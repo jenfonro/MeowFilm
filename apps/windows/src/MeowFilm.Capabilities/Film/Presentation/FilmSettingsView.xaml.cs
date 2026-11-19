@@ -26,7 +26,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
         : this(rules, sources, sources.Storage, null, () => null, metadata) { }
 
-    internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources, IDocumentStore store,
+    internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources, IStorageDatabase store,
         FilmPlaybackSettings? business, Func<FilmPlaybackTarget?> target,
         FilmMetadataService? metadata = null)
     {

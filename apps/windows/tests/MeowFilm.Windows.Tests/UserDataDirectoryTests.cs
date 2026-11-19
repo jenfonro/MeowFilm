@@ -17,22 +17,20 @@ public static class UserDataDirectoryTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("open-is-passive-idempotent-and-never-clears-without-confirmation", Passive);
-        yield return Case("cache-root-missing-or-unavailable-does-not-gate-normal-admission", PassiveCache);
-        yield return Case("cache-root-is-distinct-sibling-not-admission-metadata", CacheBoundary);
         yield return Case("shared-users-reset-refusal-exclusive-admission-and-two-generations", SharedUsers);
         yield return Case("missing-root-and-missing-parent-are-successful", Missing);
         yield return new("user-data-directory.unknown-corrupt-secret-and-cache-data-removed", AllData);
         yield return Case("delete-failure-keeps-intent-and-exclusive-admission-until-retry", DeleteFailure);
         yield return Case("interrupted-reset-is-completed-before-open", Recovery);
-        yield return new("user-data-directory.legacy-store-pin-refuses-before-any-child-deletion", LegacyStore);
+        yield return new("user-data-directory.database-pin-refuses-before-any-child-deletion", DatabasePin);
         yield return Case("root-and-nested-junctions-never-touch-targets", Junctions);
         yield return Case("hardlink-removal-preserves-external-bytes-and-readonly-attribute", Hardlink);
         yield return Case("parent-junction-and-linked-admission-metadata-are-rejected", UnsafeAdmission);
         yield return Case("pending-write-failure-does-not-delete-and-retains-exclusive-admission", MarkerFailure);
         yield return Case("completed-reset-lease-retry-preserves-another-generations-new-data", DowngradeFailure);
-        yield return new("user-data-directory.failed-shared-restoration-rechecks-pending-and-legacy-pin", UpgradeRecovery);
-        yield return new("user-data-directory.either-root-store-pin-refuses-before-any-child-deletion", EitherRootPin);
-        yield return Case("partial-two-root-deletion-remains-pending-until-reopened-retry", PartialRecovery);
+        yield return new("user-data-directory.failed-shared-restoration-rechecks-pending-and-database-pin", UpgradeRecovery);
+        yield return new("user-data-directory.database-and-resource-owner-pins-refuse-before-any-child-deletion", OwnerPins);
+        yield return Case("partial-root-deletion-remains-pending-until-reopened-retry", PartialRecovery);
         yield return new(ProcessCase, OtherProcess);
     }
 
@@ -60,26 +58,26 @@ public static class UserDataDirectoryTests
     {
         using var f = new Fixture();
         string file = f.Write("owned/keep", [1, 2, 3]);
-        string cached = f.Write("owned-cache/keep", [4]);
-        using var first = new UserDataDirectory(f.Root, f.Cache);
-        using var second = new UserDataDirectory(f.Root, f.Cache);
+        string cached = f.Write("owned/resources-v1/keep", [4]);
+        using var first = new UserDataDirectory(f.Root);
+        using var second = new UserDataDirectory(f.Root);
         first.Open(); second.Open();
         Failure(first.RequestReset);
         Failure(second.RequestReset);
         Check(!File.Exists(f.Pending));
         Bytes([1, 2, 3], File.ReadAllBytes(file));
         Bytes([4], File.ReadAllBytes(cached));
-        using (var third = new UserDataDirectory(f.Root, f.Cache)) third.Open();
+        using (var third = new UserDataDirectory(f.Root)) third.Open();
         second.Dispose();
         first.RequestReset();
         Check(File.Exists(f.Pending) && File.Exists(file) && File.Exists(cached), "RequestReset deleted data.");
-        using var blocked = new UserDataDirectory(f.Root, f.Cache);
+        using var blocked = new UserDataDirectory(f.Root);
         Failure(blocked.Open);
         first.Clear();
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending));
         first.Open(); blocked.Open();
         string next = f.Write("owned/new-generation", [4, 5]);
-        string nextCache = f.Write("owned-cache/new-generation", [6]);
+        string nextCache = f.Write("owned/resources-v1/new-generation", [6]);
         first.Open();
         Bytes([4, 5], File.ReadAllBytes(next));
         Bytes([6], File.ReadAllBytes(nextCache));
@@ -89,83 +87,49 @@ public static class UserDataDirectoryTests
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending));
     }
 
-    private static void PassiveCache()
-    {
-        using var f = new Fixture();
-        using (var owner = new UserDataDirectory(f.Root, f.Cache))
-        {
-            owner.Open(); owner.Open();
-            Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending));
-        }
-        // An unusable, exclusively held cache leaf cannot block business admission.
-        File.WriteAllBytes(f.Cache, [3, 1]);
-        using (var locked = new FileStream(f.Cache, FileMode.Open, FileAccess.Read, FileShare.None))
-        using (var owner = new UserDataDirectory(f.Root, f.Cache))
-        {
-            owner.Open(); owner.Open();
-            Check(!Directory.Exists(f.Root) && !File.Exists(f.Pending));
-        }
-        Bytes([3, 1], File.ReadAllBytes(f.Cache));
-        using var reset = new UserDataDirectory(f.Root, f.Cache);
-        reset.Open(); reset.RequestReset(); reset.Clear();
-        Check(!File.Exists(f.Cache) && !File.Exists(f.Pending));
-    }
+
 
     private static void Missing()
     {
         using var f = new Fixture();
         string parent = Path.Combine(f.Base, "not-created");
         string root = Path.Combine(parent, "owned");
-        string cache = Path.Combine(parent, "owned-cache");
-        using var owner = new UserDataDirectory(root, cache);
+        using var owner = new UserDataDirectory(root);
         Check(!Directory.Exists(parent));
         owner.Open();
-        Check(Directory.Exists(parent) && !Directory.Exists(root) && !Directory.Exists(cache));
+        Check(Directory.Exists(parent) && !Directory.Exists(root));
         owner.RequestReset(); owner.Clear(); owner.Open();
-        Check(!Directory.Exists(root) && !Directory.Exists(cache) &&
+        Check(!Directory.Exists(root) &&
             !File.Exists(Path.Combine(parent, ".owned.reset-pending")));
     }
 
-    private static void CacheBoundary()
-    {
-        using var f = new Fixture();
-        foreach (string cache in new[] { f.Root, f.Usage, f.Admission, f.Pending, f.Base, Path.Combine(f.Root, "cache") })
-            Failure(() =>
-            {
-                using var owner = new UserDataDirectory(f.Root, cache);
-            }, DocumentStoreError.InvalidRequest);
-        Check(!File.Exists(f.Usage) && !File.Exists(f.Admission) && !File.Exists(f.Pending) &&
-            !Directory.Exists(f.Root), "Invalid reset roots must not touch App data or admission metadata.");
-    }
+
 
     private static async Task AllData()
     {
         using var f = new Fixture();
         f.Write("owned/unknown/deeper/stage-interrupted.tmp", [0, 255, 1]);
-        f.Write("owned/native/document.json", "{"u8.ToArray());
+        f.Write("owned/private/opaque", "opaque"u8.ToArray());
         f.Write("owned/music-playback-cache/unindexed.audio", [1, 3, 5]);
         string script = f.Write("owned/script-runtime/sources/source.js", "synthetic"u8.ToArray());
         File.SetAttributes(script, FileAttributes.ReadOnly);
-        f.Write("owned/script-runtime/pan/accounts.json", "synthetic credential"u8.ToArray());
+        f.Write("owned/script-runtime/volumes/installation/accounts.json", "synthetic guest data"u8.ToArray());
         f.Write("owned/script-runtime/volumes/installation/tmp/blob", [2, 4, 6]);
         f.Write("owned/script-runtime/film-metadata/unknown.cache", [4, 2]);
         f.Write("owned/script-runtime/film-media/incomplete.part", [6, 2]);
         f.Write("owned/unknown-profile-state", [9]);
-        f.Write("owned-cache/audio/unindexed.audio", [8, 3]);
-        f.Write("owned-cache/unknown/deeper/interrupted.stage", [9, 3]);
+        f.Write("owned/resources-v1/audio/unindexed.audio", [8, 3]);
+        f.Write("owned/resources-v1/unknown/deeper/interrupted.stage", [9, 3]);
         string original = f.Write("outside/import-original.js", [7, 8]);
         string sibling = f.Write("other-identity/keep.json", [6, 7]);
-        await using (var store = new LocalDocumentStore(f.Root, ["test.secret"], protectedNamespaces: ["test.secret"]))
-            await store.WriteAsync("test.secret", "synthetic secret"u8.ToArray(), DocumentFingerprint.Missing);
-        foreach (string secret in Directory.EnumerateFiles(f.Root, "*.mfdp", SearchOption.AllDirectories))
-            File.WriteAllBytes(secret, "broken DPAPI envelope"u8.ToArray());
-        await using (var cache = new LocalDocumentStore(f.Cache, AppIdentity.CacheNamespaces,
-            protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
-            foreach (string ns in AppIdentity.CacheNamespaces)
-                await cache.WriteAsync(ns, "synthetic cache"u8.ToArray(), DocumentFingerprint.Missing);
-        foreach (string secret in Directory.EnumerateFiles(f.Cache, "*.mfdp", SearchOption.AllDirectories))
-            File.WriteAllBytes(secret, "broken cache envelope"u8.ToArray());
-        using var owner = new UserDataDirectory(f.Root, f.Cache);
+        await using (var store = new NativeDatabase(f.Root))
+        {
+            await new TypedRecordRepository(store, "film.tmdb.v1", MeowFilm.Capabilities.FilmStorageRecords.TMDB)
+                .UpdateAsync(_ => System.Text.Json.JsonSerializer.SerializeToElement(new {
+                    version = 1, settings = new { apiKey = "synthetic reset secret" } }));
+            await store.WriteAsync(db => db.CommitRevision("reset-cache", StorageRevision.Empty, Guid.NewGuid().ToString("D")));
+        }
+        using var owner = new UserDataDirectory(f.Root);
         owner.Open(); owner.RequestReset(); owner.Clear();
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending));
         Bytes([7, 8], File.ReadAllBytes(original));
@@ -177,21 +141,21 @@ public static class UserDataDirectoryTests
         using var f = new Fixture();
         string file = f.Write("owned/locked", [3, 2, 1]);
         f.Write("owned/nested/unknown", [8]);
-        string cached = f.Write("owned-cache/keep", [8, 6]);
-        using var owner = new UserDataDirectory(f.Root, f.Cache);
+        string cached = f.Write("owned/resources-v1/keep", [8, 6]);
+        using var owner = new UserDataDirectory(f.Root);
         owner.Open(); owner.RequestReset();
         using (var locked = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             Failure(owner.Clear);
             Check(File.Exists(f.Pending));
-            using var other = new UserDataDirectory(f.Root, f.Cache);
+            using var other = new UserDataDirectory(f.Root);
             Failure(other.Open);
             Bytes([3, 2, 1], File.ReadAllBytes(file));
             Bytes([8, 6], File.ReadAllBytes(cached));
         }
         owner.Clear();
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending));
-        using var reopened = new UserDataDirectory(f.Root, f.Cache);
+        using var reopened = new UserDataDirectory(f.Root);
         reopened.Open();
     }
 
@@ -219,19 +183,20 @@ public static class UserDataDirectoryTests
         Bytes([6], File.ReadAllBytes(current));
     }
 
-    private static async Task LegacyStore()
+    private static async Task DatabasePin()
     {
         using var f = new Fixture();
         string first = f.Write("owned/first", [1]);
         string last = f.Write("owned/nested/last", [2]);
-        await using var store = new LocalDocumentStore(f.Root, ["test.document"]);
+        await using var store = new NativeDatabase(f.Root);
+        await store.Ready;
         using var owner = new UserDataDirectory(f.Root);
         owner.Open(); owner.RequestReset();
         Failure(owner.Clear);
         Bytes([1], File.ReadAllBytes(first));
         Bytes([2], File.ReadAllBytes(last));
-        Check(Directory.EnumerateFiles(f.Root, "*", SearchOption.AllDirectories).Count() == 2,
-            "Legacy root occupancy must be checked before touching any child.");
+        Check(Directory.Exists(Path.Combine(f.Root, "storage-v1")),
+            "Database root occupancy must be checked before touching any child.");
         Check(File.Exists(f.Pending));
         await store.DisposeAsync();
         owner.Clear();
@@ -243,12 +208,12 @@ public static class UserDataDirectoryTests
         using var f = new Fixture();
         string outside = f.Write("outside/original", [7, 7]);
         f.Write("owned/local", [1]);
-        f.Write("owned-cache/local", [2]);
+        f.Write("owned/resources-v1/local", [2]);
         Junction(Path.Combine(f.Root, "nested-link"), Path.GetDirectoryName(outside)!);
         Junction(Path.Combine(f.Root, "dangling-link"), Path.Combine(f.Base, "missing-target"));
         Junction(Path.Combine(f.Cache, "nested-link"), Path.GetDirectoryName(outside)!);
         Junction(Path.Combine(f.Cache, "dangling-link"), Path.Combine(f.Base, "missing-cache-target"));
-        using var owner = new UserDataDirectory(f.Root, f.Cache);
+        using var owner = new UserDataDirectory(f.Root);
         owner.Open(); owner.RequestReset(); owner.Clear();
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache));
         Bytes([7, 7], File.ReadAllBytes(outside));
@@ -268,7 +233,7 @@ public static class UserDataDirectoryTests
         Check(CreateHardLinkW(Path.Combine(f.Root, "alias"), outside, IntPtr.Zero));
         Check(CreateHardLinkW(Path.Combine(f.Cache, "alias"), outside, IntPtr.Zero));
         File.SetAttributes(outside, FileAttributes.ReadOnly);
-        using var owner = new UserDataDirectory(f.Root, f.Cache);
+        using var owner = new UserDataDirectory(f.Root);
         owner.Open(); owner.RequestReset(); owner.Clear();
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache));
         Bytes([2, 7], File.ReadAllBytes(outside));
@@ -321,17 +286,17 @@ public static class UserDataDirectoryTests
     {
         using var f = new Fixture();
         f.Write("owned/old", [1]);
-        f.Write("owned-cache/old", [2]);
-        using var owner = new UserDataDirectory(f.Root, f.Cache);
+        f.Write("owned/resources-v1/old", [2]);
+        using var owner = new UserDataDirectory(f.Root);
         owner.Open(); owner.RequestReset();
         using (var denied = new DenyRead(f.Usage))
             Failure(owner.Clear);
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending),
             "This failure must occur after physical cleanup and marker removal.");
-        using var other = new UserDataDirectory(f.Root, f.Cache);
+        using var other = new UserDataDirectory(f.Root);
         other.Open();
         string current = f.Write("owned/other-generation", [8, 9]);
-        string currentCache = f.Write("owned-cache/other-generation", [7, 9]);
+        string currentCache = f.Write("owned/resources-v1/other-generation", [7, 9]);
         owner.RequestReset(); // Retrying the original reset, not a new confirmation.
         Check(!File.Exists(f.Pending));
         owner.Clear(); owner.Open();
@@ -347,7 +312,8 @@ public static class UserDataDirectoryTests
         using var first = new UserDataDirectory(f.Root);
         using var second = new UserDataDirectory(f.Root);
         first.Open(); second.Open();
-        await using var legacy = new LocalDocumentStore(f.Root, ["test.document"]);
+        await using var database = new NativeDatabase(f.Root);
+        await database.Ready;
         using (var denied = new DenyRead(f.Usage))
             Failure(first.RequestReset); // Both exclusive acquisition and shared restoration fail.
         Check(!File.Exists(f.Pending));
@@ -356,31 +322,35 @@ public static class UserDataDirectoryTests
         Failure(second.Clear);
         Bytes([4, 8], File.ReadAllBytes(file));
         second.Dispose();
-        Failure(first.Open); // Pending recovery also respects the still-live legacy store.
+        Failure(first.Open); // Pending recovery also respects the still-live database store.
         Bytes([4, 8], File.ReadAllBytes(file));
         Check(File.Exists(f.Pending));
-        await legacy.DisposeAsync();
+        await database.DisposeAsync();
         first.Open();
         Check(!Directory.Exists(f.Root) && !File.Exists(f.Pending));
     }
 
-    private static async Task EitherRootPin()
+    private static async Task OwnerPins()
     {
-        foreach (bool cachePinned in new[] { false, true })
+        foreach (bool resourcePinned in new[] { false, true })
         {
             using var f = new Fixture();
             string business = f.Write("owned/first", [1, 4]);
-            string cached = f.Write("owned-cache/last", [2, 5]);
-            await using var store = new LocalDocumentStore(cachePinned ? f.Cache : f.Root, ["test.document"]);
-            using var owner = new UserDataDirectory(f.Root, f.Cache);
+            string cached = f.Write("owned/resources-v1/last", [2, 5]);
+            await using var store = new NativeDatabase(f.Root);
+            await store.Ready;
+            using var resource = resourcePinned ? new RawResourceDirectory(f.Root, "test") : null;
+            if (resourcePinned) await store.DisposeAsync();
+            using var owner = new UserDataDirectory(f.Root);
             owner.Open(); owner.RequestReset();
             Failure(owner.Clear);
             Bytes([1, 4], File.ReadAllBytes(business));
             Bytes([2, 5], File.ReadAllBytes(cached));
-            Check(File.Exists(f.Pending), "Neither root can be touched while either store is still pinned.");
+            Check(File.Exists(f.Pending), "Active owner pins must prevent any root deletion.");
+            resource?.Dispose();
             await store.DisposeAsync();
             owner.Clear();
-            Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending));
+            Check(!Directory.Exists(f.Root) && !File.Exists(f.Pending));
         }
     }
 
@@ -388,15 +358,15 @@ public static class UserDataDirectoryTests
     {
         using var f = new Fixture();
         f.Write("owned/business", [3, 5]);
-        string cached = f.Write("owned-cache/locked", [7, 9]);
-        using var next = new UserDataDirectory(f.Root, f.Cache);
-        using (var interrupted = new UserDataDirectory(f.Root, f.Cache))
+        string cached = f.Write("owned/resources-v1/locked", [7, 9]);
+        using var next = new UserDataDirectory(f.Root);
+        using (var interrupted = new UserDataDirectory(f.Root))
         using (var held = new FileStream(cached, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
             interrupted.Open(); interrupted.RequestReset();
             Failure(interrupted.Clear);
-            Check(!Directory.Exists(f.Root) && File.Exists(f.Pending),
-                "Partial cleanup must retain the one request covering both roots.");
+            Check(Directory.Exists(f.Root) && File.Exists(f.Pending),
+                "Partial cleanup must retain the current root intent.");
             Bytes([7, 9], File.ReadAllBytes(cached));
             Failure(next.Open);
             interrupted.Dispose();
@@ -406,21 +376,20 @@ public static class UserDataDirectoryTests
         next.Open();
         Check(!Directory.Exists(f.Root) && !Directory.Exists(f.Cache) && !File.Exists(f.Pending));
         string business = f.Write("owned/new-generation", [2, 3]);
-        string cache = f.Write("owned-cache/new-generation", [4, 5]);
+        string cache = f.Write("owned/resources-v1/new-generation", [4, 5]);
         next.Open();
         Bytes([2, 3], File.ReadAllBytes(business));
         Bytes([4, 5], File.ReadAllBytes(cache));
     }
 
-    private const string ProcessCase = "user-data-directory.two-root-usage-is-exclusive-across-processes";
+    private const string ProcessCase = "user-data-directory.single-root-usage-is-exclusive-across-processes";
     private static async Task OtherProcess()
     {
         const string variable = "MEOWFILM_RESET_USAGE_CHILD_ROOT";
         if (Environment.GetEnvironmentVariable(variable) is { } childPath)
         {
             string root = TestWorkspace.ValidatePath(TestWorkspace.DataRoot, childPath);
-            string cache = TestWorkspace.ValidatePath(TestWorkspace.DataRoot, root + "-cache");
-            using var lease = new UserDataDirectory(root, cache);
+            using var lease = new UserDataDirectory(root);
             lease.Open();
             Console.WriteLine("RESET_USAGE_READY");
             Console.Out.Flush();
@@ -430,8 +399,8 @@ public static class UserDataDirectoryTests
 
         using var f = new Fixture();
         string business = f.Write("owned/business", [3, 6]);
-        string cached = f.Write("owned-cache/cache", [4, 7]);
-        using var owner = new UserDataDirectory(f.Root, f.Cache);
+        string cached = f.Write("owned/resources-v1/cache", [4, 7]);
+        using var owner = new UserDataDirectory(f.Root);
         owner.Open();
         var start = new ProcessStartInfo(Environment.ProcessPath!)
         {
@@ -515,7 +484,7 @@ public static class UserDataDirectoryTests
     {
         internal string Base { get; } = TestWorkspace.DataPath("user-data-" + Guid.NewGuid().ToString("N"));
         internal string Root => Path.Combine(Base, "owned");
-        internal string Cache => Path.Combine(Base, "owned-cache");
+        internal string Cache => Path.Combine(Root, "resources-v1");
         internal string Usage => Path.Combine(Base, ".owned.usage.lock");
         internal string Admission => Path.Combine(Base, ".owned.usage-gate.lock");
         internal string Pending => Path.Combine(Base, ".owned.reset-pending");

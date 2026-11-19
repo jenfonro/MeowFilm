@@ -92,15 +92,24 @@ public final class PanLoginModel: ObservableObject {
 
     public func save() {
         guard visible, !closed, method == .manual, !busy, !completed else { return }
-        notice = nil; generation = UUID()
-        do {
-            let credentials = try provider.credentials(from: draft)
-            let account = try service.replace(provider.id, credentials: credentials)
-            update(account)
-            saved = true; draft.removeAll()
-        } catch {
-            if !panCancelled(error) { notice = PanAccountNotice(error) }
+        notice = nil; generation = UUID(); busy = true
+        let ticket = generation
+        let credentials: RuntimeValue
+        do { credentials = try provider.credentials(from: draft) }
+        catch { busy = false; notice = PanAccountNotice(error); return }
+        let receipt = operations.performLocal(provider.id) { [weak self, service, provider] in
+            guard self?.isCurrent(ticket) == true else { return }
+            do {
+                let account = try await service.replace(provider.id, credentials: credentials)
+                guard let self, isCurrent(ticket) else { return }
+                update(account); saved = true; draft.removeAll(); busy = false
+            } catch {
+                guard let self, isCurrent(ticket) else { return }
+                busy = false
+                if !panCancelled(error) { notice = PanAccountNotice(error) }
+            }
         }
+        starting = Task { _ = await receipt.result }
     }
 
     public func close() {
@@ -123,7 +132,9 @@ public final class PanLoginModel: ObservableObject {
                     switch receipt.progress {
                     case .confirmed:
                         guard let account = receipt.account else { throw PanAccountError.unconfirmed }
-                        update(try service.current(account)); complete(); polling = nil; return
+                        let current = try await service.current(account)
+                        guard isCurrent(ticket) else { return }
+                        update(current); complete(); polling = nil; return
                     case .expired, .cancelled:
                         self.challenge = nil; polling = nil
                         cancel(challenge.sessionID); return

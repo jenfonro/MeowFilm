@@ -20,12 +20,12 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
         super.viewDidLoad()
         table.accessibilityIdentifier = area == .settings ? "film.player.settings" : "film.player.controls"
         observe(owner) { [weak self] in self?.update() }
-        owner.reload()
+        Task { await owner.reload() }
         update()
     }
 
     override func pageDidFinishAppearing() {
-        owner.reload()
+        Task { await owner.reload() }
         update()
         super.pageDidFinishAppearing()
     }
@@ -87,8 +87,7 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
             failure(NSError(domain: "FilmPlayerPreferences", code: 1,
                             userInfo: [NSLocalizedDescriptionKey: error]), retry: { [weak self] in
                 self?.displayedError = nil
-                self?.owner.reload()
-                self?.update()
+                Task { await self?.owner.reload(); self?.update() }
             })
         } else { displayedError = nil }
     }
@@ -113,8 +112,7 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
                            keyPath: WritableKeyPath<FilmPlayerPreferences, Bool>) -> FilmSettingsRow {
         filmSwitchRow(title, id: "film.player." + id, isOn: owner.preferences[keyPath: keyPath],
                       enabled: owner.persistenceError == nil) { [weak self] value in
-            self?.owner.set(keyPath, value)
-            self?.update()
+            Task { await self?.owner.set(keyPath, value); self?.update() }
         }
     }
 }
@@ -145,7 +143,7 @@ private final class FilmPlayerChoiceController<Value: Equatable>: FilmSettingsLi
     }
 
     override func pageDidFinishAppearing() {
-        owner.reload()
+        Task { await owner.reload() }
         update()
         super.pageDidFinishAppearing()
     }
@@ -156,10 +154,12 @@ private final class FilmPlayerChoiceController<Value: Equatable>: FilmSettingsLi
                   enabled: owner.persistenceError == nil, selected: owner.preferences[keyPath: keyPath] == value,
                   action: { [weak self] in
                 guard let self else { return }
-                if owner.set(keyPath, value) { navigationController?.popViewController(animated: true) }
-                else {
-                    failure(NSError(domain: "FilmPlayerPreferences", code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: owner.persistenceError ?? "播放器偏好保存失败"]))
+                Task {
+                    if await self.owner.set(self.keyPath, value) { self.navigationController?.popViewController(animated: true) }
+                    else {
+                        self.failure(NSError(domain: "FilmPlayerPreferences", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: self.owner.persistenceError ?? "播放器偏好保存失败"]))
+                    }
                 }
             })
         })]

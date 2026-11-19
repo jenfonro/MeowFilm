@@ -12,6 +12,7 @@ import { packageNameFromSpecifier, sourceReferences, publicPackageImport, SHARED
 import { discoverRuntimeSource } from './runtime-source.mjs';
 import { discoverWorkspaces } from './verify-dependency-lock.mjs';
 import { iosTargetPolicy, lockedNodeHeaders, nativeSourceInputs } from './quickjs/native-inputs.mjs';
+import { sqliteBuildInputs } from './quickjs/sqlite-inputs.mjs';
 
 const PRODUCTS = Object.freeze({
   aggregate: ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform'],
@@ -232,7 +233,8 @@ function trustedNative(root, inputs, target) {
     NATIVE_POLICY, 'packages/script-host/binding.gyp', 'scripts/quickjs/build-native.mjs',
     'scripts/quickjs/build-source-sdk.mjs', 'package.json', 'package-lock.json',
     ...(ios ? ['scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs',
-      'scripts/prepare-ios-runtime.py', 'scripts/ios-node-mobile.json'] : [nodeHeaders.archivePath]),
+      'scripts/prepare-ios-runtime.py', 'scripts/ios-node-mobile.json',
+      'scripts/quickjs/sqlite-inputs.mjs', 'native/SQLite/sqlite.json', 'scripts/prepare-ios-sqlite.py'] : [nodeHeaders.archivePath]),
     ...policy.mandatoryInputs,
     ...policy.patches.map(input => input.path),
     ...nativeSourceInputs(policy),
@@ -261,6 +263,10 @@ function trustedNative(root, inputs, target) {
     }
   }
   if (ios) {
+    const sqlite = sqliteBuildInputs(root, target);
+    check(isDeepStrictEqual(receipt.sqlite, sqlite)
+      && sqlite.inputs.every(input => recorded.get(input.path) === input.sha256),
+    'NATIVE_INPUT_MISMATCH', 'Both Apple storage writers require the same pinned SQLite framework');
     const web = receipt.catWebValues;
     const dependencyFields = ['dependencies', 'optionalDependencies', 'peerDependencies'];
     const { value: manifest } = readJSON(root, 'package.json');
@@ -342,7 +348,7 @@ function trustedNative(root, inputs, target) {
       schemaVersion: receipt.schemaVersion, abi: receipt.abi, napi: receipt.napi,
       platform: receipt.platform, target: receipt.target, sources: receipt.sources,
       inputs: receipt.inputs, sdk: receipt.sdk, catWebValues: receipt.catWebValues, nodeMobile: receipt.nodeMobile,
-      nodeHeaderFiles: receipt.nodeHeaderFiles,
+      nodeHeaderFiles: receipt.nodeHeaderFiles, sqlite: receipt.sqlite,
       toolchain: Object.fromEntries(Object.entries(receipt.toolchain).filter(([name]) => name !== 'commands')),
     };
     check(sha256(JSON.stringify(identity)) === receipt.bindingIdentity,
@@ -982,6 +988,8 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
         platform: receipt.platform, arch: receipt.arch, abi: receipt.abi, napi: receipt.napi,
         ...(ios ? { target: receipt.target, bindingIdentity: receipt.bindingIdentity,
           integrity: 'pre-sign-sha256; installed-code=app-signature+compiled-identity',
+          sqlite: { ...receipt.sqlite.artifact, version: receipt.sqlite.version,
+            path: 'Frameworks/MeowSQLite.framework/MeowSQLite' },
           catWebValues: { ...receipt.catWebValues, path: `${node.path}/build/Release/cat-web-values.cjs`,
             license: { ...receipt.catWebValues.license, path: 'licenses/undici-LICENSE.txt' } },
         } : {}),

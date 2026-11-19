@@ -7,7 +7,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class PanAccounts(IRuntimeClient runtime, IDocumentStore store) : INotifyPropertyChanged, IAsyncDisposable
+public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase store) : INotifyPropertyChanged, IAsyncDisposable
 {
     private readonly PanSettingsStore settings = new(runtime, store);
     private readonly HashSet<Task> pending = [];

@@ -2992,7 +2992,7 @@ public static partial class MusicCatalogTests
 
     private sealed class Fixture : IAsyncDisposable
     {
-        private readonly LocalDocumentStore store;
+        private readonly NativeDatabase store;
         private readonly string root;
         private readonly NativeMusicScriptTestRuntime runtime = new();
         private readonly CatalogTransport transport = new();
@@ -3000,7 +3000,7 @@ public static partial class MusicCatalogTests
         public Output Playback { get; } = new();
         public MusicCapability Module { get; }
         public VipApplication? Vip { get; }
-        private Fixture(LocalDocumentStore store, bool vipAccount, string root)
+        private Fixture(NativeDatabase store, bool vipAccount, string root)
         {
             this.store = store; this.root = root;
             runtime.Platform.OnRequest = transport.Read;
@@ -3013,7 +3013,7 @@ public static partial class MusicCatalogTests
         {
             var data = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Isolated test data required");
             var dir = Path.Combine(data, "catalog-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
-            var store = new LocalDocumentStore(dir, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            var store = new NativeDatabase(dir);
             var f = new Fixture(store, vipAccount, dir);
             try
             {
@@ -3056,7 +3056,7 @@ public static partial class MusicCatalogTests
                 File.WriteAllBytes(path, [0, 1, 2, 3]); // Native grant/resolve; Output does not decode bytes.
                 return path;
             }).ToArray();
-            var grants = new GrantedMediaFiles(store, "music.files.v2", [".wav"]);
+            var grants = new GrantedMediaFiles(store, [".wav"]);
             var files = await grants.GrantAsync(paths);
             var favorite = await Rpc("music.library.detail", new { id = "favorites", limit = 1 });
             await Rpc("music.library.addSongs", new { id = "favorites",

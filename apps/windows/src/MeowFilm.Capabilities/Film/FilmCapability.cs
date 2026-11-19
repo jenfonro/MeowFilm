@@ -70,7 +70,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         : this(source, null, null, search, metadata, playback, library) { }
 
     public FilmCapability(FilmRuleService rules, FilmSourceService sources, IRuntimeClient runtime,
-        IDocumentStore storage, FilmPlayback playback,
+        IStorageDatabase storage, FilmPlayback playback,
         Func<CancellationToken, Task<RuntimeConnection>> capture, FilmMetadataService metadata)
         : this(new DoubanFilmHomeSource(runtime), rules, sources,
             new FilmSearchService(capture, sources, metadata.ResolveImage),
@@ -87,7 +87,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
 
     private FilmCapability(IFilmHomeSource source, FilmRuleService? rules, FilmSourceService? sources,
         FilmSearchService? search = null, FilmMetadataService? metadata = null,
-        FilmPlaybackSession? playback = null, FilmLibrary? library = null, FilmPlaybackSettings? business = null, IDocumentStore? storage = null)
+        FilmPlaybackSession? playback = null, FilmLibrary? library = null, FilmPlaybackSettings? business = null, IStorageDatabase? storage = null)
     {
         this.source = source ?? throw new ArgumentNullException(nameof(source));
         this.rules = rules;

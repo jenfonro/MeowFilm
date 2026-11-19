@@ -31,10 +31,10 @@ public static class MusicOfficialAudioTests
                 var audio = JsonNode.Parse(result.GetRawText())!.AsObject(); audio["actualQuality"] = "flac";
                 return MusicPlatformRuntimeFixture.Json(audio);
             };
-            var app = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), runtime, f.CacheStore);
+            var app = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), runtime);
             await using var player = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             await using var module = new MusicCapability(app, f.Store, new NativeMusicPlayback(player), new CacheDialogs(),
-                playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
+                playbackCacheRoot: f.Root);
             await module.InitializeAsync(default);
             await module.ActivateQualitySettingsAsync();
             await module.SetPlaybackQualityRequestAsync("320k");
@@ -79,10 +79,10 @@ public static class MusicOfficialAudioTests
         yield return new("Official native owner caches canonical QQ audio then revokes on logout", async () =>
         {
             await using var store = new MemoryStore();
-            await using var cacheStore = new CacheDocumentStore(store);
+            await using var cacheStore = new NativeTestDatabase(store);
             int vkeys = 0;
             await using var runtime = AudioPeer(audio: () => vkeys++);
-            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime, cacheStore);
+            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             var login = await app.ExecuteAsync("music.accounts.import",
                 new { platform = "tx", cookie = "musicid=123; musickey=synthetic; encrypt_uin=FixtureEUIN" });
             Check(login.GetProperty("ok").GetBoolean(), "native import");
@@ -134,7 +134,7 @@ public static class MusicOfficialAudioTests
         yield return new("Music source and chorus caches roundtrip current facts and honor identity and TTL", async () =>
         {
             await using var backing = new MemoryStore();
-            await using var store = new CacheDocumentStore(backing);
+            await using var store = new NativeTestDatabase(backing);
             var clock = new Clock();
             var cache = new MusicSourceCache(store, clock);
             string signature = Hash('a'), policy = Hash('b');
@@ -156,7 +156,7 @@ public static class MusicOfficialAudioTests
             Check(await chorus.ReadAsync(MusicChorusCache.Key("other", "song", "wy", "1", 100), 100, default) is null);
             Check(await chorus.ReadAsync(MusicChorusCache.Key("account", "song", "wy", "2", 100), 100, default) is null);
             await store.DrainAsync();
-            await using var reopened = new CacheDocumentStore(backing);
+            await using var reopened = new NativeTestDatabase(backing);
             Check(await new MusicSourceCache(reopened, clock).ReadAsync("scope", "song", signature, default) is not null);
             clock.Now += 51000;
             Check(await cache.ReadAsync("scope", "song", signature, default) is null);
@@ -167,13 +167,11 @@ public static class MusicOfficialAudioTests
         });
         yield return new("Music source and chorus cache damaged content or storage failures miss and rebuild", async () =>
         {
-            foreach (var error in new DocumentStoreError?[] { null, DocumentStoreError.Protection, DocumentStoreError.Storage })
+            foreach (var error in new DocumentStoreError?[] { null, DocumentStoreError.Io, DocumentStoreError.Storage })
             {
                 await using var backing = new MemoryStore { Failure = error };
-                backing.Data[MusicSourceCache.Namespace] = "{"u8.ToArray();
-                backing.Data[MusicChorusCache.Namespace] = "{\"entries\":null}"u8.ToArray();
-                backing.Data["test.unrelated-document.v1"] = "business"u8.ToArray();
-                await using var store = new CacheDocumentStore(backing);
+                await backing.Inner.WriteAsync(db => db.CommitRevision("test.business", StorageRevision.Empty, "business"));
+                await using var store = new NativeTestDatabase(backing);
                 var clock = new Clock();
                 var source = new MusicSourceCache(store, clock);
                 var chorus = new MusicChorusCache(store, clock);
@@ -184,13 +182,13 @@ public static class MusicOfficialAudioTests
                 Check(await source.ReadAsync("scope", "song", Hash('a'), default) is not null);
                 Check(await chorus.ReadAsync(Hash('b'), 100, default) == (20d, 30d));
                 await store.DrainAsync();
-                Check(Encoding.UTF8.GetString(backing.Data["test.unrelated-document.v1"]) == "business");
+                Check(await backing.Inner.ReadAsync(db => db.Revision("test.business")) == new StorageRevision(1, "business"));
             }
         });
         yield return new("Music source and chorus saves never wait for initial disk read or slow persistence", async () =>
         {
             var held = new HeldCacheStore();
-            await using var store = new CacheDocumentStore(held);
+            await using var store = new NativeTestDatabase(held);
             var clock = new Clock();
             var source = new MusicSourceCache(store, clock);
             var chorus = new MusicChorusCache(store, clock);
@@ -214,13 +212,13 @@ public static class MusicOfficialAudioTests
             {
                 var clock = new Clock();
                 var info = SourceInfo("scope", "song", Hash('a'), Hash('b'), clock.Now);
-                await using var seed = new CacheDocumentStore();
+                await using var seed = new NativeTestDatabase();
                 var seeded = new MusicSourceCache(seed, clock);
                 await seeded.PutAsync("scope", "song", Hash('a'), info, default);
                 info["recording"] = Recording();
                 await seeded.ConfirmAsync("scope", "song", Hash('a'), info, default);
-                var held = new HeldCacheStore { Initial = seed.ReadMemory(MusicSourceCache.Namespace).Data };
-                await using var store = new CacheDocumentStore(held);
+                var held = new HeldCacheStore(seed);
+                await using var store = new NativeTestDatabase(held);
                 var cache = new MusicSourceCache(store, clock);
                 var reading = cache.ReadAsync("scope", "song", Hash('a'), default);
                 var history = cache.ReadHistoryAsync("scope", "song", Hash('b'), "auto", 7, default);
@@ -231,7 +229,7 @@ public static class MusicOfficialAudioTests
                         ? cache.RejectRecordingAsync("scope", "song", info["sourceKey"]!.GetValue<string>(), default)
                         : cache.InvalidateAsync("scope", "song", default);
                     await invalidating.WaitAsync(TimeSpan.FromSeconds(2));
-                    Check(store.ReadMemory(MusicSourceCache.Namespace).Data is not null,
+                    Check(held.Inner.ReadAsync(db => db.Revision(MusicSourceCache.Namespace)).GetAwaiter().GetResult() != StorageRevision.Empty,
                         "an empty invalidation still publishes its fence without waiting for disk");
                 }
                 finally { held.Release.TrySetResult(); }
@@ -254,7 +252,7 @@ public static class MusicOfficialAudioTests
         });
         yield return new("Music queue preload reserves shuffle next without moving queue or writing history", async () =>
         {
-            await using var store = new MemoryStore(); await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var store = new MemoryStore(); await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             await library.ExecuteAsync("music.queue.replace", new { songs = new[] { Song("wy", "1"), Song("wy", "2") }, index = 0 });
             await library.ExecuteAsync("music.queue.mode", new { mode = 2 });
             int writes = store.Writes;
@@ -459,23 +457,15 @@ public static class MusicOfficialAudioTests
             ["delivery"] = platform + "-official",
         };
     }
-    private sealed class HeldCacheStore : IDocumentStore
+    private sealed class HeldCacheStore : NativeTestDatabase
     {
-        internal byte[]? Initial;
-        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal readonly TaskCompletionSource Entered=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal HeldCacheStore(IStorageDatabase? storage=null):base(storage??new NativeTestDatabase(),owns:storage is null){}
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)
         {
-            Entered.TrySetResult(); await Release.Task.WaitAsync(token);
-            return new(Initial?.ToArray(), Initial is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Initial));
+            var value=await base.ReadAsync(read,token);Entered.TrySetResult();await Release.Task.WaitAsync(token);return value;
         }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default)
-        {
-            await Release.Task.WaitAsync(token);
-            return DocumentFingerprint.FromBytes(data.Span);
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     internal static JsonObject Song(string platform, string id = "1", string? title = null, double duration = 100)
     {
@@ -488,33 +478,33 @@ public static class MusicOfficialAudioTests
     { if (!value) throw new InvalidOperationException(message); }
     private static MusicPlatformSession Session(string platform) => new(platform, new string('a', 64), 1, "123",
         platform switch { "tx" => "musicid=123; musickey=synthetic", "kg" => "userid=123; token=synthetic; KUGOU_API_MID=123456", _ => "MUSIC_U=synthetic; deviceId=fixture" });
-    internal sealed class MemoryStore : IDocumentStore
+    internal sealed class MemoryStore : NativeTestDatabase
     {
-        internal readonly Dictionary<string, byte[]> Data = [];
-        internal DocumentStoreError? Failure; internal int Writes;
-        internal JsonObject Root(string ns) => JsonNode.Parse(Data[ns])!.AsObject();
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal DocumentStoreError? Failure;
+        internal byte[]? HomeData
         {
-            token.ThrowIfCancellationRequested();
-            if (Failure is { } failure) throw new DocumentStoreException(failure);
-            lock (Data) return Task.FromResult(Data.TryGetValue(ns, out var bytes)
-                ? new DocumentSnapshot(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes))
-                : new(null, DocumentFingerprint.Missing));
+            get => Project(HomeStorageRecords.Home, "device") is { } row ? JsonSerializer.SerializeToUtf8Bytes(row) : null;
+            set => Seed(HomeStorageRecords.Home, value is null ? null : JsonNode.Parse(value)!.AsObject(), "device");
         }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested();
-            if (Failure is { } failure) throw new DocumentStoreException(failure);
-            lock (Data)
+
+        internal JsonObject Root(string owner)=>Inner.ReadAsync(db=>{
+            if(owner==MusicSourceCache.Namespace)
             {
-                var before = Data.TryGetValue(ns, out var old) ? DocumentFingerprint.FromBytes(old) : DocumentFingerprint.Missing;
-                if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                Writes++;
-                Data[ns] = bytes.ToArray();
-                return Task.FromResult(DocumentFingerprint.FromBytes(bytes.Span));
+                var scopes=new JsonObject();
+                foreach(var key in db.Query("SELECT account_scope,song_id,entry_kind FROM windows_playback_source",row=>(Scope:row.GetString(0),Song:row.GetString(1),Kind:row.GetString(2))))
+                {
+                    var scope=scopes[key.Scope]?.AsObject();if(scope is null){scope=new JsonObject{["urls"]=new JsonObject(),["pointers"]=new JsonObject()};scopes[key.Scope]=scope;}
+                    scope[key.Kind]![key.Song]=PlaybackCacheRecords.Sources.Read(db,[key.Scope,key.Song,key.Kind]);
+                }
+                return new JsonObject{["version"]=1,["scopes"]=scopes};
             }
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+            if(owner==MusicAudioFileCache.Namespace)return new JsonObject{["version"]=1,["entries"]=new JsonObject(AudioStorageRecords.Index.ReadMany(db,[]).Select(row=>new KeyValuePair<string,JsonNode?>(row["resourceKey"]!.GetValue<string>(),row)))};
+            throw new InvalidOperationException("Unknown current cache relation");
+        }).GetAwaiter().GetResult();
+        public override Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)=>
+            Failure is { } error?throw new DocumentStoreException(error):base.ReadAsync(read,token);
+        public override Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)=>Failure is { } error?throw new DocumentStoreException(error):base.WriteAsync(write,token,retainedBytes,commit);
     }
     private sealed class NoRuntime : IRuntimeClient
     {

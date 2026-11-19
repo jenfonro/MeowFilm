@@ -1,98 +1,68 @@
-import * as fs from 'node:fs';
-import { randomUUID } from 'node:crypto';
-import { isUtf8 } from 'node:buffer';
-import { isAbsolute, join, resolve } from 'node:path';
-import { parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { isAbsolute } from 'node:path';
+import { openDatabase } from '@meowfilm/storage';
 import { PanError, requireValue } from './errors.js';
 import { object } from './values.js';
 
-const empty = () => ({ version: 1, accounts: {} });
-
-function state(path) {
-  try { return fs.statSync(path); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+const fields = ['cookie', 'username', 'password', 'authorization', 'refreshedAt'];
+const columns = ['cookie', 'username', 'password', 'authorization', 'refreshed_at_ms'];
+const allowed = { baidu: ['cookie'], quark: ['cookie'], uc: ['cookie'],
+  tianyi: ['cookie', 'username', 'password'], yidong: ['authorization', 'refreshedAt'] };
+const integer = value => Number.isSafeInteger(value) && value >= 0;
+const selectAccounts = 'SELECT provider,revision,row_revision,cookie,username,password,authorization,refreshed_at_ms FROM pan_standalone_accounts WHERE revision>0';
+function accounts(rows) {
+  return { version: 1, accounts: Object.fromEntries(rows.map(row => [row.provider, {
+    revision: row.revision, rowRevision: row.row_revision,
+    credentials: Object.fromEntries(fields.flatMap((field, index) =>
+      row[columns[index]] === null ? [] : [[field, row[columns[index]]]])),
+  }])) };
 }
+const fault = error => error?.code === 'STORAGE_CONFLICT' ? error : new PanError(
+  error?.code === 'STORAGE_CORRUPT' || error?.code === 'CORRUPT_STORAGE' ? 'CORRUPT_STORAGE' :
+    error?.code === 'STORAGE_CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
 
-function document(value, code) {
-  requireValue(object(value) && value.version === 1 && object(value.accounts) && !isRawJSON(value.accounts), code);
-  return value;
-}
-
-function failure(error) {
-  return error instanceof PanError && error.code === 'CORRUPT_STORAGE' ?
-    error : new PanError('STORAGE_ERROR');
-}
-
+/** Standalone account owner. App accounts use the native owner's restricted port. */
 export class PanStore {
-  #root;
-  #path;
+  #database;
 
   constructor(dataRoot) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot) &&
       !dataRoot.includes('\0') && !dataRoot.split(/[\\/]/).includes('..'));
-    this.#root = resolve(dataRoot, 'pan');
-    this.#path = join(this.#root, 'accounts.json');
+    this.#database = openDatabase(dataRoot);
   }
 
-  read() {
-    let fd;
+  async read() {
     try {
-      const root = state(this.#root);
-      if (!root) return empty();
-      requireValue(root.isDirectory(), 'STORAGE_ERROR');
-      fs.chmodSync(this.#root, 0o700);
-      const entry = state(this.#path);
-      if (!entry) return empty();
-      requireValue(entry.isFile(), 'STORAGE_ERROR');
-      fd = fs.openSync(this.#path, fs.constants.O_RDONLY);
-      fs.fchmodSync(fd, 0o600);
-      const bytes = fs.readFileSync(fd);
-      let value;
-      try {
-        requireValue(isUtf8(bytes), 'CORRUPT_STORAGE');
-        value = parseJSONText(bytes.toString('utf8'));
-      }
-      catch { throw new PanError('CORRUPT_STORAGE'); }
-      return document(value, 'CORRUPT_STORAGE');
-    } catch (error) { throw failure(error); }
-    finally {
-      if (fd !== undefined) {
-        try { fs.closeSync(fd); } catch { throw new PanError('STORAGE_ERROR'); }
-      }
-    }
+      return accounts(await this.#database.query(selectAccounts));
+    } catch (error) { throw fault(error); }
   }
 
-  write(value) {
-    let fd, temporary, error;
+  reload() { return this.read(); }
+
+  async update(command) {
+    requireValue(object(command) && Object.hasOwn(allowed, command.provider) &&
+      ['replace', 'refresh'].includes(command.mode) && integer(command.accountRevision) &&
+      integer(command.rowRevision) && object(command.credentials), 'STORAGE_ERROR');
+    const { provider, credentials, accountRevision, rowRevision, mode } = command;
+    requireValue(Object.keys(credentials).every(key => allowed[provider].includes(key)), 'STORAGE_ERROR');
+    const values = fields.map(field => {
+      const value = credentials[field] ?? null;
+      requireValue(value === null || (field === 'refreshedAt' ? integer(value) :
+        typeof value === 'string' && !value.includes('\0') && (field === 'password' || !/[\r\n]/.test(value))),
+      'STORAGE_ERROR');
+      return value;
+    });
+    const next = accountRevision + (mode === 'replace' ? 1 : 0);
+    requireValue(integer(next) && integer(rowRevision + 1), 'STORAGE_ERROR');
     try {
-      document(value, 'STORAGE_ERROR');
-      const bytes = Buffer.from(stringifyJSONValue(value));
-      this.read();
-      fs.mkdirSync(this.#root, { recursive: true, mode: 0o700 });
-      fs.chmodSync(this.#root, 0o700);
-      temporary = join(this.#root, `.accounts-${randomUUID()}.tmp`);
-      fd = fs.openSync(temporary,
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-      fs.fchmodSync(fd, 0o600);
-      fs.writeFileSync(fd, bytes);
-      fs.fsyncSync(fd);
-      fs.closeSync(fd);
-      fd = undefined;
-      // Commit point: a successful rename must not be reported as an uncommitted write.
-      fs.renameSync(temporary, this.#path);
-      temporary = undefined;
-    } catch (caught) { error = caught; }
-    finally {
-      if (fd !== undefined) {
-        try { fs.closeSync(fd); } catch (caught) { error ??= caught; }
-      }
-      if (temporary !== undefined) {
-        try { fs.unlinkSync(temporary); }
-        catch (caught) { if (caught.code !== 'ENOENT') error ??= caught; }
-      }
-    }
-    if (error) throw failure(error);
+      const [, rows] = await this.#database.transaction([
+        { sql: 'UPDATE pan_standalone_accounts SET revision=?,row_revision=row_revision+1,' +
+            columns.map(key => key + '=?').join(',') + ' WHERE provider=? AND revision=? AND row_revision=?',
+          params: [next, ...values, provider, accountRevision, rowRevision], expectChanges: 1 },
+        { sql: selectAccounts, rows: true, maxRows: 5 },
+      ]);
+      return accounts(rows);
+    } catch (error) { throw fault(error); }
   }
 
-  close() {}
+  close() { return this.#database.close(); }
 }

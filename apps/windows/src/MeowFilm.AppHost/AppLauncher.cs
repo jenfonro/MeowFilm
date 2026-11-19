@@ -9,39 +9,40 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.AppHost;
 
-public sealed record AppDefinition(string Id, IReadOnlyList<RuntimeModule> RuntimeModules,
-    IReadOnlyList<string> NativeNamespaces,
-    IReadOnlyList<string>? NativeCollections = null, IReadOnlyList<string>? ProtectedNamespaces = null);
+public sealed record AppDefinition(string Id, IReadOnlyList<RuntimeModule> RuntimeModules);
 
 public static class AppLauncher
 {
     public static void Run(AppDefinition definition,
-        Func<IRuntimeClient, IDocumentStore, IReadOnlyList<IDesktopModule>> createModules,
+        Func<IRuntimeClient, IStorageDatabase, IReadOnlyList<IDesktopModule>> createModules,
         Func<ValueTask>? disposeResources = null,
         Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
-        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
+        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
+        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null)
         => Run(definition, (runtime, store, modules) =>
         {
             foreach (var module in createModules(runtime, store)) modules.Add(module);
-        }, disposeResources, attachWindow, createPages);
+        }, disposeResources, attachWindow, createPages, runtimeSettings);
 
     /// <summary>
     /// Incremental registration owns each completed constructor even when a
     /// later capability constructor fails. It is not a global service locator.
     /// </summary>
     public static void Run(AppDefinition definition,
-        Action<IRuntimeClient, IDocumentStore, ICollection<IDesktopModule>> createModules,
+        Action<IRuntimeClient, IStorageDatabase, ICollection<IDesktopModule>> createModules,
         Func<ValueTask>? disposeResources = null,
         Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
-        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
-        => Run(AppDataPaths.Current, definition, createModules, disposeResources, attachWindow, createPages);
+        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
+        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null)
+        => Run(AppDataPaths.Current, definition, createModules, disposeResources, attachWindow, createPages, runtimeSettings);
 
     // Isolated App-host tests use the same launcher without touching the user's data.
     internal static void Run(AppDataPaths paths, AppDefinition definition,
-        Action<IRuntimeClient, IDocumentStore, ICollection<IDesktopModule>> createModules,
+        Action<IRuntimeClient, IStorageDatabase, ICollection<IDesktopModule>> createModules,
         Func<ValueTask>? disposeResources = null,
         Func<Window, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
-        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null)
+        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
+        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null)
     {
         var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         DesktopTypography.Install(application);
@@ -134,7 +135,7 @@ public static class AppLauncher
 
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
         {
-            LocalDocumentStore? store = null;
+            IStorageDatabase? store = null;
             AppRuntimeConnectionHost? runtime = null;
             ArtworkService? artwork = null;
             AppAppearance? appearance = null;
@@ -164,18 +165,16 @@ public static class AppLauncher
             }
             try
             {
-                userData ??= new UserDataDirectory(paths.Documents, paths.Caches);
+                userData ??= new UserDataDirectory(paths.Documents);
                 // A durable reset request is completed before any store, runtime
-                // or cache owner can read either partially-cleared root. Normal
-                // admission leaves the optional cache directory unopened.
+                // or cache owner can read the partially-cleared current root.
                 await Task.Run(userData.Open, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(paths.Documents);
-                store = new LocalDocumentStore(paths.Documents, definition.NativeNamespaces,
-                    definition.NativeCollections, definition.ProtectedNamespaces);
-                var settingsNamespaces = AppIdentity.RuntimeSettingsNamespaces
-                    .Where(pair => definition.NativeNamespaces.Contains(pair.Value))
-                    .ToDictionary(pair => pair.Key, pair => pair.Value);
+                store = new NativeDatabase(paths.Documents);
+                await store.Ready;
+                cancellationToken.ThrowIfCancellationRequested();
+                var nativeSettings = runtimeSettings?.Invoke(store);
                 runtime = new AppRuntimeConnectionHost(async token =>
                 {
                     // Native pages and business owners never wait for this start:
@@ -186,8 +185,7 @@ public static class AppLauncher
                     token.ThrowIfCancellationRequested();
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
                         definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token,
-                        settingsStore: settingsNamespaces.Count == 0 ? null : store,
-                        settingsNamespaces: settingsNamespaces).ConfigureAwait(false);
+                        settingsStore: nativeSettings).ConfigureAwait(false);
                 });
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);

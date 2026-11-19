@@ -6,10 +6,10 @@ namespace MeowFilm.Capabilities.Feedback;
 
 /// <summary>
 /// Native attempt and outbox ownership; shared Node protocols execute the remote work.
-/// Windows KG feedback remains unsupported. All ports and the document store are borrowed.
+/// Windows KG feedback remains unsupported. All ports and the database are borrowed.
 /// </summary>
 internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformClient client, TimeProvider? clock = null,
-    IDocumentStore? store = null, MusicFeedbackSettingsOwner? settings = null,
+    IStorageDatabase? store = null, MusicFeedbackSettingsOwner? settings = null,
     Action<MusicPlatformSession>? authenticationRejected = null) : IMusicFeedbackProtocol, IMusicFeedbackPendingProtocol
 {
     private readonly IMusicPlatformSessionSource accounts = accounts ?? throw new ArgumentNullException(nameof(accounts));

@@ -1141,10 +1141,7 @@ final class FilmUIKitTests: XCTestCase {
     }
 
     private func isolatedLibrary() throws -> FilmLibrary {
-        let suite = "FilmUIKitTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
-        return FilmLibrary(defaults: defaults)
+        try appStorageTestFilmLibrary()
     }
 
     private func homeCollection(in page: FilmHomeViewController) throws -> UICollectionView {

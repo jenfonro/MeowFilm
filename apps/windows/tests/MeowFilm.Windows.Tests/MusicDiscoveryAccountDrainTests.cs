@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Real sole account owner with a synthetic, deliberately non-cooperative store.
-// No authentication, network request, DPAPI/account write, or global-close workaround.
+// No authentication, network request, account write, or global-close workaround.
 using System.Collections.Concurrent;
 using System.IO;
 using System.Text;
@@ -84,7 +84,7 @@ public static class MusicDiscoveryAccountDrainTests
         .Single(row => row.GetProperty("platform").GetString() == "wy");
     private static byte[] Document(long generation = 1, bool anonymous = false)
     {
-        // Generate the current protected-document payload through the actual owner.
+        // Generate current account rows through the actual owner.
         // The read/drain probe below never performs authentication or writes.
         return Current().GetAwaiter().GetResult();
         async Task<byte[]> Current()
@@ -106,7 +106,7 @@ public static class MusicDiscoveryAccountDrainTests
                     new { platform = "wy", cookie = "MUSIC_U=synthetic-secret-" + generation });
                 Check(result.GetProperty("ok").GetBoolean());
             }
-            return (await store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Data!;
+            return (await store.ReadAccountsAsync()).Data!;
         }
     }
 
@@ -137,40 +137,41 @@ public static class MusicDiscoveryAccountDrainTests
             }
         }
     }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : NativeTestDatabase
     {
-        internal byte[]? Data = Document();
-        internal readonly ConcurrentDictionary<int, Hold> Holds = new();
-        internal readonly ConcurrentBag<byte[]> ReturnedBuffers = new();
-        internal int Reads, Active, Maximum, Writes, Disposals;
-        internal bool Fault;
-        internal Hold Block(int number)
+        internal Store()=>Inner.SeedAccounts(JsonNode.Parse(Document())!.AsObject());
+        internal byte[]? Data
         {
-            var value = new Hold(); Check(Holds.TryAdd(number, value)); return value;
+            get=>JsonSerializer.SerializeToUtf8Bytes(Inner.Accounts());
+            set
+            {
+                if(value is not null)Inner.SeedAccounts(JsonNode.Parse(value)!.AsObject());
+                else Inner.WriteAsync(db=>{db.Execute("DELETE FROM windows_music_accounts");return db.CommitRevision(MusicAccountOwner.DocumentNamespace,db.Revision(MusicAccountOwner.DocumentNamespace),Guid.NewGuid().ToString("D"));}).GetAwaiter().GetResult();
+            }
         }
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal readonly ConcurrentDictionary<int,Hold> Holds=new();
+        internal readonly ConcurrentBag<byte[]> ReturnedBuffers=new();
+        internal int Active,Maximum;internal bool Fault,Corrupt;
+        internal Hold Block(int number){var hold=new Hold();Check(Holds.TryAdd(number,hold));return hold;}
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)
         {
-            Check(ns == MusicAccountOwner.DocumentNamespace);
-            int count = Interlocked.Increment(ref Reads), active = Interlocked.Increment(ref Active);
-            int old; do { old = Maximum; } while (active > old && Interlocked.CompareExchange(ref Maximum, active, old) != old);
-            Holds.TryGetValue(count, out var hold);
-            var bytes = Data?.ToArray(); // Exact read snapshot; cancellation cannot change its identity.
+            int active=Interlocked.Increment(ref Active);int old;
+            do{old=Maximum;}while(active>old&&Interlocked.CompareExchange(ref Maximum,active,old)!=old);
+            T result=default!;Hold? hold=null;
             try
             {
-                if (hold is not null)
-                {
-                    using var registration = token.Register(() => hold.Cancelled.TrySetResult());
-                    hold.Entered.TrySetResult(); await hold.Release.Task; // Deliberately ignores cancellation.
-                }
-                if (Fault || hold?.Fault == true) throw new IOException("synthetic-secret-storage-path");
-                if (bytes is not null) ReturnedBuffers.Add(bytes);
-                return new(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes));
+                result=await base.ReadAsync(read,token);Holds.TryGetValue(Reads,out hold);
+                if(result is RecordSnapshot snapshot&&snapshot.Data is { } bytes)ReturnedBuffers.Add(bytes);
+                if(hold is not null)
+                {using var registration=token.Register(()=>hold.Cancelled.TrySetResult());hold.Entered.TrySetResult();await hold.Release.Task;}
+                if(Fault||hold?.Fault==true)throw new IOException("synthetic-storage-failure");
+                if(Corrupt)throw new DocumentStoreException(DocumentStoreError.Corrupt);return result;
             }
-            finally { Interlocked.Decrement(ref Active); hold?.Settled.TrySetResult(); }
+            catch{if(result is RecordSnapshot snapshot&&snapshot.Data is { } bytes)System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);throw;}
+            finally{Interlocked.Decrement(ref Active);hold?.Settled.TrySetResult();}
         }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
-        { Interlocked.Increment(ref Writes); throw new InvalidOperationException("Read-only fixture forbids writes"); }
-        public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
+        public override Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)=>throw new InvalidOperationException("Read-only account fixture forbids writes");
     }
     private sealed class Protocol : IMusicAccountProtocol
     {
@@ -396,7 +397,7 @@ public static class MusicDiscoveryAccountDrainTests
     private static async Task ReadError(bool restore, bool corrupt)
     {
         await using var f = new Fixture();
-        if (corrupt) f.Store.Data = Encoding.UTF8.GetBytes("synthetic-secret-invalid-json"); else f.Store.Fault = true;
+        if (corrupt) f.Store.Corrupt = true; else f.Store.Fault = true;
         await Failure(Read(f, restore), restore, corrupt ? "CORRUPT_STORAGE" : "STORAGE");
         Check(f.Store.Reads == 1);
     }

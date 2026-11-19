@@ -8,7 +8,7 @@ import MeowPlayback
 @MainActor final class MusicNetworkPlaylistUIKitTests: XCTestCase {
     func testLibraryGroupsNetworkReferencesAndRoutesOnlyTheirExplicitRemoteIdentity() async throws {
         let service = NetworkPlaylistUIKitService(), router = NetworkPlaylistUIKitRouter()
-        let model = MusicViewModel(service: service, playback: PlaybackController())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, playback: PlaybackController()))
         await model.load()
         let page = MusicLibraryViewController(model: model, appearance: MusicAppearancePreferencesStore(), router: router)
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
@@ -40,21 +40,15 @@ import MeowPlayback
     }
 
     func testSearchSongMenuKeepsOnlyManagedPlaylistsWhenCollectionsChangeDuringFavoritesRead() async throws {
-        let suite = "MusicNetworkPlaylistUIKitTests.search." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        let key = MusicSearchPreferencesStore.preferencesKey, saved = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.set(try JSONEncoder().encode(MusicSearchPreferences(
-            songPlatforms: [.qq], searchPlaylists: false)), forKey: key)
-        defer {
-            UserDefaults.standard.set(saved, forKey: key)
-            defaults.removePersistentDomain(forName: suite)
-        }
+        let database = try appStorageTestDatabase()
         let service = NetworkPlaylistUIKitService(), router = NetworkPlaylistUIKitRouter()
-        let model = MusicViewModel(service: service, playback: PlaybackController())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, playback: PlaybackController()), database: database)
+        let saved = await model.searchPreferences.update(.init(songPlatforms: [.qq], searchPlaylists: false))
+        XCTAssertTrue(saved)
         await model.load()
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let appearance = try appStorageTestAppearance(database)
         let root = MusicSearchViewController(model: model, appearance: appearance, router: router,
-                                            history: SearchHistoryStore(defaults: defaults))
+                                            history: try appStorageTestHistory(database))
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([root], animated: false)
         let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first

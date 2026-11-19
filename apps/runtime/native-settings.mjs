@@ -7,10 +7,8 @@ export const nativeSettingsFrameBytes = 8 * 1024 * 1024;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const codes = new Set(['INVALID_REQUEST', 'PERMISSION_DENIED', 'CLOSED', 'CANCELLED', 'TIMEOUT',
   'STORAGE_ERROR', 'CORRUPT_STORAGE', 'STORAGE_CONFLICT', 'COMMIT_UNKNOWN']);
-const fingerprint = value => object(value) &&
-  typeof value.exists === 'boolean' && Number.isSafeInteger(value.length) && value.length >= 0 &&
-  (value.exists ? typeof value.sha256 === 'string' && /^[a-f0-9]{64}$(?![\s\S])/.test(value.sha256)
-    : value.length === 0 && value.sha256 === null);
+const revision = value => Number.isSafeInteger(value) && value >= 0;
+const providers = new Set(['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
 
 /** An in-memory read capability over an App-owned private stream, never a settings store. */
 export function createNativeSettings(stream, stop) {
@@ -45,10 +43,12 @@ export function createNativeSettings(stream, stop) {
       catch { fail('CLOSED'); }
     });
   }
-  function write(block, document, expected) {
-    if (block !== 'pan.accounts' || !object(document) || !fingerprint(expected))
+  function update(block, command) {
+    if (block !== 'pan.accounts' || !object(command) || !providers.has(command.provider) ||
+        !['replace', 'refresh'].includes(command.mode) || !revision(command.accountRevision) ||
+        !revision(command.rowRevision) || !object(command.credentials))
       return Promise.reject(new BridgeError('INVALID_REQUEST'));
-    return request('settings.write', block, { document, expected });
+    return request('settings.pan.update', block, { command });
   }
   return {
     accept(bytes) {
@@ -73,7 +73,7 @@ export function createNativeSettings(stream, stop) {
         const exchange = pending.get(reply?.id);
         if (!object(reply) || reply.kind !== 'settings.result' || !exchange || typeof reply.ok !== 'boolean' ||
             reply.ok && (!(reply.document === null || object(reply.document)) ||
-              !fingerprint(reply.fingerprint)) ||
+              !revision(reply.revision)) ||
             !reply.ok && !codes.has(reply.code)) {
           fail('INVALID_RESPONSE'); return;
         }
@@ -81,7 +81,7 @@ export function createNativeSettings(stream, stop) {
         pending.delete(reply.id);
         if (!reply.ok) exchange.reject(Object.assign(new Error(reply.code), { code: reply.code }));
         else {
-          const value = { document: reply.document, fingerprint: reply.fingerprint };
+          const value = { document: reply.document, revision: reply.revision };
           snapshots.set(exchange.block, cloneJSONValue(value, -2));
           exchange.resolve(cloneJSONValue(value, -2));
         }
@@ -94,8 +94,8 @@ export function createNativeSettings(stream, stop) {
       if (!snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
       return cloneJSONValue(snapshots.get(block).document);
     },
-    write,
-    document(block) {
+    update,
+    accounts(block) {
       if (closed) throw new BridgeError('CLOSED');
       if (block !== 'pan.accounts' || !snapshots.has(block)) throw new BridgeError('INVALID_REQUEST');
       let current = cloneJSONValue(snapshots.get(block), -2);
@@ -108,9 +108,9 @@ export function createNativeSettings(stream, stop) {
           open(); current = value;
           return cloneJSONValue(current.document);
         },
-        async write(document) {
+        async update(command) {
           open();
-          const value = await write(block, document, current.fingerprint);
+          const value = await update(block, command);
           open(); current = value;
           return cloneJSONValue(current.document);
         },

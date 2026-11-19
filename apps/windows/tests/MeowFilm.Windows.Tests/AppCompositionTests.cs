@@ -17,7 +17,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real WPF, DPAPI and an explicit script process; no product Main or user profile.
+// Real WPF, current SQLite and an explicit script process; no product Main or user profile.
 public static class AppCompositionTests
 {
     private static string Required(string name) => Environment.GetEnvironmentVariable(name)
@@ -36,9 +36,7 @@ public static class AppCompositionTests
         yield return new("App shell corrupt current queue fails once without rewriting data", () => Sta(() =>
             RejectedShellStartup("queue", """{"schema":1,"entries":[],"currentId":"entry-1","priority":[],"source":null}""",
                 "播放队列数据无效或格式不兼容")));
-        yield return new("App shell corrupt current history fails once without rewriting data", () => Sta(() =>
-            RejectedShellStartup("history", """{"schema":1,"playlists":[],"days":[],"extra":true}""",
-                "播放历史数据无效或格式不兼容")));
+        yield return new("App corrupt current history fails on explicit read without rewriting data", () => Sta(RejectedHistoryRead));
     }
     private static Task Identity()
     {
@@ -58,28 +56,21 @@ public static class AppCompositionTests
             ("netease", "0.1.0"),
             ("music-platform", "0.1.0")
         }));
-        Check(AppIdentity.NativeCollections.Count == 0, "music sources are stored by the shared runtime module");
-        Check(AppIdentity.NativeNamespaces.Contains("music.accounts.v2"));
-        Check(AppIdentity.NativeNamespaces.Contains("music.fm-selection.v2"));
-        Check(AppIdentity.NativeNamespaces.Contains("film.library.v1"));
-        Check(AppIdentity.NativeNamespaces.Contains("novel.library.v1"));
-        Check(AppIdentity.ProtectedNamespaces.SequenceEqual(new[] { "music.accounts.v2" }));
-        Check(AppDataPaths.Current.Caches != AppDataPaths.Current.Documents &&
-            !AppDataPaths.Current.Caches.StartsWith(AppDataPaths.Current.Documents + Path.DirectorySeparatorChar,
-                StringComparison.OrdinalIgnoreCase));
-        Check(!AppIdentity.NativeNamespaces.Intersect(AppIdentity.CacheNamespaces, StringComparer.Ordinal).Any());
-        Check(AppIdentity.CacheProtectedNamespaces.Contains("music.account-details.v2"));
+        Check(AppDataPaths.Current.ScriptRuntime == AppDataPaths.Current.Documents);
+        Check(AppDataPaths.Current.Caches == Path.Combine(AppDataPaths.Current.Documents, "resources-v1"));
+        Check(NativeDatabase.RelativePath == "storage-v1/meowfilm.sqlite3");
         return Task.CompletedTask;
     }
     private static async Task Components()
     {
         string data = DataRoot();
-        await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+        await using var store = new NativeTestDatabase(data);
+        await store.Ready;
         await using var runtime = new AppRuntimeClient(async token =>
             await NodeRuntime.StartAsync(Required("MEOWFILM_TEST_NODE"),
                 RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"),
                     AppIdentity.RuntimeId, AppIdentity.ScriptModules), AppIdentity.ScriptModules,
-                Path.Combine(data, "script-runtime"), token));
+                data, token, settingsStore: new FilmRuntimeSettings(store)));
         await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
         await using var music = new MusicCapability(runtime, store, MusicTestStores.For(store), playback);
         var lifecycle = new AppShutdown([music], []);
@@ -110,7 +101,7 @@ public static class AppCompositionTests
         string data = DataRoot(); string? playlistId = null;
         for (int pass = 0; pass < 2; pass++)
         {
-            await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            await using var store = new NativeTestDatabase(data);
             await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("Node unavailable"));
             runtime.Start();
             await using var owner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
@@ -136,7 +127,7 @@ public static class AppCompositionTests
         string data = DataRoot();
         for (int pass = 0; pass < 2; pass++)
         {
-            await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            await using var store = new NativeTestDatabase(data);
             await using var runtime = StartupRuntime();
             await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
             var application = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
@@ -206,10 +197,34 @@ public static class AppCompositionTests
             }
         }
     }
+    private static async Task RejectedHistoryRead()
+    {
+        await using var store = new NativeTestDatabase(DataRoot());
+        var records = MusicTestStores.For(store);
+        records.SetArea("history", JsonNode.Parse("""{"schema":1,"playlists":[]}"""));
+        await using var runtime = StartupRuntime();
+        await using var playback = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
+        await using var music = new MusicCapability(runtime, store, records, playback);
+        await music.InitializeAsync(default);
+        var before = records.Root.ToJsonString();
+        try
+        {
+            await music.NavigateAsync("history", default);
+            throw new InvalidOperationException("Corrupt history must fail its explicit consumer read.");
+        }
+        catch (MusicOperationException error) when (error.Code == "CORRUPT_HISTORY")
+        {
+            Check(music.OperationErrorText(error) == "播放历史数据无效或格式不兼容");
+        }
+        Check(records.Root.ToJsonString() == before && music.IsCatalogHome,
+            "rejected history remains unchanged and cannot replace the current page");
+        Check(runtime.Requests.Count == 0 && !playback.HasMedia,
+            "local history failure starts no platform request or playback");
+    }
     private static async Task RejectedShellStartup(string area, string value, string expected)
     {
         string data = DataRoot();
-        await using var store = new LocalDocumentStore(data, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+        await using var store = new NativeTestDatabase(data);
         var records = MusicTestStores.For(store);
         records.SetArea(area, JsonNode.Parse(value));
         var before = records.Root.ToJsonString();

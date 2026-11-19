@@ -63,7 +63,7 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
     public static async Task<NodeRuntime> StartAsync(string nodeExecutable, RuntimeBundle bundle,
         IReadOnlyList<RuntimeModule> expectedModules, string scriptDataRoot,
         CancellationToken cancellationToken = default, CancellationToken ownerRevoked = default,
-        IDocumentStore? settingsStore = null, IReadOnlyDictionary<string, string>? settingsNamespaces = null)
+        IRuntimeSettingsStore? settingsStore = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         string node, dataRoot;
@@ -127,7 +127,7 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             await server.WriteAsync(config, deadline.Token).ConfigureAwait(false);
             await server.WriteAsync("\n"u8.ToArray(), deadline.Token).ConfigureAwait(false);
             await server.FlushAsync(deadline.Token).ConfigureAwait(false);
-            var settingsPipe = new RuntimeSettingsPipe(server, settingsStore, settingsNamespaces);
+            var settingsPipe = new RuntimeSettingsPipe(server, settingsStore);
             var ready = await settingsPipe.ReadyAsync(deadline.Token).ConfigureAwait(false);
             client = new RuntimeHttpClient(ready);
             runtime = new NodeRuntime(child, server, client, output, error, exited, job,

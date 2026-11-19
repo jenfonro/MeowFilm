@@ -24,7 +24,7 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
     internal readonly string Platform;
     internal readonly Store Wrapper;
     internal readonly Store CacheBacking;
-    internal readonly CacheDocumentStore Cache;
+    internal readonly NativeTestDatabase Cache;
     internal readonly MusicPlatformRuntimeFixture Runtime;
     internal readonly MusicAccountOwner Owner;
     internal readonly List<string> Steps = [];
@@ -38,11 +38,9 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         Root = root ?? TestWorkspace.DataPath("account-details", Guid.NewGuid().ToString("N"));
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root);
         Directory.CreateDirectory(Root);
-        Wrapper = new(new LocalDocumentStore(Root, [MusicAccountOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace]));
-        string cacheRoot = Path.Combine(Root, "cache"); Directory.CreateDirectory(cacheRoot);
-        CacheBacking = new(new LocalDocumentStore(cacheRoot,
-            [MusicAccountOwner.DetailsCacheNamespace], protectedNamespaces: [MusicAccountOwner.DetailsCacheNamespace]));
-        Cache = new(CacheBacking);
+        Wrapper = new(new NativeDatabase(Root));
+        CacheBacking = Wrapper;
+        Cache = new(Wrapper);
         Runtime = new();
         Runtime.OnRequest = async (call, token) => {
             if (call.Operation == "qr.cancel") return MusicPlatformRuntimeFixture.Json(new { cancelled = true });
@@ -62,7 +60,7 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
             if (call.Operation == "account.verify") value["cookie"] = call.Payload.GetProperty("candidate").GetProperty("cookie").GetString();
             return MusicPlatformRuntimeFixture.Json(Change?.Invoke(value) ?? value);
         };
-        Owner = Runtime.CreateAccountOwner(Wrapper, clock, detailsCacheStore: Cache);
+        Owner = Runtime.CreateAccountOwner(Wrapper, clock);
     }
     internal async Task Seed()
     {
@@ -82,35 +80,28 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
     internal Task<MusicAccountDetails> Refresh(CancellationToken token = default) => Owner.RefreshDetailsAsync(Platform, 1, token);
     internal async Task<JsonObject> Document()
     {
-        var doc = await Wrapper.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
+        var doc = await Wrapper.Inner.ReadAccountsAsync();
         try { return JsonNode.Parse(doc.Data!)!.AsObject(); }
         finally { CryptographicOperations.ZeroMemory(doc.Data!); }
     }
     internal async Task Mutate(Action<JsonObject> change)
     {
-        var doc = await Wrapper.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
+        var doc = await Wrapper.Inner.ReadAccountsAsync();
         try {
             var root = JsonNode.Parse(doc.Data!)!.AsObject(); change(root);
             var bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-            try { await Wrapper.Inner.WriteAsync(MusicAccountOwner.DocumentNamespace, bytes, doc.Fingerprint); }
+            try { await Wrapper.Inner.WriteAccountsAsync(bytes, doc.Revision); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
         } finally { CryptographicOperations.ZeroMemory(doc.Data!); }
     }
     internal async Task<JsonObject> CacheDocument()
     {
-        var doc = await Cache.ReadAsync(MusicAccountOwner.DetailsCacheNamespace);
-        try { return JsonNode.Parse(doc.Data!)!.AsObject(); }
-        finally { CryptographicOperations.ZeroMemory(doc.Data!); }
+        return await Wrapper.Inner.ReadDetailsAsync();
     }
     internal async Task MutateCache(Action<JsonObject> change)
     {
-        var doc = await Cache.ReadAsync(MusicAccountOwner.DetailsCacheNamespace);
-        try {
-            var root = JsonNode.Parse(doc.Data!)!.AsObject(); change(root);
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-            try { await Cache.WriteAsync(MusicAccountOwner.DetailsCacheNamespace, bytes, doc.Fingerprint); }
-            finally { CryptographicOperations.ZeroMemory(bytes); }
-        } finally { CryptographicOperations.ZeroMemory(doc.Data!); }
+        var root = await Wrapper.Inner.ReadDetailsAsync(); change(root);
+        await Wrapper.Inner.SeedDetailsAsync(root);
     }
     internal static JsonObject DetailsRow(JsonObject root) => root.First().Value!.AsObject();
     internal static JsonObject AccountRow(JsonObject root) => root["entries"]!.AsArray()
@@ -121,29 +112,29 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         try { await Owner.DisposeAsync(); }
         finally { await Runtime.DisposeAsync(); await Cache.DisposeAsync(); await CacheBacking.DisposeAsync(); await Wrapper.DisposeAsync(); }
     }
-    internal sealed class Store(LocalDocumentStore inner) : IDocumentStore
+    internal sealed class Store(NativeDatabase inner) : NativeTestDatabase(inner, owns: true)
     {
-        internal LocalDocumentStore Inner => inner;
-        internal int Reads, Writes, Disposals;
         internal bool Hold, HoldRead, LoseReceipt, Conflict, FailRead;
         internal TaskCompletionSource Entered { get; } = Signal();
         internal TaskCompletionSource Release { get; } = Signal();
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default)
         {
-            Interlocked.Increment(ref Reads);
             if (FailRead) throw new DocumentStoreException(DocumentStoreError.Storage);
-            if (HoldRead) { Entered.TrySetResult(); await Release.Task; token = default; }
-            return await inner.ReadAsync(ns, token);
+            var result = await base.ReadAsync(read, token);
+            if (HoldRead) { Entered.TrySetResult(); await Release.Task; }
+            return result;
         }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            Interlocked.Increment(ref Writes);
-            if (Hold) { Entered.TrySetResult(); await Release.Task; token = default; }
-            if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            var result = await inner.WriteAsync(ns, data, expected, token);
+            var result = await base.WriteAsync(db =>
+            {
+                if (Hold) { Entered.TrySetResult(); Release.Task.GetAwaiter().GetResult(); }
+                if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                return write(db);
+            }, token, retainedBytes, commit);
             if (LoseReceipt) throw new DocumentStoreException(DocumentStoreError.Storage);
             return result;
         }
-        public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }
     }
 }

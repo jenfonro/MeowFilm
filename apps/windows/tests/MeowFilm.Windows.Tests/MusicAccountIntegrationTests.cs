@@ -48,8 +48,8 @@ public static class MusicAccountIntegrationTests
                 Check(f.Module.SelectedAccount.UserId == "9007199254740997");
                 Check(f.Module.AccountStatus == "会话验证成功");
                 Check(f.Transport.Verifications == 1);
-                var document = await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace);
-                Check(document.Fingerprint.Exists);
+                var document = await f.Store.ReadAccountsAsync();
+                Check(document.Revision != StorageRevision.Empty);
                 var accounts = AccountDocument.Decode(document);
                 var details = await f.Application.ReadDetailsAsync("wy");
                 Check(details.Generation == accounts.Get("wy").Generation && details.Profile?.UserId == accounts.Get("wy").Profile?.UserId &&
@@ -194,7 +194,7 @@ public static class MusicAccountIntegrationTests
             f.Transport.Release.TrySetResult();
             await f.Module.ReadAccountsAsync();
             Check(f.Module.SelectedAccount!.State == "none");
-            Check(!(await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
+            Check((await f.Store.ReadAccountsAsync()).Revision == StorageRevision.Empty);
         });
         yield return Case("admitted cancelled CAS returns unknown and explicit read waits for physical DPAPI receipt", async () =>
         {
@@ -211,7 +211,7 @@ public static class MusicAccountIntegrationTests
             Check(!read.IsCompleted);
             f.Store.Release.TrySetResult();
             Check(AccountState(await read) == "saved" && f.Store.AccountWrites == 1);
-            Check((await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
+            Check((await f.Store.ReadAccountsAsync()).Revision != StorageRevision.Empty);
         });
         yield return Case("lost QR CAS acknowledgement requires explicit reconciliation without replay and survives restart", async () =>
         {
@@ -311,7 +311,7 @@ public static class MusicAccountIntegrationTests
             f.Store.Release.TrySetResult(); await import;
             Check(AccountState(await read) == "saved");
             await f.Application.PrepareShutdownAsync();
-            Check((await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
+            Check((await f.Store.ReadAccountsAsync()).Revision != StorageRevision.Empty);
             Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0 && !f.Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal)));
         });
         yield return Case("recovering preparation keeps real catalog and account owners usable without reimport", async () =>
@@ -339,7 +339,7 @@ public static class MusicAccountIntegrationTests
             Check(!abort.IsCompleted && f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
             f.Store.Release.TrySetResult(); await abort;
             Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
-            Check((await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
+            Check((await f.Store.ReadAccountsAsync()).Revision != StorageRevision.Empty);
         });
         yield return Case("production unknown library receipt fails prepare and final disposal fences without disposing shared store or runtime", async () =>
         {
@@ -488,7 +488,7 @@ public static class MusicAccountIntegrationTests
         await model.ActivateAsync();
         Check(model.HasProfile && model.HasSession && model.DisplayName == known.Profile.DisplayName && model.CanRefresh);
         int writes = f.Store.AccountWrites;
-        var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        var fingerprint = (await f.Store.ReadAccountsAsync()).Revision;
         int observations = 0; model.Observed += _ => observations++;
         foreach (string code in new[] { "FORBIDDEN", "VERIFICATION_REQUIRED", "UPSTREAM_ERROR" })
         {
@@ -499,7 +499,7 @@ public static class MusicAccountIntegrationTests
                 model.UserId == known.Profile.UserId && observations == 0);
             Check(model.Status == (code == "VERIFICATION_REQUIRED" ? "等待平台验证" : "资料或权益读取失败"));
             Check((await f.Application.ReadDetailsAsync("wy")) is { State: "verified", Profile: not null });
-            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAccountsAsync()).Revision == fingerprint);
         }
         f.Runtime.OnRequest = (call, token) => call.Operation == "account.profile"
             ? Task.FromException<JsonElement>(new MusicPlatformException("INVALID_CREDENTIALS")) : f.Transport.Respond(call, token);
@@ -517,7 +517,7 @@ public static class MusicAccountIntegrationTests
         int writes = f.Store.AccountWrites;
         int publications = f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update");
         int invalidations = 0; f.Application.VipPageInvalidated += () => invalidations++;
-        var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        var fingerprint = (await f.Store.ReadAccountsAsync()).Revision;
         foreach (string code in new[] { "FORBIDDEN", "VERIFICATION_REQUIRED", "UPSTREAM_ERROR" })
         {
             f.Runtime.OnRequest = (call, token) => call.Operation is "vip.signCard" or "vip.banner"
@@ -527,7 +527,7 @@ public static class MusicAccountIntegrationTests
                 failed.Sign is null && failed.Banner is null && failed.SignError == code && failed.BannerError == code);
             Check((await f.Application.ReadDetailsAsync("wy")) is { State: "verified", Profile: not null });
             Check(invalidations == 0 && f.Store.AccountWrites == writes &&
-                (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+                (await f.Store.ReadAccountsAsync()).Revision == fingerprint);
             Check(f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update") == publications);
         }
     }
@@ -544,14 +544,14 @@ public static class MusicAccountIntegrationTests
             var known = await f.Application.ReadVipPageAsync();
             int writes = f.Store.AccountWrites;
             int publications = f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update");
-            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            var fingerprint = (await f.Store.ReadAccountsAsync()).Revision;
             f.Runtime.OnRequest = (call, token) => call.Operation == "vip.checkIn"
                 ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status, errorCode = code })) : f.Transport.Respond(call, token);
             await OperationError(() => f.Application.SignVipPageAsync(known.Generation), expected);
             var retained = await f.Application.ReadVipPageAsync();
             Check(retained.Account == known.Account && retained.SignUnconfirmed == (status == "unknown") && !retained.SignConfirmed);
             Check((await f.Application.ReadDetailsAsync("wy")) is { State: "verified", Profile: not null });
-            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAccountsAsync()).Revision == fingerprint);
             Check(f.Runtime.Calls.Count(call => call.Method == "music.platform.session.update") == publications);
             if (status == "unknown") await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "COMMIT_UNKNOWN");
             Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1);
@@ -566,13 +566,13 @@ public static class MusicAccountIntegrationTests
                 new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
             var known = await f.Application.ReadVipPageAsync();
             int writes = f.Store.AccountWrites;
-            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            var fingerprint = (await f.Store.ReadAccountsAsync()).Revision;
             f.Runtime.OnRequest = (call, token) => call.Operation == "vip.signCard"
                 ? Task.FromException<JsonElement>(new MusicPlatformException(code)) : f.Transport.Respond(call, token);
             var receipt = await f.Application.SignVipPageAsync(known.Generation);
             Check(receipt.Generation == known.Generation && receipt.RefreshedSign is null);
             Check(AccountState(await f.Application.ExecuteAsync("music.accounts.list")) == (code == "AUTH_EXPIRED" ? "revoked" : "verified"));
-            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAccountsAsync()).Revision == fingerprint);
             if (code != "AUTH_EXPIRED")
             {
                 var retained = await f.Application.ReadVipPageAsync();
@@ -591,12 +591,12 @@ public static class MusicAccountIntegrationTests
                 new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
             await f.Application.ReadVipPageAsync();
             int writes = f.Store.AccountWrites;
-            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            var fingerprint = (await f.Store.ReadAccountsAsync()).Revision;
             f.Runtime.OnRequest = (call, token) => call.Operation == operation
                 ? Task.FromException<JsonElement>(new MusicPlatformException(code)) : f.Transport.Respond(call, token);
             await OperationError(() => f.Application.ReadVipPageAsync(), "STALE_SESSION");
             Check((await f.Application.ReadDetailsAsync("wy")) is { State: "revoked", Profile: null });
-            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAccountsAsync()).Revision == fingerprint);
         }
     }
     private static async Task VipWriteAuthentication()
@@ -608,12 +608,12 @@ public static class MusicAccountIntegrationTests
                 new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
             var known = await f.Application.ReadVipPageAsync();
             int writes = f.Store.AccountWrites;
-            var fingerprint = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+            var fingerprint = (await f.Store.ReadAccountsAsync()).Revision;
             f.Runtime.OnRequest = (call, token) => call.Operation == "vip.checkIn"
                 ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status, errorCode = code })) : f.Transport.Respond(call, token);
             await OperationError(() => f.Application.SignVipPageAsync(known.Generation), code);
             Check((await f.Application.ReadDetailsAsync("wy")) is { State: "revoked", Profile: null });
-            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == fingerprint);
+            Check(f.Store.AccountWrites == writes && (await f.Store.ReadAccountsAsync()).Revision == fingerprint);
             Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1);
         }
     }
@@ -689,7 +689,7 @@ public static class MusicAccountIntegrationTests
         Check((await f.Application.ExecuteAsync("music.accounts.import",
             new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
         var known = await f.Application.ReadVipPageAsync();
-        var before = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        var before = (await f.Store.ReadAccountsAsync()).Revision;
         var entered = Signal(); var release = Signal(); var cancelled = Signal();
         f.Runtime.OnRequest = async (call, token) =>
         {
@@ -715,7 +715,7 @@ public static class MusicAccountIntegrationTests
             Check(reread.Generation == known.Generation && reread.Sign is { SignedToday: false } &&
                 reread.SignConfirmed && reread.SignedToday && !reread.SignUnconfirmed);
             Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1 &&
-                f.Store.AccountWrites == 1 && (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == before);
+                f.Store.AccountWrites == 1 && (await f.Store.ReadAccountsAsync()).Revision == before);
         }
         finally { release.TrySetResult(); await signing; }
     }
@@ -725,7 +725,7 @@ public static class MusicAccountIntegrationTests
         Check((await f.Application.ExecuteAsync("music.accounts.import",
             new { platform = "wy", cookie = "MUSIC_U=SYNTHETIC_VIP" })).GetProperty("ok").GetBoolean());
         var known = await f.Application.ReadVipPageAsync();
-        var before = (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint;
+        var before = (await f.Store.ReadAccountsAsync()).Revision;
         f.Runtime.OnRequest = (call, token) => call.Operation == "vip.checkIn"
             ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { status = "unknown", errorCode = "NETWORK_ERROR" }))
             : f.Transport.Respond(call, token);
@@ -745,7 +745,7 @@ public static class MusicAccountIntegrationTests
             !recovered.SignConfirmed && !recovered.SignedToday);
         await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "COMMIT_UNKNOWN");
         Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1 && f.Store.AccountWrites == 1 &&
-            (await f.Store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint == before);
+            (await f.Store.ReadAccountsAsync()).Revision == before);
     }
     private static async Task VipPreparedSign()
     {
@@ -937,7 +937,7 @@ public static class MusicAccountIntegrationTests
             data ??= Path.Combine(Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT")
                 ?? throw new InvalidOperationException("Isolated data required"), "account-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(data);
-            var store = new ControlledStore(new LocalDocumentStore(data, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+            var store = new ControlledStore(new NativeDatabase(data));
             var result = new Fixture(data, store);
             try
             {
@@ -971,32 +971,35 @@ public static class MusicAccountIntegrationTests
             }
         }
     }
-    private sealed class ControlledStore(LocalDocumentStore inner) : IDocumentStore
+    private sealed class ControlledStore(NativeDatabase inner) : NativeTestDatabase(inner, owns: true)
     {
         public string? LoseReceipt;
         public bool FailAccountReads;
-        public int Writes, AccountWrites, DisposeCalls;
+        public int AccountWrites, DisposeCalls;
         public TaskCompletionSource? Arrived, Release;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) =>
-            FailAccountReads && ns == MusicAccountOwner.DocumentNamespace
-                ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : inner.ReadAsync(ns, token);
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
+        public override Task<T> ReadAsync<T>(Func<DatabaseSession,T> read, CancellationToken token = default) =>
+            FailAccountReads ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : base.ReadAsync(read,token);
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            token.ThrowIfCancellationRequested();
-            Interlocked.Increment(ref Writes);
-            if (ns == MusicAccountOwner.DocumentNamespace) Interlocked.Increment(ref AccountWrites);
-            if (ns == MusicAccountOwner.DocumentNamespace && Release is { } hold)
+            bool account = false;
+            var result = await base.WriteAsync(db =>
             {
-                Arrived!.TrySetResult();
-                await hold.Task; // Simulate a physical CAS already admitted before caller cancellation.
-                Release = null;
-                token = CancellationToken.None; // The held physical write still settles in real DPAPI.
-            }
-            var saved = await inner.WriteAsync(ns, data, expected, token);
-            if (LoseReceipt == ns) { LoseReceipt = null; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return saved;
+                var before = db.Revision(MusicAccountOwner.DocumentNamespace);
+                var value = write(db);
+                account = before != db.Revision(MusicAccountOwner.DocumentNamespace);
+                if (account && Release is { } hold)
+                {
+                    Arrived!.TrySetResult(); hold.Task.GetAwaiter().GetResult(); Release = null;
+                }
+                return value;
+            },token,retainedBytes,commit);
+            if (account) AccountWrites++;
+            if (account && LoseReceipt == MusicAccountOwner.DocumentNamespace)
+            { LoseReceipt = null; throw new DocumentStoreException(DocumentStoreError.Storage); }
+            return result;
         }
-        public async ValueTask DisposeAsync() { DisposeCalls++; await inner.DisposeAsync(); }
+        public override async ValueTask DisposeAsync() { DisposeCalls++; await base.DisposeAsync(); }
     }
     private sealed class AccountPeer
     {

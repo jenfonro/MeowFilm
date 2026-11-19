@@ -1,22 +1,33 @@
 import Foundation
 import XCTest
 import MeowStorage
+import MeowStorageTestSupport
 import MeowRuntime
 @testable import MeowNovelFeature
 
 final class NovelLibraryTests: XCTestCase {
-    private func store(_ root: URL) throws -> DocumentStore { try DocumentStore(baseURL: root, namespace: NovelLibrary.namespace) }
+    private var databases: [SQLiteDatabase] = []
+    private var roots: Set<URL> = []
+    private func store(_ root: URL) throws -> SQLiteDatabase {
+        let database = try storageTestOpen(root)
+        databases.append(database); roots.insert(root)
+        return database
+    }
+    override func tearDown() async throws {
+        for database in databases { try await database.close() }
+        for root in roots { try FileManager.default.removeItem(at: root) }
+        try await super.tearDown()
+    }
     func testBookRuntimeMaterialSurvivesShelfMutationAndReopenExactly() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
         let material = try RuntimeJSON.decode(Data(#"{"n":0.12345678901234567890123456789,"large":1e400,"é":1,"e\u0301":2}"#.utf8))
-        let library = NovelLibrary(store: try store(root))
+        let library = NovelLibrary(database: try store(root))
         let found = NovelBook(installationId: "source", bookUrl: "https://fixture.invalid/book", name: "书", variable: material)
         let retained = try await library.retain(found, identity: "book", shelf: true)
         try await library.pin(retained.id)
         await library.close()
-        let reopened = NovelLibrary(store: try store(root))
+        let reopened = NovelLibrary(database: try store(root))
         let saved = try await reopened.snapshot()
         XCTAssertEqual(saved.entries.first?.book.variable, material)
         await reopened.close()
@@ -25,8 +36,7 @@ final class NovelLibraryTests: XCTestCase {
     func testShelfHistoryAreIndependentAndIdentitySurvivesEnrichmentAndSwitch() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let library = NovelLibrary(store: try store(root))
+        let library = NovelLibrary(database: try store(root))
         let found = NovelBook(installationId: "source-a", bookUrl: "https://fixture.invalid/a", name: "猫的旅行")
         let retained = try await library.retain(found, identity: "unknown", shelf: true)
         var state = try await library.snapshot()
@@ -45,7 +55,7 @@ final class NovelLibraryTests: XCTestCase {
         try await library.deleteHistory(retained.id)
         try await library.pin(retained.id)
         await library.close()
-        let reopened = NovelLibrary(store: try store(root))
+        let reopened = NovelLibrary(database: try store(root))
         state = try await reopened.snapshot()
         XCTAssertTrue(state.books(history: true).isEmpty)
         XCTAssertEqual(state.books(history: false).first?.id, retained.id)
@@ -56,10 +66,9 @@ final class NovelLibraryTests: XCTestCase {
     func testRecordedAuthorEnrichmentPersistsIdentityAndThirdSourceRetainsTheSameLocalID() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
         let rpc = try await NovelRulesRPCFixture.start()
         addTeardownBlock { await rpc.close() }
-        let library = NovelLibrary(store: try store(root)), rules = rpc.rules
+        let library = NovelLibrary(database: try store(root)), rules = rpc.rules
         let found = NovelBook(installationId: "source-a", bookUrl: "https://fixture.invalid/a", name: "猫")
         let unknown = try await rules.identity(found)
         let local = try await library.retain(found, identity: unknown, shelf: true)
@@ -80,7 +89,7 @@ final class NovelLibraryTests: XCTestCase {
         XCTAssertEqual(entry.addedAt, previous.addedAt)
         XCTAssertEqual(recorded.books(history: true).map(\.id), [local.id])
         await library.close()
-        let reopened = NovelLibrary(store: try store(root))
+        let reopened = NovelLibrary(database: try store(root))
         let third = NovelBook(installationId: "source-c", bookUrl: "https://fixture.invalid/c", name: "猫", author: "林")
         let thirdIdentity = try await rules.identity(third)
         let retained = try await reopened.retain(third, identity: thirdIdentity)
@@ -92,23 +101,26 @@ final class NovelLibraryTests: XCTestCase {
         XCTAssertEqual(matched.addedAt, entry.addedAt); XCTAssertEqual(matched.readAt, entry.readAt)
         await reopened.close(); await rules.close()
     }
-    func testCorruptAndExternallyChangedDocumentsAreNeverOverwritten() async throws {
+    func testReadOnlyFailureAndIndependentOwnersDoNotLoseOtherEntities() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = try store(root), corrupt = Data("broken".utf8)
-        try store.write(corrupt, key: "library")
-        let library = NovelLibrary(store: store)
-        do { _ = try await library.snapshot(); XCTFail("Corrupt JSON must be reported") }
-        catch { XCTAssertEqual(error as? NovelError, .corruptStorage) }
-        XCTAssertEqual(try store.read(key: "library"), corrupt)
-        try store.remove(key: "library")
-        _ = try await library.snapshot()
-        try store.write(Data("external".utf8), key: "library")
-        do { try await library.saveSettings(.init()); XCTFail("CAS must reject an external edit") }
-        catch { XCTAssertEqual(error as? DocumentStoreError, .revisionConflict) }
-        XCTAssertEqual(try store.read(key: "library"), Data("external".utf8))
-        await library.close()
+        let database = try store(root), library = NovelLibrary(database: database)
+        let book = try await library.retain(.init(installationId: "source", bookUrl: "book", name: "猫"),
+            identity: "known", shelf: true)
+        _ = try await database.read { try $0.execute("PRAGMA query_only=ON") }
+        do { try await library.pin(book.id); XCTFail("read-only write succeeded") }
+        catch { XCTAssertEqual(error as? SQLiteStorageError, .readOnly) }
+        let before = try await library.snapshot()
+        XCTAssertNil(before.entries.first?.pinnedAt)
+        _ = try await database.read { try $0.execute("PRAGMA query_only=OFF") }
+        let other = NovelLibrary(database: try store(root))
+        var settings = NovelReadingSettings(); settings.fontSize = 25
+        try await other.saveSettings(settings)
+        try await library.pin(book.id)
+        let saved = try await other.snapshot()
+        XCTAssertEqual(saved.settings.fontSize, 25)
+        XCTAssertNotNil(saved.entries.first?.pinnedAt)
+        await library.close(); await other.close()
     }
     func testLayoutSettingsAndRulesPersistTogetherAndDefaultRuleBudgetIsReaderCompatible() async throws {
         let imported = try JSONDecoder().decode(NovelRule.self, from: Data(#"{"pattern":"广告","replacement":"","scopeTitle":true}"#.utf8))
@@ -116,12 +128,11 @@ final class NovelLibraryTests: XCTestCase {
         XCTAssertTrue(imported.isEnabled); XCTAssertTrue(imported.scopeContent); XCTAssertTrue(imported.isRegex)
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let library = NovelLibrary(store: try store(root))
+        let library = NovelLibrary(database: try store(root))
         var settings = NovelReadingSettings(); settings.mode = .scroll; settings.theme = 7
         settings.fontName = "fixture-font"; settings.foreground = "#CCCCCC"; settings.backgroundImage = Data([1, 2, 3])
         try await library.saveSettings(settings); try await library.saveRules([imported]); await library.close()
-        let reopened = NovelLibrary(store: try store(root)), restored = try await reopened.snapshot()
+        let reopened = NovelLibrary(database: try store(root)), restored = try await reopened.snapshot()
         XCTAssertEqual(restored.settings, settings); XCTAssertEqual(restored.rules, [imported]); await reopened.close()
     }
     func testContentMutationRechecksBlockAndComposedCharacterBeforeRatioFallback() {
@@ -134,42 +145,36 @@ final class NovelLibraryTests: XCTestCase {
         let fallback = NovelAnchorResolver.resolve(anchor, previous: previous, next: .init(title: "章", blocks: [.init(text: "abcdefghij")]))
         XCTAssertEqual(fallback?.blockIndex, 0); XCTAssertEqual(fallback?.utf16Offset, 5)
     }
-    func testSemanticallyCorruptAnchorAndAppearanceAreReportedWithoutChangingBytes() async throws {
+    func testSemanticallyCorruptAnchorAndAppearanceAreReportedWithoutAutomaticRepair() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let disk = try store(root), setup = NovelLibrary(store: disk)
+        let disk = try store(root), setup = NovelLibrary(database: disk)
         let book = try await setup.retain(.init(installationId: "source", bookUrl: "book", name: "猫"), identity: "known", shelf: true)
         try await setup.record(book, identity: "known", anchor: .init(chapterUrl: "chapter", chapterTitle: "章", chapterIndex: 0))
+        try await setup.saveSettings(.init())
         await setup.close()
-        let valid = try XCTUnwrap(try disk.read(key: "library"))
-        for mutation in ["negative", "ratio", "theme", "color", "font", "speed", "conversion"] {
-            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: valid) as? [String: Any])
-            if mutation == "negative" || mutation == "ratio" {
-                var entries = try XCTUnwrap(object["entries"] as? [[String: Any]])
-                var anchor = try XCTUnwrap(entries[0]["anchor"] as? [String: Any])
-                anchor[mutation == "negative" ? "blockIndex" : "ratio"] = mutation == "negative" ? -1 : 1.2
-                entries[0]["anchor"] = anchor; object["entries"] = entries
-            } else {
-                var settings = try XCTUnwrap(object["settings"] as? [String: Any])
-                switch mutation {
-                case "theme": settings["theme"] = 8
-                case "color": settings["foreground"] = "bad"
-                case "font": settings["fontSize"] = -2
-                case "speed": settings["automaticSpeed"] = 11
-                default: settings["conversion"] = "invented"
-                }
-                object["settings"] = settings
+        let mutations: [(String, String, SQLiteValue)] = [
+            ("ios_novel_progress", "blockIndex", .integer(-1)), ("ios_novel_progress", "ratio", .real(1.2)),
+            ("ios_novel_reading_settings", "theme", .integer(8)), ("ios_novel_reading_settings", "foreground", .text("bad")),
+            ("ios_novel_reading_settings", "fontSize", .real(-2)), ("ios_novel_reading_settings", "automaticSpeed", .real(11)),
+            ("ios_novel_reading_settings", "conversion", .text("invented"))
+        ]
+        for (table, column, invalid) in mutations {
+            let select = "SELECT \"\(column)\" AS value FROM \(table)"
+            let original = try await disk.read { try $0.query(select).first!["value"] }
+            try await disk.transaction { db in
+                try db.execute("PRAGMA ignore_check_constraints=ON")
+                defer { _ = try? db.execute("PRAGMA ignore_check_constraints=OFF") }
+                try db.execute("UPDATE \(table) SET \"\(column)\"=?", [invalid])
             }
-            let bytes = try JSONSerialization.data(withJSONObject: object)
-            try disk.write(bytes, key: "library")
-            let library = NovelLibrary(store: disk)
-            do { _ = try await library.snapshot(); XCTFail(mutation) }
-            catch { XCTAssertEqual(error as? NovelError, .corruptStorage, mutation) }
-            do { try await library.saveSettings(.init()); XCTFail("A corrupt document cannot be overwritten") }
-            catch { XCTAssertEqual(error as? NovelError, .corruptStorage) }
-            XCTAssertEqual(try disk.read(key: "library"), bytes, mutation)
+            let library = NovelLibrary(database: disk)
+            do { _ = try await library.snapshot(); XCTFail(column) }
+            catch { XCTAssertEqual(error as? NovelError, .corruptStorage, column) }
+            try await library.saveRules([])
+            let unchanged = try await disk.read { try $0.query(select).first!["value"] }
+            XCTAssertEqual(unchanged, invalid, column)
             await library.close()
+            _ = try await disk.transaction { try $0.execute("UPDATE \(table) SET \"\(column)\"=?", [original]) }
         }
     }
 }

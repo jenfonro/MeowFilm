@@ -436,8 +436,6 @@ private final class ContentArtworkFixture {
     let playback: PlaybackController
     let presentation: MusicMiniPlayerPresentation
     let content: MusicPlayerContentModel
-    private let defaults: UserDefaults
-    private let suite: String
 
     init(current: URL, previous: URL? = nil, next: URL? = nil, selectionGate: MusicCollectionGate? = nil) {
         let entries = [
@@ -457,16 +455,13 @@ private final class ContentArtworkFixture {
         let playback = PlaybackController()
         let model = MusicViewModel(service: service, playback: playback)
         model.playbackState.queue = entries; model.playbackState.state = state; model.clock.position = 17
-        let suite = "MusicPlayerContentModelTests." + UUID().uuidString
-        let defaults = UserDefaults(suiteName: suite)!
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let appearance = MusicAppearancePreferencesStore()
         let presentation = MusicMiniPlayerPresentation()
         presentation.setFullPlayerPresented(true)
         let content = MusicPlayerContentModel(model: model, playback: playback, appearance: appearance,
             presentation: presentation, artworkImages: images)
         self.service = service; self.cache = cache; self.images = images; self.model = model
         self.playback = playback; self.presentation = presentation; self.content = content
-        self.defaults = defaults; self.suite = suite
     }
     private static func entry(_ id: String, songID: String, url: URL?) -> MusicQueueEntry {
         .init(id: id, track: .init(ref: .init(kind: .queue, id: id), songId: songID,
@@ -475,7 +470,7 @@ private final class ContentArtworkFixture {
     func close() async {
         await model.close(); await images.close(); await content.flushArtwork()
         await service.finish()
-        playback.stop(); defaults.removePersistentDomain(forName: suite)
+        playback.stop()
     }
 }
 

@@ -202,7 +202,7 @@ export async function packageIOSRuntime({
     // These are platform capabilities imported by the bootstrap, not workspace package subpaths.
     const platformImports = new Set([
       'node:path', 'node:net', 'node:fs', 'node:crypto', 'node:buffer', 'node:util',
-      '@meowfilm/runtime-bridge',
+      '@meowfilm/runtime-bridge', '@meowfilm/storage', '@meowfilm/script-host/storage',
     ]);
     // These are path rewrites for the thin iOS launchers, not package-subpath permissions.
     const sharedImports = new Map([

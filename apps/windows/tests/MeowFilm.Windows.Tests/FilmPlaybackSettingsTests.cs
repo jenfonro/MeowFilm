@@ -47,7 +47,7 @@ public static class FilmPlaybackSettingsTests
             catch (OperationCanceledException) { }
             await BridgeTests.Expect("CLOSED", () => service.SaveManualAsync(FilmJson.Encode(new { id = "offline" })));
             Check(runtime.Calls.Single().Method == "film.manual.update", "manual remains a real runtime business operation without native fallback");
-            store.SeedBytes("film.preferences.v1", [123]);
+            store.Seed("film.preferences.v1", new { version = 2 });
             await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.ReadPreferencesAsync(default));
             await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.SavePreferencesAsync(next));
             Check(runtime.Notifications.Count == 1, "corrupt native preferences are not replaced by defaults");
@@ -83,7 +83,7 @@ public static class FilmPlaybackSettingsTests
             await using var empty = new FilmNativeSettingsFixture();
             var first = new FilmPlaybackSettings(runtime, empty);
             await InvalidPreferences(() => first.SavePreferencesAsync(FilmPreferences.Defaults with { Keywords = ["DDP", "ddp"] }));
-            Check((await empty.ReadAsync("film.preferences.v1")).Data is null && empty.Writes == 0 &&
+            Check((await empty.ReadRecordAsync("film.preferences.v1", MeowFilm.Capabilities.FilmStorageRecords.Preferences)).Data is null && empty.Writes == 0 &&
                 runtime.Notifications.Count == 0 && runtime.Calls.Count == 0, "an invalid first full save cannot create a document");
         });
         yield return Test("native preference receipts and reopen return trimmed values and preserve partial pan orders", async () =>
@@ -119,18 +119,13 @@ public static class FilmPlaybackSettingsTests
         {
             var runtime = new FilmRuleConsumerRuntime();
             await using var store = new FilmNativeSettingsFixture();
-            store.SeedBytes("film.preferences.v1", System.Text.Encoding.UTF8.GetBytes("""
-                {"version":1,"future":1e400,"preferences":{"ruleOrder":["future","quality"],"panOrder":["115","quark"],
-                 "keywords":[],"siteCleanKeywords":[],"iosAutoPrepare":true,"future":9007199254740993}}
-                """));
+            store.Seed("film.preferences.v1", new { version = 1, preferences = new { ruleOrder = new[] { "future", "quality" }, panOrder = new[] { "115", "quark" }, keywords = Array.Empty<object>(), siteCleanKeywords = Array.Empty<object>(), iosAutoPrepare = true } });
             var service = new FilmPlaybackSettings(runtime, store);
             var original = await service.ReadPreferencesAsync(default);
             var saved = await service.SavePreferencesAsync(original with { RuleOrder = ["quality", "future"] }, "ruleOrder");
             saved = await service.SavePreferencesAsync(saved with { PanOrder = ["quark", "115"] }, "panOrder");
             var raw = store.Value("film.preferences.v1");
-            Check(saved.RuleOrder.SequenceEqual(["quality", "future"]) && saved.PanOrder.SequenceEqual(["quark", "115"]) &&
-                raw.GetProperty("future").GetRawText() == "1e400" &&
-                raw.GetProperty("preferences").GetProperty("future").GetRawText() == "9007199254740993",
+            Check(saved.RuleOrder.SequenceEqual(["quality", "future"]) && saved.PanOrder.SequenceEqual(["quark", "115"]),
                 "real reorder keeps unknown IDs and precise unedited material");
         });
         yield return Test("explicit and inferred preference edits preserve untouched raw shapes and missing fields", async () =>
@@ -281,7 +276,7 @@ public static class FilmPlaybackSettingsTests
         {
             await using var scene = await Scene.Create();
             var entered = Gate(); var finish = Gate(); CancellationToken writeToken = default;
-            scene.Store.Writing = async (_, token) =>
+            scene.Store.Writing = async (token) =>
             { writeToken = token; entered.TrySetResult(); await finish.Task; };
             try
             {
@@ -399,7 +394,7 @@ public static class FilmPlaybackSettingsTests
             var list = (ListBox)priority.FindName("PriorityItems");
             var moved = list.Items[0];
             var entered = Gate(); var finish = Gate(); CancellationToken writeToken = default;
-            scene.Store.Writing = async (_, token) =>
+            scene.Store.Writing = async (token) =>
             { writeToken = token; entered.TrySetResult(); await finish.Task; };
             try
             {
@@ -412,7 +407,7 @@ public static class FilmPlaybackSettingsTests
                 Check(ReferenceEquals(list.Items[1], moved) && ReferenceEquals(Keyboard.FocusedElement, Grip(list, 1)),
                     "the original row regains its handle after the automatic save");
                 var retired = Gate(); var settle = Gate();
-                scene.Store.Writing = async (_, token) =>
+                scene.Store.Writing = async (token) =>
                 { writeToken = token; retired.TrySetResult(); await settle.Task; };
                 try
                 {

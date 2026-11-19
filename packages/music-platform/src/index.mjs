@@ -21,9 +21,9 @@ const physicalCancellation = new Set(['audio', 'lyrics', 'chorus', 'account.veri
 
 /** Shared request/parse owner. Only anonymous client state and recoverable API results live here.
  * The native account owner publishes an authorized session after its durable save. */
-export function createMusicPlatform({ documents, transport = createMusicTransport(), clock = Date.now,
+export function createMusicPlatform({ dataRoot, clientStore, transport = createMusicTransport(), clock = Date.now,
   tokenProvider } = {}) {
-  const clients = createClientContexts({ documents, transport, clock }), accounts = createAccountOperations(), mutations = createMutations();
+  const clients = createClientContexts({ dataRoot, clientStore, transport, clock }), accounts = createAccountOperations(), mutations = createMutations();
   const sessions = new Map(), active = new Set(), cache = new Map(), flights = new Map();
   let cacheBytes = 0, closed = false, closing, xeapiState = {};
   function erase(key) {
@@ -100,7 +100,7 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
         if (options.vip) reply.value = encryptedWyResponse(reply.value, options.maximumBytes);
         if (!options.raw) try { wySuccess(reply.value); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
-        if (!entry.committed) clients.acceptWy(reply.cookies, c.account, new URL(recipe.url).hostname);
+        if (!entry.committed) await clients.acceptWy(reply.cookies, c.account, new URL(recipe.url).hostname);
         return options.response ? reply : reply.value;
       },
       async tx(module, method, data = {}, prepare = false, options = {}) {
@@ -175,8 +175,8 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
       },
       async registerKg(device) { const client = await clients.registerKg(device); assertCurrent(); return client; },
-      acceptKgAccount(before, device) { assertCurrent(); clients.acceptKgAccount(before, device); },
-      acceptWyAccount(before, used, next) { assertCurrent(); clients.acceptWyAccount(before, used, next); },
+      async acceptKgAccount(before, device) { assertCurrent(); await clients.acceptKgAccount(before, device); assertCurrent(); },
+      async acceptWyAccount(before, used, next) { assertCurrent(); await clients.acceptWyAccount(before, used, next); assertCurrent(); },
       async prepareTx() { const client = await clients.prepare('tx'); assertCurrent(); return client; },
       async token() {
         if (!tokenProvider) fail('SIGNATURE_REQUIRED');
@@ -244,6 +244,9 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
     signal?.addEventListener('abort', abort, { once: true });
     active.add(entry);
     const work = Promise.resolve().then(async () => {
+      await clients.ready;
+      controller.signal.throwIfAborted();
+      if (closed) fail('CLOSED');
       const c = context(entry, params), value = await action(c, params);
       // Only the already projected public result is inspected for credential
       // reflection. Unconsumed upstream branches are never walked or validated.
@@ -294,7 +297,7 @@ export function createMusicPlatform({ documents, transport = createMusicTranspor
     });
   }
   return {
-    request, sessionUpdate,
+    get ready() { return clients.ready; }, request, sessionUpdate,
     clear({ platform } = {}) { if (closed) fail('CLOSED'); if (platform) guardPlatform(platform); invalidate(platform); return { cleared: true }; },
     describe() { return { execution: 'node', contract: 'music.platform.v1', platforms: Object.keys(providers) }; },
     close() {

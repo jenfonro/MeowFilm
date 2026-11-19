@@ -54,8 +54,7 @@ public static class FilmSourceRuntimeTests
         string root = NewData();
         await using var server = new ScriptServer(Script("final"));
         var offline = new OfflineRuntime();
-        await using (var documents = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
-            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces))
+        await using (var documents = new NativeDatabase(Path.Combine(root, "documents")))
         await using (var service = new FilmSourceService(offline, documents))
         {
             await service.ImportLocalAsync("先本地", WriteSource(Script("unused")), "enabled");
@@ -81,7 +80,7 @@ public static class FilmSourceRuntimeTests
             await WaitRuntimeAsync(runtime, "disabled", cat => cat.GetProperty("state").GetString() == "disabled", token);
             Check(enabled.Name == "最终网络" && server.Requests == 1 && service.Cats.Single(cat =>
                 cat.InstallationId == "disabled") is { Enabled: false, CanDetect: false } &&
-                !File.Exists(Path.Combine(root, "script-runtime", "volumes", "disabled", "disabled-ran")),
+                !File.Exists(Path.Combine(root, "documents", "cat", "volumes", "disabled", "disabled-ran")),
                 "real cold start downloads only final URL once and never executes the disabled selected script");
             AssertSite(Video(service, new("enabled", SiteKey)), "final");
             AssertDetection(await service.DetectAsync(new("enabled", SiteKey), token));
@@ -189,12 +188,11 @@ public static class FilmSourceRuntimeTests
         var offline = new OfflineRuntime();
         string path = WriteSource(Script("selected-before"));
         string selectedHash = Hash(path);
-        await using (var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
-            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces))
+        await using (var store = new NativeDatabase(Path.Combine(root, "documents")))
         await using (var service = new FilmSourceService(offline, store))
             await service.ImportLocalAsync("选中文件", path, "changed");
         File.WriteAllText(path, Script("unselected-after"), new UTF8Encoding(false));
-        IDocumentStore? documents = null;
+        IStorageDatabase? documents = null;
         await WithServiceAsync(root, async (service, runtime, token) =>
         {
             await service.StartAsync(token);
@@ -202,7 +200,7 @@ public static class FilmSourceRuntimeTests
             await service.RefreshAsync(token);
             Check(service.Cats.Single() is { InputRevision: 1, LocalPath: not null, CanDetect: false, UpdateError: "STORAGE_CONFLICT" } &&
                 SourceStarts(root, "changed").Length == 0, "changed file bytes are never executed under a stale selected hash");
-            var stored = await documents!.ReadAsync("film.cat-sources.v1", token);
+            var stored = await documents!.ReadRecordAsync("film.cat-sources.v1", MeowFilm.Capabilities.FilmStorageRecords.Cat, token);
             using var parsed = JsonDocument.Parse(stored.Data!);
             Check(parsed.RootElement.GetProperty("scripts")[0].GetProperty("localHash").GetString() == selectedHash &&
                 parsed.RootElement.GetProperty("scripts")[0].GetProperty("localPath").GetString() == path,
@@ -231,7 +229,7 @@ public static class FilmSourceRuntimeTests
     private static async Task FailedTypeSelection()
     {
         string root = NewData();
-        IDocumentStore? documents = null;
+        IStorageDatabase? documents = null;
         await using var server = new ScriptServer("module.exports = { start( };");
         await WithServiceAsync(root, async (service, runtime, token) =>
         {
@@ -245,7 +243,7 @@ public static class FilmSourceRuntimeTests
                 cat.GetProperty("state").GetString() == "failed", token);
             await service.RefreshAsync(token);
             var failed = service.Cats.Single();
-            var saved = await documents!.ReadAsync("film.cat-sources.v1", token);
+            var saved = await documents!.ReadRecordAsync("film.cat-sources.v1", MeowFilm.Capabilities.FilmStorageRecords.Cat, token);
             using var parsed = JsonDocument.Parse(saved.Data!);
             var input = parsed.RootElement.GetProperty("scripts")[0];
             Check(failed is { SourceType: "network", LocalPath: null, CanDetect: false } &&
@@ -270,7 +268,7 @@ public static class FilmSourceRuntimeTests
             await service.StartAsync(token);
             await ImportAndAwaitReadyAsync(service, runtime, "待删", Script("deleted"), "deleted", token);
             var sibling = await ImportAndAwaitReadyAsync(service, runtime, "保留", Script("sibling"), "sibling", token);
-            string volume = Path.Combine(root, "script-runtime", "volumes", "deleted");
+            string volume = Path.Combine(root, "documents", "cat", "volumes", "deleted");
             Check(Directory.Exists(volume), "the target owns an actual running Worker volume before deletion");
             await service.DeleteCatAsync("deleted", token);
             Check(service.Cats.Single().InstallationId == "sibling", "native deletion returns with only the target removed");
@@ -305,7 +303,7 @@ public static class FilmSourceRuntimeTests
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static string[] SourceStarts(string root, string id)
     {
-        string path = Path.Combine(root, "script-runtime", "volumes", id, "source-starts.jsonl");
+        string path = Path.Combine(root, "documents", "cat", "volumes", id, "source-starts.jsonl");
         return File.Exists(path) ? File.ReadAllLines(path).Select(line => JsonSerializer.Deserialize<string>(line)!).ToArray() : [];
     }
 
@@ -682,7 +680,7 @@ public static class FilmSourceRuntimeTests
         foreach (bool withError in new[] { true, false })
         {
             string root = NewData();
-            IDocumentStore? documents = null;
+            IStorageDatabase? documents = null;
             await WithServiceAsync(root, async (service, runtime, token) =>
             {
                 const string id = "detail-fallback";
@@ -707,7 +705,7 @@ public static class FilmSourceRuntimeTests
                     result.Steps.Any(step => step.Operation == "detail" && step.State == "failed" &&
                         step.Error == "分类详情原始错误") == withError,
                     "fallback is valid while retaining the original failed detail stage");
-                var stored = await documents!.ReadAsync(FilmSourceService.DocumentNamespace, token);
+                var stored = await documents!.ReadRecordAsync(FilmSourceService.DocumentNamespace, MeowFilm.Capabilities.FilmStorageRecords.Sources, token);
                 using var parsed = JsonDocument.Parse(stored.Data!);
                 var durable = parsed.RootElement.GetProperty("videos").EnumerateArray().Single()
                     .GetProperty("detection").Deserialize<FilmSourceDetection>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -725,7 +723,7 @@ public static class FilmSourceRuntimeTests
         foreach (bool failed in new[] { true, false })
         {
             string root = NewData();
-            IDocumentStore? documents = null;
+            IStorageDatabase? documents = null;
             await WithServiceAsync(root, async (service, runtime, token) =>
             {
                 const string id = "navigation-root";
@@ -751,7 +749,7 @@ public static class FilmSourceRuntimeTests
                     !result.MediaPlaybackVerified && result.Steps.Any(step => step.Operation == "detail" &&
                         step.State == "failed" && step.Error == "根导航失败") == failed,
                     "failed root navigation cannot be made valid by a reachable child");
-                var stored = await documents!.ReadAsync(FilmSourceService.DocumentNamespace, token);
+                var stored = await documents!.ReadRecordAsync(FilmSourceService.DocumentNamespace, MeowFilm.Capabilities.FilmStorageRecords.Sources, token);
                 using var parsed = JsonDocument.Parse(stored.Data!);
                 var durable = parsed.RootElement.GetProperty("videos").EnumerateArray().Single()
                     .GetProperty("detection").Deserialize<FilmSourceDetection>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -767,16 +765,16 @@ public static class FilmSourceRuntimeTests
     private static async Task DetectionWorkerExit()
     {
         string root = NewData();
-        IDocumentStore? documents = null;
+        IStorageDatabase? documents = null;
         await WithServiceAsync(root, async (service, runtime, token) =>
         {
             const string id = "detection-worker-exit";
             var key = new FilmSourceKey(id, "worker-exit");
-            string marker = Path.Combine(root, "script-runtime", "volumes", id, "search-count");
+            string marker = Path.Combine(root, "documents", "cat", "volumes", id, "search-count");
             await service.StartAsync(token);
             var installed = await ImportAndAwaitReadyAsync(service, runtime, "Worker 退出猫源", WorkerExitScript, id, token);
             var baseline = await service.DetectAsync(key, token);
-            var saved = await documents!.ReadAsync(FilmSourceService.DocumentNamespace, token);
+            var saved = await documents!.ReadRecordAsync(FilmSourceService.DocumentNamespace, MeowFilm.Capabilities.FilmStorageRecords.Sources, token);
             var initialEvents = ProbeEvents(root, id);
             var initialWorker = initialEvents.Single(value => value.GetProperty("kind").GetString() == "worker.start");
             int initialThreadId = initialWorker.GetProperty("threadId").GetInt32();
@@ -791,7 +789,7 @@ public static class FilmSourceRuntimeTests
             catch (OperationCanceledException error) { failure = error; }
             // Do not refresh or issue management while observing the failed call.
             var immediate = Video(service, key).Detection;
-            var after = await documents.ReadAsync(FilmSourceService.DocumentNamespace, token);
+            var after = await documents!.ReadRecordAsync(FilmSourceService.DocumentNamespace, MeowFilm.Capabilities.FilmStorageRecords.Sources, token);
             var failedEvents = ProbeEvents(root, id).Skip(initialEvents.Length).ToArray();
             var exitAttempt = failedEvents.Single(value => value.GetProperty("kind").GetString() == "worker.exit-attempt");
             Check(!token.IsCancellationRequested &&
@@ -828,7 +826,7 @@ public static class FilmSourceRuntimeTests
                 "the failed Worker neither restarts nor replays while the same Node owner and client snapshot remain intact");
             Check(returned is null && failure?.InnerException is FilmSourceException { Code: "STALE_SESSION" } &&
                 !token.IsCancellationRequested, "retired Worker invocation fails as lifecycle cancellation, not a new search_error");
-            Check(SameDetection(baseline, immediate) && after.Fingerprint == saved.Fingerprint &&
+            Check(SameDetection(baseline, immediate) && after.Revision == saved.Revision &&
                 after.Data!.SequenceEqual(saved.Data!), "the retired generation cannot replace the in-memory or durable baseline");
 
             int recoveryStart = observedEvents.Length;
@@ -839,7 +837,7 @@ public static class FilmSourceRuntimeTests
                 !ProbeOperations(ProbeEvents(root, id).Skip(recoveryStart)).Any(),
                 "explicit restart alone restores a new generation without replaying detection or replacing its baseline");
             var recovered = await service.DetectAsync(key, token);
-            var recoveryDocument = await documents.ReadAsync(FilmSourceService.DocumentNamespace, token);
+            var recoveryDocument = await documents!.ReadRecordAsync(FilmSourceService.DocumentNamespace, MeowFilm.Capabilities.FilmStorageRecords.Sources, token);
             using var recoveryJson = JsonDocument.Parse(recoveryDocument.Data!);
             var recoveryDetection = recoveryJson.RootElement.GetProperty("videos").EnumerateArray().Single()
                 .GetProperty("detection").Deserialize<FilmSourceDetection>(new JsonSerializerOptions(JsonSerializerDefaults.Web));
@@ -861,7 +859,7 @@ public static class FilmSourceRuntimeTests
 
     private static JsonElement[] ProbeEvents(string root, string id)
     {
-        string file = Path.Combine(root, "script-runtime", "volumes", id, "fixture-audit.jsonl");
+        string file = Path.Combine(root, "documents", "cat", "volumes", id, "fixture-audit.jsonl");
         return File.Exists(file) ? File.ReadAllLines(file).Where(line => line.Length > 0)
             .Select(line => JsonSerializer.Deserialize<JsonElement>(line)).ToArray() : [];
     }
@@ -926,19 +924,18 @@ public static class FilmSourceRuntimeTests
     }
 
     private static async Task WithServiceAsync(string root, Func<FilmSourceService, NodeRuntime, CancellationToken, Task> run,
-        Func<IDocumentStore, IDocumentStore>? decorateStore = null)
+        Func<IStorageDatabase, IStorageDatabase>? decorateStore = null)
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("Run scripts/windows/test.ps1; prepare-test-bundles aggregate inputs are required.");
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
-        await using var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
-            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-        IDocumentStore documents = decorateStore?.Invoke(store) ?? store;
+        await using var store = new NativeDatabase(Path.Combine(root, "documents"));
+        IStorageDatabase documents = decorateStore?.Invoke(store) ?? store;
+        await store.Ready;
         await using var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
-            Path.Combine(root, "script-runtime"), deadline.Token, settingsStore: documents,
-            settingsNamespaces: AppIdentity.RuntimeSettingsNamespaces);
+            store.ProductRoot!, deadline.Token, settingsStore: new FilmRuntimeSettings(documents));
         using var process = Process.GetProcessById(runtime.ProcessId);
         _ = process.SafeHandle; // Pin this exact child before shutdown so PID reuse cannot satisfy the assertion.
         try
@@ -956,21 +953,17 @@ public static class FilmSourceRuntimeTests
         }
     }
 
-    private sealed class FailNextWriteStore(IDocumentStore inner) : IDocumentStore
+    private sealed class FailNextWriteStore(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
         internal readonly DocumentStoreException Failure = new(DocumentStoreError.Storage);
         internal bool FailNext;
         internal int Failures;
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
-            inner.ReadAsync(documentNamespace, cancellationToken);
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
+        public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            if (FailNext && documentNamespace == FilmSourceService.DocumentNamespace)
-            { FailNext = false; Failures++; throw Failure; }
-            return inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
+            if (FailNext) { FailNext = false; Failures++; throw Failure; }
+            return base.WriteAsync(write, token, retainedBytes, commit);
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask; // The fixture owns the real store.
     }
 
     private sealed class OfflineRuntime : IRuntimeClient

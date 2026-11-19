@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 final class FilmSourceIdentityTests: XCTestCase {
@@ -35,12 +36,11 @@ final class FilmSourceIdentityTests: XCTestCase {
     func testEquivalentLookingKeysKeepOptionsDeletionDetectionAndIntentEditsSeparateAcrossRebuild() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: base) }
-        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
+        let store = try storageTestDatabase(self, root: base)
         let runtime = SourcesRuntimeFixture()
         try await setSites([composed, decomposed], runtime: runtime)
         let transport = runtime.transport
-        var service = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+        var service = FilmSourceService(transport: transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
         let first = FilmSourceKey(installationId: "a", siteKey: composed)
         let second = FilmSourceKey(installationId: "a", siteKey: decomposed)
@@ -61,7 +61,7 @@ final class FilmSourceIdentityTests: XCTestCase {
         XCTAssertFalse(calls.isEmpty)
         XCTAssertTrue(calls.allSatisfy { Array($0.utf8) == Array(decomposed.utf8) }, "Wire must preserve exact siteId")
         await service.close()
-        service = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+        service = FilmSourceService(transport: transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await service.initialize()
         snapshot = await service.snapshot
@@ -80,7 +80,7 @@ final class FilmSourceIdentityTests: XCTestCase {
         XCTAssertEqual(snapshot.videos.first { $0.key == second }?.order, -3)
         await service.close()
 
-        let rebuilt = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+        let rebuilt = FilmSourceService(transport: transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         snapshot = await rebuilt.snapshot
@@ -100,7 +100,7 @@ final class FilmSourceIdentityTests: XCTestCase {
         XCTAssertFalse(snapshot.videos.contains { $0.key == second })
         await rebuilt.close()
 
-        let finalOwner = FilmSourceService(transport: transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+        let finalOwner = FilmSourceService(transport: transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await finalOwner.initialize()
         snapshot = await finalOwner.snapshot
@@ -113,11 +113,10 @@ final class FilmSourceIdentityTests: XCTestCase {
         for deleted in [false, true] {
             let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: base) }
-            let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
+                let store = try storageTestDatabase(self, root: base)
             let runtime = SourcesRuntimeFixture()
             try await setSites([composed], runtime: runtime)
-            let service = FilmSourceService(transport: runtime.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            let service = FilmSourceService(transport: runtime.transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
             let old = FilmSourceKey(installationId: "a", siteKey: composed)
             let new = FilmSourceKey(installationId: "a", siteKey: decomposed)

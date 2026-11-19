@@ -882,6 +882,7 @@ private actor SidebarMetadataSource: FilmSource {
 @MainActor
 private final class SidebarFilmFixture {
     let directory: URL
+    let database: SQLiteDatabase
     let sources: FilmSourceService
     let rules: FilmRuleService
     let model: FilmSettingsModel
@@ -890,15 +891,16 @@ private final class SidebarFilmFixture {
     init(videos: [FilmVideoSource]) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
-        let settings = try FilmRuntimeTestSettings(root: directory)
+        database = try appStorageTestOpen(directory)
+        let settings = FilmRuntimeTestSettings(database: database)
         try settings.seedCats(Self.cats(for: videos))
         let document = FilmSourceDocument(cats: Self.cats(for: videos).map(StoredFilmCat.init), videos: videos)
-        try store.write(JSONEncoder().encode(document), key: FilmSourceService.documentKey)
+        let repository = FilmSourceRepository(database: database)
+        _ = try appStorageTestWait { try await repository.save(document, expected: 0) }
         let transport = SidebarSourceTransport()
         self.transport = transport
         sources = FilmSourceService(transport: .init(
-            request: { method, _ in try await transport.call(method) }), storeFactory: { store },
+            request: { method, _ in try await transport.call(method) }), database: database,
             settingsDocument: settings[.catSources], runtimeSourceRoot: directory.appendingPathComponent("cat"))
         rules = FilmRuleService(settingsDocument: settings[.rules], connection: {
             let resources = try await MainActor.run {
@@ -931,6 +933,7 @@ private final class SidebarFilmFixture {
         model.close()
         await sources.close()
         await rules.close()
+        try await database.close()
         try FileManager.default.removeItem(at: directory)
     }
 }
@@ -955,21 +958,24 @@ private actor SidebarSourceTransport {
 @MainActor
 private final class SidebarNovelFixture {
     let directory: URL
+    let database: SQLiteDatabase
     let feature: NovelFeature
     let runtime: SidebarNovelRuntime
 
     init(sources: [NovelSource]) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        database = try appStorageTestOpen(directory)
         let runtime = SidebarNovelRuntime(sources: sources)
         self.runtime = runtime
-        feature = try NovelFeature(
-            library: NovelLibrary(store: DocumentStore(baseURL: directory, namespace: NovelLibrary.namespace)),
+        feature = NovelFeature(
+            library: NovelLibrary(database: database),
             rules: NovelRuleProcessor(runtime: runtime), runtime: runtime)
     }
 
     func close() async throws {
         await feature.close()
+        try await database.close()
         try FileManager.default.removeItem(at: directory)
     }
 }

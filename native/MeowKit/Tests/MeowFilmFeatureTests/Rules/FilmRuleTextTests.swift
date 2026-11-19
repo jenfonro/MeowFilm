@@ -4,7 +4,7 @@ import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmRuleTextTests: XCTestCase {
-    func testTextRoundTripsEveryUTF16UnitAndKeepsDisplaySeparate() throws {
+    func testTextRoundTripsEveryUTF16UnitAndKeepsDisplaySeparate() async throws {
         // Covers every code unit, including isolated high/low surrogates.
         let units = (UInt32(0)...0xFFFF).map(UInt16.init)
         let text = FilmRuleText(utf16: units)
@@ -27,7 +27,7 @@ final class FilmRuleTextTests: XCTestCase {
         }
     }
 
-    func testMalformedCodeUnitRepresentationIsRejected() throws {
+    func testMalformedCodeUnitRepresentationIsRejected() async throws {
         for json in ["null", "{}", "[65536]", "[-1]", "[1.5]", "[true]", #"["x"]"#] {
             XCTAssertThrowsError(try JSONDecoder().decode(FilmRuleText.self, from: Data(json.utf8)), json)
         }

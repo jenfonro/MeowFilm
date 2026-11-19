@@ -29,12 +29,11 @@ final class NovelUIKitTests: XCTestCase {
         try await super.tearDown()
     }
     private func fixture() async throws -> (NovelFeature, NovelUIKitRuntime) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true); roots.append(root)
+        let database = try appStorageTestDatabase()
         let runtime = NovelUIKitRuntime(); runtimes.append(runtime)
         let resources = try await hostResources()
         let rules = NovelRuleProcessor(runtime: resources.novelRuntime)
-        let feature = try NovelFeature(library: NovelLibrary(store: DocumentStore(baseURL: root, namespace: NovelLibrary.namespace)), rules: rules, runtime: runtime)
+        let feature = try NovelFeature(library: NovelLibrary(database: database), rules: rules, runtime: runtime)
         try await feature.reloadLocal(); try await feature.refreshSources(); features.append(feature)
         return (feature, runtime)
     }

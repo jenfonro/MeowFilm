@@ -12,6 +12,7 @@
     "./cat-output": "./src/cat-output.js",
     "./media-manifest": "./src/media-manifest.js",
     "./native-json": "./src/native-json.js",
+    "./storage": "./src/native-storage.js",
     "./unicode": "./src/unicode.js"
   },
   "main": "./src/index.js",
@@ -27,6 +28,7 @@
     "check": "node scripts/check.mjs"
   },
   "dependencies": {
+    "@meowfilm/storage": "0.1.0",
     "@meowfilm/runtime-bridge": "0.2.0",
     "@meowfilm/source-runtime": "0.2.0",
     "@opentelemetry/api": "1.9.0",

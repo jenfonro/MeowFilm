@@ -267,21 +267,21 @@ public static partial class MusicUiTests
     private sealed class DiscoveryScene : IAsyncDisposable
     {
         internal readonly string Root = NewRoot();
-        private readonly IDocumentStore store;
+        private readonly IStorageDatabase store;
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly DiscoveryHttp Http = new();
         internal readonly PlaybackProbe Playback = new();
         internal readonly Dialogs Dialog = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
-        private DiscoveryScene(IDocumentStore? selectedStore = null)
+        private DiscoveryScene(IStorageDatabase? selectedStore = null)
         {
             store = selectedStore ?? ServiceStore();
             Runtime.Platform.OnRequest = Http.Read;
             App = new(store, MusicTestStores.For(store), Runtime);
             Module = new(App, store, Playback, Dialog);
         }
-        internal static async Task<DiscoveryScene> Create(IDocumentStore? store = null)
+        internal static async Task<DiscoveryScene> Create(IStorageDatabase? store = null)
         {
             var f = new DiscoveryScene(store);
             try { await f.Module.InitializeAsync(default); await Drain(); return f; }
@@ -324,32 +324,25 @@ public static partial class MusicUiTests
             finally { await Runtime.DisposeAsync(); await store.DisposeAsync(); }
         }
     }
-    private sealed class DiscoveryHeldStore(IDocumentStore inner) : IDocumentStore
+    private sealed class DiscoveryHeldStore(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
         private int target, reads, active;
         internal int Active => Volatile.Read(ref active);
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal void Arm(int number) { reads = 0; target = number; }
-        public async Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default)
         {
-            if (documentNamespace == MeowFilm.Capabilities.Accounts.MusicAccountOwner.DocumentNamespace &&
-                target > 0 && Interlocked.Increment(ref reads) == target)
+            var result = await base.ReadAsync(read, token);
+            if (target > 0 && Interlocked.Increment(ref reads) == target)
             {
                 Interlocked.Increment(ref active); Entered.TrySetResult();
-                try
-                {
-                    await Release.Task; // Deliberately uncooperative disk read, not a simulated completed read.
-                    return await inner.ReadAsync(documentNamespace, CancellationToken.None);
-                }
+                try { await Release.Task; }
                 finally { Interlocked.Decrement(ref active); }
             }
-            return await inner.ReadAsync(documentNamespace, cancellationToken);
+            return result;
         }
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default) =>
-            inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
-        public ValueTask DisposeAsync() { Release.TrySetResult(); return inner.DisposeAsync(); }
+        public override ValueTask DisposeAsync() { Release.TrySetResult(); return base.DisposeAsync(); }
     }
     private sealed class DiscoveryHttp
     {

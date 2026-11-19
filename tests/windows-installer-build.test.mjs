@@ -54,7 +54,7 @@ public static class InstallerVersionFixture
       ${code}
     `;
     const result = spawnSync(powershell,
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
       { cwd: f.root, windowsHide: true, encoding: 'utf8', timeout: 30_000 });
     assert.ifError(result.error);
     return result;

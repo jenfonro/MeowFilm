@@ -221,10 +221,11 @@ export async function packageWindowsRuntime({
       ['./native-settings.mjs', './native-settings.mjs'],
     ]);
     const settingsImports = new Map([
-      ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
-      ['@meowfilm/runtime-bridge/json', '@meowfilm/runtime-bridge/json'],
+      ['../../runtime/native-settings.mjs', '../native-settings.mjs'],
     ]);
     const entryImports = new Map([
+      ['@meowfilm/storage', '@meowfilm/storage'],
+      ['@meowfilm/script-host/storage', '@meowfilm/script-host/storage'],
       ['../bootstrap.mjs', '../bootstrap.mjs'],
       ['../../../runtime/entry.mjs', '../../entry.mjs'],
     ]);

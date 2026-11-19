@@ -31,8 +31,7 @@ public static class SettingsNavigationTests
     {
         string path = TestWorkspace.DataPath("film-settings-composition", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
-        await using var store = new LocalDocumentStore(path, AppIdentity.NativeNamespaces,
-            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+        await using var store = new NativeDatabase(path);
         int starts = 0;
         await using var runtime = new AppRuntimeConnectionHost(_ =>
         {
@@ -68,7 +67,7 @@ public static class SettingsNavigationTests
         var music = new Module("music", "音乐");
         var film = new Module("film", "影视");
         var novel = new Module("novel", "小说");
-        await using var appearance = new AppAppearance(new QualityFixture.DocumentStore());
+        await using var appearance = new AppAppearance(new QualityFixture.Database());
         await appearance.LoadAsync();
         var shell = new ShellWindow([music, film, novel], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
         {
@@ -137,7 +136,7 @@ public static class SettingsNavigationTests
         await library.SaveRulesAsync([new NovelRule { Id = "shell-rule", Name = "净化广告", Group = "正文", Pattern = "广告" }]);
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var novel = new NovelCapability(sources, library, new NovelRuleProgram(ruleRuntime));
-        await using var appearance = new AppAppearance(new QualityFixture.DocumentStore());
+        await using var appearance = new AppAppearance(new QualityFixture.Database());
         await appearance.LoadAsync();
         var shell = new ShellWindow([new Module("music", "音乐"), new Module("film", "影视"), novel], [],
             () => novel.DisposeAsync().AsTask(), () => novel.DisposeAsync().AsTask(), appearance: appearance)

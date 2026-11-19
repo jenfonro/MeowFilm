@@ -435,6 +435,8 @@ test('WY FM, rule FM and similar actions use continuous protocol identity and pr
 test('WY consumed radio arrays and heartbeat counts fail as requests before dependency dispatch', async t => {
   fixedEntropy(t);
   const invalid = fixture(() => assert.fail('unusable request material must not dispatch'));
+    await invalid.owner.ready;
+    const storageCounts = [invalid.reads.length, invalid.writes.length];
   t.after(() => invalid.close());
   for (const operation of ['fm', 'similar']) for (const unplaySongIds of [null, {}, '123', [null], [{}]]) {
     await assert.rejects(invalid.request('wy', operation, { sourceIds: [123], unplaySongIds }),
@@ -445,7 +447,7 @@ test('WY consumed radio arrays and heartbeat counts fail as requests before depe
     await assert.rejects(invalid.request('wy', 'heartbeat', { songId: '123',
       continuation: { startMusicId: '123', count } }), { code: 'INVALID_REQUEST' });
   }
-  assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, 0); assert.equal(invalid.writes.length, 0);
+  assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, storageCounts[0]); assert.equal(invalid.writes.length, storageCounts[1]);
 
   const f = fixture(request => {
     const path = new URL(request.url).pathname;

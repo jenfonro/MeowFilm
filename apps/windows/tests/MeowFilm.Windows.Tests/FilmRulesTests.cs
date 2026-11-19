@@ -75,25 +75,26 @@ public static class FilmRulesTests
         }
         store.WriteError = null;
         var concurrent = original with { AggregateRegexRules = ["concurrent"] };
-        store.Writing = (_, _) =>
+        store.BeforeWrite = (_) =>
         {
-            store.Seed("film.rules.v1", JsonSerializer.SerializeToElement(new { rules = concurrent }, FilmRuleService.Json));
+            store.Seed("film.rules.v1", JsonSerializer.SerializeToElement(new { version = 1, rules = concurrent }, FilmRuleService.Json));
             return Task.CompletedTask;
         };
         await StoreError(DocumentStoreError.Conflict, () => service.SaveAsync(next));
         Check(Same(store.Value("film.rules.v1").GetProperty("rules").Deserialize<FilmRuleSet>(FilmRuleService.Json), concurrent) &&
             Same(service.GetSavedSnapshot(), original), "the real fixture CAS preserves a concurrently committed document and does not publish this caller's draft");
-        store.Writing = null;
-        store.Seed("film.rules.v1", JsonSerializer.SerializeToElement(new { rules = original }, FilmRuleService.Json));
+        store.Writing = null; store.BeforeWrite = null;
+        store.Seed("film.rules.v1", JsonSerializer.SerializeToElement(new { version = 1, rules = original }, FilmRuleService.Json));
+        await service.InitializeAsync();
         runtime.Notify = _ => Check(Same(store.Value("film.rules.v1").GetProperty("rules").Deserialize<FilmRuleSet>(FilmRuleService.Json), next),
             "the block notification runs only after the native document commits");
         Check(Same(await service.SaveAsync(next), next) &&
-            service.Revision == DocumentFingerprint.FromBytes(JsonSerializer.SerializeToUtf8Bytes(next, FilmRuleService.Json)).Sha256,
+            service.Revision == Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(next, FilmRuleService.Json))),
             "the committed local content determines the SHA revision");
         Check(runtime.Calls.Count == 0 && runtime.Notifications.SequenceEqual(["film.rules"]) &&
             Same(store.Value("film.rules.v1").GetProperty("rules").Deserialize<FilmRuleSet>(FilmRuleService.Json), next),
             "the unique native rules document commits before its block notification");
-        store.Seed("film.rules.v1", JsonSerializer.SerializeToElement(new { rules = original }, FilmRuleService.Json));
+        store.Seed("film.rules.v1", JsonSerializer.SerializeToElement(new { version = 1, rules = original }, FilmRuleService.Json));
         await service.InitializeAsync();
         Check(Same(service.GetSavedSnapshot(), original) && service.Revision == revision, "reentry reads the native owner");
         await using var reopened = new FilmRuleService(runtime, store);
@@ -186,7 +187,7 @@ public static class FilmRulesTests
         var next = service.GetSavedSnapshot() with { MovieRules = [new("admitted")] };
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var receipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        store.Writing = async (_, _) => { entered.TrySetResult(); await receipt.Task; };
+        store.Writing = async (_) => { entered.TrySetResult(); await receipt.Task; };
         using var caller = new CancellationTokenSource();
         var save = service.SaveAsync(next, caller.Token);
         try
@@ -213,7 +214,7 @@ public static class FilmRulesTests
         await using var service = new FilmRuleService(runtime, store);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var receipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        store.Reading = async (_, _) => { entered.TrySetResult(); await receipt.Task; };
+        store.Reading = async (_) => { entered.TrySetResult(); await receipt.Task; };
         var read = service.InitializeAsync();
         try
         {
@@ -243,6 +244,7 @@ public static class FilmRulesTests
         try
         {
             await session.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await save.WaitAsync(TimeSpan.FromSeconds(5));
             Check(save.IsCompletedSuccessfully && !session.Finished.Task.IsCompleted &&
                 session.Input.EnumerateObject().Count() == 1 && session.Input.GetProperty("block").GetString() == "film.rules",
                 "the production App facade sends only the block name and the native save does not wait for its transport receipt");
@@ -258,7 +260,7 @@ public static class FilmRulesTests
     private static async Task Corrupt()
     {
         await using var store = new FilmNativeSettingsFixture();
-        store.SeedBytes("film.rules.v1", [123]);
+        store.Seed("film.rules.v1", JsonSerializer.SerializeToElement(new { version = 2, rules = new FilmRuleSet() }, FilmRuleService.Json));
         var runtime = new FilmRuleConsumerRuntime();
         await using var service = new FilmRuleService(runtime, store);
         await StoreError(DocumentStoreError.Corrupt, () => service.InitializeAsync());

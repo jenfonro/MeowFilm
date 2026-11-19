@@ -11,17 +11,17 @@ public static class MusicQqFeedbackIntegrationTests
         yield return Case("default off and consent without account remain passive", async () => {
             await using var f = new MusicQqFeedbackIntegrationFixture(); await f.App.InitializeAsync();
             f.Play(); await f.Drain(); await f.Finish(); Check(f.Runtime.Requests.Count == 0);
-            await f.Enable("tx"); f.Play(); await f.Drain(); await f.Finish(); Check(f.Runtime.Requests.Count == 0 && f.Store.Writes(AccountNamespace) == 0);
+            await f.Enable("tx"); f.Play(); await f.Drain(); await f.Finish(); Check(f.Runtime.Requests.Count == 0 && f.Store.WritesFor(AccountNamespace) == 0);
         });
         yield return Case("default factory uses real owner and one semantic terminal without generation churn", async () => {
             await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted();
-            var before = await f.Store.Fingerprint(AccountNamespace);
+            var before = await f.Store.RevisionAsync(AccountNamespace);
             for (int i = 0; i < 4; i++) f.Feedback.Started("entry-1", 0, 240);
             await f.Drain(); await f.Listen(); f.Feedback.Finish(); f.Feedback.Finish(); await f.Drain(); await f.App.PrepareShutdownAsync();
             Check(f.Handler.Steps.SequenceEqual(["feedback.prepare", "feedback.send", "feedback.release"]) && f.Handler.Reports.Count == 1 && f.Feedback.LastError is null);
-            Check(before == await f.Store.Fingerprint(AccountNamespace) && f.Store.Writes(AccountNamespace) == 1);
+            Check(before == await f.Store.RevisionAsync(AccountNamespace) && f.Store.WritesFor(AccountNamespace) == 1);
             var end = f.Handler.Reports.Single(); Check(end.GetProperty("listened").GetDouble() >= 1 && end.GetProperty("mediaListened").GetDouble() >= 1);
-            Check(f.Store.Writes(MusicFeedbackSettingsOwner.DocumentNamespace) == 1 && MusicTestStores.For(f.Store).Writes == 0);
+            Check(f.Store.WritesFor(MusicFeedbackSettingsOwner.DocumentNamespace) == 1 && MusicTestStores.For(f.Store).Writes == 0);
         });
         yield return Case("wall time without native samples never fabricates listening credit", async () => {
             await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted(); await Task.Delay(1120); await f.Finish();
@@ -36,12 +36,12 @@ public static class MusicQqFeedbackIntegrationTests
                 await hold.Wait(); f.Play();
                 await Task.Delay(1120); f.Feedback.Observe("entry-1", 1.05, 240, true); await f.Drain();
                 Check(!accepting.IsCompleted && f.Handler.Count("feedback.prepare") == 0 && f.Handler.Reports.IsEmpty &&
-                    f.Store.Writes(AccountNamespace) == 0 && f.Feedback.LastError is null,
+                    f.Store.WritesFor(AccountNamespace) == 0 && f.Feedback.LastError is null,
                     "a candidate account has not granted playback feedback eligibility");
                 hold.Release.TrySetResult(); await accepting;
                 f.Feedback.Observe("entry-1", 1.05, 240, true); await f.Drain();
                 Check(f.Handler.Count("feedback.prepare") == 1 && await f.AccountState() == "verified" &&
-                    f.Store.Writes(AccountNamespace) == 1 && f.Feedback.LastError is null);
+                    f.Store.WritesFor(AccountNamespace) == 1 && f.Feedback.LastError is null);
                 f.Feedback.Observe("entry-1", 1.05, 240, true); await f.Finish();
                 var facts = f.Handler.Reports.Single();
                 Check(facts.GetProperty("listened").GetDouble() == 0 && facts.GetProperty("mediaListened").GetDouble() == 0);
@@ -55,20 +55,20 @@ public static class MusicQqFeedbackIntegrationTests
         foreach (string code in new[] { "AUTH_REQUIRED", "AUTH_EXPIRED", "INVALID_CREDENTIALS", "IDENTITY_MISMATCH", "INVALID_RESPONSE" })
             yield return Case("canonical prepare failure never falls back " + code, async () => {
                 await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); f.Handler.FailureOperation = "feedback.prepare"; f.Handler.FailureCode = code;
-                var before = await f.Store.Fingerprint(AccountNamespace);
+                var before = await f.Store.RevisionAsync(AccountNamespace);
                 f.Play(); await f.Drain(); await f.Finish(); Check(f.Handler.Count("feedback.prepare") == 1 && f.Handler.Reports.IsEmpty && f.Feedback.LastError == "FEEDBACK_FAILED");
                 Check(await f.AccountState() == (code is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" ? "revoked" : "verified"));
-                Check(before == await f.Store.Fingerprint(AccountNamespace));
+                Check(before == await f.Store.RevisionAsync(AccountNamespace));
                 AssertRedacted(f.Feedback.LastError!);
             });
         foreach (string code in new[] { "AUTH_REQUIRED", "AUTH_EXPIRED", "INVALID_CREDENTIALS" })
             yield return Case("terminal " + code + " revokes the exact live account without durable logout", async () => {
                 await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted(); await f.Listen();
-                var before = await f.Store.Fingerprint(AccountNamespace);
+                var before = await f.Store.RevisionAsync(AccountNamespace);
                 f.Handler.SendStatus = "rejected"; f.Handler.SendErrorCode = code;
                 await f.Finish();
                 Check(f.Handler.Count("feedback.send") == 1 && f.Feedback.LastError == "FEEDBACK_FAILED");
-                Check(await f.AccountState() == "revoked" && before == await f.Store.Fingerprint(AccountNamespace));
+                Check(await f.AccountState() == "revoked" && before == await f.Store.RevisionAsync(AccountNamespace));
                 int requests = f.Handler.Steps.Length;
                 f.Play("after-revocation"); await f.Drain(); await f.Finish();
                 Check(f.Handler.Steps.Length == requests, "No automatic reauthentication or feedback replay");
@@ -77,19 +77,19 @@ public static class MusicQqFeedbackIntegrationTests
         foreach (string code in new[] { "IDENTITY_MISMATCH", "INVALID_RESPONSE" })
             yield return Case("terminal recording or field failure does not revoke authentication " + code, async () => {
                 await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted(); await f.Listen();
-                var before = await f.Store.Fingerprint(AccountNamespace);
+                var before = await f.Store.RevisionAsync(AccountNamespace);
                 f.Handler.SendStatus = "rejected"; f.Handler.SendErrorCode = code;
                 await f.Finish(); await f.Finish();
                 Check(f.Handler.Count("feedback.send") == 1 && f.Feedback.LastError == "FEEDBACK_FAILED");
-                Check(await f.AccountState() == "verified" && before == await f.Store.Fingerprint(AccountNamespace));
+                Check(await f.AccountState() == "verified" && before == await f.Store.RevisionAsync(AccountNamespace));
             });
         yield return Case("notSent authentication refusal revokes without claiming a confirmed report", async () => {
             await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted(); await f.Listen();
             f.Handler.SendStatus = "notSent"; f.Handler.SendErrorCode = "AUTH_REQUIRED";
-            var before = await f.Store.Fingerprint(AccountNamespace);
+            var before = await f.Store.RevisionAsync(AccountNamespace);
             await f.Finish(); await f.Finish();
             Check(f.Handler.Count("feedback.send") == 1 && f.Feedback.LastError == "FEEDBACK_FAILED");
-            Check(await f.AccountState() == "revoked" && before == await f.Store.Fingerprint(AccountNamespace));
+            Check(await f.AccountState() == "revoked" && before == await f.Store.RevisionAsync(AccountNamespace));
         });
         foreach (bool account in new[] { false, true })
             yield return Case((account ? "logout" : "consent revoke") + " cancels old prepare and drains physical work", async () => {
@@ -128,11 +128,11 @@ public static class MusicQqFeedbackIntegrationTests
             var hold = f.Handler.Hold("feedback.send"); f.Feedback.Finish();
             try {
                 await hold.Wait(); await f.Login(OtherKey);
-                var replacement = await f.Store.Fingerprint(AccountNamespace);
+                var replacement = await f.Store.RevisionAsync(AccountNamespace);
                 Check(await f.AccountState() == "verified" && !hold.CancelObserved.Task.IsCompleted);
                 hold.Release.TrySetResult(); await f.Drain();
                 Check(f.Handler.Reports.Count == 1 && f.Feedback.LastError == "FEEDBACK_FAILED");
-                Check(await f.AccountState() == "verified" && replacement == await f.Store.Fingerprint(AccountNamespace));
+                Check(await f.AccountState() == "verified" && replacement == await f.Store.RevisionAsync(AccountNamespace));
                 f.Handler.SendStatus = "confirmed";
                 await f.Accepted("replacement", "FEEDBACK_FAILED"); await f.Listen(); await f.Finish();
                 Check(f.Handler.Reports.Count == 2 && await f.AccountState() == "verified");

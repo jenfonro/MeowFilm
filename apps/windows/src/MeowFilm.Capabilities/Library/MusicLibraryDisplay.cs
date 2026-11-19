@@ -130,9 +130,9 @@ public sealed partial class MusicLibraryOwner
                     .Any(source => LJ.S(source["sourceKey"]) == requested), "TARGET_CHANGED");
             JsonObject? saved = null;
             var presentations = PresentationCache;
-            long cacheEpoch = presentations.LyricEpoch;
             try { await presentations.LoadAsync(token).ConfigureAwait(false); }
             catch (DocumentStoreException) { }
+            long cacheEpoch = presentations.LyricEpoch;
             await EnterAsync(token).ConfigureAwait(false); entered = true;
             LJ.Require(!closed && !preparing, "CLOSED");
             token.ThrowIfCancellationRequested();
@@ -142,17 +142,24 @@ public sealed partial class MusicLibraryOwner
             JsonObject result;
             if (!save)
             {
-                // A save admitted while disk loading or gate acquisition was in
-                // flight wins; inspect the latest memory snapshot without I/O.
+                gate.Release(); entered = false;
+                // The database lane orders this one-song read after admitted saves.
                 try
                 {
-                    saved = presentations.ReadLyricsMemory(key);
+                    saved = await presentations.ReadLyricsAsync(key, token).ConfigureAwait(false);
                     if (saved is not null)
                     {
                         saved["lines"] = DecodeCachedDisplayLines(saved["lines"]);
                     }
                 }
-                catch { saved = null; }
+                catch (OperationCanceledException) { throw; }
+                catch (DocumentStoreException) { saved = null; }
+                catch (MusicLibraryException) { saved = null; }
+                await EnterAsync(token).ConfigureAwait(false); entered = true;
+                LJ.Require(!closed && !preparing, "CLOSED");
+                await LoadAsync(token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                doc = document!;
                 if (!LJ.B(Settings(doc)["lyrics"])) result = LJ.Obj(("state", "disabled"), ("lines", new JsonArray()));
                 else if (saved is null ||
                     requested is not null && LJ.S(saved["sourceKey"]) != requested)
@@ -175,6 +182,7 @@ public sealed partial class MusicLibraryOwner
                 var display = LJ.Obj(("sourceKey", requested), ("lines", lines));
                 byte[] bytes = LJ.Bytes(display);
                 LJ.Require(bytes.Length <= 512 * 1024, "LIMIT");
+                gate.Release(); entered = false;
                 try
                 {
                     await presentations.SaveLyricsAsync(key, requested, lines, cacheEpoch, token).ConfigureAwait(false);

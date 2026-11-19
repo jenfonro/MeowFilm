@@ -2,31 +2,32 @@ import Foundation
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 final class FilmSourceImportRaceTests: XCTestCase {
     private let key = FilmSourceKey(installationId: "a", siteKey: "same")
 
     private func fixture(reader: (@Sendable (URL) async throws -> String)? = nil) throws
-        -> (FilmSourceService, SourcesRuntimeFixture, DocumentStore, URL) {
+        -> (FilmSourceService, SourcesRuntimeFixture, SQLiteDatabase, URL) {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        let runtime = SourcesRuntimeFixture(), settings = try sourceTestSettings(base)
+        let store = try storageTestDatabase(self, root: base)
+        let runtime = SourcesRuntimeFixture(), settings = try sourceTestSettings(store)
         let service: FilmSourceService
         if let reader {
-            service = FilmSourceService(transport: runtime.transport, storeFactory: { store }, settingsDocument: settings,
+            service = FilmSourceService(transport: runtime.transport, database: store, settingsDocument: settings,
                 runtimeSourceRoot: base.appendingPathComponent("cat"), readSourceFile: reader)
         } else {
-            service = FilmSourceService(transport: runtime.transport, storeFactory: { store }, settingsDocument: settings,
+            service = FilmSourceService(transport: runtime.transport, database: store, settingsDocument: settings,
                 runtimeSourceRoot: base.appendingPathComponent("cat"))
         }
         return (service, runtime, store, base)
     }
 
-    private func assertDeletedAfterRebuild(_ runtime: SourcesRuntimeFixture, store: DocumentStore, base: URL) async throws {
-        let rebuilt = FilmSourceService(transport: runtime.transport, storeFactory: { store },
-            settingsDocument: try sourceTestSettings(base), runtimeSourceRoot: base.appendingPathComponent("cat"))
+    private func assertDeletedAfterRebuild(_ runtime: SourcesRuntimeFixture, store: SQLiteDatabase, base: URL) async throws {
+        let rebuilt = FilmSourceService(transport: runtime.transport, database: store,
+            settingsDocument: try sourceTestSettings(store), runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         let initial = await rebuilt.snapshot
         XCTAssertFalse(initial.videos.contains { $0.key == key })
@@ -39,8 +40,7 @@ final class FilmSourceImportRaceTests: XCTestCase {
     func testNativeLocalOrNetworkReplacementDoesNotWaitForRuntimeAndOldStatusCannotRestoreDeletion() async throws {
         for local in [false, true] {
             let (service, runtime, store, base) = try fixture()
-            defer { try? FileManager.default.removeItem(at: base) }
-            try await service.refresh()
+                try await service.refresh()
             await runtime.pause("status")
             let refresh = Task { try await service.refresh() }
             await runtime.waitUntilPaused()
@@ -58,7 +58,7 @@ final class FilmSourceImportRaceTests: XCTestCase {
             XCTAssertEqual(stale.cats.first?.generation, 0)
             XCTAssertEqual(stale.cats.first?.sourceType, local ? "local" : "network")
             XCTAssertFalse(stale.videos.contains { $0.key == key })
-            try await runtime.acceptNativeSettings(sourceTestSettings(base))
+            try await runtime.acceptNativeSettings(sourceTestSettings(store))
             try await service.refresh()
             let current = await service.snapshot
             XCTAssertTrue(try XCTUnwrap(current.cats.first).canDetect)
@@ -71,7 +71,6 @@ final class FilmSourceImportRaceTests: XCTestCase {
     func testDeletionDuringLocalFilePreparationKeepsAllOwnAndOtherParentTombstones() async throws {
         let gate = ImportFileReadGate()
         let (service, runtime, store, base) = try fixture(reader: { _ in await gate.read() })
-        defer { try? FileManager.default.removeItem(at: base) }
         var cat = try parseFilmCat(SourcesRuntimeFixture.cat("a"))
         cat.sites.append(.init(key: "old", name: "Old", api: "/old", actions: [], methods: [:]))
         await runtime.setCat(try RuntimeJSON.decode(JSONEncoder().encode(cat)))
@@ -88,7 +87,7 @@ final class FilmSourceImportRaceTests: XCTestCase {
         catch { await gate.release(); _ = try? await importing.value; await service.close(); throw error }
         await gate.release()
         _ = try await importing.value
-        try await runtime.acceptNativeSettings(sourceTestSettings(base))
+        try await runtime.acceptNativeSettings(sourceTestSettings(store))
         try await service.refresh()
         let after = await service.snapshot
         XCTAssertFalse(after.videos.contains { $0.key == key })
@@ -102,7 +101,6 @@ final class FilmSourceImportRaceTests: XCTestCase {
     func testEarlierFileEditConflictsWithLaterSourceSaveAndCannotUndoNewDeletion() async throws {
         let gate = ImportFileReadGate()
         let (service, runtime, store, base) = try fixture(reader: { _ in await gate.read() })
-        defer { try? FileManager.default.removeItem(at: base) }
         try await service.refresh()
         let earlier = Task {
             try await service.editCat("a", name: "Earlier", sourceType: "local", fileURL: base.appendingPathComponent("source.js"))
@@ -112,11 +110,11 @@ final class FilmSourceImportRaceTests: XCTestCase {
             _ = try await service.editCat("a", name: "Later", sourceURL: "https://example.invalid/later.js")
             try await service.deleteVideo(key)
         } catch { await gate.release(); _ = try? await earlier.value; await service.close(); throw error }
-        let document = try sourceTestSettings(base), before = try document.read()
+        let document = try sourceTestSettings(store), before = try document.readForTest()
         await gate.release()
         do { _ = try await earlier.value; XCTFail("Old file edit must not overwrite the later intent") }
         catch let error as FilmSourceError { XCTAssertEqual(error.code, "STORAGE_CONFLICT") }
-        XCTAssertEqual(try document.read(), before)
+        XCTAssertEqual(try document.readForTest(), before)
         let after = await service.snapshot
         XCTAssertEqual(after.cats.first?.name, "Later")
         XCTAssertEqual(after.cats.first?.sourceUrl, "https://example.invalid/later.js")
@@ -130,10 +128,9 @@ final class FilmSourceImportRaceTests: XCTestCase {
         for boundary in ["cancel", "shutdown", "close"] {
             let gate = ImportFileReadGate()
             let (service, runtime, store, base) = try fixture(reader: { _ in await gate.read() })
-            defer { try? FileManager.default.removeItem(at: base) }
-            try await service.refresh()
-            let document = try sourceTestSettings(base), before = try document.read()
-            let snapshot = await service.snapshot, cache = try store.read(key: FilmSourceService.documentKey)
+                try await service.refresh()
+            let document = try sourceTestSettings(store), before = try document.readForTest()
+            let snapshot = await service.snapshot, cache = try sourceTestRows(store)
             let importing = Task {
                 try await service.importLocal(name: "New", fileURL: base.appendingPathComponent("source.js"), installationId: "new")
             }
@@ -152,8 +149,8 @@ final class FilmSourceImportRaceTests: XCTestCase {
             catch { XCTAssertTrue(error is CancellationError, "\(error)") }
             await draining?.value
             await observing.value
-            XCTAssertEqual(try document.read(), before)
-            XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), cache)
+            XCTAssertEqual(try document.readForTest(), before)
+            XCTAssertEqual(try sourceTestRows(store), cache)
             let after = await service.snapshot, calls = await runtime.calls
             XCTAssertEqual(after, snapshot)
             XCTAssertEqual(calls, ["status"])

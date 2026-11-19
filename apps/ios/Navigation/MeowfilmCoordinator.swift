@@ -109,7 +109,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func becameActive() {
-        assembly.appearance.reload()
+        Task { await assembly.appearance.reload() }
         if let pending = pendingPresentation, let model = assembly.music {
             pendingPresentation = nil
             if pending.access == model.accountAccessGeneration, pending.occurrence == model.current?.id {

@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { withTestDatabase } from './storage-test-fixture.mjs';
+import { decodeValueNodes } from '@meowfilm/storage/values';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +22,9 @@ import { deferred, turn, until, rawRequest } from '../packages/runtime-bridge/te
 import { lxScript } from '../packages/script-host/test/fixtures.js';
 
 const config = () => ({ sessionId: randomUUID() });
+const storedValue = (root, id) => withTestDatabase(root, async db => decodeValueNodes(await db.query(
+  'SELECT * FROM music_script_kv_nodes WHERE installation_id=? AND site_id=? AND entry_key=? ORDER BY node_id',
+  [id, 'kw', 'key'])));
 function temporaryData() {
   const directory = fileURLToPath(new URL('../tmp/test-results/runtime-assembly/', import.meta.url));
   mkdirSync(directory, { recursive: true });
@@ -570,8 +575,8 @@ test('real LX private KV preserves installation site and generation authority ac
     assert.ok(Number.isSafeInteger(context.requestId) && context.requestId > 0);
     assert.equal(context.isCurrent(), false);
   }
-  const persisted = () => JSON.parse(readFileSync(join(dataRoot, 'music/data', `${first.installationId}.json`), 'utf8'));
-  assert.deepEqual(persisted(), { schema: 1, sites: { kw: [{ key: 'key', value }] } });
+  const persisted = () => storedValue(dataRoot, first.installationId);
+  assert.deepEqual(await persisted(), value);
   const listed = musicValue(await client.call('music.script.sources.list'));
   assert.ok(Number.isSafeInteger(listed.revision) && listed.revision > 0);
   assert.deepEqual(listed.items.map(item => item.installationId), [first.installationId, second.installationId]);
@@ -587,7 +592,7 @@ test('real LX private KV preserves installation site and generation authority ac
   assert.equal(detail.contentHash, first.contentHash);
   assert.deepEqual(musicValue(await reopened.client.call('music.script.invoke',
     musicRequest(first.installationId, {}))), value);
-  assert.deepEqual(persisted(), { schema: 1, sites: { kw: [{ key: 'key', value }] } });
+  assert.deepEqual(await persisted(), value);
 });
 
 async function heldHttp() {
@@ -680,9 +685,9 @@ test('real LX cancellation fences old storage context while runtime close releas
     assert.deepEqual(musicValue(await invoke('probe')), { old: 'PERMISSION_DENIED', value: 'new-committed' });
     await first.closed;
     assert.equal(physical, 0);
-    const persisted = () => JSON.parse(readFileSync(join(dataRoot, 'music/data', `${item.installationId}.json`), 'utf8'));
-    const expected = { schema: 1, sites: { kw: [{ key: 'key', value: 'new-committed' }] } };
-    assert.deepEqual(persisted(), expected);
+    const persisted = () => storedValue(dataRoot, item.installationId);
+    const expected = 'new-committed';
+    assert.deepEqual(await persisted(), expected);
     const closingRequest = assert.rejects(invoke('close'), { code: 'CLOSED' });
     const closingNetwork = await upstream.wait('/close');
     assert.equal(physical, 1); assert.equal(closingNetwork.socket.destroyed, false);
@@ -691,7 +696,7 @@ test('real LX cancellation fences old storage context while runtime close releas
     assert.equal(runtime.state.active, 0);
     for (const key of ['liveSessions', 'activeRequests', 'timers', 'networkRequests', 'pendingAdapterTasks'])
       assert.equal(host.stats()[key], 0, key);
-    assert.deepEqual(persisted(), expected);
+    assert.deepEqual(await persisted(), expected);
   });
 
 test('App close reports actual LX I/O debt when an adapter ignores cancellation instead of claiming physical cleanup',

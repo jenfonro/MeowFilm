@@ -39,8 +39,8 @@ public static class MediaControlSettingsUiTests
 
     private static async Task Layout()
     {
-        await using var owner = new AppMediaControlSettings(new DocumentStore());
-        await using var appearance = new AppAppearance(new DocumentStore());
+        await using var owner = new AppMediaControlSettings(new AppSettingsTestDatabase());
+        await using var appearance = new AppAppearance(new AppSettingsTestDatabase());
         await owner.LoadAsync(); await appearance.LoadAsync();
         var general = new GeneralSettingsView(appearance, [], mediaControls: owner);
         using var mount = new Mount(general);
@@ -132,7 +132,7 @@ public static class MediaControlSettingsUiTests
 
     private static async Task Recording()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         var view = new MediaControlSettingsView(owner);
@@ -192,7 +192,7 @@ public static class MediaControlSettingsUiTests
 
     private static async Task InputBoundary()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         var view = new MediaControlSettingsView(owner);
@@ -282,11 +282,11 @@ public static class MediaControlSettingsUiTests
 
     private static async Task RecordingRegistration()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         await owner.SaveAsync(ShortcutFixture.Preferences());
-        store.HoldNamespace = AppMediaControlSettings.DocumentNamespace;
+        store.HoldWrites = true;
         await using var fixture = new ShortcutFixture();
         var view = new MediaControlSettingsView(owner);
         fixture.Root.Children.Clear();
@@ -374,7 +374,7 @@ public static class MediaControlSettingsUiTests
 
     private static async Task Failures()
     {
-        var store = new DocumentStore { FaultNamespace = AppMediaControlSettings.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { };
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         var view = new MediaControlSettingsView(owner);
@@ -413,7 +413,7 @@ public static class MediaControlSettingsUiTests
 
     private static async Task Lifecycle()
     {
-        var store = new DocumentStore { HoldNamespace = AppMediaControlSettings.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { HoldWrites = true};
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         var view = new MediaControlSettingsView(owner);
@@ -467,9 +467,9 @@ public static class MediaControlSettingsUiTests
 
     private static async Task ShellInjection()
     {
-        await using var owner = new AppMediaControlSettings(new DocumentStore());
-        await using var appearance = new AppAppearance(new DocumentStore());
-        await using var closePreferences = new AppClosePreferences(new DocumentStore());
+        await using var owner = new AppMediaControlSettings(new AppSettingsTestDatabase());
+        await using var appearance = new AppAppearance(new AppSettingsTestDatabase());
+        await using var closePreferences = new AppClosePreferences(new AppSettingsTestDatabase());
         await owner.LoadAsync(); await appearance.LoadAsync(); await closePreferences.LoadAsync();
         var shell = new ShellWindow([new SettingsNavigationTests.Module("music", "音乐")], [],
             () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance,

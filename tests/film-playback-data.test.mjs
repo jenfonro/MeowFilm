@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';

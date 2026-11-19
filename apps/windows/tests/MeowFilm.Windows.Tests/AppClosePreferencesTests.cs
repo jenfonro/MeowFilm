@@ -21,7 +21,7 @@ public static class AppClosePreferencesTests
 
     private static async Task Persistence()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppClosePreferences(store);
         Check(owner.Behavior == WindowCloseBehavior.Ask && !owner.CanEdit);
         Check(!await owner.SaveAsync(WindowCloseBehavior.Exit) && store.Writes == 0,
@@ -48,7 +48,7 @@ public static class AppClosePreferencesTests
         Check(changes.IsSupersetOf([nameof(IDesktopClosePreferences.Behavior),
             nameof(IDesktopClosePreferences.CanEdit), nameof(IDesktopClosePreferences.Status)]),
             "the settings and close prompt can observe the same owner");
-        Check(store.WriteNames.SetEquals(["app.window.v1"]));
+        Check(store.WrittenOwners.SetEquals(["app.window.v1"]));
         int before = store.Writes;
         try { await owner.SaveAsync((WindowCloseBehavior)99); throw new Exception("invalid behavior accepted"); }
         catch (ArgumentOutOfRangeException) { }
@@ -57,7 +57,7 @@ public static class AppClosePreferencesTests
 
     private static async Task SaveFailures()
     {
-        var store = new DocumentStore { FaultNamespace = AppClosePreferences.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { };
         await using var first = new AppClosePreferences(store);
         await using var second = new AppClosePreferences(store);
         await first.LoadAsync(); await second.LoadAsync();
@@ -98,7 +98,7 @@ public static class AppClosePreferencesTests
 
     private static async Task ReadFailures()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         var guarded = new ReadFaultStore(store) { FailReads = true };
         await using var owner = new AppClosePreferences(guarded);
         await owner.LoadAsync();
@@ -113,31 +113,29 @@ public static class AppClosePreferencesTests
         Check(await owner.SaveAsync(WindowCloseBehavior.Exit));
         foreach (string invalid in new[]
         {
-            "not-json", "null", "[]", "{}",
+            "{}",
             "{\"schema\":99,\"closeBehavior\":\"ask\"}",
             "{\"schema\":1,\"closeBehavior\":\"unknown\"}",
-            "{\"schema\":1,\"closeBehavior\":1}",
-            "{\"schema\":1,\"closeBehavior\":\"ask\",\"extra\":true}"
         })
         {
             byte[] bytes = Encoding.UTF8.GetBytes(invalid);
-            store.Data[AppClosePreferences.DocumentNamespace] = bytes;
+            store.WindowData = bytes;
             await owner.LoadAsync();
             int writes = store.Writes;
             Check(!owner.CanEdit && owner.Status.Length > 0 && owner.Behavior == WindowCloseBehavior.Exit,
                 "invalid storage preserves the last confirmed value and blocks edits");
             Check(!await owner.SaveAsync(WindowCloseBehavior.Ask) && store.Writes == writes &&
-                store.Data[AppClosePreferences.DocumentNamespace].SequenceEqual(bytes),
+                store.WindowData!.SequenceEqual(bytes),
                 "invalid storage is never repaired by an implicit default write");
         }
-        store.Data.Remove(AppClosePreferences.DocumentNamespace);
+        store.WindowData = null;
         await owner.LoadAsync();
         Check(owner.CanEdit && owner.Behavior == WindowCloseBehavior.Ask && owner.Status == "");
     }
 
     private static async Task Shutdown()
     {
-        var store = new DocumentStore { HoldNamespace = AppClosePreferences.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { HoldWrites = true};
         await using var owner = new AppClosePreferences(store);
         await owner.LoadAsync();
         var save = owner.SaveAsync(WindowCloseBehavior.MinimizeToTray);
@@ -168,7 +166,7 @@ public static class AppClosePreferencesTests
     {
         foreach (bool abort in new[] { false, true })
         {
-            var store = new DocumentStore { HoldNamespace = AppClosePreferences.DocumentNamespace };
+            var store = new AppSettingsTestDatabase { HoldWrites = true};
             await using var owner = new AppClosePreferences(store);
             await owner.LoadAsync();
             var save = owner.SaveAsync(WindowCloseBehavior.Exit);
@@ -197,15 +195,13 @@ public static class AppClosePreferencesTests
         Directory.CreateDirectory(root);
         foreach (var behavior in new[] { WindowCloseBehavior.MinimizeToTray, WindowCloseBehavior.Exit, WindowCloseBehavior.Ask })
         {
-            await using (var store = new LocalDocumentStore(root, AppIdentity.NativeNamespaces,
-                AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces))
+            await using (var store = new NativeDatabase(root))
             await using (var owner = new AppClosePreferences(store))
             {
                 await owner.LoadAsync();
                 Check(owner.CanEdit && await owner.SaveAsync(behavior) && owner.Status == "");
             }
-            await using var reopenedStore = new LocalDocumentStore(root, AppIdentity.NativeNamespaces,
-                AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            await using var reopenedStore = new NativeDatabase(root);
             await using var reopened = new AppClosePreferences(reopenedStore);
             await reopened.LoadAsync();
             Check(reopened.CanEdit && reopened.Behavior == behavior && reopened.Status == "",
@@ -213,13 +209,10 @@ public static class AppClosePreferencesTests
         }
     }
 
-    private sealed class ReadFaultStore(IDocumentStore inner) : IDocumentStore
+    private sealed class ReadFaultStore(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
         internal bool FailReads;
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken token = default) =>
-            FailReads ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : inner.ReadAsync(documentNamespace, token);
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default) => inner.WriteAsync(documentNamespace, data, expected, token);
-        public ValueTask DisposeAsync() => inner.DisposeAsync();
+        public override Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) =>
+            FailReads ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : base.ReadAsync(read, token);
     }
 }

@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -62,7 +63,7 @@ function setup(t, { search, metadata, getRules, cachedEntry, invoke } = {}) {
   const service = createFilmSearchService({ data, program, catalog: createFilmCatalog({ library }),
     rules: { snapshot: async () => getRules ? getRules() : { rules: { aggregateRegexRules: [] }, revision: 'one' } },
     now: () => Date.UTC(2026, 10, 10) });
-  t.after(async () => { await service.close(); library.close(); rmSync(directory, { recursive: true }); });
+  t.after(async () => { await service.close(); await library.close(); rmSync(directory, { recursive: true }); });
   const snapshot = id => service.snapshot({ sessionId: id });
   const complete = id => until(() => {
     const value = snapshot(id);

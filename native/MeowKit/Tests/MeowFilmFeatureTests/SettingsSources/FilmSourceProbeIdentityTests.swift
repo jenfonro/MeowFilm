@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 final class FilmSourceProbeIdentityTests: XCTestCase {
@@ -31,9 +32,8 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             }
             let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: base) }
-            let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-            let service = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+                let store = try storageTestDatabase(self, root: base)
+            let service = FilmSourceService(transport: fixture.transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
             let key = FilmSourceKey(installationId: "a", siteKey: "same")
             let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
@@ -51,7 +51,7 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.detection, result)
             await service.close()
-            let rebuilt = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            let rebuilt = FilmSourceService(transport: fixture.transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
             try await rebuilt.initialize()
             let restored = await rebuilt.snapshot
@@ -196,9 +196,8 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             }
             let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: base) }
-            let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-            let service = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+                let store = try storageTestDatabase(self, root: base)
+            let service = FilmSourceService(transport: fixture.transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
             let key = FilmSourceKey(installationId: "a", siteKey: "same")
             let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
@@ -218,7 +217,7 @@ final class FilmSourceProbeIdentityTests: XCTestCase {
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.detection, result)
             XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
             await service.close()
-            let rebuilt = FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+            let rebuilt = FilmSourceService(transport: fixture.transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
             try await rebuilt.initialize()
             let restored = await rebuilt.snapshot

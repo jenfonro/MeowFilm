@@ -5,14 +5,11 @@ import MeowStorage
 /// App-scoped owner. Local state works before Node is available; all durable
 /// mutations commit before publishing a snapshot. The runtime is borrowed.
 public actor FilmSourceService {
-    public static let documentNamespace = "film.video-sources.v1"
-    public static let documentKey = "catalog"
     let transport: CatScriptTransport
     private let settings: CatSourceSettings
     private let localInput: CatLocalSourceInput
-    private let storeFactory: @Sendable () throws -> DocumentStore
-    private var store: DocumentStore?
-    private var expected: Data?
+    private let repository: FilmSourceRepository
+    private var revision = 0
     private var document = FilmSourceDocument()
     private let readSourceFile: @Sendable (URL) async throws -> String
     private let observeConnection: @Sendable () async -> RuntimeHTTPClient?
@@ -30,21 +27,21 @@ public actor FilmSourceService {
     private var observers: [UUID: AsyncStream<FilmSourceSnapshot>.Continuation] = [:]
     public private(set) var snapshot = FilmSourceSnapshot(cats: [], videos: [], runtimeError: nil)
 
-    public init(transport: CatScriptTransport, storeFactory: @escaping @Sendable () throws -> DocumentStore,
+    public init(transport: CatScriptTransport, database: SQLiteDatabase,
                 settingsDocument: FilmSettingsDocument, runtimeSourceRoot: URL,
                 observeConnection: @escaping @Sendable () async -> RuntimeHTTPClient? = { nil }) {
-        self.transport = transport; self.storeFactory = storeFactory
+        self.transport = transport; self.repository = FilmSourceRepository(database: database)
         self.settings = CatSourceSettings(document: settingsDocument)
         self.localInput = CatLocalSourceInput(runtimeRoot: runtimeSourceRoot)
         self.readSourceFile = { url in try await Self.readSource(url) }
         self.observeConnection = observeConnection
     }
 
-    init(transport: CatScriptTransport, storeFactory: @escaping @Sendable () throws -> DocumentStore,
+    init(transport: CatScriptTransport, database: SQLiteDatabase,
          settingsDocument: FilmSettingsDocument, runtimeSourceRoot: URL,
          observeConnection: @escaping @Sendable () async -> RuntimeHTTPClient? = { nil },
          readSourceFile: @escaping @Sendable (URL) async throws -> String) {
-        self.transport = transport; self.storeFactory = storeFactory; self.readSourceFile = readSourceFile
+        self.transport = transport; self.repository = FilmSourceRepository(database: database); self.readSourceFile = readSourceFile
         self.settings = CatSourceSettings(document: settingsDocument)
         self.localInput = CatLocalSourceInput(runtimeRoot: runtimeSourceRoot)
         self.observeConnection = observeConnection
@@ -67,22 +64,18 @@ public actor FilmSourceService {
         for observer in observers.values { observer.yield(value) }
     }
 
-    public func initialize() throws {
+    public func initialize() async throws {
         try available()
-        try load()
+        try await load()
         observeStartedRuntime()
     }
 
-    private func load() throws {
-        let configured = try settings.read()
+    private func load() async throws {
+        let configured = try await settings.read()
         if initialized { applyConfiguration(configured, received: snapshot.cats); return }
-        if store == nil { store = try storeFactory() }
-        let data = try store!.read(key: Self.documentKey)
-        let loaded: FilmSourceDocument
-        do { loaded = try data.map { try FilmSourceDocument.read($0, configured: configured) } ?? FilmSourceDocument() }
-        catch { throw FilmSourceError(code: "INVALID_DOCUMENT") }
+        let (loaded, revision) = try await repository.load()
         cancelDetections()
-        document = loaded; expected = data; initialized = true
+        document = loaded; self.revision = revision; initialized = true
         let cats = configured.map { input in
             (loaded.cats.first { $0.installationId == input.installationId } ?? StoredFilmCat(emptyCat(input))).snapshot(input)
         }
@@ -91,22 +84,15 @@ public actor FilmSourceService {
             runtimeError: snapshot.runtimeError))
     }
 
-    private func commit(cats: [FilmCatSource], videos: [FilmVideoSource], deleted: Set<FilmSourceKey>) throws {
+    private func commit(cats: [FilmCatSource], videos: [FilmVideoSource], deleted: Set<FilmSourceKey>) async throws {
         try Task.checkCancellation()
         let candidate = FilmSourceDocument(cats: cats.map(StoredFilmCat.init), videos: videos,
             deleted: deleted.sorted(by: FilmSourceKey.ordered))
-        let bytes = try candidate.encode(replacing: document, original: expected)
-        if bytes != expected {
-            do { try store!.compareAndSwap(key: Self.documentKey, expected: expected, replacement: bytes) }
-            catch {
-                // Resolve a possibly committed receipt without claiming success on failure.
-                guard let actual = try? store!.read(key: Self.documentKey), actual == bytes else {
-                    initialized = false
-                    throw error
-                }
-            }
+        if candidate != document {
+            do { revision = try await repository.save(candidate, expected: revision) }
+            catch { initialized = false; throw error }
         }
-        document = candidate; expected = bytes; initialized = true
+        document = candidate; initialized = true
         publish(.init(cats: cats, videos: videos, runtimeError: snapshot.runtimeError))
     }
 
@@ -150,10 +136,10 @@ public actor FilmSourceService {
         }
     }
 
-    private func importLocalCore(name: String, source: String, id: String) throws -> FilmCatSource {
+    private func importLocalCore(name: String, source: String, id: String) async throws -> FilmCatSource {
         try CatSourceSettings.validateSource(name: name, type: "local", url: nil)
         let hash = try localInput.prepare(source)
-        return try saveConfiguration(id) { inputs in
+        return try await saveConfiguration(id) { inputs in
             guard !inputs.contains(where: { $0.installationId == id }) else { throw FilmSourceError(code: "STORAGE_CONFLICT") }
             return inputs + [.init(installationId: id, name: CatSourceSettings.trim(name), sourceType: "local",
                 sourceUrl: nil, localPath: nil, localHash: hash, enabled: true, inputRevision: 1)]
@@ -173,7 +159,7 @@ public actor FilmSourceService {
     }
 
     public func editCat(_ installationId: String, name: String, sourceURL: String? = nil) async throws -> FilmCatSource {
-        try available(); try load()
+        try available(); try await load()
         let cat = try findCat(installationId)
         return try await editCat(installationId, name: name, sourceType: cat.sourceType,
             sourceURL: sourceURL ?? cat.sourceUrl)
@@ -182,8 +168,8 @@ public actor FilmSourceService {
     public func editCat(_ installationId: String, name: String, sourceType: String,
                         sourceURL: String? = nil, fileURL: URL? = nil) async throws -> FilmCatSource {
         try CatSourceSettings.validateSource(name: name, type: sourceType, url: sourceURL)
-        try available(); try load()
-        let previous = try configuredCat(installationId)
+        try available(); try await load()
+        let previous = try await configuredCat(installationId)
         return try await run {
             let source: String?
             if let fileURL { source = try await self.readSourceFile(fileURL) } else { source = nil }
@@ -193,19 +179,19 @@ public actor FilmSourceService {
 
     public func editCat(_ installationId: String, name: String, sourceType: String,
                         sourceURL: String? = nil, source: String) async throws -> FilmCatSource {
-        try available(); try load()
-        let previous = try configuredCat(installationId)
+        try available(); try await load()
+        let previous = try await configuredCat(installationId)
         return try await run {
             try await self.editCore(previous, name: name, type: sourceType, url: sourceURL, source: source)
         }
     }
 
     private func editCore(_ previous: CatSourceConfiguration, name: String, type: String,
-                          url: String?, source: String?) throws -> FilmCatSource {
+                          url: String?, source: String?) async throws -> FilmCatSource {
         try CatSourceSettings.validateSource(name: name, type: type, url: url)
         guard source == nil || type == "local" else { throw FilmSourceError(code: "INVALID_SOURCE") }
         let hash = try source.map { try localInput.prepare($0) }
-        return try saveConfiguration(previous.installationId) { inputs in
+        return try await saveConfiguration(previous.installationId) { inputs in
             guard inputs.first(where: { $0.installationId == previous.installationId }) == previous else {
                 throw FilmSourceError(code: "STORAGE_CONFLICT")
             }
@@ -220,7 +206,7 @@ public actor FilmSourceService {
     }
 
     public func updateCat(_ installationId: String, fileURL: URL? = nil) async throws -> FilmCatSource {
-        try available(); try load()
+        try available(); try await load()
         let cat = try findCat(installationId)
         if cat.sourceType == "local" {
             guard let fileURL else { throw FilmSourceError(code: "INVALID_SOURCE") }
@@ -231,7 +217,7 @@ public actor FilmSourceService {
     }
 
     public func updateCat(_ installationId: String, source: String?) async throws -> FilmCatSource {
-        try available(); try load()
+        try available(); try await load()
         let cat = try findCat(installationId)
         if cat.sourceType == "local" {
             guard let source else { throw FilmSourceError(code: "INVALID_SOURCE") }
@@ -277,7 +263,7 @@ public actor FilmSourceService {
 
     private func manageCore(_ id: String,
                             operation: @Sendable () async throws -> RuntimeValue) async throws -> FilmCatSource {
-        let before = try configuredCat(id)
+        let before = try await configuredCat(id)
         invalidateCat(id); changingCats.insert(id)
         defer { changingCats.remove(id) }
         do {
@@ -288,7 +274,7 @@ public actor FilmSourceService {
             throw error
         }
         try await synchronize()
-        let current = try configuredCat(id)
+        let current = try await configuredCat(id)
         guard current.hasSameInput(as: before), current.inputRevision == before.inputRevision,
               current.enabled == before.enabled else { throw CancellationError() }
         let result = try findCat(id)
@@ -301,17 +287,17 @@ public actor FilmSourceService {
         }
     }
 
-    private func configuredCat(_ id: String) throws -> CatSourceConfiguration {
-        guard let input = try settings.read().first(where: { $0.installationId == id }) else {
+    private func configuredCat(_ id: String) async throws -> CatSourceConfiguration {
+        guard let input = try await settings.read().first(where: { $0.installationId == id }) else {
             throw FilmSourceError(code: "NOT_FOUND")
         }
         return input
     }
 
     private func saveConfiguration(_ id: String,
-                                   edit: ([CatSourceConfiguration]) throws -> [CatSourceConfiguration]) throws -> FilmCatSource {
+                                   edit: @escaping @Sendable ([CatSourceConfiguration]) throws -> [CatSourceConfiguration]) async throws -> FilmCatSource {
         try available(); try Task.checkCancellation()
-        let configured = try settings.change(edit)
+        let configured = try await settings.change(edit)
         configurationEpoch = UUID()
         // A failed cache write or runtime request cannot revoke this native commit.
         applyConfiguration(configured, received: snapshot.cats)
@@ -320,9 +306,9 @@ public actor FilmSourceService {
         return saved
     }
 
-    private func removeConfiguration(_ id: String) throws {
+    private func removeConfiguration(_ id: String) async throws {
         try available(); try Task.checkCancellation()
-        let configured = try settings.change { inputs in
+        let configured = try await settings.change { inputs in
             guard inputs.contains(where: { $0.installationId == id }) else { throw FilmSourceError(code: "NOT_FOUND") }
             return inputs.filter { $0.installationId != id }
         }
@@ -371,14 +357,14 @@ public actor FilmSourceService {
             runtimeError: snapshot.runtimeError))
     }
 
-    public func deleteVideo(_ key: FilmSourceKey) throws {
-        try initialize(); _ = try findVideo(key); cancelDetection(key)
+    public func deleteVideo(_ key: FilmSourceKey) async throws {
+        try await initialize(); _ = try findVideo(key); cancelDetection(key)
         var deleted = Set(document.deleted); deleted.insert(key)
-        try commit(cats: snapshot.cats, videos: snapshot.videos.filter { $0.key != key }, deleted: deleted)
+        try await commit(cats: snapshot.cats, videos: snapshot.videos.filter { $0.key != key }, deleted: deleted)
     }
 
-    public func saveVideoOptions(_ key: FilmSourceKey, options: FilmVideoOptions, order: Int? = nil) throws {
-        try initialize(); _ = try findVideo(key)
+    public func saveVideoOptions(_ key: FilmSourceKey, options: FilmVideoOptions, order: Int? = nil) async throws {
+        try await initialize(); _ = try findVideo(key)
         var videos = snapshot.videos.map { original in
             var video = original
             if video.key == key { video.options = options; video.order = order ?? video.order }
@@ -389,7 +375,7 @@ public actor FilmSourceService {
             if a.order != b.order { return a.order < b.order }
             return order != nil && a.key == key && b.key != key
         }
-        try commit(cats: snapshot.cats, videos: videos, deleted: Set(document.deleted))
+        try await commit(cats: snapshot.cats, videos: videos, deleted: Set(document.deleted))
     }
 
     private func synchronize(using observedTransport: CatScriptTransport? = nil) async throws {
@@ -409,8 +395,8 @@ public actor FilmSourceService {
         guard epoch == configurationEpoch else { return }
         // Native intent may have changed while status was in flight. Neither a
         // missing runtime instance nor an old revision may delete that intent.
-        try load()
-        let configured = try settings.read()
+        try await load()
+        let configured = try await settings.read()
         let ids = Set(configured.map(\.installationId))
         let deleted = Set(document.deleted)
         var videos = snapshot.videos.filter { ids.contains($0.key.installationId) }
@@ -443,7 +429,7 @@ public actor FilmSourceService {
                 }
             }
         }
-        try commit(cats: cats, videos: sorted(videos), deleted: deleted)
+        try await commit(cats: cats, videos: sorted(videos), deleted: deleted)
         publish(.init(cats: snapshot.cats, videos: snapshot.videos, runtimeError: nil))
     }
 
@@ -519,7 +505,7 @@ public actor FilmSourceService {
               snapshot.videos.contains(where: { $0.key == key }) else { throw CancellationError() }
         var videos = snapshot.videos
         if let index = videos.firstIndex(where: { $0.key == key }) { videos[index].detection = result }
-        try commit(cats: snapshot.cats, videos: videos, deleted: Set(document.deleted))
+        try await commit(cats: snapshot.cats, videos: videos, deleted: Set(document.deleted))
         return result
     }
 
@@ -551,10 +537,10 @@ public actor FilmSourceService {
 
     public func clear() async throws {
         await prepareShutdown()
-        _ = try settings.change { _ in [] }
-        if store == nil { store = try storeFactory() }
-        try store!.remove(key: Self.documentKey)
-        document = FilmSourceDocument(); expected = nil; initialized = true
+        _ = try await settings.change { _ in [] }
+        let (_, current) = try await repository.load()
+        revision = try await repository.save(FilmSourceDocument(), expected: current)
+        document = FilmSourceDocument(); initialized = true
         publish(.init(cats: [], videos: [], runtimeError: nil))
     }
 
@@ -566,7 +552,7 @@ public actor FilmSourceService {
     }
 
     private func run<T: Sendable>(_ operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        try available(); try Task.checkCancellation(); try load()
+        try available(); try Task.checkCancellation(); try await load()
         let id = UUID()
         let task = Task { try Task.checkCancellation(); return try await operation() }
         active[id] = { task.cancel() }

@@ -53,7 +53,12 @@ internal static class Program
         var failed = 0;
         foreach (var test in tests)
         {
-            try { await test.Run(); Console.WriteLine($"PASS {test.Name}"); }
+            try
+            {
+                try { await test.Run(); }
+                finally { await MusicTestStores.ReleaseAsync(); }
+                Console.WriteLine($"PASS {test.Name}");
+            }
             catch (Exception error)
             {
                 failed++;
@@ -61,7 +66,6 @@ internal static class Program
                 Console.WriteLine($"ERROR_HRESULT 0x{error.HResult:X8}");
                 Console.WriteLine(error.StackTrace);
             }
-            finally { await MusicTestStores.ReleaseAsync(); }
         }
         Console.WriteLine($"TOTAL {tests.Length}; PASSED {tests.Length - failed}; FAILED {failed}; SKIPPED 0");
         return failed == 0 ? 0 : 1;

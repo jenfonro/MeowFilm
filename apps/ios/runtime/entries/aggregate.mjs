@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import { startIOSAppRuntime, reportIOSRuntimeStartFailure } from '../bootstrap.mjs';
 import { createMusicScriptModule } from '../../../runtime/modules/music-script.mjs';
 import { createCatScriptModule } from '../../../runtime/modules/cat-script.mjs';
@@ -19,13 +18,13 @@ try {
         stage = 'music';
         modules.push(createMusicScriptModule({ dataRoot }));
         stage = 'cat';
-        modules.push(createCatScriptModule({ dataRoot: join(dataRoot, 'cat'), ...(settings ? {
+        modules.push(createCatScriptModule({ dataRoot, ...(settings ? {
           configuration: { read: () => settings.read('cat.sources'), reload: () => settings.reload('cat.sources') },
         } : {}) }));
         stage = 'source';
         modules.push(createSourceRuntimeModule({ dataRoot, platform: 'ios' }));
         stage = 'pan';
-        modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.document('pan.accounts') } : {}) }));
+        modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.accounts('pan.accounts') } : {}) }));
         stage = 'tmdb';
         modules.push(createTMDBDataModule({ dataRoot, nativeSettings: settings }));
         stage = 'douban';

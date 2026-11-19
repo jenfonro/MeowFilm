@@ -472,12 +472,14 @@ test('mandatory material, JSON, transport, upstream denial and byte limits keep 
 
 test('TX consumed directory offsets fail before dependency reads and created-only calls ignore unused continuation', async t => {
   const invalid = fixture(() => assert.fail('bad directory offset must not dispatch'));
+    await invalid.owner.ready;
+    const storageCounts = [invalid.reads.length, invalid.writes.length];
   t.after(() => invalid.close()); await invalid.session('tx');
   for (const kind of ['all', 'subscribed']) for (const txOffset of ['not-a-number', '1e400', {}, { toString: null }]) {
     await assert.rejects(invalid.request('tx', 'personalPlaylists', { kind, continuation: { txOffset } }),
       { code: 'INVALID_REQUEST' });
   }
-  assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, 0); assert.equal(invalid.writes.length, 0);
+  assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, storageCounts[0]); assert.equal(invalid.writes.length, storageCounts[1]);
   const methods = [];
   const f = fixture(request => {
     const { method, param } = qq(request).req_0; methods.push(method);

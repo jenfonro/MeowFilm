@@ -2,7 +2,7 @@
 
 `source@0.3.0` 使用 `source.runtime.v2`，与既有 `load/unload/invoke/status/close` 同时装配。书架、历史、阅读锚点和排版由原生业务拥有；书源定义与管理配置只有一个持久化 owner，执行实例、Cookie 和私有变量仍由运行器拥有。
 
-`createSourceRuntimeModule` 缺省 `configurationOwner:"runtime"`，用于 iOS 现行装配：运行器独占 `<dataRoot>/source/library.json`。Windows aggregate 显式选择 `"native"`：原生配置格式见 [Windows 小说](../windows/novel.md#书源配置与设置保存)，书源库仅在内存应用原生配置快照，磁盘只读写 `<dataRoot>/source/private.json`。Windows 不读取、迁移、回退或删除旧混合库。没有 `dataRoot` 的独立模块只保留会话内状态。
+`createSourceRuntimeModule` 的当前 App 装配按平台显式选择配置 owner；source definitions、管理字段、Cookie、Reader 状态和 per-key KV 使用 `source_installations`、定义关系、`source_private_*` 与 typed value-tree 表。iOS 由运行器持有书源配置，Windows 的原生配置 owner 由原生服务提交，Node 只应用该快照并保存运行器私有状态。不会创建 `library.json` 或 `private.json`。没有 `dataRoot` 的独立模块只保留会话内状态。
 
 所有方法使用 `source.runtime.` 前缀，HTTP 为 `POST /v1/source/<operation>`。响应成功为 `{ok:true,contract:"source.runtime.v2",value}`，失败为 `{ok:false,contract:"source.runtime.v2",code}`，错误不携带源代码、Cookie 或底层异常。
 
@@ -29,7 +29,7 @@ native owner 拒绝 `library.import/save/update/remove`，返回 `PERMISSION_DEN
 
 `library.apply` 只处理真实变化、失败重试和移除项；相同快照幂等，成功源不重复初始化，禁用源不执行。替换或移除会撤销旧调用、Web 与图片并等待实际清理。初始化失败在当前已保存 revision 上返回该源 `errorCode`，关闭执行准入，不回写配置或恢复旧定义；清理失败仍为 `SOURCE_CLEANUP`。精确快照可重试失败项，后继快照使旧应用结果失效。运行器恢复后须重新接收最新原生快照才能执行。
 
-native owner 的私有文档为 `{schema:1,sources:[{installationId,private:{cookies,storage}}]}`，定义不落盘。当前 generation 的私有写入只更新这个文档，不产生第二份配置；损坏或写入失败不以空数据覆盖。本会话已登记的源移除时，在真实资源清理成功后删除相应私有项；尚未在本会话登记的磁盘私有项不会因快照缺项自动移除。
+native owner 模式下，来源配置由原生 typed tables 持有，Node 仅将 Cookie、Reader 状态、变量和 per-key KV 写入运行器私有关系；不会复制来源配置，也不会将 private 数据编码成 JSON 文档。事务失败不写入默认空数据。本会话已登记的源移除时，在真实资源清理成功后删除相应私有项；尚未在本会话登记的磁盘私有项不会因快照缺项自动移除。
 
 `SourceRecord` 为 `installationId,revision,name,sourceUrl,group,order,enabled,enabledExplore,protocol,actions:[string]`，另投影用于管理排序／操作的 `weight,lastUpdateTime,respondTime,hasExplore`；恢复或应用失败时带 `errorCode`。generation 不属于公开记录。revision 为正整数，每次接受的定义或管理修改递增，旧 revision 返回 `STALE_SOURCE`。名称可为空，order 是用于排序的有限数值，不要求整数；`library.list` 按 order、名称、installationId 排序。无源返回空列表。
 
@@ -43,7 +43,7 @@ runtime owner 的 URL 导入和预览使用同一 HTTP(S) 下载，初始地址�
 
 runtime owner 的 save 先试运行完整候选，随后原子替换仓库；语法、初始化、取消或写盘失败保留原定义及 revision，并恢复可用的旧运行实例。禁用不删除定义或私有状态，重新启用恢复；remove 删除该源及其私有值，撤销 Web、图片和运行任务。该模式下客户端不保存原始定义用来恢复安装；get 仅供编辑，export 仅包含定义和管理字段，不导出 Cookie、缓存和私有变量。
 
-仓库文件整体写入临时文件、fsync、rename，沿用 `PrivateDocuments` 的私有权限与链接校验。根解码失败、非空全不可用列表和歧义身份返回 `CORRUPT_STORAGE`，不可读／不可写返回 `STORAGE_ERROR`，均不以空库覆写。逐项投影可用身份，管理展示或未接纳 private 记录不封锁健康来源；实际执行的来源／profile 失败只关闭该源准入。无关保存保留未接纳条目、根与记录封套扩展，通过公共 Node 无关 JSON 入口保留会失真的数字原文。运行器关闭前排空已接受的写入和真实宿主资源；仅取消信号不算清理完成。
+来源定义、属性和有序子行按需增量写入 SQLite 事务；guest private volume 仍由现有脚本文件 capability 管理，使用何种文件格式由第三方脚本自行决定。根解码失败、非空全不可用列表和歧义身份返回 `CORRUPT_STORAGE`，不可读／不可写返回 `STORAGE_ERROR`，均不以空库覆写。逐项投影可用身份，管理展示或未接纳 private 记录不封锁健康来源；实际执行的来源／profile 失败只关闭该源准入。无关保存保留未接纳条目、根与记录封套扩展，仅 RPC、导入/导出和外部定义输入输出使用 JSON 边界；内部持久化字段使用 typed values。运行器关闭前排空已接受的数据库写入和真实宿主资源；仅取消信号不算清理完成。
 
 ## 小说纯规则
 

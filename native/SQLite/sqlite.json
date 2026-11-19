@@ -1,0 +1,18 @@
+{
+  "version": "3.53.4",
+  "url": "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
+  "archiveSha256": "1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d",
+  "sourceSha256": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189",
+  "headerSha256": "919e7f2e8ed1d8f56ac17b412b8971c76aa5d1a879752cc6058f75e7d5910e1d",
+  "compileOptions": [
+    "SQLITE_THREADSAFE=1",
+    "SQLITE_DEFAULT_FOREIGN_KEYS=1",
+    "SQLITE_ENABLE_FTS5=1",
+    "SQLITE_ENABLE_COLUMN_METADATA=1",
+    "SQLITE_OMIT_LOAD_EXTENSION=1",
+    "SQLITE_DQS=0",
+    "SQLITE_DEFAULT_WAL_AUTOCHECKPOINT=0",
+    "SQLITE_DEFAULT_SYNCHRONOUS=2",
+    "SQLITE_DEFAULT_WAL_SYNCHRONOUS=2"
+  ]
+}

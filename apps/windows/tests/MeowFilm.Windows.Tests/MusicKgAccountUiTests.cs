@@ -331,7 +331,7 @@ public static class MusicKgAccountUiTests
         private Fixture()
         {
             Directory.CreateDirectory(Root);
-            Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+            Store = new(new NativeDatabase(Root));
             Dialogs = new() { Path = System.IO.Path.Combine(Root, "explicit-qr.png") };
             Runtime.Platform.OnRequest = Transport.Read;
             Calls = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime));

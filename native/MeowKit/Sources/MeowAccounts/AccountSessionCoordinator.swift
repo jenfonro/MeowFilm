@@ -339,7 +339,7 @@ public actor AccountSessionCoordinator {
             record = try store.read(for: token.identity)
         } catch {
             let failure = CredentialStoreError.sanitized(error)
-            // A temporary Keychain lock/permission error denies access, not an automatic
+            // A temporary database/permission error denies access, not an automatic
             // network logout or a fallback to cached secret bytes.
             entries[token.identity]?.failure = .storage(failure)
             publish(token.identity)

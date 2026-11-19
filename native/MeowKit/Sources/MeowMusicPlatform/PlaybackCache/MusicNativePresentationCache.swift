@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 import MeowUI
 import MeowMusicFeature
 import MeowStorage
@@ -7,197 +6,206 @@ import MeowStorage
 private final class PresentationCacheRevisions: @unchecked Sendable {
     private let lock = NSLock()
     private var image = UUID(), lyric = UUID()
-    func value(images: Bool) -> UUID { lock.lock(); defer { lock.unlock() }; return images ? image : lyric }
+    func value(images: Bool) -> UUID { lock.withLock { images ? image : lyric } }
     func clear(images: Bool, lyrics: Bool) {
-        lock.lock(); defer { lock.unlock() }
-        if images { image = UUID() }
-        if lyrics { lyric = UUID() }
+        lock.withLock {
+            if images { image = UUID() }
+            if lyrics { lyric = UUID() }
+        }
     }
 }
 
-/// Original network bytes, keyed by full public URL. Lyrics and images share
-/// the original 256 MiB budget and 30-day lifetime; no song image copies exist.
+/// URL-indexed original image files and typed lyric lines/words. Reads select
+/// one resource; playing a song only touches its two indexed timestamps.
 public actor MusicNativePresentationCache: MusicPresentationCaching {
-    public static let namespace = "music.presentation-resources.v1"
     private static let lifetime: TimeInterval = 30 * 86_400
     private static let capacity = Int(NativeMusicAudioCacheHTTPPolicy.maximumBytes)
     private nonisolated let revisions = PresentationCacheRevisions()
     public nonisolated var revision: UUID { revisions.value(images: true) }
     public nonisolated var lyricRevision: UUID { revisions.value(images: false) }
-    private let factory: @Sendable () throws -> DocumentStore
+    private let database: SQLiteDatabase
     private let clock: @Sendable () -> Date
-    private var document: DocumentStore?
-    private enum Kind: String, Codable { case image, lyrics }
-    private struct Entry: Codable {
-        let key: String
-        let resource: String
-        let kind: Kind
-        var updatedAt: Date
-        var bytes: Int
-        var ready: Bool
-    }
-    private struct Index: Codable { var entries: [Entry] = [] }
+    private var images: RawResourceDirectory?
+    private var closed = false
     private var imagesReadable = true, lyricsReadable = true
 
-    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore,
-                clock: @escaping @Sendable () -> Date = { Date() }) {
-        factory = storeFactory; self.clock = clock
+    public init(database: SQLiteDatabase, clock: @escaping @Sendable () -> Date = { Date() }) {
+        self.database = database; self.clock = clock
     }
-    private func store() throws -> DocumentStore {
-        if let document { return document }
-        let value = try factory(); document = value; return value
+    private func files(_ db: SQLiteConnection) throws -> RawResourceDirectory {
+        if let images { return images }
+        let directory = try RawResourceDirectory(dataRoot: database.dataRoot, namespace: "music-images")
+        try directory.recover(referenced: Set(try db.query("SELECT filename FROM ios_music_images").map { try $0.text("filename") }))
+        images = directory
+        return directory
     }
-    private static func key(_ resource: String, kind: Kind) -> String {
-        kind.rawValue + "-" + SHA256.hash(data: Data(resource.utf8)).map { String(format: "%02x", $0) }.joined()
+    private func removeImage(_ row: SQLiteRow, db: SQLiteConnection, directory: RawResourceDirectory) throws {
+        let resource = try row.text("resource")
+        try db.execute("UPDATE ios_music_images SET ready=0 WHERE resource=?", [.text(resource)])
+        do {
+            try directory.remove(row.text("filename"))
+            try db.execute("DELETE FROM ios_music_images WHERE resource=?", [.text(resource)])
+        } catch {
+            // An undeleted leaf remains charged and ineligible.
+        }
     }
-    private func index() throws -> Index {
-        guard let data = try store().read(key: "index") else { return .init() }
-        guard data.count <= 1024 * 1024 else { throw DocumentStoreError.documentTooLarge }
-        return try JSONDecoder().decode(Index.self, from: data)
-    }
-    private func commit(_ value: Index) throws {
-        try store().write(JSONEncoder().encode(value), key: "index")
-    }
-    private func prune(_ value: inout Index) throws {
-        let expired = value.entries.filter { $0.updatedAt.addingTimeInterval(Self.lifetime) <= clock() }
-        guard !expired.isEmpty else { return }
-        // Failed removals remain charged. Missing leaves are individual misses.
-        for entry in expired {
-            do {
-                try store().remove(key: entry.key)
-                value.entries.removeAll { $0.key == entry.key }
-            } catch {
-                if let position = value.entries.firstIndex(where: { $0.key == entry.key }) {
-                    value.entries[position].ready = false
-                }
+    private func makeRoom(_ db: SQLiteConnection, directory: RawResourceDirectory, incoming: Int, at: Date) throws {
+        for row in try db.query("SELECT * FROM ios_music_images WHERE updated_at<=? OR ready=0", [.optional(at.addingTimeInterval(-Self.lifetime))]) {
+            try removeImage(row, db: db, directory: directory)
+        }
+        try db.execute("DELETE FROM ios_music_lyrics WHERE updated_at<=?", [.optional(at.addingTimeInterval(-Self.lifetime))])
+        var size = try db.query("SELECT (SELECT coalesce(sum(bytes),0) FROM ios_music_images)+" +
+            "(SELECT coalesce(sum(bytes),0) FROM ios_music_lyrics) AS bytes").first!.integer("bytes")
+        for row in try db.query("SELECT * FROM ios_music_images WHERE ready=1 ORDER BY updated_at,resource") where size + incoming > Self.capacity {
+            try removeImage(row, db: db, directory: directory)
+            if try db.query("SELECT resource FROM ios_music_images WHERE resource=?", [row["resource"]]).isEmpty {
+                size -= try row.integer("bytes")
             }
         }
-        try commit(value)
-    }
-    private func put(_ data: Data, resource: String, kind: Kind, at: Date) throws {
-        var value = try index(); try prune(&value)
-        for position in value.entries.indices where
-            value.entries[position].kind == .image && !imagesReadable ||
-            value.entries[position].kind == .lyrics && !lyricsReadable {
-            value.entries[position].ready = false
+        for row in try db.query("SELECT song_id,bytes FROM ios_music_lyrics ORDER BY updated_at,song_id") where size + incoming > Self.capacity {
+            try db.execute("DELETE FROM ios_music_lyrics WHERE song_id=?", [row["song_id"]])
+            size -= try row.integer("bytes")
         }
-        let key = Self.key(resource, kind: kind)
-        let old = value.entries.first { $0.key == key }
-        value.entries.removeAll { $0.key == key }
-        // Reserve enough for both the old leaf and its atomic replacement. A
-        // failed leaf write leaves a charged miss, never an uncharged orphan.
-        value.entries.append(.init(key: key, resource: resource, kind: kind, updatedAt: at,
-                                   bytes: max(old?.bytes ?? 0, data.count), ready: false))
-        var encoded = try JSONEncoder().encode(value)
-        var removed: [Entry] = []
-        while encoded.count > 1024 * 1024 || value.entries.reduce(encoded.count, { $0 + $1.bytes }) > Self.capacity {
-            guard let victim = value.entries.filter({ $0.key != key }).min(by: { $0.updatedAt < $1.updatedAt }) else {
-                throw DocumentStoreError.documentTooLarge
-            }
-            value.entries.removeAll { $0.key == victim.key }; removed.append(victim)
-            encoded = try JSONEncoder().encode(value)
-        }
-        for entry in removed { try store().remove(key: entry.key) }
-        try store().write(encoded, key: "index")
-        try store().write(data, key: key)
-        if let position = value.entries.firstIndex(where: { $0.key == key }) {
-            value.entries[position].bytes = data.count
-            value.entries[position].ready = true
-            try commit(value)
-        }
+        guard size + incoming <= Self.capacity else { throw SQLiteStorageError.full }
     }
     public func read(_ url: URL) -> ArtworkBytes? {
-        guard imagesReadable else { return nil }
+        guard !closed, imagesReadable else { return nil }
         do {
-            let value = try index(), key = Self.key(url.absoluteString, kind: .image)
-            guard let entry = value.entries.first(where: {
-                $0.kind == .image && $0.ready && $0.key == key && $0.resource == url.absoluteString &&
-                    $0.updatedAt.addingTimeInterval(Self.lifetime) > clock()
-            }),
-                  let data = try store().read(key: entry.key), data.count <= 4 * 1024 * 1024 else { return nil }
-            return .init(data: data, expiresAt: entry.updatedAt.addingTimeInterval(Self.lifetime))
+            return try database.readSync { db in
+                let now = clock()
+                guard let row = try db.query("SELECT * FROM ios_music_images WHERE resource=? AND ready=1 AND updated_at>? AND updated_at<=?",
+                    [.text(url.absoluteString), .optional(now.addingTimeInterval(-Self.lifetime)), .optional(now)]).first,
+                      let data = try files(db).read(row.text("filename"), maximumBytes: 4 * 1024 * 1024),
+                      data.count == (try row.integer("bytes")) else { return nil }
+                return .init(data: data, expiresAt: Date(timeIntervalSince1970: try row.double("updated_at")).addingTimeInterval(Self.lifetime))
+            }
         } catch { return nil }
     }
     public func store(_ data: Data, for url: URL, revision expected: UUID) -> ArtworkBytes? {
-        guard !Task.isCancelled, revision == expected, data.count <= 4 * 1024 * 1024,
+        guard !closed, imagesReadable, !Task.isCancelled, revision == expected, !data.isEmpty, data.count <= 4 * 1024 * 1024,
               MusicArtworkURL.normalized(url.absoluteString) == url else { return nil }
         let at = clock()
-        // Decode admission is owned by ArtworkImages, before this call.
+        var created: String?
         do {
-            try put(data, resource: url.absoluteString, kind: .image, at: at)
-            imagesReadable = true
-        } catch {}
+            try database.writeSync(ownedBytes: data.count) { db in
+                let directory = try files(db)
+                try SQLiteDatabase.transaction(db, commit: { action in
+                    guard revision == expected else { throw SQLiteStorageError.conflict }
+                    try action()
+                }) { db in
+                    if let old = try db.query("SELECT * FROM ios_music_images WHERE resource=?", [.text(url.absoluteString)]).first {
+                        try removeImage(old, db: db, directory: directory)
+                        guard try db.query("SELECT resource FROM ios_music_images WHERE resource=?", [.text(url.absoluteString)]).isEmpty else {
+                            throw SQLiteStorageError.io
+                        }
+                    }
+                    try makeRoom(db, directory: directory, incoming: data.count, at: at)
+                    let filename = try directory.write(data); created = filename
+                    try db.execute("INSERT INTO ios_music_images(resource,filename,updated_at,bytes,ready) VALUES(?,?,?,?,1)",
+                        [.text(url.absoluteString), .text(filename), .optional(at), .integer(data.count)])
+                }
+            }
+        } catch {
+            if let created { try? database.writeSync { _ in try images?.remove(created) } }
+            guard revision == expected else { return nil }
+            return .init(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
+        }
         guard revision == expected else { return nil }
         return .init(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
     }
     public func lyrics(songID: String, authorization: MusicQueueAuthorization) -> MusicLyricDisplaySnapshot? {
-        guard lyricsReadable else { return nil }
+        guard !closed, lyricsReadable, authorization.isActive else { return nil }
         do {
-            return try authorization.perform {
-                let value = try index()
-                let key = Self.key(songID, kind: .lyrics)
-                guard value.entries.contains(where: { $0.key == key && $0.ready &&
-                    $0.updatedAt.addingTimeInterval(Self.lifetime) > clock() }),
-                      let data = try store().read(key: key), data.count <= 1024 * 1024 else { return nil }
-                let saved = try JSONDecoder().decode(MusicLyricDisplaySnapshot.self, from: data)
-                return saved.songID == songID && Self.usableLyrics(saved.lines) ? saved : nil
+            let value = try database.readSync { db in
+                try SQLiteDatabase.readSnapshot(db) { db -> MusicLyricDisplaySnapshot? in
+                    let now = clock()
+                    guard let row = try db.query("SELECT source_key FROM ios_music_lyrics WHERE song_id=? AND updated_at>? AND updated_at<=?",
+                        [.text(songID), .optional(now.addingTimeInterval(-Self.lifetime)), .optional(now)]).first else { return nil }
+                    var grouped: [Int: [MusicLyricWord]] = [:]
+                    for word in try db.query("SELECT line_position,time,duration,text FROM ios_music_lyric_words WHERE song_id=? ORDER BY line_position,position",
+                        [.text(songID)]) {
+                        let line = try word.integer("line_position")
+                        grouped[line, default: []].append(.init(time: try word.double("time"),
+                            duration: try word.double("duration"), text: try word.text("text")))
+                    }
+                    var lines: [MusicLyricLine] = []
+                    for line in try db.query("SELECT * FROM ios_music_lyric_lines WHERE song_id=? ORDER BY position", [.text(songID)]) {
+                        let words = grouped[try line.integer("position")] ?? []
+                        lines.append(.init(index: try line.integer("line_index"), time: try line.double("time"), end: try line.double("end"),
+                            text: try line.text("text"), translation: try line.text("translation"), words: words))
+                    }
+                    guard !lines.isEmpty, Self.usableLyrics(lines) else { return nil }
+                    return .init(songID: songID, sourceKey: try row.text("source_key"), lines: lines)
+                }
             }
+            return try authorization.perform { value }
         } catch { return nil }
     }
     public func storeLyrics(_ lines: [MusicLyricLine], sourceKey: String, songID: String,
                             revision expected: UUID, authorization: MusicQueueAuthorization) {
-        guard !Task.isCancelled, lyricRevision == expected, !lines.isEmpty, Self.usableLyrics(lines) else { return }
+        guard !closed, lyricsReadable, !Task.isCancelled, lyricRevision == expected, authorization.isActive, !lines.isEmpty,
+              Self.usableLyrics(lines) else { return }
+        let bytes = lines.reduce(songID.utf8.count + sourceKey.utf8.count) {
+            $0 + 96 + $1.text.utf8.count + $1.translation.utf8.count + $1.words.reduce(0) { $0 + 48 + $1.text.utf8.count }
+        }
+        guard bytes <= 1024 * 1024 else { return }
         do {
-            let value = MusicLyricDisplaySnapshot(songID: songID, sourceKey: sourceKey, lines: lines)
-            let data = try JSONEncoder().encode(value)
-            guard data.count <= 1024 * 1024 else { return }
-            try authorization.perform { try put(data, resource: songID, kind: .lyrics, at: clock()) }
-            lyricsReadable = true
+            try database.writeSync(ownedBytes: bytes) { db in
+                try SQLiteDatabase.transaction(db, commit: { action in try authorization.perform { try action() } }) { db in
+                    try db.execute("DELETE FROM ios_music_lyrics WHERE song_id=?", [.text(songID)])
+                    try makeRoom(db, directory: files(db), incoming: bytes, at: clock())
+                    try db.execute("INSERT INTO ios_music_lyrics VALUES(?,?,?,?)", [.text(songID), .text(sourceKey), .optional(clock()), .integer(bytes)])
+                    for (position, line) in lines.enumerated() {
+                        try db.execute("INSERT INTO ios_music_lyric_lines VALUES(?,?,?,?,?,?,?)",
+                            [.text(songID), .integer(position), .integer(line.index), .real(line.time), .real(line.end), .text(line.text), .text(line.translation)])
+                        for (index, word) in line.words.enumerated() {
+                            try db.execute("INSERT INTO ios_music_lyric_words VALUES(?,?,?,?,?,?)",
+                                [.text(songID), .integer(position), .integer(index), .real(word.time), .real(word.duration), .text(word.text)])
+                        }
+                    }
+                }
+            }
         } catch {}
     }
     private static func usableLyrics(_ lines: [MusicLyricLine]) -> Bool {
-        lines.allSatisfy {
-            $0.time.isFinite && $0.end.isFinite && $0.time >= 0 && $0.end >= $0.time &&
-                $0.words.allSatisfy { $0.time.isFinite && $0.duration.isFinite && $0.duration >= 0 }
+        var previous = -Double.infinity
+        return lines.allSatisfy { line in
+            defer { previous = line.time }
+            return line.time.isFinite && line.end.isFinite && line.time >= 0 && line.end >= line.time &&
+                line.time >= previous &&
+                line.words.allSatisfy { $0.time.isFinite && $0.duration.isFinite && $0.duration >= 0 }
         }
     }
     public func played(songID: String, artwork: URL?, confirmedAt: Date) {
-        guard confirmedAt <= clock() else { return }
-        do {
-            var value = try index(); try prune(&value)
-            for i in value.entries.indices where value.entries[i].ready &&
-                (value.entries[i].kind == .lyrics && value.entries[i].resource == songID ||
-                value.entries[i].kind == .image && value.entries[i].resource == artwork?.absoluteString) {
-                value.entries[i].updatedAt = max(value.entries[i].updatedAt, confirmedAt)
+        guard !closed, confirmedAt <= clock() else { return }
+        try? database.transactionSync { db in
+            try db.execute("UPDATE ios_music_lyrics SET updated_at=max(updated_at,?) WHERE song_id=?", [.optional(confirmedAt), .text(songID)])
+            if let artwork {
+                try db.execute("UPDATE ios_music_images SET updated_at=max(updated_at,?) WHERE resource=? AND ready=1",
+                    [.optional(confirmedAt), .text(artwork.absoluteString)])
             }
-            try commit(value)
-        } catch {}
+        }
     }
     public func clearImages() { clear(images: true, lyrics: false) }
     public func clearLyrics() { clear(images: false, lyrics: true) }
     public func clear() { clear(images: true, lyrics: true) }
     private func clear(images: Bool, lyrics: Bool) {
+        guard !closed else { return }
         revisions.clear(images: images, lyrics: lyrics)
         if images { imagesReadable = false }
         if lyrics { lyricsReadable = false }
-        do {
-            var value = try index()
-            let removed = value.entries.filter { $0.kind == .image ? images : lyrics }
-            for index in value.entries.indices where value.entries[index].kind == .image ? images : lyrics {
-                value.entries[index].ready = false
+        do { try database.transactionSync { db in
+            if lyrics { try db.execute("DELETE FROM ios_music_lyrics") }
+            if images {
+                let directory = try files(db)
+                for row in try db.query("SELECT * FROM ios_music_images") { try removeImage(row, db: db, directory: directory) }
             }
-            // Invalidate successful-read eligibility before deleting leaves.
-            // Failed deletions remain charged but cannot be served after clear.
-            try commit(value)
+        }
             if images { imagesReadable = true }
             if lyrics { lyricsReadable = true }
-            for entry in removed {
-                do {
-                    try store().remove(key: entry.key)
-                    value.entries.removeAll { $0.key == entry.key }
-                } catch {}
-            }
-            try commit(value)
         } catch {}
+    }
+    public func close() {
+        closed = true; revisions.clear(images: true, lyrics: true); images = nil
     }
 }

@@ -1,4 +1,6 @@
-import test from 'node:test';
+import '../../../tests/storage-test-fixture.mjs';
+import { readCatFacts } from '../../../tests/storage-test-fixture.mjs';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
@@ -13,17 +15,22 @@ import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json
 const source = value => `module.exports = { home() { return { value: ${JSON.stringify(value)} }; } };`;
 const digest = value => createHash('sha256').update(value).digest('hex');
 const target = installationId => ({ installationId, siteId: 'default', operation: 'home', payload: {} });
-function rootFor(t) {
+const runtimeRoots = new Set();
+after(() => {
+  for (const root of runtimeRoots) rmSync(root, { recursive: true, force: true });
+});
+
+function rootFor() {
   const root = mkdtempSync(join(tmpdir(), 'meow-cat-management-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  runtimeRoots.add(root);
   return root;
 }
 function runtimeFor(t, options = {}) {
-  const runtime = createCatRuntime({ dataRoot: rootFor(t), ...options });
+  const runtime = createCatRuntime({ dataRoot: rootFor(), ...options });
   t.after(() => runtime.close());
   return runtime;
 }
-function disk(runtime) { return JSON.parse(readFileSync(join(runtime.dataRoot, 'settings.json'), 'utf8')); }
+function disk(runtime) { return runtime.settings.read(); }
 async function ready(runtime, id) {
   for (let attempt = 0; attempt < 500; attempt++) {
     const item = (await runtime.status()).instances.find(item => item.installationId === id);
@@ -146,17 +153,16 @@ test('Cat management persists local identity and only successful changed content
 test('Cat unrelated settings and script extensions survive loading and editing without rounding', { timeout: 30000 }, async t => {
   const runtime = runtimeFor(t);
   await runtime.install({ installationId: 'exact-json', source: source('live'), enabled: false });
-  const path = (await runtime.status()).settingsPath;
-  const document = parseJSONText(readFileSync(path, 'utf8'));
+  const document = disk(runtime);
   const extension = parseJSONText('{"é":9007199254740993,"é":1.0000000000000001,"large":1e400}');
   document.extension = extension;
   document.scripts[0].extension = extension;
   document.scripts[0].config.extension = extension;
-  writeFileSync(path, stringifyJSONValue(document));
+  await runtime.settings.save(() => document);
   await runtime.setEnabled('exact-json', true);
   assert.equal((await runtime.invoke(target('exact-json'))).value, 'live');
   await runtime.edit({ installationId: 'exact-json', name: 'changed' });
-  const saved = parseJSONText(readFileSync(path, 'utf8'));
+  const saved = disk(runtime);
   assert.equal(saved.scripts[0].name, 'changed');
   for (const value of [saved.extension, saved.scripts[0].extension, saved.scripts[0].config.extension])
     assert.equal(stringifyJSONValue(value), stringifyJSONValue(extension));
@@ -195,7 +201,7 @@ test('Cat failed activation restores old executable source and description and p
     assert.equal(runtime.instance('restore').name, '旧描述');
     assert.equal(runtime.instance('restore').importedAt, 1000);
     await runtime.close();
-    const reopened = runtimeFor(t, { dataRoot: runtime.dataRoot });
+    const reopened = runtimeFor(t, { dataRoot: runtime.productRoot });
     const recovered = await ready(reopened, 'restore');
     assert.equal(recovered.updateState, 'failed');
     assert.equal(recovered.updateError, 'SCRIPT_EXCEPTION');
@@ -222,7 +228,7 @@ test('Cat disabled installs and updates do not execute; sites and enabled intent
     await assert.rejects(runtime.management('disabled'), { code: 'DISABLED' });
     await runtime.close();
 
-    const reopened = runtimeFor(t, { dataRoot: runtime.dataRoot, clock: () => now });
+    const reopened = runtimeFor(t, { dataRoot: runtime.productRoot, clock: () => now });
     const cold = (await reopened.start()).instances[0];
     assert.equal(cold.state, 'disabled');
     assert.equal(reopened.hostState('disabled'), null);
@@ -495,7 +501,13 @@ for (const operation of ['cancel', 'disable', 'uninstall', 'close']) {
         assert.equal(existsSync(join(runtime.dataRoot, 'volumes', 'active')), false);
         assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), []);
       } else {
-        const saved = disk(runtime).scripts[0];
+        let savedRuntime = runtime;
+        if (operation === 'close') {
+          assert.equal(runtime.host, null);
+          savedRuntime = runtimeFor(t, { dataRoot: runtime.productRoot });
+          await ready(savedRuntime, 'active');
+        }
+        const saved = disk(savedRuntime).scripts[0];
         assert.equal(saved.sourceHash, original.sourceHash);
         assert.equal(saved.updatedAt, null);
         assert.equal(saved.updateState, 'failed');
@@ -507,10 +519,7 @@ for (const operation of ['cancel', 'disable', 'uninstall', 'close']) {
           await runtime.setEnabled('active', true);
         }
         if (operation === 'close') {
-          assert.equal(runtime.host, null);
-          const reopened = runtimeFor(t, { dataRoot: runtime.dataRoot });
-          await ready(reopened, 'active');
-          assert.deepEqual(await reopened.invoke(target('active')), { value: 'accepted' });
+          assert.deepEqual(await savedRuntime.invoke(target('active')), { value: 'accepted' });
         } else assert.deepEqual(await runtime.invoke(target('active')), { value: 'accepted' });
       }
     });
@@ -726,7 +735,9 @@ for (const operation of ['cancel', 'disable-cancel', 'uninstall-cancel',
         assert.equal(recovering.activated, true, 'old recovery completes before the queued command');
         assert.equal(fixture.restoreResponse.writableFinished, true);
       }
-      const saved = disk(runtime);
+      const saved = operation === 'close'
+        ? await readCatFacts(runtime.productRoot)
+        : disk(runtime);
       if (operation === 'uninstall-success') {
         assert.deepEqual((await runtime.status()).instances, []);
         assert.deepEqual(saved.scripts, []);
@@ -829,8 +840,8 @@ test('Cat failed settings commit restores source and old runtime; an already com
     assert.equal(runtime.instance('commit').updatedAt, null);
     assert.deepEqual(await runtime.invoke(target('commit')), { value: 'old' });
     assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), [original.sourceHash + '.js']);
-    runtime.settings.save = change => {
-      save(change);
+    runtime.settings.save = async change => {
+      await save(change);
       throw fault('COMMIT_UNKNOWN');
     };
     now = 30;
@@ -917,7 +928,7 @@ for (const outcome of ['failure', 'cancel', 'close']) {
       assert.equal(starting.state, 'starting');
       assert.equal(starting.sourceHash, null);
       assert.deepEqual(starting.sites, []);
-      assert.deepEqual(disk(runtime).scripts, []);
+      assert.deepEqual((await readCatFacts(runtime.productRoot)).scripts, []);
       assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), []);
       if (outcome === 'cancel') controller.abort();
       else if (outcome === 'close') await runtime.close();
@@ -925,9 +936,9 @@ for (const outcome of ['failure', 'cancel', 'close']) {
       await rejected;
       await disconnected.promise;
       assert.equal(candidate.worker, null);
-      const remaining = outcome === 'close' ? runtimeFor(t, { dataRoot: runtime.dataRoot }) : runtime;
+      const remaining = outcome === 'close' ? runtimeFor(t, { dataRoot: runtime.productRoot }) : runtime;
       assert.deepEqual((await remaining.status()).instances, []);
-      assert.deepEqual(disk(runtime).scripts, []);
+      assert.deepEqual(disk(remaining).scripts, []);
       assert.deepEqual(readdirSync(join(runtime.dataRoot, 'sources')), []);
       assert.equal(existsSync(join(runtime.dataRoot, 'volumes', 'first')), false);
       await assert.rejects(remaining.setEnabled('first', false), { code: 'NOT_FOUND' });
@@ -1021,7 +1032,7 @@ test('Cat settings CAS rejects an external same-installation edit without overwr
     const candidate = runtime.host.initializingSessions().find(worker => worker.installationId === 'a');
     const changed = disk(runtime);
     changed.scripts.find(item => item.installationId === 'a').name = 'external edit';
-    writeFileSync(runtime.settings.path, JSON.stringify(changed));
+    await runtime.settings.save(() => changed);
     await runtime.edit({ installationId: 'b', name: 'committed B' });
     const b = disk(runtime).scripts.find(item => item.installationId === 'b');
     release.resolve();

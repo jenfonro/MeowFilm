@@ -131,7 +131,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
         // Facts can advance while this one projection is running. Do not queue
         // their obsolete intermediate versions or publish an out-of-date pair.
         if (revision !== session.displayRevision) continue;
-        const cards = catalog.search([...value.cards, ...value.rawCards],
+        const cards = await catalog.search([...value.cards, ...value.rawCards],
           session.cursors.map(cursor => cursor.source), session.ruleSnapshot.revision);
         session.cards = cards.slice(0, value.cards.length); session.rawCards = cards.slice(value.cards.length);
         session.projectedRevision = revision;

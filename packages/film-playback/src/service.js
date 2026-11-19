@@ -769,9 +769,9 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     state.work = work;
     return work;
   }
-  function manualOutcome(row, error) {
+  async function manualOutcome(row, error) {
     if (error && cancelled(error)) return;
-    library.update(document => {
+    await library.update(document => {
       const entry = document.manual.find(item => item?.id === row.id);
       if (!entry || entry.enabled === false || manualIdentity(entry) !== manualIdentity(row)) return;
       requireValue(Number.isSafeInteger(entry.failureCount) && entry.failureCount >= 0, 'CORRUPT_STORAGE');
@@ -833,7 +833,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         visited.add(key);
         return consumeResult(session, result, generation);
       };
-      const document = library.read();
+      const savedHistory = await library.history(session.target.id);
+      const document = {...library.read(),history:savedHistory ? [savedHistory] : []};
       for (const stage of ['history', 'manual']) {
         if (!valid(session, generation)) return;
         session.stage = session.target.metadataProvider ? stage : 'loading'; publish(session);
@@ -863,11 +864,11 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
                 manualId: row.id, manualIdentity: manualIdentity(row), state: 'ready', error: null,
                 detail: isDeepStrictEqual(result.detail, detail) ? result.detail : detail });
               await candidatesFrom(session, result, result.detail);
-              manualOutcome(row);
+              await manualOutcome(row);
               if (await tryCandidate(session, generation)) return;
             } catch (error) {
               if (!valid(session, generation)) return;
-              manualOutcome(row, error); session.selectionError = codeOf(error); publish(session);
+              await manualOutcome(row, error); session.selectionError = codeOf(error); publish(session);
             }
             continue;
           }
@@ -1178,7 +1179,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (!session.restoreOnly && session.target.kind === 'tv' &&
           session.target.episode === undefined && session.generation === 0 && session.selectionEpoch === 0) {
         const previous = session.platform === 'windows'
-          ? library.read().history.find(row => row?.targetId === session.target.id) : null;
+          ? await library.history(session.target.id) : null;
         initializeEpisode(session, previous);
         if (session.target.episode !== undefined) {
           session.stage = 'idle'; session.error = null;
@@ -1378,7 +1379,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         }
       }
       const previous = !session.restoreOnly && session.platform === 'windows'
-        ? library.read().history.find(row => row?.targetId === session.target.id) : null;
+        ? await library.history(session.target.id) : null;
       if (session.target.kind === 'tv') {
         initializeEpisode(session, session.generation === 0 ? previous : null);
         if (session.target.metadataProvider === 'tmdb' && session.target.season !== undefined) {
@@ -1992,22 +1993,14 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     requireValue(result, 'NOT_FOUND');
     return browse(session, result.id, candidate?.lineId, { refresh, retainDisplay: true });
   }
-  function saveHistory(session, selected = session.current, ended = false) {
+  async function saveHistory(session, selected = session.current, ended = false) {
     if (!selected) return;
     const candidate = selected.candidate;
-    library.update(document => {
-      const matches = document.history.filter(row => row?.targetId === selected.target.id);
-      requireValue(matches.length <= 1, 'CORRUPT_STORAGE');
-      const previous = matches[0];
-      const value = { ...previous, targetId: selected.target.id, title: selected.target.title,
-        playbackTarget: catalog.candidate(selected.target, candidate).playbackTarget,
-        sourceKey: candidate.source.key, detailId: candidate.source.detailId,
-        lineId: candidate.lineId, candidateId: candidate.id,
-        episode: fields(selected.target, ['season', 'episode', 'globalEpisode']),
-        position: session.position, duration: session.duration, paused: session.paused, ended,
-        updatedAt: now() };
-      document.history = [value, ...document.history.filter(row => row?.targetId !== value.targetId)];
-    });
+    await library.saveHistory({targetId:selected.target.id,title:selected.target.title,
+      playbackTarget:catalog.candidate(selected.target,candidate).playbackTarget,
+      sourceKey:candidate.source.key,detailId:candidate.source.detailId,lineId:candidate.lineId,candidateId:candidate.id,
+      episode:fields(selected.target,['season','episode','globalEpisode']),position:session.position,
+      duration:session.duration,paused:session.paused,ended,updatedAt:now()});
     session.lastHistoryWrite = now();
   }
   function report(session, event, selected = session.current, force = false) {
@@ -2443,7 +2436,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     session.stopped = true; session.stage = 'stopped';
     const current = session.current;
     let error;
-    try { saveHistory(session); } catch (caught) { error = caught; }
+    try { await saveHistory(session); } catch (caught) { error = caught; }
     report(session, 'stopped', current, true);
     session.current = null; session.pending = null;
     const results = await Promise.allSettled([cancelCalculations(session), clearPrefetch(session),
@@ -2496,7 +2489,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         await moveEpisode(session, input.action === 'next' ? 1 : -1); break;
       case 'preview':
         requireValue(typeof input.enabled === 'boolean');
-        library.update(document => {
+        await library.update(document => {
           document.previewTargets = [...document.previewTargets.filter(id => id !== session.target.id),
             ...(input.enabled ? [session.target.id] : [])];
         });
@@ -2525,7 +2518,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         const selected = session.current ?? session.pending;
         requireValue(selected && input.attemptId === selected.id, 'STALE_SESSION');
         const candidate = selected.candidate;
-        library.update(document => {
+        await library.update(document => {
           const block = { targetId: selected.target.id, sourceKey: candidate.source.key,
             detailId: candidate.source.detailId, lineId: candidate.lineId };
           if (!document.blocks.some(row => identity(row) === identity(block))) document.blocks.push(block);
@@ -2580,7 +2573,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         session.duration = 0; session.stage = 'playing'; session.error = null;
         if (old) detached(session, retire(session, old));
         report(session, 'started', session.current, true);
-        try { saveHistory(session); }
+        try { await saveHistory(session); }
         catch (error) { session.error = codeOf(error); publish(session); throw error; }
         publish(session); detached(session, prefetchNeighbors(session)); break;
       }
@@ -2610,7 +2603,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         let storageFailure;
         if (attempted === session.pending) session.pending = null;
         if (attempted === session.current) {
-          try { saveHistory(session); } catch (error) { storageFailure = error; }
+          try { await saveHistory(session); } catch (error) { storageFailure = error; }
           report(session, 'stopped', attempted, true); session.current = null;
         }
         detached(session, retire(session, attempted));
@@ -2639,7 +2632,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         const changedPause = session.paused !== input.paused;
         const changedPausedPosition = input.paused && session.position !== input.position;
         session.position = input.position; session.duration = input.duration; session.paused = input.paused;
-        if (changedPause || changedPausedPosition || now() - session.lastHistoryWrite >= 12_000) saveHistory(session);
+        if (changedPause || changedPausedPosition || now() - session.lastHistoryWrite >= 12_000) await saveHistory(session);
         report(session, 'progress', session.current, changedPause); publish(session); break;
       }
       case 'media.ended': {
@@ -2653,7 +2646,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           latest = ended.generation === session.generation && sameEpisode(ended.target, session.target) && !session.stopped;
           next = latest ? adjacent(session, 1) : null;
         }
-        session.position = session.duration; saveHistory(session, session.current, true);
+        session.position = session.duration; await saveHistory(session, session.current, true);
         report(session, 'stopped', session.current, true);
         session.current = null;
         detached(session, retire(session, ended));
@@ -2756,28 +2749,27 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     async setSettings(input) {
       requireValue(library.configurationOwner !== 'native', 'PERMISSION_DENIED');
       const next = normalizePreferences(input);
-      library.update(document => { document.preferences = { ...document.preferences, ...next }; });
+      await library.update(document => { document.preferences = { ...document.preferences, ...next }; });
       for (const session of sessions.values()) await refreshEligibility(session);
       return clone(next);
     },
-    library() { return library.read(); },
-    removeLibrary(input) {
-      requireValue(object(input) && ['history', 'blocks'].includes(input.kind));
-      library.update(document => {
-        if (input.kind === 'history') {
-          requireValue(input.id == null || text(input.id));
-          document.history = input.id == null ? [] : document.history.filter(row => row?.targetId !== input.id);
-        } else {
-          requireValue(input.block == null || object(input.block));
-          document.blocks = input.block == null ? [] : document.blocks.filter(row => identity(row) !== identity(input.block));
-        }
-      });
-      return library.read();
+    library(input) { return library.list(input); },
+    async removeLibrary(input) {
+      requireValue(object(input) && ['history','blocks'].includes(input.kind));
+      if (input.kind === 'history') {
+        requireValue(input.id == null || text(input.id));
+        await library.removeHistory(input.id);
+      } else {
+        requireValue(input.block == null || object(input.block));
+        await library.update(document => {document.blocks = input.block == null ? [] :
+          document.blocks.filter(row => identity(row) !== identity(input.block));});
+      }
+      return library.list();
     },
     async updateManual(input) {
       requireValue(object(input) && ['save', 'remove'].includes(input.action));
       let previous, updated;
-      library.update(document => {
+      await library.update(document => {
         if (input.action === 'remove') {
           requireValue(text(input.id));
           previous = document.manual.find(row => row?.id === input.id);

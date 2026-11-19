@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 import sys
+import shutil
 
 # App source directories are declared by the project generator, not duplicated here.
 import runpy
@@ -15,7 +16,7 @@ LOCAL_PRODUCTS = {
     "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
     "MeowAetherKernel": ("aetherkernel", "../AetherKernel"),
 }
-SYSTEM_TARGETS = {"CSQLite": {"MeowMusicNativeService"}}
+BINARY_TARGETS = {"MeowSQLite": ("../SQLite/.cache/Artifacts/MeowSQLite.xcframework", {"MeowStorage"})}
 
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
@@ -30,6 +31,9 @@ def application_membership(base, project_text):
         elif relative.parts[0] == "UITests":
             expected_test.add(relative.as_posix())
         elif relative.parts[0] == "RuntimeTests":
+            expected_runtime.add(relative.as_posix())
+        elif relative.parts[0] == "TestSupport":
+            expected_test.add(relative.as_posix())
             expected_runtime.add(relative.as_posix())
         else:
             failures.append("Unowned App source: " + relative.as_posix())
@@ -146,6 +150,15 @@ def check(root):
     # that this system alias is not misclassified as a linked source.
     root = Path(root).resolve()
     failures = []
+    node = Path(sys.argv[0]).parent.parent / "node_modules/.bin/node"
+    node = str(node) if node.exists() else shutil.which("node")
+    if node:
+        result = subprocess.run([node, str(root / "scripts/verify-storage-boundaries.mjs")],
+                                cwd=root, capture_output=True, text=True)
+        if result.returncode:
+            failures.extend(result.stderr.splitlines() or ["Storage boundary check failed"])
+    else:
+        failures.append("Cannot run storage boundary check: Node.js is unavailable")
     package = root / "native/MeowKit"
     try:
         manifest = evaluate_package(package)
@@ -185,23 +198,18 @@ def check(root):
     sources = {name for name, kind in kinds.items() if kind == "regular"}
     tests = {name for name, kind in kinds.items() if kind == "test"}
     systems = {name for name, kind in kinds.items() if kind == "system"}
-    if not systems <= SYSTEM_TARGETS.keys():
+    binaries = {name for name, kind in kinds.items() if kind == "binary"}
+    if systems:
         failures.append("Unapproved system target")
+    if not binaries <= BINARY_TARGETS.keys():
+        failures.append("Unapproved binary target")
     for declaration in manifest["targets"]:
         name = declaration["name"]
-        if name not in systems:
+        if name not in binaries:
             continue
-        if (name != "CSQLite" or declaration.get("pkgConfig") != "sqlite3" or targets[name]
-                or declaration.get("providers") or declaration.get("path") is not None):
-            failures.append("Invalid system target: " + name)
-            continue
-        directory = package / "Sources" / name
-        modulemap, shim = directory / "module.modulemap", directory / "shim.h"
-        expected_module = r'module\s+CSQLite\s+\[system\]\s*\{\s*header\s+"shim\.h"\s+link\s+"sqlite3"\s+export\s+\*\s*\}'
-        if (not directory.is_dir() or {path.name for path in directory.iterdir()} != {"module.modulemap", "shim.h"}
-                or not modulemap.is_file() or not re.fullmatch(expected_module, modulemap.read_text(encoding="utf-8").strip())
-                or not shim.is_file() or shim.read_text(encoding="utf-8").strip() != "#include <sqlite3.h>"):
-            failures.append("Invalid system module: " + name)
+        if name in BINARY_TARGETS and (declaration.get("path") != BINARY_TARGETS[name][0]
+                or declaration.get("url") or declaration.get("checksum") or targets[name]):
+            failures.append("Invalid binary target: " + name)
     if not sources:
         failures.append("No package source targets")
     for folder, expected in (("Sources", sources | systems), ("Tests", tests)):
@@ -221,11 +229,11 @@ def check(root):
         if not linked or not linked <= sources:
             failures.append("Invalid package product targets: " + name)
     for target, dependencies in targets.items():
-        if not dependencies <= sources | external | systems:
+        if not dependencies <= sources | external | binaries:
             failures.append("Non-source dependency: " + target)
-        for system in dependencies & systems:
-            if target not in SYSTEM_TARGETS.get(system, set()):
-                failures.append("Unapproved system dependency: " + target)
+        for binary in dependencies & binaries:
+            if target not in BINARY_TARGETS.get(binary, (None, set()))[1]:
+                failures.append("Unapproved binary dependency: " + target)
         folder = "Sources" if target in sources | systems else "Tests"
         imported = set()
         for path in (package / folder / target).rglob("*.swift"):

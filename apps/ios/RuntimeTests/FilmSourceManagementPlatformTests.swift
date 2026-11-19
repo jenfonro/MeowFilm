@@ -430,7 +430,7 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
                 editor.documentPicker(UIDocumentPickerViewController(forOpeningContentTypes: [.javaScript]),
                                       didPickDocumentsAt: [file])
                 await eventually { editor.file != nil && (try? self.row(editor, "film.cat.editor.save").enabled) == true }
-                let before = try fixture.native.document.read()
+                let before = try await fixture.native.document.read()
                 if fail { try fixture.native.receipts.setSaveFailure(true) }
                 let entered = expectation(description: "native local input committed")
                 if !fail { fixture.native.receipts.pauseNext { entered.fulfill() } }
@@ -441,7 +441,8 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
                     XCTAssertNotNil(editor.file, "A failed save retains the selected file")
                     XCTAssertTrue(fixture.native.receipts.commits.isEmpty)
                     try fixture.native.receipts.setSaveFailure(false)
-                    XCTAssertEqual(try fixture.native.document.read(), before)
+                    let unchanged = try await fixture.native.document.read()
+                    XCTAssertEqual(unchanged, before)
                     fixture.native.receipts.pauseNext { entered.fulfill() }
                     editor.selectAlertChoice("重试")
                     await fulfillment(of: [entered], timeout: 5)
@@ -562,7 +563,7 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
                 await eventually { !page.busy && (page.presentedViewController as? UIAlertController)?.title == "错误" }
                 XCTAssertEqual(fixture.native.receipts.commits, ["a"])
                 try fixture.native.receipts.setSaveFailure(false)
-                let partial = try CatSourceSettings(document: fixture.native.document).read()
+                let partial = try await CatSourceSettings(document: fixture.native.document).read()
                 XCTAssertEqual(partial.map(\.enabled), [action == 0, action != 0])
                 await eventually { (page.presentedViewController as? UIAlertController)?.isBeingPresented == false }
                 page.selectAlertChoice(choice)
@@ -693,6 +694,7 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
             fixture.native.receipts.release()
             await fixture.runtime.release()
             await fixture.service.close()
+            try await fixture.database.close()
             try FileManager.default.removeItem(at: fixture.base)
         }
         return fixture
@@ -747,17 +749,18 @@ private final class SourceListTheme: PageThemeProviding {
 
 private struct SourceListFixture {
     let base: URL
+    let database: SQLiteDatabase
     let runtime: SourceListRuntime
     let service: FilmSourceService
     let native: SourceListNativeSettings
     init() throws {
         base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
+        database = try appStorageTestOpen(base)
         let runtime = SourceListRuntime(); self.runtime = runtime
-        let native = try SourceListNativeSettings(base); self.native = native
+        let native = try SourceListNativeSettings(database); self.native = native
         service = FilmSourceService(transport: .init(request: { try await runtime.call($0, $1) }),
-            storeFactory: { store }, settingsDocument: native.document,
+            database: database, settingsDocument: native.document,
             runtimeSourceRoot: base.appendingPathComponent("cat"))
     }
     func useLocalSource(_ id: String) async throws {
@@ -773,41 +776,56 @@ private struct SourceListFixture {
 private struct SourceListNativeSettings: Sendable {
     let document: FilmSettingsDocument
     let receipts: SourceListNativeReceipts
-    init(_ base: URL) throws {
-        let store = try DocumentStore(baseURL: base, namespace: FilmSettingsBlock.catSources.namespace)
+    init(_ database: SQLiteDatabase) throws {
         let scripts = ["a", "b"].map { id in
             CatSourceConfiguration(installationId: id, name: "来源 " + id, sourceType: "network",
                 sourceUrl: "https://example.invalid/\(id).js", localPath: nil, localHash: nil,
                 enabled: true, inputRevision: 1).value
         }
-        try store.write(RuntimeJSON.encode(.object(["version": .number(1), "port": .number(0),
-            "providers": .object([:]), "mappings": .array([]), "scripts": .array(scripts)])),
-            key: FilmSettingsDocument.key)
-        let receipts = SourceListNativeReceipts(store: store, base: base, scripts: scripts)
+        let seed = FilmSettingsDocument(block: .catSources, database: database)
+        try appStorageTestIO {
+            _ = try database.transactionSync { db in
+                for (ordinal, input) in scripts.enumerated() {
+                    guard case .object(let fields) = input else { throw FilmPlaybackError.invalidResponse }
+                    guard let installationId = fields["installationId"]?.filmText,
+                          let name = fields["name"]?.filmText,
+                          let sourceType = fields["sourceType"]?.filmText,
+                          case .bool(let enabled)? = fields["enabled"],
+                          let inputRevision = fields["inputRevision"]?.filmInteger else {
+                        throw FilmPlaybackError.invalidResponse
+                    }
+                    try db.upsert("ios_cat_inputs", columns: ["installationId", "ordinal", "name", "sourceType", "sourceUrl", "localPath", "localHash", "enabled", "inputRevision"],
+                        values: [.text(installationId), .integer(ordinal), .text(name), .text(sourceType),
+                            .optional(fields["sourceUrl"]?.filmText),
+                            .null, .null,
+                            .bool(enabled), .integer(inputRevision)],
+                        key: ["installationId"])
+                }
+                try db.execute("INSERT INTO ios_cat_settings(singleton,port) VALUES(1,0)")
+                try db.execute("UPDATE ios_settings_blocks SET revision=1 WHERE block='cat.sources'")
+            }
+        }
+        let receipts = SourceListNativeReceipts(document: seed, database: database, scripts: scripts)
         self.receipts = receipts
-        document = FilmSettingsDocument(block: .catSources, storage: .plain { store },
+        document = FilmSettingsDocument(block: .catSources, database: database,
             changed: { _ in receipts.committed() })
     }
 }
 
-/// Blocks only a synthetic native commit receipt, never a runtime apply. The
-/// symlink fault is reversible and does not depend on simulator user privileges.
+/// Blocks only a synthetic native commit receipt, never a runtime apply.
+/// query_only is reversible and preserves the committed database rows.
 private final class SourceListNativeReceipts: @unchecked Sendable {
     private let lock = NSLock()
-    private let store: DocumentStore
-    private let settingsFile: URL
-    private let savedFile: URL
+    private let document: FilmSettingsDocument
+    private let database: SQLiteDatabase
     private var previous: [RuntimeValue]
     private var recorded: [String] = []
     private var gate: (DispatchSemaphore, @Sendable () -> Void)?
     private var failNext = false
     private var failing = false
 
-    init(store: DocumentStore, base: URL, scripts: [RuntimeValue]) {
-        self.store = store; previous = scripts
-        settingsFile = base.appendingPathComponent(FilmSettingsBlock.catSources.namespace)
-            .appendingPathComponent(FilmSettingsDocument.key + ".json")
-        savedFile = settingsFile.appendingPathExtension("saved")
+    init(document: FilmSettingsDocument, database: SQLiteDatabase, scripts: [RuntimeValue]) {
+        self.document = document; self.database = database; previous = scripts
     }
     var commits: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
     func reset() { lock.lock(); recorded.removeAll(); lock.unlock() }
@@ -822,26 +840,22 @@ private final class SourceListNativeReceipts: @unchecked Sendable {
     func setSaveFailure(_ value: Bool) throws {
         lock.lock(); defer { lock.unlock() }
         guard value != failing else { return }
-        if value {
-            try FileManager.default.moveItem(at: settingsFile, to: savedFile)
-            do { try FileManager.default.createSymbolicLink(at: settingsFile, withDestinationURL: savedFile) }
-            catch { try FileManager.default.moveItem(at: savedFile, to: settingsFile); throw error }
-        } else {
-            try FileManager.default.removeItem(at: settingsFile)
-            try FileManager.default.moveItem(at: savedFile, to: settingsFile)
+        try appStorageTestIO {
+            _ = try self.database.readSync { try $0.query(value ? "PRAGMA query_only=ON" : "PRAGMA query_only=OFF") }
         }
         failing = value
     }
     func committed() {
         do {
-            let bytes = try XCTUnwrap(store.read(key: FilmSettingsDocument.key))
-            let scripts = try XCTUnwrap(RuntimeJSON.decode(bytes).catField("scripts")?.catArray)
+            let scripts = try XCTUnwrap(document.appStorageTestRead()?.catField("scripts")?.catArray)
             lock.lock()
-            let ids = (previous + scripts).compactMap { $0.catField("installationId")?.catText }
+            let ids = try (previous + scripts).compactMap {
+                try $0.filmRequiredObject().filmValue("installationId").filmText
+            }
             let changed = ids.reduce(into: [String]()) { result, id in
                 guard !result.contains(id),
-                      previous.first(where: { $0.catField("installationId") == .string(id) }) !=
-                        scripts.first(where: { $0.catField("installationId") == .string(id) }) else { return }
+                      previous.first(where: { $0.filmObject?["installationId"] == .string(id) }) !=
+                        scripts.first(where: { $0.filmObject?["installationId"] == .string(id) }) else { return }
                 result.append(id)
             }
             recorded += changed; previous = scripts
@@ -867,8 +881,8 @@ private actor SourceListRuntime {
     private var probed: String?
     private(set) var mutations: [(String, String)] = []
     private(set) var probes: [String] = []
-    func acceptNativeSettings(_ document: FilmSettingsDocument, resetUpdates: Bool = false) throws {
-        let saved = try CatSourceSettings(document: document).read()
+    func acceptNativeSettings(_ document: FilmSettingsDocument, resetUpdates: Bool = false) async throws {
+        let saved = try await CatSourceSettings(document: document).read()
         if resetUpdates { updated.removeAll() }
         else {
             for input in saved {

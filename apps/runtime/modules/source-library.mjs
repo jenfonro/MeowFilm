@@ -1,10 +1,11 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { isUtf8 } from 'node:buffer';
-import { PrivateDocuments, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
+import { ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { normalizeSourceDefinition } from '@meowfilm/source-runtime';
 import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { InstallationOperations } from './source-candidates.mjs';
+import { SourceStorage } from './source-storage.mjs';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const emptyPrivate = () => ({ cookies: [], storage: [] });
@@ -20,15 +21,15 @@ const sameConfiguration = (left, right, revision = true) => left && right &&
   configurationKeys.every(key => !revision && key === 'revision' || left[key] === right[key]);
 
 /** Source sessions and private state; the default mode also owns permanent definitions. */
-export function createSourceLibrary({ dataRoot, documents, host, owner, web, network,
+export function createSourceLibrary({ dataRoot, storage, host, owner, web, network,
   fail, errorCode, guard, lifetime, configurationOwner, externalInstallation = () => false }) {
   const native = configurationOwner === 'native';
-  const disk = documents ?? (dataRoot === undefined ? null : new PrivateDocuments(dataRoot, 'source'));
+  const disk = storage ?? (dataRoot === undefined ? null : new SourceStorage(dataRoot, native));
   const records = new Map(), states = new Map(), images = new Map(), streams = new Set();
   const sourceLeases = new Map();
   const operations = new InstallationOperations();
+  const memoryReaderValues = disk ? null : new Map();
   let privateRecords = new Map(), nativeConfiguration = new Map(), nativeRevision = 0, nativeSnapshotHash;
-  let document = { schema: 1, sources: [] };
   let readFailure;
 
   const require = (value, code = 'INVALID_REQUEST') => { if (!value) throw fail(code); };
@@ -60,49 +61,24 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       hasExplore: Boolean(raw.exploreUrl || actions.includes('explore')),
       actions: [...actions], ...(state?.errorCode ? { errorCode: state.errorCode } : {}) };
   }
-  function persist(next = records, removed = []) {
+  async function persist(next = records, removed = []) {
     if (readFailure) throw readFailure;
-    if (!native && !disk) return;
+    if (!disk) return;
     const nextPrivate = new Map(privateRecords);
     if (native) {
       for (const id of removed) nextPrivate.delete(id);
       for (const item of next.values()) nextPrivate.set(item.installationId, item.private);
     }
-    const name = native ? 'private.json' : 'library.json';
-    const remaining = new Map(native ? [...nextPrivate].map(([installationId, privateState]) =>
-      [installationId, { installationId, ...(privateState === undefined ? {} : { private: privateState }) }]) : next);
-    const sources = document.sources.flatMap(item => {
-      if (!object(item) || !installationId(item.installationId)) return [item];
-      const updated = remaining.get(item.installationId);
-      remaining.delete(item.installationId);
-      return updated ? [{ ...item, ...updated }]
-        : !records.has(item.installationId) && !removed.includes(item.installationId) ? [item] : [];
-    });
-    sources.push(...remaining.values());
-    const nextDocument = { ...document, sources };
-    const bytes = Buffer.from(stringifyJSONValue(nextDocument));
-    let previous, readComplete = false;
+    const proposed = native ? new Map([...nextPrivate].map(([installationId, privateState]) =>
+      [installationId, { installationId, private: privateState }])) : next;
     try {
-      if (disk) {
-        previous = disk.read(name); readComplete = true;
-        if (!native || !Buffer.from(previous ?? []).equals(bytes)) disk.write(name, bytes);
-      }
+      await disk.save(proposed);
     }
-    catch {
-      // A writer may fail after rename. Restore the previous committed bytes,
-      // and fence further operations if the storage owner cannot establish them.
-      try {
-        if (!readComplete) throw fail('STORAGE_ERROR');
-        const current = disk.read(name);
-        if (!Buffer.from(current ?? []).equals(Buffer.from(previous ?? []))) {
-          if (previous) disk.write(name, previous);
-          else disk.remove(name);
-        }
-      } catch { readFailure = fail('STORAGE_ERROR'); }
-      throw fail('STORAGE_ERROR');
+    catch (error) {
+      if (error.code === 'STORAGE_CONFLICT') readFailure = fail('STORAGE_ERROR');
+      throw fail(error.code === 'STORAGE_CORRUPT' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
     }
     if (native) privateRecords = nextPrivate;
-    document = nextDocument;
   }
   function parseDefinition(definition) {
     require(typeof definition === 'string' && definition.trim().length > 0);
@@ -152,37 +128,6 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       protocol: normalized.importedProtocol, actions: old?.actions ?? [],
       definition, ...(old ? {} : { private: emptyPrivate() }),
     };
-  }
-  function validateStored(value) {
-    require(object(value) && value.schema === 1 && Array.isArray(value.sources), 'CORRUPT_STORAGE');
-    const ids = new Set(), urls = new Set();
-    for (const item of value.sources) {
-      if (!object(item) || !installationId(item.installationId)) continue;
-      require(!ids.has(item.installationId), 'CORRUPT_STORAGE');
-      ids.add(item.installationId);
-      if (native) privateRecords.set(item.installationId, item.private);
-      else {
-        if (typeof item.sourceUrl !== 'string' || !item.sourceUrl.trim() ||
-            !Number.isSafeInteger(item.revision) || item.revision <= 0) continue;
-        require(!urls.has(item.sourceUrl), 'CORRUPT_STORAGE');
-        urls.add(item.sourceUrl);
-        records.set(item.installationId, item);
-      }
-    }
-    require(!value.sources.length || (native ? privateRecords.size : records.size), 'CORRUPT_STORAGE');
-    document = value;
-  }
-  try {
-    const bytes = disk?.read(native ? 'private.json' : 'library.json');
-    if (bytes) {
-      require(isUtf8(bytes), 'CORRUPT_STORAGE');
-      validateStored(parseJSONText(bytes.toString('utf8')));
-    }
-  } catch (error) {
-    records.clear();
-    privateRecords.clear();
-    readFailure = error?.code === 'STORAGE_ERROR' || error?.code === 'PERMISSION_DENIED'
-      ? fail('STORAGE_ERROR') : fail('CORRUPT_STORAGE');
   }
   function assertOpen(signal) {
     guard(signal);
@@ -291,7 +236,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       guard(signal);
       await release(id, state.generation);
       const next = new Map(records).set(id, item);
-      persist(next);
+      await persist(next);
       records.set(id, item);
       state.trial = false;
       state.accepting = item.enabled;
@@ -309,6 +254,16 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
     }
   }
   const ready = Promise.resolve().then(async () => {
+    try {
+      const saved = await disk?.load();
+      for (const [id, item] of saved ?? []) {
+        if (native) privateRecords.set(id, item.private);
+        else records.set(id, item);
+      }
+    } catch (error) {
+      readFailure = fail(error?.code === 'STORAGE_CORRUPT' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
+      throw readFailure;
+    }
     if (readFailure || native) return;
     for (const saved of records.values()) {
       guard(lifetime.signal);
@@ -318,7 +273,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       try {
         require(item.enabled === true, 'CORRUPT_STORAGE');
         await execute(item, state, lifetime.signal);
-        persist(new Map(records).set(item.installationId, item));
+        await persist(new Map(records).set(item.installationId, item));
         records.set(item.installationId, item);
         state.trial = false; state.accepting = true;
       } catch (error) {
@@ -388,7 +343,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       await release(id, state.generation);
       cleanup(id);
       nativeSourceGuard(item, signal);
-      persist();
+      await persist();
       state.trial = false; state.accepting = item.enabled;
     } catch (error) {
       retire(id);
@@ -461,8 +416,8 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
         await applyNativeSource(item, old.get(item.installationId), signal);
       }
       nativeGuard(params, signal);
-      persist(records, removed);
-      for (const id of removed) states.delete(id);
+      await persist(records, removed);
+      for (const id of removed) { states.delete(id); memoryReaderValues?.delete(id); }
       require(![...states.values()].some(state => state.errorCode === 'SOURCE_CLEANUP'), 'SOURCE_CLEANUP');
       return { revision: params.revision, sources: [...records.values()].map(publicRecord) };
     });
@@ -617,7 +572,7 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
         guard(signal);
         if (!item.enabled) await release(item.installationId);
         const next = new Map(records).set(item.installationId, item);
-        persist(next);
+        await persist(next);
         records.set(item.installationId, item);
         if (!item.enabled) {
           states.set(item.installationId, { controller: new AbortController(), accepting: false,
@@ -640,8 +595,9 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
         guard(signal);
         await release(old.installationId);
         const next = new Map(records); next.delete(old.installationId);
-        persist(next);
+        await persist(next);
         records.delete(old.installationId); states.delete(old.installationId);
+        memoryReaderValues?.delete(old.installationId);
         return { removed: true };
       } catch (error) {
         if (!lifetime.signal.aborted) await restore(old);
@@ -700,6 +656,29 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       host.captureInitialization(item.installationId)?.();
     },
     owns: id => records.has(id) || states.has(id) || nativeConfiguration.has(id),
+    async readerValues(name, input, context) {
+      const { installationId: id, generation, protocol, requestId } = context.scope;
+      const state = states.get(id);
+      require(protocol === 'legado' && state && input.profile === profile(id, generation) + 'reader', 'PERMISSION_DENIED');
+      require(state.generation === generation && (state.trial || state.accepting), 'STALE_SOURCE');
+      const signal = AbortSignal.any([context.signal, state.controller.signal, lifetime.signal]);
+      assertOpen(signal);
+      const reading = name === 'reader.values.read';
+      if (!reading) require(state.accepting && !state.trial && requestId > 0, 'PERMISSION_DENIED');
+      if (disk) {
+        try { return reading ? await disk.readReader(id) : await disk.applyReader(id, input, signal); }
+        catch (error) { throw new ScriptHostError(error.code === 'CANCELLED' ? 'CANCELLED' : 'STORAGE_ERROR'); }
+      }
+      // Data-root-free modules keep only this session's values.
+      const current = memoryReaderValues.get(id) ?? { revision: 0, values: new Map() };
+      if (reading) return { revision: current.revision, entries: [...current.values],
+        ...(current.variable === undefined ? {} : { variable: current.variable }) };
+      require(input.revision === current.revision && Number.isSafeInteger(current.revision + 1), 'STORAGE_ERROR');
+      for (const [key, value] of input.entries) current.values.set(key, value);
+      if (input.variable !== undefined) current.variable = input.variable;
+      memoryReaderValues.set(id, current);
+      return ++current.revision;
+    },
     prepareCapability(_name, input, context) {
       const id = context.scope?.installationId, state = states.get(id);
       if (!state) return;
@@ -711,19 +690,22 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       const name = input.profile ?? input.cookieProfile;
       if (name) require(name.startsWith(profile(id, generation)), 'PERMISSION_DENIED');
     },
-    profileChanged(prefix) {
+    async profileChanged(prefix) {
       const match = /^source:([^:]+):([1-9][0-9]*):$/.exec(prefix);
       if (!match || !states.has(match[1])) return;
       const state = states.get(match[1]);
       require(state.generation === Number(match[2]) && (state.trial || state.accepting) &&
         !lifetime.signal.aborted, 'STALE_SOURCE');
       if (state.trial) return;
-      const item = record(match[1]);
-      const nextItem = { ...item, private: { ...item.private, ...owner.snapshotProfiles(prefix) } };
-      const next = new Map(records).set(item.installationId, nextItem);
-      persist(next);
-      // Keep admitted calls' record identity stable during private writes.
-      item.private = nextItem.private;
+      await operations.run('library', async () => {
+        require(states.get(match[1]) === state && state.accepting && !lifetime.signal.aborted, 'STALE_SOURCE');
+        const item = record(match[1]);
+        const nextItem = { ...item, private: { ...item.private, ...owner.snapshotProfiles(prefix) } };
+        const next = new Map(records).set(item.installationId, nextItem);
+        await persist(next);
+        // Keep admitted calls' record identity stable during private writes.
+        item.private = nextItem.private;
+      });
     },
     async image(reference, { signal } = {}) {
       assertOpen(signal);
@@ -756,6 +738,8 @@ export function createSourceLibrary({ dataRoot, documents, host, owner, web, net
       await Promise.allSettled([ready, operations.drain()]);
       await Promise.allSettled([...streams].map(stream => stream.dispose()));
       const results = await Promise.allSettled([...states.keys()].map(id => release(id)));
+      await disk?.close();
+      memoryReaderValues?.clear();
       states.clear(); images.clear();
       if (native) { records.clear(); nativeConfiguration.clear(); sourceLeases.clear(); privateRecords.clear(); }
       require(results.every(result => result.status === 'fulfilled'), 'SOURCE_CLEANUP');

@@ -16,7 +16,7 @@ public static class NovelConfigurationTests
         yield return new("novel configuration: slow application cannot block saving and cannot publish an older snapshot", Latest);
         yield return new("novel configuration: a fresh runtime epoch receives the latest native snapshot before invocation", Recovery);
         yield return new("novel configuration: a new draft persists offline without replacing an existing source", Draft);
-        yield return new("novel configuration: edits keep raw siblings and precise extensions without decoding unrelated definitions", RawInputs);
+        yield return new("novel configuration: typed definition extensions and sibling sources survive independent edits", RawInputs);
         yield return new("novel configuration: cold search applies before selecting actions and cancellation drains preparation", SearchPreparation);
         yield return new("novel configuration: malformed current documents fail without publishing or overwriting data", Format);
     }
@@ -144,41 +144,37 @@ public static class NovelConfigurationTests
     }
     private static async Task RawInputs()
     {
-        var runtime = new Probe { Offline = true }; var store = new NovelSourceMemoryStore();
+        var runtime = new Probe { Offline = true };
+        await using var store = new NovelSourceMemoryStore();
         var configuration = new NovelSourceConfiguration(store);
-        await configuration.LoadAsync(default);
-        string definition = Definition.Insert(1, "\"future\":9007199254740993,\"future\":1e400,\"unused\":\"\\ud800\",");
+        string definition = Definition.Insert(1, "\"preciseId\":9007199254740993,\"future\":1e400,\"unused\":\"合成🎬扩展\",\"é\":1,\"e\\u0301\":2,");
         await configuration.ImportAsync(definition, null, null, default);
-        string raw = System.Text.Encoding.UTF8.GetString(store.Bytes!);
-        raw = raw.Insert(1, "\"future\":9007199254740993,\"future\":1e400,");
-        int at = raw.IndexOf("\"sources\":[{", StringComparison.Ordinal) + "\"sources\":[{".Length;
-        raw = raw.Insert(at, "\"future\":1e400,\"future\":9007199254740993,");
-        using var input = JsonDocument.Parse(raw);
-        var row = input.RootElement.GetProperty("sources")[0];
-        string unused = """{"installationId":"unread","revision":1,"name":"unused","sourceUrl":"https://unread.invalid","group":"","order":1,"enabled":false,"enabledExplore":false,"protocol":"legado","definition":"{","future":1e400}""";
-        string broken = """{"installationId":"broken","revision":"unusable","future":9007199254740993}""";
-        raw = raw.Replace(row.GetRawText(), row.GetRawText() + "," + unused + "," + broken, StringComparison.Ordinal);
-        store.Bytes = System.Text.Encoding.UTF8.GetBytes(raw);
+        await configuration.ImportAsync(Definition.Replace("books.invalid", "sibling.invalid"), null, null, default);
+        var input = store.Project(NovelStorageRecords.Sources, "device")!;
+        string sibling = input["sources"]![1]!.ToJsonString();
         var service = new NovelSourceService(runtime, store);
         try
         {
             await service.RefreshAsync();
-            Check(service.Sources.Count == 2, "unexecuted malformed definition does not reject the healthy list");
+            Check(service.Sources.Count == 2, "the native list restores independently stored source records");
             var selected = service.Sources.Single(source => source.SourceUrl == "https://books.invalid");
             await service.UpdateAsync(selected, new { name = "已修改" });
             using var saved = JsonDocument.Parse(store.Bytes!);
             var result = saved.RootElement;
-            Check(result.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
-                result.GetProperty("sources")[0].EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
-                result.GetProperty("sources")[1].GetRawText() == unused && result.GetProperty("sources")[2].GetRawText() == broken,
-                "unrelated source records and duplicate precise extensions survive an ordinary metadata edit");
+            Check(result.GetProperty("sources")[1].GetRawText() == sibling,
+                "editing one source does not rewrite its sibling's definition or management fields");
             Check(service.Sources.Single(source => source.InstallationId == selected.InstallationId).Revision == 2,
                 "the selected source still advances its revocation revision");
-            using var savedDefinition = JsonDocument.Parse(result.GetProperty("sources")[0].GetProperty("definition").GetString()!);
-            Check(savedDefinition.RootElement.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
-                savedDefinition.RootElement.GetProperty("future").GetRawText() == "1e400" &&
-                savedDefinition.RootElement.GetProperty("unused").GetRawText() == "\"\\ud800\"",
-                "import and metadata editing preserve unconsumed raw definition members");
+            var savedDefinition = result.GetProperty("sources")[0].GetProperty("definition");
+            Check(savedDefinition.GetProperty("preciseId").GetRawText() == "9007199254740993" &&
+                savedDefinition.GetProperty("future").GetRawText() == "1e400" &&
+                savedDefinition.GetProperty("unused").GetString() == "合成🎬扩展" &&
+                savedDefinition.GetProperty("é").GetInt32() == 1 && savedDefinition.GetProperty("e\u0301").GetInt32() == 2,
+                "typed definition nodes retain exact numeric literals and distinct Unicode property identities");
+            var exported = await service.ExportAsync([selected.InstallationId]);
+            using var external = JsonDocument.Parse(exported.GetProperty("text").GetString()!);
+            Check(external.RootElement[0].GetProperty("future").GetRawText() == "1e400",
+                "explicit user JSON export retains third-party extensions");
         }
         finally { await service.PrepareShutdownAsync(); }
     }
@@ -226,22 +222,28 @@ public static class NovelConfigurationTests
 
     private static async Task Format()
     {
-        foreach (string text in new[] { "{", """{"version":2,"revision":1,"sources":[]}""",
-            """{"version":"1","revision":1,"sources":[]}""",
-            """{"version":1,"revision":"1","sources":[]}""",
-            """{"version":1,"revision":1,"sources":null}""",
-            """{"version":1,"revision":1,"sources":[{"installationId":"invalid"}]}""" })
+        foreach (string sql in new[]
+        {
+            "UPDATE windows_novel_sources SET version=2",
+            "UPDATE windows_novel_sources SET revision=0",
+            "UPDATE windows_novel_sources SET shape_mask=shape_mask & ~4",
+            "UPDATE windows_novel_sources_sources SET revision=0"
+        })
         {
             var runtime = new Probe { Offline = true };
-            var store = new NovelSourceMemoryStore { Bytes = System.Text.Encoding.UTF8.GetBytes(text) };
+            await using var store = new NovelSourceMemoryStore();
+            await new NovelSourceConfiguration(store).ImportAsync(Definition, null, null, default);
+            await store.Inner.WriteAsync(db => db.Execute(sql));
             var service = new NovelSourceService(runtime, store); var before = store.Bytes!.ToArray();
+            var revision = await store.RevisionAsync(NovelSourceConfiguration.DocumentNamespace);
             try
             {
                 try { await service.RefreshAsync(); throw new InvalidOperationException("Corrupt document loaded"); }
                 catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
                 try { await service.ImportAsync(text: Definition); throw new InvalidOperationException("Corrupt document overwritten"); }
                 catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
-                Check(service.Sources.Count == 0 && store.Writes == 0 && store.Bytes!.SequenceEqual(before) && runtime.Calls.Count == 0);
+                Check(service.Sources.Count == 0 && (await store.RevisionAsync(NovelSourceConfiguration.DocumentNamespace)) == revision &&
+                    store.Bytes!.SequenceEqual(before) && runtime.Calls.Count == 0);
             }
             finally { await service.PrepareShutdownAsync(); }
         }

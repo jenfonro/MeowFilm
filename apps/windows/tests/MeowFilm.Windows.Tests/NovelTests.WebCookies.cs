@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Runtime;
+using MeowFilm.Platform.Storage;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 
@@ -18,8 +19,10 @@ public static partial class NovelTests
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        await using var database = new NativeDatabase(TestWorkspace.DataPath("novel-web-cookie-scope"));
+        await database.Ready;
         await using var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
-            TestWorkspace.DataPath("novel-web-cookie-scope"), deadline.Token);
+            database.ProductRoot!, deadline.Token, settingsStore: new FilmRuntimeSettings(database));
         var sources = NovelTestSources.Create(runtime);
         await using var rules = new NovelRuleProgram(runtime);
         var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(host); host.Show();

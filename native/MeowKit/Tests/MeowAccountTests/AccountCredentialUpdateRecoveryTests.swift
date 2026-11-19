@@ -71,9 +71,9 @@ final class AccountCredentialUpdateRecoveryTests: XCTestCase {
         let f = try await AccountCredentialUpdateFixture.signedIn()
         let lease = try await f.coordinator.credentialUpdateLease(for: f.token)
         let original = f.store.persisted(for: f.identity)
-        f.store.failNextRead(with: CredentialStoreError.interactionNotAllowed)
+        f.store.failNextRead(with: CredentialStoreError.unavailable)
         let counts = f.store.calls
-        await assertAccountError(.storage(.interactionNotAllowed)) {
+        await assertAccountError(.storage(.unavailable)) {
             try await f.coordinator.commitCredentialUpdate(
                 lease, credential: AccountFixtures.credential("blocked"), validation: .verified
             )
@@ -85,7 +85,7 @@ final class AccountCredentialUpdateRecoveryTests: XCTestCase {
         let denied = await f.coordinator.snapshot(for: f.identity)
         XCTAssertEqual(denied.generation, f.token.generation)
         XCTAssertEqual(denied.phase, .signedIn)
-        XCTAssertEqual(denied.failure, .storage(.interactionNotAllowed))
+        XCTAssertEqual(denied.failure, .storage(.unavailable))
         let consumedCounts = f.store.calls
         await assertAccountError(.storage(.conflict)) {
             try await f.coordinator.commitCredentialUpdate(
@@ -206,8 +206,8 @@ final class AccountCredentialUpdateRecoveryTests: XCTestCase {
         XCTAssertFalse(AccountSessionError.storage(.backendFailure).localizedDescription.contains(marker))
 
         // Even a failed recovery read does not mutate or automatically accept disk state.
-        f.store.failNextRead(with: CredentialStoreError.interactionNotAllowed)
-        await assertAccountError(.storage(.interactionNotAllowed)) {
+        f.store.failNextRead(with: CredentialStoreError.unavailable)
+        await assertAccountError(.storage(.unavailable)) {
             try await f.coordinator.restore(for: f.identity)
         }
         let retry = try await f.coordinator.restore(for: f.identity)
@@ -245,9 +245,9 @@ final class AccountCredentialUpdateRecoveryTests: XCTestCase {
                 expectedBytes = f.original
                 expectedError = .conflict
             default:
-                f.store.arm(.failConfirmationRead(CredentialStoreError.interactionNotAllowed))
+                f.store.arm(.failConfirmationRead(CredentialStoreError.unavailable))
                 expectedBytes = updated
-                expectedError = .interactionNotAllowed
+                expectedError = .unavailable
             }
             let counts = f.store.calls
             await assertAccountError(.storage(expectedError)) {

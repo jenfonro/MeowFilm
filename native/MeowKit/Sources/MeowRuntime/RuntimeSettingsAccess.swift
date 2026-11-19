@@ -2,9 +2,9 @@ import Foundation
 
 public struct RuntimeSettingsSnapshot: Sendable {
     public let document: RuntimeValue?
-    public let fingerprint: RuntimeValue
-    public init(document: RuntimeValue?, fingerprint: RuntimeValue) {
-        self.document = document; self.fingerprint = fingerprint
+    public let revision: Int64
+    public init(document: RuntimeValue?, revision: Int64) {
+        self.document = document; self.revision = revision
     }
 }
 
@@ -18,12 +18,12 @@ public struct RuntimeSettingsAccess: Sendable {
     public let blocks: Set<String>
     public let writableBlocks: Set<String>
     let read: @Sendable (String) throws -> RuntimeSettingsSnapshot
-    let write: @Sendable (String, RuntimeValue, RuntimeValue) throws -> RuntimeSettingsSnapshot
+    let update: @Sendable (String, RuntimeValue) throws -> RuntimeSettingsSnapshot
 
     public init(blocks: Set<String>, writableBlocks: Set<String>,
                 read: @escaping @Sendable (String) throws -> RuntimeSettingsSnapshot,
-                write: @escaping @Sendable (String, RuntimeValue, RuntimeValue) throws -> RuntimeSettingsSnapshot) {
+                update: @escaping @Sendable (String, RuntimeValue) throws -> RuntimeSettingsSnapshot) {
         self.blocks = blocks; self.writableBlocks = writableBlocks
-        self.read = read; self.write = write
+        self.read = read; self.update = update
     }
 }

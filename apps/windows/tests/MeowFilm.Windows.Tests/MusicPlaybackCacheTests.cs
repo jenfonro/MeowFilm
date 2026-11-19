@@ -123,9 +123,8 @@ public static class MusicPlaybackCacheTests
             string signature = MusicAudioFileCache.ScriptSignature("source", "wy", "recording", "flac");
             string scope = "script:" + signature;
             await f.Cache.StorePlayedAsync(scope, "song", signature, f.ScriptInfo("source", "flac"), () => true, default);
-            byte[] index = f.CacheStore.ReadMemory(MusicAudioFileCache.Namespace).Data!;
-            var backing = new HeldIndexStore(index);
-            await using var store = new CacheDocumentStore(backing);
+            var backing = new HeldIndexStore(f.CacheStore);
+            await using var store = new NativeTestDatabase(backing);
             var cache = new MusicAudioFileCache(f.Root, store, clock: f.Clock);
             var opening = cache.OpenAsync(scope, "song", signature, default);
             var info = cache.ReadInfoAsync(scope, "song", signature, default);
@@ -157,8 +156,8 @@ public static class MusicPlaybackCacheTests
             string signature = MusicAudioFileCache.ScriptSignature("source", "wy", "recording", "flac");
             string scope = "script:" + signature;
             await f.Cache.StorePlayedAsync(scope, "song", signature, f.ScriptInfo("source", "flac"), () => true, default);
-            var backing = new HeldIndexStore(f.CacheStore.ReadMemory(MusicAudioFileCache.Namespace).Data!);
-            await using var store = new CacheDocumentStore(backing);
+            var backing = new HeldIndexStore(f.CacheStore);
+            await using var store = new NativeTestDatabase(backing);
             var cache = new MusicAudioFileCache(f.Root, store, clock: f.Clock);
             var opening = cache.OpenAsync(scope, "song", signature, default);
             var info = cache.ReadInfoAsync(scope, "song", signature, default);
@@ -214,7 +213,7 @@ public static class MusicPlaybackCacheTests
                         f.ScriptInfo(provider, quality), () => true, default);
                 }
             await f.CacheStore.DrainAsync();
-            await using var reopenedStore = new CacheDocumentStore(f.Store);
+            await using var reopenedStore = new NativeTestDatabase(f.Store);
             var restarted = f.NewCache(cacheStore: reopenedStore);
             var history = await restarted.ReadScriptHistoryAsync("song", default);
             Check(history.Length == 4 && (await restarted.ReadScriptHistoryAsync("another-song", default)).Length == 0);
@@ -306,14 +305,14 @@ public static class MusicPlaybackCacheTests
             var raw = System.Text.Json.Nodes.JsonNode.Parse(f.Info(scope: "public:wy").GetRawText())!.AsObject();
             await f.Cache.StorePlayedAsync("public:wy", "song", CacheSignature, JsonSerializer.SerializeToElement(raw), () => true, default);
             await f.CacheStore.DrainAsync();
-            await using var reopenedStore = new CacheDocumentStore(f.Store);
+            await using var reopenedStore = new NativeTestDatabase(f.Store);
             var restarted = f.NewCache(cacheStore: reopenedStore);
             var info = await restarted.ReadInfoAsync("public:wy", "song", CacheSignature, default);
             Check(info is not null, "healthy bytes outlive their source URL");
             await using var lease = await restarted.OpenAsync("public:wy", "song", CacheSignature, default);
             Check(lease is not null && lease.Length == f.Bytes.Length);
             await f.CacheStore.DrainAsync();
-            Check(f.Store.Data.Keys.SequenceEqual(new[] { MusicAudioFileCache.Namespace }));
+            Check((await f.Store.ReadAccountsAsync()).Revision == StorageRevision.Empty);
         });
         yield return new("Music file prefetch serves validated bytes but publishes only at real started and cancels unplayed files", async () =>
         {
@@ -348,8 +347,8 @@ public static class MusicPlaybackCacheTests
         yield return new("Music cache clear fences pending publication and leaves active read and unrelated documents untouched", async () =>
         {
             await using var f = new Fixture();
-            f.Store.Data["test.unrelated-document.v1"] = "library"u8.ToArray();
-            f.Store.Data["unrelated.settings.v1"] = "settings"u8.ToArray();
+            await f.Store.Inner.WriteAsync(db => db.CommitRevision("test.business", StorageRevision.Empty, "library"));
+            await f.Store.Inner.WriteAsync(db => db.CommitRevision("test.settings", StorageRevision.Empty, "settings"));
             await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
             await using (var lease = await f.Cache.OpenAsync("scope", "song", CacheSignature, default))
             {
@@ -362,8 +361,8 @@ public static class MusicPlaybackCacheTests
                 Check(await f.Cache.OpenAsync("scope", "song", CacheSignature, default) is null &&
                     await f.Cache.OpenAsync("scope", "next", CacheSignature, default) is null);
                 Check(lease is not null && lease.Content.ReadByte() == 'R', "clearing cannot interrupt current playback");
-                Check(Encoding.UTF8.GetString(f.Store.Data["test.unrelated-document.v1"]) == "library" &&
-                    Encoding.UTF8.GetString(f.Store.Data["unrelated.settings.v1"]) == "settings");
+                Check(await f.Store.Inner.ReadAsync(db => db.Revision("test.business")) == new StorageRevision(1, "library") &&
+                    await f.Store.Inner.ReadAsync(db => db.Revision("test.settings")) == new StorageRevision(1, "settings"));
             }
             await f.Cache.ClearAsync(default);
             Check(!Directory.EnumerateFiles(f.Root, "*.audio").Any(), "reclaim released lease");
@@ -386,9 +385,10 @@ public static class MusicPlaybackCacheTests
                 "{\"entries\":{\"bad\":{}}}"u8.ToArray() })
             {
                 await using var f = new Fixture();
-                f.CacheStore.Save(MusicAudioFileCache.Namespace, data);
+                f.Store.BeforeRead = _ => throw new DocumentStoreException(DocumentStoreError.Corrupt);
                 Check(await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default) is null);
                 Check(await f.Cache.OpenAsync("scope", "song", CacheSignature, default) is null);
+                f.Store.BeforeRead = null;
                 await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
                 await using var lease = await f.Cache.OpenAsync("scope", "song", CacheSignature, default);
                 Check(f.Requests == 1 && lease?.Length == f.Bytes.Length);
@@ -409,9 +409,9 @@ public static class MusicPlaybackCacheTests
             {
                 await using var f = new Fixture();
                 await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
-                var root = JsonNode.Parse(f.CacheStore.ReadMemory(MusicAudioFileCache.Namespace).Data!)!.AsObject();
+                var root = JsonNode.Parse(f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data!)!.AsObject();
                 change(root["entries"]!.AsObject().Single().Value!.AsObject());
-                f.CacheStore.Save(MusicAudioFileCache.Namespace, JsonSerializer.SerializeToUtf8Bytes(root));
+                await f.Store.Inner.SeedAudioIndexAsync(root);
                 Check(await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default) is null);
                 Check(await f.Cache.OpenAsync("scope", "song", CacheSignature, default) is null);
                 await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
@@ -439,7 +439,7 @@ public static class MusicPlaybackCacheTests
         yield return new("Music file cache storage protection and persistence failures are optional", async () =>
         {
             await using var f = new Fixture();
-            f.Store.Failure = DocumentStoreError.Protection;
+            f.Store.Failure = DocumentStoreError.Io;
             Check(await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default) is null);
             await f.Cache.StorePlayedAsync("scope", "song", CacheSignature, f.Info(), () => true, default);
             Check(await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default) is not null);
@@ -448,9 +448,10 @@ public static class MusicPlaybackCacheTests
         yield return new("Music file cache explicit clear discards bad index and cache bytes only", async () =>
         {
             await using var f = new Fixture();
-            f.CacheStore.Save(MusicAudioFileCache.Namespace, "{"u8.ToArray());
+            f.Store.BeforeRead = _ => throw new DocumentStoreException(DocumentStoreError.Corrupt);
             await File.WriteAllBytesAsync(Path.Combine(f.Root, Guid.NewGuid().ToString("N") + ".audio"), f.Bytes);
             await f.Cache.ClearAsync(default);
+            f.Store.BeforeRead = null;
             Check(await f.Cache.ReadInfoAsync("scope", "song", CacheSignature, default) is null &&
                 !Directory.EnumerateFiles(f.Root, "*.audio").Any());
         });
@@ -487,8 +488,8 @@ public static class MusicPlaybackCacheTests
             var info = f.Info(scope: "account");
             await f.Cache.StorePlayedAsync("account", "song", CacheSignature, info, () => true, default);
             await f.CacheStore.DrainAsync();
-            Check(f.Store.Data.Keys.SequenceEqual(new[] { MusicAudioFileCache.Namespace }));
-            await using var reopenedStore = new CacheDocumentStore(f.Store);
+            Check((await f.Store.ReadAccountsAsync()).Revision == StorageRevision.Empty);
+            await using var reopenedStore = new NativeTestDatabase(f.Store);
             var restarted = f.NewCache(cacheStore: reopenedStore);
             await using var lease = await restarted.OpenAsync("account", "song", CacheSignature, default);
             Check(lease is not null && lease.Length == f.Bytes.Length && !lease.Content.CanWrite);
@@ -554,24 +555,21 @@ public static class MusicPlaybackCacheTests
             Check(rejected, "decoded duration beyond ten seconds must fail");
         });
     }
-    private sealed class HeldIndexStore(byte[] index) : IDocumentStore
+    private sealed class HeldIndexStore : NativeTestDatabase
     {
-        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal readonly TaskCompletionSource Entered=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Release=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal HeldIndexStore(IStorageDatabase storage):base(storage){}
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)
         {
-            Entered.TrySetResult(); await Release.Task.WaitAsync(token);
-            return new(index.ToArray(), DocumentFingerprint.FromBytes(index));
+            var result=await base.ReadAsync(read,token);Entered.TrySetResult();await Release.Task.WaitAsync(token);return result;
         }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default) => Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     internal sealed class Fixture : IAsyncDisposable
     {
         internal readonly string Root = TestWorkspace.DataPath("meowfilm-audio-cache-test-" + Guid.NewGuid().ToString("N"));
         internal readonly MemoryStore Store = new();
-        internal readonly CacheDocumentStore CacheStore;
+        internal readonly NativeTestDatabase CacheStore;
         internal readonly Clock Clock = new();
         internal readonly byte[] Bytes;
         internal int Requests;
@@ -589,7 +587,7 @@ public static class MusicPlaybackCacheTests
             server = Serve(); Cache = NewCache();
         }
         internal MusicAudioFileCache NewCache(Func<string, double, CancellationToken, Task<double>>? validate = null,
-            CacheDocumentStore? cacheStore = null) =>
+            NativeTestDatabase? cacheStore = null) =>
             new(Root, cacheStore ?? CacheStore, validate ?? ((_, expected, _) => Task.FromResult(expected)), Clock,
                 new NativeHttpMediaOptions());
         internal string? RequiredHeader;

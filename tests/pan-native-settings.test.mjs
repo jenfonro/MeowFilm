@@ -9,7 +9,7 @@ test('pan module forwards trusted native-store reload, exposes no credentials an
   const store = {
     read: () => structuredClone(saved),
     async reload() { entered(); await gate; return structuredClone(saved); },
-    async write() { assert.fail('ordinary native edits must not be HTTP-backfilled'); },
+    async update() { assert.fail('ordinary native edits must not be HTTP-backfilled'); },
     async close() {},
   };
   const module = createPanRuntimeModule({ store, transport: {
@@ -20,7 +20,7 @@ test('pan module forwards trusted native-store reload, exposes no credentials an
   const read = () => module.methods['pan.settings.get']({}, {});
   assert.equal((await read()).value.accounts.find(item => item.provider === 'baidu').configured, false);
   saved = { version: 1, accounts: { baidu: {
-    revision: 2, credentials: { cookie: 'synthetic-native-private' },
+    revision: 2, rowRevision: 2, credentials: { cookie: 'synthetic-native-private' },
   } } };
   const notification = module.settingsChanged();
   await ready;
@@ -38,12 +38,12 @@ test('pan module reports bad native accounts individually without replacing thei
   const module = createPanRuntimeModule({ store: {
     read: () => saved,
     async reload() { return saved; },
-    async write() { assert.fail('no second persistence owner'); },
+    async update() { assert.fail('no second persistence owner'); },
     async close() {},
   }, transport: { async request() { assert.fail('passive settings'); }, async close() {} } });
   t.after(() => module.close());
   saved = { version: 1, accounts: { baidu: {
-    revision: 1, credentials: { cookie: 'synthetic-native-private' },
+    revision: 1, rowRevision: 1, credentials: { cookie: 'synthetic-native-private' },
   } } };
   await module.settingsChanged();
   const result = await module.methods['pan.settings.get']({}, {});
@@ -51,7 +51,7 @@ test('pan module reports bad native accounts individually without replacing thei
   assert.equal(result.contract, 'pan.runtime.v1');
   assert.equal(result.value.accounts.find(item => item.provider === 'baidu').revision, 1);
   assert.equal(JSON.stringify(result).includes('synthetic-native-private'), false);
-  saved = { version: 1, accounts: { baidu: { revision: 0, credentials: {} } } };
+  saved = { version: 1, accounts: { baidu: { revision: 0, rowRevision: 1, credentials: {} } } };
   await module.settingsChanged();
   const changed = await module.methods['pan.settings.get']({}, {});
   assert.deepEqual(changed.value.accounts.find(item => item.provider === 'baidu'),

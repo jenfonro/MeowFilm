@@ -113,7 +113,8 @@ final class MusicFullPlayerMotionTests: XCTestCase {
             XCTAssertTrue(fixture.content.artwork === fixture.images.cached(fixture.secondArtwork))
             XCTAssertFalse(fixture.content.artwork === original)
             self.assertAngle(fixture.rotor, degrees: 60)
-            XCTAssertTrue(fixture.content.appearance.selectFixedPalette(.preset(.sky)))
+            let selected = try await appStorageTestWait { await fixture.content.appearance.selectFixedPalette(.preset(.sky)) }
+            XCTAssertTrue(selected)
             await self.drainUpdates()
             XCTAssertEqual(fixture.content.appearance.preferences.colorPalette, .preset(.sky))
             XCTAssertEqual(fixture.content.appearance.effectivePalette, .preset(.sky))
@@ -181,7 +182,8 @@ final class MusicFullPlayerMotionTests: XCTestCase {
             XCTAssertEqual(value.2, url)
         }
         let playback = PlaybackController()
-        let model = MusicViewModel(service: FullPlayerMotionService(), playback: playback)
+        let database = try appStorageTestDatabase()
+        let model = try appStorageTestMusicModel(MusicViewModel(service: FullPlayerMotionService(), playback: playback), database: database)
         model.playbackState.queue = ["previous", "current", "next"].map {
             MusicQueueEntry(id: $0, track: .init(ref: .init(kind: .queue, id: $0),
                 songId: $0, title: $0, artwork: firstURL))
@@ -190,11 +192,8 @@ final class MusicFullPlayerMotionTests: XCTestCase {
         model.playbackState.phase = .playing
         model.metadataState.occurrenceID = "current"
         model.metadataState.artworkURL = firstURL
-        let defaultsName = "MusicFullPlayerMotionTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
-        defer { defaults.removePersistentDomain(forName: defaultsName) }
         let content = MusicPlayerContentModel(model: model, playback: playback,
-            appearance: MusicAppearancePreferencesStore(defaults: defaults),
+            appearance: try appStorageTestAppearance(database),
             presentation: MusicMiniPlayerPresentation(), artworkImages: images)
         let page = MusicFullPlayerView(content: content)
         page.frame = CGRect(x: 0, y: 0, width: 390, height: 844)

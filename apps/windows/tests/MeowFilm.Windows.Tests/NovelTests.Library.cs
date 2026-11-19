@@ -14,19 +14,14 @@ public static partial class NovelTests
 {
     private const string OpenLibrary = """
         {"version":1,
-         "extra":{"big":9007199254740993123456789,"fraction":0.12345678901234567890123456789,"wide":1e400},
-         "é":{"keep":1},"e\u0301":{"keep":2},
          "entries":[{"bookId":"raw-book","identityKey":"raw-key","onShelf":true,"chapterCount":2,
            "readAt":"2026-01-01T00:00:00+00:00","contentSignature":"original",
-           "extra":{"big":9007199254740993123456789},"é":1,"e\u0301":2,"BookId":{"extra":true},
            "book":{"installationId":"a","revision":1,"bookUrl":"https://novel.invalid/book","name":"原书名",
-             "extra":{"fraction":0.12345678901234567890123456789},"é":3,"e\u0301":4,
-             "data":{"runtimeContext":{"big":9007199254740993123456789}}},
-           "anchor":{"chapterUrl":"chapter-1","chapterTitle":"第一章","chapterIndex":0,"blockIndex":1,"utf16Offset":2,"ratio":0.25,
-             "extra":{"fraction":0.12345678901234567890123456789},"é":5,"e\u0301":6}}],
+             "data":{"extra":{"fraction":0.12345678901234567890123456789},"é":3,"e\u0301":4,
+               "runtimeContext":{"big":9007199254740993123456789}}},
+           "anchor":{"chapterUrl":"chapter-1","chapterTitle":"第一章","chapterIndex":0,"blockIndex":1,"utf16Offset":2,"ratio":0.25}}],
          "appearance":{"mode":"future-mode","conversion":"future-conversion","theme":99,"fontSize":22,
-           "lineHeight":1.80000000000000000000000000001,
-           "extra":{"big":9007199254740993123456789},"é":7,"e\u0301":8},
+           "lineHeight":1.8},
          "rules":[{"id":"raw-rule","name":"原规则","pattern":"广告","replacement":"","isRegex":false,
            "extra":{"fraction":0.12345678901234567890123456789},"é":9,"e\u0301":10}]}
         """;
@@ -62,110 +57,70 @@ public static partial class NovelTests
         Check(reopened.Appearance.Mode == "future-mode" && reopened.Appearance.Conversion == "future-conversion" && reopened.Appearance.Theme == 99);
         var raw = StoredLibrary(store); var entry = raw.GetProperty("entries")[0]; var book = entry.GetProperty("book"); var anchor = entry.GetProperty("anchor");
         var appearance = raw.GetProperty("appearance"); var rule = raw.GetProperty("rules")[0];
-        RawNumber(raw.GetProperty("extra"), "big", "9007199254740993123456789");
-        RawNumber(raw.GetProperty("extra"), "fraction", "0.12345678901234567890123456789");
-        RawNumber(raw.GetProperty("extra"), "wide", "1e400");
-        RawNumber(entry.GetProperty("extra"), "big", "9007199254740993123456789");
-        RawNumber(book.GetProperty("extra"), "fraction", "0.12345678901234567890123456789");
+        RawNumber(book.GetProperty("data").GetProperty("extra"), "fraction", "0.12345678901234567890123456789");
         RawNumber(book.GetProperty("data").GetProperty("runtimeContext"), "big", "9007199254740993123456789");
-        RawNumber(anchor.GetProperty("extra"), "fraction", "0.12345678901234567890123456789");
-        RawNumber(appearance.GetProperty("extra"), "big", "9007199254740993123456789");
-        RawNumber(appearance, "lineHeight", "1.80000000000000000000000000001");
+        RawNumber(appearance, "lineHeight", "1.8");
         RawNumber(rule.GetProperty("extra"), "fraction", "0.12345678901234567890123456789");
-        Check(raw.GetProperty("é").GetProperty("keep").GetInt32() == 1 && raw.GetProperty("e\u0301").GetProperty("keep").GetInt32() == 2);
-        DifferentKeys(entry, 1, 2); DifferentKeys(book, 3, 4); DifferentKeys(anchor, 5, 6); DifferentKeys(appearance, 7, 8); DifferentKeys(rule, 9, 10);
-        Check(entry.GetProperty("BookId").GetProperty("extra").GetBoolean());
+        DifferentKeys(book.GetProperty("data"), 3, 4); DifferentKeys(rule, 9, 10);
         await reopened.DeleteHistoryAsync("raw-book");
         Check(reopened.Entries.Single() is { OnShelf: true, ReadAt: null, Anchor: null });
-        Check(StoredLibrary(store).GetProperty("entries")[0].GetProperty("extra").GetProperty("big").GetRawText() == "9007199254740993123456789");
+        Check(StoredLibrary(store).GetProperty("entries")[0].GetProperty("book").GetProperty("data").GetProperty("runtimeContext").GetProperty("big").GetRawText() == "9007199254740993123456789");
     }
     private static async Task LibraryIsolation()
     {
-        const string text = """
-            {"version":1,"entries":[
-              {"bookId":"live","identityKey":"live-key","book":{"installationId":"a","revision":1,"bookUrl":"live","name":"健康"},"onShelf":true},
-              {"bookId":"dormant","identityKey":"dormant-key","book":{"installationId":"a","revision":1,"bookUrl":"dormant","name":"不相关记录"}},
-              null,17,{"bookId":"broken","identityKey":"broken-key","book":false,"extra":9007199254740993123456789},
-              {"bookId":"duplicate","identityKey":"duplicate-key","book":{"installationId":"a","revision":1,"bookUrl":"duplicate-a","name":"甲"}},
-              {"bookId":"duplicate","identityKey":"duplicate-key","book":{"installationId":"a","revision":1,"bookUrl":"duplicate-b","name":"乙"}},
-              {"bookId":"first","bookId":"second","book":{"installationId":"a","revision":1,"bookUrl":"ambiguous","name":"歧义"}}],
-             "appearance":{"mode":{"unreadable":true},"fontSize":"broken","extra":1e400},
-             "rules":[{"id":"keep","pattern":"广告"},false,{"id":"broken-rule","pattern":[]},
-               {"id":"duplicate-rule","pattern":"甲"},{"id":"duplicate-rule","pattern":"乙"},
-               {"id":"rule-first","id":"rule-second","pattern":"歧义"}]}
-            """;
-        await using var store = new MemoryStore { Bytes = Encoding.UTF8.GetBytes(text) };
-        var before = StoredLibrary(store); var library = new NovelLibrary(store); await library.InitializeAsync();
-        Check(library.Entries.Select(entry => entry.BookId).SequenceEqual(["live", "dormant"]) && library.Rules.Single().Id == "keep");
-        Check(library.Appearance.FontSize == 22 && library.Appearance.Mode == "none");
-        await library.PinAsync("live");
-        await library.SaveRulesAsync([library.Rules.Single() with { Group = "健康组", Enabled = false }]);
-        await library.SaveAppearanceAsync(library.Appearance with { FontSize = 24 });
-        var raw = StoredLibrary(store);
-        foreach (int index in Enumerable.Range(2, 6))
-            Check(JsonElement.DeepEquals(before.GetProperty("entries")[index], raw.GetProperty("entries")[index]), "An isolated entry slot was rewritten or deleted.");
-        foreach (int index in Enumerable.Range(1, 5))
-            Check(JsonElement.DeepEquals(before.GetProperty("rules")[index], raw.GetProperty("rules")[index]), "An isolated rule slot was rewritten or deleted.");
-        Check(JsonElement.DeepEquals(before.GetProperty("appearance").GetProperty("mode"), raw.GetProperty("appearance").GetProperty("mode")));
-        RawNumber(raw.GetProperty("appearance"), "extra", "1e400");
-        RawNumber(raw.GetProperty("entries")[4], "extra", "9007199254740993123456789");
-        Check(raw.GetProperty("entries").EnumerateArray().Single(value => value.ValueKind == JsonValueKind.Object && NovelJson.Text(value, "bookId") == "dormant").GetProperty("book").GetProperty("name").GetString() == "不相关记录");
-        var reopened = new NovelLibrary(store); await reopened.InitializeAsync();
-        Check(reopened.Entries.Count == 2 && reopened.Entries.Single(entry => entry.BookId == "live").PinnedAt is not null && reopened.Rules.Single().Group == "健康组");
-        int writes = store.Writes;
-        foreach (Func<Task> action in new Func<Task>[]
+        await using var store = new MemoryStore();
+        var library = new NovelLibrary(store);
+        await library.SaveEntryAsync(new("live", "live-key", Book(), OnShelf: true));
+        await library.SaveEntryAsync(new("other", "other-key", Book(url: "https://novel.invalid/other"), OnShelf: true));
+        var before = store.Bytes!;
+        foreach (string sql in new[]
         {
-            () => reopened.SaveEntryAsync(new("broken", "key", Book())),
-            () => reopened.SaveEntryAsync(new("duplicate", "key", Book())),
-            () => reopened.SetShelfAsync("broken", true),
-            () => reopened.PinAsync("first"),
-            () => reopened.DeleteHistoryAsync("second"),
-            () => reopened.SaveRulesAsync([new() { Id = "broken-rule", Pattern = "x" }]),
-            () => reopened.SaveRulesAsync([new() { Id = "rule-first", Pattern = "x" }])
+            "INSERT INTO windows_novel_library_entries SELECT * FROM windows_novel_library_entries",
+            "UPDATE windows_novel_library_entries SET scope_key='missing-parent'",
+            "UPDATE windows_novel_library_entries SET ordinal=-1",
+            "UPDATE windows_novel_library_entries SET onShelf=2"
         })
         {
-            try { await action(); throw new InvalidOperationException("An unusable or ambiguous identity was overwritten."); }
-            catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
-        }
-        Check(store.Writes == writes && JsonElement.DeepEquals(raw, StoredLibrary(store)));
-        foreach (string key in new[] { "broken-key", "duplicate-key" })
-        {
-            try { reopened.Find(Book(), key); throw new InvalidOperationException("An ambiguous identity was guessed."); }
-            catch (InvalidDataException error) { Check(error.Message == "AMBIGUOUS_NOVEL_IDENTITY"); }
-        }
-        foreach (string section in new[] { "entries", "appearance", "rules" })
-        {
-            string data = "{\"version\":1,\"entries\":[],\"appearance\":{},\"rules\":[]}";
-            data = data.Replace("\"" + section + "\":" + (section == "appearance" ? "{}" : "[]"), "\"" + section + "\":false", StringComparison.Ordinal);
-            await using var broken = new MemoryStore { Bytes = Encoding.UTF8.GetBytes(data) };
-            var partial = new NovelLibrary(broken); await partial.InitializeAsync();
-            if (section == "appearance") await partial.SaveEntryAsync(new("healthy", "key", Book(), OnShelf: true));
-            else await partial.SaveAppearanceAsync(partial.Appearance with { FontSize = 25 });
-            Check(StoredLibrary(broken).GetProperty(section).ValueKind == JsonValueKind.False);
-            int accepted = broken.Writes;
             try
             {
-                if (section == "entries") await partial.SaveEntryAsync(new("new", "key", Book()));
-                else if (section == "appearance") await partial.SaveAppearanceAsync(new() { FontSize = 26 });
-                else await partial.SaveRulesAsync([new() { Pattern = "x" }]);
-                throw new InvalidOperationException("An unusable section was replaced from its empty projection.");
+                await store.Inner.WriteAsync(db =>
+                {
+                    db.Execute("UPDATE windows_novel_library_entries SET contentSignature='must-roll-back'");
+                    return db.Execute(sql);
+                });
+                throw new InvalidOperationException("Expected relational constraint failure");
             }
-            catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
-            Check(broken.Writes == accepted && StoredLibrary(broken).GetProperty(section).ValueKind == JsonValueKind.False);
+            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict) { }
+            Check(store.Bytes!.SequenceEqual(before), "constraint failure must roll back the complete transaction");
         }
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_novel_library_entries_book SET revision=0 WHERE entries_key='other'"));
+        var bad = StoredLibrary(store).GetProperty("entries").EnumerateArray().Single(row => row.GetProperty("bookId").GetString() == "other");
+        await library.PinAsync("live");
+        Check(JsonElement.DeepEquals(bad, StoredLibrary(store).GetProperty("entries").EnumerateArray().Single(row => row.GetProperty("bookId").GetString() == "other")),
+            "a selected row write preserves unrelated corrupt data");
+        before = store.Bytes!;
+        try { await library.PinAsync("other"); throw new InvalidOperationException("Corrupt selected row was replaced"); }
+        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
+        var reopened = new NovelLibrary(store);
+        try { await reopened.InitializeAsync(); throw new InvalidOperationException("Corrupt entry was silently discarded"); }
+        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
+        Check(store.Bytes!.SequenceEqual(before));
+        await library.PrepareShutdownAsync(); await reopened.PrepareShutdownAsync();
     }
     private static async Task RuleProjectionExecution()
     {
         const string text = """
             {"version":1,"entries":[],"appearance":{},"rules":[
-              {"id":"name","name":{"extra":9007199254740993123456789},"unused":9007199254740993123456789,"group":"正文","pattern":"广告","replacement":"甲","isRegex":false},
-              {"id":"group","name":"第二条","group":[1,false],"pattern":"甲","replacement":"乙","isRegex":false,"order":1}]}
+              {"id":"name","name":"第一条","unused":9007199254740993123456789,"group":"正文","pattern":"广告","replacement":"甲","isRegex":false,
+               "isEnabled":true,"scopeTitle":false,"scopeContent":true,"scope":"","excludeScope":"","order":0,"timeoutMillisecond":3000},
+              {"id":"group","name":"第二条","group":"次组","pattern":"甲","replacement":"乙","isRegex":false,"order":1,
+               "isEnabled":true,"scopeTitle":false,"scopeContent":true,"scope":"","excludeScope":"","timeoutMillisecond":3000}]}
             """;
         await using var store = new MemoryStore { Bytes = Encoding.UTF8.GetBytes(text) };
         var library = new NovelLibrary(store); await library.InitializeAsync();
         var original = StoredLibrary(store).GetProperty("rules");
         Check(library.Rules.Select(rule => rule.Id).SequenceEqual(["name", "group"]) &&
-            library.Rules[0].Name == "" && library.Rules[1].Group == "");
+            library.Rules[0].Name == "第一条" && library.Rules[1].Group == "次组");
         var runtime = new Runtime { Text = "广告正文" }; var sources = NovelTestSources.Create(runtime);
         await using var engine = new RuleProbe(); await using var rules = new NovelRuleProgram(engine);
         var session = new NovelBookSession(sources, library, rules, new("projection", "key", Book()));
@@ -194,7 +149,6 @@ public static partial class NovelTests
                 reopened.Rules.Single(rule => rule.Id == "invalid").Pattern == "[");
             var raw = StoredLibrary(store).GetProperty("rules");
             Check(JsonElement.DeepEquals(raw[0], original[0]) && JsonElement.DeepEquals(raw[1], original[1]));
-            RawNumber(raw[0].GetProperty("name"), "extra", "9007199254740993123456789");
             RawNumber(raw[0], "unused", "9007199254740993123456789");
             await reopened.SaveRulesAsync(reopened.Rules.Select(rule => rule.Id == "invalid" ? rule with { Enabled = false } : rule).ToArray());
             await restored.ReprocessAsync(); Check(restored.Blocks.Single().Text == "乙正文" && restored.Entry.Anchor == entry.Anchor);
@@ -204,53 +158,46 @@ public static partial class NovelTests
             if (restored is not null) await restored.PrepareShutdownAsync();
             await session.PrepareShutdownAsync(); await sources.PrepareShutdownAsync();
         }
-        foreach (string pattern in new[] { "null", "[]", "{}" })
-        {
-            await using var broken = new MemoryStore
-            {
-                Bytes = Encoding.UTF8.GetBytes("""{"version":1,"rules":[{"id":"bad","name":{},"group":[],"pattern":""" + pattern + "}]}")
-            };
-            var unreadable = new NovelLibrary(broken); await unreadable.InitializeAsync();
-            Check(unreadable.Rules.Count == 0);
-            try
-            {
-                await rules.TransformAsync("标题", [new("text", "正文")], Book(), Source(), unreadable.RuleInputs, "none");
-                throw new InvalidOperationException("Unprojectable execution material became an empty rule set.");
-            }
-            catch (BridgeException error) { Check(error.Code == "INVALID_REQUEST"); }
-            Check(broken.Writes == 0);
-        }
     }
     private static async Task LibraryGuards()
     {
-        foreach (string text in new[] { "broken", "[]", "{\"version\":2,\"entries\":[],\"appearance\":{},\"rules\":[]}",
-            "{\"version\":1,\"version\":2,\"entries\":[],\"appearance\":{},\"rules\":[]}" })
+        foreach (string sql in new[] { "UPDATE windows_novel_library SET version=2", "UPDATE windows_novel_library SET shape_mask=shape_mask & ~2" })
         {
-            await using var corrupt = new MemoryStore { Bytes = Encoding.UTF8.GetBytes(text) };
+            await using var corrupt = new MemoryStore();
+            var initialized = new NovelLibrary(corrupt); await initialized.SaveAppearanceAsync(new() { FontSize = 24 });
+            await corrupt.Inner.WriteAsync(db => db.Execute(sql)); var before = corrupt.Bytes!;
             var library = new NovelLibrary(corrupt);
-            try { await library.SaveAppearanceAsync(new()); throw new InvalidOperationException("An unreadable root was overwritten."); }
+            try { await library.SaveAppearanceAsync(new()); throw new InvalidOperationException("An unreadable root was overwritten"); }
             catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
-            Check(corrupt.Writes == 0 && Encoding.UTF8.GetString(corrupt.Bytes!) == text);
+            Check(corrupt.Bytes!.SequenceEqual(before));
+            await initialized.PrepareShutdownAsync(); await library.PrepareShutdownAsync();
         }
         await using var store = new MemoryStore();
-        var first = new NovelLibrary(store); var stale = new NovelLibrary(store);
-        await first.InitializeAsync(); await stale.InitializeAsync();
-        await first.SaveEntryAsync(new("winner", "key", Book(), OnShelf: true)); var accepted = store.Bytes!.ToArray();
-        try { await stale.SaveAppearanceAsync(new() { FontSize = 30 }); throw new InvalidOperationException("A stale CAS published."); }
-        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Conflict); }
-        Check(stale.Appearance.FontSize == 22 && stale.Entries.Count == 0 && store.Bytes!.SequenceEqual(accepted));
-        int writes = store.Writes;
+        var first = new NovelLibrary(store); var other = new NovelLibrary(store);
+        await first.InitializeAsync(); await other.InitializeAsync();
+        await first.SaveEntryAsync(new("winner", "key", Book(), OnShelf: true));
+        await other.SaveAppearanceAsync(new() { FontSize = 30 });
+        var reopened = new NovelLibrary(store); await reopened.InitializeAsync();
+        Check(reopened.Appearance.FontSize == 30 && reopened.Entries.Single().BookId == "winner",
+            "independent field writes preserve another owner's committed entry");
+        int writes = store.Writes; var accepted = store.Bytes!;
         using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
-        try { await first.SaveAppearanceAsync(new() { FontSize = 31 }, cancellation.Token); throw new InvalidOperationException("A cancelled mutation was admitted."); }
+        try { await first.SaveAppearanceAsync(new() { FontSize = 31 }, cancellation.Token); throw new InvalidOperationException("Cancelled mutation was admitted"); }
         catch (OperationCanceledException) { }
-        Check(store.Writes == writes && first.Appearance.FontSize == 22 && store.Bytes!.SequenceEqual(accepted));
+        Check(store.Writes == writes && store.Bytes!.SequenceEqual(accepted));
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_novel_library SET version=2"));
+        accepted = store.Bytes!;
+        try { await other.SaveAppearanceAsync(new() { FontSize = 32 }); throw new InvalidOperationException("Loaded owner reset a corrupt root"); }
+        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
+        Check(store.Bytes!.SequenceEqual(accepted));
+        await first.PrepareShutdownAsync(); await other.PrepareShutdownAsync(); await reopened.PrepareShutdownAsync();
     }
     private static async Task AppearanceRoundTrip()
     {
         const string text = """
             {"version":1,"entries":[],"rules":[],"appearance":{"mode":"future-mode","conversion":"future-conversion","theme":99,
-              "fontSize":22.000000000000000000001,"lineHeight":1.800000000000000000001,"background":"future-color",
-              "margin":1e400,"extra":{"big":9007199254740993123456789},"é":1,"e\u0301":2}}
+              "fontSize":22,"lineHeight":1.8,"background":"future-color",
+              "margin":32}}
             """;
         await using var store = new MemoryStore { Bytes = Encoding.UTF8.GetBytes(text) };
         var library = new NovelLibrary(store); await library.InitializeAsync();
@@ -268,20 +215,19 @@ public static partial class NovelTests
             Check(Select("阅读模式").SelectedIndex == 2 && Select("简繁转换").SelectedIndex == 0 && Select("主题").SelectedIndex == 0);
             await library.SaveAppearanceAsync(editor.Read());
             var raw = StoredLibrary(store).GetProperty("appearance");
-            RawNumber(raw, "fontSize", "22.000000000000000000001");
-            RawNumber(raw, "margin", "1e400");
+            RawNumber(raw, "fontSize", "22");
+            RawNumber(raw, "margin", "32");
             Input("字号").Text = "27"; await library.SaveAppearanceAsync(editor.Read());
             var reopened = new NovelLibrary(store); await reopened.InitializeAsync();
             Check(reopened.Appearance.FontSize == 27 && reopened.Appearance.Mode == initial.Mode && reopened.Appearance.Conversion == initial.Conversion && reopened.Appearance.Theme == initial.Theme && reopened.Appearance.Background == "future-color");
             raw = StoredLibrary(store).GetProperty("appearance");
-            RawNumber(raw, "lineHeight", "1.800000000000000000001"); RawNumber(raw, "margin", "1e400");
-            RawNumber(raw.GetProperty("extra"), "big", "9007199254740993123456789"); DifferentKeys(raw, 1, 2);
+            RawNumber(raw, "lineHeight", "1.8"); RawNumber(raw, "margin", "32");
             Select("阅读模式").SelectedIndex = 0; Select("简繁转换").SelectedIndex = 1; Select("主题").SelectedIndex = 1;
             await library.SaveAppearanceAsync(editor.Read());
             reopened = new NovelLibrary(store); await reopened.InitializeAsync();
             Check(reopened.Appearance.Mode == "cover" && reopened.Appearance.Conversion == "simplified" && reopened.Appearance.Theme == 1 &&
                 reopened.Appearance.Background == NovelAppearance.Themes[1].Background && reopened.Appearance.Foreground == NovelAppearance.Themes[1].Foreground);
-            RawNumber(StoredLibrary(store).GetProperty("appearance"), "margin", "1e400");
+            RawNumber(StoredLibrary(store).GetProperty("appearance"), "margin", "32");
         }
         finally { host.Close(); await library.PrepareShutdownAsync(); }
     }

@@ -381,7 +381,7 @@ public static partial class MusicLyricDisplayTests
     private static async Task VerifyMultiplePresentations()
     {
         await using var disk = new MusicOfficialAudioTests.MemoryStore();
-        await using var documents = new CacheDocumentStore(disk);
+        await using var documents = new NativeTestDatabase(disk);
         var cache = new MusicPresentationCache(documents);
         string[] songs = [Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D")];
         const string image = "https://images.example.test/shared.png?size=original";
@@ -396,20 +396,20 @@ public static partial class MusicLyricDisplayTests
             Equal(key, MusicPresentationCache.SongKey(raw));
         }
         await documents.DrainAsync();
-        await using var restarted = new CacheDocumentStore(disk);
+        await using var restarted = new NativeTestDatabase(disk);
         var cold = new MusicPresentationCache(restarted);
         await cold.LoadAsync(default);
         foreach (string song in songs.Reverse())
         {
-            var saved = cold.ReadLyricsMemory(song);
+            var saved = cold.ReadLyricsAsync(song, default).GetAwaiter().GetResult();
             Equal(song, saved!["lines"]![0]!["text"]!.GetValue<string>());
         }
         Check((await cold.ReadAsync(image, default))!.Content.SequenceEqual(original));
-        var entries = JsonNode.Parse(restarted.ReadMemory(MusicPresentationCache.Namespace).Data!)!["entries"]!.AsObject();
+        var entries = await restarted.ReadPresentationEntriesAsync();
         Equal(3, entries.Count); // Two song-referenced lyrics and one shared image, not per-song images.
         await cold.ClearImagesAsync(default);
-        Check(await cold.ReadAsync(image, default) is null && songs.All(song => cold.ReadLyricsMemory(song) is not null));
+        Check(await cold.ReadAsync(image, default) is null && songs.All(song => cold.ReadLyricsAsync(song, default).GetAwaiter().GetResult() is not null));
         await cold.ClearAllAsync(default);
-        Check(songs.All(song => cold.ReadLyricsMemory(song) is null));
+        Check(songs.All(song => cold.ReadLyricsAsync(song, default).GetAwaiter().GetResult() is null));
     }
 }

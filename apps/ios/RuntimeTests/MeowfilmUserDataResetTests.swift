@@ -1,89 +1,54 @@
 import XCTest
 import Combine
-import Security
+import MeowStorage
 @testable import Meowfilm
 
+@MainActor
 final class MeowfilmUserDataResetTests: XCTestCase {
-    func testFilmDocumentsAndScriptRuntimeAreErasedOnlyAfterColdLaunch() throws {
+    func testDatabaseAndDurableResourcesAreErasedOnlyAfterColdLaunch() throws {
         let f = try ResetFixture()
         defer { f.dispose() }
-        let paths = ["script-runtime/film-rules/rules.json",
-                     "documents/film.video-sources.v1/catalog.json",
-                     "script-runtime/cat/fixture.json"]
-            .map { f.support.appendingPathComponent("meowfilm/" + $0) }
-        for path in paths {
-            try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data("synthetic".utf8).write(to: path)
-        }
+        XCTAssertTrue(f.hasDatabase)
         try f.store().request()
-        XCTAssertTrue(paths.allSatisfy { FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertTrue(f.hasDatabase); XCTAssertTrue(f.hasPayload)
         try f.store().completePendingReset()
-        XCTAssertTrue(paths.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        XCTAssertFalse(f.hasDatabase); XCTAssertFalse(f.hasPayload)
         XCTAssertEqual(try String(contentsOf: f.external), "original")
     }
 
-    func testNoRequestDoesNotTouchFilesPreferencesOrKeychain() throws {
+    func testNoRequestDoesNotTouchDatabaseOrNetworkState() throws {
         let f = try ResetFixture()
         defer { f.dispose() }
         try f.store().completePendingReset()
-        XCTAssertEqual(f.deletedServices, [])
         XCTAssertEqual(f.networkClears, 0)
-        XCTAssertTrue(f.hasPayload)
-        XCTAssertEqual(f.defaults.string(forKey: "fixture"), "saved")
+        XCTAssertTrue(f.hasDatabase); XCTAssertTrue(f.hasPayload)
     }
 
     func testRequestOnlyRecordsConsentAndColdLaunchErasesExactlyOwnedData() throws {
         let f = try ResetFixture()
         defer { f.dispose() }
-        let firstProcess = f.store()
-        try firstProcess.request()
-        try firstProcess.request()
-        XCTAssertTrue(f.pending)
-        XCTAssertTrue(f.hasPayload)
-        XCTAssertTrue(f.deletedServices.isEmpty)
-        XCTAssertEqual(f.defaults.string(forKey: "fixture"), "saved")
-
+        try f.store().request(); try f.store().request()
+        XCTAssertTrue(f.pending); XCTAssertTrue(f.hasDatabase); XCTAssertTrue(f.hasPayload)
         try f.store().completePendingReset()
-        XCTAssertFalse(f.pending)
-        XCTAssertFalse(f.hasPayload)
-        XCTAssertNil(f.defaults.string(forKey: "fixture"))
-        XCTAssertEqual(Set(f.deletedServices), Set(ResetFixture.expectedServices))
-        XCTAssertEqual(f.remainingServices, ["other.product.credentials"])
+        XCTAssertFalse(f.pending); XCTAssertFalse(f.hasDatabase); XCTAssertFalse(f.hasPayload)
         XCTAssertEqual(f.networkClears, 1)
         XCTAssertEqual(try String(contentsOf: f.external), "original")
         XCTAssertTrue(FileManager.default.fileExists(atPath: f.unrelated.path))
-        let deletes = f.deletedServices
         try f.store().completePendingReset()
-        XCTAssertEqual(f.deletedServices, deletes, "No repeated wipe after the marker is gone")
+        XCTAssertEqual(f.networkClears, 1, "No repeated wipe after the marker is gone")
     }
 
-    func testPartialKeychainFailureRetainsFenceAndRetryIsIdempotent() throws {
+    func testLastStepFailureRetainsRestartFenceAndRetryIsIdempotent() throws {
         let f = try ResetFixture()
         defer { f.dispose() }
-        try f.store().request()
-        f.failingService = ResetFixture.expectedServices[0]
+        try f.store().request(); f.failNetwork = true
         XCTAssertThrowsError(try f.store().completePendingReset()) {
-            XCTAssertEqual($0 as? MeowfilmUserDataReset.Failure, .keychainPermission)
+            XCTAssertEqual($0 as? MeowfilmUserDataReset.Failure, .cookies)
         }
-        XCTAssertTrue(f.pending)
-        XCTAssertFalse(f.hasPayload)
-        XCTAssertEqual(f.defaults.string(forKey: "fixture"), "saved")
-        f.failingService = nil
-        try f.store().completePendingReset()
-        XCTAssertFalse(f.pending)
-        XCTAssertEqual(f.remainingServices, ["other.product.credentials"])
-    }
-
-    func testLastStepFailureCannotReportSuccessOrDiscardRestartFence() throws {
-        let f = try ResetFixture()
-        defer { f.dispose() }
-        try f.store().request()
-        f.failNetwork = true
-        XCTAssertThrowsError(try f.store().completePendingReset())
-        XCTAssertTrue(f.pending)
+        XCTAssertTrue(f.pending); XCTAssertFalse(f.hasPayload); XCTAssertFalse(f.hasDatabase)
         f.failNetwork = false
         try f.store().completePendingReset()
-        XCTAssertFalse(f.pending)
+        XCTAssertFalse(f.pending); XCTAssertEqual(f.networkClears, 1)
     }
 
     func testNestedSymbolicLinkIsRemovedWithoutTouchingExternalOriginal() throws {
@@ -91,8 +56,7 @@ final class MeowfilmUserDataResetTests: XCTestCase {
         defer { f.dispose() }
         try FileManager.default.createSymbolicLink(
             at: f.payloads[0].appendingPathComponent("external-link"), withDestinationURL: f.external)
-        try f.store().request()
-        try f.store().completePendingReset()
+        try f.store().request(); try f.store().completePendingReset()
         XCTAssertEqual(try String(contentsOf: f.external), "original")
     }
 
@@ -100,27 +64,15 @@ final class MeowfilmUserDataResetTests: XCTestCase {
         let f = try ResetFixture()
         defer { f.dispose() }
         try f.store().request()
-        let moved = f.root.appendingPathComponent("external-caches")
-        try FileManager.default.moveItem(at: f.caches, to: moved)
-        try FileManager.default.createSymbolicLink(at: f.caches, withDestinationURL: moved)
-        XCTAssertThrowsError(try f.store().completePendingReset())
+        let moved = f.root.appendingPathComponent("external-temporary")
+        try FileManager.default.moveItem(at: f.temporary, to: moved)
+        try FileManager.default.createSymbolicLink(at: f.temporary, withDestinationURL: moved)
+        XCTAssertThrowsError(try f.store().completePendingReset()) {
+            XCTAssertEqual($0 as? MeowfilmUserDataReset.Failure, .files)
+        }
         XCTAssertTrue(f.pending)
         XCTAssertTrue(FileManager.default.fileExists(atPath: moved.appendingPathComponent("meowfilm/fixture").path))
-        XCTAssertTrue(f.deletedServices.isEmpty)
-    }
-
-    func testKeychainDeleteIsExactServiceAndDoesNotRequireReadingOldPolicy() {
-        XCTAssertEqual(Set(MeowfilmUserDataReset.keychainServices), Set(ResetFixture.expectedServices))
-        for service in MeowfilmUserDataReset.keychainServices {
-            let query = MeowfilmUserDataReset.keychainQuery(service: service)
-            XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
-            XCTAssertEqual(query[kSecAttrService as String] as? String, service)
-            XCTAssertEqual(query[kSecAttrSynchronizable as String] as? Bool, false)
-            XCTAssertEqual(query[kSecUseDataProtectionKeychain as String] as? Bool, true)
-            XCTAssertNil(query[kSecAttrAccessible as String])
-            XCTAssertNil(query[kSecAttrAccessGroup as String])
-            XCTAssertNil(query[kSecReturnData as String])
-        }
+        XCTAssertEqual(f.networkClears, 0)
     }
 }
 
@@ -138,7 +90,6 @@ final class MeowfilmLaunchResetTests: XCTestCase {
         XCTAssertEqual(launch.phase, .restartRequired)
         XCTAssertTrue(f.pending)
         XCTAssertTrue(f.hasPayload)
-        XCTAssertTrue(f.deletedServices.isEmpty)
         launch.start() // Resume/reentry is not a cold process.
         try await launch.requestReset { stops += 1 }
         XCTAssertEqual(stops, 1)
@@ -156,16 +107,16 @@ final class MeowfilmLaunchResetTests: XCTestCase {
         let f = try ResetFixture()
         defer { f.dispose() }
         try f.store().request()
-        f.failingService = ResetFixture.expectedServices[0]
+        f.failNetwork = true
         let launch = MeowfilmLaunchController(factory: { f.store() })
         var admitted = 0
         let observation = launch.$phase.sink { if $0 == .ready { admitted += 1 } }
         defer { observation.cancel() }
         launch.start()
-        await phase(.failed(.keychainPermission), on: launch)
+        await phase(.failed(.cookies), on: launch)
         XCTAssertEqual(admitted, 0)
         XCTAssertTrue(f.pending)
-        f.failingService = nil
+        f.failNetwork = false
         launch.start()
         await ready(launch)
         XCTAssertEqual(admitted, 1)
@@ -201,62 +152,52 @@ final class MeowfilmLaunchResetTests: XCTestCase {
     }
 }
 
-/// All files/defaults/services are synthetic. Never calls the real Keychain,
-/// network stores, standard preferences or the App's production reset factory.
+/// Fresh synthetic database and resources, closed before a destructive cold reset.
+/// Never touches the App's production data root or global network stores.
 private final class ResetFixture: @unchecked Sendable {
-    static let expectedServices = [
-        "dev.meowfilm.aggregate.music.platform.accounts.v1",
-        "dev.meowfilm.aggregate.film.settings.keys.v1"
-    ]
-    let root: URL, support: URL, caches: URL, temporary: URL, external: URL, unrelated: URL
+    let root: URL, support: URL, temporary: URL, external: URL, unrelated: URL
     let payloads: [URL]
-    let defaults: UserDefaults, domain: String
     private let lock = NSLock()
-    private var services = Set(expectedServices + ["other.product.credentials"])
-    private var deleted: [String] = []
     private var clears = 0
-    var failingService: String?
-    var failNetwork = false
-    var deletedServices: [String] { lock.lock(); defer { lock.unlock() }; return deleted }
-    var remainingServices: Set<String> { lock.lock(); defer { lock.unlock() }; return services }
+    private var networkFailure = false
+    var failNetwork: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return networkFailure }
+        set { lock.lock(); defer { lock.unlock() }; networkFailure = newValue }
+    }
     var networkClears: Int { lock.lock(); defer { lock.unlock() }; return clears }
     var pending: Bool { FileManager.default.fileExists(atPath: support.appendingPathComponent("meowfilm-reset.pending").path) }
     var hasPayload: Bool { payloads.contains { FileManager.default.fileExists(atPath: $0.path) } }
+    var hasDatabase: Bool { FileManager.default.fileExists(atPath: payloads[0].appendingPathComponent("storage-v1/meowfilm.sqlite3").path) }
 
-    init() throws {
+    @MainActor init() throws {
         root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         support = root.appendingPathComponent("support", isDirectory: true)
-        caches = root.appendingPathComponent("caches", isDirectory: true)
-        temporary = root.appendingPathComponent("tmp", isDirectory: true)
+        temporary = root.appendingPathComponent("temporary", isDirectory: true)
         external = root.appendingPathComponent("original.js")
         unrelated = support.appendingPathComponent("other-owner")
-        payloads = [support.appendingPathComponent("meowfilm"), caches.appendingPathComponent("meowfilm"),
-                    caches.appendingPathComponent("meowfilm.music.audio-resources.v1"), temporary.appendingPathComponent("meowfilm")]
-        domain = "MeowfilmResetTests." + UUID().uuidString
-        defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        payloads = [support.appendingPathComponent("meowfilm"), temporary.appendingPathComponent("meowfilm")]
         for url in payloads {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             try Data("synthetic".utf8).write(to: url.appendingPathComponent("fixture"))
         }
+        let database = try appStorageTestOpen(payloads[0])
+        try appStorageTestWait {
+            _ = try await database.transaction { try $0.execute("INSERT INTO ios_search_history(text,used_at) VALUES('synthetic',1)") }
+            try await database.close()
+        }
+        let source = payloads[0].appendingPathComponent("cat/source.js")
+        try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("// synthetic third-party source".utf8).write(to: source)
         try Data("original".utf8).write(to: external)
         try Data("unrelated".utf8).write(to: unrelated)
-        defaults.set("saved", forKey: "fixture")
     }
 
     func store() -> MeowfilmUserDataReset {
-        .init(support: support, caches: caches, temporary: temporary, defaults: defaults, defaultsDomain: domain,
-            deleteKeychain: { [self] service in
-                lock.lock(); defer { lock.unlock() }
-                if service == failingService { throw MeowfilmUserDataReset.Failure.keychainPermission }
-                deleted.append(service); services.remove(service)
-            }, clearNetworkState: { [self] in
-                lock.lock(); defer { lock.unlock() }
-                if failNetwork { throw MeowfilmUserDataReset.Failure.cookies }
-                clears += 1
-            })
+        .init(support: support, temporary: temporary, clearNetworkState: { [self] in
+            lock.lock(); defer { lock.unlock() }
+            if networkFailure { throw MeowfilmUserDataReset.Failure.cookies }
+            clears += 1
+        })
     }
-    func dispose() {
-        defaults.removePersistentDomain(forName: domain)
-        try? FileManager.default.removeItem(at: root)
-    }
+    func dispose() { do { try FileManager.default.removeItem(at: root) } catch { XCTFail("Reset fixture cleanup failed: \(error)") } }
 }

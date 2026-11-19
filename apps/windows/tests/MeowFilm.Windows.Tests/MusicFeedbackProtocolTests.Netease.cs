@@ -207,7 +207,7 @@ public static partial class MusicFeedbackProtocolTests
             await Error(() => f.Protocol.StartAsync(f.Account, input), "LIMIT"); Equal(0, f.Calls); Equal(0, f.Saved().Length);
             var bytes = NeteasePlaybackOutboxDocument.Encode([NeteasePlaybackTransport.Start(f.Account, input, 1)]);
             await Error(() => {
-                _ = NeteasePlaybackOutboxDocument.Decode(new(bytes, DocumentFingerprint.FromBytes(bytes)));
+                _ = NeteasePlaybackOutboxDocument.Decode(new(bytes, StorageRevision.Empty));
                 return Task.CompletedTask;
             }, "CORRUPT_STORAGE");
         });
@@ -377,16 +377,16 @@ public static partial class MusicFeedbackProtocolTests
         public bool IsCurrent(MusicPlatformSession account) => Current && ReferenceEquals(account, Value);
         public void Dispose() => Disposals++;
     }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : NativeTestDatabase
     {
-        private readonly Dictionary<string, byte[]> rows = []; internal bool HoldNext;
+        internal bool HoldNext;
         internal readonly TaskCompletionSource Entered = Signal(), Release = Signal();
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) { lock (rows) { var bytes = rows.GetValueOrDefault(ns)?.ToArray(); return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes))); } }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default) {
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
+        {
             if (HoldNext) { HoldNext = false; Entered.TrySetResult(); await Release.Task; }
-            lock (rows) { var old = rows.GetValueOrDefault(ns); if ((old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old)) != expected) throw new DocumentStoreException(DocumentStoreError.Conflict); rows[ns] = bytes.ToArray(); return DocumentFingerprint.FromBytes(bytes.Span); }
+            return await base.WriteAsync(write, token, retainedBytes, commit);
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private sealed class FactClock : TimeProvider
     {
@@ -403,7 +403,7 @@ public static partial class MusicFeedbackProtocolTests
         private int calls; internal int Calls => Volatile.Read(ref calls);
         private Fixture() { Settings = new(Store); Runtime.Client.BindSessions(Accounts); Runtime.OnRequest = Send; Protocol = new(Accounts, Runtime.Client, Clock, Store, Settings); }
         internal static async Task<Fixture> Create() { var f = new Fixture(); await f.Settings.ReadAsync(); await f.Settings.SaveAsync(0, ["wy"]); return f; }
-        internal NeteasePlaybackPending[] Saved() => NeteasePlaybackOutboxDocument.Decode(Store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace).GetAwaiter().GetResult());
+        internal NeteasePlaybackPending[] Saved() => NeteasePlaybackOutboxDocument.Decode(Store.ReadRecordAsync(NeteasePlaybackOutboxDocument.Namespace, MeowFilm.Capabilities.Feedback.FeedbackStorageRecords.Outbox).GetAwaiter().GetResult());
         internal JsonElement Default(MusicPlatformRuntimeFixture.Call call) => call.Operation switch {
             "feedback.qualify" => MusicPlatformRuntimeFixture.Json(new { qualified = true }),
             "feedback.upload" => MusicPlatformRuntimeFixture.Json(new { status = "confirmed" }), _ => throw new InvalidOperationException(call.Operation) };

@@ -30,10 +30,8 @@ internal static class Program
         NovelCapability? pendingNovel = null;
         SearchResultsPage? searchPage = null;
         AppMediaWindowAttachment? pendingMediaAttachment = null;
-        CacheDocumentStore? cacheStore = null;
         MusicLibraryDatabase? musicLibraryStore = null;
-        AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules,
-            AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
+        AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules),
             (runtime, storage, capabilities) =>
             {
                 playbackCoordinator = new(
@@ -42,15 +40,9 @@ internal static class Program
                 musicPlayback = new NativeAudioPlayback(acquireOutput: playbackCoordinator.AcquireMusicAsync);
                 filmPlayback = new FilmPlayback(acquireOutput: playbackCoordinator.AcquireFilmAsync);
                 var cacheRoot = AppDataPaths.Current.Caches;
-                cacheStore = new CacheDocumentStore(() =>
-                {
-                    Directory.CreateDirectory(cacheRoot);
-                    return new LocalDocumentStore(cacheRoot, AppIdentity.CacheNamespaces,
-                        protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
-                });
-                musicLibraryStore = new(Path.Combine(AppDataPaths.Current.Documents, "music-library"));
+                musicLibraryStore = new(storage);
                 capabilities.Add(new MusicCapability(runtime, storage, musicLibraryStore, musicPlayback,
-                    Path.Combine(cacheRoot, "music-audio"), cacheStore));
+                    Path.Combine(cacheRoot, "music-audio")));
                 pendingRules = new FilmRuleService(runtime, storage);
                 pendingSources = new FilmSourceService(runtime, storage);
                 pendingMetadata = new FilmMetadataService(runtime, storage);
@@ -75,55 +67,28 @@ internal static class Program
                 }
                 try
                 {
-                    searchPage?.Dispose();
-                    searchPage = null;
+                    searchPage?.Dispose(); searchPage = null;
                     await Task.WhenAll(pendingRules?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingSources?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingMetadata?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingNovel?.DisposeAsync().AsTask() ?? Task.CompletedTask);
-                    pendingRules = null;
-                    pendingSources = null;
-                    pendingMetadata = null;
-                    pendingNovel = null;
+                    pendingRules = null; pendingSources = null; pendingMetadata = null; pendingNovel = null;
                 }
                 finally
                 {
                     try
                     {
-                        if (musicLibraryStore is not null)
-                        {
-                            await musicLibraryStore.DisposeAsync();
-                            musicLibraryStore = null;
-                        }
+                        if (musicLibraryStore is not null) { await musicLibraryStore.DisposeAsync(); musicLibraryStore = null; }
                     }
                     finally
                     {
                         try
                         {
-                            if (cacheStore is not null)
-                            {
-                                await cacheStore.DisposeAsync();
-                                cacheStore = null;
-                            }
+                            if (musicPlayback is not null) { await musicPlayback.DisposeAsync(); musicPlayback = null; }
                         }
                         finally
                         {
-                            try
-                            {
-                                if (musicPlayback is not null)
-                                {
-                                    await musicPlayback.DisposeAsync();
-                                    musicPlayback = null;
-                                }
-                            }
-                            finally
-                            {
-                                if (filmPlayback is not null)
-                                {
-                                    await filmPlayback.DisposeAsync();
-                                    filmPlayback = null;
-                                }
-                            }
+                            if (filmPlayback is not null) { await filmPlayback.DisposeAsync(); filmPlayback = null; }
                         }
                     }
                 }
@@ -170,6 +135,7 @@ internal static class Program
                 return attachment;
             },
             capabilities => [searchPage = new SearchResultsPage(capabilities.OfType<MusicCapability>().Single(),
-                capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())]);
+                capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())],
+            runtimeSettings: database => new FilmRuntimeSettings(database));
     }
 }

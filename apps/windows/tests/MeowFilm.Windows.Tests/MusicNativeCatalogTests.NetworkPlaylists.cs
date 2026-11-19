@@ -59,7 +59,7 @@ public static partial class MusicNativeCatalogTests
                 saved.Add(collection);
             }
             await f.Owner.DisposeAsync(); await f.Library.AbortAsync();
-            await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             var bytes = f.Store.Bytes!.ToArray(); int before = f.Store.Writes;
             for (int i = 0; i < remoteIds.Length; i++)
             {
@@ -137,7 +137,7 @@ public static partial class MusicNativeCatalogTests
         Error(await f.Library.ExecuteAsync("music.library.network.remove", stale), "REVISION_CONFLICT");
         Check(f.Store.Writes == writes && f.Store.Bytes.SequenceEqual(bytes));
         await f.Owner.DisposeAsync(); await f.Library.AbortAsync();
-        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
         var reopened = Ok(await reader.ExecuteAsync("music.library.network.get", new { platform, id = remoteId }));
         Check(reopened.GetProperty("present").GetBoolean() &&
             reopened.GetProperty("collection").GetRawText() == current.GetRawText());
@@ -160,7 +160,7 @@ public static partial class MusicNativeCatalogTests
             if (defect == "locator") wrapper["library"]!["networkPlaylists"]![0]!["remoteId"] = new JsonArray();
             f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(document, LJ.Json);
             var original = f.Store.Bytes.ToArray(); int writes = f.Store.Writes;
-            await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             Check(N(Ok(await reader.ExecuteAsync("music.library.list")), "total") == 2);
             if (defect == "locator")
             {

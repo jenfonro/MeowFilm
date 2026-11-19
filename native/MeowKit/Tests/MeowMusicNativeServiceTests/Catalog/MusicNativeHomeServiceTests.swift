@@ -3,6 +3,7 @@ import MeowMusicFeature
 import MeowMusicTestSupport
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicNativeService
 
 private extension MusicPublicBrowseSection {
@@ -287,7 +288,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         XCTAssertGreaterThan(encoded.count, 400_000); XCTAssertLessThan(encoded.count, MusicNativeHomeSnapshot.maximumBytes)
         let decoded = try XCTUnwrap(MusicNativeHomeSnapshot.decode(encoded, source: .netease)); XCTAssertEqual(decoded.sections.first?.items.count, 650)
         XCTAssertEqual(Set(try MJ.parse(encoded).fields.map(\.0)), ["source", "sections"])
-        let document = MusicNativeHomeSnapshotDocument { throw MusicServiceError.unavailable }
+        let document = MusicNativeHomeSnapshotDocument(database: try storageTestDatabase(self))
         XCTAssertThrowsError(try document.write(Data(count: MusicNativeHomeSnapshot.maximumBytes + 1))) { XCTAssertEqual($0 as? MusicServiceError, .limit) }
     }
     func testImageQueriesSurviveRepositoryAndHomeReferenceRestoreWithoutCredentials() async throws {
@@ -309,22 +310,23 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         await restarted.close()
     }
     func testSnapshotDocumentRestoresIndependentCDNQueriesWithoutPersistingCredentials() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false); defer { try? FileManager.default.removeItem(at: root) }
-        let factory: @Sendable () throws -> DocumentStore = { try DocumentStore(baseURL: root, namespace: MusicNativeHomeSnapshotDocument.namespace) }
-        let document = MusicNativeHomeSnapshotDocument(storeFactory: factory), image = URL(string: "http://independent-cdn.invalid/cover.jpg?param=800y800&extra=a%2Fb")!
+        let database = try storageTestDatabase(self)
+        let document = MusicNativeHomeSnapshotDocument(database: database), image = URL(string: "http://independent-cdn.invalid/cover.jpg?param=800y800&extra=a%2Fb")!
         let secret = URL(string: "https://independent-cdn.invalid/avatar.jpg?MUSIC_U=synthetic-private")!
         let collection = MusicPublicBrowseCollection(platform: .netease, nativeID: "42", title: "歌单", artwork: image)
         let page = MusicNativePublicBrowseDiscovery(sections: [.init(id: "s", title: "", items: [
             .init(id: "playlist", title: "歌单", artwork: image, content: .collection(collection)),
             .init(id: "private", title: "歌单", artwork: secret, content: .collection(collection))])])
-        try document.write(MusicNativeHomeSnapshot.encode(page, source: .netease))
-        let reopened = MusicNativeHomeSnapshotDocument(storeFactory: factory), data = try XCTUnwrap(reopened.read())
+        let encoded = try MusicNativeHomeSnapshot.encode(page, source: .netease)
+        try storageTestIO { try document.write(encoded) }
+        let reopened = MusicNativeHomeSnapshotDocument(database: database), data = try XCTUnwrap(storageTestIO { try reopened.read() })
         XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("synthetic-private"))
         let restored = try XCTUnwrap(MusicNativeHomeSnapshot.decode(data, source: .netease)), expected = "https://independent-cdn.invalid/cover.jpg?param=800y800&extra=a%2Fb"
         XCTAssertEqual(restored.sections[0].items[0].artwork?.absoluteString, expected); XCTAssertNil(restored.sections[0].items[1].artwork)
         guard case .collection(let saved) = restored.sections[0].items[0].content else { return XCTFail("collection required") }
-        XCTAssertEqual(saved.artwork?.absoluteString, expected); try reopened.clear(); XCTAssertNil(try document.read())
+        XCTAssertEqual(saved.artwork?.absoluteString, expected)
+        try storageTestIO { try reopened.clear() }
+        XCTAssertNil(try storageTestIO { try document.read() })
     }
     func testDailyRecommendationRowsKeepNormalizedAlbumArtwork() async throws {
         let account = HomeAccountFixture(), value = try await service(account)

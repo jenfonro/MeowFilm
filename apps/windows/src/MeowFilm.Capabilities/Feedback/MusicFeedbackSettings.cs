@@ -8,8 +8,9 @@ namespace MeowFilm.Capabilities.Feedback;
 public sealed record MusicFeedbackSettings(long Revision, IReadOnlyList<string> Enabled);
 
 /// <summary>One native-only preferences owner. It never stores listening instances or credentials.</summary>
-public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDisposable
+public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsyncDisposable
 {
+    private readonly TypedRecordRepository store = new(database, DocumentNamespace, FeedbackStorageRecords.Settings);
     public const string DocumentNamespace = "music.feedback.v2";
     public const string ContractVersion = "1.0.0";
     private const long MaximumRevision = 9007199254740991;
@@ -17,7 +18,7 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
     private readonly object sync = new();
     private MusicFeedbackSettings current = new(0, Array.Empty<string>());
     private JsonObject document = new();
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, uncertain, closed, preservesWyConsent;
     public event Action? Changed;
 
@@ -57,14 +58,14 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
                     return current;
                 }
             }
-            var saved = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
+            var saved = await store.ReadAsync(token).ConfigureAwait(false);
             var decoded = Decode(saved, out var raw);
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
                 preservesWyConsent = loaded && !uncertain && current.Revision == decoded.Revision &&
                     current.Enabled.Contains("wy") && decoded.Enabled.Contains("wy");
-                current = decoded; document = raw; fingerprint = saved.Fingerprint; loaded = true; uncertain = false;
+                current = decoded; document = raw; storageRevision = saved.Revision; loaded = true; uncertain = false;
             }
             Notify(); return decoded;
         }
@@ -111,11 +112,9 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
             Notify();
             try
             {
-                var expected = DocumentFingerprint.FromBytes(data);
                 // A final CAS admission cannot be undone by UI cancellation.
-                var actual = await store.WriteAsync(DocumentNamespace, data, fingerprint, CancellationToken.None).ConfigureAwait(false);
-                if (actual != expected) throw Error("COMMIT_UNKNOWN");
-                lock (sync) { current = next; document = nextDocument; fingerprint = actual; uncertain = false; }
+                var actual = await store.WriteAsync(data, storageRevision, CancellationToken.None).ConfigureAwait(false);
+                lock (sync) { current = next; document = nextDocument; storageRevision = actual; uncertain = false; }
                 Notify(); return next;
             }
             catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
@@ -132,11 +131,11 @@ public sealed class MusicFeedbackSettingsOwner(IDocumentStore store) : IAsyncDis
         finally { lane.Release(); }
     }
 
-    private static MusicFeedbackSettings Decode(DocumentSnapshot saved, out JsonObject raw)
+    private static MusicFeedbackSettings Decode(RecordSnapshot saved, out JsonObject raw)
     {
         if (saved.Data is null)
         {
-            if (saved.Fingerprint != DocumentFingerprint.Missing) throw Error("CORRUPT_STORAGE");
+            if (saved.Revision != StorageRevision.Empty) throw Error("CORRUPT_STORAGE");
             raw = new(); return new(0, Array.Empty<string>());
         }
         try

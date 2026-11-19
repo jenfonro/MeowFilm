@@ -1,4 +1,5 @@
-import test from 'node:test';
+import '../../../tests/storage-test-fixture.mjs';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
@@ -609,9 +610,14 @@ function stop() {
 module.exports = { start, stop };
 `;
 
-function rootFor(t) {
+const runtimeRoots = new Set();
+after(() => {
+  for (const root of runtimeRoots) rmSync(root, { recursive: true, force: true });
+});
+
+function rootFor() {
   const root = mkdtempSync(join(tmpdir(), 'meowfilm-cat-runtime-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  runtimeRoots.add(root);
   return root;
 }
 
@@ -790,9 +796,8 @@ function request(url, { method = 'GET', headers = {}, body } = {}) {
   });
 }
 
-function writeSettings(path, change) {
-  const current = JSON.parse(readFileSync(path, 'utf8'));
-  writeFileSync(path, JSON.stringify(change(current), null, 2) + '\n');
+function writeSettings(runtime, change) {
+  return runtime.settings.save(change);
 }
 
 async function waitForState(runtime, installationId, expected, timeoutMs = 10000) {
@@ -1195,7 +1200,7 @@ function streamBridgeSource(upstreamOrigin, valuesDigest = '') {
 
 async function startStreamBridge(t, upstream, { files = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'meowfilm-cat-runtime-'));
-  const volumeRoot = join(root, 'volumes', 'bridge');
+  const volumeRoot = volumeDirectory(root, 'bridge');
   const runtime = createCatRuntime({
     dataRoot: root, network: networkForLocalServers([upstream]),
   });
@@ -1317,12 +1322,15 @@ function volumeSource(marker, extra = '') {
 }
 
 function settingsScript(runtime, installationId) {
-  return JSON.parse(readFileSync(runtime.settings.path, 'utf8')).scripts
-    .find(script => script.installationId === installationId);
+  return runtime.settings.read().scripts.find(script => script.installationId === installationId);
 }
 
 function sourceFile(dataRoot, hash) {
-  return join(dataRoot, 'sources', hash + '.js');
+  return join(dataRoot, 'cat', 'sources', hash + '.js');
+}
+
+function volumeDirectory(productRoot, installationId) {
+  return join(productRoot, 'cat', 'volumes', installationId);
 }
 
 
@@ -1449,7 +1457,7 @@ test('Cat imports reuse the complete uploaded source identity but enables read e
     runtime.readSource = originalRead;
     await runtime.setEnabled('uploaded', false);
     const edited = 'module.exports.home = () => ({ value: "edited bytes with a different length" });';
-    writeFileSync(sourceFile(runtime.dataRoot, contentHash), edited);
+    writeFileSync(sourceFile(runtime.productRoot, contentHash), edited);
     const enabled = await runtime.setEnabled('uploaded', true);
     assert.equal(enabled.sourceHash, sourceHash(edited));
     assert.deepEqual(await runtime.invoke({ installationId: 'uploaded', siteId: 'default',
@@ -1588,10 +1596,9 @@ test('Cat start publishes aggregate readiness and starts instances independently
     });
     await runtime.close();
 
-    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    const reopened = createCatRuntime({ dataRoot: runtime.productRoot });
     t.after(() => reopened.close());
     const started = await reopened.start();
-    assert.equal(started.settingsPath, join(reopened.dataRoot, 'settings.json'));
     assert.equal(started.aggregate.origin, `http://127.0.0.1:${reopened.server.address().port}`);
     assert.ok(reopened.server.listening);
     assert.deepEqual((await reopened.status()).instances.map(instance => instance.state).sort(),
@@ -1638,7 +1645,7 @@ test('Cat management proceeds while another instance starts',
     });
     await runtime.close();
 
-    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    const reopened = createCatRuntime({ dataRoot: runtime.productRoot });
     t.after(() => reopened.close());
     await reopened.start();
     const before = (await reopened.status()).instances.find(instance =>
@@ -1667,7 +1674,7 @@ test('Cat starting instances reject management and session access without hidden
     });
     await runtime.close();
 
-    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    const reopened = createCatRuntime({ dataRoot: runtime.productRoot });
     t.after(() => reopened.close());
     await reopened.start();
     assert.throws(() => reopened.getSession('pending'), { code: 'STARTING' });
@@ -1697,7 +1704,7 @@ test('Cat close stops concurrent startup and waits for every owner',
     });
     await runtime.close();
 
-    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    const reopened = createCatRuntime({ dataRoot: runtime.productRoot });
     await reopened.start();
     await waitForState(reopened, 'first', 'ready');
     assert.equal((await reopened.status()).instances.find(instance =>
@@ -1726,13 +1733,13 @@ test('Cat startup failure is recorded without blocking later instances',
       installationId: 'healthy', source: delayedSource('healthy', 20), config: {},
       version: '1', enabled: true,
     });
-    writeSettings((await runtime.status()).settingsPath, value => ({
+    await writeSettings(runtime, value => ({
       ...value,
       scripts: value.scripts.map(script => ({ ...script, enabled: true })),
     }));
     await runtime.close();
 
-    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    const reopened = createCatRuntime({ dataRoot: runtime.productRoot });
     t.after(() => reopened.close());
     await reopened.start();
     await waitForState(reopened, 'broken', 'failed');
@@ -1752,7 +1759,7 @@ test('Cat cold-start reports disabled instances without loading a host revision'
     });
     await runtime.close();
 
-    const reopened = createCatRuntime({ dataRoot: runtime.dataRoot });
+    const reopened = createCatRuntime({ dataRoot: runtime.productRoot });
     t.after(() => reopened.close());
     await reopened.start();
     const state = (await reopened.status()).instances.find(instance =>
@@ -1821,7 +1828,7 @@ test('Cat source file failures affect only the enabled instance',
         await runtime.install({
           installationId: 'healthy-file', source: delayedSource('healthy-file', 0), enabled: true,
         });
-        writeSettings(runtime.settings.path, value => ({
+        await writeSettings(runtime, value => ({
           ...value, scripts: value.scripts.map(script => ({ ...script, enabled: true })),
         }));
         await runtime.close();
@@ -1858,7 +1865,7 @@ test('Cat refresh rejects invalid and pre-aborted signals before startup',
     await assert.rejects(runtime.refresh({ signal: controller.signal }), { code: 'CANCELLED' });
     assert.equal(runtime.initialization, null);
     assert.equal(existsSync(join(root, 'settings.json')), false);
-    assert.equal(existsSync(join(root, 'sources')), false);
+    assert.equal(existsSync(join(root, 'cat', 'sources')), false);
   });
 
 test('Cat refresh cancellation during shared start does not stop background initialization',
@@ -1870,7 +1877,7 @@ test('Cat refresh cancellation during shared start does not stop background init
     t.after(() => runtime.close());
     await runtime.install({ installationId: 'background-refresh',
       source: gatedSource('background', upstream.socketOrigin), enabled: false });
-    writeSettings(runtime.settings.path, value => ({
+    await writeSettings(runtime, value => ({
       ...value, scripts: value.scripts.map(script => ({ ...script, enabled: true })),
     }));
     await runtime.close();
@@ -1910,9 +1917,9 @@ test('Cat refresh cancelled in an installation queue cannot apply after the prec
     const owner = runtime.getSession('queued-refresh');
     const barrier = new Promise(resolve => { release = resolve; });
     const preceding = runtime.serial('queued-refresh', () => barrier);
-    writeFileSync(sourceFile(runtime.dataRoot, original.sourceHash),
+    writeFileSync(sourceFile(runtime.productRoot, original.sourceHash),
       delayedSource('must-not-publish', 0));
-    writeSettings(runtime.settings.path, value => ({
+    await writeSettings(runtime, value => ({
       ...value, scripts: value.scripts.map(script => ({ ...script, version: '2' })),
     }));
     const controller = new AbortController();
@@ -1971,7 +1978,7 @@ test('Cat metadata commits after a cancelled refresh do not acknowledge unapplie
         const owner = runtime.getSession('metadata-refresh');
         const barrier = new Promise(resolve => { release = resolve; });
         const preceding = runtime.serial('metadata-refresh', () => barrier);
-        writeSettings(runtime.settings.path, value => ({
+        await writeSettings(runtime, value => ({
           ...value, scripts: value.scripts.map(script => ({
             ...script, version: '2', config: { value: 'new' },
           })),
@@ -2032,7 +2039,7 @@ test('Cat refresh cancellation exits A and reports failed while preserving B and
     }
     writeFileSync(sourceFile(root, originals.get('a').sourceHash),
       gatedSource('cancelled-a', `${upstream.socketOrigin}/refresh`));
-    writeSettings(runtime.settings.path, value => ({
+    await writeSettings(runtime, value => ({
       ...value, scripts: value.scripts.map(script =>
         script.installationId === 'a' ? { ...script, version: '2' } : script),
     }));
@@ -2146,12 +2153,12 @@ test('Cat leaves disabled bad files unread and refresh loads only changed enable
       const changedGeneration = reopened.instance('changed').generation;
       reads.length = 0;
       rmSync(files.unchanged);
-      writeSettings(reopened.settings.path, value => ({
+      await writeSettings(reopened, value => ({
         ...value, providers: { quark: true },
       }));
       assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
       assert.deepEqual(reads, []);
-      writeSettings(reopened.settings.path, value => ({
+      await writeSettings(reopened, value => ({
         ...value, scripts: value.scripts.map(script =>
           ['changed', 'disabled'].includes(script.installationId) ? { ...script, version: '2' } : script),
       }));
@@ -2170,7 +2177,7 @@ test('Cat leaves disabled bad files unread and refresh loads only changed enable
       const published = reopened.instance('changed');
       const oldOwner = reopened.getSession('changed');
       writeFileSync(files.changed, 'module.exports = { home( };');
-      writeSettings(reopened.settings.path, value => ({
+      await writeSettings(reopened, value => ({
         ...value, scripts: value.scripts.map(script =>
           script.installationId === 'changed' ? { ...script, version: '3' } : script),
       }));
@@ -2236,7 +2243,7 @@ test('Cat failed atomic reimport preserves the edited file and restores the work
     writeFileSync(file, edited);
     const generation = runtime.instance('atomic-reimport').generation;
     const previousWorker = runtime.getSession('atomic-reimport');
-    const settings = readFileSync(runtime.settings.path, 'utf8');
+    const settings = runtime.settings.read();
     const rename = fs.renameSync;
     fs.renameSync = (from, to) => {
       if (resolve(to) === file) throw Object.assign(new Error('synthetic rename failure'), { code: 'EBUSY' });
@@ -2250,7 +2257,7 @@ test('Cat failed atomic reimport preserves the edited file and restores the work
       syncBuiltinESMExports();
     }
     assert.equal(readFileSync(file, 'utf8'), edited);
-    assert.equal(readFileSync(runtime.settings.path, 'utf8'), settings);
+    assert.deepEqual(runtime.settings.read(), settings);
     assert.equal(runtime.instance('atomic-reimport').generation, generation + 2);
     assert.equal(previousWorker.worker, null);
     assert.equal(runtime.instance('atomic-reimport').sourceHash, sourceHash(original));
@@ -2286,7 +2293,7 @@ test('Cat removal and updates clean the import reference rather than the execute
         } else {
           if (operation === 'refresh-update')
             writeFileSync(sourceFile(root, sourceHash(replacement)), replacement);
-          writeSettings(runtime.settings.path, value => ({
+          await writeSettings(runtime, value => ({
             ...value, scripts: operation === 'refresh-remove' ? [] : value.scripts.map(script =>
               ({ ...script, sourceHash: sourceHash(replacement) })),
           }));
@@ -3920,7 +3927,7 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
       },
     });
     const status = await runtime.status();
-    writeSettings(status.settingsPath, value => ({
+    await writeSettings(runtime, value => ({
       ...value,
       providers: { ...value.providers, quark: true },
       mappings: [{ provider: 'quark', aliases: ['QuarkAlias'] }],
@@ -3968,7 +3975,7 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
     assert.match(guest.url, new RegExp('^' +
       status.aggregate.origin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/proxy/'));
 
-    writeSettings(status.settingsPath, value => ({
+    await writeSettings(runtime, value => ({
       ...value,
       providers: { ...value.providers, quark: false },
     }));
@@ -3980,14 +3987,14 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
     assert.match(fallback.list[0].vod_play_url, /https:\/\/pan\.quark\.cn\/s\/abcd1234/);
     assert.equal(fallback._meow, undefined);
 
-    writeSettings(status.settingsPath, value => ({ ...value, port: -1 }));
-    await assert.rejects(runtime.refresh(), { code: 'CORRUPT_STORAGE' });
+    await assert.rejects(writeSettings(runtime, value => ({ ...value, port: -1 })),
+      { code: 'STORAGE_ERROR' });
     const stillApplied = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'pan', payload: {},
     });
     assert.equal(calls.length, 3);
     assert.equal(stillApplied._meow, undefined);
-    writeSettings(status.settingsPath, value => ({ ...value, port: 0 }));
+    await writeSettings(runtime, value => ({ ...value, port: 0 }));
     await runtime.refresh();
   });
 
@@ -4003,7 +4010,7 @@ test('Cat provider list identity distinguishes missing, invalid and unknown shar
       },
     });
     const status = await runtime.status();
-    writeSettings(status.settingsPath, value => ({
+    await writeSettings(runtime, value => ({
       ...value, providers: { ...value.providers, quark: true, uc: true },
     }));
     await runtime.refresh();
@@ -4768,7 +4775,7 @@ test('Cat invocation uses one settings snapshot while a refresh publishes the ne
       installationId: 'fixture-a', siteId: 'site-a', operation: 'pan', payload: {},
     });
     await entered;
-    writeSettings(status.settingsPath, value => ({
+    await writeSettings(runtime, value => ({
       ...value,
       providers: { ...value.providers, quark: true },
       mappings: [{ provider: 'quark', aliases: ['QuarkAlias'] }],
@@ -5006,7 +5013,7 @@ test('Cat guest pipes 1, 4 and 8 MiB upstream responses into private-volume file
         '/bridge/download?size=' + size);
       assert.equal(result.status, 200);
       assert.deepEqual(JSON.parse(result.text), { size, length: size });
-      const target = join(root, 'volumes', 'bridge', 'download-' + size + '.bin');
+      const target = join(volumeDirectory(root, 'bridge'), 'download-' + size + '.bin');
       assert.equal(readFileSync(target).length, size);
       assert.equal(sha256(readFileSync(target)), sha256(bytes));
     }
@@ -5041,7 +5048,7 @@ test('Cat guest data listeners preserve 1, 4 and 8 MiB while writing to response
       const written = await scriptRequest(endpoint, '/bridge/dataFile?size=' + size);
       assert.equal(written.status, 200);
       assert.deepEqual(JSON.parse(written.text), { size, length: size, bytes: size });
-      const target = join(root, 'volumes', 'bridge', 'data-' + size + '.bin');
+      const target = join(volumeDirectory(root, 'bridge'), 'data-' + size + '.bin');
       assert.equal(sha256(readFileSync(target)), sha256(bytes),
         size + ' byte data file digest');
     }
@@ -5056,7 +5063,7 @@ test('Cat guest pipe keeps an existing data listener complete while writing the 
     const result = await scriptRequest(endpoint, '/bridge/observed?size=' + size);
     assert.equal(result.status, 200);
     assert.deepEqual(JSON.parse(result.text), { size, length: size, observed: size });
-    const target = join(root, 'volumes', 'bridge', 'observed.bin');
+    const target = join(volumeDirectory(root, 'bridge'), 'observed.bin');
     assert.equal(sha256(readFileSync(target)), sha256(bytes));
   });
 
@@ -5397,7 +5404,7 @@ test('Cat native callbacks and methods preserve bytes and typed-array subviews',
     assert.deepEqual(JSON.parse(args.text), {
       viewOffset: 16, viewLength: 256, arrayBuffer: true,
     });
-    const volume = join(root, 'volumes', 'bridge');
+    const volume = volumeDirectory(root, 'bridge');
     for (const name of ['call-values.bin', 'call-subview.bin'])
       assert.equal(sha256(readFileSync(join(volume, name))), sha256(upstream.values), name);
     assert.equal(readFileSync(join(volume, 'call-empty.bin')).length, 0);
@@ -5421,7 +5428,7 @@ test('Cat guest reads a 40 MiB private-volume file and processes 12 MiB buffers 
     const work = 12 * 1024 * 1024;
     const bytes = deterministicBytes(size, 0x13579bdf);
     const root = rootFor(t);
-    const volumeRoot = join(root, 'volumes', 'large-read');
+    const volumeRoot = volumeDirectory(root, 'large-read');
     const runtime = createCatRuntime({ dataRoot: root });
     t.after(() => runtime.close());
     await runtime.install({
@@ -5971,7 +5978,7 @@ test('Cat gateway port publication updates an existing worker without replacing 
     const port = reserved.address().port;
     await new Promise(resolve => reserved.close(resolve));
     for (const nextPort of [port, 0]) {
-      writeSettings(initial.settingsPath, value => ({ ...value, port: nextPort }));
+      await writeSettings(runtime, value => ({ ...value, port: nextPort }));
       await runtime.refresh();
       const status = await runtime.status();
       assert.equal(runtime.instance('fixture-a').generation, generation);
@@ -6144,7 +6151,7 @@ test('Cat stops active I/O before a cooperative stop hook waits and durably writ
     worker.once('exit', () => { exited = true; });
     const result = await runtime.setEnabled('io-before-stop', false);
     assert.equal(result.state, 'disabled');
-    assert.equal(readFileSync(join(root, 'volumes', 'io-before-stop', 'stop-finished.txt'),
+    assert.equal(readFileSync(join(volumeDirectory(root, 'io-before-stop'), 'stop-finished.txt'),
       'utf8'), 'durable');
     assert.equal(owner.cleanupError, null);
     assert.equal(owner.worker, null); assert.equal(worker.threadId, -1);
@@ -6201,7 +6208,7 @@ test('Cat discovers a short startup wrapper, pairs its adjacent async stop and p
       installationId: 'wrapped', siteId: 'wrapped', operation: 'home', payload: {},
     }), { class: [] });
     await runtime.setEnabled('wrapped', false);
-    assert.equal(readFileSync(join(root, 'volumes', 'wrapped', 'wrapped-stop.txt'), 'utf8'), 'done');
+    assert.equal(readFileSync(join(volumeDirectory(root, 'wrapped'), 'wrapped-stop.txt'), 'utf8'), 'done');
   });
 
 test('Cat direct spider fallback exposes homeVod and homeVideo actions',
@@ -7542,7 +7549,7 @@ test('Cat waits for an asynchronous guest stop before releasing the private volu
       version: '1', enabled: true,
     });
     await runtime.setEnabled('async-stop', false);
-    assert.equal(readFileSync(join(root, 'volumes', 'async-stop', 'shutdown', 'flushed.txt'), 'utf8'), 'done');
+    assert.equal(readFileSync(join(volumeDirectory(root, 'async-stop'), 'shutdown', 'flushed.txt'), 'utf8'), 'done');
   });
 
 test('Cat marks a session inactive before destroying residual native requests',
@@ -7749,7 +7756,7 @@ test('Cat uninstall publishes the durable removal after cleanup failure', { time
     version: '1',
     enabled: true,
   });
-  const sourceFile = join(root, 'sources',
+  const sourcePath = join(runtime.dataRoot, 'sources',
     runtime.host.get('fixture-a').contentHash + '.js');
   const session = runtime.getSession('fixture-a');
   const stop = session.stop.bind(session);
@@ -7757,17 +7764,16 @@ test('Cat uninstall publishes the durable removal after cleanup failure', { time
     await stop();
     throw fault('SERVICE_ERROR');
   };
-  const settingsPath = (await runtime.status()).settingsPath;
   await assert.rejects(runtime.uninstall('fixture-a'), { code: 'SERVICE_ERROR' });
   assert.equal(runtime.host.stats().liveSessions, 0);
   assert.equal(runtime.sessions.has('fixture-a'), false);
-  assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')).scripts, []);
+  assert.deepEqual(runtime.settings.read().scripts, []);
   assert.deepEqual(runtime.settings.value.scripts, []);
   assert.deepEqual((await runtime.status()).instances, []);
   assert.equal(runtime.applied.has('fixture-a'), false);
   assert.equal(runtime.failures.has('fixture-a'), false);
-  assert.equal(existsSync(join(root, 'volumes', 'fixture-a')), false);
-  assert.equal(existsSync(sourceFile), false);
+  assert.equal(existsSync(volumeDirectory(root, 'fixture-a')), false);
+  assert.equal(existsSync(sourcePath), false);
 });
 
 test('Cat uninstall deletes the private volume and unreferenced source but keeps shared source',
@@ -7799,10 +7805,10 @@ test('Cat uninstall deletes the private volume and unreferenced source but keeps
     writeFileSync(sourceFile(root, sharedHash), volumeSource('shared', '// manually edited shared file'));
     await runtime.setEnabled('remove-b', false);
     await runtime.setEnabled('remove-b', true);
-    assert.equal(existsSync(join(root, 'volumes', 'remove-a')), true);
+    assert.equal(existsSync(volumeDirectory(root, 'remove-a')), true);
 
     await runtime.uninstall('remove-a');
-    assert.equal(existsSync(join(root, 'volumes', 'remove-a')), false);
+    assert.equal(existsSync(volumeDirectory(root, 'remove-a')), false);
     assert.equal(existsSync(sourceFile(root, uniqueHash)), false);
     assert.equal(existsSync(sourceFile(root, sharedHash)), true);
     assert.deepEqual(await runtime.invoke({
@@ -7810,7 +7816,7 @@ test('Cat uninstall deletes the private volume and unreferenced source but keeps
     }), { value: 'shared' });
 
     await runtime.uninstall('remove-b');
-    assert.equal(existsSync(join(root, 'volumes', 'remove-b')), false);
+    assert.equal(existsSync(volumeDirectory(root, 'remove-b')), false);
     assert.equal(existsSync(sourceFile(root, sharedHash)), true);
     assert.deepEqual(await runtime.invoke({
       installationId: 'remove-c', siteId: 'shared', operation: 'read', payload: {},
@@ -7833,12 +7839,12 @@ test('Cat refresh removing a script deletes the same artifacts as uninstall',
       installationId: 'refresh-remove', siteId: 'refresh-remove', operation: 'write', payload: {},
     });
     const hash = sourceHash(sourceText);
-    writeSettings(runtime.settings.path, value => ({
+    await writeSettings(runtime, value => ({
       ...value,
       scripts: value.scripts.filter(script => script.installationId !== 'refresh-remove'),
     }));
     assert.deepEqual(await runtime.refresh(), { applied: true, failures: [] });
-    assert.equal(existsSync(join(root, 'volumes', 'refresh-remove')), false);
+    assert.equal(existsSync(volumeDirectory(root, 'refresh-remove')), false);
     assert.equal(existsSync(sourceFile(root, hash)), false);
     assert.deepEqual((await runtime.status()).instances, []);
   });
@@ -7863,7 +7869,7 @@ test('Cat cold disabled removals clean their persisted source and volume referen
     const unknown = volumeSource('unknown');
     const unknownFile = sourceFile(root, sourceHash(unknown));
     writeFileSync(unknownFile, unknown);
-    const unknownVolume = join(root, 'volumes', 'unknown-volume');
+    const unknownVolume = volumeDirectory(root, 'unknown-volume');
     mkdirSync(unknownVolume);
     writeFileSync(join(unknownVolume, 'unknown.txt'), 'leave untouched');
 
@@ -7875,22 +7881,22 @@ test('Cat cold disabled removals clean their persisted source and volume referen
       assert.equal(instance.state, 'disabled');
       assert.equal(instance.enabled, false);
       assert.equal(reopened.hostState(instance.installationId), null);
-      assert.equal(existsSync(join(root, 'volumes', instance.installationId)), true);
+      assert.equal(existsSync(volumeDirectory(root, instance.installationId)), true);
     }
     assert.equal(existsSync(sourceFile(root, sourceHash(unique))), true);
-    writeSettings(reopened.settings.path, value => ({
+    await writeSettings(reopened, value => ({
       ...value, scripts: value.scripts.filter(script => script.installationId === 'cold-keep-shared'),
     }));
     assert.deepEqual(await reopened.refresh(), { applied: true, failures: [] });
-    assert.equal(existsSync(join(root, 'volumes', 'cold-remove-unique')), false);
-    assert.equal(existsSync(join(root, 'volumes', 'cold-remove-shared')), false);
+    assert.equal(existsSync(volumeDirectory(root, 'cold-remove-unique')), false);
+    assert.equal(existsSync(volumeDirectory(root, 'cold-remove-shared')), false);
     assert.equal(existsSync(sourceFile(root, sourceHash(unique))), false);
     assert.equal(readFileSync(sourceFile(root, sourceHash(shared)), 'utf8'), shared);
     assert.equal(readFileSync(unknownFile, 'utf8'), unknown);
     assert.equal(readFileSync(join(unknownVolume, 'unknown.txt'), 'utf8'), 'leave untouched');
     assert.deepEqual((await reopened.status()).instances.map(instance =>
       [instance.installationId, instance.state]), [['cold-keep-shared', 'disabled']]);
-    assert.equal(existsSync(join(root, 'volumes', 'cold-keep-shared')), true);
+    assert.equal(existsSync(volumeDirectory(root, 'cold-keep-shared')), true);
     await reopened.setEnabled('cold-keep-shared', true);
     assert.deepEqual(await reopened.invoke({ installationId: 'cold-keep-shared',
       siteId: 'cold-shared', operation: 'read', payload: {} }), { value: 'cold-shared' });
@@ -7957,17 +7963,17 @@ test('Cat stop, disable, update and restart preserve the private volume',
 test('Cat restart does not clean a residual volume but reinstall starts it empty',
   { timeout: 60000 }, async t => {
     const root = rootFor(t);
-    mkdirSync(join(root, 'volumes', 'residual'), { recursive: true });
-    writeFileSync(join(root, 'volumes', 'residual', 'old.txt'), 'old');
+    mkdirSync(volumeDirectory(root, 'residual'), { recursive: true });
+    writeFileSync(join(volumeDirectory(root, 'residual'), 'old.txt'), 'old');
     const runtime = createCatRuntime({ dataRoot: root });
     t.after(() => runtime.close());
     await runtime.start();
-    assert.equal(readFileSync(join(root, 'volumes', 'residual', 'old.txt'), 'utf8'), 'old');
+    assert.equal(readFileSync(join(volumeDirectory(root, 'residual'), 'old.txt'), 'utf8'), 'old');
     await runtime.install({
       installationId: 'residual', source: volumeSource('residual'), config: {},
       version: '1', enabled: true,
     });
-    assert.equal(existsSync(join(root, 'volumes', 'residual', 'old.txt')), false);
+    assert.equal(existsSync(join(volumeDirectory(root, 'residual'), 'old.txt')), false);
     assert.deepEqual(await runtime.invoke({
       installationId: 'residual', siteId: 'residual', operation: 'read', payload: {},
     }), { value: null });
@@ -7992,7 +7998,7 @@ test('Cat reports volume deletion failure without affecting another instance',
     await runtime.invoke({
       installationId: 'remove-works', siteId: 'remove-works', operation: 'write', payload: {},
     });
-    const blocked = resolve(root, 'volumes', 'remove-fails');
+    const blocked = resolve(root, 'cat', 'volumes', 'remove-fails');
     const originals = Object.fromEntries(['rmSync', 'rmdirSync', 'unlinkSync']
       .map(name => [name, fs[name]]));
     const failure = () => Object.assign(
@@ -8013,12 +8019,12 @@ test('Cat reports volume deletion failure without affecting another instance',
       syncBuiltinESMExports();
     }
     assert.equal(runtime.failures.has('remove-fails'), true);
-    assert.equal(existsSync(join(root, 'volumes', 'remove-fails')), true);
+    assert.equal(existsSync(volumeDirectory(root, 'remove-fails')), true);
     assert.deepEqual(await runtime.invoke({
       installationId: 'remove-works', siteId: 'remove-works', operation: 'read', payload: {},
     }), { value: 'remove-works' });
     await runtime.uninstall('remove-works');
-    assert.equal(existsSync(join(root, 'volumes', 'remove-works')), false);
+    assert.equal(existsSync(volumeDirectory(root, 'remove-works')), false);
   });
 
 test('Cat runtime close rejects incomplete host cleanup after releasing runtime ownership',
@@ -8345,28 +8351,23 @@ test('Cat management accepts the public 189 provider name', async () => {
   });
 });
 
-test('Cat restores a hard-linked settings authority and atomically saves its own file', { timeout: 30000 }, async t => {
-  const root = rootFor(t);
-  const runtime = await installed(t, root);
-  const settings = (await runtime.status()).settingsPath;
-  await runtime.close();
-  renameSync(settings, settings + '.original');
-  linkSync(settings + '.original', settings);
-  const reopened = createCatRuntime({ dataRoot: root });
-  t.after(() => reopened.close());
-  await reopened.start();
-  await waitForState(reopened, 'fixture-a', 'ready');
-  await reopened.setEnabled('fixture-a', false);
-  assert.equal(JSON.parse(readFileSync(settings, 'utf8')).scripts[0].enabled, false);
-  assert.equal(JSON.parse(readFileSync(settings + '.original', 'utf8')).scripts[0].enabled, true);
+test('Cat ignores a legacy JSON settings file and leaves it untouched', { timeout: 30000 }, async t => {
+  const root = rootFor(t), legacy = join(root, 'settings.json');
+  writeFileSync(legacy, '{ not an internal storage format }');
+  const runtime = createCatRuntime({ dataRoot: root });
+  t.after(() => runtime.close());
+  await runtime.start();
+  assert.deepEqual(runtime.settings.read().scripts, []);
+  assert.equal(readFileSync(legacy, 'utf8'), '{ not an internal storage format }');
+  assert.equal(existsSync(join(root, 'storage-v1', 'meowfilm.sqlite3')), true);
 });
 
 test('Cat restores hard-linked source files and uninstalls only its own reference', { timeout: 30000 }, async t => {
   const root = rootFor(t);
   const runtime = await installed(t, root);
   const status = await runtime.status();
-  const hash = JSON.parse(readFileSync(status.settingsPath, 'utf8')).scripts[0].sourceHash;
-  const path = join(root, 'sources', hash + '.js');
+  const hash = runtime.settings.read().scripts[0].sourceHash;
+  const path = sourceFile(root, hash);
   await runtime.close();
   renameSync(path, path + '.original');
   linkSync(path + '.original', path);
@@ -8383,48 +8384,39 @@ test('Cat restores hard-linked source files and uninstalls only its own referenc
 test('Cat recreates a missing live source directory for a new installation', { timeout: 30000 }, async t => {
   const root = rootFor(t);
   const runtime = await installed(t, root);
-  rmSync(join(root, 'sources'), { recursive: true, force: true });
+  rmSync(join(root, 'cat', 'sources'), { recursive: true, force: true });
   const item = await runtime.install({
     installationId: 'fixture-next', source, config: { id: 'site-next', protocol: 'old' },
     version: '1', enabled: false,
   });
   assert.equal(item.installationId, 'fixture-next');
-  assert.equal(readFileSync(join(root, 'sources', item.sourceHash + '.js'), 'utf8'), source);
+  assert.equal(readFileSync(join(root, 'cat', 'sources', item.sourceHash + '.js'), 'utf8'), source);
 });
 
-test('Cat starts and restores scripts through App root and source directory aliases', { timeout: 30000 }, async t => {
-  const base = rootFor(t), actual = join(base, 'actual'), alias = join(base, 'alias');
-  mkdirSync(actual);
-  symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
-  const root = alias;
-  const sourceRoot = join(base, 'source-files');
+test('Cat starts and restores scripts through its source directory alias', { timeout: 30000 }, async t => {
+  const root = rootFor(t);
+  const sourceRoot = join(root, 'source-files');
+  mkdirSync(join(root, 'cat'));
   mkdirSync(sourceRoot);
-  symlinkSync(sourceRoot, join(root, 'sources'), process.platform === 'win32' ? 'junction' : 'dir');
+  symlinkSync(sourceRoot, join(root, 'cat', 'sources'), process.platform === 'win32' ? 'junction' : 'dir');
   const runtime = await installed(t, root);
-  assert.equal((await runtime.status()).settingsPath, join(root, 'settings.json'));
+  assert.equal(Object.hasOwn(await runtime.status(), 'settingsPath'), false);
   await runtime.close();
   const reopened = createCatRuntime({ dataRoot: root });
   t.after(() => reopened.close());
   await reopened.start();
   await waitForState(reopened, 'fixture-a', 'ready');
   await reopened.uninstall('fixture-a');
-  assert.equal(existsSync(join(root, 'volumes', 'fixture-a')), false);
+  assert.equal(existsSync(volumeDirectory(root, 'fixture-a')), false);
   assert.equal(fs.readdirSync(sourceRoot).length, 0);
 });
 
-test('Cat rejects malformed settings and a non-file source without replacing them', { timeout: 30000 }, async t => {
+test('Cat rejects a non-file installed source without changing typed installation state', { timeout: 30000 }, async t => {
   const root = rootFor(t), runtime = await installed(t, root);
-  const settings = (await runtime.status()).settingsPath;
-  const original = readFileSync(settings, 'utf8');
-  const sourceHash = JSON.parse(original).scripts[0].sourceHash;
+  const original = runtime.settings.read();
+  const sourceHash = original.scripts[0].sourceHash;
   await runtime.close();
-  writeFileSync(settings, '{');
-  const corrupt = createCatRuntime({ dataRoot: root });
-  t.after(() => corrupt.close());
-  await assert.rejects(corrupt.start(), { code: 'CORRUPT_STORAGE' });
-  assert.equal(readFileSync(settings, 'utf8'), '{');
-  writeFileSync(settings, original);
-  const path = join(root, 'sources', sourceHash + '.js');
+  const path = sourceFile(root, sourceHash);
   rmSync(path);
   mkdirSync(path);
   const reopened = createCatRuntime({ dataRoot: root });
@@ -8433,6 +8425,7 @@ test('Cat rejects malformed settings and a non-file source without replacing the
   await waitForState(reopened, 'fixture-a', 'failed');
   assert.equal(reopened.instance('fixture-a').error, 'CORRUPT_STORAGE');
   assert.equal(fs.statSync(path).isDirectory(), true);
+  assert.deepEqual(reopened.settings.read(), original);
 });
 
 test('Cat applies JSON config material and rejects oversized versions before installation',
@@ -8458,7 +8451,7 @@ test('Cat applies JSON config material and rejects oversized versions before ins
       when: '1970-01-01T00:00:00.000Z',
       map: {},
     });
-    const settings = JSON.parse(readFileSync((await runtime.status()).settingsPath, 'utf8'));
+    const settings = runtime.settings.read();
     assert.deepEqual(settings.scripts[0].config.jsonValue, result.configValue);
     await assert.rejects(runtime.install({
       installationId: 'oversized-version', source, config: {},
@@ -8522,3 +8515,4 @@ test('Cat accepts a synchronous guest callback result larger than the external m
       installationId: 'oversized-callback', siteId: 'oversized', operation: 'home', payload: {},
     }), { class: [] });
   });
+import '../../../tests/storage-test-fixture.mjs';

@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -13,9 +14,9 @@ public static partial class FilmSourcesTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("local initialization options order and aggregate choice survive restart", LocalState);
-        yield return Case("mixed documents preserve exact raw extensions facts and nested values through save sync and restart", RawSourcePersistence);
-        yield return Case("unusable cache and isolated fact records never clear healthy options order or tombstones", IsolatedSourceRecords);
-        yield return Case("duplicate source identity members isolate every candidate through save sync and restart", AmbiguousSourceIdentityMembers);
+        yield return Case("typed source facts options and detection fields survive independent edits refresh and restart", RawSourcePersistence);
+        yield return Case("missing display cache never clears native options order or tombstones", IsolatedSourceRecords);
+        yield return Case("source identity foreign key order and boolean constraints roll back whole transactions", AmbiguousSourceIdentityMembers);
         yield return Case("unknown update display state never retires an otherwise valid source generation", UnknownUpdateState);
         yield return Case("unsupported roots and real source CAS conflicts preserve original storage", SourceDocumentBoundaries);
         yield return Case("native source intent is authoritative and only update restart and detection use Cat RPC", Management);
@@ -1004,7 +1005,7 @@ public static partial class FilmSourcesTests
         await service.SaveVideoOptionsAsync(Key("a"), new(false, false, false, true));
         Check(service.Videos.Single().Options == new FilmVideoOptions(false, false, false, true),
             "lost receipt is reconciled against the actual committed document");
-        var corrupt = new Store { Bytes = Encoding.UTF8.GetBytes("{invalid") };
+        var corrupt = new Store { Bytes = Encoding.UTF8.GetBytes("{\"version\":2,\"cats\":[],\"videos\":[],\"deleted\":[]}") };
         await using var broken = new FilmSourceService(runtime, corrupt);
         int calls = runtime.Calls.Count;
         await Code(() => broken.InitializeAsync(), "INVALID_DOCUMENT");
@@ -1381,54 +1382,31 @@ public static partial class FilmSourcesTests
         public void Dispose() => File.Delete(Path);
     }
 
-    private sealed class Store : IDocumentStore
+    private sealed class Store : NativeTestDatabase
     {
         internal const string CatNamespace = "film.cat-sources.v1";
-        internal byte[]? Bytes, CatBytes;
+        private byte[]? Projection(RelationalRecord record) {var row=Project(record,"device");return row is null?null:JsonSerializer.SerializeToUtf8Bytes(row);}
+        internal byte[]? Bytes { get=>Projection(FilmStorageRecords.Sources); set {if(value is not null)Seed(FilmStorageRecords.Sources,JsonNode.Parse(value)!.AsObject(),"device");} }
+        internal byte[]? CatBytes { get=>Projection(FilmStorageRecords.Cat); set {if(value is not null)Seed(FilmStorageRecords.Cat,JsonNode.Parse(value)!.AsObject(),"device");} }
         internal Store(Runtime? runtime = null)
         {
-            if (runtime is not null) CatBytes = JsonSerializer.SerializeToUtf8Bytes(new
-            {
-                version = 1, port = 0, providers = new { }, mappings = Array.Empty<object>(),
-                scripts = runtime.Nodes.Select(pair => new
-                {
-                    installationId = pair.Key, name = pair.Value.Name, sourceType = pair.Value.SourceType,
-                    sourceUrl = pair.Value.SourceUrl, localPath = (string?)null,
-                    localHash = pair.Value.SourceType == "local" ? new string('0', 64) : null,
-                    enabled = pair.Value.Enabled, inputRevision = pair.Value.InputRevision
-                }).ToArray()
-            });
+            if (runtime is not null) CatBytes=JsonSerializer.SerializeToUtf8Bytes(new {
+                version=1,port=0,providers=new {},mappings=Array.Empty<object>(),
+                scripts=runtime.Nodes.Select(pair=>new {installationId=pair.Key,name=pair.Value.Name,sourceType=pair.Value.SourceType,
+                    sourceUrl=pair.Value.SourceUrl,localPath=(string?)null,localHash=pair.Value.SourceType=="local"?new string('0',64):null,
+                    enabled=pair.Value.Enabled,inputRevision=pair.Value.InputRevision}).ToArray()});
         }
-        internal int Reads, Writes, WriteFailures;
-        internal bool FailBefore, FailAfter, FailAlways, Disposed;
+        internal int WriteFailures;
+        internal bool FailBefore,FailAfter,FailAlways,Disposed;
         internal DocumentStoreException? WriteError;
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)
         {
-            Check(documentNamespace is FilmSourceService.DocumentNamespace or CatNamespace, "known native document namespace");
-            cancellationToken.ThrowIfCancellationRequested(); Reads++;
-            var bytes = documentNamespace == CatNamespace ? CatBytes : Bytes;
-            return Task.FromResult(new DocumentSnapshot(bytes?.ToArray(),
-                bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+            if(FailBefore||FailAlways){FailBefore=false;WriteFailures++;throw WriteError??new DocumentStoreException(DocumentStoreError.Storage);}
+            var result=await base.WriteAsync(write,token,retainedBytes,commit);
+            if(FailAfter){FailAfter=false;throw new DocumentStoreException(DocumentStoreError.Storage);}
+            return result;
         }
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            Check(documentNamespace is FilmSourceService.DocumentNamespace or CatNamespace, "known native document namespace");
-            cancellationToken.ThrowIfCancellationRequested();
-            if (FailBefore || FailAlways)
-            {
-                FailBefore = false; WriteFailures++;
-                throw WriteError ?? new DocumentStoreException(DocumentStoreError.Storage);
-            }
-            var bytes = documentNamespace == CatNamespace ? CatBytes : Bytes;
-            var previous = bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes);
-            if (previous != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            bytes = data.ToArray();
-            if (documentNamespace == CatNamespace) CatBytes = bytes; else Bytes = bytes;
-            Writes++;
-            if (FailAfter) { FailAfter = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return Task.FromResult(DocumentFingerprint.FromBytes(bytes));
-        }
-        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+        public override async ValueTask DisposeAsync(){Disposed=true;await base.DisposeAsync();}
     }
 }

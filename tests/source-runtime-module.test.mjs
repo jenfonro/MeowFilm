@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import test from 'node:test';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { deferred, until } from '../packages/runtime-bridge/test/http-fixture.js';

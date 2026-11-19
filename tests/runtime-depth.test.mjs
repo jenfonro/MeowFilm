@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { withTestDatabase } from './storage-test-fixture.mjs';
+import { decodeValueNodes } from '@meowfilm/storage/values';
 import { join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -112,12 +114,14 @@ test('HTTP LX private KV preserves depth 64 through persistence and rejects dept
     assert.deepEqual(await invoke({ depth: 64 }), {
       ok: true, contract: musicScriptContract, value: nestedArrays(64),
     });
-    const persisted = () => JSON.parse(readFileSync(join(dataRoot, 'music/data', `${item.installationId}.json`), 'utf8'));
-    assert.deepEqual(persisted(), { schema: 1, sites: { kw: [{ key: 'depth', value: nestedArrays(64) }] } });
+    const persisted = () => withTestDatabase(dataRoot, async db => decodeValueNodes(await db.query(
+      'SELECT * FROM music_script_kv_nodes WHERE installation_id=? AND site_id=? AND entry_key=? ORDER BY node_id',
+      [item.installationId, 'kw', 'depth'])));
+    assert.deepEqual(await persisted(), nestedArrays(64));
     assert.deepEqual(await invoke({ depth: 65 }), {
       ok: false, contract: musicScriptContract, code: 'INVALID_REQUEST',
     });
-    assert.deepEqual(persisted(), { schema: 1, sites: { kw: [{ key: 'depth', value: nestedArrays(64) }] } });
+    assert.deepEqual(await persisted(), nestedArrays(64));
     const disabled = await rpc('sources.disable', { installationId: item.installationId });
     assert.equal(disabled.ok, true, JSON.stringify(disabled));
     const reopened = await rpc('sources.enable', { installationId: item.installationId });

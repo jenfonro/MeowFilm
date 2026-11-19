@@ -69,15 +69,18 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
     func testPrivateSettingsFramesWorkBeforeAndAfterEndpointAndOnlyPanCanWrite() async throws {
         let root = try payload()
         let blocks = ["cat.sources", "pan.accounts", "tmdb", "douban", "film.rules", "film.preferences"]
-        let fingerprint: RuntimeValue = .object(["exists": .bool(false), "length": .number(0), "sha256": .null])
+        let revision: Int64 = 1
+        let command: RuntimeValue = .object(["provider": .string("baidu"), "mode": .string("replace"),
+            "accountRevision": .number(0), "rowRevision": .number(0),
+            "credentials": .object(["cookie": .string("synthetic-cookie")])])
         let writes = RuntimeLaunchRecord()
         let access = RuntimeSettingsAccess(blocks: Set(blocks), writableBlocks: ["pan.accounts"], read: { block in
-            .init(document: .object(["block": .string(block)]), fingerprint: fingerprint)
-        }, write: { block, value, expected in
-            XCTAssertEqual(block, "pan.accounts"); XCTAssertEqual(expected, fingerprint)
-            XCTAssertEqual(value, .object(["version": .number(1)]))
+            .init(document: .object(["block": .string(block)]), revision: revision)
+        }, update: { block, value in
+            XCTAssertEqual(block, "pan.accounts")
+            XCTAssertEqual(value, command)
             writes.set([block])
-            return .init(document: value, fingerprint: fingerprint)
+            return .init(document: value, revision: revision + 1)
         })
         let updated = expectation(description: "post-endpoint private write settled")
         let launcher = RuntimeEmbeddedLauncher(payload: { try RuntimePayload(root: root) }, dataDirectory: root,
@@ -99,11 +102,11 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
                     XCTAssertEqual(result["id"], .number(Double(index + 1)))
                     XCTAssertEqual(result["ok"], .bool(true))
                     XCTAssertEqual(result["document"], .object(["block": .string(block)]))
-                    XCTAssertEqual(result["fingerprint"], fingerprint)
+                    XCTAssertEqual(result["revision"], .number(Double(revision)))
                 }
                 peer.endpoint()
-                peer.frame(.object(["kind": .string("settings.write"), "id": .number(7),
-                    "block": .string("pan.accounts"), "document": .object(["version": .number(1)]), "expected": fingerprint, "extra": .null]))
+                peer.frame(.object(["kind": .string("settings.pan.update"), "id": .number(7),
+                    "block": .string("pan.accounts"), "command": command, "extra": .null]))
                 guard let bytes = peer.readLine(), case .object(let result) = try? RuntimeJSON.decode(bytes) else {
                     peer.close(); return 1
                 }
@@ -123,20 +126,20 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
         let root = try payload(), reads = RuntimeLaunchRecord()
         let access = RuntimeSettingsAccess(blocks: ["pan.accounts", "tmdb"], writableBlocks: ["pan.accounts"], read: { _ in
             throw RuntimeSettingsAccessError.storageFailure
-        }, write: { _, _, _ in throw RuntimeSettingsAccessError.conflict })
+        }, update: { _, _ in throw RuntimeSettingsAccessError.conflict })
         let launcher = RuntimeEmbeddedLauncher(payload: { try RuntimePayload(root: root) }, dataDirectory: root,
             settings: access, start: { arguments in
                 let peer = RuntimeBootstrapPeer(duplicating: Int32(arguments[3])!)
                 _ = peer.readLine()
-                peer.frame(.object(["kind": .string("settings.write"), "id": .number(1),
-                    "block": .string("pan.accounts"), "document": .object([:]), "expected": .object([:])]))
+                peer.frame(.object(["kind": .string("settings.pan.update"), "id": .number(1),
+                    "block": .string("pan.accounts"), "command": .object([:])]))
                 if let bytes = peer.readLine(), case .object(let result) = try? RuntimeJSON.decode(bytes) {
                     XCTAssertEqual(result, ["kind": .string("settings.result"), "id": .number(1),
                                            "ok": .bool(false), "code": .string("STORAGE_CONFLICT")])
                     reads.set(["conflict"])
                 } else { XCTFail("missing closed error reply") }
-                peer.frame(.object(["kind": .string("settings.write"), "id": .number(2),
-                    "block": .string("tmdb"), "document": .object([:]), "expected": .object([:])]))
+                peer.frame(.object(["kind": .string("settings.pan.update"), "id": .number(2),
+                    "block": .string("tmdb"), "command": .object([:])]))
                 XCTAssertNil(peer.readLine())
                 peer.close(); return 0
             })

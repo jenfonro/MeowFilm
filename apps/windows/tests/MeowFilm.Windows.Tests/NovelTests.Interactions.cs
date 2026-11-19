@@ -42,11 +42,13 @@ public static partial class NovelTests
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
         string data = TestWorkspace.DataPath("novel-runtime-library");
-        string configuration = TestWorkspace.DataPath("novel-runtime-configuration"); Directory.CreateDirectory(configuration); string id; long revision;
+        string id; long revision;
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
-        await using (var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, data, deadline.Token))
-        await using (var store = new LocalDocumentStore(configuration, [NovelSourceConfiguration.DocumentNamespace]))
+        await using (var store = new NativeDatabase(data))
         {
+            await store.Ready;
+            await using var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, data, deadline.Token,
+                settingsStore: new FilmRuntimeSettings(store));
             var source = new NovelSourceService(runtime, store);
             var imported = await source.ImportAsync(fileName: "novel.html", text: """
                 <script>async function search(keyword) {
@@ -64,18 +66,22 @@ public static partial class NovelTests
             Check(result.GetProperty("books")[0].GetProperty("name").GetString() == "persisted");
             await source.PrepareShutdownAsync();
         }
-        await using (var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, data, deadline.Token))
-        await using (var store = new LocalDocumentStore(configuration, [NovelSourceConfiguration.DocumentNamespace]))
+        await using (var store = new NativeDatabase(data))
         {
+            await store.Ready;
+            await using var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, data, deadline.Token,
+                settingsStore: new FilmRuntimeSettings(store));
             var source = new NovelSourceService(runtime, store); await source.RefreshAsync(deadline.Token);
             var item = source.Sources.Single(); Check(item.InstallationId == id && item.Revision == revision && item.Group == "持久化" && item.Order == -4 && !item.EnabledExplore);
             var result = await source.InvokeAsync(item, "search", new { keyword = "read", page = 1 }, deadline.Token);
             Check(result.GetProperty("books")[0].GetProperty("name").GetString() == "persisted");
             await source.PrepareShutdownAsync();
         }
-        using var privateState = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(data, "source", "private.json"), deadline.Token));
-        Check(privateState.RootElement.GetProperty("sources")[0].GetProperty("installationId").GetString() == id &&
-            !privateState.RootElement.GetProperty("sources")[0].TryGetProperty("definition", out _));
+        await using var reopened = new NativeDatabase(data);
+        Check(await reopened.ReadAsync(db => db.Scalar<long>(
+            "SELECT count(*) FROM source_private_kv_entries WHERE installation_id=$id AND entry_key='native-probe'", ("$id", id))) == 1);
+        Check(await reopened.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM source_definitions")) == 0,
+            "the runtime does not persist a second native source definition");
     }
     private static async Task WebHost()
     {

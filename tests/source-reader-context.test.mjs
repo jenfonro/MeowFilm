@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';

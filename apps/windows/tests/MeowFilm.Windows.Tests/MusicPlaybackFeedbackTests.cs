@@ -246,7 +246,7 @@ public static partial class MusicPlaybackFeedbackTests
             var store = new MemoryStore
             {
                 SkipWrite = true,
-                WriteReceipt = new DocumentFingerprint(true, 1, new string('0', 64))
+                WriteReceipt = new StorageRevision(1, new string('0', 64))
             };
             await using var settings = new MusicFeedbackSettingsOwner(store);
             await settings.ReadAsync();
@@ -258,12 +258,12 @@ public static partial class MusicPlaybackFeedbackTests
         {
             string root = DataPath();
             Directory.CreateDirectory(root);
-            await using (var store = new LocalDocumentStore(root, [MusicFeedbackSettingsOwner.DocumentNamespace]))
+            await using (var store = new NativeDatabase(root))
             await using (var settings = new MusicFeedbackSettingsOwner(store))
             {
                 await settings.ReadAsync(); await settings.SaveAsync(0, ["kg", "wy"]);
             }
-            await using var second = new LocalDocumentStore(root, [MusicFeedbackSettingsOwner.DocumentNamespace]);
+            await using var second = new NativeDatabase(root);
             await using var reopened = new MusicFeedbackSettingsOwner(second);
             var value = await reopened.ReadAsync();
             Check(value.Revision == 1 && value.Enabled.ToHashSet().SetEquals(["kg", "wy"]));
@@ -518,55 +518,35 @@ public static partial class MusicPlaybackFeedbackTests
             public ValueTask DisposeAsync() { Interlocked.Increment(ref owner.DisposedSessions); return ValueTask.CompletedTask; }
         }
     }
-    private sealed class NativeFeedbackStore : IDocumentStore
+    private sealed class NativeFeedbackStore : NativeTestDatabase
     {
-        private readonly Dictionary<string, byte[]> rows = [];
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            lock (rows)
-            {
-                var bytes = rows.GetValueOrDefault(ns)?.ToArray();
-                return Task.FromResult(new DocumentSnapshot(bytes,
-                    bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
-            }
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default)
-        {
-            lock (rows)
-            {
-                var old = rows.GetValueOrDefault(ns);
-                if ((old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old)) != expected)
-                    throw new DocumentStoreException(DocumentStoreError.Conflict);
-                rows[ns] = data.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
-            }
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
-    private sealed class MemoryStore : IDocumentStore
+    private sealed class MemoryStore : NativeTestDatabase
     {
-        internal byte[]? Data;
-        internal int Reads, Writes, Disposals;
         internal bool Lose, SkipWrite;
-        internal DocumentFingerprint? WriteReceipt;
+        internal StorageRevision? WriteReceipt;
         internal TaskCompletionSource? Arrived, Release;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal byte[]? Data
         {
-            Check(ns == MusicFeedbackSettingsOwner.DocumentNamespace); Interlocked.Increment(ref Reads);
-            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(),
-                Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
+            get => Project(MeowFilm.Capabilities.Feedback.FeedbackStorageRecords.Settings, "device") is { } value
+                ? JsonSerializer.SerializeToUtf8Bytes(value) : null;
+            set => Seed(MeowFilm.Capabilities.Feedback.FeedbackStorageRecords.Settings,
+                JsonNode.Parse(value!)!.AsObject(), "device");
         }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            Check(ns == MusicFeedbackSettingsOwner.DocumentNamespace); Interlocked.Increment(ref Writes);
             Arrived?.TrySetResult(); if (Release is not null) await Release.Task;
-            var before = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            if (!SkipWrite) Data = data.ToArray();
+            T receipt;
+            if (SkipWrite)
+            {
+                Interlocked.Increment(ref Writes);
+                receipt = (T)(object)(WriteReceipt ?? new StorageRevision(1, Guid.NewGuid().ToString("D")));
+            }
+            else receipt = await base.WriteAsync(write, token, retainedBytes, commit);
             if (Lose) { Lose = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return WriteReceipt ?? DocumentFingerprint.FromBytes(data.Span);
+            return WriteReceipt is null ? receipt : (T)(object)WriteReceipt;
         }
-        public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
     }
     private sealed class Fixture : IAsyncDisposable
     {

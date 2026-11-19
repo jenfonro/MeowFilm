@@ -4,85 +4,69 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-/// <summary>Explicit native document/CAS test double, not a real disk or runtime.</summary>
-internal sealed class FilmNativeSettingsFixture(params string[] namespaces) : IDocumentStore
+/// <summary>Current typed repositories on real SQLite, with explicit I/O fault/receipt probes.</summary>
+internal class FilmNativeSettingsFixture : NativeTestDatabase
 {
-    private readonly HashSet<string> allowed = new(namespaces.Length == 0
-        ? ["film.rules.v1", "film.tmdb.v1", "film.douban.v1", "film.preferences.v1"] : namespaces);
-    private readonly Dictionary<string, byte[]> documents = [];
-    private readonly object gate = new();
-    private int active;
-    private bool closed;
-    private TaskCompletionSource? drained;
     internal DocumentStoreError? ReadError, WriteError;
-    internal Func<string, CancellationToken, Task>? Reading, Writing;
-    internal int Writes { get; private set; }
+    internal Func<CancellationToken, Task>? Reading, Writing;
     internal CancellationToken WriteToken { get; private set; }
-
-    internal void Seed(string space, JsonElement value) => SeedBytes(space, JsonSerializer.SerializeToUtf8Bytes(value));
-    internal void SeedBytes(string space, byte[] bytes)
+    internal bool FailWrite;
+    private readonly Dictionary<string, int> writesByOwner = [];
+    internal int WritesFor(string owner) => writesByOwner.GetValueOrDefault(owner);
+    private static RelationalRecord Record(string owner) => owner switch
     {
-        lock (gate) { Verify(space); documents[space] = bytes.ToArray(); }
-    }
-    internal JsonElement Value(string space)
+        "film.rules.v1" => MeowFilm.Capabilities.FilmStorageRecords.Rules,
+        "film.tmdb.v1" => MeowFilm.Capabilities.FilmStorageRecords.TMDB,
+        "film.douban.v1" => MeowFilm.Capabilities.FilmStorageRecords.Douban,
+        "film.preferences.v1" => MeowFilm.Capabilities.FilmStorageRecords.Preferences,
+        "film.cat-sources.v1" => MeowFilm.Capabilities.FilmStorageRecords.Cat,
+        _ => throw new InvalidOperationException("Unknown current test relation")
+    };
+    internal void Seed(string owner, JsonElement value)
     {
-        lock (gate) { Verify(space); using var json = JsonDocument.Parse(documents[space]); return json.RootElement.Clone(); }
-    }
-    private void Verify(string space)
-    {
-        if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
-        if (!allowed.Contains(space)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-    }
-    public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
-        Run(documentNamespace, cancellationToken, async () =>
+        var record = Record(owner);
+        var row = System.Text.Json.Nodes.JsonNode.Parse(value.GetRawText())!.AsObject();
+        Inner.WriteAsync(db =>
         {
-            if (Reading is { } read) await read(documentNamespace, cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            lock (gate)
-            {
-                if (ReadError is { } error) throw new DocumentStoreException(error);
-                var bytes = documents.GetValueOrDefault(documentNamespace)?.ToArray();
-                return new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes));
-            }
-        });
-    public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-        DocumentFingerprint expected, CancellationToken cancellationToken = default)
-    {
-        byte[] owned = data.ToArray();
-        return Run(documentNamespace, cancellationToken, async () =>
-        {
-            lock (gate) { Writes++; WriteToken = cancellationToken; }
-            if (Writing is { } write) await write(documentNamespace, cancellationToken).ConfigureAwait(false);
-            lock (gate)
-            {
-                if (WriteError is { } error) throw new DocumentStoreException(error);
-                var before = documents.GetValueOrDefault(documentNamespace);
-                if ((before is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(before)) != expected)
-                    throw new DocumentStoreException(DocumentStoreError.Conflict);
-                documents[documentNamespace] = owned;
-                return DocumentFingerprint.FromBytes(owned);
-            }
-        });
+            record.Save(db, row, record.Read(db, ["device"]), ["device"]);
+            db.CommitRevision(owner, db.Revision(owner), Guid.NewGuid().ToString("D"));
+            return true;
+        }).GetAwaiter().GetResult();
     }
-    private Task<T> Run<T>(string space, CancellationToken token, Func<Task<T>> operation)
+    internal void Seed(string owner, object value) => Seed(owner, JsonSerializer.SerializeToElement(value,
+        new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    internal JsonElement Read(string owner) => Value(owner);
+    internal JsonElement Value(string owner) => Inner.ReadAsync(db =>
+        JsonSerializer.SerializeToElement(Record(owner).Read(db, ["device"])!)).GetAwaiter().GetResult();
+    public override async Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default)
     {
-        lock (gate) { Verify(space); token.ThrowIfCancellationRequested(); active++; }
-        return Execute();
-        async Task<T> Execute()
-        {
-            try { return await operation().ConfigureAwait(false); }
-            finally { lock (gate) { if (--active == 0) drained?.TrySetResult(); } }
-        }
+        Interlocked.Increment(ref Reads);
+        if (Reading is { } hook) await hook(token).ConfigureAwait(false);
+        if (ReadError is { } error) throw new DocumentStoreException(error);
+        return await Inner.ReadAsync(read, token).ConfigureAwait(false);
     }
-    public ValueTask DisposeAsync()
+    public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+        int retainedBytes = 0, Action<Action>? commit = null)
     {
-        lock (gate)
+        if (BeforeWrite is { } before) await before(token).ConfigureAwait(false);
+        var changed = new List<string>();
+        var result = await Inner.WriteAsync(db =>
         {
-            closed = true;
-            drained ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
-            if (active == 0) drained.TrySetResult();
-            return new(drained.Task);
-        }
+            Interlocked.Increment(ref Writes);
+            WriteToken = CancellationToken.None;
+            Writing?.Invoke(CancellationToken.None).GetAwaiter().GetResult();
+            if (FailWrite) throw new DocumentStoreException(DocumentStoreError.Storage);
+            if (WriteError is { } error) throw new DocumentStoreException(error);
+            var previous = new Dictionary<string, StorageRevision>();
+            foreach (var owner in new[] { "film.rules.v1", "film.tmdb.v1", "film.douban.v1", "film.preferences.v1", "film.cat-sources.v1" })
+                previous[owner] = db.Revision(owner);
+            var result = write(db);
+            foreach (var (owner, revision) in previous)
+                if (db.Revision(owner) != revision) changed.Add(owner);
+            return result;
+        }, token, retainedBytes, commit).ConfigureAwait(false);
+        foreach (string owner in changed) writesByOwner[owner] = WritesFor(owner) + 1;
+        return result;
     }
 }
 

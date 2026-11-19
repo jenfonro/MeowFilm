@@ -112,7 +112,7 @@ public static class ShellCloseBehaviorTests
 
     private static async Task RememberMinimize()
     {
-        var store = new QualityFixture.DocumentStore { HoldNamespace = AppClosePreferences.DocumentNamespace };
+        var store = new QualityFixture.Database { HoldWrites = true};
         await using var f = await Fixture.Create(store: store);
         await f.OpenChoice();
         f.Remember.IsChecked = true;
@@ -137,7 +137,7 @@ public static class ShellCloseBehaviorTests
 
     private static async Task RememberExit()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         await using (var first = await Fixture.Create(store: store))
         {
             await first.OpenChoice();
@@ -219,8 +219,8 @@ public static class ShellCloseBehaviorTests
 
     private static async Task SaveFailure()
     {
-        var store = new QualityFixture.DocumentStore
-        { FaultNamespace = AppClosePreferences.DocumentNamespace, Fault = true };
+        var store = new QualityFixture.Database
+        { Fault = true };
         await using var f = await Fixture.Create(store: store);
         await f.OpenChoice();
         f.Remember.IsChecked = true;
@@ -265,7 +265,7 @@ public static class ShellCloseBehaviorTests
 
     private static async Task PendingSaveExit()
     {
-        var store = new QualityFixture.DocumentStore { HoldNamespace = AppClosePreferences.DocumentNamespace };
+        var store = new QualityFixture.Database { HoldWrites = true};
         var releaseShutdown = Pending();
         await using var f = await Fixture.Create(store: store, shutdown: () => releaseShutdown.Task);
         try
@@ -293,7 +293,7 @@ public static class ShellCloseBehaviorTests
     private static async Task PendingSaveAfterCancellation()
     {
         int attempts = 0;
-        var store = new QualityFixture.DocumentStore { HoldNamespace = AppClosePreferences.DocumentNamespace };
+        var store = new QualityFixture.Database { HoldWrites = true};
         await using var f = await Fixture.Create(store: store,
             shutdown: () => ++attempts == 1 ? Task.FromException(new InvalidOperationException()) : Task.CompletedTask);
         await f.OpenChoice();
@@ -401,7 +401,7 @@ public static class ShellCloseBehaviorTests
 
     private static async Task ThemePreviews()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         await using var appearance = new AppAppearance(store);
         await appearance.LoadAsync();
         await using var f = await Fixture.Create(store: store, appearance: appearance);
@@ -501,7 +501,7 @@ public static class ShellCloseBehaviorTests
 
     private sealed class Fixture : IAsyncDisposable
     {
-        internal QualityFixture.DocumentStore Store { get; }
+        internal QualityFixture.Database Store { get; }
         internal AppClosePreferences Preferences { get; }
         internal ShellWindow Shell { get; }
         internal TrayIcon Tray { get; } = new();
@@ -514,7 +514,7 @@ public static class ShellCloseBehaviorTests
         internal CloseWindowDialog Dialog => ShellElement<CloseWindowDialog>("CloseDialog");
         internal CheckBox Remember => DialogElement<CheckBox>("RememberChoice");
 
-        private Fixture(QualityFixture.DocumentStore store, AppClosePreferences preferences,
+        private Fixture(QualityFixture.Database store, AppClosePreferences preferences,
             IDesktopAppearance? appearance, Func<Task>? shutdown, bool trayAvailable, bool showActivated)
         {
             Store = store; Preferences = preferences; Tray.Available = trayAvailable;
@@ -547,7 +547,7 @@ public static class ShellCloseBehaviorTests
         }
 
         internal static async Task<Fixture> Create(WindowCloseBehavior behavior = WindowCloseBehavior.Ask,
-            QualityFixture.DocumentStore? store = null, IDesktopAppearance? appearance = null,
+            QualityFixture.Database? store = null, IDesktopAppearance? appearance = null,
             Func<Task>? shutdown = null, bool trayAvailable = true, bool showActivated = false)
         {
             store ??= new();

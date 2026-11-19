@@ -85,23 +85,23 @@ public struct PanAccountService: Sendable {
         try PanSettingsStore.validate(document)
     }
     public func providers() -> [PanProvider] { PanProvider.all }
-    public func accounts() throws -> [PanAccount] { try settings.accounts() }
-    public func replace(_ provider: PanProviderID, credentials: RuntimeValue) throws -> PanAccount {
-        try settings.replace(provider, credentials: credentials)
+    public func accounts() async throws -> [PanAccount] { try await settings.accounts() }
+    public func replace(_ provider: PanProviderID, credentials: RuntimeValue) async throws -> PanAccount {
+        try await settings.replace(provider, credentials: credentials)
     }
-    public func clear(_ provider: PanProviderID) throws -> PanAccount {
-        try settings.replace(provider, credentials: .object([:]))
+    public func clear(_ provider: PanProviderID) async throws -> PanAccount {
+        try await settings.replace(provider, credentials: .object([:]))
     }
     public func refresh(_ provider: PanProviderID) async throws -> PanAccount {
-        let before = try settings.signature(provider)
+        let before = try await settings.signature(provider)
         do {
             let value = try await request("refresh", input(provider), nil)
             guard value.panField("refreshed") == .bool(true), let state = value.panField("account") else {
                 throw PanAccountError.invalidResponse
             }
-            return try settings.accept(account(state, provider: provider))
+            return try await settings.accept(account(state, provider: provider))
         } catch {
-            if panAuthenticationFailed(error) { try settings.expire(provider, expected: before) }
+            if panAuthenticationFailed(error) { try await settings.expire(provider, expected: before) }
             throw error
         }
     }
@@ -122,10 +122,10 @@ public struct PanAccountService: Sendable {
         guard receipt.sessionID == id, receipt.account.map({ $0.provider == provider }) ?? true else {
             throw PanAccountError.invalidResponse
         }
-        if receipt.progress == .confirmed, let account = receipt.account { _ = try settings.accept(account) }
+        if receipt.progress == .confirmed, let account = receipt.account { _ = try await settings.accept(account) }
         return receipt
     }
-    func current(_ account: PanAccount) throws -> PanAccount { try settings.accept(account) }
+    func current(_ account: PanAccount) async throws -> PanAccount { try await settings.accept(account) }
     public func cancel(_ id: String) async throws { _ = try await request("login.cancel", session(id), nil) }
     private func input(_ provider: PanProviderID) -> RuntimeValue { .object(["provider": .string(provider.rawValue)]) }
     private func session(_ id: String) -> RuntimeValue { .object(["sessionId": .string(id)]) }

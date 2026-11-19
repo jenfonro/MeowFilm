@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createPanRuntime, createRuntimeClient } from '../apps/runtime/pan-entry.mjs';
 import { PanError } from '../packages/pan-runtime/src/errors.js';
 import { deferred } from '../packages/runtime-bridge/test/http-fixture.js';
+import { withTestDatabase } from './storage-test-fixture.mjs';
 
 async function connect(t, handler, options = {}) {
   const area = fileURLToPath(new URL('../tmp/test-results/pan-login/http/', import.meta.url));
@@ -59,8 +60,10 @@ test('HTTP account settings expose three states, distinguish authentication from
   for (const value of [saved, refreshed, await client.call('pan.settings.get')]) {
     assert.ok(!JSON.stringify(value).includes('synthetic-private-'));
   }
-  const stored = JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'));
-  assert.equal(stored.accounts.quark.credentials.cookie, 'session=synthetic-private-rotated');
+  await withTestDatabase(dataRoot, async database => {
+    const [stored] = await database.query('SELECT cookie FROM pan_standalone_accounts WHERE provider=?', ['quark']);
+    assert.equal(stored.cookie, 'session=synthetic-private-rotated');
+  });
   outcome = 'auth';
   assert.deepEqual(await client.call('pan.refresh', { provider: 'quark' }),
     { ok: false, contract: 'pan.runtime.v1', code: 'AUTH_REQUIRED' });
@@ -80,8 +83,10 @@ test('HTTP account settings expose three states, distinguish authentication from
   assert.deepEqual(cleared.value, {
     provider: 'quark', revision: 2, configured: false, fields: [], status: 'signedOut',
   });
-  assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'))
-    .accounts.quark.credentials, {});
+  await withTestDatabase(dataRoot, async database => {
+    const [stored] = await database.query('SELECT cookie FROM pan_standalone_accounts WHERE provider=?', ['quark']);
+    assert.equal(stored.cookie, null);
+  });
 });
 
 test('HTTP pan operations ignore extra fields and never grant them credential or transport authority', async t => {
@@ -101,7 +106,10 @@ test('HTTP pan operations ignore extra fields and never grant them credential or
     accountRevision: 999, method: 'DELETE', url: 'https://untrusted.invalid', headers: { Cookie: 'untrusted' } });
   assert.equal(saved.ok, true);
   assert.deepEqual(saved.value.fields, ['cookie']);
-  assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'))).accounts.quark.credentials, credentials);
+  await withTestDatabase(dataRoot, async database => {
+    const [stored] = await database.query('SELECT cookie FROM pan_standalone_accounts WHERE provider=?', ['quark']);
+    assert.equal(stored.cookie, credentials.cookie);
+  });
   for (const extra of [null, 'unused', [], { nested: { cookie: 'untrusted' } }]) {
     const ignored = { method: extra, headers: extra, url: extra, body: extra, credentials: extra, extra };
     assert.deepEqual(await client.call('pan.providers', ignored), providers);
@@ -144,8 +152,10 @@ test('HTTP logout revokes an in-flight refresh and late credentials cannot sign 
   release.resolve();
   assert.deepEqual(await pending, { ok: false, contract: 'pan.runtime.v1', code: 'STALE_ACCOUNT' });
   assert.deepEqual(await account(client), cleared.value);
-  assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'))
-    .accounts.quark.credentials, {});
+  await withTestDatabase(dataRoot, async database => {
+    const [stored] = await database.query('SELECT cookie FROM pan_standalone_accounts WHERE provider=?', ['quark']);
+    assert.equal(stored.cookie, null);
+  });
 });
 
 test('HTTP QR confirmation publishes the persisted account and closing the confirmed challenge does not log out', async t => {
@@ -186,8 +196,10 @@ test('HTTP QR confirmation publishes the persisted account and closing the confi
   assert.equal(confirmation.value.account.status, 'signedIn');
   assert.equal(confirmation.value.account.revision, 1);
   assert.ok(!JSON.stringify(confirmation).includes('synthetic-qr-cookie'));
-  assert.match(JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'))
-    .accounts.baidu.credentials.cookie, /BDUSS=synthetic-qr-cookie/);
+  await withTestDatabase(dataRoot, async database => {
+    const [stored] = await database.query('SELECT cookie FROM pan_standalone_accounts WHERE provider=?', ['baidu']);
+    assert.match(stored.cookie, /BDUSS=synthetic-qr-cookie/);
+  });
   assert.equal((await client.call('pan.login.cancel', input)).value.status, 'confirmed');
   assert.deepEqual(await account(client, 'baidu'), confirmation.value.account);
   assert.equal(polls, 3);

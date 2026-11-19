@@ -59,7 +59,7 @@ public static partial class MusicUiTests
     private sealed class PlaybackResponsivenessFixture : IAsyncDisposable
     {
         internal readonly BlockingLibraryDocumentStore Store = new();
-        internal readonly CacheDocumentStore Cache = new();
+        internal readonly NativeTestDatabase Cache = new();
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly PlaybackProbe Playback = new();
         internal readonly MusicNativeApplication Application;
@@ -68,8 +68,8 @@ public static partial class MusicUiTests
         internal string[] EntryIds = [];
         private PlaybackResponsivenessFixture()
         {
-            Application = new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime, Cache);
-            Module = new MusicCapability(Application, Store, Playback, cacheStore: Cache);
+            Application = new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime);
+            Module = new MusicCapability(Application, Store, Playback);
         }
         internal static async Task<PlaybackResponsivenessFixture> Create()
         {
@@ -82,7 +82,7 @@ public static partial class MusicUiTests
                     string path = Path.Combine(root, $"responsiveness-{index}.wav");
                     File.WriteAllBytes(path, [0, 1, 2, 3]); return path;
                 }).ToArray();
-                var files = await new GrantedMediaFiles(f.Store, "music.files.v2", [".wav"]).GrantAsync(paths);
+                var files = await new GrantedMediaFiles(f.Store, [".wav"]).GrantAsync(paths);
                 f.Songs = files.Select(file => MusicSongFixture.Local(file.Id, file.Title, duration: 180)).ToArray();
                 await f.Rpc("music.queue.replace", new { songs = f.Songs, index = 0 });
                 await f.Module.InitializeAsync(default);
@@ -114,9 +114,8 @@ public static partial class MusicUiTests
         }
     }
 
-    private sealed class BlockingLibraryDocumentStore : IDocumentStore
+    private sealed class BlockingLibraryDocumentStore : NativeTestDatabase
     {
-        private readonly DocumentProbe inner = new();
         private SynchronousLibraryWriteHold? nextWrite;
         private int libraryWrites;
         internal int LibraryWrites => Volatile.Read(ref libraryWrites);
@@ -134,14 +133,6 @@ public static partial class MusicUiTests
             True(Interlocked.CompareExchange(ref nextWrite, hold, null) is null, "only one library write is held");
             return hold;
         }
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
-            inner.ReadAsync(documentNamespace, cancellationToken);
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            return inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
-        }
-        public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
 
     private sealed class SynchronousLibraryWriteHold : IDisposable

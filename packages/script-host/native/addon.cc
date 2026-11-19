@@ -1,5 +1,9 @@
 #include "engine.h"
 #include "libunicode.h"
+#include "storage-lock.h"
+#ifdef MEOW_APPLE_STORAGE
+#include "sqlite-storage.h"
+#endif
 #include <array>
 #include <climits>
 #include <cstdlib>
@@ -263,6 +267,10 @@ static napi_value DuplicateBootstrapDescriptor(napi_env env, napi_callback_info 
 #endif
 static napi_value Initialize(napi_env env, napi_value exports) {
   return Protect(env, [&] {
+#ifdef MEOW_APPLE_STORAGE
+    RegisterSQLiteStorage(env, exports);
+#endif
+    RegisterStorageLock(env, exports);
     napi_value create, abi, napi;
     NCheck(napi_create_function(env, "create", NAPI_AUTO_LENGTH, Create, nullptr, &create));
     NCheck(napi_set_named_property(env, exports, "create", create));

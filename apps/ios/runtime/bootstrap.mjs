@@ -3,6 +3,8 @@ import { isAbsolute } from 'node:path';
 import { Socket } from 'node:net';
 import { BridgeError, decodeJSONValue, validateSession } from '@meowfilm/runtime-bridge';
 import { duplicateBootstrapDescriptor } from '../../../packages/script-host/src/native-engine.js';
+import { createNativeStorageDriver } from '@meowfilm/script-host/storage';
+import { configureStorage } from '@meowfilm/storage';
 import { createAppRuntime } from '../../runtime/bootstrap.mjs';
 import { createNativeSettings, nativeSettingsFrameBytes } from '../../runtime/native-settings.mjs';
 
@@ -95,6 +97,7 @@ export async function startIOSAppRuntime({
       channel.on('data', bytes => settings ? settings.accept(bytes) : stop('INVALID_REQUEST'));
     });
     if (ended) throw stopError;
+    configureStorage({ driver: createNativeStorageDriver, initialize: configuration.nativeSettings !== true });
     await settings?.initialize();
     if (ended) throw stopError;
     onStage('assembly');

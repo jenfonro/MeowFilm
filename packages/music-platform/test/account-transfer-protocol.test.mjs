@@ -22,7 +22,7 @@ test('B09 WY successful authentication returns and saves the device actually sen
       return response({ code: 200, profile: { userId: succeeds ? 42 : 99 } },
         { cookies: ['NMTID=synthetic-validated-new; Path=/; Domain=music.163.com'] });
     }); seedClients(f);
-    const before = Buffer.from(f.files.get('clients.json'));
+    const before = await f.clientState();
     const cookie = 'MUSIC_U=synthetic-music-u; MUSIC_A=synthetic-account-a; JSESSIONID=synthetic-jsession';
     if (succeeds) {
       const result = await verify(f, 'wy', cookie), saved = fields(result.cookie);
@@ -31,11 +31,11 @@ test('B09 WY successful authentication returns and saves the device actually sen
       assert.equal(saved._ntes_nnid, 'synthetic-nuid,1800000000000');
       assert.equal(saved.JSESSIONID, 'synthetic-jsession');
       assert.equal(saved.MUSIC_A, 'synthetic-account-a');
-      assert.equal(JSON.parse(f.files.get('clients.json')).wy.cookies.NMTID, saved.NMTID);
+      assert.equal((await f.clientState()).wy.cookies.NMTID, saved.NMTID);
       assert.equal(f.writes.length, 1);
     } else {
       await assert.rejects(verify(f, 'wy', cookie), { code: 'INVALID_CREDENTIALS' });
-      assert.deepEqual(f.files.get('clients.json'), before); assert.equal(f.writes.length, 0);
+      assert.deepEqual(await f.clientState(), before); assert.equal(f.writes.length, 0);
     }
     assert.equal(f.requests.length, 1);
     await assert.rejects(f.request('wy', 'account.profile'), { code: 'AUTH_REQUIRED' });
@@ -48,11 +48,11 @@ test('B09 a WY candidate using a different external device cannot patch the inst
     assert.ok(request.headers.Cookie.includes('deviceId=EXTERNAL_DEVICE'));
     return response({ code: 200, profile: { userId: 42 } }, { cookies: ['NMTID=external-nmtid'] });
   }); seedClients(f);
-  const before = Buffer.from(f.files.get('clients.json'));
+  const before = await f.clientState();
   const result = await verify(f, 'wy', 'MUSIC_U=synthetic-music-u; deviceId=EXTERNAL_DEVICE; _ntes_nnid=external,1800000000000');
   assert.equal(fields(result.cookie).deviceId, 'EXTERNAL_DEVICE');
   assert.equal(fields(result.cookie).NMTID, 'external-nmtid');
-  assert.deepEqual(f.files.get('clients.json'), before); assert.equal(f.writes.length, 0);
+  assert.deepEqual(await f.clientState(), before); assert.equal(f.writes.length, 0);
   await f.close();
 });
 
@@ -71,10 +71,10 @@ test('WY rotated authentication cookies are authenticated once using the replace
 
 test('B09 KG GUID must produce the exact decimal MD5 MID before registration or authentication', async () => {
   const f = fixture(() => assert.fail('a mismatched account device cannot dispatch')); seedClients(f);
-  const before = Buffer.from(f.files.get('clients.json'));
+  const before = await f.clientState();
   await assert.rejects(verify(f, 'kg', `userid=42; token=synthetic-token; KUGOU_API_GUID=${seed}; KUGOU_API_MID=1`),
     { code: 'DEVICE_CONTEXT_REQUIRED' });
-  assert.deepEqual(f.files.get('clients.json'), before); assert.equal(f.writes.length, 0); await f.close();
+  assert.deepEqual(await f.clientState(), before); assert.equal(f.writes.length, 0); await f.close();
 });
 
 test('B09 KG registration is anonymous and installs DFID only after successful candidate authentication', async t => {
@@ -101,21 +101,21 @@ test('B09 KG registration is anonymous and installs DFID only after successful c
       assert.equal(value.body.userid, 42);
       return response({ status: 1, data: { userid: outcome === 'wrong-profile' ? 99 : 42 } });
     }); seedClients(f);
-    const initial = JSON.parse(f.files.get('clients.json')); initial.kg.dfid = null;
-    f.files.set('clients.json', Buffer.from(JSON.stringify(initial)));
-    const before = Buffer.from(f.files.get('clients.json'));
+    const initial = (await f.clientState()); initial.kg.dfid = null;
+    await f.setClientState(initial);
+    const before = await f.clientState();
     if (outcome === 'save-failed') f.failWrites();
     const work = verify(f, 'kg', `userid=42; token=synthetic-token; KUGOU_API_GUID=${seed}; KUGOU_API_MID=${mid}; t1=SYNTHETIC_T1_OPAQUE`);
     if (outcome === 'confirmed') {
       const result = await work;
       assert.equal(fields(result.cookie).dfid, 'registered-dfid');
       assert.equal(fields(result.cookie).t1, 'SYNTHETIC_T1_OPAQUE');
-      assert.equal(JSON.parse(f.files.get('clients.json')).kg.dfid, 'registered-dfid');
+      assert.equal((await f.clientState()).kg.dfid, 'registered-dfid');
       assert.equal(f.writes.length, 1);
     } else {
       await assert.rejects(work, { code: ({ 'wrong-profile': 'INVALID_CREDENTIALS', 'registration-rejected': 'UPSTREAM_ERROR',
-        'plaintext-success': 'INVALID_RESPONSE', 'save-failed': 'COMMIT_UNKNOWN' })[outcome] });
-      assert.deepEqual(f.files.get('clients.json'), before);
+        'plaintext-success': 'INVALID_RESPONSE', 'save-failed': 'STORAGE_ERROR' })[outcome] });
+      assert.deepEqual(await f.clientState(), before);
       assert.equal(f.writes.length, outcome === 'save-failed' ? 1 : 0);
     }
     assert.equal(f.requests.length, ['registration-rejected', 'plaintext-success'].includes(outcome) ? 1 : 2);

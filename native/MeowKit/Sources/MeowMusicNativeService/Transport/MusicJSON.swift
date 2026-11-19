@@ -3,6 +3,7 @@ import CryptoKit
 import CoreFoundation
 import MeowJSON
 import MeowMusicFeature
+import MeowRuntime
 
 /// Ordered JSON keeps locator hashes stable. Foundation Dictionary and
 /// sortedKeys must not reorder an existing platform locator object.
@@ -102,6 +103,23 @@ indirect enum MJ: Sendable, Equatable {
         }
     }
     var bytes: Data { Data(json.utf8) }
+    /// Domain values reach the relational writer without a JSON text round trip.
+    var storageValue: RuntimeValue {
+        get throws {
+            switch self {
+            case .null: return .null
+            case .bool(let value): return .bool(value)
+            case .number(let value):
+                guard value.isFinite else { throw MusicServiceError.corruptDocument }
+                return .number(value)
+            case .string(let value): return .string(value)
+            case .array(let values): return .array(try values.map { try $0.storageValue })
+            case .object(let fields):
+                return .object(try RuntimeObject(uniqueKeysWithValues: fields.map { ($0.0, try $0.1.storageValue) }))
+            case .upstreamNumber(let token): return try RuntimeJSON.decode(Data(token.utf8))
+            }
+        }
+    }
     var digest: String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
     static func quote(_ value: String) -> String {
         var out = "\""

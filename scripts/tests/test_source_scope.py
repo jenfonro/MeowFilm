@@ -16,6 +16,8 @@ class SourceScopeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        self.write('scripts/verify-storage-boundaries.mjs',
+                   (ROOT / 'scripts/verify-storage-boundaries.mjs').read_text())
         targets = []
         for folder, names in (("Sources", {"MeowUI", "MeowJSON", "MeowAccounts", "MeowMusicPlatform"}), ("Tests", {"MeowUITests"})):
             for name in sorted(names):
@@ -241,27 +243,24 @@ let package = Package(name: "Fixture", products: [
         path.write_text(video)
         self.assertTrue(any("depends on video" in error for error in scope.check(self.root)))
 
-    def sqlite_target(self, consumer="MeowMusicNativeService", module="sqlite3"):
+    def sqlite_target(self, consumer="MeowStorage", binary_path="../SQLite/.cache/Artifacts/MeowSQLite.xcframework"):
         path = self.root / "native/MeowKit/Package.swift"
-        text = path.read_text().replace("targets: [\n", 'targets: [\n.systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),\n'
-            f'.target(name: "{consumer}", dependencies: ["CSQLite"]),\n')
+        text = path.read_text().replace("targets: [\n", f'targets: [\n.binaryTarget(name: "MeowSQLite", path: "{binary_path}"),\n'
+            f'.target(name: "{consumer}", dependencies: ["MeowSQLite"]),\n')
         path.write_text(text)
-        self.write(f"native/MeowKit/Sources/{consumer}/Fixture.swift", "import CSQLite\n")
-        self.write("native/MeowKit/Sources/CSQLite/module.modulemap",
-            f'module CSQLite [system] {{ header "shim.h" link "{module}" export * }}\n')
-        self.write("native/MeowKit/Sources/CSQLite/shim.h", "#include <sqlite3.h>\n")
+        self.write(f"native/MeowKit/Sources/{consumer}/Fixture.swift", "import MeowSQLite\n")
 
-    def test_system_sqlite_is_explicit_and_owned_by_native_music(self):
+    def test_binary_sqlite_is_explicit_and_owned_by_storage(self):
         self.sqlite_target()
         self.assertEqual(scope.check(self.root), [])
 
-    def test_system_sqlite_rejects_other_linked_libraries(self):
-        self.sqlite_target(module="foreign")
-        self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
+    def test_binary_sqlite_rejects_other_paths(self):
+        self.sqlite_target(binary_path="../Foreign/MeowSQLite.xcframework")
+        self.assertIn("Invalid binary target: MeowSQLite", scope.check(self.root))
 
-    def test_system_sqlite_rejects_unowned_consumers(self):
+    def test_binary_sqlite_rejects_unowned_consumers(self):
         self.sqlite_target(consumer="UnownedSQLiteConsumer")
-        self.assertIn("Unapproved system dependency: UnownedSQLiteConsumer", scope.check(self.root))
+        self.assertIn("Unapproved binary dependency: UnownedSQLiteConsumer", scope.check(self.root))
 
     def test_unknown_system_targets_are_rejected(self):
         path = self.root / "native/MeowKit/Package.swift"

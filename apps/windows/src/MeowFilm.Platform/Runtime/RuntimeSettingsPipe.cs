@@ -6,8 +6,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Platform.Runtime;
 
 /// <summary>A settings-only capability on the PID-verified private lifetime pipe. No arbitrary namespaces or files.</summary>
-internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
-    IReadOnlyDictionary<string, string>? namespaces)
+internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? store)
 {
     private const int MaximumFrameBytes = 8 * 1024 * 1024;
     private readonly byte[] buffer = new byte[4096];
@@ -15,30 +14,42 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
 
     internal async Task<string> ReadyAsync(CancellationToken token)
     {
-        for (;;)
+        try
         {
-            var line = await ReadAsync(token).ConfigureAwait(false) ?? throw new BridgeException("CLOSED");
-            try
+            for (;;)
             {
-                var value = BridgeCodec.DecodeJSONValue(line);
-                if (value.TryGetProperty("protocol", out _))
+                var line = await ReadAsync(token, store is null ? 64 * 1024 : MaximumFrameBytes).ConfigureAwait(false)
+                    ?? throw new BridgeException("CLOSED");
+                try
                 {
-                    if (BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
-                        throw new BridgeException("INVALID_RESPONSE");
-                    string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;
-                    _ = RuntimeHttpProtocol.ValidateEndpoint(endpoint);
-                    return endpoint;
+                    var value = BridgeCodec.DecodeJSONValue(line);
+                    if (value.TryGetProperty("protocol", out _))
+                    {
+                        if (line.Length > 64 * 1024 || offset != count ||
+                            value.EnumerateObject().Count() != 2 ||
+                            BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
+                            throw new BridgeException("INVALID_RESPONSE");
+                        string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;
+                        _ = RuntimeHttpProtocol.ValidateEndpoint(endpoint);
+                        return endpoint;
+                    }
+                    await RespondAsync(value, token).ConfigureAwait(false);
                 }
-                await RespondAsync(value, token).ConfigureAwait(false);
+                finally { CryptographicOperations.ZeroMemory(line); }
             }
-            finally { CryptographicOperations.ZeroMemory(line); }
         }
+        catch (BridgeException error) when (error.Code != "CLOSED") { throw new BridgeException("INVALID_RESPONSE"); }
+        catch (JsonException) { throw new BridgeException("INVALID_RESPONSE"); }
+        catch (InvalidOperationException) { throw new BridgeException("INVALID_RESPONSE"); }
     }
 
     internal async Task<string> RunAsync()
     {
         try
         {
+            if (store is null)
+                return await stream.ReadAsync(buffer.AsMemory(0, 1), CancellationToken.None).ConfigureAwait(false) == 0
+                    ? "CLOSED" : "INVALID_RESPONSE";
             for (;;)
             {
                 var line = await ReadAsync(CancellationToken.None).ConfigureAwait(false);
@@ -60,47 +71,38 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
 
     private async Task RespondAsync(JsonElement request, CancellationToken token)
     {
-        if (store is null || namespaces is null ||
+        if (store is null ||
             !BridgeCodec.RequiredProperty(request, "id").TryGetInt64(out long id) ||
             id is < 1 or > BridgeCodec.MaximumSafeInteger ||
             BridgeCodec.RequiredProperty(request, "block").GetString() is not { } block ||
             BridgeCodec.RequiredProperty(request, "kind").GetString() is not { } kind ||
-            !namespaces.TryGetValue(block, out var documentNamespace))
+            block is not ("cat.sources" or "pan.accounts" or "tmdb" or "douban" or "film.rules" or "film.preferences"))
             throw new BridgeException("INVALID_RESPONSE");
-        if (kind is not ("settings.read" or "settings.write") ||
-            kind == "settings.write" && block != "pan.accounts")
+        if (kind is not ("settings.read" or "settings.pan.update") ||
+            kind == "settings.pan.update" && block != "pan.accounts")
             throw new BridgeException("INVALID_RESPONSE");
         object reply;
-        byte[]? data = null;
         try
         {
-            DocumentFingerprint fingerprint;
-            if (kind == "settings.read")
-            {
-                var snapshot = await store.ReadAsync(documentNamespace, token).ConfigureAwait(false);
-                data = snapshot.Data;
-                fingerprint = snapshot.Fingerprint;
-            }
-            else
-            {
-                var expected = BridgeCodec.RequiredProperty(request, "expected");
-                var hash = BridgeCodec.RequiredProperty(expected, "sha256");
-                var before = new DocumentFingerprint(BridgeCodec.RequiredProperty(expected, "exists").GetBoolean(),
-                    BridgeCodec.RequiredProperty(expected, "length").GetInt32(),
-                    hash.ValueKind == JsonValueKind.Null ? null : hash.GetString());
-                data = BridgeCodec.EncodeJSONValue(BridgeCodec.RequiredProperty(request, "document"));
-                fingerprint = await store.WriteAsync(documentNamespace, data, before, token).ConfigureAwait(false);
-            }
-            using var json = data is null ? null : JsonDocument.Parse(data);
-            reply = new { kind = "settings.result", id, ok = true, document = json?.RootElement.Clone(),
-                fingerprint = new { exists = fingerprint.Exists, length = fingerprint.Length, sha256 = fingerprint.Sha256 } };
+            var snapshot = kind == "settings.read" ? await store.ReadAsync(block, token).ConfigureAwait(false) :
+                await store.UpdatePanAsync(BridgeCodec.RequiredProperty(request, "command"), token).ConfigureAwait(false);
+            reply = new { kind = "settings.result", id, ok = true, document = snapshot.Document, revision = snapshot.Revision };
         }
         catch (DocumentStoreException error)
         {
-            reply = new { kind = "settings.result", id, ok = false,
-                code = error.Error == DocumentStoreError.Conflict ? "STORAGE_CONFLICT" : "STORAGE_ERROR" };
+            reply = new { kind = "settings.result", id, ok = false, code = error.Error switch
+            {
+                DocumentStoreError.Conflict => "STORAGE_CONFLICT",
+                DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
+                DocumentStoreError.InvalidRequest => "INVALID_REQUEST",
+                DocumentStoreError.Closed => "CLOSED",
+                _ => "STORAGE_ERROR"
+            } };
         }
-        finally { if (data is not null) CryptographicOperations.ZeroMemory(data); }
+        catch (BridgeException error)
+        {
+            reply = new { kind = "settings.result", id, ok = false, code = error.Code is "INVALID_REQUEST" ? "INVALID_REQUEST" : "STORAGE_ERROR" };
+        }
         byte[] response = BridgeCodec.EncodeJSONValue(reply);
         try
         {
@@ -112,7 +114,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
         finally { CryptographicOperations.ZeroMemory(response); }
     }
 
-    private async Task<byte[]?> ReadAsync(CancellationToken token)
+    private async Task<byte[]?> ReadAsync(CancellationToken token, int maximum = MaximumFrameBytes)
     {
         using var line = new MemoryStream();
         try
@@ -131,7 +133,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IDocumentStore? store,
                 }
                 int newline = Array.IndexOf(buffer, (byte)'\n', offset, count - offset);
                 int length = (newline < 0 ? count : newline) - offset;
-                if (line.Length + length > MaximumFrameBytes) throw new BridgeException("INVALID_RESPONSE");
+                if (line.Length + length > maximum) throw new BridgeException("INVALID_RESPONSE");
                 line.Write(buffer, offset, length);
                 CryptographicOperations.ZeroMemory(buffer.AsSpan(offset, length));
                 offset += length;

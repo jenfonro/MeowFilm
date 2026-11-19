@@ -3,40 +3,37 @@ import assert from 'node:assert/strict';
 import { fixture, response, rpc, qq, seedClients, gate, wySong, nativeHTTP } from './support.mjs';
 import { createMusicTransport } from '../src/transport.mjs';
 import { MusicPlatformError } from '../src/index.mjs';
-import { parseJSONText } from '@meowfilm/runtime-bridge/json';
 import { gzipSync, brotliCompressSync } from 'node:zlib';
 
 // HEAD Clients/{MusicNativeClientContextTests,MusicClientStorageFailureTests}
-// and QQ/MusicQQPublicPersistence{,Document}Tests: the Node owner uses the
-// current synchronous PrivateDocuments contract, not the old native CAS schema.
-test('a failed current-document read dispatches nothing and never manufactures a replacement installation', async () => {
-  const f = fixture(() => assert.fail('unreadable identity cannot reach HTTP'), { documentIO: {
-    read() { throw Error('synthetic read failure'); }, write() { assert.fail('must not reset storage'); },
-  } });
+// and QQ/MusicQQPublicPersistenceTests: faults surround actual current SQLite I/O.
+test('a failed current-row read dispatches nothing and never manufactures a replacement installation', async () => {
+  const f = fixture(() => assert.fail('unreadable identity cannot reach HTTP'), {
+    beforeRead() { throw Error('synthetic read failure'); },
+  });
   await assert.rejects(f.request('tx', 'search', { keyword: 'x' }), { code: 'STORAGE_ERROR' });
   assert.equal(f.requests.length, 0); assert.equal(f.writes.length, 0); await f.close();
 });
 
 test('an unknown initial save is reloaded, never retried with another installation or used before acknowledgement', async () => {
-  const files = new Map(); let unknown = true;
-  const f = fixture(() => response({ code: 200, data: [wySong('1')] }), { files, documentIO: {
-    read: key => files.get(key),
-    write(key, bytes) { files.set(key, bytes); if (unknown) { unknown = false; throw Error('lost save acknowledgement'); } },
-  } });
+  let unknown = true;
+  const f = fixture(() => response({ code: 200, data: [wySong('1')] }), {
+    afterWrite() { if (unknown) { unknown = false; throw Error('lost save acknowledgement'); } },
+  });
   await assert.rejects(f.request('wy', 'fm'), { code: 'COMMIT_UNKNOWN' });
   assert.equal(f.requests.length, 0);
-  const saved = JSON.parse(files.get('clients.json'));
+  const saved = await f.clientState();
   await f.request('wy', 'fm');
   assert.ok(f.requests[0].headers.Cookie.includes('deviceId=' + saved.wy.cookies.deviceId));
   assert.equal(f.writes.length, 1, 'reload of the applied save is not a replay'); await f.close();
-  const cold = fixture(() => response({ code: 200, data: [] }), { files });
+  const cold = fixture(() => response({ code: 200, data: [] }), { dataRoot: f.root });
   await cold.request('wy', 'fm'); assert.equal(cold.writes.length, 0);
   assert.ok(cold.requests[0].headers.Cookie.includes('deviceId=' + saved.wy.cookies.deviceId)); await cold.close();
 });
 
 test('an unknown QIMEI save reloads the applied value or actual durable winner, without replaying its HTTP', async () => {
   for (const conflict of [false, true]) {
-    const files = new Map(); let unknown = true;
+    let unknown = true;
     const f = fixture(request => {
       if (new URL(request.url).hostname === 'api.tencentmusic.com')
         return response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'new-q36' } }) });
@@ -44,57 +41,53 @@ test('an unknown QIMEI save reloads the applied value or actual durable winner, 
       assert.equal(root.comm.QIMEI36, conflict ? 'winner-q36' : 'new-q36');
       if (root.req_0.method === 'GetSession') return rpc({ session: { uid: 'new-uid', sid: 'new-sid' } });
       return rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } });
-    }, { files, documentIO: {
-      read: key => files.get(key),
-      write(key, bytes) {
+    }, {
+      async afterWrite(platform, value, backing) {
         if (unknown) {
           unknown = false;
           if (conflict) {
-            const winner = JSON.parse(bytes);
-            winner.tx.qimei = { ...winner.tx.qimei, q36: 'winner-q36' };
-            files.set(key, Buffer.from(JSON.stringify(winner)));
-          } else files.set(key, bytes);
+            await backing.writePlatform(platform, { ...value, qimei: { ...value.qimei, q36: 'winner-q36' } });
+          }
           throw Error('save acknowledgement unavailable');
         }
-        files.set(key, bytes);
       },
-    } }); seedClients(f);
-    const saved = JSON.parse(files.get('clients.json')); saved.tx.qimei = null; saved.tx.session = null;
-    files.set('clients.json', Buffer.from(JSON.stringify(saved)));
+    }); seedClients(f);
+    const saved = await f.clientState(); saved.tx.qimei = null; saved.tx.session = null;
+    await f.setClientState(saved);
     await assert.rejects(f.request('tx', 'search', { keyword: 'x' }), { code: 'COMMIT_UNKNOWN' });
     assert.equal(f.requests.length, 1, 'no GetSession or business use after an unconfirmed save');
     await f.request('tx', 'search', { keyword: 'x' });
     assert.equal(f.requests.length, 3); assert.equal(f.writes.length, 2);
     assert.equal(f.requests.filter(row => new URL(row.url).hostname === 'api.tencentmusic.com').length, 1);
     await f.close();
-    const cold = fixture(() => rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }), { files });
+    const cold = fixture(() => rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }), { dataRoot: f.root });
     await cold.request('tx', 'search', { keyword: 'x' }); assert.equal(cold.requests.length, 1);
     assert.equal(cold.writes.length, 0);
     assert.equal(qq(cold.requests[0]).comm.QIMEI36, conflict ? 'winner-q36' : 'new-q36'); await cold.close();
   }
 });
 
-test('anonymous context updates and cold reload preserve unconsumed precise JSON material', async t => {
+test('anonymous context rejects unknown internal fields and cold reload keeps fixed identity and session rows', async t => {
   const f = fixture(request => qq(request).req_0.method === 'GetSession' ?
     rpc({ session: { uid: 'new-uid', sid: 'new-sid' } }) :
     rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }));
   t.after(() => f.close());
   seedClients(f);
-  const state = JSON.parse(f.files.get('clients.json')); state.tx.session = null;
-  const raw = JSON.stringify(state).replace(/}$/, ',"unknown":{"integer":9007199254740993,"decimal":0.123456789012345678901,' +
-    '"huge":1e400,"tiny":1e-400,"negativeZero":-0,"é":1,"é":2}}')
-    .replace('"qimei":', '"extension":{"number":9007199254740995},"qimei":');
-  f.files.set('clients.json', Buffer.from(raw));
-  const before = parseJSONText(raw);
+  const state = (await f.clientState()); state.tx.session = null;
+  const before = await f.clientState();
+  const invalid = structuredClone(state); invalid.tx.extension = { number: '9007199254740995' };
+  await assert.rejects(f.setClientState(invalid), { code: 'INVALID_REQUEST' });
+  assert.deepEqual(await f.clientState(), before);
+  await f.setClientState(state);
   await f.request('tx', 'search', { keyword: 'x' });
-  const saved = parseJSONText(f.files.get('clients.json').toString());
-  assert.deepEqual(saved.unknown, before.unknown); assert.deepEqual(saved.tx.extension, before.tx.extension);
+  const saved = await f.clientState();
+  assert.deepEqual(saved.wy, before.wy); assert.deepEqual(saved.kg, before.kg);
   assert.equal(f.writes.length, 1); assert.equal(saved.tx.session.uid, 'new-uid');
-  const cold = fixture(() => rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }), { files: f.files });
+  const cold = fixture(() => rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }), { dataRoot: f.root });
   t.after(() => cold.close());
-  const snapshot = Buffer.from(cold.files.get('clients.json'));
+  const snapshot = await cold.clientState();
   await cold.request('tx', 'search', { keyword: 'x' });
-  assert.equal(cold.writes.length, 0); assert.deepEqual(cold.files.get('clients.json'), snapshot);
+  assert.equal(cold.writes.length, 0); assert.deepEqual(await cold.clientState(), snapshot);
   assert.equal(qq(cold.requests[0]).comm.uid, 'new-uid');
 });
 
@@ -109,8 +102,8 @@ test('a cancelled QQ waiter does not cancel shared prepare; close aborts and dra
       if (qq(request).req_0.method === 'GetSession') return rpc({ session: { uid: 'new-uid', sid: 'new-sid' } });
       return rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } });
     }); seedClients(f);
-    const saved = JSON.parse(f.files.get('clients.json')); saved.tx.qimei = null; saved.tx.session = null;
-    f.files.set('clients.json', Buffer.from(JSON.stringify(saved)));
+    const saved = (await f.clientState()); saved.tx.qimei = null; saved.tx.session = null;
+    await f.setClientState(saved);
     t.after(async () => { held.release(); await f.close(); });
     const first = f.request('tx', 'search', { keyword: 'a' }, { signal: controller.signal });
     first.catch(() => {});
@@ -126,7 +119,9 @@ test('a cancelled QQ waiter does not cancel shared prepare; close aborts and dra
       held.release(); await close;
       await assert.rejects(joined, { code: 'CLOSED' });
       assert.equal(f.writes.length, 0); assert.equal(f.requests.length, 1);
-      assert.deepEqual(JSON.parse(f.files.get('clients.json')), saved);
+      const cold = fixture(() => assert.fail('storage inspection must not dispatch'), { dataRoot: f.root });
+      t.after(() => cold.close());
+      assert.deepEqual(await cold.clientState(), saved);
     } else {
       held.release(); assert.equal((await joined).items.length, 0);
       assert.equal(f.requests.filter(row => new URL(row.url).hostname === 'api.tencentmusic.com').length, 1);

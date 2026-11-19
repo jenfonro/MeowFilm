@@ -1727,7 +1727,7 @@ internal static class RecommendationTest
         internal Fixture(IMusicPlatformCatalog? actual = null,
             Func<MusicRecommendationSelection, CancellationToken, Task<bool>>? selectionAsync = null)
         {
-            Library = new(MusicTestStores.For(Store)); Port = new(Library);
+            Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage); Port = new(Library);
             Rec = new(actual ?? Catalog, Port, selectionAsync ?? ((value, _) =>
             { if (value.IsCurrent()) { Selections.Enqueue(value); OnSelection?.Invoke(value); } return Task.FromResult(value.IsCurrent()); }), Clock,
                 actual is null ? Catalog.Read : null);

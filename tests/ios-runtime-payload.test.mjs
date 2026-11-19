@@ -8,7 +8,7 @@ import { fixture } from './ios-native-package-support.mjs';
 test('packaged iOS JavaScript resolves only its offline closure on the build host', async t => {
   const f = fixture(t);
   await f.pack();
-  // This is import/storage/HTTP evidence only. iOS native invocation and true
+  // This is import/HTTP evidence only. iOS storage, native invocation and true
   // NodeMobile exit run in the signed preflight and real App host.
   const entry = join(f.output, 'closure-probe.mjs');
   writeFileSync(entry, `
@@ -30,67 +30,31 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
       }
       return result;
     } });
-    const { createRuntime, createRuntimeClient, createAppRuntime, createMusicScriptModule,
-      createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule,
-      createTMDBDataModule, createDoubanDataModule, connectFilmPlayback, connectMusicPlatform,
-      createNeteaseTokenModule } = await import('./app/entry.mjs');
-    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
-    const runtime = createRuntime({ sessionId, dataRoot: join(payload, 'data'), source: { platform: 'ios' } });
-    let client;
-    try {
-      await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
-      const described = await client.describe();
-      assert.equal(described.ok, true);
-      assert.deepEqual(described.value.modules.map(value => [value.id, value.version]),
-        [['music', '0.8.0'], ['cat', '0.2.0'], ['source', '0.3.0']]);
-      const listed = await client.call('music.script.sources.list');
-      assert.equal(listed.ok, true);
-      assert.equal((await client.shutdown()).ok, true);
-    } finally { await runtime.close(); await client?.close(); }
+    const entryExports = await import('./app/entry.mjs');
+    for (const name of ['createRuntime', 'createRuntimeClient', 'createAppRuntime', 'createMusicScriptModule',
+      'createCatScriptModule', 'createSourceRuntimeModule', 'createPanRuntimeModule', 'createTMDBDataModule',
+      'createDoubanDataModule', 'connectFilmPlayback', 'connectMusicPlatform', 'createNeteaseTokenModule']) {
+      assert.equal(typeof entryExports[name], 'function', name);
+    }
     commonOnly = false;
-    const dataRoot = join(payload, 'app-data');
-    const modules = [
-      createMusicScriptModule({ dataRoot }), createCatScriptModule({ dataRoot: join(dataRoot, 'cat') }),
-      createSourceRuntimeModule({ platform: 'ios', dataRoot }), createPanRuntimeModule({ dataRoot }),
-      createTMDBDataModule({ dataRoot }), createDoubanDataModule({ dataRoot }),
-    ];
-    connectFilmPlayback(modules, { dataRoot });
-    modules.push(createNeteaseTokenModule());
-    connectMusicPlatform(modules, { dataRoot });
-    const app = createAppRuntime({ sessionId, modules });
+    await import('./app/modules/metadata/douban.mjs');
+    const { createAppRuntime, createRuntimeClient, createNeteaseTokenModule } = entryExports;
+    const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
+    // This real owner has no native persistence or SDK work until token.get.
+    // Storage-backed owners execute in MeowfilmRuntimeTests, with the signed
+    // iOS framework and the App's actual shared database, not a macOS stand-in.
+    const app = createAppRuntime({ sessionId, modules: [createNeteaseTokenModule()] });
+    let client;
     try {
       await app.start();
       client = createRuntimeClient({ baseUrl: app.baseUrl });
       const described = await client.describe();
       assert.equal(described.ok, true);
+      assert.deepEqual(described.value.modules, [{
+        id: 'netease', version: '0.1.0', contract: 'netease.token.v1', methods: ['netease.token.get'],
+      }]);
       const manifest = JSON.parse(readFileSync('runtime-manifest.json', 'utf8'));
-      assert.deepEqual(described.value.modules.map(value => value.id), manifest.modules);
-      assert.deepEqual(described.value.modules.map(value => [value.id, value.version, value.contract]), [
-        ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
-        ['source', '0.3.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
-        ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
-        ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
-        ['music-platform', '0.1.0', 'music.platform.v1'],
-      ]);
-      assert.deepEqual(described.value.modules[4].methods, [
-        'tmdb.data.request', 'tmdb.data.settings.get', 'tmdb.data.settings.update',
-      ]);
-      assert.deepEqual(described.value.modules[7].methods, ['netease.token.get']);
-      assert.deepEqual(described.value.modules[8].methods, [
-        'music.platform.cache.clear', 'music.platform.describe', 'music.platform.request', 'music.platform.session.update',
-      ]);
-      assert.ok(described.value.modules[2].methods.includes('source.runtime.rules.process'));
-      for (const method of ['pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get',
-        'film.settings.get', 'film.library.get']) {
-        const reply = await client.call(method);
-        assert.equal(reply.ok, true, JSON.stringify(reply));
-      }
-      const settings = await client.call('tmdb.data.settings.get');
-      assert.equal(settings.ok, true);
-      assert.equal(settings.contract, 'tmdb.data.v1');
-      assert.equal(settings.value.apiKey, '');
-      assert.equal(settings.value.accessToken, '');
+      assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
       assert.equal((await client.shutdown()).ok, true);
     } finally { await app.close(); await client?.close(); }
     console.log('IOS_JS_CLOSURE_OK');

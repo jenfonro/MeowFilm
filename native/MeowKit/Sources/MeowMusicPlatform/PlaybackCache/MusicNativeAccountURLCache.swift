@@ -1,7 +1,6 @@
 import Foundation
 import MeowRuntime
 import MeowMusicFeature
-import MeowJSON
 import MeowStorage
 
 /// Actor-confined disposable cache, not a credential store, queue or download.
@@ -31,14 +30,16 @@ struct MusicNativeAccountURLCache {
                 (audio.expiresAt == nil || audio.expiresAt!.addingTimeInterval(-10) > now)
         }
     }
-    private let store: DocumentStore?
+    private let database: SQLiteDatabase?
+    private static let columns = ["scope", "platform", "native_id", "quality", "url", "full", "actual_quality", "bitrate",
+                                  "sample_rate", "duration", "expires_at", "license_expires_at", "saved_at"]
     private var loaded = false
     private var entries: [Entry] = []
     // A delayed pre-failure resolver must not reinsert a URL rejected by the
     // player. This is short-lived request state, never another disk schema.
     private var rejected: [Key: [(url: URL, at: Date)]] = [:]
 
-    init(store: DocumentStore?) { self.store = store }
+    init(database: SQLiteDatabase?) { self.database = database }
 
     /// Consume the shared audio fields. Unused fields never participate in
     /// admission and are not copied into the disposable cache.
@@ -72,26 +73,22 @@ struct MusicNativeAccountURLCache {
         guard !loaded else { return }
         loaded = true
         do {
-            guard let data = try store?.read(key: Self.key) else { return }
-            guard data.count <= Self.maximumBytes,
-                  let fields = try? JSONObject.decodeValue(data) as? JSONObject.Fields,
-                  (fields["version"] as? JSONNumber)?.exactDouble == 1,
-                  let rows = fields["entries"] as? [Any] else { return }
+            guard let database else { return }
+            let rows = try database.readSync { try $0.query("SELECT * FROM ios_music_audio_urls ORDER BY saved_at LIMIT 200") }
             for row in rows {
-                guard let row = row as? JSONObject.Fields,
-                      let value = row["value"] as? JSONObject.Fields,
-                      let keyFields = row["key"] as? JSONObject.Fields,
-                      let scope = keyFields["scope"] as? String,
-                      let platform = keyFields["platform"] as? String,
-                      let nativeID = keyFields["nativeID"] as? String,
-                      let quality = keyFields["quality"] as? String,
-                      let savedAt = (row["savedAt"] as? JSONNumber)?.exactDouble else { continue }
-                var projected = JSONObject.Fields()
-                for name in Self.audioFields { projected[name] = value[name] }
-                guard let data = try? JSONObject.encode(projected),
-                      let value = try? RuntimeJSON.decode(data) else { continue }
-                let entry = Entry(key: .init(scope: scope, platform: platform, nativeID: nativeID, quality: quality),
-                                  value: value, savedAt: Date(timeIntervalSinceReferenceDate: savedAt))
+                var projected = RuntimeObject()
+                for (name, column) in zip(Self.audioFields, Self.columns.dropFirst(4)) {
+                    switch row[column] {
+                    case .null: break
+                    case .text(let value): projected[name] = .string(value)
+                    case .real(let value): projected[name] = .number(value)
+                    case .integer(let value): projected[name] = name == "full" ? .bool(value == 1) : .number(Double(value))
+                    case .blob: throw SQLiteStorageError.corrupt
+                    }
+                }
+                let entry = Entry(key: .init(scope: try row.text("scope"), platform: try row.text("platform"),
+                                            nativeID: try row.text("native_id"), quality: try row.text("quality")),
+                                  value: .object(projected), savedAt: Date(timeIntervalSince1970: try row.double("saved_at")))
                 guard Self.valid(entry.key), entry.usable(at: now) else { continue }
                 entries.removeAll { $0.key == entry.key }; entries.append(entry)
             }
@@ -157,24 +154,50 @@ struct MusicNativeAccountURLCache {
                 if let index = entries.firstIndex(where: { $0.key.scope == scope }) { entries.remove(at: index) }
             }
         }
+        var bytes = entries.reduce(0) { $0 + Self.bytes($1) }
+        while bytes > Self.maximumBytes, !entries.isEmpty {
+            bytes -= Self.bytes(entries.removeFirst())
+        }
+    }
+
+    private static func bytes(_ entry: Entry) -> Int {
+        let identity = entry.key.scope.utf8.count + entry.key.platform.utf8.count +
+            entry.key.nativeID.utf8.count + entry.key.quality.utf8.count
+        guard case .object(let fields) = entry.value else { return identity }
+        return fields.reduce(identity + 128) { size, field in
+            let bytes: Int
+            if case .string(let text) = field.value { bytes = text.utf8.count } else { bytes = 16 }
+            return size + field.key.utf8.count + bytes
+        }
     }
 
     private mutating func save() {
-        func encoded(_ entries: [Entry]) throws -> Data {
-            try RuntimeJSON.encode(.object(["version": .number(1), "entries": .array(entries.map { entry in
-                .object(["key": .object(["scope": .string(entry.key.scope), "platform": .string(entry.key.platform),
-                    "nativeID": .string(entry.key.nativeID), "quality": .string(entry.key.quality)]),
-                    "value": entry.value, "savedAt": .number(entry.savedAt.timeIntervalSinceReferenceDate)])
-            })]))
+        func cells(_ entry: Entry) throws -> [SQLiteValue] {
+            guard case .object(let fields) = entry.value else { throw SQLiteStorageError.invalidValue }
+            var cells: [SQLiteValue] = [.text(entry.key.scope), .text(entry.key.platform), .text(entry.key.nativeID), .text(entry.key.quality)]
+            for name in Self.audioFields {
+                switch fields[name] ?? .null {
+                case .null: cells.append(.null)
+                case .string(let value): cells.append(.text(value))
+                case .bool(let value): cells.append(.bool(value))
+                case .number(let value) where value.isFinite: cells.append(.real(value))
+                default: throw SQLiteStorageError.invalidValue
+                }
+            }
+            cells.append(.optional(entry.savedAt))
+            return cells
         }
         do {
-            var data = try encoded(entries)
-            while data.count > Self.maximumBytes, !entries.isEmpty {
-                entries.removeFirst(); data = try encoded(entries)
+            var rows = try entries.map(cells)
+            while rows.reduce(0, { $0 + $1.reduce(0, { $0 + $1.byteCount + 16 }) }) > Self.maximumBytes, !entries.isEmpty {
+                entries.removeFirst(); rows.removeFirst()
             }
             // The byte budget also applies when persistence is absent/failed.
-            guard let store else { return }
-            try store.write(data, key: Self.key)
+            guard let database else { return }
+            try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
+                try db.reconcile("ios_music_audio_urls", columns: Self.columns,
+                    key: ["scope", "platform", "native_id", "quality"], rows: rows)
+            }
         } catch {
             // A disk failure cannot turn usable media into failure.
             // Keep process-local eviction effective instead of reloading stale disk.

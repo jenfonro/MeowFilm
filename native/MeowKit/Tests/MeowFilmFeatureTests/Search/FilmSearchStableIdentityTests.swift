@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import XCTest
 import MeowRuntime
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 @MainActor
@@ -15,14 +16,14 @@ final class FilmSearchStableIdentityTests: XCTestCase {
         XCTAssertEqual(session.snapshot.rawCards.map(\.detailID), [.number(0), .string("0"), .string("é"), .string("e\u{301}")])
         let keys = session.snapshot.rawCards.map { Data($0.displayKey.utf8) }
         XCTAssertEqual(Set(keys).count, 4)
-        let name = "film-search-favorites-" + UUID().uuidString, defaults: UserDefaults
-        defaults = try XCTUnwrap(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
-        let library = FilmLibrary(defaults: defaults)
+        let database = try storageTestDatabase(self)
+        let library = FilmLibrary()
+        try await library.bind(database: database)
         let details = session.snapshot.rawCards.map { session.context(for: $0).detail }
-        for detail in details { try library.toggle(detail.item) }
+        for detail in details { try await library.toggle(detail.item) }
         XCTAssertEqual(library.favorites.count, 4)
-        let reopened = FilmLibrary(defaults: defaults)
+        let reopened = FilmLibrary()
+        try await reopened.bind(database: database)
         XCTAssertTrue(details.allSatisfy { reopened.contains($0.item) })
         XCTAssertEqual(session.snapshot.cards.first?.members, rows)
         await service.close()

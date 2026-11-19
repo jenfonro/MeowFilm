@@ -13,6 +13,8 @@ const names = new Set([
   'storage.get',
   'storage.set',
   'storage.delete',
+  'reader.values.read',
+  'reader.values.apply',
   'encoding.encode',
   'encoding.decode',
   'crypto.digest',
@@ -143,6 +145,24 @@ function validateHttpResult(value) {
 
 function validateInput(name, input) {
   switch (name) {
+    case 'reader.values.read':
+      fields(input, ['version', 'profile']);
+      sourceRequire(input.version === hostApiVersion);
+      return { version: hostApiVersion, profile: profile(input.profile) };
+    case 'reader.values.apply': {
+      fields(input, ['version', 'profile', 'revision', 'entries']);
+      sourceRequire(input.version === hostApiVersion && Number.isSafeInteger(input.revision) && input.revision >= 0);
+      sourceRequire(input.variable === undefined || typeof input.variable === 'string');
+      sourceRequire(Array.isArray(input.entries) && (input.entries.length > 0 || input.variable !== undefined));
+      const seen = new Set();
+      const entries = input.entries.map(pair => {
+        sourceRequire(Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && !seen.has(pair[0]));
+        seen.add(pair[0]);
+        return [pair[0], jsonClone(pair[1])];
+      });
+      return { version: hostApiVersion, profile: profile(input.profile), revision: input.revision, entries,
+        ...(input.variable === undefined ? {} : { variable: input.variable }) };
+    }
     case 'http.request': return validateHttp(input);
     case 'cookie.get':
     case 'cookie.clear':

@@ -2,26 +2,33 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRuntime, createRuntimeClient } from '../apps/runtime/entry.mjs';
+import { configureStorage, openDatabase } from '@meowfilm/storage';
+import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
+
+configureStorage({ driver: createDesktopStorageDriver, initialize: true });
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const temporary = join(root, 'tmp/test-results/film-playback/runtime-assembly');
 function area(t) {
   mkdirSync(temporary, { recursive: true });
   const path = mkdtempSync(join(temporary, 'case-'));
-  t.after(() => rmSync(path, { recursive: true }));
   return path;
 }
 
 test('E49/E50: the common embedding factory retains its default three-module contract', async t => {
   const sessionId = randomUUID();
-  const runtime = createRuntime({ sessionId, dataRoot: join(area(t), 'data') });
+  const base = area(t);
+  const runtime = createRuntime({ sessionId, dataRoot: join(base, 'data') });
   await runtime.start();
   const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
-  t.after(async () => { await client.close(); await runtime.close(); });
+  t.after(async () => {
+    try { await client.close(); await runtime.close(); }
+    finally { rmSync(base, { recursive: true }); }
+  });
   const description = await client.describe();
   assert.equal(description.ok, true);
   assert.deepEqual(description.value.modules.map(({ id, version, contract }) => [id, version, contract]), [
@@ -31,11 +38,15 @@ test('E49/E50: the common embedding factory retains its default three-module con
 });
 
 for (const platform of ['ios', 'windows']) {
-  test(`E42/E48/E49/E50: the ${platform} App entry assembles nine real owners and connects provider invalidation`, t => {
+  test(`E42/E48/E49/E50: the ${platform} App entry assembles nine real owners and connects provider invalidation`, async t => {
     const base = area(t), actual = join(base, 'private', 'var'), alias = join(base, 'var');
+    t.after(() => rmSync(base, { recursive: true }));
     mkdirSync(actual, { recursive: true });
     symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
-    const dataRoot = join(alias, 'data');
+    const dataRoot = join(realpathSync(alias), 'data');
+    const database = openDatabase(dataRoot);
+    await database.ready;
+    await database.close();
     const bootstrap = new URL(`../apps/${platform}/runtime/bootstrap.mjs`, import.meta.url).href;
     const entry = new URL(`../apps/${platform}/runtime/entries/aggregate.mjs`, import.meta.url).href;
     const sharedBootstrap = new URL('../apps/runtime/bootstrap.mjs', import.meta.url).href;
@@ -46,6 +57,9 @@ for (const platform of ['ios', 'windows']) {
     // this does not claim Windows pipes or an iOS NodeMobile executor was run.
     const startup = platform === 'ios' ? `
       import { createAppRuntime } from ${JSON.stringify(sharedBootstrap)};
+      import { configureStorage } from '@meowfilm/storage';
+      import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
+      configureStorage({ driver: createDesktopStorageDriver, initialize: false });
       export async function startIOSAppRuntime({ product, assemble, settingsChanged }) {
         const { settings, ...configuration } = globalThis.fixtureConfiguration;
         await settings.initialize();
@@ -103,11 +117,11 @@ for (const platform of ['ios', 'windows']) {
           assert.equal(snapshots.has(block), true);
           return structuredClone(snapshots.get(block));
         },
-        document(block) {
+        accounts(block) {
           assert.equal(block, 'pan.accounts');
           return { read: () => settings.read(block),
             async reload() { await settings.reload(block); return settings.read(block); },
-            write() { assert.fail('assembly reads must not write native accounts'); },
+            update() { assert.fail('assembly reads must not write native accounts'); },
             close() {} };
         },
       };

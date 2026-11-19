@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import MeowContracts
+import MeowStorage
 
 public enum FilmPlayerTapAction: String, Codable, Sendable, CaseIterable {
     case none, toggleControls, playPause, seek
@@ -72,63 +73,74 @@ private enum FilmPlayerPreferencesError: LocalizedError {
 /// App composition shares this owner with settings and the film player.
 @MainActor
 public final class FilmPlayerPreferencesStore: ObservableObject {
-    public static let preferencesKey = "film.player.preferences.v1"
     @Published public private(set) var preferences = FilmPlayerPreferences()
     @Published public private(set) var persistenceError: String?
-    private let defaults: UserDefaults
+    private var database: SQLiteDatabase?
+    private var epoch = UUID()
+    private var closed = false
+    nonisolated private static let columns = ["engine", "defaultRate", "holdRate", "seekStep", "showsControlCenter", "recognizesChapters",
+        "singleTapCenter", "singleTapSides", "doubleTapCenter", "doubleTapSides", "swipeVolume", "swipeBrightness",
+        "swipeSeek", "swipeEpisodes", "hapticHold", "hapticBrightness", "hapticVolume", "hapticSeek"]
+    nonisolated private static let booleans: Set<String> = ["showsControlCenter", "recognizesChapters", "swipeVolume", "swipeBrightness",
+        "swipeSeek", "swipeEpisodes", "hapticHold", "hapticBrightness", "hapticVolume", "hapticSeek"]
 
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        reload()
+    /// An unbound owner is ephemeral. The product binds its one database before
+    /// publishing settings or admitting playback.
+    public init(database: SQLiteDatabase? = nil) {
+        self.database = database
+    }
+    public func bind(database: SQLiteDatabase) async {
+        guard self.database == nil, !closed else { return }
+        self.database = database
+        await reload()
     }
 
-    public func reload() {
-        persistenceError = nil
-        guard let raw = defaults.object(forKey: Self.preferencesKey) else {
-            preferences = .init()
-            return
-        }
-        guard let data = raw as? Data,
-              var next = try? JSONDecoder().decode(FilmPlayerPreferences.self, from: data) else {
-            persistenceError = "播放器偏好读取失败"
-            return
-        }
-        let saved = next
-        do { try next.normalize() }
-        catch {
-            persistenceError = "播放器偏好读取失败"
-            return
-        }
-        if next != saved { _ = save(next) }
-        else { preferences = next }
+    nonisolated private static func load(_ db: SQLiteConnection) throws -> FilmPlayerPreferences {
+        guard let row = try db.query("SELECT * FROM ios_film_player_preferences WHERE singleton=1").first else { return .init() }
+        var next = try SQLiteRecord.decode(FilmPlayerPreferences.self, row: row, columns: columns, booleans: booleans)
+        try next.normalize()
+        return next
     }
-
-    @discardableResult
-    public func set<Value>(_ keyPath: WritableKeyPath<FilmPlayerPreferences, Value>, _ value: Value) -> Bool {
-        // Rebase the field edit without overwriting another owner's unrelated edit.
-        reload()
-        guard persistenceError == nil else { return false }
-        var next = preferences
-        next[keyPath: keyPath] = value
-        do { try next.normalize() }
-        catch {
-            persistenceError = error.localizedDescription
-            return false
-        }
-        return save(next)
-    }
-
-    @discardableResult
-    private func save(_ next: FilmPlayerPreferences) -> Bool {
+    public func reload() async {
+        guard !closed, let database else { return }
+        let ticket = UUID(); epoch = ticket
         do {
-            let data = try JSONEncoder().encode(next)
-            defaults.set(data, forKey: Self.preferencesKey)
-            preferences = next
-            persistenceError = nil
+            let next = try await database.read(Self.load)
+            guard epoch == ticket, !closed else { return }
+            preferences = next; persistenceError = nil
+        }
+        catch {
+            if epoch == ticket, !closed { persistenceError = "播放器偏好读取失败" }
+        }
+    }
+
+    @discardableResult
+    public func set<Value>(_ keyPath: WritableKeyPath<FilmPlayerPreferences, Value>, _ value: Value) async -> Bool {
+        guard !closed else { return false }
+        let ticket = UUID(); epoch = ticket
+        do {
+            let next: FilmPlayerPreferences
+            if let database {
+                next = try await database.transaction { db in
+                    var next = try Self.load(db); next[keyPath: keyPath] = value; try next.normalize()
+                    let revision = try db.query("SELECT row_revision FROM ios_film_player_preferences WHERE singleton=1").first?.integer("row_revision") ?? 0
+                    try db.upsert("ios_film_player_preferences", columns: ["singleton"] + Self.columns + ["row_revision"],
+                        values: [.integer(1)] + (try SQLiteRecord.values(next, columns: Self.columns)) + [.integer(revision + 1)],
+                        key: ["singleton"])
+                    return next
+                }
+            } else {
+                var local = preferences; local[keyPath: keyPath] = value; try local.normalize(); next = local
+            }
+            if epoch == ticket, !closed { preferences = next; persistenceError = nil }
             return true
         } catch {
-            persistenceError = "播放器偏好保存失败"
+            if epoch == ticket, !closed { persistenceError = "播放器偏好保存失败" }
             return false
         }
+    }
+    public func close() async {
+        closed = true; epoch = UUID()
+        _ = try? await database?.flush()
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 import MeowUI
+import MeowStorage
 
 // Reference: iWebPlus b900c259:
 // - browse-settings.js:229-266 / account-settings.js:3-19: grid, starlight,
@@ -114,7 +115,7 @@ struct MusicDisplayedArtwork {
     }
 }
 
-private struct MusicSongColorCache: Codable {
+private struct MusicSongColorCache: Sendable {
     var last: PageColorway = .lilac
     var colors: [[String]] = []
 
@@ -128,36 +129,14 @@ private struct MusicSongColorCache: Codable {
         colors.append([key, palette.rawValue])
         if colors.count > 128 { colors.removeFirst(colors.count - 128) }
     }
-    static func read(_ data: Data?) -> Self {
-        guard let data, data.count <= 2_000_000,
-              let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let entries = json["colors"] as? [Any] else { return .init() }
-        var result = Self()
-        result.last = PageColorway(rawValue: json["last"] as? String ?? "") ?? .lilac
-        let valid = entries.compactMap { entry -> [String]? in
-            guard let pair = entry as? [Any], pair.count >= 2,
-                  let key = pair[0] as? String, key.utf16.count <= 2048,
-                  let palette = pair[1] as? String, PageColorway(rawValue: palette) != nil else { return nil }
-            return [key, palette]
-        }.suffix(128)
-        // Map construction keeps the first insertion position for duplicate keys.
-        for pair in valid {
-            if let index = result.colors.firstIndex(where: { $0[0].utf16.elementsEqual(pair[0].utf16) }) {
-                result.colors[index] = pair
-            } else { result.colors.append(pair) }
-        }
-        return result
-    }
 }
 
 #if os(iOS) || os(macOS)
 import Combine
 
 /// One owner is injected into the music root, settings and player. No singleton,
-/// notification bus or observation of unrelated UserDefaults domains.
+/// notification bus or another persistence authority.
 @MainActor public final class MusicAppearancePreferencesStore: ObservableObject, PageThemeProviding {
-    public static let preferencesKey = "music.ui.preferences.v1"
-    public static let songColorsKey = "music.ui.song-palettes.v1"
     @Published public private(set) var preferences = MusicAppearancePreferences()
     @Published public private(set) var effectivePalette: PagePalette = .preset(.lilac)
     @Published public private(set) var persistenceError: String?
@@ -177,54 +156,78 @@ import Combine
     public var pageThemeChanges: AnyPublisher<Void, Never> {
         $effectivePalette.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher()
     }
-    private let defaults: UserDefaults
+    private var database: SQLiteDatabase?
+    private var epoch = UUID()
+    private var closed = false
+    private var pendingColors: [Data: (key: String, palette: PageColorway)] = [:]
+    private var pendingLast: PageColorway?
+    private var savedLast: PageColorway?
+    private var colorWriter: Task<Void, Never>?
+    nonisolated private static let columns = ["playlistView", "playerTheme", "colorMode", "colorPalette", "lockLyric", "lyricTranslation", "lyricBackground"]
     private var cache = MusicSongColorCache()
     private var songKey = ""
     private var generation = UUID()
     private var artworkID: String?
     private var previewPalette: PagePalette?
 
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        cache = MusicSongColorCache.read(defaults.data(forKey: Self.songColorsKey))
-        reload()
+    public init(database: SQLiteDatabase? = nil) { self.database = database }
+    nonisolated private static func load(_ db: SQLiteConnection) throws -> MusicAppearancePreferences {
+        guard let row = try db.query("SELECT * FROM ios_music_appearance WHERE singleton=1").first else { return .init() }
+        return try SQLiteRecord.decode(MusicAppearancePreferences.self, row: row, columns: columns,
+            booleans: ["lockLyric", "lyricTranslation", "lyricBackground"])
+    }
+    public func bind(database: SQLiteDatabase) async throws {
+        guard self.database == nil || self.database === database, !closed else { return }
+        let result = try await database.snapshot { db -> (MusicAppearancePreferences, MusicSongColorCache) in
+            var cache = MusicSongColorCache()
+            for row in try db.query("SELECT * FROM ios_music_song_palettes ORDER BY used_at,song_key LIMIT 128") {
+                guard let palette = PageColorway(rawValue: try row.text("palette")) else { throw SQLiteStorageError.corrupt }
+                cache.insert(palette, for: try row.text("song_key"))
+            }
+            if let row = try db.query("SELECT last_palette FROM ios_music_palette_state WHERE singleton=1").first {
+                guard let palette = PageColorway(rawValue: try row.text("last_palette")) else { throw SQLiteStorageError.corrupt }
+                cache.last = palette
+            }
+            return (try Self.load(db), cache)
+        }
+        guard !closed else { return }
+        self.database = database
+        cache = result.1; savedLast = cache.last
+        publishPreferences(result.0)
     }
 
     /// Call on foreground if another native preferences owner was used.
     /// A palette read is not a cache touch; matches the reference Map order.
-    public func reload() {
-        var next = MusicAppearancePreferences()
-        persistenceError = nil
-        if let raw = defaults.object(forKey: Self.preferencesKey) {
-            guard let data = raw as? Data,
-                  let value = try? JSONDecoder().decode(MusicAppearancePreferences.self, from: data) else {
-                persistenceError = "音乐偏好读取失败"; return
-            }
-            next = value
-        }
+    public func reload() async {
+        guard !closed, let database else { return }
+        let ticket = UUID(); epoch = ticket
+        do {
+            let next = try await database.read(Self.load)
+            guard epoch == ticket, !closed else { return }
+            publishPreferences(next); persistenceError = nil
+        } catch { if epoch == ticket, !closed { persistenceError = "音乐偏好读取失败" } }
+    }
+    private func publishPreferences(_ next: MusicAppearancePreferences) {
         let colorChanged = next.colorMode != preferences.colorMode || next.colorPalette != preferences.colorPalette
-        if colorChanged { generation = UUID(); coverPreferenceRevision = UUID() }
+        if colorChanged {
+            generation = UUID(); coverPreferenceRevision = UUID()
+            if next.colorMode == .song, !songKey.isEmpty {
+                cache.last = cache.color(for: songKey) ?? MusicSongPalette.fallback(for: songKey)
+            }
+        }
         preferences = next
         publishPalette(animated: false)
     }
 
     @discardableResult public func set<Value>(_ keyPath: WritableKeyPath<MusicAppearancePreferences, Value>,
-                                              _ value: Value) -> Bool {
+                                              _ value: Value) async -> Bool {
         // Rebase a field edit; a stale settings page must not overwrite another
         // page's unrelated native preference. No remote/server write is made.
-        reload()
-        guard persistenceError == nil else { return false }
-        var next = preferences
-        next[keyPath: keyPath] = value
-        return save(next)
+        await edit { $0[keyPath: keyPath] = value }
     }
 
-    @discardableResult public func selectFixedPalette(_ palette: PagePalette) -> Bool {
-        reload()
-        guard persistenceError == nil else { return false }
-        var next = preferences
-        next.colorMode = .fixed; next.colorPalette = palette
-        return save(next)
+    @discardableResult public func selectFixedPalette(_ palette: PagePalette) async -> Bool {
+        await edit { $0.colorMode = .fixed; $0.colorPalette = palette }
     }
 
     public func previewFixedColor(_ rgb: UInt32) {
@@ -238,8 +241,17 @@ import Combine
     }
 
     /// Explicit recovery only; never removes the original export or library.
-    public func resetPreferences() {
-        save(.init())
+    public func resetPreferences() async {
+        guard !closed else { return }
+        let ticket = UUID(); epoch = ticket
+        do {
+            if let database {
+                try await database.transaction { try $0.execute("DELETE FROM ios_music_appearance WHERE singleton=1") }
+            }
+            if !closed, epoch == ticket { publishPreferences(.init()); persistenceError = nil }
+        } catch {
+            if !closed, epoch == ticket { persistenceError = "音乐偏好保存失败" }
+        }
     }
 
     /// Stable song identity, never queue occurrence. Multiple views
@@ -333,6 +345,7 @@ import Combine
 
     @discardableResult public func applyCover(rgba: [UInt8], ticket: MusicAppearanceCoverTicket) -> Bool {
         guard accepts(ticket), let found = MusicSongPalette.fromPixels(rgba) else { return false }
+        if cache.color(for: songKey) != found { pendingColors[Data(songKey.utf8)] = (songKey, found) }
         cache.insert(found, for: songKey); cache.last = found
         publishPalette(animated: true); persistColors()
         return true
@@ -344,6 +357,9 @@ import Combine
                                              isPlaceholder: Bool = false) -> PageColorway? {
         guard !isPlaceholder, !identity.stableKey.isEmpty,
               let found = MusicSongPalette.fromPixels(rgba) else { return nil }
+        if cache.color(for: identity.stableKey) != found {
+            pendingColors[Data(identity.stableKey.utf8)] = (identity.stableKey, found)
+        }
         cache.insert(found, for: identity.stableKey); persistColors()
         return found
     }
@@ -352,22 +368,29 @@ import Combine
         ticket.generation == generation && ticket.songKey.utf16.elementsEqual(songKey.utf16) &&
         preferences.colorMode == .song
     }
-    @discardableResult private func save(_ next: MusicAppearancePreferences) -> Bool {
-        guard let data = try? JSONEncoder().encode(next) else {
-            persistenceError = "音乐偏好保存失败"; return false
-        }
-        defaults.set(data, forKey: Self.preferencesKey)
-        if preferences.colorMode != next.colorMode || preferences.colorPalette != next.colorPalette {
-            generation = UUID()
-            coverPreferenceRevision = UUID()
-            // Switching back to song mode uses the latest cached cover/fallback.
-            if next.colorMode == .song, !songKey.isEmpty {
-                cache.last = cache.color(for: songKey) ?? MusicSongPalette.fallback(for: songKey)
+    @discardableResult private func edit(_ change: @escaping @Sendable (inout MusicAppearancePreferences) -> Void) async -> Bool {
+        guard !closed else { return false }
+        let ticket = UUID(); epoch = ticket
+        do {
+            let next: MusicAppearancePreferences
+            if let database {
+                next = try await database.transaction { db in
+                    var next = try Self.load(db); change(&next)
+                    let revision = try db.query("SELECT row_revision FROM ios_music_appearance WHERE singleton=1").first?.integer("row_revision") ?? 0
+                    try db.upsert("ios_music_appearance", columns: ["singleton"] + Self.columns + ["row_revision"],
+                        values: [.integer(1)] + (try SQLiteRecord.values(next, columns: Self.columns)) + [.integer(revision + 1)],
+                        key: ["singleton"])
+                    return next
+                }
+            } else {
+                var local = preferences; change(&local); next = local
             }
+            if epoch == ticket, !closed { publishPreferences(next); persistenceError = nil; persistColors() }
+            return true
+        } catch {
+            if epoch == ticket, !closed { persistenceError = "音乐偏好保存失败" }
+            return false
         }
-        preferences = next; persistenceError = nil
-        publishPalette(animated: false)
-        return true
     }
     private func publishPalette(animated: Bool) {
         animatesPaletteChanges = animated
@@ -375,7 +398,42 @@ import Combine
         if effectivePalette != next { effectivePalette = next }
     }
     private func persistColors() {
-        if let data = try? JSONEncoder().encode(cache) { defaults.set(data, forKey: Self.songColorsKey) }
+        guard !closed else { return }
+        if cache.last != savedLast { pendingLast = cache.last }
+        // Retain only the latest bounded palette cache, not every sampled cover.
+        let retained = Set(cache.colors.map { Data($0[0].utf8) })
+        pendingColors = pendingColors.filter { retained.contains($0.key) }
+        guard colorWriter == nil, let database, pendingLast != nil || !pendingColors.isEmpty else { return }
+        colorWriter = Task {
+            while pendingLast != nil || !pendingColors.isEmpty {
+                let last = pendingLast
+                let colors = cache.colors.compactMap { pendingColors[Data($0[0].utf8)] }
+                pendingLast = nil; pendingColors.removeAll()
+                do {
+                    try await database.transaction { db in
+                        var ordinal = try db.query("SELECT COALESCE(MAX(used_at),0) AS ordinal FROM ios_music_song_palettes").first!.double("ordinal")
+                        for value in colors {
+                            ordinal += 1
+                            try db.upsert("ios_music_song_palettes", columns: ["song_key", "palette", "used_at"],
+                                values: [.text(value.key), .text(value.palette.rawValue), .real(ordinal)], key: ["song_key"])
+                        }
+                        try db.execute("DELETE FROM ios_music_song_palettes WHERE song_key IN " +
+                            "(SELECT song_key FROM ios_music_song_palettes ORDER BY used_at DESC,song_key LIMIT -1 OFFSET 128)")
+                        if let last {
+                            try db.upsert("ios_music_palette_state", columns: ["singleton", "last_palette"],
+                                values: [.integer(1), .text(last.rawValue)], key: ["singleton"])
+                        }
+                    }
+                    if let last { savedLast = last }
+                } catch { persistenceError = "歌曲配色保存失败" }
+            }
+            colorWriter = nil
+        }
+    }
+    public func close() async {
+        closed = true; epoch = UUID()
+        await colorWriter?.value
+        _ = try? await database?.flush()
     }
 }
 #endif

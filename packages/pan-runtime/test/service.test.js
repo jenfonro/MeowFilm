@@ -1,9 +1,10 @@
+import { readPanFacts, setTestReadOnly, withTestDatabase } from '../../../tests/storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parseJSONText, stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
+import { rawJSON } from '@meowfilm/runtime-bridge/json';
 import { createPanService } from '../src/index.js';
 
 const area = fileURLToPath(new URL('../../../tmp/test-results/pan-runtime/', import.meta.url));
@@ -48,16 +49,16 @@ test('five providers expose actual capabilities and configurations persist in pl
   assert.ok(!JSON.stringify(saved).includes(secret));
   const state = await service.invoke('settings.get');
   assert.ok(!JSON.stringify(state).includes(secret));
-  const bytes = readFileSync(join(root, 'pan/accounts.json'), 'utf8');
-  assert.equal(JSON.parse(bytes).accounts.baidu.credentials.cookie, secret);
-  assert.equal(JSON.parse(bytes).accounts.baidu.revision, 1);
+  const committed = await readPanFacts(root);
+  assert.equal(committed.accounts.baidu.credentials.cookie, secret);
+  assert.equal(committed.accounts.baidu.revision, 1);
   await service.close();
   const recovered = createPanService({ dataRoot: root, transport });
   try {
     assert.deepEqual(await recovered.invoke('settings.get'), state);
     assert.deepEqual(await recovered.invoke('settings.clear', { provider: 'baidu' }),
       { provider: 'baidu', revision: 2, configured: false, fields: [], status: 'signedOut' });
-    assert.equal(JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.baidu.revision, 2);
+    assert.equal((await readPanFacts(root)).accounts.baidu.revision, 2);
   } finally { await recovered.close(); }
 });
 
@@ -98,7 +99,7 @@ test('ordinary request extras are inert and only provider-defined credential fie
         url: extra, headers: extra, future: extra } });
     assert.equal(saved.configured, true);
     assert.deepEqual(saved.fields, ['cookie']);
-    const stored = JSON.parse(readFileSync(join(root, 'pan/accounts.json')));
+    const stored = (await readPanFacts(root));
     assert.deepEqual(stored.accounts.baidu.credentials, { cookie: 'synthetic=COOKIE' });
     const refreshed = await service.invoke('refresh', { ...ignored, provider: 'baidu' });
     assert.equal(refreshed.refreshed, true);
@@ -115,7 +116,7 @@ test('ordinary request extras are inert and only provider-defined credential fie
   const cleared = await service.invoke('settings.clear', { provider: 'baidu',
     credentials: { cookie: 'must-not-be-saved' }, headers: { Cookie: 'must-not-be-sent' } });
   assert.equal(cleared.configured, false);
-  assert.deepEqual(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts.baidu.credentials, {});
+  assert.deepEqual((await readPanFacts(root)).accounts.baidu.credentials, {});
   const unsupported = await service.invoke('settings.set', { provider: 'baidu',
     credentials: { password: 'not-a-baidu-credential' } });
   assert.equal(unsupported.configured, false);
@@ -139,24 +140,25 @@ test('list projects share URL and password without forwarding nested or top-leve
   assert.equal(initial[0].headers.cookie, 'synthetic=COOKIE');
 });
 
-test('failed atomic configuration write does not publish new account state; damaged documents are not reset', async t => {
+test('account publication waits for commit and opening a damaged database preserves the file', async t => {
   const { service, root } = setup(t);
   await service.invoke('settings.set', { provider: 'baidu', credentials: { cookie: 'old-synthetic' } });
-  const path = join(root, 'pan/accounts.json'), backup = join(root, 'pan/test-backup');
-  renameSync(path, backup);
-  mkdirSync(path);
+  await setTestReadOnly(root, true);
   await assert.rejects(service.invoke('settings.set', { provider: 'baidu', credentials: { cookie: 'new-synthetic' } }),
     { code: 'STORAGE_ERROR' });
   assert.equal((await service.invoke('settings.get')).accounts.find(item => item.provider === 'baidu').revision, 1);
-  rmSync(path, { recursive: true }); renameSync(backup, path);
+  await setTestReadOnly(root, false);
   await service.close();
-  writeFileSync(path, '{"version":1,"accounts":[]}');
-  const before = readFileSync(path);
-  assert.throws(() => createPanService({ dataRoot: root }), { code: 'CORRUPT_STORAGE' });
+  const path = join(root, 'storage-v1', 'meowfilm.sqlite3');
+  const before = Buffer.from('damaged synthetic database');
+  writeFileSync(path, before);
+  const damaged = createPanService({ dataRoot: root });
+  await assert.rejects(damaged.ready, { code: 'CORRUPT_STORAGE' });
+  await assert.rejects(damaged.close(), { code: 'STORAGE_ERROR' });
   assert.deepEqual(readFileSync(path), before);
 });
 
-test('file store preserves exact numeric extensions and bad siblings across Cookie writes and restart', async t => {
+test('rotating a Cookie preserves a corrupt sibling and its exact row revision across restart', async t => {
   const { service, root, transport } = setup(t, input => {
     assert.equal(input.url, 'https://pan.quark.cn/account/info?fr=pc&platform=pc');
     assert.equal(input.method, 'GET');
@@ -166,36 +168,25 @@ test('file store preserves exact numeric extensions and bad siblings across Cook
     return response({ code: 'OK', success: true, data: { nickname: 'synthetic' } },
       { 'set-cookie': ['session=synthetic-rotated; Path=/'] });
   });
-  const material = '{"large":9007199254740993,"decimal":1.00000000000000001,"tiny":1e-400,"huge":1e400,"zero":-0}';
-  const source = `{"version":1,"extra":${material},"accounts":{
-    "baidu":{"revision":7,"credentials":{"cookie":2},"extra":${material}},
-    "future":{"data":${material}},
-    "quark":{"revision":1,"extra":${material},"credentials":{
-      "cookie":"${credentials.cookie}","extra":${material}
-    }}}}`;
-  mkdirSync(join(root, 'pan'));
-  const path = join(root, 'pan/accounts.json');
-  writeFileSync(path, source);
+  await service.invoke('settings.set', { provider: 'quark', credentials });
+  await withTestDatabase(root, db => db.execute(
+    'UPDATE pan_standalone_accounts SET revision=7,row_revision=11,cookie=? WHERE provider=?', ['bad\r\nheader', 'baidu']));
   await service.settingsChanged();
+  const before = await readPanFacts(root);
   const result = await service.invoke('refresh', { provider: 'quark' });
   assert.equal(result.account.status, 'signedIn');
-  const written = readFileSync(path, 'utf8'), saved = parseJSONText(written), original = parseJSONText(source);
-  for (const value of [saved.extra, saved.accounts.quark.extra, saved.accounts.quark.credentials.extra])
-    assert.equal(stringifyJSONValue(value), material);
-  assert.equal(stringifyJSONValue(saved.accounts.baidu), stringifyJSONValue(original.accounts.baidu));
-  assert.equal(stringifyJSONValue(saved.accounts.future), stringifyJSONValue(original.accounts.future));
-  assert.equal(saved.accounts.quark.credentials.cookie, 'session=synthetic-rotated');
+  const saved = await readPanFacts(root);
+  assert.deepEqual(saved.accounts.baidu, before.accounts.baidu);
+  assert.deepEqual(saved.accounts.quark, { revision: 1, rowRevision: 2, credentials: { cookie: 'session=synthetic-rotated' } });
   await service.close();
   const restarted = createPanService({ dataRoot: root, transport });
   try {
     const accounts = (await restarted.invoke('settings.get')).accounts;
-    assert.deepEqual(accounts.find(item => item.provider === 'baidu'),
-      { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' });
-    assert.equal(accounts.find(item => item.provider === 'quark').revision, 1);
+    assert.deepEqual(accounts.find(item => item.provider === 'baidu'), { provider: 'baidu', errorCode: 'CORRUPT_STORAGE' });
     await restarted.invoke('settings.clear', { provider: 'uc' });
-    const next = parseJSONText(readFileSync(path, 'utf8'));
-    assert.equal(stringifyJSONValue(next.extra), material);
-    assert.equal(stringifyJSONValue(next.accounts.quark), stringifyJSONValue(saved.accounts.quark));
+    const next = await readPanFacts(root);
+    assert.deepEqual(next.accounts.baidu, before.accounts.baidu);
+    assert.deepEqual(next.accounts.quark, saved.accounts.quark);
   } finally { await restarted.close(); }
 });
 
@@ -215,7 +206,7 @@ test('parallel Cookie refreshes share one upstream request and persist rotation 
   await entered.promise; release.resolve();
   for (const value of await Promise.all(calls)) assert.equal(value.refreshed, true);
   assert.equal(requests.length, 1);
-  const saved = JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.quark;
+  const saved = (await readPanFacts(root)).accounts.quark;
   assert.equal(saved.credentials.cookie, 'session=synthetic-rotated');
   assert.equal(saved.revision, 1);
 });
@@ -254,7 +245,7 @@ test('account replacement fences an old Cookie response and never overwrites the
   await service.invoke('settings.set', { provider: 'quark',
     credentials: { cookie: 'session=synthetic-new-account' } });
   release.resolve(); await rejected;
-  const current = JSON.parse(readFileSync(join(root, 'pan/accounts.json'), 'utf8')).accounts.quark;
+  const current = (await readPanFacts(root)).accounts.quark;
   assert.equal(current.revision, 2);
   assert.deepEqual(current.credentials, { cookie: 'session=synthetic-new-account' });
 });
@@ -335,7 +326,7 @@ test('all cancelled refresh waiters abort their work; a new caller starts a fres
   releaseOld.resolve();
   await turn();
   assert.equal(count, 2);
-  assert.equal(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts.quark.credentials.cookie, 'session=synthetic-active-new');
+  assert.equal((await readPanFacts(root)).accounts.quark.credentials.cookie, 'session=synthetic-active-new');
 });
 
 test('switching an account cancels resolution of its stored-file reference', async t => {
@@ -398,7 +389,7 @@ test('QR pending, scanned, concurrent confirmation and repeated polling expose s
     assert.ok(!JSON.stringify(reply).includes('synthetic-confirmed-cookie'));
   }
   assert.equal(polls, 3);
-  const saved = JSON.parse(readFileSync(join(root, 'pan/accounts.json')));
+  const saved = (await readPanFacts(root));
   assert.equal(saved.accounts.baidu.revision, 1);
   assert.match(saved.accounts.baidu.credentials.cookie, /BDUSS=synthetic-confirmed-cookie/);
   assert.equal((await service.invoke('login.poll', input)).status, 'confirmed');
@@ -418,18 +409,16 @@ test('QR persistence failure is not confirmation and may be retried without repe
   await assert.rejects(service.invoke('refresh', { provider: 'baidu' }), { code: 'AUTH_REQUIRED' });
   assert.equal((await service.invoke('settings.get')).accounts[0].status, 'expired');
   const login = await service.invoke('login.start', { provider: 'baidu' }), input = { sessionId: login.sessionId };
-  const path = join(root, 'pan/accounts.json'), backup = join(root, 'pan/held-accounts');
-  renameSync(path, backup);
-  mkdirSync(path);
+  await setTestReadOnly(root, true);
   await assert.rejects(service.invoke('login.poll', input), { code: 'STORAGE_ERROR' });
   assert.equal((await service.invoke('settings.get')).accounts[0].revision, 1);
   assert.equal((await service.invoke('settings.get')).accounts[0].status, 'expired');
-  rmSync(path, { recursive: true }); renameSync(backup, path);
+  await setTestReadOnly(root, false);
   const confirmed = await service.invoke('login.poll', input);
   assert.equal(confirmed.status, 'confirmed');
   assert.equal(confirmed.account.status, 'signedIn');
   assert.equal(polls, 1);
-  assert.equal(JSON.parse(readFileSync(path)).accounts.baidu.revision, 2);
+  assert.equal((await readPanFacts(root)).accounts.baidu.revision, 2);
 });
 
 for (const provider of ['baidu', 'quark', 'uc']) {
@@ -462,7 +451,7 @@ for (const provider of ['baidu', 'quark', 'uc']) {
       assert.equal(current.revision, action === 'cancel' ? 0 : 1);
       assert.equal(current.status, action === 'cancel' ? 'signedOut' : 'signedIn');
       if (action === 'replace') {
-        assert.deepEqual(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts[provider].credentials,
+        assert.deepEqual((await readPanFacts(root)).accounts[provider].credentials,
           { cookie: 'session=synthetic-new' });
       }
       const next = await service.invoke('login.start', { provider });
@@ -491,7 +480,7 @@ test('QR cancellation and replacement invalidate pending completion without savi
     assert.equal(upstreamSignal.aborted, true);
     release.resolve(); await pending;
     if (action === 'cancel') assert.equal((await service.invoke('settings.get')).accounts[0].revision, 0);
-    else assert.equal(JSON.parse(readFileSync(join(root, 'pan/accounts.json'))).accounts.baidu.credentials.cookie, 'synthetic-new');
+    else assert.equal((await readPanFacts(root)).accounts.baidu.credentials.cookie, 'synthetic-new');
     assert.equal((await service.invoke('login.poll', input)).status, 'cancelled');
   }
 });

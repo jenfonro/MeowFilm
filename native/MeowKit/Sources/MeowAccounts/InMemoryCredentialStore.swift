@@ -1,6 +1,6 @@
 import Foundation
 
-/// Explicit test/ephemeral storage, never an automatic fallback for a Keychain failure.
+/// Explicit test/ephemeral storage, never an automatic fallback for durable storage.
 /// All mutable state is protected by lock. No filesystem, preferences or logging.
 public final class InMemoryCredentialStore: CredentialStore, @unchecked Sendable {
     private let lock = NSLock()

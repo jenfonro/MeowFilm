@@ -42,8 +42,7 @@ public static class MusicSongFactsTests
     private static JsonElement Page(MusicSearchRequest request, params JsonObject[] songs) => JsonSerializer.SerializeToElement(new
     { platform = request.Platform, page = request.Page, limit = request.Limit, items = songs, more = false });
     private static JsonObject ReadSong(JsonElement reply) => JsonNode.Parse(reply.GetProperty("song").GetRawText())!.AsObject();
-    private static JsonArray Saved(MemoryStore store) => store.Data.TryGetValue(MusicSongMatchStore.Namespace, out var bytes)
-        ? JsonNode.Parse(bytes)!["entries"]!.AsArray() : [];
+    private static JsonArray Saved(MemoryStore store) => store.ReadMatchRowsAsync().GetAwaiter().GetResult();
     private static async Task<JsonElement> Ok(MusicLibraryOwner owner, string method, object? input = null)
     {
         var reply = await owner.ExecuteAsync(method, input);
@@ -65,7 +64,7 @@ public static class MusicSongFactsTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly MemoryStore Store = new();
-        internal readonly CacheDocumentStore CacheStore;
+        internal readonly NativeTestDatabase CacheStore;
         internal readonly Clock Clock = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicSongMatcher Facts;
@@ -73,7 +72,7 @@ public static class MusicSongFactsTests
         internal Fixture()
         {
             CacheStore = new(Store);
-            Library = new(MusicTestStores.For(Store));
+            Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage);
             Facts = new(Library, new(CacheStore), async (request, token) =>
             {
                 Searches++;
@@ -292,8 +291,8 @@ public static class MusicSongFactsTests
         var original = Song();
         await f.Favorite(original); await f.Match(original, "tx"); await f.Facts.PersistAsync(default);
         await f.CacheStore.DrainAsync();
-        await using var restartedCache = new CacheDocumentStore(f.Store);
-        await using var restartedLibrary = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+        await using var restartedCache = new NativeTestDatabase(f.Store);
+        await using var restartedLibrary = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
         var restartedFacts = new MusicSongMatcher(restartedLibrary, new(restartedCache), (_, _) =>
             throw new InvalidOperationException("first library read cannot search"), f.Clock);
         await restartedFacts.InitializeAsync(default);
@@ -450,7 +449,7 @@ public static class MusicSongFactsTests
         await using var f = new Fixture();
         await f.Favorite(Song()); await f.Match(Song(), "tx"); await f.Facts.PersistAsync(default);
         await f.CacheStore.DrainAsync();
-        await using var restartedCache = new CacheDocumentStore(f.Store);
+        await using var restartedCache = new NativeTestDatabase(f.Store);
         var catalog = new Catalog();
         await using var owner = new MusicNativeCatalogOwner(catalog, f.Library);
         var restarted = new MusicSongMatcher(f.Library, new(restartedCache), (_, _) =>

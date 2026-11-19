@@ -128,21 +128,7 @@ public static partial class MusicNativeLibraryTests
         Check(!(await Ok(owner, "music.lyrics.display.get", new { song })).GetProperty("lines")[0].TryGetProperty("timing", out _));
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
     }
-    private sealed class LyricCacheStore : IDocumentStore
-    {
-        internal byte[]? Data;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            Check(ns == MusicLibraryOwner.LyricDisplayNamespace); token.ThrowIfCancellationRequested();
-            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
-        {
-            Check(ns == MusicLibraryOwner.LyricDisplayNamespace); token.ThrowIfCancellationRequested();
-            Check(expected == (Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
-            Data = bytes.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(Data));
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    private sealed class LyricCacheStore : NativeTestDatabase {
     }
 
 }

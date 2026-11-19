@@ -1,6 +1,4 @@
 import Foundation
-import Security
-import LocalAuthentication
 import Darwin
 import MeowMusicFeature
 import MeowMusicPlatform
@@ -9,32 +7,19 @@ import MeowMusicPlatform
 /// only the next cold launch, before constructing any business owner, may erase.
 final class MeowfilmUserDataReset: @unchecked Sendable {
     enum Failure: String, Error, LocalizedError {
-        case request, files, keychainLocked, keychainPermission, keychain, preferences, cookies
+        case request, files, cookies
 
         var errorDescription: String? {
             switch self {
             case .request: return "无法记录清除请求，尚未开始清除"
             case .files: return "本机文件清理未完成"
-            case .keychainLocked: return "请解锁设备后重试清除"
-            case .keychainPermission: return "当前安装缺少钥匙串访问权限，请检查签名"
-            case .keychain: return "本机钥匙串清理未完成"
-            case .preferences: return "偏好设置清理未完成"
             case .cookies: return "本机 Cookie 清理未完成"
             }
         }
     }
 
-    // Only the current sensitive stores belong to this reset.
-    // Never enumerate/delete arbitrary services in the signed app's access group.
-    static let keychainServices = [
-        "music.platform.accounts.v1", "film.settings.keys.v1"
-    ].map { MeowfilmIdentity.bundleIdentifier + "." + $0 }
-
     private let support: URL
     private let directories: [URL]
-    private let defaults: UserDefaults
-    private let defaultsDomain: String
-    private let deleteKeychain: @Sendable (String) throws -> Void
     private let clearNetworkState: @Sendable () throws -> Void
     private let lock = NSLock()
     private var marker: URL { support.appendingPathComponent("meowfilm-reset.pending") }
@@ -42,20 +27,9 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
     static func live() throws -> MeowfilmUserDataReset {
         let fm = FileManager.default
         guard let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
-              let caches = fm.urls(for: .cachesDirectory, in: .userDomainMask).first,
-              let domain = Bundle.main.bundleIdentifier else { throw Failure.files }
-        return .init(support: support, caches: caches, temporary: fm.temporaryDirectory,
-            defaults: .standard, defaultsDomain: domain,
-            deleteKeychain: { service in
-                let status = SecItemDelete(keychainQuery(service: service) as CFDictionary)
-                switch status {
-                case errSecSuccess, errSecItemNotFound: return
-                case errSecInteractionNotAllowed: throw Failure.keychainLocked
-                case errSecMissingEntitlement, errSecAuthFailed, errSecUserCanceled:
-                    throw Failure.keychainPermission
-                default: throw Failure.keychain
-                }
-            }, clearNetworkState: {
+              support.isFileURL else { throw Failure.files }
+        return .init(support: support, temporary: fm.temporaryDirectory,
+            clearNetworkState: {
                 let cookies = HTTPCookieStorage.shared
                 for cookie in cookies.cookies ?? [] { cookies.deleteCookie(cookie) }
                 guard cookies.cookies?.isEmpty != false else { throw Failure.cookies }
@@ -63,33 +37,14 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
             })
     }
 
-    /// Exact service, local data-protection Keychain only. Deletion does not
-    /// read/decode the item or require its obsolete accessibility policy to match.
-    static func keychainQuery(service: String) -> [String: Any] {
-        let context = LAContext()
-        context.interactionNotAllowed = true
-        return [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrSynchronizable as String: false,
-            kSecUseDataProtectionKeychain as String: true,
-            kSecUseAuthenticationContext as String: context
-        ]
-    }
-
-    init(support: URL, caches: URL, temporary: URL, defaults: UserDefaults,
-         defaultsDomain: String,
-         deleteKeychain: @escaping @Sendable (String) throws -> Void,
+    init(support: URL, temporary: URL,
          clearNetworkState: @escaping @Sendable () throws -> Void) {
         self.support = support
         directories = [
             support.appendingPathComponent("meowfilm", isDirectory: true),
-            caches.appendingPathComponent("meowfilm", isDirectory: true),
-            caches.appendingPathComponent("meowfilm.music.audio-resources.v1", isDirectory: true),
             temporary.appendingPathComponent("meowfilm", isDirectory: true)
         ]
-        self.defaults = defaults; self.defaultsDomain = defaultsDomain
-        self.deleteKeychain = deleteKeychain; self.clearNetworkState = clearNetworkState
+        self.clearNetworkState = clearNetworkState
     }
 
     func request() throws {
@@ -129,13 +84,6 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
                 }
             }
         } catch { throw Failure.files }
-        for service in Self.keychainServices { try deleteKeychain(service) }
-        defaults.removePersistentDomain(forName: defaultsDomain)
-        // Clearing must reach the persistent domain before removing the restart fence.
-        guard defaults.synchronize(),
-              defaults.persistentDomain(forName: defaultsDomain)?.isEmpty != false else {
-            throw Failure.preferences
-        }
         try clearNetworkState()
         do { try FileManager.default.removeItem(at: marker) }
         catch { throw Failure.files }

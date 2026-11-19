@@ -115,27 +115,19 @@ internal static class FilmPlaybackFixture
     }
 }
 
-internal sealed class FilmMemoryStore : IDocumentStore
+internal sealed class FilmMemoryStore : NativeTestDatabase
 {
-    internal byte[]? Data;
-    internal int Writes;
     internal bool FailWrite;
-    internal Func<CancellationToken, Task>? BeforeWrite;
-    public Task<DocumentSnapshot> ReadAsync(string key, CancellationToken token = default)
+    internal byte[]? Data
     {
-        token.ThrowIfCancellationRequested();
-        return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data)));
+        get => Project(MeowFilm.Capabilities.FilmStorageRecords.Favorites, "device") is { } value
+            ? JsonSerializer.SerializeToUtf8Bytes(value) : null;
+        set => Seed(MeowFilm.Capabilities.FilmStorageRecords.Favorites,
+            System.Text.Json.Nodes.JsonNode.Parse(value!)!.AsObject(), "device");
     }
-    public async Task<DocumentFingerprint> WriteAsync(string key, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
-    {
-        token.ThrowIfCancellationRequested(); Writes++;
-        if (BeforeWrite is { } admitted) await admitted(token);
-        if (FailWrite) throw new DocumentStoreException(DocumentStoreError.Storage);
-        var actual = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-        if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-        Data = data.ToArray(); return DocumentFingerprint.FromBytes(Data);
-    }
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+        int retainedBytes = 0, Action<Action>? commit = null) =>
+        FailWrite ? throw new DocumentStoreException(DocumentStoreError.Storage) : base.WriteAsync(write, token, retainedBytes, commit);
 }
 
 internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSource

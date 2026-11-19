@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
 
@@ -8,12 +9,10 @@ namespace MeowFilm.Windows.Tests;
 
 public static class GrantedMediaFilesTests
 {
-    private const string Namespace = "music.files.v1";
-
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("current-format-roundtrip-restart-and-resolve", Roundtrip);
-        yield return Case("every-non-current-document-is-rejected-without-write", NonCurrentDocuments);
+        yield return Case("corrupt-current-rows-are-rejected-without-change", NonCurrentDocuments);
         yield return Case("CAS-conflict-is-not-retried-or-overwritten", CasConflict);
         yield return Case("wrong-write-receipt-is-explicitly-uncertain", WrongReceipt);
         yield return Case("constructor-rejects-invalid-owner-contracts", ConstructorContracts);
@@ -55,54 +54,24 @@ public static class GrantedMediaFilesTests
     private static async Task NonCurrentDocuments()
     {
         using var file = new Fixture();
-        string id = Id(file.MediaPath);
-        string path = JsonSerializer.Serialize(file.MediaPath);
-        string title = JsonSerializer.Serialize(file.Title);
-        string identifier = JsonSerializer.Serialize(id);
-        string item = $$"""{"Id":{{identifier}},"Path":{{path}},"Title":{{title}}}""";
-        string secondPath = Path.Combine(file.Root, "second.wav");
-        File.WriteAllBytes(secondPath, [4, 5, 6]);
-        string second = CurrentItem(secondPath);
-        string forwardPath = JsonSerializer.Serialize(file.MediaPath.Replace('\\', '/'));
-        string wrongTitle = JsonSerializer.Serialize(file.Title + "-old");
-        string badId = JsonSerializer.Serialize("local:" + new string('0', 64));
-
-        string[] variants =
-        [
-            "",
-            "{",
-            "null",
-            "[]",
-            """{"Schema":2,"Items":[]}""",
-            """{"Schema":1.0,"Items":[]}""",
-            """{"Schema":1e0,"Items":[]}""",
-            """{"Schema":"1","Items":[]}""",
-            """{"schema":1,"items":[]}""",
-            """{"Schema":1}""",
-            """{"Schema":1,"Items":[],"Legacy":true}""",
-            """{"Schema":1,"Schema":1,"Items":[]}""",
-            """{"Schema":1,"Items":null}""",
-            $$"""{"Schema":1,"Items":[{"Id":{{identifier}},"Path":{{path}}}]}""",
-            $$"""{"Schema":1,"Items":[{"Id":{{identifier}},"Path":{{path}},"Title":{{title}},"Legacy":true}]}""",
-            $$"""{"Schema":1,"Items":[{"Id":{{identifier}},"Id":{{identifier}},"Path":{{path}},"Title":{{title}}}]}""",
-            $$"""{"Schema":1,"Items":[{"Id":{{badId}},"Path":{{path}},"Title":{{title}}}]}""",
-            $$"""{"Schema":1,"Items":[{"Id":{{identifier}},"Path":{{forwardPath}},"Title":{{title}}}]}""",
-            $$"""{"Schema":1,"Items":[{"Id":{{identifier}},"Path":{{path}},"Title":{{wrongTitle}}}]}""",
-            $$"""{"Schema":1,"Items":[{{item}},{{item}}]}""",
-            $$"""{"Schema":1,"Items":[{{item}},{{second}}],"Unknown":0}"""
-        ];
-
-        foreach (string json in variants)
+        foreach (string sql in new[]
         {
-            await using var store = new MemoryStore { Data = Encoding.UTF8.GetBytes(json) };
-            byte[] original = store.Data.ToArray();
+            "UPDATE windows_file_grants SET Schema=2 WHERE scope_key='device'",
+            "UPDATE windows_file_grants_Items SET Path=replace(Path,'\\','/') WHERE scope_key='device'",
+            "UPDATE windows_file_grants_Items SET Title=Title||'-wrong' WHERE scope_key='device'"
+        })
+        {
+            await using var store = new MemoryStore();
             var owner = Owner(store);
+            _ = await owner.GrantAsync([file.MediaPath]);
+            await store.Inner.WriteAsync(db => db.Execute(sql));
+            byte[] original = store.Data!;
+            int writes = store.Writes;
             await Corrupt(() => owner.ListAsync());
-            await Corrupt(async () => _ = await owner.ResolveAsync(id));
+            await Corrupt(async () => _ = await owner.ResolveAsync(Id(file.MediaPath)));
             await Corrupt(() => owner.GrantAsync([file.MediaPath]));
-            Check(store.Writes == 0 && store.Data.SequenceEqual(original),
-                "invalid document was written or replaced");
-            CryptographicOperations.ZeroMemory(original);
+            Check(store.Writes == writes + 1 && store.Data!.SequenceEqual(original),
+                "Invalid current rows were overwritten or replayed.");
         }
     }
 
@@ -128,33 +97,21 @@ public static class GrantedMediaFilesTests
     private static Task ConstructorContracts()
     {
         var store = new MemoryStore();
-        Throws<ArgumentException>(() => new GrantedMediaFiles(store, "", [".wav"]));
-        Throws<ArgumentException>(() => new GrantedMediaFiles(store, "../files", [".wav"]));
-        Throws<ArgumentException>(() => new GrantedMediaFiles(store, Namespace, []));
-        Throws<ArgumentException>(() => new GrantedMediaFiles(store, Namespace, ["."]));
-        Throws<ArgumentException>(() => new GrantedMediaFiles(store, Namespace, [".w.av"]));
-        Throws<ArgumentException>(() => new GrantedMediaFiles(store, Namespace, [".音乐"]));
-        _ = new GrantedMediaFiles(store, Namespace, [".WAV", ".wav"]);
+        Throws<ArgumentException>(() => new GrantedMediaFiles(store, []));
+        Throws<ArgumentException>(() => new GrantedMediaFiles(store, ["."]));
+        Throws<ArgumentException>(() => new GrantedMediaFiles(store, [".w.av"]));
+        Throws<ArgumentException>(() => new GrantedMediaFiles(store, [".音乐"]));
+        _ = new GrantedMediaFiles(store, [".WAV", ".wav"]);
         return store.DisposeAsync().AsTask();
     }
 
-    private static GrantedMediaFiles Owner(IDocumentStore store) =>
-        new(store, Namespace, [".wav"]);
-
-    private static string CurrentDocument(string path) =>
-        $$"""{"Schema":1,"Items":[{{CurrentItem(path)}}]}""";
-
-    private static string CurrentItem(string path) => JsonSerializer.Serialize(new
-    {
-        Id = Id(path),
-        Path = path,
-        Title = Path.GetFileNameWithoutExtension(path)
-    });
+    private static GrantedMediaFiles Owner(IStorageDatabase store) =>
+        new(store, [".wav"]);
 
     private static string Id(string path) => "local:" + Convert.ToHexStringLower(
         SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
 
-    private static async Task Corrupt(Func<Task> action) => await Error("CORRUPT_DOCUMENT", action);
+    private static async Task Corrupt(Func<Task> action) => await Error("CORRUPT_STORAGE", action);
 
     private static async Task Error(string code, Func<Task> action)
     {
@@ -204,41 +161,21 @@ public static class GrantedMediaFilesTests
 
     private enum WriteBehavior { Normal, Conflict, WrongReceipt }
 
-    private sealed class MemoryStore : IDocumentStore
+    private sealed class MemoryStore : NativeTestDatabase
     {
-        internal byte[]? Data;
-        internal int Reads;
-        internal int Writes;
+        internal byte[]? Data
+        {
+            get { var value=Project(FileGrantRecords.Files,"device"); return value is null ? null : JsonSerializer.SerializeToUtf8Bytes(value); }
+            set { if (value is not null) Seed(FileGrantRecords.Files,JsonNode.Parse(value)!.AsObject(),"device"); }
+        }
         internal WriteBehavior Behavior;
-
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace,
-            CancellationToken cancellationToken = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            Check(documentNamespace == Namespace);
-            Reads++;
-            var fingerprint = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            return Task.FromResult(new DocumentSnapshot(Data?.ToArray(), fingerprint));
-        }
-
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Check(documentNamespace == Namespace);
-            Writes++;
-            var current = Data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data);
-            if (current != expected || Behavior == WriteBehavior.Conflict)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
-            Data = data.ToArray();
-            return Task.FromResult(Behavior == WriteBehavior.WrongReceipt
-                ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Data));
-        }
-
-        public ValueTask DisposeAsync()
-        {
-            if (Data is not null) CryptographicOperations.ZeroMemory(Data);
-            return ValueTask.CompletedTask;
+            if (Behavior == WriteBehavior.Conflict) { Writes++; throw new DocumentStoreException(DocumentStoreError.Conflict); }
+            var result=await base.WriteAsync(write,token,retainedBytes,commit);
+            if (Behavior == WriteBehavior.WrongReceipt) throw new DocumentStoreException(DocumentStoreError.Storage);
+            return result;
         }
     }
 }

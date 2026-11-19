@@ -20,8 +20,8 @@ public static class MusicFeedbackIntegrationTests
 // No private implementation from another business module is accessed.
 public static partial class MusicUiTests
 {
-    private static LocalDocumentStore ServiceStore() =>
-        new(NewRoot(), AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+    private static NativeDatabase ServiceStore() =>
+        new(NewRoot());
 
     internal static IEnumerable<TestCase> NativeServiceIntegrationCases()
     {
@@ -29,17 +29,15 @@ public static partial class MusicUiTests
         yield return Case("assembled native store registers the credential-free playback outbox", async () =>
         {
             await using var store = ServiceStore();
-            True(AppIdentity.NativeNamespaces.Contains(NeteasePlaybackOutboxDocument.Namespace), "native-only outbox registered");
-            True(!AppIdentity.ProtectedNamespaces.Contains(NeteasePlaybackOutboxDocument.Namespace), "no credential document");
-            var missing = await store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace);
-            True(!missing.Fingerprint.Exists, "outbox starts absent");
+            var missing = await store.ReadRecordAsync(NeteasePlaybackOutboxDocument.Namespace, MeowFilm.Capabilities.Feedback.FeedbackStorageRecords.Outbox);
+            True(missing.Data is null, "outbox starts absent");
             byte[] empty = NeteasePlaybackOutboxDocument.Encode([]);
-            var receipt = await store.WriteAsync(NeteasePlaybackOutboxDocument.Namespace, empty, missing.Fingerprint);
+            var receipt = await new TypedRecordRepository(store, NeteasePlaybackOutboxDocument.Namespace, FeedbackStorageRecords.Outbox).WriteAsync(empty, missing.Revision);
             await using var runtime = new MusicPlatformRuntimeFixture();
             await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             await app.InitializeAsync(); await app.Feedback.DrainAsync(); await app.PrepareShutdownAsync();
-            var saved = await store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace);
-            Equal(receipt, saved.Fingerprint);
+            var saved = await store.ReadRecordAsync(NeteasePlaybackOutboxDocument.Namespace, MeowFilm.Capabilities.Feedback.FeedbackStorageRecords.Outbox);
+            Equal(receipt, saved.Revision);
             Equal(0, NeteasePlaybackOutboxDocument.Decode(saved).Length);
             Equal(0, runtime.Requests.Count);
         });
@@ -54,8 +52,8 @@ public static partial class MusicUiTests
                     !platform.Value.GetProperty("playlists").GetBoolean(), "default-off");
             await ServiceCall(app, "music.librarySync.run");
             Equal(0, runtime.Requests.Count);
-            True(!(await store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists, "no account writer");
-            True(!(await store.ReadAsync(MusicFeedbackSettingsOwner.DocumentNamespace)).Fingerprint.Exists, "no implicit feedback consent");
+            True((await store.ReadAccountsAsync()).Revision == StorageRevision.Empty, "no account writer");
+            True((await store.ReadRecordAsync(MusicFeedbackSettingsOwner.DocumentNamespace, MeowFilm.Capabilities.Feedback.FeedbackStorageRecords.Settings)).Data is null, "no implicit feedback consent");
         });
         yield return Case("assembled scheduler is startup-local and drains explicit work before library shutdown", async () =>
         {

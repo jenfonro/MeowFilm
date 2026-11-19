@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -67,12 +68,31 @@ internal sealed record NovelSourceConfigurationSnapshot(int Version, long Revisi
 }
 
 /// <summary>The native configuration owner. Execution and private source state never enter this document.</summary>
-internal sealed class NovelSourceConfiguration(IDocumentStore store)
+internal sealed class NovelSourceConfiguration(IStorageDatabase database)
 {
+    private readonly TypedRecordRepository store = new(database, DocumentNamespace, NovelStorageRecords.Sources, ToRows, FromRows);
+    private static JsonObject ToRows(JsonObject value)
+    {
+        foreach (var row in value["sources"]!.AsArray().OfType<JsonObject>())
+            row["definition"] = JsonNode.Parse(row["definition"]!.GetValue<string>()) as JsonObject ??
+                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        return value;
+    }
+    private static JsonObject FromRows(JsonObject value)
+    {
+        if (value["sources"] is not JsonArray sources) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        foreach (var item in sources)
+        {
+            if (item is not JsonObject row || row["definition"] is not JsonObject definition)
+                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            row["definition"] = definition.ToJsonString();
+        }
+        return value;
+    }
     internal const string DocumentNamespace = "novel.sources.v1";
     private const long MaximumRevision = 9007199254740991;
     private readonly SemaphoreSlim serial = new(1, 1);
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private StorageRevision storageRevision = StorageRevision.Empty;
     private NovelSourceConfigurationSnapshot? saved;
     internal NovelSourceConfigurationSnapshot Snapshot => saved ?? throw new InvalidOperationException("NOT_INITIALIZED");
 
@@ -85,7 +105,7 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
     private async Task LoadCoreAsync(CancellationToken token, bool reload = false)
     {
         if (saved is not null && !reload) return;
-        var read = await store.ReadAsync(DocumentNamespace, token);
+        var read = await store.ReadAsync(token);
         NovelSourceConfigurationSnapshot next;
         if (read.Data is null)
             next = new(1, 1, []);
@@ -94,7 +114,7 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
             try { using var json = JsonDocument.Parse(read.Data); next = Decode(json.RootElement); }
             catch (JsonException) { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
         }
-        fingerprint = read.Fingerprint; saved = next;
+        storageRevision = read.Revision; saved = next;
     }
     private static NovelSourceConfigurationSnapshot Decode(JsonElement value)
     {
@@ -243,8 +263,8 @@ internal sealed class NovelSourceConfiguration(IDocumentStore store)
             raw = SettingsDocument.SetMember(raw, "sources", BridgeCodec.Value(merged));
             var next = new NovelSourceConfigurationSnapshot(1, current.Revision + 1, values) { Original = raw };
             var bytes = BridgeCodec.EncodeJSONValue(raw);
-            var receipt = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, token);
-            fingerprint = receipt; saved = next;
+            var receipt = await store.WriteAsync(bytes, storageRevision, token);
+            storageRevision = receipt; saved = next;
         }
         finally { serial.Release(); }
     }

@@ -20,7 +20,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     private bool stopping, disposed, applyingReaderSettings;
     private Task? preparation, disposal;
     private string route = HomeRoute;
-    public NovelCapability(IRuntimeClient runtime, IDocumentStore store) : this(new NovelSourceService(runtime, store),
+    public NovelCapability(IRuntimeClient runtime, IStorageDatabase store) : this(new NovelSourceService(runtime, store),
         new NovelLibrary(store), new NovelRuleProgram(runtime)) { }
     public NovelCapability(NovelSourceService sources, NovelLibrary library, NovelRuleProgram rules)
     {

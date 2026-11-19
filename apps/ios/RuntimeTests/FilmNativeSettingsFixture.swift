@@ -5,29 +5,30 @@ import MeowStorage
 @testable import MeowFilmFeature
 @testable import Meowfilm
 
-/// Isolated native documents for component fixtures. Real App-hosted settings
-/// tests use resources.filmSettings and the App's protected stores instead.
+/// Isolated current database rows for component fixtures. Real App-hosted
+/// settings tests use resources.filmSettings and the shared App database.
 final class FilmRuntimeTestSettings {
+    let database: SQLiteDatabase
     let documents: [FilmSettingsBlock: FilmSettingsDocument]
-    init(root: URL) throws {
-        documents = try Dictionary(uniqueKeysWithValues: FilmSettingsBlock.allCases.map { block in
-            let store = try DocumentStore(baseURL: root, namespace: block.namespace)
-            return (block, FilmSettingsDocument(block: block, storage: .plain { store }))
+    init(database: SQLiteDatabase) {
+        self.database = database
+        documents = Dictionary(uniqueKeysWithValues: FilmSettingsBlock.allCases.map { block in
+            (block, FilmSettingsDocument(block: block, database: database))
         })
     }
     subscript(_ block: FilmSettingsBlock) -> FilmSettingsDocument { documents[block]! }
 
-    func seedCats(_ cats: [FilmCatSource]) throws {
+    @MainActor func seedCats(_ cats: [FilmCatSource]) throws {
         let inputs: [RuntimeValue] = cats.map { cat in
             .object(["installationId": .string(cat.installationId), "name": .string(cat.name),
                      "sourceType": .string(cat.sourceType), "sourceUrl": cat.sourceUrl.map(RuntimeValue.string) ?? .null,
                      "localPath": .null, "localHash": cat.sourceType == "local" ? .string(String(repeating: "a", count: 64)) : .null,
                      "enabled": .bool(cat.enabled), "inputRevision": .number(Double(max(1, cat.inputRevision)))])
         }
-        _ = try self[.catSources].update { _ in .object([
+        _ = try appStorageTestWait { try await self[.catSources].update { _ in .object([
             "version": .number(1), "port": .number(0), "providers": .object([:]),
             "mappings": .array([]), "scripts": .array(inputs)
-        ]) }
+        ]) } }
     }
 }
 
@@ -54,7 +55,7 @@ enum NativeFilmFixture {
 
     @MainActor
     static func preferences(_ value: RuntimeValue, resources: MeowfilmResources) async throws {
-        _ = try resources.filmSettings[.preferences].update { current in
+        _ = try await resources.filmSettings[.preferences].update { current in
             var root = current?.filmObject ?? ["version": .number(1)]
             root["preferences"] = value
             return .object(root)
@@ -65,7 +66,7 @@ enum NativeFilmFixture {
     @MainActor
     static func waitForNativeRuntimeSettings(_ block: FilmSettingsBlock, resources: MeowfilmResources) async throws {
         let client = try await resources.scriptSession.connection()
-        guard case .object(let document)? = try resources.filmSettings[block].read() else {
+        guard case .object(let document)? = try await resources.filmSettings[block].read() else {
             throw FilmSettingsStorageError.invalidDocument
         }
         let expected: RuntimeValue, module: RuntimeModule, operation: String

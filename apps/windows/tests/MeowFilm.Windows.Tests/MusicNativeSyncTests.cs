@@ -140,7 +140,7 @@ public static partial class MusicNativeSyncTests
             Runtime.OnRequest = (call, token) => (call.Platform == Server.Platform ? Server
                 : second is not null && call.Platform == second.Platform ? second
                 : throw new InvalidOperationException("Unexpected sync platform")).Respond(call, token);
-            Owner = new(MusicTestStores.For(Store)); Sync = new(Owner, Sessions, Runtime.Client, clock);
+            Owner = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage); Sync = new(Owner, Sessions, Runtime.Client, clock);
         }
         internal async Task Enable(bool favorites = true, bool playlists = false)
         {
@@ -154,7 +154,7 @@ public static partial class MusicNativeSyncTests
             return Ok(await Owner.ExecuteAsync("music.library.addSongs", new { id = "favorites", ifRevision = c.GetProperty("revision").GetInt64(), songs = new[] { Song(Server.Platform, Native(Server.Platform, n), n) } }));
         }
         internal async Task Restart()
-        { await Sync.DisposeAsync(); await Owner.AbortAsync(); Owner = new(MusicTestStores.For(Store)); Sync = new(Owner, Sessions, Runtime.Client, clock); }
+        { await Sync.DisposeAsync(); await Owner.AbortAsync(); Owner = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage); Sync = new(Owner, Sessions, Runtime.Client, clock); }
         public async ValueTask DisposeAsync() { Server.Release?.TrySetResult(); await Sync.DisposeAsync(); await Owner.AbortAsync(); await Runtime.DisposeAsync(); }
     }
     private sealed class Entry(string id, string name, bool favorite = false, bool writable = true)
@@ -848,7 +848,7 @@ public static partial class MusicNativeSyncTests
         var sync = root["areas"]!["library-sync"]!.AsObject();
         sync["unexpected"] = JsonNode.Parse("{\"exact\":900719925474099312345}");
         f.Store.Data = LJ.Bytes(root);
-        f.Owner = new(MusicTestStores.For(f.Store));
+        f.Owner = new(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
         f.Sync = new(f.Owner, f.Sessions, f.Runtime.Client);
         Ok(await f.Owner.ExecuteAsync("music.library.list"));
         Ok(await f.Sync.ExecuteAsync("music.librarySync.get"));
@@ -869,7 +869,7 @@ public static partial class MusicNativeSyncTests
         byte[] original = f.Store.Data.ToArray();
         f.Store.Writes = 0;
         f.Server.Reads = f.Server.Writes = f.Server.Creates = 0;
-        f.Owner = new(MusicTestStores.For(f.Store));
+        f.Owner = new(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
         f.Sync = new(f.Owner, f.Sessions, f.Runtime.Client);
         Ok(await f.Owner.ExecuteAsync("music.library.list"));
         Code(await f.Sync.ExecuteAsync("music.librarySync.get"), "CORRUPT_SYNC");
@@ -890,13 +890,13 @@ public static partial class MusicNativeSyncTests
         var sessions = new Sessions(); var server = new Server("tx");
         await using var runtime = new MusicPlatformRuntimeFixture(); runtime.Client.BindSessions(sessions); runtime.OnRequest = server.Respond;
         await using var store = new MusicRecordTestStore(path);
-        var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await using (var sync = new MusicLibrarySyncService(owner, sessions, runtime.Client))
         {
             Ok(await sync.ExecuteAsync("music.librarySync.set", new { platform = "tx", favorites = false, playlists = true, ifRevision = 0, confirm = true }));
             Ok(await owner.CreatePlaylistAsync("Local", [])); server.DropWrites = true; Code(await sync.ExecuteAsync("music.librarySync.run"), "CREATE_UNCONFIRMED");
         }
-        await owner.AbortAsync(); owner = new(MusicTestStores.For(store)); await using var next = new MusicLibrarySyncService(owner, sessions, runtime.Client);
+        await owner.AbortAsync(); owner = new(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage); await using var next = new MusicLibrarySyncService(owner, sessions, runtime.Client);
         Code(await next.ExecuteAsync("music.librarySync.run"), "CREATE_UNCONFIRMED"); Check(server.Creates == 1);
         var snapshot = await owner.ReadLibrarySyncAsync(); Check(!snapshot.State.GetRawText().Contains("synthetic-only", StringComparison.Ordinal));
         await next.AbortAsync(); await owner.AbortAsync();

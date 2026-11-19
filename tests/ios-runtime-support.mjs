@@ -1,20 +1,32 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { decodeJSONValue, validateEndpoint } from '@meowfilm/runtime-bridge';
 import { createRuntimeClient } from '../apps/runtime/client.mjs';
 import { assertOwnedPath, temporaryRoot } from '../scripts/windows/working-paths.mjs';
 
 export const root = fileURLToPath(new URL('../', import.meta.url));
 export const contract = 'music.script.v3';
+const bootstrapURL = pathToFileURL(join(root, 'apps/ios/runtime/bootstrap.mjs')).href;
 
 // Desktop execution of the iOS bootstrap with the desktop native engine.
 // Actual iOS framework loading belongs to the App host tests.
 export const simulatedIOS = `
   Object.defineProperty(globalThis, 'WebAssembly', { value: undefined, configurable: false, writable: false });
+  const { readFileSync } = await import('node:fs');
+  const { registerHooks } = await import('node:module');
+  registerHooks({ load(url, context, next) {
+    const loaded = next(url, context);
+    if (url !== ${JSON.stringify(bootstrapURL)}) return loaded;
+    const source = typeof loaded.source === 'string' ? loaded.source : readFileSync(new URL(url), 'utf8');
+    return { format: 'module', shortCircuit: true, source: source
+      .replace("import { createNativeStorageDriver } from '@meowfilm/script-host/storage';",
+        "import { createDesktopStorageDriver as createNativeStorageDriver } from '@meowfilm/script-host/storage';")
+      .replace('initialize: configuration.nativeSettings !== true', 'initialize: true') };
+  } });
 `;
 
 export function spawnRuntime(t, { preload = simulatedIOS, argv, entry, fixture, cwd = root,

@@ -11,7 +11,7 @@ internal sealed class NovelSourceProjectionChange(IReadOnlySet<string> retired) 
 }
 
 /// <summary>Native source configuration and revision-bound execution through the runtime.</summary>
-public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore store)
+public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase store)
 {
     private readonly NovelSourceConfiguration configuration = new(store);
     private readonly NovelWork work = new();
@@ -340,7 +340,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore st
                 int count;
                 while ((count = await body.ReadAsync(buffer, deadline.Token)) != 0)
                 {
-                    if (output.Length + count > LocalDocumentStore.MaximumSourceBytes) throw new BridgeException("LIMIT");
+                    if (output.Length + count > 16 * 1024 * 1024) throw new BridgeException("LIMIT");
                     output.Write(buffer, 0, count);
                 }
                 try { return new System.Text.UTF8Encoding(false, true).GetString(output.ToArray()).TrimStart('\uFEFF'); }

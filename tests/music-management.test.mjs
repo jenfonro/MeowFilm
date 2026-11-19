@@ -1,8 +1,8 @@
+import { withTestDatabase } from './storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import fs, { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
@@ -44,9 +44,16 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const turn = () => new Promise(resolve => setImmediate(resolve));
+const cleanupByRoot = new Map();
 function root(t) {
   const path = mkdtempSync(join(tmpdir(), 'music-script-'));
-  t.after(() => rmSync(path, { recursive: true, force: true }));
+  const cleanups = [];
+  cleanupByRoot.set(path, cleanups);
+  t.after(async () => {
+    for (const cleanup of cleanups) await cleanup();
+    cleanupByRoot.delete(path);
+    rmSync(path, { recursive: true, force: true });
+  });
   return path;
 }
 function setup(t, extra = {}) {
@@ -59,7 +66,7 @@ function setup(t, extra = {}) {
     ...extra,
     hostFactory: input => { host = (extra.hostFactory ?? createScriptHost)(input); return host; },
   });
-  t.after(async () => {
+  cleanupByRoot.get(dataRoot).push(async () => {
     okay(await module.close());
     if (host) {
       const stats = host.stats();
@@ -146,18 +153,17 @@ test('a corrupt catalog is reported and never reset or overwritten', async t => 
   const first = setup(t, { dataRoot });
   await imported(first.rpc);
   okay(await first.module.close());
-  const path = join(dataRoot, 'music', 'catalog.json');
-  for (const bytes of ['{', JSON.stringify({ schema: 2, revision: 0, installations: [] }),
-    JSON.stringify({ schema: 1, revision: 0, installations: [{ id: 'not-a-uuid' }] })]) {
-    writeFileSync(path, bytes);
+  await withTestDatabase(dataRoot, async database => {
+    await database.execute("UPDATE music_script_installations SET name=''");
+    const original = await database.query('SELECT * FROM music_script_installations');
     const reopened = setup(t, { dataRoot });
     denied(await reopened.rpc('sources.list'), 'CORRUPT_STORAGE');
     const installationId = randomUUID();
     const sourceRevision = await upload(reopened.rpc, installationId);
     denied(await reopened.rpc('sources.add', { installationId, sourceRevision }), 'CORRUPT_STORAGE');
-    assert.equal(readFileSync(path, 'utf8'), bytes);
+    assert.deepEqual(await database.query('SELECT * FROM music_script_installations'), original);
     okay(await reopened.module.close());
-  }
+  });
 });
 
 test('import accepts a leading BOM and rejects malformed or empty UTF-8 before storing', async t => {
@@ -395,8 +401,8 @@ test('check runs one sample per declared platform without changing enablement an
     mg: { state: 'unsupported', quality: null, sample: null, code: null },
   });
   assert.deepEqual(Object.keys(checked.sites), ['tx', 'kw', 'mg']);
-  assert.equal(JSON.stringify(readFileSync(join(dataRoot, 'music', 'catalog.json'), 'utf8')).includes('media.invalid'),
-    false);
+  const storedChecks = await withTestDatabase(dataRoot, db => db.query('SELECT * FROM music_script_checks'));
+  assert.equal(JSON.stringify(storedChecks).includes('media.invalid'), false);
   okay(await module.close());
   const reopened = setup(t, { dataRoot });
   const restored = okay(await reopened.rpc('sources.list')).items[0];
@@ -440,12 +446,13 @@ test('guest storage is request bound, isolated by installation and site, and rem
   assert.equal(await value(rpc, a, 'kw', { op: 'delete' }), null);
   assert.equal(await value(rpc, a, 'kw', { op: 'get' }), null);
   assert.equal(await value(rpc, a, 'kw', { op: 'set', value: 1 }), null);
-  const data = join(dataRoot, 'music', 'data', `${a.installationId}.json`);
-  assert.deepEqual(JSON.parse(readFileSync(data, 'utf8')), { schema: 1, sites: { kw: [{ key: 'key', value: 1 }] } });
+  const values = () => withTestDatabase(dataRoot, db => db.query(
+    'SELECT site_id,entry_key,kind,int_value FROM music_script_kv_nodes WHERE installation_id=?', [a.installationId]));
+  assert.deepEqual(await values(), [{ site_id: 'kw', entry_key: 'key', kind: 'integer', int_value: 1 }]);
   assert.equal(JSON.stringify(okay(await rpc('sources.list'))).includes('"key"'), false);
   assert.deepEqual(okay(await rpc('sources.remove', { installationId: a.installationId })), {
     removed: true });
-  assert.equal(existsSync(data), false);
+  assert.deepEqual(await values(), []);
   assert.equal(readdirSync(join(dataRoot, 'music', 'sources')).length, 1);
   okay(await rpc('sources.remove', { installationId: b.installationId }));
   assert.deepEqual(readdirSync(join(dataRoot, 'music', 'sources')), []);
@@ -630,44 +637,35 @@ test('callback timeout is bounded by the real host and a timed-out startup leave
 test('catalog write failure does not publish an enabled replacement or silently recreate it', async t => {
   const { rpc, host, dataRoot } = setup(t);
   const item = await enabled(rpc);
-  const path = join(dataRoot, 'music', 'catalog.json');
-  const original = readFileSync(path);
-  const sourceRevision = await upload(rpc, item.installationId, fixture({ name: 'candidate' }));
-  const rename = fs.renameSync;
-  let failCatalog = true, failedWrites = 0;
-  const failingRename = t.mock.method(fs, 'renameSync', (from, to) => {
-    if (failCatalog && to === path) {
-      failedWrites++;
-      throw Object.assign(new Error('synthetic catalog write failure'), { code: 'EIO' });
-    }
-    return rename(from, to);
-  });
-  syncBuiltinESMExports();
-  try {
+  await withTestDatabase(dataRoot, async database => {
+    const catalog = () => database.snapshot([
+      { sql: 'SELECT * FROM music_script_catalog_state', rows: true },
+      { sql: 'SELECT * FROM music_script_installations', rows: true },
+    ]);
+    const original = await catalog();
+    const sourceRevision = await upload(rpc, item.installationId, fixture({ name: 'candidate' }));
+    await database.query('PRAGMA query_only=ON');
+    try {
     denied(await rpc('sources.update', { installationId: item.installationId, sourceRevision }), 'STORAGE_ERROR');
-    assert.equal(failedWrites, 1);
     assert.equal(host().stats().liveSessions, 0);
-    assert.deepEqual(readFileSync(path), original);
-    failCatalog = false;
+    assert.deepEqual(await catalog(), original);
+    await database.query('PRAGMA query_only=OFF');
     const failed = okay(await rpc('sources.detail', { installationId: item.installationId })).item;
     assert.equal(failed.contentHash, item.contentHash); assert.equal(failed.state, 'failed');
     denied(await resolve(rpc, item), 'STORAGE_ERROR');
     const recovered = okay(await rpc('sources.enable', { installationId: item.installationId })).item;
     assert.ok(recovered.generation > item.generation);
     assert.equal(recovered.contentHash, item.contentHash);
-    const beforeDisable = readFileSync(path);
-    failCatalog = true;
+    const beforeDisable = await catalog();
+    await database.query('PRAGMA query_only=ON');
     denied(await rpc('sources.disable', { installationId: item.installationId }), 'STORAGE_ERROR');
-    assert.equal(failedWrites, 2);
     assert.equal(host().stats().liveSessions, 0);
-    assert.deepEqual(readFileSync(path), beforeDisable);
-    failCatalog = false;
+    assert.deepEqual(await catalog(), beforeDisable);
+    await database.query('PRAGMA query_only=OFF');
     denied(await resolve(rpc, item), 'SOURCE_DISABLED');
     assert.equal(host().stats().liveSessions, 0);
-  } finally {
-    failingRename.mock.restore();
-    syncBuiltinESMExports();
-  }
+    } finally { await database.query('PRAGMA query_only=OFF'); }
+  });
 });
 
 test('another installation committing cannot collect a source whose update trial still owns it', async t => {

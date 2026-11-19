@@ -11,7 +11,7 @@ import { resolve, join, isAbsolute } from 'node:path';
 import { parse } from 'acorn';
 import { ScriptHost } from './host.js';
 import { WorkerSession, workerResult } from './worker-session.js';
-import { CatSettingsFile, normalizeCatConfig, catName, catSourceURL } from './cat-settings.js';
+import { CatSettingsStore, normalizeCatConfig, catName, catSourceURL } from './cat-settings.js';
 import { CatNativeSettings } from './cat-native-settings.js';
 import { downloadCatSource } from './cat-source-download.js';
 import { atomicWrite, removePrivateVolume } from './private-volume.js';
@@ -56,7 +56,8 @@ function decodeSource(bytes) {
 export class CatRuntime {
   constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits, clock = Date.now, configuration } = {}) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
-    this.dataRoot = resolve(dataRoot);
+    this.productRoot = resolve(dataRoot);
+    this.dataRoot = join(this.productRoot, 'cat');
     this.network = network; this.onDiagnostic = onDiagnostic; this.onScriptError = onScriptError;
     this.configuration = configuration;
     this.onNetwork = onNetwork; this.limits = limits; this.clock = clock;
@@ -128,8 +129,9 @@ export class CatRuntime {
         mkdirSync(this.dataRoot, { recursive: true });
         this.sourcesRoot = join(this.dataRoot, 'sources');
         mkdirSync(this.sourcesRoot, { recursive: true });
-        this.settings = this.configuration ? new CatNativeSettings(this.dataRoot, this.configuration)
-          : new CatSettingsFile(this.dataRoot);
+        this.settings = this.configuration ? new CatNativeSettings(this.productRoot, this.configuration)
+          : new CatSettingsStore(this.productRoot);
+        await this.settings.ready;
         this.host = new ScriptHost({ adapters: {
           cat: input => this.workerSession(input),
         }, network: this.network, onDiagnostic: this.onDiagnostic,
@@ -358,7 +360,7 @@ export class CatRuntime {
             try { this.deleteSource(sourceHash); }
             catch (error) { this.failures.set(installationId, safeError(error, 'STORAGE_ERROR').code); }
           }
-          this.settings.prune?.(installationId);
+          await this.settings.prune?.(installationId);
         }
         if (failure) throw failure;
         return;
@@ -421,7 +423,7 @@ export class CatRuntime {
       await this.host.enable(id, { signal });
       const sites = this.hostSites(id);
       if (!same(sites, spec.sites)) {
-        const next = this.settings.save(value => ({ ...value, scripts: value.scripts.map(script => {
+        const next = await this.settings.save(value => ({ ...value, scripts: value.scripts.map(script => {
           if (script.installationId !== id) return script;
           requireValue(sameExecution(script, spec), 'STORAGE_CONFLICT');
           return { ...script, sites };
@@ -479,7 +481,7 @@ export class CatRuntime {
       const current = this.settings.read().scripts.find(value => value.installationId === id);
       if (current?.inputIdentity === spec.inputIdentity && current.enabled === spec.enabled) {
         const code = safeError(error).code;
-        this.saveSpec(current, { ...current, updateState: 'failed', updateError: code });
+        await this.saveSpec(current, { ...current, updateState: 'failed', updateError: code });
         this.failures.set(id, code);
         this.applied.set(id, current);
         this.settled.add(id);
@@ -511,7 +513,8 @@ export class CatRuntime {
     requireValue(!signal?.aborted, 'CANCELLED');
     await this.start();
     requireValue(!signal?.aborted, 'CANCELLED');
-    const diskSettings = this.settings.read();
+    const diskSettings = await this.settings.reload();
+    requireValue(!signal?.aborted, 'CANCELLED');
     const previousSettings = new Map(this.settings.value.scripts.map(script =>
       [script.installationId, script]));
     const diskScripts = new Map(diskSettings.scripts.map(script => [script.installationId, script]));
@@ -650,10 +653,10 @@ export class CatRuntime {
     requireValue(spec, 'NOT_FOUND');
     return spec;
   }
-  saveSpec(previous, spec) {
+  async saveSpec(previous, spec) {
     let next, failure;
     try {
-      next = this.settings.save(value => {
+      next = await this.settings.save(value => {
         const current = value.scripts.find(script => script.installationId === spec.installationId);
         requireValue(same(current, previous), 'STORAGE_CONFLICT');
         return { ...value, scripts: current
@@ -752,7 +755,7 @@ export class CatRuntime {
       const previous = this.installedSpec(installationId);
       requireValue(sourceUrl === undefined || previous.sourceType === 'network');
       task.scope.assertOpen();
-      this.saveSpec(previous, { ...previous, name: displayName,
+      await this.saveSpec(previous, { ...previous, name: displayName,
         ...(sourceUrl === undefined ? {} : { sourceUrl }) });
       return this.instance(installationId);
     });
@@ -783,7 +786,7 @@ export class CatRuntime {
           // A post-rename failure may already have committed the candidate.
           // Never turn that accepted version into a failed/rolled-back update.
           const current = this.installedSpec(installationId);
-          if (same(current, previous)) this.saveSpec(current, { ...current,
+          if (same(current, previous)) await this.saveSpec(current, { ...current,
             updateState: 'failed', updateError: task.scope.signal.aborted
               ? task.scope.reason.code : safeError(error, 'STORAGE_ERROR').code });
           throw task.scope.signal.aborted ? task.scope.reason : error;
@@ -817,7 +820,7 @@ export class CatRuntime {
     }
     const changed = Boolean(previous?.sourceHash && previousSource !== source);
     if (update && !changed && (!spec.enabled || this.hostState(installationId)?.state === 'ready')) {
-      this.saveSpec(previous, { ...previous, updateState: 'unchanged', updateError: null });
+      await this.saveSpec(previous, { ...previous, updateState: 'unchanged', updateError: null });
       return this.instance(installationId);
     }
     const file = this.sourcePath(spec.sourceHash);
@@ -854,7 +857,7 @@ export class CatRuntime {
       // Until this point both the old source and its description remain durable.
       touchedSource = true;
       atomicWrite(file, bytes);
-      try { this.saveSpec(previous, spec); }
+      try { await this.saveSpec(previous, spec); }
       catch (error) {
         const disk = this.settings.read();
         if (same(disk.scripts.find(script => script.installationId === installationId), spec)) {
@@ -897,6 +900,8 @@ export class CatRuntime {
         if (previous) this.applied.set(installationId, previous);
       }
       failure = task.scope.signal.aborted ? task.scope.reason : error;
+      if (!committed && !previous && !this.failures.has(installationId))
+        this.failures.set(installationId, safeError(failure, 'STORAGE_ERROR').code);
     } finally {
       if (committed) {
         this.applied.set(installationId, spec);
@@ -948,7 +953,7 @@ export class CatRuntime {
       } catch (error) {
         const latest = this.settings.read().scripts.find(spec => spec.installationId === installationId);
         if (latest?.inputIdentity === identity)
-          this.saveSpec(latest, { ...latest, updateState: 'failed', updateError: safeError(error).code });
+          await this.saveSpec(latest, { ...latest, updateState: 'failed', updateError: safeError(error).code });
         throw error;
       } finally { prepared.value?.bytes.fill(0); }
     }, 'STALE_SESSION', async task => {
@@ -966,7 +971,7 @@ export class CatRuntime {
     return this.manage(installationId, signal, async task => {
       requireValue(this.settings.read().scripts.some(script => script.installationId === installationId), 'NOT_FOUND');
       let next, failure;
-      try { next = this.settings.save(value => ({ ...value, scripts: value.scripts.map(script =>
+      try { next = await this.settings.save(value => ({ ...value, scripts: value.scripts.map(script =>
         script.installationId === installationId ? { ...script, enabled } : script) })); }
       catch (error) {
         if (error.code !== 'COMMIT_UNKNOWN') throw error;
@@ -982,7 +987,7 @@ export class CatRuntime {
   async uninstall(installationId, { signal } = {}) {
     return this.manage(installationId, signal, async task => {
       let next, failure;
-      try { next = this.settings.save(value => ({ ...value,
+      try { next = await this.settings.save(value => ({ ...value,
         scripts: value.scripts.filter(script => script.installationId !== installationId) })); }
       catch (error) {
         if (error.code !== 'COMMIT_UNKNOWN') throw error;
@@ -1101,7 +1106,7 @@ export class CatRuntime {
     return this.statusSnapshot();
   }
   statusSnapshot() {
-    return { settingsPath: this.settings.path, aggregate: {
+    return { aggregate: {
       origin: `http://127.0.0.1:${this.server.address().port}` },
       instances: [...new Set([...this.settings.value.scripts.map(spec => spec.installationId),
         ...this.replacements])].map(id => this.instance(id)) };
@@ -1453,6 +1458,7 @@ export class CatRuntime {
       this.settled.clear();
       this.transactions.clear(); this.pending.clear();
       this.initialization = null;
+      try { await this.settings?.close(); } catch (error) { failure ??= error; }
       this.host = null; this.settings = null;
       this.network = null; this.onDiagnostic = null; this.onScriptError = null; this.onNetwork = null;
       if (failure) throw failure;

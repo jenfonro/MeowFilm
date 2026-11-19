@@ -347,10 +347,10 @@ public static partial class MusicNativeLibraryTests
         string root = Environment.GetEnvironmentVariable("MEOWFILM_TEST_DATA_ROOT") ?? throw new InvalidOperationException("Test data root required");
         Check(Path.IsPathFullyQualified(root) && Directory.Exists(root)); string path = Path.Combine(root, "native-music-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path);
         await using (var store = new MusicRecordTestStore(path))
-        await using (var first = new MusicLibraryOwner(MusicTestStores.For(store)))
+        await using (var first = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             await Ok(first, "music.library.create", new { name = "Plain files", songs = new[] { Song() } });
         await using var reopened = new MusicRecordTestStore(path);
-        await using var second = new MusicLibraryOwner(MusicTestStores.For(reopened));
+        await using var second = new MusicLibraryOwner(MusicTestStores.For(reopened), database: MusicTestStores.For(reopened).Storage);
         Check((await Ok(second, "music.library.list")).GetProperty("total").GetInt32() == 2);
     }
     private static async Task UnknownCommit(bool committed)

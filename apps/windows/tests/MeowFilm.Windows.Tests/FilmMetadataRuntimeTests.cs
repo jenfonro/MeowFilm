@@ -304,8 +304,7 @@ public static class FilmMetadataRuntimeTests
     {
         string root = NewData();
         int starts = 0;
-        await using (var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
-            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces))
+        await using (var store = new NativeDatabase(Path.Combine(root, "documents")))
         await using (var runtime = new AppRuntimeConnectionHost(_ =>
         {
             starts++;
@@ -668,7 +667,7 @@ public static class FilmMetadataRuntimeTests
     {
         internal readonly AppRuntimeConnectionHost Client;
         internal readonly FilmMetadataService Metadata;
-        internal readonly LocalDocumentStore Store;
+        internal readonly NativeDatabase Store;
         private NodeRuntime? session;
         private Process? child;
         internal int ProcessId => session!.ProcessId;
@@ -676,13 +675,13 @@ public static class FilmMetadataRuntimeTests
         private RuntimeHost(string root, RuntimeBundle bundle)
         {
             Directory.CreateDirectory(Path.Combine(root, "documents"));
-            Store = new(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
-                AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+            Store = new(Path.Combine(root, "documents"));
             Client = new(async token =>
             {
+                await Store.Ready;
                 session = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle,
-                    AppIdentity.ScriptModules, Path.Combine(root, "script-runtime"), token, ownerRevoked: token,
-                    settingsStore: Store, settingsNamespaces: AppIdentity.RuntimeSettingsNamespaces);
+                    AppIdentity.ScriptModules, Store.ProductRoot!, token, ownerRevoked: token,
+                    settingsStore: new FilmRuntimeSettings(Store));
                 child = Process.GetProcessById(session.ProcessId);
                 _ = child.SafeHandle;
                 return session;
@@ -714,9 +713,8 @@ public static class FilmMetadataRuntimeTests
         }
         internal async Task<JsonElement> WaitSettingsAsync(string block)
         {
-            string space = AppIdentity.RuntimeSettingsNamespaces[block];
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            var document = await new SettingsDocument(Store, space).ReadAsync(deadline.Token)
+            var document = (await new FilmRuntimeSettings(Store).ReadAsync(block, deadline.Token)).Document
                 ?? throw new InvalidOperationException("Expected a committed native settings document.");
             string field = block == "film.rules" ? "rules" : block == "film.preferences" ? "preferences" : "settings";
             var expected = document.GetProperty(field);

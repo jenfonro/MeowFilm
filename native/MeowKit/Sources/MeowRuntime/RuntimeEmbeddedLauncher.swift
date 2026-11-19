@@ -312,8 +312,8 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
               case .number(let id)? = request["id"], id >= 1, id <= 9_007_199_254_740_991,
               id.rounded(.towardZero) == id,
               kind == "settings.read" ||
-                kind == "settings.write" && settings.writableBlocks.contains(block),
-              kind != "settings.write" || request["document"] != nil && request["expected"] != nil else {
+                kind == "settings.pan.update" && block == "pan.accounts" && settings.writableBlocks.contains(block),
+              kind != "settings.pan.update" || request["command"] != nil else {
             throw RuntimeHTTPError.invalidResponse
         }
         var reply: RuntimeObject = ["kind": .string("settings.result"), "id": .number(id)]
@@ -321,14 +321,14 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
             let snapshot: RuntimeSettingsSnapshot
             if kind == "settings.read" { snapshot = try settings.read(block) }
             else {
-                guard case .object? = request["document"], case .object? = request["expected"] else {
+                guard case .object? = request["command"] else {
                     throw RuntimeHTTPError.invalidResponse
                 }
-                snapshot = try settings.write(block, request["document"]!, request["expected"]!)
+                snapshot = try settings.update(block, request["command"]!)
             }
             reply["ok"] = .bool(true)
             reply["document"] = snapshot.document ?? .null
-            reply["fingerprint"] = snapshot.fingerprint
+            reply["revision"] = .number(Double(snapshot.revision))
         } catch let error as RuntimeSettingsAccessError {
             reply["ok"] = .bool(false)
             reply["code"] = .string(error == .conflict ? "STORAGE_CONFLICT" : "STORAGE_ERROR")

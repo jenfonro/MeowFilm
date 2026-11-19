@@ -83,8 +83,8 @@ import MeowMusicFeature
                 _ = try await f.accounts.completeLogin(token, credential: MusicUpdateProvider.credential("replacement"))
                 expected = .staleSession
             default:
-                f.store.failRead(.interactionNotAllowed)
-                expected = .storage(.interactionNotAllowed)
+                f.store.failRead(.unavailable)
+                expected = .storage(.unavailable)
             }
             let record = f.store.peek(f.identity), writes = f.store.counts().writes, removes = f.store.counts().removes
             let counts = await f.provider.counts()

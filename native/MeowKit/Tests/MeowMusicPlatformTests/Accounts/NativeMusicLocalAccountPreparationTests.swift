@@ -140,7 +140,7 @@ import MeowMusicFeature
 
     func testStorageFailureIsNotPreparedGuestAndExplicitRetryStaysLocal() async throws {
         let f = try MusicLocalPreparationFixture(); try await f.enable()
-        f.store.failRead(.interactionNotAllowed)
+        f.store.failRead(.unavailable)
         do { try await f.service.prepareLocalAccounts(); XCTFail("Failed read accepted as guest") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
         XCTAssertNotNil(f.store.peek(f.identity))

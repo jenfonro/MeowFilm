@@ -2,6 +2,8 @@ import Foundation
 import Darwin
 import XCTest
 import MeowMusicFeature
+import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicPlatform
 
 /// These are deterministic injected-I/O tests, NOT evidence of an upstream
@@ -116,23 +118,21 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         let ancestor = Darwin.open(f.parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         if ancestor >= 0 { Darwin.close(ancestor) }
         XCTAssertLessThan(ancestor, 0, "The fixture must deny directory reads above the trusted base")
-        let index = Data("synthetic-index".utf8)
         do {
             let directory = try NativeMusicAudioCacheDirectory(url: root, baseURL: base)
-            try directory.writeIndex(index)
-            XCTAssertEqual(try directory.readIndex(), index)
+            try directory.check()
         }
         do {
             let reopened = try NativeMusicAudioCacheDirectory(url: root, baseURL: base)
-            XCTAssertEqual(try reopened.readIndex(), index)
+            try reopened.check()
         }
-        let cache = NativeMusicAudioFileCache(rootURL: root, baseURL: base, clock: { f.clock.now() },
+        let cache = NativeMusicAudioFileCache(database: f.database, rootURL: root, baseURL: base, clock: { f.clock.now() },
             transport: AudioCacheTestTransport(), inspector: AudioCacheTestInspector(), capacity: 256 * 1024 * 1024)
         await cache.storeAfterPlayback(f.request())
         let hit = await f.hit(cache)
         XCTAssertNotNil(hit)
         await cache.close()
-        let reopened = NativeMusicAudioFileCache(rootURL: root, baseURL: base, clock: { f.clock.now() },
+        let reopened = NativeMusicAudioFileCache(database: f.database, rootURL: root, baseURL: base, clock: { f.clock.now() },
             transport: AudioCacheTestTransport(), inspector: AudioCacheTestInspector(), capacity: 256 * 1024 * 1024)
         let restored = await f.hit(reopened)
         XCTAssertEqual(restored?.fileURL, hit?.fileURL)
@@ -143,12 +143,11 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
     func testProductionCachesBaseCanonicalizationStillRejectsDescendantSymlinks() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
-        let base = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask,
-                                               appropriateFor: nil, create: true)
+        let base = f.parent
         let root = base.appendingPathComponent("meow-audio-cache-test-" + UUID().uuidString, isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let transport = AudioCacheTestTransport()
-        let cache = NativeMusicAudioFileCache(rootURL: root, clock: { f.clock.now() },
+        let cache = NativeMusicAudioFileCache(database: f.database, rootURL: root, clock: { f.clock.now() },
             transport: transport, inspector: AudioCacheTestInspector())
         await cache.storeAfterPlayback(f.request())
         let hit = await f.hit(cache)
@@ -156,32 +155,32 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         await cache.close()
         try FileManager.default.removeItem(at: root)
         try FileManager.default.createSymbolicLink(at: root, withDestinationURL: f.parent)
-        let refused = NativeMusicAudioFileCache(rootURL: root, clock: { f.clock.now() },
+        let refused = NativeMusicAudioFileCache(database: f.database, rootURL: root, clock: { f.clock.now() },
             transport: transport, inspector: AudioCacheTestInspector())
         await refused.storeAfterPlayback(f.request())
         await refused.close()
         let count = await transport.count
         XCTAssertEqual(count, 1, "Caller descendants still use NOFOLLOW")
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.parent.path), [])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.parent.path).filter { $0 != "storage-v1" }.sorted(), [root.lastPathComponent])
         let nested = base.appendingPathComponent("meow-audio-cache-parent-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: nested) }
         let link = nested.appendingPathComponent("link", isDirectory: true)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: f.parent)
-        let escaped = NativeMusicAudioFileCache(rootURL: link.appendingPathComponent("cache", isDirectory: true),
+        let escaped = NativeMusicAudioFileCache(database: f.database, rootURL: link.appendingPathComponent("cache", isDirectory: true),
             clock: { f.clock.now() }, transport: transport, inspector: AudioCacheTestInspector())
         await escaped.storeAfterPlayback(f.request())
         await escaped.close()
         let finalCount = await transport.count
         XCTAssertEqual(finalCount, 1, "Intermediate descendants still use NOFOLLOW")
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.parent.path), [])
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: f.parent.path)), ["storage-v1", root.lastPathComponent, nested.lastPathComponent])
     }
 
     func testConstructionAndDeniedRequestsNeverCreateDirectoryOrTransfer() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
         let transport = AudioCacheTestTransport(), cache = f.cache(transport: transport)
-        let production = NativeMusicAudioFileCache(rootURL: f.root)
+        let production = NativeMusicAudioFileCache(database: f.database, rootURL: f.root)
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.path))
         await production.close()
         var requests = [
@@ -206,16 +205,17 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.path))
     }
 
-    func testPublicProductionInitializerRefusesNonCachesRootBeforeTransport() async throws {
+    func testPublicProductionInitializerRefusesRootOutsideAppDataBeforeTransport() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
         let transport = AudioCacheTestTransport()
-        let cache = NativeMusicAudioFileCache(rootURL: f.root, clock: { f.clock.now() },
+        let outside = f.parent.deletingLastPathComponent().appendingPathComponent("unowned-audio-" + UUID().uuidString)
+        let cache = NativeMusicAudioFileCache(database: f.database, rootURL: outside, clock: { f.clock.now() },
             transport: transport, inspector: AudioCacheTestInspector())
         await cache.storeAfterPlayback(f.request())
         let count = await transport.count
         XCTAssertEqual(count, 0)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: outside.path))
         await cache.close()
     }
 
@@ -236,7 +236,8 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         XCTAssertEqual(hit?.expiresAt, license)
         XCTAssertEqual(hit?.measuredQuality, "flac")
         XCTAssertTrue(try XCTUnwrap(hit).fileURL.path.hasPrefix(f.root.path + "/"))
-        let index = try String(contentsOf: f.root.appendingPathComponent("index.json"), encoding: .utf8)
+        let data = try XCTUnwrap(storageTestRowData(f.database, "SELECT * FROM ios_music_audio_files"))
+        let index = String(decoding: data, as: UTF8.self)
         for text in ["synthetic-signed-url", "synthetic-cookie", "synthetic-bearer", "qqmusic.qq.com", "expiresAtURL"] {
             XCTAssertFalse(index.contains(text))
         }
@@ -557,7 +558,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         await cache.storeAfterPlayback(f.request()); await cache.clear(); await cache.close()
         XCTAssertEqual(try Data(contentsOf: sentinel), original)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), ["sentinel"])
-        let nested = NativeMusicAudioFileCache(rootURL: f.root.appendingPathComponent("child"), baseURL: f.parent,
+        let nested = NativeMusicAudioFileCache(database: f.database, rootURL: f.root.appendingPathComponent("child"), baseURL: f.parent,
             clock: { f.clock.now() }, transport: AudioCacheTestTransport(), inspector: AudioCacheTestInspector(),
             capacity: 256 * 1024 * 1024)
         await nested.storeAfterPlayback(f.request()); await nested.close()
@@ -580,7 +581,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: hit.fileURL.path), "Do not unlink an unowned hardlinked file")
     }
 
-    func testIndexTraversalAndReplacementSymlinkCannotEscapeOwnedDirectory() async throws {
+    func testIndexTraversalCannotEscapeOwnedDirectoryAndSharedDatabaseRemainsUsable() async throws {
         let f = try AudioCacheTestFixture()
         defer { f.cleanup() }
         let cache = f.cache()
@@ -588,21 +589,13 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         await cache.close()
         let outside = f.parent.appendingPathComponent("user.wav"), original = Data("outside-original".utf8)
         try original.write(to: outside)
-        let index = f.root.appendingPathComponent("index.json")
-        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: index)) as? [String: Any])
-        var entries = try XCTUnwrap(object["entries"] as? [[String: Any]])
-        entries[0]["file"] = "../user.wav"; object["entries"] = entries
-        try JSONSerialization.data(withJSONObject: object).write(to: index)
+        try await f.database.transaction { try $0.execute("UPDATE ios_music_audio_files SET file='../user.wav'") }
         let reopened = f.cache(), rejected = await f.hit(reopened)
         XCTAssertNil(rejected)
         await reopened.clear(); await reopened.close()
         XCTAssertEqual(try Data(contentsOf: outside), original)
-        // Replacing index itself with a symlink must not read/write its target.
-        try FileManager.default.removeItem(at: index)
-        try FileManager.default.createSymbolicLink(at: index, withDestinationURL: outside)
-        let hostile = f.cache()
-        await hostile.storeAfterPlayback(f.request()); await hostile.clear(); await hostile.close()
-        XCTAssertEqual(try Data(contentsOf: outside), original)
+        let count = try await f.database.snapshot { try $0.query("SELECT count(*) AS count FROM ios_music_audio_files").first!.integer("count") }
+        XCTAssertEqual(count, 0)
     }
 
     #if os(iOS) && !targetEnvironment(simulator)
@@ -612,7 +605,7 @@ final class NativeMusicAudioFileCacheTests: XCTestCase {
         let cache = f.cache()
         await cache.storeAfterPlayback(f.request())
         let saved = await f.hit(cache), hit = try XCTUnwrap(saved)
-        for url in [f.root, f.root.appendingPathComponent("index.json"), hit.fileURL] {
+        for url in [f.root, f.database.url, hit.fileURL] {
             let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
             XCTAssertGreaterThanOrEqual(fd, 0)
             if fd >= 0 {
@@ -698,6 +691,7 @@ struct AudioCacheTestInspector: NativeMusicAudioCacheInspecting {
 struct AudioCacheTestFixture: Sendable {
     let parent: URL
     let root: URL
+    let database: SQLiteDatabase
     let clock = AudioCacheTestClock()
     init() throws {
         let temporary = FileManager.default.temporaryDirectory
@@ -708,14 +702,15 @@ struct AudioCacheTestFixture: Sendable {
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false,
                                                 attributes: [.posixPermissions: 0o700])
         root = parent.appendingPathComponent("cache", isDirectory: true)
+        database = try storageTestOpen(parent)
     }
-    func cleanup() { try? FileManager.default.removeItem(at: parent) }
+    func cleanup() { try? storageTestAsync { try await database.close() }; try? FileManager.default.removeItem(at: parent) }
     func names() throws -> [String] { try FileManager.default.contentsOfDirectory(atPath: root.path).sorted() }
     func cache(transport: any NativeMusicAudioCacheTransport = AudioCacheTestTransport(),
                inspector: any NativeMusicAudioCacheInspecting = AudioCacheTestInspector(),
                capacity: Int64 = 256 * 1024 * 1024,
                timing: NativeMusicAudioCacheTiming = .init()) -> NativeMusicAudioFileCache {
-        NativeMusicAudioFileCache(rootURL: root, baseURL: parent, clock: { clock.now() },
+        NativeMusicAudioFileCache(database: database, rootURL: root, baseURL: parent, clock: { clock.now() },
                                   transport: transport, inspector: inspector, capacity: capacity, timing: timing)
     }
     func request(song: String = "one", quality: String = "flac", platform: String = "tx", generation: Int = 1,

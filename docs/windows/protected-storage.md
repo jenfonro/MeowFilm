@@ -1,84 +1,33 @@
-# Windows local documents and sensitive storage
+# Windows 本地存储
 
-The App uses the `aggregate` business data directory and the exact namespaces declared by `AppIdentity.NativeNamespaces`. `AppIdentity.ProtectedNamespaces` (`music.accounts.v2`, `pan.accounts.v1`, `film.tmdb.v1`, `film.douban.v1`, `film.cat-sources.v1`) use CurrentUser DPAPI. App assembly passes this list through `AppDefinition` to `LocalDocumentStore`. Ordinary business records are raw JSON bytes; complete script sources are raw `.js` files.
+Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/meowfilm.sqlite3` 使用唯一内部数据库。原生 App owner 直接借用一个 `NativeDatabase`；随 App 启动的 Node Worker 通过受限私密启动管道，以相同数据根和平台 SQLite driver 打开同一路径。它们共享 schema identity、事务和持久事实，不再有业务 JSON 文档库、单独缓存数据库或凭据文件库。
 
-Rebuildable music snapshots use the sibling `aggregate-cache` directory (`AppDataPaths.Caches`) and `AppIdentity.CacheNamespaces`, with a separate `LocalDocumentStore` queue and root lock. `music.account-details.v2` uses CurrentUser DPAPI protection through `CacheProtectedNamespaces`; it contains no credential authority. The cache store and directory are opened lazily. `CacheDocumentStore` publishes memory snapshots immediately, owns ordered background writes, and drains accepted work before disposal. Cache reads that fail are misses; domain decoders only require the data actually used by consumers. Cache replacement never decodes the previous document and may rebuild unusable data. Cache I/O failures are diagnostics, not business CAS receipts or reconciliation gates. Public business `WriteAsync` remains strict CAS; the internal cache replacement entry point is available only to the disposable cache owner.
+共同表定义位于 `packages/storage/schema/*.sql`，由 `scripts/generate-storage-schema.py` 生成。实体使用 typed columns、关系表、外键、唯一约束、索引、revision 和 operation receipt；业务文档不得作为整份 JSON TEXT/BLOB 落库。对于来源扩展等有界动态结构，使用 typed value tree 关系。当前 schema identity／版本／hash 不匹配、损坏或孤立 journal 失败关闭，不执行升级或旧数据转换。
 
-The uninstaller's explicit delete-user-data choice covers both directories. Silent uninstall and the keep-data choice preserve both; normal playback-cache cleanup never deletes business documents.
+## 数据 owner
 
-Native owners use the store directly. The script process has no general reverse document API or arbitrary native namespace grants. The PID-verified private pipe exposes only the [native settings capability](native-settings.md#私密配置能力) to trusted Node owners; user scripts do not receive it. Installation sources and script private data remain under the explicit runtime data root; Windows cat source intent and the listed ordinary settings have their sole persistence in native documents.
+| 数据 | 写入 owner |
+| --- | --- |
+| Windows 外观、窗口、关闭、媒体控制、字幕、语言等 App 设置 | 对应原生 AppHost owner，写共享库 |
+| 影视规则、来源意图、TMDB／豆瓣设置、小说来源配置、网盘凭据 | 原生领域 owner 写 typed rows；Node 只获得 capability 指定的读取或 provider 行回写。TMDB／豆瓣 runtime cache 与影视播放资料由各自 Node owner 写同库专属关系表 |
+| 音乐账号与凭据、曲库、匹配、歌单快照、feedback outbox、建议偏好 | Windows 原生音乐 owner 写共享库；Node 执行协议请求但不另存账号、曲库或第二事实源 |
+| 小说书架、阅读位置与历史 | Windows 原生 Novel owner 写共享库；Node runtime 管理被授权的来源执行状态，不复制原生书架 |
+| Cat/source/music 脚本安装、来源 Cookie、脚本 KV 与运行器数据 | Node owner 写共享库对应关系表；源码文件仍留在对应 runtime 源码目录 |
+| 原始图片、歌词、音频和其他二进制资源 | 各资源 owner 使用 `resources-v1` 下的文件目录；SQLite 仅保存强类型身份、索引、时间和状态 |
+| 用户显式导入／导出 JSON 与第三方脚本 private volume | 外部交换或脚本自有存储，不属于应用内部 JSON 持久化禁令 |
 
-## Music record database
+原生 UI 可以直接写库，不依赖运行器在线。Node 登录／刷新网盘凭据等受信写入使用 provider revision CAS；设置成功通知只传块标识，不带凭据或完整设置值。SQLite 串行化物理事务，owner revision/CAS 解决 stale-write；不以共享内存快照回写覆盖另一 writer。私密管道限制 owner 和操作，但不是 SQLite 表级安全 ACL。
 
-Music metadata uses the separate native `MusicLibraryDatabase` at `aggregate/music-library/music-library.sqlite3`, not an `AppIdentity.NativeNamespaces` document. Songs, source indexes, control areas and generation/receipt share standard SQLite transactions. The App owns database disposal after the music application drains; the library owner only borrows it. Format and provider details are in [native music storage](music-native-library.md#唯一当前数据库).
+凭据字段与所属业务行同库同事务、纯明文保存。不使用 DPAPI、Keychain、数据库加密、应用层字段加密、密钥文件或额外解锁口令。保留 App 私有目录 ACL、owner 授权、撤销、HTTPS、错误封闭与日志脱敏。
 
-`DatabaseDirectory` reuses `WindowsDocumentFiles` for no-follow ancestor/root checks, single-link main/journal files and handles denying delete sharing. The native SQLite PERSIST journal is pinned through normal transactions and hot-journal recovery; pre-existing WAL/SHM are rejected. SQLite's bundled Windows VFS/provider has no complete no-follow switch for every sidecar. These pins do not claim to eliminate races in which an equally privileged malicious process creates extra hard links or new WAL/SHM names after checks. The directory remains app-private; this is not a sandbox for hostile same-user processes. No custom VFS or recovery-log deletion is used.
+## 事务与可靠性
 
-Only the new database is opened. Retired music JSON is not inspected, migrated, read, written or automatically deleted; explicit whole-product user-data reset retains its existing scope.
+`NativeDatabase` 使用受限单 writer I/O lane、bounded operation/byte admission、WAL 与 `synchronous=FULL`，所有连接启用外键及 `trusted_schema=OFF`。业务事务保持短小；缓存更新按查询身份、行和关系增量写入，读取按 owner 索引及窗口分页。关闭先拒绝新操作并排空已接纳事务，再 checkpoint、释放数据库连接和运行器 Worker。SQLite backup API 生成一致全库快照；本地 SQLite 不等同于服务器集群或跨设备多主高可用。
 
-## Public store API (MeowFilm.Platform.Storage)
+缓存按所属表／记录策略失效，不因图片或 metadata cache 失败删除主数据库。图片、歌词、音频、源码等原始 bytes 不进入数据库。`resources-v1` 是资源文件目录，不是第二份结构化数据库。
 
-```csharp
-public sealed record DocumentFingerprint(bool Exists, int Length, string? Sha256)
-{
-    public static DocumentFingerprint Missing { get; }
-    public static DocumentFingerprint FromBytes(ReadOnlySpan<byte> bytes);
-}
-public sealed record DocumentSnapshot(byte[]? Data, DocumentFingerprint Fingerprint);
+JSON 仍允许用于 HTTP/IPC、脚本 API、构建元数据、源码与锁文件、测试夹具，以及用户主动导入／导出的交换文件。第三方脚本自建 private volume 由其脚本和现有宿主文件 capability 管理，应用不按 `.json` 扩展名禁止或接管。仅禁止应用自身内部运行期业务／缓存 JSON 文档直接落盘或整文档 JSON 入数据库。
 
-public interface IDocumentStore : IAsyncDisposable
-{
-    Task<DocumentSnapshot> ReadAsync(string documentNamespace,
-        CancellationToken cancellationToken = default);
-    Task<DocumentFingerprint> WriteAsync(string documentNamespace,
-        ReadOnlyMemory<byte> data, DocumentFingerprint expected,
-        CancellationToken cancellationToken = default);
-}
+## 清除本机数据
 
-public LocalDocumentStore(string productRoot, IEnumerable<string> allowedNamespaces,
-    IEnumerable<string>? allowedCollections = null,
-    IEnumerable<string>? protectedNamespaces = null);
-```
-
-- One opaque business document per exact namespace, at most **8 MiB** whether plaintext or protected. The store does not decode/normalize JSON. The separate **16 MiB** source-file limit applies only to collection members, not business documents.
-- Root must already be a dedicated, app-owned directory on a local fixed/removable volume with a nonzero directory file identity. Constructor validates/pins it without creating directories/files or calling DPAPI. Product owns root selection, ACL policy and lifetime; the App continues using its existing aggregate root. Do not supply a shared/world-writable or roaming/cloud-synchronized root.
-- Namespace lists contain 0–64 unique case-sensitive entries. Syntax: 1–128 ASCII characters, first alphanumeric, remainder alphanumeric/period/underscore/hyphen, no `..`. `protectedNamespaces` must be a subset of the exact `allowedNamespaces`; omission means no DPAPI namespaces. Prefix matches do not grant access or protection. Invalid names fail before storage access; valid unregistered names return `Unavailable`.
-- `allowedCollections` is the trusted-native source-file grant: a member is exactly `collection.<64 lowercase hex>`, with no chunk index. The current App grants no source collections: script installation files belong to the runtime. The suffix is an import-content reference/update identity, not a read-time content check. Ordinary exact namespace grants take precedence if a grant overlaps a collection member. Collections do not expose any script capability.
-- `Data == null` means genuinely absent. An existing zero-byte file has `Exists=true`, `Length=0`, the empty-content SHA-256, and a non-null empty array. Caller owns returned bytes. Reads use the current file length; there is no historical length parameter or persisted plaintext checksum envelope.
-- Every write needs an exact base fingerprint (`Missing` only for an absent file). The store computes the current file's existence/length/SHA-256 and compares/writes while holding the same root-wide lock. These are content CAS fingerprints, **not monotonic revisions**; identical-content A→B→A cannot be distinguished. Editing a plaintext file changes its next fingerprint without causing an integrity refusal. An outdated write base returns `Conflict`.
-- Write takes an owned byte snapshot before its first asynchronous suspension. There is no pending-operation count quota. One operation executes at a time for atomic CAS, and blocking native/filesystem work runs off the caller's UI thread. Cancelled queued reads are retired; accepted writes are not cancelled; close waits for actual operations before releasing root handles and synchronization resources. Ordinary/source buffers are not zeroed by the store; owned sensitive plaintext buffers are.
-- `DocumentStoreException.Error` is `DocumentStoreError`: `InvalidRequest`, `Unavailable`, `UnsafePath`, `Limit`, `Conflict`, `Corrupt`, `UnsupportedVersion`, `Protection`, `Storage`, `Closed`. Fixed message only, no inner exception/path/payload. LocalDocumentStore checks write cancellation before admission. An admitted write retains its owned bytes and awaits the real CAS receipt, independently of caller cancellation or disposal. Reads remain cancellable. Cancellation/disposal cannot undo a won atomic replacement.
-
-## Persistence and path safety
-
-| Data | Directory relative to root | Committed file | On-disk bytes |
-| --- | --- | --- | --- |
-| Ordinary document | `n-<namespace>-<lowercase SHA256(namespace UTF-8)>` | `document.json` | Exact supplied bytes |
-| Collection source | `c-<collection>-<lowercase SHA256(collection UTF-8)>` | `<import-content hash>.js` | Complete source bytes, at most 16 MiB |
-| Sensitive document | `n-<lowercase SHA256(namespace UTF-8)>` | `document.mfdp` | Existing v1 DPAPI envelope |
-
-The readable names identify ordinary data and collections. Namespace/collection identity digests avoid Windows case-insensitive filename collisions; generated prefixes/suffixes also keep reserved logical names such as `CON` safe. They do not authenticate plaintext content. Source reads do not compare the file's bytes or length with the import reference. Multiple source files may share one collection directory.
-
-- Sensitive protection uses PInvoke `CryptProtectData` / `CryptUnprotectData`, **CurrentUser** (no `CRYPTPROTECT_LOCAL_MACHINE`), `CRYPTPROTECT_UI_FORBIDDEN`, no prompt/description. Native DPAPI output is freed with `LocalFree`.
-- Sensitive optional entropy remains SHA-256 of the v1 domain marker, pinned product directory identity (volume serial plus file index) and exact namespace bytes. It is binding context, not a secret or second authentication factor. Ciphertext copied to a different root identity or namespace fails authentication. Current protected namespaces use the root and namespace binding described above; anonymous platform state belongs to Node, not a native device-session document.
-- Sensitive outer format remains ASCII `MEOWDPAP` (8), version byte `01`, little-endian Int32 DPAPI-blob length, DPAPI blob. Inner authenticated payload: ASCII `MFDPDOC1` (8), little-endian Int32 data length, 32-byte content SHA-256, opaque bytes. Disk input is size-bounded before allocation (8 MiB + 64 KiB DPAPI allowance + 13-byte header).
-- Sensitive unknown magic/version, malformed/trailing/truncated content, failed unprotect or inner length/hash are errors, **never an empty document**. Prior sensitive content is authenticated before replacement; a CAS write cannot replace corrupt/unreadable protected content. Plaintext documents have no such envelope or persisted integrity gate; JSON/business validity belongs to their consumer.
-- Root validation rejects relative/UNC/device roots, network drives, alternate-data-stream syntax, traversal components, ambiguous trailing periods/spaces and reserved Windows path components. Every directory component is opened with `FILE_FLAG_OPEN_REPARSE_POINT`/backup semantics and checked through its handle. Pinned ancestor/root/data-directory handles include FILE_LIST_DIRECTORY and deny replacement while used. Ancestors must therefore be list-readable; denied access is an explicit failure, not a reparse/pinning bypass. Target files reject reparse points, directories, non-disk handles and multiple hardlinks before reading content, regardless of protection mode.
-- An instance uses an explicit FIFO operation queue; a failed operation does not break the queue. Close rejects new admission, cancels reads and drains accepted writes before releasing directory handles. Cross-instance/cooperating-process serialization uses an exclusive zero-byte `.documents.lock` file in the pinned product root. Acquisition is bounded at five seconds (cross-process contention); read acquisition is cancellable, accepted write acquisition is not tied to its caller. First read can create this metadata lock, not a document/source file. Operations across namespaces serialize as well. This is **not CAS against writers bypassing this lock**, including a concurrently running external editor.
-- Writes use a uniquely `CREATE_NEW` staging file in the same pinned destination directory. Ordinary/source stages contain raw bytes; sensitive stages contain ciphertext only. Win32 rename receives an explicitly NUL-terminated UTF-16 filename; declared byte length excludes the terminator. Directory pins allow read/write sharing but deny delete sharing: allowing `FILE_ADD_FILE` prevents conflict with our destination-directory pin. Flush to disk, then `SetFileInformationByHandle(FileRenameInfoEx)` with replace/Posix semantics on the already-open staging handle. Readers permitting delete sharing retain their old file; readers denying delete sharing and read-only targets block replacement. Unsupported systems/filesystems fail closed. No copy/delete fallback or fallible post-commit verification/cancellation that implies rollback.
-- Failed pre-commit staging cleanup uses open-handle disposition, never a guessed path. Cleanup failure/crash can leave a stage. Ordinary/source reads and writes ignore neighboring unknown files/directories and interrupted stages; they never read or delete them automatically, and an absent target remains absent. Sensitive namespace inventory retains its strict rejection of unknown entries, including stages, with explicit recovery required. `Flush` + rename is not a tested power-loss durability guarantee.
-
-## Current format
-
-Only the current data and wire formats are supported. Music only reads the current account and account-details namespaces declared above; it does not identify or adopt previous account/device-session documents. Ordinary documents and v2 source collections use the new plaintext layout; old encrypted ordinary documents and v1 source chunks are not migrated, used as a fallback, or automatically deleted. This is a development format boundary, not a completed data migration. [Windows native settings](native-settings.md#当前格式与启动) use only their current namespaces; startup does not adopt, convert or delete legacy runtime settings. Corrupt/unsupported sensitive documents and inaccessible/unsafe target files are errors, not empty initial state. Cancellation cannot undo an acknowledged atomic commit.
-
-
-## Clear all local user data
-
-The Windows general settings reset deletes both whole application-owned roots, `%LOCALAPPDATA%/meowfilm/aggregate` and its sibling `aggregate-cache`, not a list of readable documents or cache namespaces. It includes native music/film documents, DPAPI account files, preferences, granted-file records, all `script-runtime` sources, private volumes, account/settings files and Node metadata/media/script caches under the business root, and every native cache document, protected account snapshot and audio file under the cache root. Unknown files, interrupted stages and corrupt documents are removed without first decoding or decrypting them. Current Windows composition has no separate WebView2 profile; it does not clear external browser state or Windows DPAPI master keys.
-
-AppHost first records one durable pending request outside both roots, revokes input and releases the old generation's runtime, modules, playback, window attachments, artwork, cache owner and business store. Cache disposal rejects admission and waits for accepted writes and its backing store release; in-memory caches retire with their owners. Only an actual successful drain allows deletion. A failure or timeout keeps the old generation unavailable and offers explicit retry/exit; the pending request also gates a later process startup before any business or cache owner is created. If either deletion fails, the same request remains pending even if the other root was already removed. Only after both roots are removed is the request cleared and the entire App generation rebuilt in the same process. New business data and caches are not deleted again by a completed request.
-
-`UserDataDirectory` owns one shared App usage lease during normal operation and an exclusive lease covering both roots for reset. The sibling cache root shares this admission identity and pending request, not the business store's queue or `.documents.lock`. Normal admission pins their common parent but neither opens nor creates the cache leaf: a missing or unusable cache root is not a normal startup gate. Multiple ordinary instances remain allowed; a reset cannot run while another App instance holds the shared lease. Deletion opens and retains deletion handles for both roots before deleting any child, so a still-live store pin in either root prevents starting deletion in the other. Pinned, non-reparse ancestors define the boundary; root/nested reparse entries are removed as entries, never traversed to their targets. Missing data is already clean, while access, ownership or sharing failures during explicit reset are not success.
-
-The operation does not invoke cloud logout/deletion, parse granted paths to delete external files, remove the installation/runtime payload, other product data roots or developer caches. User-selected media, source scripts, lyrics and exported images outside these roots are preserved. This is filesystem deletion, not a secure-erasure guarantee for the storage device or its backups.
+显式重置在所有 owner、Node runtime 和受理操作真实关闭后，清除当前应用拥有的数据根，再建立新的当前格式数据库。该流程不是格式迁移或错误自愈；不探测、读取、转换、回退或自动删除旧存储路径，不触碰应用根之外的用户文件、第三方未纳管数据或其它产品数据。

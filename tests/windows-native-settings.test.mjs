@@ -19,7 +19,7 @@ function pipe(t) {
   t.after(() => settings.close());
   function respond(request, document, overrides = {}) {
     const reply = { kind: 'settings.result', id: request.id, ok: true, document,
-      fingerprint: { exists: document !== null, length: 0, sha256: null }, ...overrides };
+      revision: 1, ...overrides };
     return Buffer.from(stringifyJSONValue(reply) + '\n');
   }
   return { settings, requests, stopped, respond };
@@ -36,7 +36,7 @@ test('Windows private settings handle fragmented replies, detached reads and bou
   f.settings.read('tmdb').settings.language = 'changed-copy';
   assert.equal(f.settings.read('tmdb').settings.language, 'zh-CN');
   await assert.rejects(f.settings.reload('unregistered'), { code: 'INVALID_REQUEST' });
-  await assert.rejects(f.settings.write('tmdb', {}, {}), { code: 'INVALID_REQUEST' });
+  await assert.rejects(f.settings.update('tmdb', {}), { code: 'INVALID_REQUEST' });
   assert.equal(f.requests.length, 1);
 });
 
@@ -48,19 +48,22 @@ test('malformed private settings success retires and rejects the actual pending 
   assert.deepEqual(f.stopped, ['INVALID_RESPONSE']);
 });
 
-test('Windows private settings preserve unconsumed numeric material across read and CAS write', async t => {
+test('Windows private settings preserve exact credential material in provider-scoped CAS commands', async t => {
   const f = pipe(t), read = f.settings.reload('pan.accounts');
   const text = '{"version":1,"accounts":{},"extension":{"integer":9007199254740993,' +
     '"fraction":1.0000000000000001,"overflow":1e400,"rawJSON":"ordinary"}}';
   const before = parseJSONText(text);
   f.settings.accept(f.respond(f.requests[0], before));
   assert.equal(stringifyJSONValue(await read), text);
-  const document = f.settings.document('pan.accounts');
+  const document = f.settings.accounts('pan.accounts');
   const changed = document.read();
   changed.accounts.quark = { cookie: 'synthetic' };
-  const saved = document.write(changed);
-  assert.equal(stringifyJSONValue(f.requests[1].document.extension),
-    stringifyJSONValue(before.extension));
+  const command = {provider:'quark', mode:'replace', accountRevision:0, rowRevision:0,
+    credentials:{cookie:'synthetic', extension:before.extension}};
+  const saved = document.update(command);
+  assert.equal(stringifyJSONValue(f.requests[1].command.credentials.extension), stringifyJSONValue(before.extension));
+  assert.equal(f.requests[1].kind, 'settings.pan.update');
+  assert.equal('document' in f.requests[1], false);
   f.settings.accept(f.respond(f.requests[1], changed));
   assert.equal(stringifyJSONValue((await saved).extension), stringifyJSONValue(before.extension));
   assert.equal(stringifyJSONValue(f.settings.read('pan.accounts').extension),
@@ -74,7 +77,8 @@ test('private settings CAS failure keeps the prior snapshot and close drains pen
   const before = { version: 1, accounts: {} };
   f.settings.accept(f.respond(f.requests[0], before));
   await read;
-  const write = f.settings.write('pan.accounts', before, { exists: true, length: 1, sha256: 'test' });
+  const write = f.settings.update('pan.accounts', {provider:'quark', mode:'replace',
+    accountRevision:0, rowRevision:0, credentials:{cookie:'synthetic'}});
   const conflict = assert.rejects(write, { code: 'STORAGE_CONFLICT' });
   f.settings.accept(Buffer.from(JSON.stringify({ kind: 'settings.result',
     id: f.requests[1].id, ok: false, code: 'STORAGE_CONFLICT' }) + '\n'));

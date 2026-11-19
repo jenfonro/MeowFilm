@@ -1,652 +1,144 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { openDatabase } from '@meowfilm/storage';
 import { createPlaybackLibrary } from '../packages/film-playback/src/library.js';
-import { cloneJSONValue, parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
+import './storage-test-fixture.mjs';
 
-function area(t) {
-  const root = fileURLToPath(new URL('../tmp/test-results/film-playback/', import.meta.url));
-  fs.mkdirSync(root, { recursive: true });
-  const path = fs.mkdtempSync(join(root, 'library-'));
-  t.after(() => fs.rmSync(path, { recursive: true, force: true }));
-  return path;
+async function fixture(t, options = {}) {
+  const base = resolve('tmp/test-results/storage-audit');
+  await mkdir(base, {recursive:true});
+  const root = await mkdtemp(base + '/library-'), owners = [];
+  const database = openDatabase(root);
+  async function open() {
+    const owner = createPlaybackLibrary({dataRoot:root,...options}); owners.push(owner);
+    await owner.ready; return owner;
+  }
+  const owner = await open();
+  t.after(async () => {
+    try { for (const item of owners) await item.close(); await database.close(); }
+    finally { await rm(root, {recursive:true,force:true}); }
+  });
+  return {owner,database,open};
 }
+const history = (index = 0) => ({
+  targetId:'tmdb:tv:'+index,title:'合成剧集',sourceKey:'cat:installation:site',detailId:0,lineId:0,
+  candidateId:'candidate:exact-file',episode:{season:1,episode:2,globalEpisode:2},position:12.5,duration:600,
+  paused:false,ended:false,playedAt:1000,updatedAt:1200+index,
+  playbackTarget:{id:'tmdb:tv:'+index,kind:'source',title:'合成剧集',year:2024,season:1,episode:2,globalEpisode:2,
+    source:{key:'cat:installation:site',detailId:0,lineId:0,siteId:0}},
+});
+const manual = () => ({id:'manual:one',targetId:'tmdb:tv:0',kind:'site',sourceKey:'cat:installation:site',
+  detailId:0,seasonHint:1,enabled:true,autoDisable:true,failureCount:0});
+const block = () => ({targetId:'tmdb:tv:0',sourceKey:'cat:installation:site',detailId:0,lineId:0});
 
-function library(t, dataRoot = area(t)) {
-  const owner = createPlaybackLibrary({ dataRoot });
-  t.after(() => owner.close());
-  return { owner, dataRoot, directory: join(dataRoot, 'film-playback'),
-    path: join(dataRoot, 'film-playback', 'library.json') };
-}
-
-const history = () => ({
-  targetId: 'tmdb:tv:42', title: '合成剧集', sourceKey: 'cat:installation:site',
-  candidateId: 'candidate:exact-file', episode: { season: 1, episode: 2, globalEpisode: 2 },
-  detailId: 'detail:one', lineId: 'raw-flag', position: 12.5, duration: 600,
-  paused: false, ended: false, playedAt: 1000, updatedAt: 1200,
-  playbackTarget: { id: 'tmdb:tv:42', kind: 'source', title: '合成剧集', season: 1, episode: 2, globalEpisode: 2,
-    source: { key: 'cat:installation:site', detailId: 'detail:one', lineId: 'raw-flag', candidateId: 'candidate:exact-file' } },
-});
-const manual = () => ({
-  id: 'manual:one', targetId: 'tmdb:tv:42', kind: 'site', sourceKey: 'cat:installation:site',
-  detailId: 'detail:one', seasonHint: 1, enabled: true, autoDisable: true, failureCount: 0,
-});
-const block = (extra = {}) => ({
-  targetId: 'tmdb:tv:42', sourceKey: 'cat:installation:site',
-  detailId: 'detail:one', lineId: 'raw-flag', ...extra,
-});
-const empty = () => ({
-  version: 2, preferences: defaultPreferences(), history: [], manual: [], blocks: [], previewTargets: [], groups: [],
-});
-
-test('native preferences stay in their sole settings owner while repeated business writes and reopen preserve library facts', t => {
-  const dataRoot = area(t), path = join(dataRoot, 'film-playback', 'library.json');
-  let preferences = { ...defaultPreferences(), keywords: ['native-first'] };
-  const owner = createPlaybackLibrary({ dataRoot, nativePreferences: () => preferences });
-  t.after(() => owner.close());
-  owner.update(draft => { draft.history.push(history()); });
-  owner.update(draft => { draft.manual.push(manual()); });
-  assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(path, 'utf8')), 'preferences'), false);
-  assert.deepEqual(owner.read().preferences.keywords, ['native-first']);
-  preferences = { ...preferences, keywords: ['native-latest'] };
-  assert.deepEqual(owner.read().preferences.keywords, ['native-latest']);
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot, nativePreferences: () => preferences });
-  t.after(() => restarted.close());
-  assert.deepEqual(restarted.read().history, [history()]);
-  assert.deepEqual(restarted.read().manual, [manual()]);
-  assert.deepEqual(restarted.read().preferences.keywords, ['native-latest']);
-});
-
-test('E31/E36: initial document takes defaults only from policy and exposes an immutable snapshot', t => {
-  const { owner, path } = library(t);
-  assert.deepEqual(owner.read(), empty());
-  assert.equal(fs.existsSync(path), false);
-  assert.ok(Object.isFrozen(owner.read()));
-  assert.ok(Object.isFrozen(owner.read().preferences));
+test('current defaults are immutable and do not create a saved control revision', async t => {
+  const {owner,database} = await fixture(t);
+  assert.deepEqual(owner.read(), {version:2,preferences:defaultPreferences(),history:[],manual:[],blocks:[],previewTargets:[],groups:[]});
+  assert.ok(Object.isFrozen(owner.read().preferences.keywords));
   assert.throws(() => owner.read().manual.push(manual()), TypeError);
+  assert.equal((await database.query("SELECT count(*) AS n FROM owner_revisions WHERE owner='film.library'"))[0].n,0);
 });
 
-test('E37: update publishes only a successful atomic commit, detached from any retained draft', t => {
-  const { owner, path } = library(t);
-  const before = owner.read();
-  let held;
-  const after = owner.update(draft => {
-    assert.equal(owner.read(), before);
-    assert.equal(fs.existsSync(path), false);
-    held = draft;
-    draft.blocks.push(block());
-    return 'mutator return is not document state';
+test('native preferences have one owner and business writes never persist a second copy', async t => {
+  let preferences = {...defaultPreferences(),keywords:['native-first']};
+  const {owner,database,open} = await fixture(t,{nativePreferences:() => preferences});
+  await owner.saveHistory(history());
+  await owner.update(draft => {draft.manual.push(manual());});
+  assert.equal((await database.query('SELECT count(*) AS n FROM film_preferences_state'))[0].n,0);
+  assert.deepEqual(owner.read().preferences.keywords,['native-first']);
+  preferences = {...preferences,keywords:['native-latest']};
+  assert.deepEqual(owner.read().preferences.keywords,['native-latest']);
+  await owner.close(); const restarted = await open();
+  assert.deepEqual(await restarted.history(history().targetId),history());
+  assert.deepEqual(restarted.read().manual,[manual()]);
+  assert.deepEqual(restarted.read().preferences.keywords,['native-latest']);
+  await assert.rejects(restarted.update(draft => {draft.preferences = defaultPreferences();}),{code:'INVALID_REQUEST'});
+});
+
+test('publication follows a real commit and never retains a caller-owned draft', async t => {
+  const {owner} = await fixture(t); const before = owner.read(); let held;
+  const pending = owner.update(draft => {assert.equal(owner.read(),before); held=draft; draft.blocks.push(block());});
+  const after = await pending;
+  assert.equal(owner.read(),after); assert.notEqual(after,held);
+  held.blocks[0].lineId='not persisted';
+  assert.deepEqual(after.blocks,[block()]);
+});
+
+test('control edits and point history writes reopen with exact identifier types and progress', async t => {
+  const {owner,open} = await fixture(t);
+  await owner.update(draft => {
+    draft.preferences.keywords=['DDP','H.265']; draft.preferences.siteCleanKeywords=[]; draft.preferences.iosAutoPrepare=false;
+    draft.manual.push(manual(),{id:'manual:share',targetId:'tmdb:tv:0',kind:'share',provider:'quark',
+      share:{url:'https://fixture.invalid/s/one',password:'synthetic-only'},seasonHint:0,enabled:false,autoDisable:false,failureCount:3});
+    draft.blocks.push(block()); draft.previewTargets.push('tmdb:tv:0');
   });
-  assert.equal(owner.read(), after);
-  assert.notEqual(after, held);
-  held.blocks[0].lineId = 'changed-after-commit';
-  assert.deepEqual(after.blocks, [block()]);
-  assert.deepEqual(JSON.parse(fs.readFileSync(path, 'utf8')), after);
+  const entry=history(); await owner.saveHistory(entry);
+  await owner.saveHistory({...entry,position:123.75,paused:true,updatedAt:1400});
+  await owner.close(); const restarted = await open();
+  assert.deepEqual(await restarted.history(entry.targetId),{...entry,position:123.75,paused:true,updatedAt:1400});
+  assert.deepEqual(restarted.read().preferences.keywords,['DDP','H.265']);
+  assert.deepEqual(restarted.read().preferences.siteCleanKeywords,[]);
+  assert.equal(restarted.read().manual[1].share.password,'synthetic-only');
+  assert.deepEqual(restarted.read().blocks,[block()]);
+  assert.deepEqual(restarted.read().history,[], 'progress is not materialized into the control snapshot');
 });
 
-test('E05/E19/E30/E31/E36: all five new local sections persist on close/reopen without a cache owner', t => {
-  const { owner, dataRoot } = library(t);
-  const preferences = defaultPreferences();
-  preferences.keywords = ['DDP', 'H.265'];
-  preferences.siteCleanKeywords = [];
-  preferences.iosAutoPrepare = false;
-  const state = owner.update(draft => {
-    draft.preferences = preferences;
-    draft.history.push(history());
-    draft.manual.push(manual());
-    draft.blocks.push(block());
-    draft.previewTargets.push('tmdb:tv:42');
+test('movie metadata IDs and omitted episode material survive without coercion', async t => {
+  const {owner} = await fixture(t); const entry=history(); delete entry.episode;
+  entry.playbackTarget={id:entry.targetId,kind:'movie',title:entry.title,metadataProvider:'tmdb',metadataId:42};
+  await owner.saveHistory(entry); assert.deepEqual(await owner.history(entry.targetId),entry);
+  entry.playbackTarget.metadataId='42'; await owner.saveHistory(entry);
+  assert.equal((await owner.history(entry.targetId)).playbackTarget.metadataId,'42');
+});
+
+test('history uses stable bounded keyset windows and removal does not rewrite controls', async t => {
+  const {owner,database} = await fixture(t);
+  await owner.update(draft => {draft.manual.push(manual());});
+  const revision=(await database.query("SELECT revision FROM owner_revisions WHERE owner='film.library'"))[0].revision;
+  for (let index=0;index<650;index++) await owner.saveHistory(history(index));
+  const first=await owner.list({limit:500}),second=await owner.list({limit:500,historyAfter:first.historyAfter});
+  assert.equal(first.history.length,500); assert.equal(second.history.length,150); assert.equal(second.historyAfter,null);
+  assert.equal(new Set([...first.history,...second.history].map(row=>row.targetId)).size,650);
+  await owner.removeHistory(first.history[0].targetId); assert.equal(await owner.history(first.history[0].targetId),undefined);
+  assert.equal((await database.query("SELECT revision FROM owner_revisions WHERE owner='film.library'"))[0].revision,revision);
+  await owner.removeHistory(); assert.deepEqual((await owner.list()).history,[]); assert.deepEqual(owner.read().manual,[manual()]);
+});
+
+test('read-only storage failure cannot publish an edit and a retry uses the latest healthy state', async t => {
+  const {owner,database} = await fixture(t); await owner.update(draft=>{draft.blocks.push(block());}); const before=owner.read();
+  await database.query('PRAGMA query_only=ON');
+  await assert.rejects(owner.update(draft=>{draft.blocks=[];}),{code:'STORAGE_READONLY'});
+  assert.equal(owner.read(),before); await database.query('PRAGMA query_only=OFF');
+  await owner.update(draft=>{draft.blocks=[];}); assert.deepEqual(owner.read().blocks,[]);
+});
+
+test('independent control owners detect stale revisions without overwriting another commit', async t => {
+  const {owner,open} = await fixture(t); const second=await open();
+  await owner.update(draft=>{draft.manual.push(manual());});
+  await assert.rejects(second.update(draft=>{draft.blocks.push(block());}),{code:'STORAGE_CHANGED'});
+  assert.deepEqual(second.read().blocks,[]); await owner.close(); await second.close();
+  const reopened=await open(); assert.deepEqual(reopened.read().manual,[manual()]); assert.deepEqual(reopened.read().blocks,[]);
+});
+
+test('invalid, asynchronous and reentrant edits never commit and diagnostics contain no input', async t => {
+  const {owner} = await fixture(t); const before=owner.read();
+  assert.throws(()=>owner.update(async ()=>{}),{code:'INVALID_REQUEST'});
+  await assert.rejects(owner.update(()=>Promise.resolve()),{code:'INVALID_REQUEST'});
+  await assert.rejects(owner.update(()=>owner.update(()=>{})),{code:'INVALID_REQUEST'});
+  await assert.rejects(owner.update(draft=>{draft.manual.push({...manual(),unknown:'not a field'});}),{code:'INVALID_REQUEST'});
+  await assert.rejects(owner.update(()=>{throw new Error('SYNTHETIC_PRIVATE_DIAGNOSTIC');}),error=>{
+    assert.equal(error.code,'LIBRARY_UPDATE_FAILED'); assert.equal(error.cause,undefined);
+    assert.equal(error.stack.includes('SYNTHETIC_PRIVATE_DIAGNOSTIC'),false); return true;
   });
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.deepEqual(restarted.read(), state);
-  assert.deepEqual(restarted.read().preferences.keywords, ['DDP', 'H.265']);
-  assert.deepEqual(restarted.read().preferences.siteCleanKeywords, []);
-  assert.equal(restarted.read().preferences.iosAutoPrepare, false);
-  assert.deepEqual(restarted.read().previewTargets, ['tmdb:tv:42']);
+  assert.equal(owner.read(),before);
 });
 
-test('E05/F6: per-target preview switches survive restart without creating or rewriting watching history', t => {
-  const { owner, dataRoot } = library(t);
-  owner.update(draft => { draft.previewTargets.push('tmdb:tv:42', 'douban:movie:50'); });
-  assert.deepEqual(owner.read().history, []);
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.deepEqual(restarted.read().previewTargets, ['tmdb:tv:42', 'douban:movie:50']);
-  assert.deepEqual(restarted.read().history, []);
-  assert.throws(() => restarted.read().previewTargets.push('new target'), TypeError);
-  restarted.update(draft => { draft.history.push(history()); });
-  const before = restarted.read().history;
-  restarted.update(draft => {
-    draft.previewTargets = draft.previewTargets.filter(targetId => targetId !== 'tmdb:tv:42');
-  });
-  assert.deepEqual(restarted.read().history, before);
-  restarted.close();
-  const reopened = createPlaybackLibrary({ dataRoot });
-  t.after(() => reopened.close());
-  assert.deepEqual(reopened.read().previewTargets, ['douban:movie:50']);
-  assert.deepEqual(reopened.read().history, before);
-});
-
-test('E19/E31: precise blocks and both site/share manual references support durable add/edit/remove', t => {
-  const { owner, dataRoot } = library(t);
-  owner.update(draft => {
-    draft.manual.push(manual(), {
-      id: 'manual:share', targetId: 'tmdb:tv:42', kind: 'share', provider: 'quark',
-      share: { url: 'https://synthetic.invalid/s/share-reference', password: 'fixture-only' },
-      seasonHint: 0, enabled: false, autoDisable: false, failureCount: 3,
-    });
-    draft.blocks.push(block(), block({ lineId: 'another-line' }),
-      block({ targetId: 'tmdb:tv:43' }), block({ detailId: 'detail:two' }));
-  });
-  owner.update(draft => {
-    draft.manual[0].seasonHint = 2;
-    draft.manual[0].enabled = false;
-    draft.manual[0].failureCount = 3;
-    draft.blocks = draft.blocks.filter(entry => entry.lineId !== 'another-line');
-  });
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.equal(restarted.read().manual[0].seasonHint, 2);
-  assert.equal(restarted.read().manual[0].enabled, false);
-  assert.equal(restarted.read().manual[0].failureCount, 3);
-  assert.equal(restarted.read().manual[1].share.password, 'fixture-only');
-  assert.deepEqual(restarted.read().blocks, [block(), block({ targetId: 'tmdb:tv:43' }),
-    block({ detailId: 'detail:two' })]);
-  restarted.update(draft => { draft.manual = []; draft.blocks = []; });
-  assert.deepEqual(restarted.read().manual, []);
-  assert.deepEqual(restarted.read().blocks, []);
-});
-
-test('E30: history preserves movie identity, exact source/candidate and progress through successive durable updates', t => {
-  const { owner, dataRoot } = library(t);
-  const entry = history();
-  entry.targetId = 'douban:movie:50';
-  entry.title = '合成电影';
-  delete entry.episode;
-  entry.playbackTarget = { id: entry.targetId, kind: 'movie', title: entry.title,
-    metadataProvider: 'douban', metadataId: 50 };
-  owner.update(draft => { draft.history.push(entry); });
-  owner.update(draft => {
-    const current = draft.history[0];
-    current.position = 123.75;
-    current.paused = true;
-    current.updatedAt = 1400;
-  });
-  owner.update(draft => {
-    const current = draft.history[0];
-    current.ended = true;
-    current.position = current.duration;
-    current.updatedAt = 1600;
-  });
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  const actual = restarted.read().history[0];
-  assert.equal(actual.candidateId, entry.candidateId);
-  assert.equal(actual.sourceKey, entry.sourceKey);
-  assert.equal(actual.episode, undefined);
-  assert.equal(actual.position, 600);
-  assert.equal(actual.paused, true);
-  assert.equal(actual.ended, true);
-  assert.equal(actual.playedAt, 1000);
-  assert.equal(actual.updatedAt, 1600);
-});
-
-test('E31: manual failure state, resets and disabled flags remain exact persisted user data', t => {
-  const { owner, dataRoot } = library(t);
-  owner.update(draft => { draft.manual.push(manual()); });
-  for (const failureCount of [1, 2, 0, 1, 2, 3]) {
-    owner.update(draft => {
-      draft.manual[0].failureCount = failureCount;
-      draft.manual[0].enabled = failureCount < 3;
-    });
-  }
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.equal(restarted.read().manual[0].failureCount, 3);
-  assert.equal(restarted.read().manual[0].enabled, false);
-  assert.equal(restarted.read().manual[0].autoDisable, true);
-});
-
-test('E35/E36: preference groups can save, restart and restore individually using policy defaults', t => {
-  const { owner, dataRoot } = library(t);
-  owner.update(draft => {
-    draft.preferences.ruleOrder.reverse();
-    draft.preferences.panOrder.reverse();
-    draft.preferences.keywords = ['DDP', 'H.265'];
-    draft.preferences.siteCleanKeywords = ['合成净化词'];
-    draft.preferences.iosAutoPrepare = false;
-  });
-  const customized = structuredClone(owner.read().preferences);
-  owner.update(draft => { draft.preferences.keywords = defaultPreferences().keywords; });
-  assert.deepEqual(owner.read().preferences, { ...customized, keywords: defaultPreferences().keywords });
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.deepEqual(restarted.read().preferences, { ...customized, keywords: defaultPreferences().keywords });
-  restarted.update(draft => { draft.preferences = defaultPreferences(); });
-  assert.deepEqual(restarted.read().preferences, defaultPreferences());
-});
-
-test('stored unused preferences and bad siblings are retained during unrelated business writes', t => {
-  const { owner, path, dataRoot } = library(t);
-  owner.close();
-  const original = { ...empty(), preferences: { ruleOrder: [], extra: true },
-    history: [null, { targetId: 'broken' }], manual: [null], blocks: [null],
-    groups: [null], extra: { nested: 'retained' } };
-  fs.mkdirSync(join(dataRoot, 'film-playback'), { recursive: true });
-  fs.writeFileSync(path, JSON.stringify(original));
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  restarted.update(draft => { draft.previewTargets.push('tmdb:movie:42'); });
-  assert.deepEqual(restarted.read(), { ...original, previewTargets: ['tmdb:movie:42'] });
-});
-
-test('E37/E48: mutator exceptions fail without publication or disk replacement and redact their diagnostics', t => {
-  const { owner, path } = library(t);
-  owner.update(draft => { draft.blocks.push(block()); });
-  const before = owner.read(), bytes = fs.readFileSync(path);
-  const secret = 'https://synthetic.invalid/?signature=private-fixture';
-  assert.throws(() => owner.update(draft => {
-    draft.blocks = [];
-    throw new Error(secret);
-  }), error => {
-    assert.equal(error.code, 'LIBRARY_UPDATE_FAILED');
-    assert.equal(error.message, error.code);
-    assert.equal(error.cause, undefined);
-    assert.equal(error.stack.includes(secret), false);
-    return true;
-  });
-  assert.equal(owner.read(), before);
-  assert.deepEqual(fs.readFileSync(path), bytes);
-});
-
-test('E37: asynchronous and reentrant transactions cannot publish a partial draft', async t => {
-  const { owner, path } = library(t);
-  const before = owner.read();
-  assert.throws(() => owner.update(async draft => { draft.blocks.push(block()); }), { code: 'INVALID_REQUEST' });
-  assert.throws(() => owner.update(() => Promise.resolve()), { code: 'INVALID_REQUEST' });
-  assert.throws(() => owner.update(() => owner.update(() => {})), { code: 'INVALID_REQUEST' });
-  assert.equal(owner.read(), before);
-  assert.equal(fs.existsSync(path), false);
-  await Promise.resolve();
-});
-
-test('root and non-JSON transaction failures preserve the committed document', async t => {
-  for (const [name, mutate] of [
-    ['version', draft => { draft.version = 3; }],
-    ['missing section', draft => { delete draft.manual; }],
-    ['bad container', draft => { draft.history = {}; }],
-    ['missing preview targets', draft => { delete draft.previewTargets; }],
-    ['nonfinite material', draft => { draft.extra = Infinity; }],
-    ['undefined material', draft => { draft.extra = undefined; }],
-    ['accessor', draft => { Object.defineProperty(draft, 'extra', { enumerable: true, get() { assert.fail('getter'); } }); }],
-    ['cycle', draft => { draft.extra = draft; }],
-  ]) await t.test(name, sub => {
-    const { owner, path } = library(sub);
-    owner.update(() => {});
-    const before = owner.read(), bytes = fs.readFileSync(path);
-    assert.throws(() => owner.update(mutate), { code: 'INVALID_REQUEST' });
-    assert.equal(owner.read(), before);
-    assert.deepEqual(fs.readFileSync(path), bytes);
-  });
-});
-
-test('exact numeric extensions and malformed records survive unrelated writes and reopen', t => {
-  const { owner, path, dataRoot } = library(t);
-  const material = parseJSONText('{"integer":9007199254740993,"decimal":1.00000000000000001,"big":1e400,"tiny":1e-400,"zero":-0}');
-  owner.update(draft => {
-    draft.extra = material;
-    draft.preferences.extra = material;
-    draft.history.push(null, { targetId: 'broken', extra: material }, { ...history(), extra: material });
-    draft.manual.push(null, { ...manual(), extra: material });
-    draft.blocks.push(null, { ...block(), extra: material });
-    draft.groups.push({ broken: material });
-  });
-  const before = cloneJSONValue(owner.read());
-  owner.update(draft => { draft.previewTargets.push('tmdb:movie:42'); });
-  before.previewTargets.push('tmdb:movie:42');
-  assert.equal(fs.readFileSync(path, 'utf8'), stringifyJSONValue(before));
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.equal(stringifyJSONValue(restarted.read()), stringifyJSONValue(before));
-  assert.equal(isRawJSON(restarted.read().extra.integer), true);
-});
-
-test('E37: malformed JSON, unsupported versions, invalid roots and invalid UTF-8 are explicit corruption', async t => {
-  const unpublishedDraft = empty();
-  delete unpublishedDraft.previewTargets;
-  const cases = [
-    ['JSON', Buffer.from('{')],
-    ['version', Buffer.from(JSON.stringify({ ...empty(), version: 3 }))],
-    ['missing rows', Buffer.from(JSON.stringify({ version: 1, preferences: defaultPreferences() }))],
-    ['null root', Buffer.from('null')],
-    ['bad container', Buffer.from(JSON.stringify({ ...empty(), blocks: {} }))],
-    ['old version', Buffer.from(JSON.stringify({ ...empty(), version: 1 }))],
-    ['unpublished draft missing preview targets', Buffer.from(JSON.stringify(unpublishedDraft))],
-    ['UTF-8', Buffer.concat([Buffer.from('{"version":1,"x":"'), Buffer.from([0xff]), Buffer.from('"}')])],
-  ];
-  for (const [name, bytes] of cases) {
-    await t.test(name, sub => {
-      const dataRoot = area(sub), directory = join(dataRoot, 'film-playback');
-      fs.mkdirSync(directory);
-      const path = join(directory, 'library.json');
-      fs.writeFileSync(path, bytes);
-      assert.throws(() => createPlaybackLibrary({ dataRoot }), { code: 'CORRUPT_STORAGE' });
-      assert.deepEqual(fs.readFileSync(path), bytes);
-    });
-  }
-});
-
-test('E37: a running owner refuses to overwrite later on-disk corruption or removal', async t => {
-  for (const action of ['corrupt', 'remove']) {
-    await t.test(action, sub => {
-      const { owner, path } = library(sub);
-      owner.update(draft => { draft.blocks.push(block()); });
-      const before = owner.read();
-      if (action === 'corrupt') fs.writeFileSync(path, '{synthetic corruption');
-      else fs.unlinkSync(path);
-      assert.throws(() => owner.update(draft => { draft.blocks = []; }),
-        { code: action === 'corrupt' ? 'CORRUPT_STORAGE' : 'STORAGE_CHANGED' });
-      assert.equal(owner.read(), before);
-      if (action === 'corrupt') assert.equal(fs.readFileSync(path, 'utf8'), '{synthetic corruption');
-      else assert.equal(fs.existsSync(path), false);
-    });
-  }
-});
-
-test('E37: a stale second owner cannot silently clobber another successful commit', t => {
-  const { owner, dataRoot } = library(t);
-  const second = createPlaybackLibrary({ dataRoot });
-  t.after(() => second.close());
-  owner.update(draft => { draft.blocks.push(block()); });
-  assert.throws(() => second.update(draft => { draft.manual.push(manual()); }), { code: 'STORAGE_CHANGED' });
-  const reopened = createPlaybackLibrary({ dataRoot });
-  t.after(() => reopened.close());
-  assert.deepEqual(reopened.read().blocks, [block()]);
-  assert.deepEqual(reopened.read().manual, []);
-});
-
-test('E37: open/write/fsync/close/rename failures preserve disk and memory and clean this transaction temporary file', async t => {
-  for (const method of ['openSync', 'writeFileSync', 'fsyncSync', 'closeSync', 'renameSync']) {
-    await t.test(method, sub => {
-      const { owner, path, directory } = library(sub);
-      owner.update(draft => { draft.manual.push(manual()); });
-      const before = owner.read(), bytes = fs.readFileSync(path);
-      const original = fs[method];
-      let temporaryFD;
-      const open = fs.openSync;
-      if (method === 'closeSync') {
-        sub.mock.method(fs, 'openSync', function(path, ...rest) {
-          const fd = open.call(this, path, ...rest);
-          if (typeof path === 'string' && path.includes('.library-')) temporaryFD = fd;
-          return fd;
-        });
-      }
-      let failed = false;
-      const mocked = sub.mock.method(fs, method, function(...args) {
-        const targeted = method === 'openSync' ? typeof args[0] === 'string' && args[0].includes('.library-') :
-          method === 'writeFileSync' || method === 'fsyncSync' || method === 'renameSync' ? true :
-          args[0] === temporaryFD;
-        if (targeted && !failed) {
-          failed = true;
-          throw Object.assign(new Error('synthetic private storage diagnostic'), { code: 'EIO' });
-        }
-        return original.apply(this, args);
-      });
-      assert.throws(() => owner.update(draft => { draft.manual = []; draft.blocks.push(block()); }),
-        { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
-      mocked.mock.restore();
-      assert.equal(failed, true);
-      assert.equal(owner.read(), before);
-      assert.deepEqual(fs.readFileSync(path), bytes);
-      assert.deepEqual(fs.readdirSync(directory), ['library.json']);
-    });
-  }
-});
-
-test('E37: a failed first commit creates no successful owner state or document', t => {
-  const { owner, path, directory } = library(t);
-  const before = owner.read();
-  const mocked = t.mock.method(fs, 'renameSync', () => {
-    throw Object.assign(new Error('synthetic'), { code: 'EACCES' });
-  });
-  assert.throws(() => owner.update(draft => { draft.blocks.push(block()); }), { code: 'STORAGE_ERROR' });
-  mocked.mock.restore();
-  assert.equal(owner.read(), before);
-  assert.equal(fs.existsSync(path), false);
-  assert.deepEqual(fs.readdirSync(directory), []);
-  owner.update(draft => { draft.blocks.push(block()); });
-  assert.deepEqual(owner.read().blocks, [block()]);
-});
-
-test('E31/E37: sensitive share document and containing directory have owner-only POSIX permissions', t => {
-  const { owner, path, directory, dataRoot } = library(t);
-  owner.update(draft => {
-    draft.manual.push({
-      id: 'manual:share', targetId: 'tmdb:movie:42', kind: 'share',
-      share: { url: 'https://synthetic.invalid/s/private-share', password: 'fixture-only' },
-      enabled: true, autoDisable: false, failureCount: 0,
-    });
-  });
-  if (process.platform !== 'win32') {
-    assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
-    assert.equal(fs.statSync(path).mode & 0o777, 0o600);
-  }
-  fs.chmodSync(directory, 0o755);
-  fs.chmodSync(path, 0o644);
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  if (process.platform !== 'win32') {
-    assert.equal(fs.statSync(directory).mode & 0o777, 0o700);
-    assert.equal(fs.statSync(path).mode & 0o777, 0o600);
-  }
-  assert.equal(restarted.read().manual[0].share.password, 'fixture-only');
-});
-
-test('E37: linked documents and App-managed directory aliases support reads, atomic saves and restart', async t => {
-  for (const kind of ['file-symlink', 'hardlink', 'directory-symlink']) {
-    await t.test(kind, sub => {
-      const base = area(sub), dataRoot = join(base, 'data'), other = join(base, 'other');
-      fs.mkdirSync(dataRoot);
-      fs.mkdirSync(other);
-      const bytes = JSON.stringify(empty()), otherFile = join(other, 'library.json');
-      fs.writeFileSync(otherFile, bytes);
-      const directory = join(dataRoot, 'film-playback');
-      if (kind === 'directory-symlink') fs.symlinkSync(other, directory, 'junction');
-      else {
-        fs.mkdirSync(directory);
-        if (kind === 'file-symlink') fs.symlinkSync(otherFile, join(directory, 'library.json'));
-        else fs.linkSync(otherFile, join(directory, 'library.json'));
-      }
-      const { owner, path } = library(sub, dataRoot);
-      assert.deepEqual(owner.read(), empty());
-      const saved = owner.update(draft => { draft.blocks.push(block()); });
-      assert.deepEqual(JSON.parse(fs.readFileSync(path, 'utf8')), saved);
-      if (kind === 'directory-symlink') {
-        assert.deepEqual(JSON.parse(fs.readFileSync(otherFile, 'utf8')), saved);
-      } else {
-        assert.equal(fs.readFileSync(otherFile, 'utf8'), bytes, 'atomic replacement preserves the other linked entry');
-      }
-      owner.close();
-      const { owner: restarted } = library(sub, dataRoot);
-      assert.deepEqual(restarted.read(), saved);
-    });
-  }
-});
-
-test('E37: an App-owned root alias follows its current destination for normal I/O', t => {
-  const base = area(t), original = join(base, 'original'), other = join(base, 'other');
-  const linked = join(base, 'linked');
-  fs.mkdirSync(original);
-  fs.mkdirSync(other);
-  fs.symlinkSync(original, linked, 'junction');
-  const owner = createPlaybackLibrary({ dataRoot: linked });
-  t.after(() => owner.close());
-  fs.unlinkSync(linked);
-  fs.symlinkSync(other, linked, 'junction');
-  const saved = owner.update(draft => { draft.blocks.push(block()); });
-  assert.equal(fs.existsSync(join(original, 'film-playback', 'library.json')), false);
-  assert.deepEqual(JSON.parse(fs.readFileSync(join(other, 'film-playback', 'library.json'), 'utf8')), saved);
-  owner.close();
-  const { owner: restarted } = library(t, linked);
-  assert.deepEqual(restarted.read(), saved);
-});
-
-test('E37: a not-yet-created App root below a platform alias supports first save, restart and later saves', t => {
-  const base = area(t), actual = join(base, 'actual'), linked = join(base, 'linked');
-  fs.mkdirSync(actual);
-  fs.symlinkSync(actual, linked, 'junction');
-  const dataRoot = join(linked, 'application-support', 'script-runtime');
-  const owner = createPlaybackLibrary({ dataRoot });
-  t.after(() => owner.close());
-  owner.update(draft => { draft.blocks.push(block()); });
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.deepEqual(restarted.read().blocks, [block()]);
-  restarted.update(draft => { draft.manual.push(manual()); });
-  const actualPath = join(actual, 'application-support', 'script-runtime', 'film-playback', 'library.json');
-  assert.deepEqual(JSON.parse(fs.readFileSync(actualPath, 'utf8')), restarted.read());
-});
-
-test('E37: an App-managed module directory alias supports first creation and restart', t => {
-  const base = area(t), dataRoot = join(base, 'data'), actual = join(base, 'actual');
-  fs.mkdirSync(dataRoot);
-  fs.mkdirSync(actual);
-  fs.symlinkSync(actual, join(dataRoot, 'film-playback'), 'junction');
-  const { owner, path } = library(t, dataRoot);
-  assert.equal(fs.existsSync(path), false);
-  const saved = owner.update(draft => { draft.manual.push(manual()); });
-  assert.deepEqual(JSON.parse(fs.readFileSync(join(actual, 'library.json'), 'utf8')), saved);
-  owner.close();
-  const { owner: restarted } = library(t, dataRoot);
-  assert.deepEqual(restarted.read(), saved);
-  restarted.update(draft => { draft.blocks.push(block()); });
-  assert.deepEqual(JSON.parse(fs.readFileSync(join(actual, 'library.json'), 'utf8')), restarted.read());
-});
-
-test('E37: obstructed paths cannot commit and preserve existing filesystem contents', async t => {
-  for (const kind of ['data-root', 'module-directory', 'document']) {
-    await t.test(kind, sub => {
-      const base = area(sub), dataRoot = join(base, 'data');
-      const directory = join(dataRoot, 'film-playback'), path = join(directory, 'library.json');
-      const blocked = kind === 'data-root' ? dataRoot : directory;
-      if (kind === 'document') fs.mkdirSync(path, { recursive: true });
-      else {
-        fs.mkdirSync(kind === 'data-root' ? base : dataRoot, { recursive: true });
-        fs.writeFileSync(blocked, 'synthetic storage obstruction');
-      }
-      // Windows open reports ENOENT below a file rather than POSIX ENOTDIR.
-      // Reading can therefore be a miss, but saving must never accept this path.
-      if (process.platform === 'win32' && kind !== 'document') {
-        const { owner } = library(sub, dataRoot);
-        assert.deepEqual(owner.read(), empty());
-        assert.throws(() => owner.update(draft => { draft.blocks.push(block()); }),
-          { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
-        assert.deepEqual(owner.read(), empty());
-      } else {
-        assert.throws(() => createPlaybackLibrary({ dataRoot }), { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
-      }
-      if (kind === 'document') assert.deepEqual(fs.readdirSync(path), []);
-      else assert.equal(fs.readFileSync(blocked, 'utf8'), 'synthetic storage obstruction');
-    });
-  }
-});
-
-test('E48: close is idempotent, rejects further operations, and cannot be bypassed by a held transaction', t => {
-  const { owner, dataRoot, path } = library(t);
-  owner.update(draft => { draft.blocks.push(block()); });
-  const bytes = fs.readFileSync(path);
-  assert.throws(() => owner.update(draft => { draft.blocks = []; owner.close(); }), { code: 'CLOSED' });
-  owner.close();
-  assert.throws(() => owner.read(), { code: 'CLOSED' });
-  assert.throws(() => owner.update(() => {}), { code: 'CLOSED' });
-  assert.deepEqual(fs.readFileSync(path), bytes);
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.deepEqual(restarted.read().blocks, [block()]);
-});
-
-test('E37: a normal site detail URL remains an accurate persistent identity', t => {
-  const { owner } = library(t);
-  const detailId = 'https://synthetic.invalid/detail?id=42';
-  owner.update(draft => { draft.blocks.push(block({ detailId })); });
-  assert.equal(owner.read().blocks[0].detailId, detailId);
-});
-
-test('E19/E30: ordinary source page URLs remain valid opaque target/source/line identities', t => {
-  const { owner } = library(t);
-  const value = history();
-  value.targetId = 'https://synthetic.invalid/detail?id=42';
-  value.sourceKey = 'https://synthetic.invalid/source?id=site';
-  value.lineId = 'https://synthetic.invalid/line?id=original';
-  value.playbackTarget = { ...value.playbackTarget, id: value.targetId,
-    source: { ...value.playbackTarget.source, key: value.sourceKey, lineId: value.lineId } };
-  owner.update(draft => {
-    draft.history.push(value);
-    draft.blocks.push(block({ targetId: value.targetId, sourceKey: value.sourceKey, lineId: value.lineId }));
-  });
-  assert.deepEqual(owner.read().history, [value]);
-  assert.equal(owner.read().blocks[0].lineId, value.lineId);
-});
-
-test('E19/E30/E31: source numeric detail and line ids retain their exact scalar identity across restart', t => {
-  const { owner, dataRoot } = library(t);
-  const entry = { ...history(), detailId: 42, lineId: 0 };
-  delete entry.ended;
-  delete entry.playedAt;
-  delete entry.duration;
-  entry.episode = {};
-  owner.update(draft => {
-    draft.history.push(entry);
-    draft.manual.push({
-      id: 'manual:numeric', targetId: entry.targetId, sourceKey: entry.sourceKey,
-      detailId: 42, failureCount: 0,
-    });
-    draft.blocks.push(block({ detailId: 42, lineId: 0 }), block({ detailId: '42', lineId: '0' }));
-  });
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.equal(restarted.read().history[0].detailId, 42);
-  assert.equal(restarted.read().history[0].lineId, 0);
-  assert.equal(Object.hasOwn(restarted.read().history[0], 'duration'), false);
-  assert.deepEqual(restarted.read().history[0].episode, {});
-  assert.equal(restarted.read().manual[0].detailId, 42);
-  assert.equal(restarted.read().blocks[0].lineId, 0);
-  assert.equal(restarted.read().blocks[1].detailId, '42');
-  assert.equal(restarted.read().blocks[1].lineId, '0');
-});
-
-test('E30/E31: optional manual display strings and millisecond clock adjustments do not restrict durable user data', t => {
-  const { owner, dataRoot } = library(t);
-  const entry = { ...history(), playedAt: 1200, updatedAt: 1000 };
-  owner.update(draft => {
-    draft.history.push(entry);
-    draft.manual.push({ ...manual(), title: '', name: '' });
-  });
-  owner.close();
-  const restarted = createPlaybackLibrary({ dataRoot });
-  t.after(() => restarted.close());
-  assert.equal(restarted.read().history[0].playedAt, 1200);
-  assert.equal(restarted.read().history[0].updatedAt, 1000);
-  assert.equal(restarted.read().manual[0].title, '');
-  assert.equal(restarted.read().manual[0].name, '');
-});
-
-test('E37: relative or traversing roots are rejected without touching storage', () => {
-  for (const dataRoot of ['relative', '/tmp/../other', '/tmp/\0bad']) {
-    assert.throws(() => createPlaybackLibrary({ dataRoot }), { code: 'INVALID_REQUEST' });
-  }
+test('close drains an already admitted control write and rejects new work', async t => {
+  const {owner,open} = await fixture(t); const pending=owner.update(draft=>{draft.previewTargets.push('tmdb:tv:0');});
+  const closing=owner.close(); await pending; await closing;
+  assert.throws(()=>owner.read(),{code:'CLOSED'}); assert.throws(()=>owner.update(()=>{}),{code:'CLOSED'});
+  assert.deepEqual((await open()).read().previewTargets,['tmdb:tv:0']);
 });

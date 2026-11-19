@@ -53,10 +53,10 @@ internal sealed record FilmPreferences(string[] RuleOrder, string[] PanOrder, st
     }
 }
 
-internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IDocumentStore store)
+internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IStorageDatabase database)
 {
     private readonly FilmPlaybackClient client = new(runtime);
-    private readonly SettingsDocument document = new(store, "film.preferences.v1");
+    private readonly SettingsDocument document = new(new(database, "film.preferences.v1", FilmStorageRecords.Preferences));
     internal async Task<FilmPreferences> ReadPreferencesAsync(CancellationToken token) =>
         (await document.ReadAsync(token)) is { } saved ? FilmPreferences.Read(saved.GetProperty("preferences")) : FilmPreferences.Defaults;
     internal async Task<FilmPreferences> SavePreferencesAsync(FilmPreferences preferences, string? field = null)

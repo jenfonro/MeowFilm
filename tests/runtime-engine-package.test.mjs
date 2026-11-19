@@ -43,12 +43,13 @@ function sourceFixture() {
   for (const path of new Set(['package.json', 'package-lock.json', policyPath, receiptPath,
     artifactPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
   for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-    'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules']) {
+    'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules', 'storage']) {
     const location = `packages/${name}`;
     copy(`${location}/package.json`);
     for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
       : name === 'film-search' ? ['film-search.js']
         : name === 'novel-rules' ? ['index.js', 'novel-rules.js'] : ['src']) copy(`${location}/${file}`);
+    if (name === 'storage') copy(`${location}/schema.sql`);
     const installed = join(root, 'node_modules/@meowfilm', name);
     mkdirSync(dirname(installed), { recursive: true });
     symlinkSync(join(root, location), installed, process.platform === 'win32' ? 'junction' : 'dir');
@@ -278,7 +279,8 @@ test('packaged pan entry imports and serves its contract without script engines 
       await runtime.start();
       client = createRuntimeClient({ baseUrl: runtime.baseUrl });
       assert.deepEqual((await client.describe()).value.modules.map(item => item.id), ['pan']);
-      assert.equal((await client.call('pan.providers')).value.providers.length, 7);
+      assert.deepEqual((await client.call('pan.providers')).value.providers.map(item => item.provider),
+        ['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
       const saved = await client.call('pan.settings.set', {
         provider: 'uc', credentials: { cookie: 'synthetic-offline-only' },
       });

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Anonymous client recipes from the pinned QQMusicApi / KuGouMusicApi sources.
 import { constants, publicEncrypt, randomInt, randomUUID } from 'node:crypto';
-import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { createAnonymousClientStore } from './client-store.mjs';
 import { aes, decrypt, hex, kgPublicKey, kgRequest, kgSuccess, md5, responseCookies, txRequest, txSuccess } from './protocols.mjs';
-import { decodeJSON, object, required, utf8 } from './model.mjs';
+import { decodeJSON, object, required } from './model.mjs';
 import { fail, MusicPlatformError } from './errors.mjs';
 
 const qimeiPublicKey = `-----BEGIN PUBLIC KEY-----
@@ -62,33 +62,51 @@ function kgRegistration(seed) {
   return data;
 }
 const chinaDay = time => Math.floor((time + 8 * 3600000) / 86400000);
-/** Only anonymous protocol state is durable. Account credentials never enter this document. */
-export function createClientContexts({ documents, transport, clock }) {
-  let state;
+/** Credentials are native-owned; only anonymous protocol state is durable here. */
+export function createClientContexts({ dataRoot, clientStore, transport, clock }) {
+  const store = clientStore ?? createAnonymousClientStore(dataRoot);
+  let state, loading, uncertain = false, writes = Promise.resolve();
   const flights = new Map(), lifetime = new AbortController();
+  function ready() {
+    if (state && !uncertain) return Promise.resolve();
+    if (!loading) loading = Promise.resolve().then(async () => {
+      lifetime.signal.throwIfAborted();
+      let current;
+      try { current = await store.read(); }
+      catch (error) { fail(error?.code === 'CORRUPT_STORAGE' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR'); }
+      if (!current) {
+        if (uncertain) fail('STORAGE_ERROR');
+        current = fresh(clock);
+        try { await store.initialize(current); }
+        catch (error) { uncertain = true; fail(commitCode(error)); }
+      }
+      state = current; uncertain = false;
+    }).finally(() => { loading = undefined; });
+    loading.catch(() => {});
+    return loading;
+  }
+  function commitCode(error) {
+    if (error?.code === 'STORAGE_CONFLICT') return 'STORAGE_CONFLICT';
+    return ['STORAGE_BUSY', 'STORAGE_FULL', 'STORAGE_READONLY', 'STORAGE_LIMIT', 'INVALID_REQUEST'].includes(error?.code)
+      ? 'STORAGE_ERROR' : 'COMMIT_UNKNOWN';
+  }
   function load() {
     lifetime.signal.throwIfAborted();
-    if (state) return state;
-    let bytes;
-    try { bytes = documents.read('clients.json'); } catch { fail('STORAGE_ERROR'); }
-    if (bytes) {
-      try { state = object(parseJSONText(utf8(bytes))); }
-      catch { fail('CORRUPT_STORAGE'); }
-    } else {
-      const candidate = fresh(clock);
-      try { documents.write('clients.json', Buffer.from(stringifyJSONValue(candidate))); }
-      catch { fail('COMMIT_UNKNOWN'); }
-      state = candidate;
-    }
+    if (!state || uncertain) fail('STORAGE_ERROR');
     return state;
   }
-  function save(platform, value) {
-    lifetime.signal.throwIfAborted();
-    const candidate = { ...load(), [platform]: value };
-    try { documents.write('clients.json', Buffer.from(stringifyJSONValue(candidate))); }
-    catch { state = undefined; fail('COMMIT_UNKNOWN'); }
-    state = candidate;
-    return value;
+  function save(platform, proposed) {
+    const work = writes.then(async () => {
+      await ready(); lifetime.signal.throwIfAborted();
+      const value = typeof proposed === 'function' ? proposed(load()[platform]) : proposed;
+      if (value === undefined) return load()[platform];
+      try { await store.writePlatform(platform, value); }
+      catch (error) { uncertain = true; fail(commitCode(error)); }
+      state = {...state,[platform]:value};
+      return value;
+    });
+    writes = work.catch(() => {});
+    return work;
   }
   async function prepare(platform, signal) {
     let client = load()[platform];
@@ -101,7 +119,7 @@ export function createClientContexts({ documents, transport, clock }) {
       if (inner.code != null && required(inner.code) !== '0') fail('UPSTREAM_ERROR');
       const data = object(inner.data);
       signal.throwIfAborted();
-      client = save('tx', { ...client, qimei: { q36: required(data.q36), savedAt: now },
+      client = await save('tx', { ...client, qimei: { q36: required(data.q36), savedAt: now },
         session: null });
     }
     if (!client.session || client.session.savedAt > clock() || chinaDay(client.session.savedAt) !== chinaDay(clock())) {
@@ -111,7 +129,7 @@ export function createClientContexts({ documents, transport, clock }) {
       const data = txSuccess((await transport({ ...request, maximumBytes: 65536, signal })).value);
       const session = object(data.session);
       signal.throwIfAborted();
-      client = save('tx', { ...client, session: { uid: required(session.uid), sid: required(session.sid), savedAt: now } });
+      client = await save('tx', { ...client, session: { uid: required(session.uid), sid: required(session.sid), savedAt: now } });
     }
     return client;
   }
@@ -126,6 +144,7 @@ export function createClientContexts({ documents, transport, clock }) {
     return flights.get(key);
   }
   return {
+    get ready() { return ready(); },
     get(platform) { return load()[platform]; },
     prepare(platform) { return shared(platform, signal => prepare(platform, signal)); },
     registerKg(device) { return shared(device ? 'kg-candidate:' + device.seed : 'kg-registration', async signal => {
@@ -155,29 +174,32 @@ export function createClientContexts({ documents, transport, clock }) {
       return device ? next : save('kg', next);
     }); },
     acceptKgAccount(before, device) {
-      const current = load().kg;
-      if (current === before && current.seed === device.seed && current.mid === device.mid && current.dfid !== device.dfid)
-        save('kg', { ...current, dfid: device.dfid });
+      return save('kg', current => current === before && current.seed === device.seed &&
+        current.mid === device.mid && current.dfid !== device.dfid ? {...current,dfid:device.dfid} : undefined);
     },
     acceptWyAccount(before, used, next) {
-      const current = load().wy;
-      if (current !== before || current.cookies.deviceId !== used.deviceId || next.deviceId !== used.deviceId) return;
-      const cookies = { ...current.cookies };
-      for (const key of ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', 'NMTID']) {
-        if (next[key] == null) delete cookies[key]; else cookies[key] = next[key];
-      }
-      if (JSON.stringify(cookies) !== JSON.stringify(current.cookies)) save('wy', { ...current, cookies });
+      return save('wy', current => {
+        if (current !== before || current.cookies.deviceId !== used.deviceId || next.deviceId !== used.deviceId) return;
+        const cookies = {...current.cookies};
+        for (const key of ['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','NMTID']) {
+          if (next[key] == null) delete cookies[key]; else cookies[key] = next[key];
+        }
+        if (JSON.stringify(cookies) !== JSON.stringify(current.cookies)) return {...current,cookies};
+      });
     },
     acceptWy(headers, account, host) {
-      if (account) return; // Account publication and explicit refresh belong to the native owner.
-      const client = load().wy, cookies = responseCookies(headers,
-        ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', 'NMTID', 'MUSIC_A'], client.cookies, clock, host);
-      if (cookies.deviceId !== client.cookies.deviceId) fail('VERIFICATION_REQUIRED');
-      if (JSON.stringify(cookies) !== JSON.stringify(client.cookies)) save('wy', { ...client, cookies });
+      if (account) return;
+      return save('wy', client => {
+        const cookies = responseCookies(headers,
+          ['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','NMTID','MUSIC_A'],client.cookies,clock,host);
+        if (cookies.deviceId !== client.cookies.deviceId) fail('VERIFICATION_REQUIRED');
+        if (JSON.stringify(cookies) !== JSON.stringify(client.cookies)) return {...client,cookies};
+      });
     },
     async close() {
       lifetime.abort(new MusicPlatformError('CLOSED'));
-      await Promise.allSettled([...flights.values()]);
+      await Promise.allSettled([loading,writes,...flights.values()]);
+      await store.close();
     },
   };
 }

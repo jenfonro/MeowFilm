@@ -97,9 +97,11 @@ export function checkIOSMachO(bytes, target) {
   }
   if (offset !== end || builds !== 1
       || !dylibs.includes('@rpath/NodeMobile.framework/NodeMobile')
+      || !dylibs.includes('@rpath/MeowSQLite.framework/MeowSQLite')
       || dylibs.some(name => ![
         '@rpath/NodeMobile.framework/NodeMobile', '/usr/lib/libc++.1.dylib',
         '/usr/lib/libSystem.B.dylib',
+        '@rpath/MeowSQLite.framework/MeowSQLite',
       ].includes(name))) fail();
   return { dylibs };
 }

@@ -107,7 +107,7 @@ public static class MusicCatalogClientStorageTests
     {
         await using var store = new Store(CreateRoot()) { LoseReceipt = true };
         await using var runtime = Runtime();
-        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await using var catalog = new MusicNativeCatalogOwner(runtime.Catalog, library);
         Error(await catalog.ExecuteAsync("music.catalog.home", new { platform = "wy" }), "COMMIT_UNKNOWN");
         Error(await catalog.ExecuteAsync("music.catalog.home", new { platform = "wy" }), "PENDING_WRITE");
@@ -155,18 +155,15 @@ public static class MusicCatalogClientStorageTests
     private static JsonElement Home() => MusicPlatformRuntimeFixture.Json(new {
         platform = "wy", sections = new[] { new { id = "tracks", title = "Synthetic", type = "songs", items = new[] { Song } } },
         more = false, continuation = (object?)null });
-    private sealed class Store : IDocumentStore
+    private sealed class Store : NativeTestDatabase
     {
-        private readonly LocalDocumentStore inner;
         internal readonly MusicRecordTestStore Records;
-        internal int Writes => Records.Writes;
-        internal int Disposals;
+        internal new int Writes => Records.Writes;
         internal bool Hold, LoseReceipt;
         internal readonly TaskCompletionSource Entered = Signal(), Release = Signal();
-        internal Store(string root)
+        internal Store(string root) : base(root)
         {
-            inner = new(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces);
-            Records = MusicTestStores.Use(this, Path.Combine(root, "music-records"));
+            Records = MusicTestStores.Use(this, root);
             Records.BeforeCommit = async (_, _) =>
             { Entered.TrySetResult(); if (Hold) await Release.Task; };
             Records.AfterCommit = (_, _) =>
@@ -175,10 +172,7 @@ public static class MusicCatalogClientStorageTests
                 return Task.CompletedTask;
             };
         }
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default) => inner.WriteAsync(ns, data, expected, token);
-        public async ValueTask DisposeAsync()
-        { Release.TrySetResult(); Disposals++; await Records.DisposeAsync(); await inner.DisposeAsync(); }
+        public override async ValueTask DisposeAsync()
+        { Release.TrySetResult(); await Records.DisposeAsync(); await base.DisposeAsync(); }
     }
 }

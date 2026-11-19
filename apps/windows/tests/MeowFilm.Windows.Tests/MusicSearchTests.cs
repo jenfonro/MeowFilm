@@ -179,7 +179,7 @@ public static partial class MusicSearchTests
         internal Fixture(TimeProvider? clock = null,
             Func<Catalog, MusicSearchRequest, CancellationToken, Task<JsonElement>>? searchAsync = null)
         {
-            Library = new(MusicTestStores.For(Store));
+            Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage);
             Search = new(Catalog, clock, async (request, token) =>
             {
                 long observation = Library.BeginSongObservation();

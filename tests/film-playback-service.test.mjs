@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -65,7 +66,7 @@ function historyEntry(target, value = {}) {
       detailId, lineId, candidateId },
   } : {}) };
   return { targetId: target.id, title: target.title, sourceKey, detailId, lineId, candidateId, episode,
-    position: 0, duration: 0, paused: false, updatedAt: 1, playbackTarget, ...value };
+    position: 0, duration: 0, paused: false, ended: false, updatedAt: 1, playbackTarget, ...value };
 }
 function fixture(overrides = {}) {
   let clock = Date.parse('2026-11-08T12:00:00Z');
@@ -80,6 +81,25 @@ function fixture(overrides = {}) {
     update(mutator) {
       if (storageError) throw error(storageError);
       const draft = structuredClone(document); mutator(draft); document = draft;
+    },
+    async history(targetId) { return structuredClone(document.history.find(row => row?.targetId === targetId)); },
+    async saveHistory(value) {
+      if (storageError) throw error(storageError);
+      const index = document.history.findIndex(row => row?.targetId === value.targetId);
+      if (index < 0) document.history.push(structuredClone(value));
+      else document.history[index] = structuredClone(value);
+    },
+    async list({limit = 100, historyAfter} = {}) {
+      const rows = document.history.filter(row => row && (!historyAfter ||
+        row.updatedAt < historyAfter.updatedAt || row.updatedAt === historyAfter.updatedAt && row.targetId < historyAfter.targetId))
+        .sort((a,b) => b.updatedAt - a.updatedAt || b.targetId.localeCompare(a.targetId));
+      const history = rows.slice(0,limit), last = history.at(-1);
+      return {...structuredClone(document),history:structuredClone(history),
+        historyAfter:rows.length > limit ? {updatedAt:last.updatedAt,targetId:last.targetId} : null};
+    },
+    async removeHistory(targetId) {
+      if (storageError) throw error(storageError);
+      document.history = targetId == null ? [] : document.history.filter(row => row?.targetId !== targetId);
     },
   };
   const data = {
@@ -190,7 +210,7 @@ test('playback captures only owner rules, preserves a playing snapshot and accep
   const saved = await owner.set({ rules: empty });
   assert.equal(f.snapshot(first.sessionId).rulesRevision, initial.revision);
   assert.equal(f.snapshot(first.sessionId).current.attemptId, current.id);
-  f.service.removeLibrary({ kind: 'history', id: movie.id });
+  await f.service.removeLibrary({ kind: 'history', id: movie.id });
   const second = await f.open(input);
   assert.equal(second.rulesRevision, saved.revision);
   await until(() => f.snapshot(second.sessionId).stage === 'idle');
@@ -2865,13 +2885,13 @@ test('library management clears only the selected collection and reports write f
   f.service.removeLibrary({ kind: 'history', id: movie.id });
   assert.deepEqual(f.library.read().history, [historyEntry(tv)]);
   f.failStorage('STORAGE_ERROR');
-  assert.throws(() => f.service.removeLibrary({ kind: 'blocks' }), { code: 'STORAGE_ERROR' });
+  await assert.rejects(f.service.removeLibrary({ kind: 'blocks' }), { code: 'STORAGE_ERROR' });
   assert.equal(f.library.read().blocks.length, 1);
   f.failStorage(null);
-  f.service.removeLibrary({ kind: 'history', id: null });
+  await f.service.removeLibrary({ kind: 'history', id: null });
   assert.equal(f.library.read().history.length, 0);
   assert.equal(f.library.read().blocks.length, 1);
-  f.service.removeLibrary({ kind: 'blocks' });
+  await f.service.removeLibrary({ kind: 'blocks' });
   assert.equal(f.library.read().blocks.length, 0);
 });
 
@@ -3352,8 +3372,8 @@ test('a late old manual bootstrap cannot publish or overwrite the edited mapping
   assert.equal(next.candidate.source.detailId, 'New');
   release.resolve(); await delay(2); await delay(2);
   assert.equal(f.snapshot(sessionId).attempt.id, next.id);
-  assert.equal(f.service.library().manual[0].failureCount, 0);
-  assert.equal(f.service.library().manual[0].enabled, true);
+  assert.equal((await f.service.library()).manual[0].failureCount, 0);
+  assert.equal((await f.service.library()).manual[0].enabled, true);
 });
 
 for (const action of ['disable', 'remove']) {
@@ -6255,40 +6275,31 @@ for (const secondCount of [7, null]) {
   });
 }
 
-test('real library edits and playback writes retain corrupt siblings and exact unedited extension materials after restart', async t => {
+test('real typed library edits and playback writes reopen without accepting unknown internal fields', async t => {
   const root = mkdtempSync(join(tmpdir(), 'film-library-service-'));
   const library = createPlaybackLibrary({ dataRoot: root });
+  await library.ready;
   const f = fixture({ library });
-  t.after(async () => { await f.service.close(); library.close(); rmSync(root, { recursive: true }); });
-  library.update(document => {
-    document.extension = rawJSON('1e400');
-    document.preferences.extension = rawJSON('9007199254740993');
-    document.manual.push(null, { id: 'bad-sibling', failureCount: 'broken' },
-      { id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'old', failureCount: 0,
-        extension: rawJSON('9007199254740993') });
-    document.history.push(null, { targetId: 'bad-sibling', position: 'broken' });
-    document.blocks.push(null, { targetId: 'unrelated', extension: rawJSON('1e400') });
+  const owners = [library];
+  t.after(async () => { await f.service.close(); for (const owner of owners) await owner.close(); rmSync(root, { recursive: true, force:true }); });
+  await assert.rejects(library.update(document => { document.extension = rawJSON('1e400'); }), {code:'INVALID_REQUEST'});
+  await library.update(document => {
+    document.manual.push({ id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'old', failureCount: 0 });
   });
   await f.service.updateManual({ action: 'save', item: { id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'new' } });
   await f.service.setSettings({ ...defaultPreferences(), iosAutoPrepare: false });
   const { sessionId } = await f.open({ platform: 'windows' });
   const playing = await f.current(sessionId);
-  library.update(document => { document.history[0].extension = rawJSON('0.123456789012345678901'); });
   await f.command(sessionId, 'stop');
   assert.equal(f.resources.size, 0);
+  await f.service.close(); await library.close();
   const restarted = createPlaybackLibrary({ dataRoot: root });
-  t.after(() => restarted.close());
+  owners.push(restarted); await restarted.ready;
   const stored = restarted.read();
-  assert.equal(stringifyJSONValue(stored.extension), '1e400');
-  assert.equal(stringifyJSONValue(stored.preferences.extension), '9007199254740993');
   assert.equal(stored.preferences.iosAutoPrepare, false);
-  assert.deepEqual(stored.manual.slice(0, 2), [null, { id: 'bad-sibling', failureCount: 'broken' }]);
-  assert.equal(stored.manual[2].detailId, 'new');
-  assert.equal(stringifyJSONValue(stored.manual[2].extension), '9007199254740993');
-  assert.deepEqual(stored.history.slice(1), [null, { targetId: 'bad-sibling', position: 'broken' }]);
-  assert.equal(stored.history[0].playbackTarget.source.candidateId, playing.candidate.id);
-  assert.equal(stringifyJSONValue(stored.history[0].extension), '0.123456789012345678901');
-  assert.equal(stored.blocks[0], null);
+  assert.equal(stored.manual[0].detailId, 'new');
+  assert.equal(stored.manual.length, 1); assert.deepEqual(stored.history, []); assert.deepEqual(stored.blocks, []);
+  assert.equal((await restarted.history(movie.id)).playbackTarget.source.candidateId, playing.candidate.id);
 });
 
 for (const item of [

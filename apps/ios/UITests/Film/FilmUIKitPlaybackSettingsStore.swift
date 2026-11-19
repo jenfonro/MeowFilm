@@ -8,9 +8,7 @@ import MeowStorage
 /// Real native preference storage and Node-owned business-library receipts.
 actor FilmUIKitPlaybackSettingsStore {
     nonisolated let document: FilmSettingsDocument
-    private let storage: DocumentStore
-    private let settingsFile: URL
-    private let savedFile: URL
+    private let storage: SQLiteDatabase
     private let changes: Changes
     private var manual: [RuntimeObject]
     private var history: [RuntimeValue]
@@ -18,51 +16,32 @@ actor FilmUIKitPlaybackSettingsStore {
     private var log: [FilmUIKitPlaybackServer.Call] = []
 
     init(_ test: XCTestCase, manual: [RuntimeObject] = [], history: [RuntimeValue] = [],
-         blocks: [RuntimeValue] = []) throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("film-uikit-settings-" + UUID().uuidString.lowercased(), isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-        test.addTeardownBlock { try FileManager.default.removeItem(at: root) }
-        let storage = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.preferences.namespace)
+         blocks: [RuntimeValue] = []) async throws {
+        let storage = try test.appStorageTestDatabase()
         self.storage = storage
         let changes = Changes()
         self.changes = changes
-        document = FilmSettingsDocument(block: .preferences, storage: .plain { storage },
+        document = FilmSettingsDocument(block: .preferences, database: storage,
                                         changed: { changes.record($0) })
-        settingsFile = root.appendingPathComponent(FilmSettingsBlock.preferences.namespace)
-            .appendingPathComponent(FilmSettingsDocument.key + ".json")
-        savedFile = settingsFile.appendingPathExtension("saved")
         self.manual = manual; self.history = history; self.blocks = blocks
-        try storage.compareAndSwap(key: FilmSettingsDocument.key, expected: nil,
-            replacement: RuntimeJSON.encode(.object([
-                "version": .number(1), "preferences": FilmPlaybackPreferences.defaults.value,
-            ])))
+        _ = try await FilmSettingsDocument(block: .preferences, database: storage).update { _ in .object([
+            "version": .number(1), "preferences": FilmPlaybackPreferences.defaults.value,
+        ]) }
     }
     nonisolated var transport: FilmPlaybackTransport {
         .init(request: { [self] operation, input in try await call(operation, input) },
               observation: { _, _, _ in throw FilmPlaybackError(code: "INVALID_REQUEST") })
     }
-    func setSaveFailure(_ value: Bool) throws {
-        if value {
-            try FileManager.default.moveItem(at: settingsFile, to: savedFile)
-            do {
-                try FileManager.default.createSymbolicLink(at: settingsFile, withDestinationURL: savedFile)
-            } catch {
-                try FileManager.default.moveItem(at: savedFile, to: settingsFile)
-                throw error
-            }
-        } else {
-            try FileManager.default.removeItem(at: settingsFile)
-            try FileManager.default.moveItem(at: savedFile, to: settingsFile)
-        }
+    func setSaveFailure(_ value: Bool) async throws {
+        _ = try await storage.read { try $0.query(value ? "PRAGMA query_only=ON" : "PRAGMA query_only=OFF") }
     }
-    func preferenceBytes() throws -> Data? { try storage.read(key: FilmSettingsDocument.key) }
+    func preferenceBytes() async throws -> Data? { try await document.read().map(RuntimeJSON.encode) }
     func notifications() -> [String] { changes.values }
     func calls() -> [FilmUIKitPlaybackServer.Call] { log }
     func librarySnapshot() -> RuntimeValue { library }
     private var library: RuntimeValue {
         .object(["manual": .array(manual.map(RuntimeValue.object)),
-                 "history": .array(history), "blocks": .array(blocks)])
+                 "history": .array(history), "historyAfter": .null, "blocks": .array(blocks)])
     }
     private func call(_ operation: String, _ input: RuntimeValue) throws -> RuntimeValue {
         log.append(.init(operation: operation, input: input))

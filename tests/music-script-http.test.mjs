@@ -1,7 +1,9 @@
+import { withTestDatabase } from './storage-test-fixture.mjs';
+import { decodeValueNodes } from '@meowfilm/storage/values';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
@@ -36,14 +38,28 @@ function okay(reply) {
   return reply.value;
 }
 function denied(reply, code) { assert.deepEqual(reply, { ok: false, contract: musicScriptContract, code }); }
+const cleanupsByRoot = new Map();
+const storedNodes = (root, installationId, key = 'exact') => withTestDatabase(root, db => db.query(
+  'SELECT * FROM music_script_kv_nodes WHERE installation_id=? AND site_id=? AND entry_key=? ORDER BY node_id',
+  [installationId, 'kw', key]));
+const storedValue = async (root, id, key) => decodeValueNodes(await storedNodes(root, id, key), { rawNumbers: true });
 function setup(t, extra = {}) {
   let host;
   const dataRoot = extra.dataRoot ?? mkdtempSync(join(tmpdir(), 'music-http-'));
+  if (!cleanupsByRoot.has(dataRoot)) {
+    const cleanups = [];
+    cleanupsByRoot.set(dataRoot, cleanups);
+    t.after(async () => {
+      for (const cleanup of cleanups) await cleanup();
+      cleanupsByRoot.delete(dataRoot);
+      rmSync(dataRoot, { recursive: true, force: true });
+    });
+  }
   const module = createMusicScriptModule({ dataRoot,
     network: () => { throw new ScriptHostError('NETWORK_ERROR'); },
     hostFactory: input => { host = createScriptHost(input); return host; }, ...extra,
   });
-  t.after(async () => {
+  cleanupsByRoot.get(dataRoot).push(async () => {
     okay(await module.close());
     if (host) {
       const stats = host.stats();
@@ -52,7 +68,6 @@ function setup(t, extra = {}) {
       for (const key of ['localServices', 'activeWorkers']) assert.equal(key in stats, false, key);
       for (const key of ['openService', 'mapServiceURL', 'resource', 'services']) assert.equal(key in host, false, key);
     }
-    if (!extra.dataRoot) rmSync(dataRoot, { recursive: true, force: true });
   });
   const rpc = moduleHttp(t, module);
   return { module, host: () => host, rpc, dataRoot };
@@ -207,26 +222,24 @@ test('private storage preserves exact untouched values and projects only LX read
     { key: 'exact', value: exact }));
   await wrapped.state.storage.set(storageInput(item.installationId, item.generation, 'kw',
     { key: 'overflow', value: parseJSONText('1e400') }));
-  const path = join(first.dataRoot, 'music', 'data', `${item.installationId}.json`);
-  const retained = () => parseJSONText(readFileSync(path, 'utf8')).sites.kw.find(entry => entry.key === 'exact').value;
-  assert.equal(stringifyJSONValue(retained()), text);
-  const beforeRead = readFileSync(path);
+  const retained = () => storedValue(first.dataRoot, item.installationId, 'exact');
+  assert.equal(stringifyJSONValue(await retained()), text);
+  const beforeRead = await storedNodes(first.dataRoot, item.installationId);
   denied(await first.rpc('invoke', request(item, 'kw', { key: 'overflow' })), 'INVALID_REQUEST');
-  assert.deepEqual(readFileSync(path), beforeRead);
+  assert.deepEqual(await storedNodes(first.dataRoot, item.installationId), beforeRead);
   const expected = { types: ['number', 'number', 'number', 'number'],
     values: ['9007199254740992', '0.12345678901234568', '1e+300', '0'],
     ordinary: { rawJSON: '9007199254740993' } };
   assert.deepEqual(await value(first.rpc, item), expected);
   assert.equal(await value(first.rpc, item, 'kw', { op: 'set', key: 'edited', value: 7 }), null);
   assert.equal(await value(first.rpc, item, 'tx', { op: 'set', key: 'other-site', value: 8 }), null);
-  assert.equal(stringifyJSONValue(retained()), text);
+  assert.equal(stringifyJSONValue(await retained()), text);
   okay(await first.module.close());
   const reopened = setup(t, { dataRoot: first.dataRoot });
   assert.deepEqual(await value(reopened.rpc, item), expected);
   assert.equal(await value(reopened.rpc, item, 'kw', { op: 'delete', key: 'edited' }), null);
-  assert.equal(stringifyJSONValue(retained()), text);
-  assert.equal(stringifyJSONValue(parseJSONText(readFileSync(path, 'utf8'))
-    .sites.kw.find(entry => entry.key === 'overflow').value), '1e400');
+  assert.equal(stringifyJSONValue(await retained()), text);
+  assert.equal(stringifyJSONValue(await storedValue(first.dataRoot, item.installationId, 'overflow')), '1e400');
   denied(await reopened.rpc('invoke', request(item, 'kw', { key: 'overflow' })), 'INVALID_REQUEST');
   assert.equal(stringifyJSONValue(exact), text);
 });
@@ -241,12 +254,11 @@ test('private storage counts exact numeric text against the unchanged value byte
   assert.equal(Buffer.byteLength(stringifyJSONValue(exact)), 16384);
   const input = storageInput(item.installationId, item.generation, 'kw', { value: exact });
   await wrapped.state.storage.set(input);
-  const path = join(dataRoot, 'music', 'data', `${item.installationId}.json`);
-  const before = readFileSync(path);
-  assert.equal(stringifyJSONValue(parseJSONText(before.toString()).sites.kw[0].value), stringifyJSONValue(exact));
+  const before = await storedNodes(dataRoot, item.installationId, 'key');
+  assert.equal(stringifyJSONValue(decodeValueNodes(before, { rawNumbers: true })), stringifyJSONValue(exact));
   exact.padding += 'x';
   await assert.rejects(wrapped.state.storage.set(input), { code: 'RESOURCE_LIMIT' });
-  assert.deepEqual(readFileSync(path), before);
+  assert.deepEqual(await storedNodes(dataRoot, item.installationId, 'key'), before);
 });
 
 test('private storage get/set/delete is isolated by installation and site', async t => {
@@ -481,24 +493,23 @@ test('private KV accepts an independent 64-level value, rejects 65 levels and su
   assert.deepEqual(await value(reopened.rpc, item), expected);
 });
 
-test('private KV corrupt documents and invalid directories are explicit and never reset stored data', async t => {
+test('private KV corrupt typed values and write failures are explicit and never reset stored data', async t => {
   const { rpc, dataRoot } = setup(t);
   const item = await load(rpc, options(), storageFixture);
   await value(rpc, item, 'kw', { op: 'set', value: 'safe' });
-  const path = join(dataRoot, 'music', 'data', `${item.installationId}.json`);
-  writeFileSync(path, '{broken');
-  denied(await rpc('invoke', request(item)), 'CORRUPT_STORAGE');
-  denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'CORRUPT_STORAGE');
-  assert.equal(readFileSync(path, 'utf8'), '{broken');
-  writeFileSync(path, JSON.stringify({ schema: 1, sites: {} }));
-  // A non-directory storage layout remains intact and fails storage I/O.
-  const directory = join(dataRoot, 'music', 'data');
-  rmSync(path);
-  rmSync(directory, { recursive: true });
-  writeFileSync(directory, 'occupied');
-  denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'STORAGE_ERROR');
-  assert.equal(readFileSync(directory, 'utf8'), 'occupied');
-  rmSync(directory); mkdirSync(directory);
+  await withTestDatabase(dataRoot, async db => {
+    await db.execute("UPDATE music_script_kv_nodes SET kind='integer',text_value=NULL WHERE installation_id=?", [item.installationId]);
+    const corrupt = await storedNodes(dataRoot, item.installationId, 'key');
+    denied(await rpc('invoke', request(item)), 'CORRUPT_STORAGE');
+    denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'CORRUPT_STORAGE');
+    assert.deepEqual(await storedNodes(dataRoot, item.installationId, 'key'), corrupt);
+    await db.execute("UPDATE music_script_kv_nodes SET kind='text',text_value='safe' WHERE installation_id=?", [item.installationId]);
+    await db.query('PRAGMA query_only=ON');
+    try {
+      denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'STORAGE_ERROR');
+      assert.equal(await storedValue(dataRoot, item.installationId, 'key'), 'safe');
+    } finally { await db.query('PRAGMA query_only=OFF'); }
+  });
 });
 
 test('large JSON values retain content while private KV keeps its independent data boundary', async t => {

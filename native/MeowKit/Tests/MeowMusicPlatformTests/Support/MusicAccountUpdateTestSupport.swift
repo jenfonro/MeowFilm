@@ -46,7 +46,7 @@ final class MusicUpdateStore: CredentialStore, @unchecked Sendable {
         records[identity] = record
         switch fault {
         case .some(.after): throw CredentialStoreError.backendFailure
-        case .some(.readback): readFault = .interactionNotAllowed
+        case .some(.readback): readFault = .unavailable
         case .some(.mismatch): records[identity] = .init(credential: record.credential)
         case .some(.foreign): records[identity] = .init(credential: try MusicUpdateProvider.credential("external", uid: "99"))
         case .some(.missing): records.removeValue(forKey: identity)

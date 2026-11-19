@@ -29,7 +29,13 @@ public static class RuntimeTests
     private const string Identity = "aggregate";
     private static RuntimeModule[] Modules => RuntimeHttpClientTests.Modules;
     private static string[] Namespaces => [MusicAccountOwner.DocumentNamespace];
-    private static string ScriptData() => Path.Combine(NewData(), "script-runtime");
+    private static string ScriptData()
+    {
+        string root = NewData();
+        var database = new NativeTestDatabase(root);
+        database.Ready.GetAwaiter().GetResult();
+        return root;
+    }
 
     public static IEnumerable<TestCase> Cases()
     {
@@ -37,7 +43,7 @@ public static class RuntimeTests
         {
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
-            await using var store = new LocalDocumentStore(NewData(), Namespaces, protectedNamespaces: [MusicAccountOwner.DocumentNamespace]);
+            await using var store = new NativeDatabase(NewData());
             var scriptData = ScriptData();
             int pid;
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, scriptData))
@@ -51,8 +57,7 @@ public static class RuntimeTests
                 var cat = await runtime.CallAsync("cat.script.status", new { });
                 BridgeTests.Equal(true, cat.GetProperty("ok").GetBoolean());
                 var catStatus = cat.GetProperty("value");
-                BridgeTests.Equal(Path.GetFullPath(Path.Combine(scriptData, "settings.json")),
-                    catStatus.GetProperty("settingsPath").GetString());
+                BridgeTests.Equal(false, catStatus.TryGetProperty("settingsPath", out _));
                 var sourceStatus = await runtime.CallAsync("source.runtime.status", new { });
                 BridgeTests.Equal(true, sourceStatus.GetProperty("ok").GetBoolean());
                 BridgeTests.Equal("source.runtime.v2", sourceStatus.GetProperty("contract").GetString());
@@ -102,7 +107,7 @@ public static class RuntimeTests
             string collectionId, songId;
             await using (var store = new MusicRecordTestStore(Path.Combine(root, "music-library")))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData()))
-            await using (var library = new MusicLibraryOwner(MusicTestStores.For(store)))
+            await using (var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             {
                 var created = await library.ExecuteAsync("music.library.create", new { name = "本机契约测试" });
                 BridgeTests.Equal(true, created.GetProperty("ok").GetBoolean());
@@ -122,7 +127,7 @@ public static class RuntimeTests
             }
             await using (var store = new MusicRecordTestStore(Path.Combine(root, "music-library")))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData()))
-            await using (var library = new MusicLibraryOwner(MusicTestStores.For(store)))
+            await using (var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             {
                 var detail = await library.ExecuteAsync("music.library.detail", new { id = collectionId, offset = 0, limit = 10 });
                 BridgeTests.Equal("确定性测试", detail.GetProperty("songs")[0].GetProperty("title").GetString());
@@ -136,11 +141,14 @@ public static class RuntimeTests
         {
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
-            await using var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData());
+            await using var database = new NativeTestDatabase(NewData());
+            await database.Ready;
+            await using var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, database.ProductRoot!);
             using (var owned = Process.GetProcessById(runtime.ProcessId)) owned.Kill();
             await runtime.Completion.WaitAsync(TimeSpan.FromSeconds(5));
             await BridgeTests.Expect("CLOSED", () => runtime.CallAsync("music.script.sources.list", new { }));
             AssertExited(runtime.ProcessId);
+            BridgeTests.Equal("ok", await database.ReadAsync(db => db.Scalar<string>("PRAGMA quick_check")));
         });
         foreach (var mode in new[] { "exit-after-start", "disconnect-after-start" })
             yield return new("native-runtime: " + mode + " proves release without a close ACK and permits explicit recovery", async () =>
@@ -390,11 +398,11 @@ public static class RuntimeTests
             var root = NewData();
             var media = Path.Combine(root, "测试.wav");
             await File.WriteAllBytesAsync(media, Encoding.ASCII.GetBytes("test-only-grant-not-playback"));
-            await using var store = new LocalDocumentStore(root, ["music.files.v1"]);
-            var files = new GrantedMediaFiles(store, "music.files.v1", [".wav"]);
+            await using var store = new NativeDatabase(root);
+            var files = new GrantedMediaFiles(store, [".wav"]);
             var grants = await files.GrantAsync([media, media]);
             BridgeTests.Equal(1, grants.Count);
-            var restored = new GrantedMediaFiles(store, "music.files.v1", [".wav"]);
+            var restored = new GrantedMediaFiles(store, [".wav"]);
             BridgeTests.Equal(media, (await restored.ResolveAsync(grants[0].Id)).LocalPath);
         });
     }

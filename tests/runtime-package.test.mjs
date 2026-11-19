@@ -723,7 +723,7 @@ test('CLI uses its own repository root and never imports fixture business code',
   for (const path of [
     'scripts/package-runtime.mjs', 'scripts/module-policy.mjs', 'scripts/runtime-source.mjs',
     'scripts/verify-dependency-lock.mjs', 'scripts/script-host-native.json', 'scripts/quickjs/ios-target.mjs',
-    'scripts/quickjs/native-inputs.mjs',
+    'scripts/quickjs/native-inputs.mjs', 'scripts/quickjs/sqlite-inputs.mjs',
   ]) write(f.root, path, readFileSync(join(repository, path)));
   const parser = join(repository, 'node_modules/acorn');
   cpSync(parser, join(f.root, 'node_modules/acorn'), { recursive: true });

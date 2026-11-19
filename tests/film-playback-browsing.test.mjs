@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -38,6 +39,13 @@ function fixture(t, overrides = {}) {
   const library = {
     read: () => structuredClone(document),
     update: mutator => { const draft = structuredClone(document); mutator(draft); document = draft; },
+    async history(targetId) { return structuredClone(document.history.find(row => row?.targetId === targetId)); },
+    async saveHistory(value) {
+      document.history = document.history.filter(row => row?.targetId !== value.targetId);
+      document.history.push(structuredClone(value));
+    },
+    async list() { return {...structuredClone(document),historyAfter:null}; },
+    async removeHistory(targetId) { document.history = targetId == null ? [] : document.history.filter(row => row?.targetId !== targetId); },
   };
   const catalog = createFilmCatalog({ library });
   const data = {

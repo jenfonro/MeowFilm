@@ -7,6 +7,7 @@ import { installIOSFailureBoundary, parseIOSConfiguration, parseIOSLaunchArgumen
 import { connect, contract, load, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-support.mjs';
 import { verifyPanAndDoubanAssembly, verifyTMDBAssembly } from './tmdb-runtime-assembly-support.mjs';
 import { seedSourceLibrary, verifyRecoveredSourceLibrary } from './source-library-assembly-support.mjs';
+import { withTestDatabase } from './storage-test-fixture.mjs';
 
 const entry = join(root, 'apps/ios/runtime/entries/aggregate.mjs');
 
@@ -209,8 +210,9 @@ test('iOS bootstrap serves the complete HTTP assembly with module-owned storage'
   assert.deepEqual(okay(await client.call('music.script.invoke', {
     installationId: instance.installationId, siteId: 'tx', operation: 'lyric', payload: { musicInfo: { songmid: 'm' } },
   })), { lyric: '[00:00.00]tx', tlyric: '', rlyric: '' });
-  assert.deepEqual(JSON.parse(readFileSync(join(runtime.area, 'scripts', 'music', 'data',
-    `${instance.installationId}.json`), 'utf8')), { schema: 1, sites: { tx: [{ key: 'count', value: 3 }] } });
+  const stored = await withTestDatabase(runtime.configuration.dataRoot, db => db.query(
+    'SELECT site_id,entry_key,kind,int_value FROM music_script_kv_nodes WHERE installation_id=?', [instance.installationId]));
+  assert.deepEqual(stored, [{ site_id: 'tx', entry_key: 'count', kind: 'integer', int_value: 3 }]);
   assert.deepEqual(await resolve('flac'), { ok: false, contract, code: 'CAPABILITY_UNAVAILABLE' });
   assert.equal(okay(await client.call('music.script.sources.disable',
     { installationId: instance.installationId })).item.state, 'disabled');

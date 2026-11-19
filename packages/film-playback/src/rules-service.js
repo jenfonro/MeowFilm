@@ -1,8 +1,7 @@
-import fs from 'node:fs';
-import { createHash, randomUUID } from 'node:crypto';
-import { isAbsolute, join, resolve } from 'node:path';
-import { isUtf8 } from 'node:buffer';
-import { cloneJSONValue, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { openRuleStorage } from './rule-storage.js';
+import { createHash } from 'node:crypto';
+import { isAbsolute } from 'node:path';
+import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { bindRuleSnapshot, filmRuleFailure, filmRuleKernelRevision, filmRuleSource, validRuleText } from './rules.js';
 
@@ -56,14 +55,13 @@ function previewRequest({ section, text, query }) {
     ...(section === 'search' && query !== undefined ? { query: Array.isArray(query) ? [...query] : query } : {}) };
 }
 
-/** The sole rules document owner. Every accepted write publishes only after rename. */
+/** The standalone rule owner publishes only after its typed-row transaction commits. */
 export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
   if (typeof dataRoot !== 'string' || !isAbsolute(dataRoot) || dataRoot.includes('\0') ||
       dataRoot.split(/[\\/]/).includes('..')) throw fault('INVALID_REQUEST');
-  const root = join(resolve(dataRoot), 'film-rules');
-  const path = join(root, 'rules.json');
+  const storage = nativeSettings ? null : openRuleStorage(dataRoot);
   const program = new NativeJsonProgram(filmRuleSource), jobs = new Set();
-  let closed = false, closing, initialized, committed, fingerprint = null;
+  let closed = false, closing, initialized, committed, defaults, basis, stale = false;
   let writes = Promise.resolve();
   function open(signal) {
     if (closed) throw fault('CLOSED');
@@ -74,63 +72,11 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     void work.finally(() => jobs.delete(work)).catch(() => {});
     return work;
   }
-  function readDisk() {
-    let descriptor;
-    try {
-      if (nativeSettings) {
-        const value = nativeSettings.read('film.rules');
-        return value === null ? null : { rules: copyRules(value.rules), fingerprint: digest(stringifyJSONValue(value)) };
-      }
-      descriptor = fs.openSync(path, fs.constants.O_RDONLY);
-      const bytes = fs.readFileSync(descriptor);
-      let document;
-      try {
-        if (!isUtf8(bytes)) throw fault('CORRUPT_STORAGE');
-        document = parseJSONText(bytes.toString('utf8'));
-        document.rules = copyRules(document.rules);
-      } catch { throw fault('CORRUPT_STORAGE'); }
-      return { rules: document.rules, fingerprint: digest(bytes) };
-    } catch (error) {
-      if (descriptor === undefined && error.code === 'ENOENT') return null;
-      throw fault(error.code === 'CORRUPT_STORAGE' ? error.code : 'STORAGE_ERROR');
-    } finally {
-      if (descriptor !== undefined) {
-        try { fs.closeSync(descriptor); } catch { throw fault('STORAGE_ERROR'); }
-      }
-    }
-  }
-  function unchanged() {
-    if ((readDisk()?.fingerprint ?? null) !== fingerprint) throw fault('STORAGE_CHANGED');
-  }
-  function write(rules) {
-    if (nativeSettings) throw fault('PERMISSION_DENIED');
-    let temporary = join(root, `.rules-${randomUUID()}.tmp`), descriptor, failure;
-    try {
-      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-      fs.chmodSync(root, 0o700);
-      unchanged();
-      const bytes = stringifyJSONValue({ rules });
-      const next = digest(bytes);
-      descriptor = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
-      fs.writeFileSync(descriptor, bytes);
-      fs.fsyncSync(descriptor);
-      fs.closeSync(descriptor); descriptor = undefined;
-      unchanged();
-      fs.renameSync(temporary, path);
-      temporary = undefined;
-      fingerprint = next;
-    } catch (error) {
-      failure = error;
-    } finally {
-      if (descriptor !== undefined) {
-        try { fs.closeSync(descriptor); } catch (error) { failure ??= error; }
-      }
-      if (temporary !== undefined) {
-        try { fs.unlinkSync(temporary); }
-        catch (error) { if (error.code !== 'ENOENT') failure ??= error; }
-      }
-    }
-    if (failure) throw fault(['STORAGE_CHANGED', 'CORRUPT_STORAGE'].includes(failure.code) ? failure.code : 'STORAGE_ERROR');
+  async function write(edits, signal) {
+    try { basis = await storage.save(basis, defaults, edits, signal); }
+    catch (error) { if (error.code === 'STORAGE_CHANGED') stale = true; throw error; }
+    stale = false;
+    return committed = snapshotOf(basis.rules);
   }
   function snapshotOf(rules) {
     const snapshot = freeze({ rules, revision: digest(stringifyJSONValue([filmRuleKernelRevision, rules])) });
@@ -142,15 +88,15 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
   }
   function initialize() {
     return initialized ??= tracked((async () => {
-      const disk = readDisk();
-      if (disk) {
-        fingerprint = disk.fingerprint;
-        committed = snapshotOf(disk.rules);
+      defaults ??= (await invokeNative({ operation: 'defaults' })).rules;
+      open();
+      if (storage) {
+        basis = await storage.read(defaults);
+        committed = snapshotOf(basis.rules);
+        stale = false;
       } else {
-        const { rules } = await invokeNative({ operation: 'defaults' });
-        open();
-        if (!nativeSettings) write(rules);
-        committed = snapshotOf(rules);
+        const value = nativeSettings.read('film.rules');
+        committed = snapshotOf(value === null ? defaults : copyRules(value.rules));
       }
     })().catch(error => {
       initialized = undefined;
@@ -159,8 +105,9 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
   }
   async function snapshot() {
     open();
-    await initialize();
     await writes;
+    if (stale) { stale = false; initialized = undefined; }
+    await initialize();
     open();
     return committed;
   }
@@ -182,21 +129,16 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
       if (!nativeSettings) return;
       await writes;
       await initialize();
-      const disk = readDisk();
-      const rules = disk ? disk.rules :
-        (await invokeNative({ operation: 'defaults' })).rules;
+      const value = nativeSettings.read('film.rules');
       open();
-      if ((readDisk()?.fingerprint ?? null) !== (disk?.fingerprint ?? null)) return;
-      fingerprint = disk?.fingerprint ?? null;
-      committed = snapshotOf(rules);
+      committed = snapshotOf(value === null ? defaults : copyRules(value.rules));
     },
     set({ rules }, options) {
       const draft = copyRules(rules);
       return mutate(async signal => {
         const normalized = await invokeNative({ operation: 'save', rules: draft }, { signal });
         open(signal);
-        write(normalized.rules);
-        return committed = snapshotOf(normalized.rules);
+        return write(copyRules(normalized.rules), signal);
       }, options);
     },
     setGroup({ group, rules }, options) {
@@ -204,9 +146,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
       return mutate(async signal => {
         const normalized = await invokeNative({ operation: 'save', rules: draft }, { signal });
         open(signal);
-        const merged = { ...committed.rules, [key]: normalized.rules[key] };
-        write(merged);
-        return committed = snapshotOf(merged);
+        return write({ [key]: normalized.rules[key] }, signal);
       }, options);
     },
     async groupDefaults({ group }, options) {
@@ -220,10 +160,8 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
       request = previewRequest(request);
       if (request.section !== section) throw fault('INVALID_REQUEST');
       open(signal);
-      await writes;
+      const saved = (await snapshot()).rules;
       open(signal);
-      const saved = committed?.rules ?? readDisk()?.rules ??
-        (await invokeNative({ operation: 'defaults' }, { signal })).rules;
       return invokeNative({ operation: 'preview', request,
         rules: { ...saved, [key]: draft } }, { signal });
     },
@@ -233,9 +171,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
       return mutate(async signal => {
         const normalized = await invokeNative({ operation: 'restore', section, rules: draft ?? committed.rules }, { signal });
         open(signal);
-        const current = copyRules(normalized.rules);
-        write(current);
-        return committed = snapshotOf(current);
+        return write(copyRules(normalized.rules), signal);
       }, options);
     },
     async preview({ request, rules }, { signal } = {}) {
@@ -243,10 +179,8 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
       request = previewRequest(request);
       let selected;
       if (rules === undefined) {
-        await writes;
+        selected = (await snapshot()).rules;
         open(signal);
-        selected = committed?.rules ?? readDisk()?.rules ??
-          (await invokeNative({ operation: 'defaults' }, { signal })).rules;
       } else selected = rules;
       return invokeNative({ operation: 'preview', request, rules: selected }, { signal });
     },
@@ -260,13 +194,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     clear(_input = {}, options) {
       if (nativeSettings) throw fault('PERMISSION_DENIED');
       return mutate(async signal => {
-        const { rules } = await invokeNative({ operation: 'defaults' }, { signal });
-        open(signal);
-        unchanged();
-        try { fs.unlinkSync(path); }
-        catch (error) { if (error.code !== 'ENOENT') throw fault('STORAGE_ERROR'); }
-        fingerprint = null;
-        return committed = snapshotOf(rules);
+        return write(Object.fromEntries(Object.keys(defaults).map(key => [key, null])), signal);
       }, options);
     },
     async invoke(request, { snapshot: selected, signal } = {}) {
@@ -279,6 +207,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
         closing = (async () => {
           await program.close();
           await Promise.allSettled([...jobs]);
+          await storage?.close();
         })();
       }
       return closing;

@@ -20,6 +20,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'bootstrap-marker'))) 
 `;
 
 function fixture(run, { args = [], prepare = bootstrap, compile = build } = {}) {
+  mkdirSync(temporaryRoot, { recursive: true });
   assertOwnedPath(windowsRoot, temporaryRoot);
   const root = mkdtempSync(join(temporaryRoot, 'meowfilm build-entry-'));
   try {
@@ -30,7 +31,7 @@ function fixture(run, { args = [], prepare = bootstrap, compile = build } = {}) 
     writeFileSync(join(scripts, 'bootstrap.ps1'), prepare);
     writeFileSync(join(scripts, 'build.ps1'), compile);
     const result = spawnSync(powershell,
-      ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'build-windows.ps1'), ...args],
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', join(root, 'build-windows.ps1'), ...args],
       { cwd: caller, windowsHide: true, encoding: 'utf8', timeout: 30_000,
         env: { ...process.env, PSModulePath: join(dirname(powershell), 'Modules') } });
     assert.ifError(result.error);
@@ -105,7 +106,7 @@ for (const failStage of ['', 'verify-dependency-lock', 'test-root', 'ensure-runt
       }
     `);
     const result = spawnSync(powershell,
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', join(scripts, 'test-node.ps1'), '-All'],
+      ['-NoProfile', '-NonInteractive', '-File', join(scripts, 'test-node.ps1'), '-All'],
       { cwd: root, windowsHide: true, encoding: 'utf8', timeout: 30000 });
     assert.ifError(result.error);
     assert.equal(result.status, failStage ? 23 : 0, result.stderr);
@@ -129,7 +130,7 @@ test('Windows build rejects a concurrent build before dependency preparation or 
     $Lock = [IO.File]::Open((Join-Path $WindowsTmpRoot 'build.lock'), 'OpenOrCreate', 'ReadWrite', 'None')
     try {
       $ErrorActionPreference = 'Continue'
-      $Output = & ${quote(powershell)} -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${quote(join(windowsRoot, 'build-windows.ps1'))} 2>&1
+      $Output = & ${quote(powershell)} -NoProfile -NonInteractive -File ${quote(join(windowsRoot, 'build-windows.ps1'))} 2>&1
       [ordered]@{exit=$LASTEXITCODE; error=($Output | Out-String)} | ConvertTo-Json -Compress
     } finally { $Lock.Dispose() }
   `;

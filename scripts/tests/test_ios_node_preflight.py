@@ -161,10 +161,16 @@ class NodePreflightBuildTests(unittest.TestCase):
             native.mkdir(parents=True)
             executable = native / "MeowScriptHost"
             executable.write_bytes(b"native-fixture")
+            sqlite_target = "ios-simulator" if sdk == "iphonesimulator" else "ios-arm64"
+            sqlite = self.root / f"native/SQLite/.cache/Artifacts/{sqlite_target}/MeowSQLite.framework/MeowSQLite"
+            sqlite.parent.mkdir(parents=True)
+            sqlite.write_bytes(b"sqlite-fixture")
             receipt = native.parent / "build/Release/script-host-native.json"
             receipt.parent.mkdir(parents=True)
             receipt.write_text(json.dumps({
                 "target": selected, "bindingIdentity": "a" * 64,
+                "sqlite": {"artifact": {"path": sqlite.relative_to(self.root).as_posix(),
+                                        "sha256": hashlib.sha256(sqlite.read_bytes()).hexdigest()}},
                 "artifact": {"path": executable.relative_to(self.root).as_posix(),
                              "sha256": hashlib.sha256(executable.read_bytes()).hexdigest()},
             }))
@@ -220,7 +226,7 @@ class NodePreflightBuildTests(unittest.TestCase):
         self.assertEqual(events[:2], [("run", command) for command in self.prepare_commands()])
         compiles = [command for kind, command in events if kind == "run" and "clang" in command]
         self.assertEqual([command[command.index("-target") + 1] for command in compiles],
-                         ["x86_64-apple-ios17.0-simulator", "arm64-apple-ios17.0"])
+                         ["x86_64-apple-ios18.0-simulator", "arm64-apple-ios18.0"])
         self.assertEqual(len([event for event in events if event[0] == "validate"]), 4)
         self.assertLess(events.index(("validate", self.runtime_path(self.prepare["target"]("iphonesimulator", "x64")))),
                         events.index(("run", compiles[0])))
@@ -229,6 +235,7 @@ class NodePreflightBuildTests(unittest.TestCase):
         for name in ("simulator", "device"):
             app = self.work / name / "NodePreflight.app"
             self.assertEqual((app / "Frameworks/MeowScriptHost.framework/MeowScriptHost").read_bytes(), b"native-fixture")
+            self.assertEqual((app / "Frameworks/MeowSQLite.framework/MeowSQLite").read_bytes(), b"sqlite-fixture")
             self.assertEqual((app / "Runtime/probe.mjs").read_bytes(), self.probe_source)
 
     def test_either_prepare_failure_stops_before_using_old_complete_payloads(self):
@@ -263,7 +270,7 @@ class NodePreflightBuildTests(unittest.TestCase):
                          self.prepare_commands()[:1])
         compiles = [command for command in commands if "clang" in command]
         self.assertEqual([command[command.index("-target") + 1] for command in compiles],
-                         ["x86_64-apple-ios17.0-simulator"])
+                         ["x86_64-apple-ios18.0-simulator"])
         self.assertTrue((self.work / "simulator/NodePreflight.app").is_dir())
         self.assertFalse((self.work / "device").exists())
 

@@ -56,7 +56,7 @@ public static class MusicAccountTransferTests
         yield return Case("slow failed details persistence neither blocks import nor makes the next credential commit uncertain", async () =>
         {
             await using var backing = new FailingDetailsStore();
-            await using var cache = new CacheDocumentStore(backing);
+            await using var cache = new NativeTestDatabase(backing);
             await using var f = new TransferFixture(cache);
             try
             {
@@ -137,11 +137,11 @@ public static class MusicAccountTransferTests
         {
             foreach (bool deviceMismatch in new[] { false, true })
             {
-                await using var cache = new CacheDocumentStore();
+                await using var cache = new NativeTestDatabase();
                 await using var f = new TransferFixture(cache); await f.Seed(TransferFixture.Only("wy"));
                 var old = await f.Owner.AcquireAsync("wy"); var bytes = await f.AccountBytes();
                 await f.Owner.RefreshDetailsAsync("wy", 1);
-                var cached = cache.ReadMemory(MusicAccountOwner.DetailsCacheNamespace).Fingerprint;
+                var cached = cache.ReadAsync(db => db.Revision(MusicAccountOwner.DetailsCacheNamespace)).GetAwaiter().GetResult();
                 if (deviceMismatch) f.IdentityFailurePlatform = "wy"; else f.FailPlatform = "wy";
                 using var plan = await f.Prepare(TransferFixture.Only("wy"));
                 var result = await f.Owner.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite);
@@ -149,7 +149,7 @@ public static class MusicAccountTransferTests
                     (deviceMismatch ? "IDENTITY_MISMATCH" : "AUTH_EXPIRED"));
                 var after = await f.AccountBytes();
                 Check(f.Owner.IsCurrent(old!) && f.Notifications.Count == 0 && f.Store.Writes == 0 && bytes.SequenceEqual(after));
-                Check(cache.ReadMemory(MusicAccountOwner.DetailsCacheNamespace).Fingerprint == cached);
+                Check(cache.ReadAsync(db => db.Revision(MusicAccountOwner.DetailsCacheNamespace)).GetAwaiter().GetResult() == cached);
             }
         });
         yield return Case("bad candidate cannot supersede an existing production protocol details read", async () =>
@@ -329,7 +329,7 @@ public static class MusicAccountTransferTests
         });
         yield return Case("owner account change during validation wins and old candidate cannot revoke its lease", async () =>
         {
-            await using var cache = new CacheDocumentStore();
+            await using var cache = new NativeTestDatabase();
             await using var f = new TransferFixture(cache); await f.Seed(TransferFixture.Only("wy"));
             f.HoldPlatform = "wy";
             using var plan = await f.Prepare(TransferFixture.Only("wy"));
@@ -340,7 +340,7 @@ public static class MusicAccountTransferTests
             var current = await f.Owner.AcquireAsync("wy");
             f.Release.TrySetResult(); var result = await importing;
             Check(result.Items.Single().Code == "STORAGE_CONFLICT" && f.Owner.IsCurrent(current!) && f.Store.Writes == 0);
-            Check(cache.ReadMemory(MusicAccountOwner.DetailsCacheNamespace).Data is null);
+            Check((await cache.ReadDetailsAsync()).Count == 0);
         });
         yield return Case("cancel during candidate stops pending platforms and preserves an existing valid lease", async () =>
         {
@@ -357,17 +357,17 @@ public static class MusicAccountTransferTests
         {
             foreach (bool loseReceipt in new[] { false, true })
             {
-                await using var cache = new CacheDocumentStore();
+                await using var cache = new NativeTestDatabase();
                 await using var f = new TransferFixture(cache); f.Store.Hold = true; f.Store.LoseReceipt = loseReceipt;
                 using var cancellation = new CancellationTokenSource(); using var plan = await f.Prepare();
                 var importing = f.Owner.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite, cancellation.Token);
                 await f.Store.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel(); Check(!importing.IsCompleted);
-                Check(cache.ReadMemory(MusicAccountOwner.DetailsCacheNamespace).Data is null);
+                Check((await cache.ReadDetailsAsync()).Count == 0);
                 f.Store.Release.TrySetResult(); var result = await importing;
                 Check(result.Items[0].Status == (loseReceipt ? "failed" : "imported") &&
                     result.Items[0].Code == (loseReceipt ? "COMMIT_UNKNOWN" : null) &&
                     result.Items.Skip(1).All(item => item.Status == "cancelled") && f.Store.Writes == 1);
-                if (loseReceipt) Check(cache.ReadMemory(MusicAccountOwner.DetailsCacheNamespace).Data is null);
+                if (loseReceipt) Check((await cache.ReadDetailsAsync()).Count == 0);
                 else
                 {
                     var details = await f.Owner.ReadDetailsAsync("wy");
@@ -450,20 +450,17 @@ public static class MusicAccountTransferTests
     }
     private static async Task ExpectDisposed(Func<Task> run)
     { try { await run(); throw new InvalidOperationException("Expected disposed payload"); } catch (ObjectDisposedException) { } }
-    private sealed class FailingDetailsStore : IDocumentStore
+    private sealed class FailingDetailsStore : NativeTestDatabase
     {
-        internal int Writes;
         internal TaskCompletionSource Arrived { get; } = TransferFixture.Signal();
         internal TaskCompletionSource Release { get; } = TransferFixture.Signal();
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) =>
-            Task.FromResult(new DocumentSnapshot(null, DocumentFingerprint.Missing));
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected,
-            CancellationToken token = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            Writes++; Arrived.TrySetResult(); await Release.Task.WaitAsync(token);
+            Interlocked.Increment(ref Writes); Arrived.TrySetResult(); await Release.Task.WaitAsync(token);
             throw new IOException("SYNTHETIC_SECRET_CACHE_PATH");
         }
-        public ValueTask DisposeAsync() { Release.TrySetResult(); return ValueTask.CompletedTask; }
+        public override ValueTask DisposeAsync() { Release.TrySetResult(); return base.DisposeAsync(); }
     }
     private sealed class BrokenStream : Stream
     {
@@ -481,7 +478,8 @@ public static class MusicAccountTransferTests
 internal sealed class TransferFixture : IAsyncDisposable
 {
     internal string Root { get; } = TestWorkspace.DataPath("account-transfer", Guid.NewGuid().ToString("N"));
-    internal LocalDocumentStore Inner { get; }
+    internal IStorageDatabase Inner { get; }
+    private readonly bool ownsDatabase;
     internal TransferStore Store { get; }
     internal MusicPlatformRuntimeFixture Runtime { get; } = new();
     internal MusicAccountOwner Owner { get; }
@@ -493,15 +491,16 @@ internal sealed class TransferFixture : IAsyncDisposable
     internal string? IdentityFailurePlatform;
     internal TaskCompletionSource Arrived { get; } = Signal();
     internal TaskCompletionSource Release { get; } = Signal();
-    internal TransferFixture(IDocumentStore? detailsCacheStore = null)
+    internal TransferFixture(IStorageDatabase? database = null)
     {
         Directory.CreateDirectory(Root);
-        Inner = new(Root, AppIdentity.NativeNamespaces, AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+        Inner = database ?? new NativeDatabase(Root);
+        ownsDatabase = database is null;
         Store = new(Inner);
         Runtime.OnRequest = Respond;
         var scripts = new NativeMusicScriptTestRuntime();
         Runtime.OnOtherCall = (call, token) => scripts.CallAsync(call.Method, call.Payload, token);
-        Owner = Runtime.CreateAccountOwner(Store, detailsCacheStore: detailsCacheStore); Owner.SessionChanged += Notifications.Add;
+        Owner = Runtime.CreateAccountOwner(Store); Owner.SessionChanged += Notifications.Add;
     }
     internal MusicNativeApplication Application() => new(Store, MusicTestStores.For(Store), Runtime);
     internal static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -536,20 +535,20 @@ internal sealed class TransferFixture : IAsyncDisposable
         var result = await owner.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite);
         MusicAccountTransferTests.Check(result.Items.All(item => item.Status == "imported"));
     }
-    internal async Task<byte[]> AccountBytes() => (await Inner.ReadAsync(MusicAccountOwner.DocumentNamespace)).Data ?? [];
+    internal async Task<byte[]> AccountBytes() => (await Inner.ReadAccountsAsync()).Data ?? [];
     internal async Task ChangeStoredName(string platform)
     {
-        var snapshot = await Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
+        var snapshot = await Inner.ReadAccountsAsync();
         var root = JsonNode.Parse(snapshot.Data!)!;
         var row = root["entries"]!.AsArray().Single(item => item!["key"]!.GetValue<string>() == AccountDocument.Key(platform));
         row!["value"]!["profile"]!["displayName"] = "Changed synthetic account";
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-        try { await Inner.WriteAsync(MusicAccountOwner.DocumentNamespace, bytes, snapshot.Fingerprint); }
+        try { await Inner.WriteAccountsAsync(bytes, snapshot.Revision); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
     internal async Task MutateStoredCookie(string platform, Func<string, string> change, string remove)
     {
-        var snapshot = await Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
+        var snapshot = await Inner.ReadAccountsAsync();
         try
         {
             var root = JsonNode.Parse(snapshot.Data!)!;
@@ -558,7 +557,7 @@ internal sealed class TransferFixture : IAsyncDisposable
             cookie = string.Join("; ", cookie.Split("; ").Where(part => !part.StartsWith(remove + "=", StringComparison.Ordinal)));
             row["cookie"] = change(cookie);
             byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-            try { await Inner.WriteAsync(MusicAccountOwner.DocumentNamespace, bytes, snapshot.Fingerprint); }
+            try { await Inner.WriteAccountsAsync(bytes, snapshot.Revision); }
             finally { CryptographicOperations.ZeroMemory(bytes); }
         }
         finally { CryptographicOperations.ZeroMemory(snapshot.Data!); }
@@ -582,26 +581,24 @@ internal sealed class TransferFixture : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         Release.TrySetResult(); Store.Release.TrySetResult();
-        await Owner.DisposeAsync(); await Runtime.DisposeAsync(); await Inner.DisposeAsync();
+        await Owner.DisposeAsync(); await Runtime.DisposeAsync(); if (ownsDatabase) await Inner.DisposeAsync();
     }
-    internal sealed class TransferStore(LocalDocumentStore inner) : IDocumentStore
+    internal sealed class TransferStore(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
-        internal int Writes, Reads;
         internal bool Hold, LoseReceipt, Conflict;
         internal TaskCompletionSource Arrived { get; } = Signal();
         internal TaskCompletionSource Release { get; } = Signal();
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        { if (ns == MusicAccountOwner.DocumentNamespace) Reads++; return inner.ReadAsync(ns, token); }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            if (ns != MusicAccountOwner.DocumentNamespace) return await inner.WriteAsync(ns, bytes, expected, token);
-            Writes++;
-            if (Hold) { Arrived.TrySetResult(); await Release.Task; }
-            if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            var receipt = await inner.WriteAsync(ns, bytes, expected, token);
+            var receipt = await base.WriteAsync(db =>
+            {
+                if (Hold) { Arrived.TrySetResult(); Release.Task.GetAwaiter().GetResult(); }
+                if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                return write(db);
+            }, token, retainedBytes, commit);
             if (LoseReceipt) throw new IOException("SYNTHETIC_SECRET_PATH");
             return receipt;
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

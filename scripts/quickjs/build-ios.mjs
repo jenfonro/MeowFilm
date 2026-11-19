@@ -11,11 +11,13 @@ import {
 } from './build-native.mjs';
 import { buildSourceSDK } from './build-source-sdk.mjs';
 import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols, IOS_CAT_WEB_VALUES } from './ios-target.mjs';
+import { sqliteBuildInputs } from './sqlite-inputs.mjs';
 
 const hash = data => createHash('sha256').update(data).digest('hex');
 const exists = path => access(path).then(() => true, () => false);
 const loadedIOSInputs = await hashInputs([
   'scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs', 'scripts/quickjs/build-source-sdk.mjs',
+  'scripts/quickjs/sqlite-inputs.mjs', 'native/SQLite/sqlite.json', 'scripts/prepare-ios-sqlite.py',
 ]);
 
 async function catWebValueCandidates() {
@@ -117,6 +119,9 @@ export async function buildIOSNative(target) {
   const lock = resolve(directory, 'build.lock');
   await mkdir(lock);
   try {
+    await run('python3', ['-I', '-B', 'scripts/prepare-ios-sqlite.py',
+      '--target', target.sdk === 'iphoneos' ? 'ios-arm64' : 'ios-simulator']);
+    const sqlite = sqliteBuildInputs(root, target);
     const mobile = JSON.parse(await run('python3', [
       '-I', '-B', 'scripts/prepare-ios-runtime.py', '--verify-node-mobile',
       '--sdk', target.sdk, '--arch', target.arch,
@@ -138,6 +143,7 @@ export async function buildIOSNative(target) {
       'scripts/ios-node-mobile.json', ...nativeInputs, ...sourceInputs, ...sdkCandidates, ...catWebCandidates,
       ...nativeSourceInputs(policy), ...policy.patches.map(patch => patch.path),
       ...mobile.inputs.map(input => input.path),
+      ...sqlite.inputs.map(input => input.path),
     ]);
     const beforeMap = new Map(before.map(input => [input.path, input.sha256]));
     await unchanged([...loadedBuildInputs, ...loadedIOSInputs]);
@@ -175,7 +181,7 @@ export async function buildIOSNative(target) {
       [name, { version, commit, url, sha256 }]));
     const identity = {
       schemaVersion: 1, abi: 1, napi: 8, platform: 'ios', target, sources,
-      inputs: before, sdk, catWebValues, nodeMobile: mobile.identity, nodeHeaderFiles: mobile.headers, toolchain,
+      inputs: before, sdk, catWebValues, nodeMobile: mobile.identity, nodeHeaderFiles: mobile.headers, sqlite, toolchain,
     };
     const bindingIdentity = hash(JSON.stringify(identity));
     await writeFile(resolve(directory, 'binding-identity.h'), [
@@ -216,12 +222,14 @@ export async function buildIOSNative(target) {
       resolve(root, policy.sources.openssl.sourcePath, 'include'),
       resolve(root, policy.sources.quickjs.sourcePath), resolve(root, policy.sources.zlib.sourcePath),
       resolve(root, mobile.headerDirectory),
+      resolve(root, sqlite.framework, 'Headers'),
     ].flatMap(path => ['-I', path]);
     const objectDirectory = resolve(directory, 'obj');
     await mkdir(objectDirectory, { recursive: true });
     // C/C++ source membership comes from the same gyp file as the desktop build.
     for (const targetSpec of gyp.targets) {
-      for (const input of targetSpec.sources) {
+      for (const input of [...targetSpec.sources,
+        ...(targetSpec.target_name === 'script_host_native' ? ['native/sqlite-storage.cc'] : [])]) {
         const source = input.startsWith('<(runtime_native)/')
           ? resolve(root, policy.build.cache, input.slice('<(runtime_native)/'.length))
           : input.startsWith('<(quickjs_source)/')
@@ -229,7 +237,7 @@ export async function buildIOSNative(target) {
           : resolve(root, 'packages/script-host', input);
         const object = resolve(objectDirectory, `${targetSpec.target_name}-${basename(source)}.o`);
         const args = [...flags, ...headers, '-DNAPI_VERSION=8', '-DNODE_GYP_MODULE_NAME=script_host_native',
-          '-DMEOW_IOS_FRAMEWORK=1', '-DZ_PREFIX', ...(source.endsWith('.cc')
+          '-DMEOW_IOS_FRAMEWORK=1', '-DMEOW_APPLE_STORAGE=1', '-DZ_PREFIX', ...(source.endsWith('.cc')
             ? ['-std=c++17', '-fvisibility-inlines-hidden']
             : ['-std=c11', '-D_GNU_SOURCE', '-DQUICKJS_NG_BUILD']), '-c', source, '-o', object];
         const stamp = `${object}.json`;
@@ -256,6 +264,7 @@ export async function buildIOSNative(target) {
     const temporary = resolve(directory, 'MeowScriptHost.partial');
     await run(compiler, [...flags, '-dynamiclib', '-std=c++17', ...objects,
       resolve(opensslBuild, 'libcrypto.a'), '-lc++',
+      '-F', resolve(root, dirname(sqlite.framework)), '-framework', 'MeowSQLite',
       '-F', resolve(root, mobile.frameworkDirectory), '-framework', 'NodeMobile',
       '-Wl,-twolevel_namespace', '-Wl,-undefined,error', '-Wl,-no_implicit_dylibs',
       `-Wl,-exported_symbols_list,${exportsFile}`,

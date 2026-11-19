@@ -343,7 +343,7 @@ public static class MusicQqAccountUiTests
         {
             string root = TestWorkspace.DataPath("qq-account-ui", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            Store = new(new LocalDocumentStore(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+            Store = new(new NativeDatabase(root));
             Runtime.Platform.OnRequest = Transport.Read;
             Application = new(Store, MusicTestStores.For(Store), Runtime);
             Calls = new(Application);

@@ -263,6 +263,13 @@ const { createNodeNetwork, createScriptHost, ScriptHostError } = hostExports;
 const modulePath = sourceModulePath;
 
 const runtimeDirectory = dirname(dirname(modulePath));
+const { configureStandaloneStorage } = options.payload
+  ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/storage/src/database.js')).href)
+  : await import('@meowfilm/storage');
+const { createDesktopStorageDriver } = options.payload
+  ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/script-host/src/native-storage.js')).href)
+  : await import('@meowfilm/script-host/storage');
+configureStandaloneStorage(createDesktopStorageDriver);
 const [{ createAppRuntime }, { createRuntimeClient }] = await Promise.all([
   import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
   import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),

@@ -99,15 +99,15 @@ struct MusicDocument: Sendable {
             }, .corruptDocument)
         }
     }
-    func area(_ name: String) throws -> Data {
+    func area(_ name: String) throws -> MJ {
         switch name {
-        case "library": return library.bytes
-        case "queue": return queue.bytes
-        case "history": return history.bytes
-        case "catalogSource": return catalogSource.bytes
+        case "library": return library
+        case "queue": return MusicModel.durable(queue)
+        case "history": return MusicModel.durable(history)
+        case "catalogSource": return catalogSource
         case "playback":
             var value = playback; value["position"]["seconds"] = .n(0)
-            return value.bytes
+            return value
         default: throw MusicServiceError.invalidRequest
         }
     }
@@ -391,18 +391,19 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     func read() throws -> MusicDocument {
         try check()
         do {
-            let snapshot = try repositoryReader.readSnapshot()
+            let identity = try repositoryReader.readRevision()
             if let pending = pendingTransaction {
-                if snapshot.identity == pending.after {
+                if identity == pending.after {
                     pendingTransaction = nil
-                    publishTransaction(pending.draft, identity: snapshot.identity, areas: pending.areas, changed: pending.changed, songs: pending.songs)
-                } else if snapshot.identity == pending.before {
+                    publishTransaction(pending.draft, identity: identity, areas: pending.areas, changed: pending.changed, songs: pending.songs)
+                } else if identity == pending.before {
                     pendingTransaction = nil; parsedDocument = nil
                 } else { throw MusicServiceError.storageConflict }
             }
             var state: MusicDocument
-            if let cached = parsedDocument, cached.identity == snapshot.identity { state = cached.state }
+            if let cached = parsedDocument, cached.identity == identity { state = cached.state }
             else {
+                let snapshot = try repositoryReader.readSnapshot()
                 state = try MusicDocument(snapshot: snapshot, runID: runID, songs: repositoryReader)
                 parsedDocument = (snapshot.identity, state)
             }
@@ -425,13 +426,15 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         var commitIdentity: MusicNativeLibraryRevision?
         let value: T
         do {
-            value = try database.withTransaction(commit: { action in
+            value = try withUnsafeCurrentTask { task in
+            try database.withTransaction(commit: { action in
                 try access.perform {
-                    commitIdentity = try database.readSnapshot().identity
+                    if task?.isCancelled == true { throw MusicServiceError.cancelled }
+                    commitIdentity = try database.readRevision()
                     try action()
                 }
             }) { writer in
-                try musicRequire(try writer.readSnapshot().identity == originalIdentity, .storageConflict)
+                try musicRequire(try writer.readRevision() == originalIdentity, .storageConflict)
                 activeSongWriter = writer
                 defer { activeSongWriter = nil }
                 let result = try change(&draft)
@@ -453,11 +456,12 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                     try musicRequire(UUID(uuidString: id) != nil && writer.containsSong(id: id), .corruptDocument)
                 }
                 if changed.contains("queue") { try draft.requireQueue(knownSongIDs: retained) }
-                if Task.isCancelled { throw MusicServiceError.cancelled }
-                for area in changed { try writer.saveArea(area, data: draft.area(area)) }
+                if task?.isCancelled == true { throw MusicServiceError.cancelled }
+                for area in changed { try writer.saveArea(area, value: draft.area(area).storageValue) }
                 changedSongs = writer.changedSongIDs
                 candidateReady = true
                 return result
+            }
             }
         } catch MusicNativeLibraryCommitError.receiptLost {
             // The store verifies this transaction's durable receipt before

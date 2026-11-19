@@ -431,9 +431,11 @@ internal sealed class NativeMusicScriptTestRuntime : IRuntimeClient, IAsyncDispo
             ?? throw new InvalidOperationException("Verified Node required.");
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
         Directory.CreateDirectory(dataRoot);
+        var database = new NativeTestDatabase(dataRoot);
+        await database.Ready.ConfigureAwait(false);
         return await NodeRuntime.StartAsync(node,
             RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules),
-            modules, dataRoot, token).ConfigureAwait(false);
+            modules, dataRoot, token, settingsStore: new MeowFilm.Capabilities.FilmRuntimeSettings(database)).ConfigureAwait(false);
     }
     public async ValueTask DisposeAsync()
     {

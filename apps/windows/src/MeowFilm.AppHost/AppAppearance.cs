@@ -5,11 +5,12 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.AppHost;
 
-public sealed class AppAppearance(IDocumentStore store) : IDesktopAppearance, IDesktopShutdownParticipant
+public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearance, IDesktopShutdownParticipant
 {
+    private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.Appearance);
     public const string DocumentNamespace = "app.appearance.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, busy, stopping;
     public string ThemeColor { get; private set; } = AppearanceColors.DefaultColor;
     public string Status { get; private set; } = "";
@@ -22,7 +23,7 @@ public sealed class AppAppearance(IDocumentStore store) : IDesktopAppearance, ID
     }
     private async Task Read()
     {
-        var snapshot = await store.ReadAsync(DocumentNamespace);
+        var snapshot = await store.ReadAsync();
         string color = AppearanceColors.DefaultColor;
         if (snapshot.Data is { } bytes)
         {
@@ -35,7 +36,7 @@ public sealed class AppAppearance(IDocumentStore store) : IDesktopAppearance, ID
                 throw new DocumentStoreException(DocumentStoreError.Corrupt);
             color = AppearanceColors.Hex(parsed);
         }
-        fingerprint = snapshot.Fingerprint;
+        storageRevision = snapshot.Revision;
         ThemeColor = color;
         loaded = true;
     }
@@ -65,7 +66,7 @@ public sealed class AppAppearance(IDocumentStore store) : IDesktopAppearance, ID
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new { schema = 1, themeColor = color });
             try
             {
-                fingerprint = await store.WriteAsync(DocumentNamespace, bytes, fingerprint);
+                storageRevision = await store.WriteAsync(bytes, storageRevision);
                 ThemeColor = color;
             }
             catch

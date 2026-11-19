@@ -32,12 +32,12 @@ public struct FilmDoubanSettingsService: Sendable {
     public init(settingsDocument: FilmSettingsDocument) { self.settingsDocument = settingsDocument }
     public func settings() async throws -> FilmDoubanSettings {
         try Task.checkCancellation()
-        let value = try FilmDoubanSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmDoubanSettings.defaultValue))
+        let value = try await FilmDoubanSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmDoubanSettings.defaultValue))
         try Task.checkCancellation()
         return value
     }
     public func updateSettings(_ patch: RuntimeObject) async throws -> FilmDoubanSettings {
         try Task.checkCancellation()
-        return try FilmDoubanSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmDoubanSettings.defaultValue, patch: patch))
+        return try await FilmDoubanSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmDoubanSettings.defaultValue, patch: patch))
     }
 }

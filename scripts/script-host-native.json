@@ -99,7 +99,7 @@
   "ios": {
     "framework": "MeowScriptHost.framework/MeowScriptHost",
     "cache": ".cache/ios-native",
-    "minimumOS": "17.0",
+    "minimumOS": "18.0",
     "targets": [
       {
         "sdk": "iphoneos",

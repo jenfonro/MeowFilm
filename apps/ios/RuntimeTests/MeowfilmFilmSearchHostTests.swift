@@ -13,14 +13,10 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         let resources = try await hostResources()
         try await controlledMetadata(resources)
         try await controlledRules(resources)
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let sourceStore = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
         let transport = CatScriptTransport(connectionProvider: { try await resources.scriptSession.connection() })
-        let sources = FilmSourceService(transport: transport, storeFactory: { sourceStore },
+        let sources = FilmSourceService(transport: transport, database: resources.database,
             settingsDocument: resources.filmSettings[.catSources],
-            runtimeSourceRoot: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent("cat"))
+            runtimeSourceRoot: resources.database.dataRoot.appendingPathComponent("cat"))
         let service = FilmSearchService(sources: sources, connection: { try await resources.scriptSession.connection() })
         let id = "ios-film-search-" + UUID().uuidString.lowercased()
         do {
@@ -340,11 +336,11 @@ final class MeowfilmFilmSearchHostTests: XCTestCase {
         let client = try await resources.scriptSession.connection()
         let original = try await client.call(module: .film, operation: "rules.get").filmRequiredObject().filmValue("rules")
         addTeardownBlock {
-            _ = try resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": original]) }
+            _ = try await resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": original]) }
             try await self.waitForNativeRuntimeSettings(.rules, resources: resources)
         }
         let value = try RuntimeJSON.decode(JSONEncoder().encode(rules))
-        _ = try resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": value]) }
+        _ = try await resources.filmSettings[.rules].update { _ in .object(["version": .number(1), "rules": value]) }
         try await waitForNativeRuntimeSettings(.rules, resources: resources)
     }
 

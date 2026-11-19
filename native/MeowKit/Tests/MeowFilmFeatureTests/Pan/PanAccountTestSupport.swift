@@ -1,7 +1,7 @@
 import Foundation
-import Darwin
 import XCTest
 import MeowRuntime
+import MeowStorageTestSupport
 @testable import MeowStorage
 @testable import MeowFilmFeature
 
@@ -47,37 +47,6 @@ func panReceipt(_ progress: PanLoginProgress, id: String = "synthetic-session",
     return .object(value)
 }
 
-final class PanTestKeys: EncryptedDocumentKeyProvider, @unchecked Sendable {
-    private let lock = NSLock()
-    private var material: Data?
-    private var nextRead: (@Sendable () throws -> Void)?
-    func onNextRead(_ action: @escaping @Sendable () throws -> Void) {
-        lock.lock(); defer { lock.unlock() }; nextRead = action
-    }
-    func readKey(namespace: String) throws -> Data? {
-        lock.lock(); let action = nextRead, value = material; nextRead = nil; lock.unlock()
-        try action?()
-        return value
-    }
-    func createKeyIfAbsent(namespace: String) throws -> Data {
-        lock.lock(); defer { lock.unlock() }
-        if material == nil { material = Data(repeating: 0x37, count: 32) }
-        return material!
-    }
-}
-
-final class PanTestCommitter: EncryptedDocumentCommitter, @unchecked Sendable {
-    private let lock = NSLock()
-    private var failure = false
-    func fail(_ value: Bool) { lock.lock(); defer { lock.unlock() }; failure = value }
-    func commit(staged: URL, destination: URL) throws {
-        lock.lock(); defer { lock.unlock() }
-        guard !failure, Darwin.rename(staged.path, destination.path) == 0 else {
-            throw EncryptedDocumentStoreError.storageFailure
-        }
-    }
-}
-
 final class PanTestChanges: @unchecked Sendable {
     private let lock = NSLock()
     private var blocks: [String] = []
@@ -85,33 +54,50 @@ final class PanTestChanges: @unchecked Sendable {
     var values: [String] { lock.lock(); defer { lock.unlock() }; return blocks }
 }
 
-/// Real protected document + CAS, with synthetic keys and a commit failure seam.
-/// This is not evidence of system Keychain/lock behavior or the private pipe.
+/// Actual current account rows, provider CAS and SQLite write failures.
 final class PanTestStorage: @unchecked Sendable {
     let root: URL
-    let keys: PanTestKeys
-    let committer: PanTestCommitter
     let changes: PanTestChanges
-    let store: EncryptedDocumentStore
+    let database: SQLiteDatabase
     let document: FilmSettingsDocument
     init() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pan-native-test-" + UUID().uuidString)
-        let keys = PanTestKeys(), committer = PanTestCommitter(), changes = PanTestChanges()
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-        let store = try EncryptedDocumentStore(baseURL: root, namespace: FilmSettingsBlock.panAccounts.namespace,
-                                               keyProvider: keys, committer: committer)
-        self.root = root; self.keys = keys; self.committer = committer; self.changes = changes; self.store = store
-        document = FilmSettingsDocument(block: .panAccounts, storage: .protected { store }, changed: { changes.record($0) })
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("pan-native-test-" + UUID().uuidString)
+        let database = try storageTestOpen(root), changes = PanTestChanges()
+        self.root = root; self.changes = changes; self.database = database
+        document = FilmSettingsDocument(block: .panAccounts, database: database, changed: { changes.record($0) })
     }
-    func read() throws -> RuntimeValue { try document.read() ?? PanSettingsStore.empty }
+    func read() throws -> RuntimeValue { try document.readForTest() ?? PanSettingsStore.empty }
     func credentials(_ id: PanProviderID) throws -> RuntimeValue? {
         try read().panField("accounts")?.panField(id.rawValue)?.panField("credentials")
     }
     func seed(_ id: PanProviderID, credentials: RuntimeValue, revision: Int = 1) throws {
-        var accounts = try read().panField("accounts")!.panObject!
-        accounts[id.rawValue] = .object(["revision": .number(Double(revision)), "credentials": credentials])
-        try store.write(RuntimeJSON.encode(.object(["version": .number(1), "accounts": .object(accounts)])),
-                        key: FilmSettingsDocument.key)
+        let fields = ["cookie", "username", "password", "authorization", "refreshedAt"]
+        let values: [SQLiteValue] = try fields.map { name in
+            switch credentials.panField(name) {
+            case nil, .null: return .null
+            case .string(let text): return .text(text)
+            case .number(let number) where name == "refreshedAt":
+                guard let integer = Int64(exactly: number) else { throw SQLiteStorageError.invalidValue }
+                return .integer(integer)
+            default: throw SQLiteStorageError.invalidValue
+            }
+        }
+        let database = database
+        try storageTestAsync {
+            try await database.transaction { db in
+                if revision < 0 { _ = try db.query("PRAGMA ignore_check_constraints=ON") }
+                defer { if revision < 0 { _ = try? db.query("PRAGMA ignore_check_constraints=OFF") } }
+                try db.execute("UPDATE ios_pan_accounts SET account_revision=?,row_revision=row_revision+1," +
+                    fields.map { "\($0)=?" }.joined(separator: ",") + " WHERE provider=?",
+                    [.integer(revision)] + values + [.text(id.rawValue)])
+                try db.execute("UPDATE ios_settings_blocks SET revision=revision+1 WHERE block='pan.accounts'")
+            }
+        }
+    }
+    func failWrites(_ value: Bool) throws {
+        let database = database
+        try storageTestAsync { _ = try await database.read { try $0.query(value ? "PRAGMA query_only=ON" : "PRAGMA query_only=OFF") } }
     }
     func snapshot(_ id: PanProviderID, status: PanAccountStatus) throws -> RuntimeValue {
         let record = try read().panField("accounts")?.panField(id.rawValue)
@@ -121,18 +107,25 @@ final class PanTestStorage: @unchecked Sendable {
         return panAccountValue(id, fields.isEmpty ? .signedOut : status,
                                revision: Int(record?.panField("revision")?.panInteger ?? 0), fields: fields)
     }
-    func persist(_ account: RuntimeValue, expected: RuntimeValue) throws {
+    func persist(_ account: RuntimeValue, expected: RuntimeSettingsSnapshot) throws {
         let provider = try PanAccount(account).provider
-        var accounts = try read().panField("accounts")!.panObject!
-        accounts[provider.rawValue] = .object(["revision": account.panField("revision")!,
-                                              "credentials": panSyntheticCredentials(provider)])
-        let value = RuntimeValue.object(["version": .number(1), "accounts": .object(accounts)])
-        try PanAccountService.validateSettingsDocument(value)
-        do { _ = try document.compareAndSwap(expected: expected, document: value) }
+        let row = expected.document?.panField("accounts")?.panField(provider.rawValue)
+        let revision = row?.panField("revision")?.panInteger ?? 0
+        guard account.panField("revision")?.panInteger == revision + 1 else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
+        let command: RuntimeValue = .object([
+            "provider": .string(provider.rawValue), "mode": .string("replace"),
+            "rowRevision": row?.panField("rowRevision") ?? .number(0),
+            "accountRevision": .number(Double(revision)), "credentials": panSyntheticCredentials(provider)
+        ])
+        do { _ = try storageTestIO { try self.document.updatePanSync(command) } }
         catch FilmSettingsStorageError.conflict { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
         catch { throw RuntimeHTTPError.remote("STORAGE_ERROR") }
     }
-    deinit { try? FileManager.default.removeItem(at: root) }
+    deinit {
+        let database = database
+        try? storageTestAsync { try await database.close() }
+        try? FileManager.default.removeItem(at: root)
+    }
 }
 
 /// A non-cooperative upstream gate lets native edits overtake online receipts.
@@ -155,7 +148,7 @@ actor PanTestRuntime {
     private(set) var effects: [String] = []
     private var states: [PanProviderID: PanAccountStatus] = [:]
     private var sessions: [PanProviderID: String] = [:]
-    private var sessionExpected: [String: RuntimeValue] = [:]
+    private var sessionExpected: [String: RuntimeSettingsSnapshot] = [:]
     private var refreshed: [PanProviderID: RuntimeValue] = [:]
     private var refreshFailures: [PanProviderID: RuntimeHTTPError] = [:]
     private var startValue = panChallengeValue()
@@ -188,7 +181,7 @@ actor PanTestRuntime {
             if let failure { throw failure }
             return .object(["refreshed": .bool(true), "account": result])
         case "login.start":
-            let value = startValue, expected = try storage.document.snapshot().fingerprint
+            let value = startValue, expected = try await storage.document.snapshot()
             if let gate = gates.removeValue(forKey: operation) { await gate.wait() }
             if let sessionID = value.panField("sessionId")?.panString {
                 if let old = sessions[id] { effects.append("revoke:" + old) }
@@ -203,7 +196,7 @@ actor PanTestRuntime {
             if result.panField("status") == .string("confirmed"), let account = result.panField("account"),
                let expected = sessionExpected[session] {
                 try storage.persist(account, expected: expected)
-                sessionExpected[session] = try storage.document.snapshot().fingerprint
+                sessionExpected[session] = try await storage.document.snapshot()
             }
             return result
         case "login.cancel":

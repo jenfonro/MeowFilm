@@ -40,7 +40,7 @@ public struct SourceAddress: Codable, Hashable, Sendable {
     }
     // A source key is an opaque protocol identifier, not display text. Swift's
     // default String equality canonicalizes Unicode. Keep byte-distinct
-    // upstream keys distinct in native requests and Keychain.
+    // upstream keys distinct in native requests and account storage.
     public static func == (lhs: SourceAddress, rhs: SourceAddress) -> Bool {
         lhs.installationID == rhs.installationID && lhs.siteKey.utf8.elementsEqual(rhs.siteKey.utf8)
     }

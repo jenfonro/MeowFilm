@@ -7,10 +7,12 @@ import { discoverWorkspaces } from './verify-dependency-lock.mjs';
 import {
   SHARED_RUNTIME_BUILTINS, packageNameFromSpecifier, publicPackageImport, sourceReferences, workspaceMap,
 } from './module-policy.mjs';
+import { verifyStorageBoundaries } from './verify-storage-boundaries.mjs';
 
 const portablePackage = '@meowfilm/source-runtime';
 
 export function verifyBoundaries(root = windowsRoot) {
+  verifyStorageBoundaries(root);
   const workspaces = discoverWorkspaces(root, JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')));
   const names = new Set([...workspaces.values()].map(manifest => manifest.name));
   const packages = workspaceMap(root, workspaces);

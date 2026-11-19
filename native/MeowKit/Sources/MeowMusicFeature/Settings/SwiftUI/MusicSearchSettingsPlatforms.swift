@@ -152,8 +152,10 @@ private struct MusicSearchPlatformTable: UIViewRepresentable {
             let platform = order.remove(at: sourceIndexPath.row)
             order.insert(platform, at: destinationIndexPath.row)
             let enabled = state.settings(kind).platforms
-            if !state.setPlatforms(order.filter { enabled.contains($0) }, kind: kind) { state.reload() }
-            tableView.reloadData()
+            Task {
+                if !(await state.setPlatforms(order.filter { enabled.contains($0) }, kind: kind)) { await state.reload() }
+                tableView.reloadData()
+            }
         }
 
         private func setEnabled(_ platform: MusicPublicBrowsePlatform, enabled: Bool) {
@@ -161,7 +163,9 @@ private struct MusicSearchPlatformTable: UIViewRepresentable {
             var platforms = Set(state.settings(kind).platforms)
             if enabled { platforms.insert(platform) }
             else { platforms.remove(platform) }
-            if !state.setPlatforms(order.filter { platforms.contains($0) }, kind: kind) { state.reload() }
+            Task {
+                if !(await state.setPlatforms(order.filter { platforms.contains($0) }, kind: kind)) { await state.reload() }
+            }
         }
     }
 }

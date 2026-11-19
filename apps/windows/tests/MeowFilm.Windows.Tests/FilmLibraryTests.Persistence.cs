@@ -8,136 +8,92 @@ namespace MeowFilm.Windows.Tests;
 
 public static partial class FilmLibraryTests
 {
-    private const string RawFavorite = """
-        {"id":"source:raw","title":"原始","poster":"","score":"","recordExtra":{"number":1.234567890123456789012345678901},
-         "playbackContext":{"contextExtra":{"value":90071992547409931234567890},"metadata":false,
-          "target":{"id":"source:raw","Id":{"extra":1e999},"kind":"source","Kind":false,"title":"原始","Title":[],
-           "Source":false,"targetExtra":{"é":7,"e\u0301":8},
-           "source":{"key":"raw-source","detailId":0,"lineId":"0","sourceExtra":{"number":1e999}}}}}
-        """;
-
-    private static async Task RawPersistence()
+    private static async Task TypedPersistence()
     {
-        var store = new FilmMemoryStore { Data = Encoding.UTF8.GetBytes($$"""
-            {"version":1,"Version":[],"Favorites":{},"é":1,"e\u0301":2,"rootExtra":{"integer":900719925474099312345678901234567890,
-             "fraction":0.12345678901234567890123456789},"favorites":[{{RawFavorite}}]}
-            """) };
-        using var before = JsonDocument.Parse(store.Data!);
+        await using var store = new FilmMemoryStore();
+        var target = new FilmPlaybackTarget("source:typed", "source", "原始", Source: FilmJson.Encode(new
+            { key = "e\u0301-\u00e9", detailId = 0, lineId = "0" }));
+        var item = new FilmCardItem(target.Id, target.Title, "", "") { PlaybackContext = new(target) };
         await using (var library = new FilmLibrary(store))
         {
-            var original = (await library.ReadAsync()).Single();
-            Check(original.PlaybackContext!.Target.Id == "source:raw" &&
-                original.PlaybackContext.Target.Source!.Value.GetProperty("detailId").GetInt32() == 0,
-                "persistent keys are exact: differently cased extras and optional context fields do not change identity");
+            await library.SetFavoriteAsync(item, true);
             await library.SetFavoriteAsync(Card(number: 200), true);
-            await library.SetFavoriteAsync(original with { Title = "明确修改标题" }, true);
+            await library.SetFavoriteAsync(item with { Title = "明确修改标题" }, true);
         }
         await using var reopened = new FilmLibrary(store);
-        Check((await reopened.ReadAsync()).Count == 2 &&
-            (await reopened.ReadAsync()).Single(row => row.Id == "source:raw").Title == "明确修改标题",
-            "real edits and independent favorites survive cold reopen");
-        using var after = JsonDocument.Parse(store.Data!);
-        var root = after.RootElement;
-        Check(root.GetProperty("Version").ValueKind == JsonValueKind.Array && root.GetProperty("Favorites").ValueKind == JsonValueKind.Object &&
-            root.GetProperty("é").GetInt32() == 1 && root.GetProperty("e\u0301").GetInt32() == 2 &&
-            JsonElement.DeepEquals(root.GetProperty("rootExtra"), before.RootElement.GetProperty("rootExtra")) &&
-            root.GetProperty("rootExtra").GetProperty("integer").GetRawText() == "900719925474099312345678901234567890" &&
-            root.GetProperty("rootExtra").GetProperty("fraction").GetRawText() == "0.12345678901234567890123456789",
-            "distinct Unicode keys and high precision root values remain exact");
-        var saved = root.GetProperty("favorites").EnumerateArray().Single(row => row.GetProperty("id").GetString() == "source:raw");
-        using var expected = JsonDocument.Parse(RawFavorite);
-        Check(JsonElement.DeepEquals(saved.GetProperty("recordExtra"), expected.RootElement.GetProperty("recordExtra")) &&
-            saved.GetProperty("recordExtra").GetProperty("number").GetRawText() == "1.234567890123456789012345678901" &&
-            JsonElement.DeepEquals(saved.GetProperty("playbackContext"), expected.RootElement.GetProperty("playbackContext")) &&
-            saved.GetProperty("playbackContext").GetProperty("target").GetProperty("source")
-                .GetProperty("sourceExtra").GetProperty("number").GetRawText() == "1e999",
-            "editing a title does not rewrite existing context target source extensions or optional malformed material");
+        var saved = (await reopened.ReadAsync()).Single(row => row.Id == target.Id);
+        var source = saved.PlaybackContext!.Target.Source!.Value;
+        Check(saved.Title == "明确修改标题" && source.GetProperty("key").GetString() == "e\u0301-\u00e9" &&
+            source.GetProperty("detailId").GetInt32() == 0 && source.GetProperty("lineId").GetString() == "0",
+            "typed relations preserve exact text and distinguish numeric and textual identity");
+        Check(await store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_film_library_favorites WHERE scope_key='device'")) == 2,
+            "each favorite occupies an independent row");
     }
 
-    private static async Task IsolatedRecords()
+    private static async Task CorruptRow()
     {
-        const string broken = """{"id":"broken","title":{},"playbackContext":{"target":{"id":"broken"}},"raw":{"number":1e999}}""";
-        const string ambiguous = """{"id":"ambiguous","title":"重复","playbackContext":{"target":{"id":"tmdb:tv:300","kind":"tv","title":"重复","metadataProvider":"tmdb","metadataId":"300"}}}""";
-        var store = new FilmMemoryStore { Data = Encoding.UTF8.GetBytes($$"""
-            {"version":1,"favorites":[{{broken}},null,{{ambiguous}},{{RawFavorite}},{{ambiguous}}]}
-            """) };
-        await using (var library = new FilmLibrary(store))
-        {
-            Check((await library.ReadAsync()).Single().Id == "source:raw", "bad and ambiguous siblings do not reject the healthy row");
-            await library.SetFavoriteAsync(Card(number: 200), true);
-            int writes = store.Writes;
-            await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(number: 300), true));
-            Check(store.Writes == writes, "an ambiguous identity is not guessed or overwritten");
-        }
-        await using var reopened = new FilmLibrary(store);
-        Check((await reopened.ReadAsync()).Count == 2, "healthy records still reopen independently");
-        using var after = JsonDocument.Parse(store.Data!);
-        var rows = after.RootElement.GetProperty("favorites").EnumerateArray().ToArray();
-        Check(rows.Length == 6 && rows[0].GetRawText() == broken && rows[1].ValueKind == JsonValueKind.Null &&
-            rows.Count(row => row.ValueKind == JsonValueKind.Object &&
-                row.TryGetProperty("id", out var id) && id.GetString() == "ambiguous") == 2,
-            "unreadable original records are retained rather than filtered out by an unrelated save");
-        foreach (string badRoot in new[]
-        {
-            "{broken", "[]", """{"version":2,"favorites":[]}""", """{"version":1,"favorites":{}}""",
-            """{"version":2,"version":1,"favorites":[]}""",
-            """{"version":1,"favorites":{},"favorites":[]}"""
-        })
-        {
-            store.Data = Encoding.UTF8.GetBytes(badRoot);
-            int writes = store.Writes;
-            await Error("CORRUPT_STORAGE", () => reopened.ReadAsync());
-            await Error("CORRUPT_STORAGE", () => reopened.SetFavoriteAsync(Card(), false));
-            Check(store.Writes == writes && Encoding.UTF8.GetString(store.Data!) == badRoot, "bad roots are never reset");
-        }
-    }
-
-    private static async Task AmbiguousIdentityMembers()
-    {
-        string[] isolated =
-        [
-            """{"id":"duplicate-id","title":"row","playbackContext":{"target":{"id":"tmdb:tv:310","id":"tmdb:tv:311","kind":"tv","title":"row","metadataProvider":"tmdb","metadataId":"311"}},"extra":{"number":1e999}}""",
-            """{"id":"duplicate-target","title":"row","playbackContext":{"target":{"id":"tmdb:tv:312"},"target":{"id":"tmdb:tv:313","kind":"tv","title":"row","metadataProvider":"tmdb","metadataId":"313"}}}""",
-            """{"id":"duplicate-context","title":"row","playbackContext":{"target":{"id":"tmdb:tv:314"}},"playbackContext":{"target":{"id":"tmdb:tv:315","kind":"tv","title":"row","metadataProvider":"tmdb","metadataId":"315"}}}""",
-            """{"id":"same-id-twice","title":"row","playbackContext":{"target":{"id":"tmdb:tv:316","id":"tmdb:tv:316","kind":"tv","title":"row","metadataProvider":"tmdb","metadataId":"316"}}}""",
-            """{"id":"partial-context","title":"row","playbackContext":false,"playbackContext":{"target":{"id":"tmdb:tv:317","kind":"tv","title":"row","metadataProvider":"tmdb","metadataId":"317"}}}""",
-            """{"id":"colliding-row","title":"row","playbackContext":{"target":{"id":"tmdb:tv:310","kind":"tv","title":"row","metadataProvider":"tmdb","metadataId":"310"}}}"""
-        ];
-        var store = new FilmMemoryStore { Data = Encoding.UTF8.GetBytes(
-            "{\"version\":1,\"favorites\":[" + string.Join(",", isolated) + "," + RawFavorite + "]}") };
-        await using (var library = new FilmLibrary(store))
-        {
-            Check((await library.ReadAsync()).Single().Id == "source:raw",
-                "cold read isolates all candidates, including a separate otherwise healthy row sharing an ambiguous candidate");
-            await library.SetFavoriteAsync(Card(number: 200), true);
-            int writes = store.Writes;
-            for (int number = 310; number <= 317; number++)
-            {
-                await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(number: number), true));
-                await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(number: number), false));
-            }
-            Check(store.Writes == writes, "neither add/update nor removal guesses an earlier or last duplicate identity");
-        }
-        await using var reopened = new FilmLibrary(store);
-        Check((await reopened.ReadAsync()).Count == 2, "unrelated healthy writes reopen without promoting isolated candidates");
-        using var after = JsonDocument.Parse(store.Data!);
-        var records = after.RootElement.GetProperty("favorites");
-        Check(records.GetArrayLength() == isolated.Length + 2 &&
-            isolated.Select((raw, index) => records[index].GetRawText() == raw).All(equal => equal),
-            "duplicate member order, every original identity and exact unused numbers survive unrelated persistence");
-    }
-
-    private static async Task CasConflict()
-    {
-        var store = new FilmMemoryStore();
+        await using var store = new FilmMemoryStore();
         await using var library = new FilmLibrary(store);
         await library.SetFavoriteAsync(Card(), true);
-        byte[] external = Encoding.UTF8.GetBytes("""{"version":1,"favorites":[],"external":true}""");
-        int publications = 0; library.Changed += (_, _) => publications++;
-        store.BeforeWrite = _ => { store.Data = external; return Task.CompletedTask; };
-        try { await library.SetFavoriteAsync(Card(number: 200), true); throw new InvalidOperationException("Expected CAS conflict"); }
-        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict) { }
-        Check(publications == 0 && store.Data!.SequenceEqual(external), "a failed CAS preserves the other writer and publishes no success");
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_film_library_favorites_playbackContext_target SET kind='invalid'"));
+        await Error("CORRUPT_STORAGE", () => library.ReadAsync());
+        await library.SetFavoriteAsync(Card(number: 200), true);
+        var revision = await store.RevisionAsync(FilmLibrary.DocumentNamespace);
+        await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(), true));
+        await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(), false));
+        Check(await store.RevisionAsync(FilmLibrary.DocumentNamespace) == revision &&
+            await store.ReadAsync(db => db.Scalar<string>("SELECT kind FROM windows_film_library_favorites_playbackContext_target WHERE favorites_key='tmdb:tv:100'")) == "invalid" &&
+            await store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_film_library_favorites")) == 2,
+            "an unrelated incremental write preserves the damaged row; changing that row fails without reset");
+        await using var reopened = new FilmLibrary(store);
+        await Error("CORRUPT_STORAGE", () => reopened.ReadAsync());
+    }
+
+    private static async Task IdentityConstraints()
+    {
+        await using var store = new FilmMemoryStore();
+        await using var library = new FilmLibrary(store);
+        await library.SetFavoriteAsync(Card(), true);
+        byte[] original = store.Data!;
+        foreach (string sql in new[]
+        {
+            "INSERT INTO windows_film_library_favorites SELECT * FROM windows_film_library_favorites",
+            "UPDATE windows_film_library_favorites SET scope_key='missing-parent'",
+            "UPDATE windows_film_library_favorites SET ordinal=-1",
+            "UPDATE windows_film_library_favorites SET title=x'00'"
+        })
+        {
+            try
+            {
+                await store.Inner.WriteAsync(db =>
+                {
+                    db.Execute("UPDATE windows_film_library_favorites SET title='must-roll-back'");
+                    return db.Execute(sql);
+                });
+                throw new InvalidOperationException("Expected a relational constraint failure");
+            }
+            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict) { }
+            Check(store.Data!.SequenceEqual(original), "constraint failure rolls back every preceding change");
+        }
+    }
+
+    private static async Task ConcurrentWriters()
+    {
+        await using var first = new FilmMemoryStore();
+        await using var second = new NativeDatabase(first.ProductRoot!);
+        await using var a = new FilmLibrary(first);
+        await using var b = new FilmLibrary(second);
+        await a.SetFavoriteAsync(Card(), true);
+        await b.ReadAsync();
+        int publications = 0; a.Changed += (_, _) => publications++;
+        await Task.WhenAll(a.SetFavoriteAsync(Card(number: 200), true), b.SetFavoriteAsync(Card(number: 300), true));
+        Check((await a.ReadAsync()).Count == 3 && (await b.ReadAsync()).Count == 3 && publications == 1,
+            "independent owners serialize incremental transactions without replacing another favorite");
+        await a.SetFavoriteAsync(Card(number: 200), false);
+        Check((await b.ReadAsync()).Select(row => row.PlaybackContext!.Target.Id).ToHashSet().SetEquals([Card().Id, Card(number: 300).Id]),
+            "removal never overwrites another writer's distinct row");
+        Check((await first.RevisionAsync(FilmLibrary.DocumentNamespace)).Revision == 4,
+            "every committed favorite mutation advances the owner revision once");
     }
 
     private static async Task GroupPrivacy()

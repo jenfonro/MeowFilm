@@ -71,13 +71,13 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
     }
     public func settings() async throws -> FilmTMDBSettings {
         try Task.checkCancellation()
-        let value = try FilmTMDBSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmTMDBSettings.defaultValue))
+        let value = try await FilmTMDBSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmTMDBSettings.defaultValue))
         try Task.checkCancellation()
         return value
     }
     public func updateSettings(_ patch: RuntimeObject) async throws -> FilmTMDBSettings {
         try Task.checkCancellation()
-        return try FilmTMDBSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmTMDBSettings.defaultValue, patch: patch))
+        return try await FilmTMDBSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmTMDBSettings.defaultValue, patch: patch))
     }
     public func imageURL(path: String) -> URL? { RuntimeHTTPClient.metadataImageURL(path) }
     public func readImage(_ reference: URL) async throws -> Data {
@@ -91,29 +91,30 @@ enum FilmMetadataSettingsDocument {
     private static let inputWhitespace = CharacterSet(charactersIn:
         "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
 
-    static func read(_ document: FilmSettingsDocument, defaults: RuntimeValue) throws -> RuntimeValue {
-        try settings(document.read(), defaults: defaults)
+    static func read(_ document: FilmSettingsDocument, defaults: RuntimeValue) async throws -> RuntimeValue {
+        try await settings(document.read(), defaults: defaults)
     }
 
-    static func update(_ document: FilmSettingsDocument, defaults: RuntimeValue, patch: RuntimeObject) throws -> RuntimeValue {
-        let saved = try document.update { current in
+    static func update(_ document: FilmSettingsDocument, defaults: RuntimeValue, patch: RuntimeObject) async throws -> RuntimeValue {
+        let saved = try await document.update { current in
             var values = try settings(current, defaults: defaults).filmRequiredObject()
+            guard Set(patch.keys).isSubset(of: Set(defaults.filmObject!.keys)) else {
+                throw RuntimeHTTPError.remote("INVALID_REQUEST")
+            }
             for (key, value) in patch {
-                guard defaults.filmObject?[key] != nil else { continue }
                 values[key] = value
             }
             let normalized = try normalize(values, defaults: defaults.filmObject!, keys: patch.keys)
-            var envelope = current?.filmObject ?? ["version": .number(1)]
-            envelope["settings"] = .object(normalized)
-            return .object(envelope)
+            return .object(["version": .number(1), "settings": .object(normalized)])
         }
         return saved.filmObject!["settings"]!
     }
 
     private static func settings(_ document: RuntimeValue?, defaults: RuntimeValue) throws -> RuntimeValue {
         guard let document else { return defaults }
-        guard let fields = document.filmObject, fields["version"] == .number(1),
+        guard let fields = document.filmObject, Set(fields.keys) == ["version", "settings"], fields["version"] == .number(1),
               let settings = fields["settings"]?.filmObject,
+              Set(settings.keys) == Set(defaults.filmObject!.keys),
               defaults.filmObject!.allSatisfy({ key, expected in
                   if case .bool = expected { if case .bool? = settings[key] { return true }; return false }
                   return settings[key]?.filmText != nil

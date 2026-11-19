@@ -67,7 +67,7 @@ public static partial class MusicUiTests
         snapshot.GetProperty("platforms").EnumerateArray().Single(p => p.GetProperty("platform").GetString() == platform);
     private sealed class PublicSearchScene : IAsyncDisposable
     {
-        private readonly LocalDocumentStore store = ServiceStore();
+        private readonly NativeDatabase store = ServiceStore();
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly PublicSearchHttp Http = new();
         internal readonly MusicNativeApplication App;

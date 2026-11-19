@@ -7,61 +7,6 @@
         "resolved": "9.0.1.1",
         "contentHash": "+BLh0C8VET4aMUorxr/LMZAgmKl2PYSoY7Qm4PJ4eePx/LT2gIHkxOUnlGM91QETgfsnSZajHx9rK0d67ilpgw=="
       },
-      "meowfilm.apphost": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Desktop": "[1.0.0, )",
-          "MeowFilm.Platform": "[1.0.0, )"
-        }
-      },
-      "meowfilm.audio": {
-        "type": "Project",
-        "dependencies": {
-          "FFmpeg.AutoGen": "[9.0.1.1, 9.0.1.1]",
-          "MeowFilm.Core": "[1.0.0, )",
-          "NAudio.Core": "[3.3.0, 3.3.0]",
-          "NAudio.Wasapi": "[3.3.0, 3.3.0]"
-        }
-      },
-      "meowfilm.capabilities": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Audio": "[1.0.0, )",
-          "MeowFilm.Desktop": "[1.0.0, )",
-          "MeowFilm.Media": "[1.0.0, )",
-          "MeowFilm.Platform": "[1.0.0, )",
-          "Microsoft.Web.WebView2": "[1.0.4314.35, 1.0.4314.35]",
-          "Net.Codecrete.QrCodeGenerator": "[3.2.1, 3.2.1]",
-          "ZXing.Net": "[0.16.11, 0.16.11]",
-          "Microsoft.Data.Sqlite": "[10.0.15, 10.0.15]"
-        }
-      },
-      "meowfilm.core": {
-        "type": "Project"
-      },
-      "meowfilm.desktop": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Core": "[1.0.0, )",
-          "SkiaSharp": "[4.155.0, 4.155.0]",
-          "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"
-        }
-      },
-      "meowfilm.media": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Core": "[1.0.0, )"
-        }
-      },
-      "meowfilm.platform": {
-        "type": "Project",
-        "dependencies": {
-          "MeowFilm.Core": "[1.0.0, )"
-        }
-      },
-      "meowfilm.systemmedia": {
-        "type": "Project"
-      },
       "Microsoft.Data.Sqlite": {
         "type": "Transitive",
         "resolved": "10.0.15",
@@ -155,6 +100,62 @@
         "type": "Transitive",
         "resolved": "0.16.11",
         "contentHash": "OZfAVu88hl87BffQ+rlWCj/vLvAhhCK4QnFaoveeF/MY8SjHNSYBQ3qyUEWlPKNgBQGh1syXhCDg10vUnCsqkg=="
+      },
+      "meowfilm.apphost": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Desktop": "[1.0.0, )",
+          "MeowFilm.Platform": "[1.0.0, )"
+        }
+      },
+      "meowfilm.audio": {
+        "type": "Project",
+        "dependencies": {
+          "FFmpeg.AutoGen": "[9.0.1.1, 9.0.1.1]",
+          "MeowFilm.Core": "[1.0.0, )",
+          "NAudio.Core": "[3.3.0, 3.3.0]",
+          "NAudio.Wasapi": "[3.3.0, 3.3.0]"
+        }
+      },
+      "meowfilm.capabilities": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Audio": "[1.0.0, )",
+          "MeowFilm.Desktop": "[1.0.0, )",
+          "MeowFilm.Media": "[1.0.0, )",
+          "MeowFilm.Platform": "[1.0.0, )",
+          "Microsoft.Data.Sqlite": "[10.0.15, 10.0.15]",
+          "Microsoft.Web.WebView2": "[1.0.4314.35, 1.0.4314.35]",
+          "Net.Codecrete.QrCodeGenerator": "[3.2.1, 3.2.1]",
+          "ZXing.Net": "[0.16.11, 0.16.11]"
+        }
+      },
+      "meowfilm.core": {
+        "type": "Project"
+      },
+      "meowfilm.desktop": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )",
+          "SkiaSharp": "[4.155.0, 4.155.0]",
+          "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"
+        }
+      },
+      "meowfilm.media": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )"
+        }
+      },
+      "meowfilm.platform": {
+        "type": "Project",
+        "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )",
+          "Microsoft.Data.Sqlite": "[10.0.15, 10.0.15]"
+        }
+      },
+      "meowfilm.systemmedia": {
+        "type": "Project"
       }
     },
     "net10.0-windows10.0.19041/win-x64": {

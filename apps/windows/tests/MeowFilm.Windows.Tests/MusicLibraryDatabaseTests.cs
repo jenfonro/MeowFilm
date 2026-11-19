@@ -12,15 +12,15 @@ namespace MeowFilm.Windows.Tests;
 public static class MusicLibraryDatabaseTests
 {
     private const string Scope = "database-tests";
-    private const string DatabaseName = "music-library.sqlite3";
-    private const string RecoveryCase = "Music SQLite crashed write recovers the pinned persistent journal before schema reads";
+    private const string DatabaseName = "storage-v1/meowfilm.sqlite3";
+    private const string RecoveryCase = "Music SQLite crashed uncommitted WAL write recovers before owner reads";
     private const string CrashRootEnvironment = "MEOWFILM_SQLITE_CRASH_FIXTURE";
 
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("Music SQLite explicit memory store reads empty controls and indexed records", MemoryRecords);
-        yield return new("Music SQLite lazy file construction and owned records reopen durably", Reopen);
-        yield return new("Music SQLite missing root is created only on first read", MissingRoot);
+        yield return new("Music SQLite typed records in the App database reopen durably", Reopen);
+        yield return new("Music SQLite native coordinator creates a fresh current root", MissingRoot);
         yield return new("Music SQLite exact generations and receipts reject stale commits", Generations);
         yield return new("Music SQLite source conflict atomically rolls back songs controls and receipt", AtomicSourceConflict);
         yield return new("Music SQLite registered source removal cannot enable later rebinding", SourceRemoval);
@@ -31,7 +31,7 @@ public static class MusicLibraryDatabaseTests
         yield return new(RecoveryCase, Recovery);
         yield return new("Music SQLite corrupt existing and empty databases fail without replacement", Corrupt);
         yield return new("Music SQLite unknown schema and header formats fail without replacement", UnknownFormat);
-        yield return new("Music SQLite database and persistent journal hardlinks fail closed", UnsafeFiles);
+        yield return new("Music SQLite database and all sidecar hardlinks fail closed", UnsafeFiles);
         yield return new("Music SQLite ten thousand five-source songs hot queries and one-record page changes", Scale);
         yield return new("Music library ten thousand songs use bounded page reads zero-write adoption and control-only sync", OwnerScale);
     }
@@ -42,7 +42,7 @@ public static class MusicLibraryDatabaseTests
     }
     private static MusicLibraryRevision Next(MusicLibraryRevision previous) => new(previous.Generation + 1, Guid.NewGuid().ToString("D"));
     private static MusicLibraryChanges Changes(IEnumerable<JsonObject>? songs = null, JsonObject? control = null) =>
-        new(control is null ? new Dictionary<string, JsonObject>() : new Dictionary<string, JsonObject> { ["control"] = control },
+        new(control is null ? new Dictionary<string, JsonObject>() : new Dictionary<string, JsonObject> { ["playback-settings"] = control },
             (songs ?? []).ToDictionary(song => song["songId"]!.GetValue<string>(), StringComparer.Ordinal));
     private static JsonObject Song(string platform, string native, double duration = 100, string title = "Recording", string? id = null)
     {
@@ -62,15 +62,29 @@ public static class MusicLibraryDatabaseTests
     {
         internal string Root { get; } = TestWorkspace.DataPath("music-sqlite-" + Guid.NewGuid().ToString("N"));
         internal string Database => Path.Combine(Root, DatabaseName);
-        internal Folder() => Directory.CreateDirectory(Root);
-        public void Dispose() => Directory.Delete(Root, recursive: true);
+        private NativeDatabase? storage;
+        private MusicLibraryDatabase? library;
+        internal NativeDatabase Storage => storage ??= new(Root);
+        internal MusicLibraryDatabase Library => library ??= new(Storage);
+        internal Folder() => Directory.CreateDirectory(Path.GetDirectoryName(Database)!);
+        internal async Task CloseAsync()
+        {
+            var oldLibrary = library; var oldStorage = storage;
+            library = null; storage = null;
+            try { if (oldLibrary is not null) await oldLibrary.DisposeAsync(); }
+            finally { if (oldStorage is not null) await oldStorage.DisposeAsync(); }
+        }
+        public void Dispose()
+        {
+            if (library is not null || storage is not null) CloseAsync().GetAwaiter().GetResult();
+            Directory.Delete(Root, recursive: true);
+        }
     }
     private static SqliteConnection Inspect(string path)
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString());
         connection.Open();
-        _ = Sql(connection, "PRAGMA journal_mode=PERSIST");
         return connection;
     }
     private static object? Sql(SqliteConnection connection, string sql)
@@ -89,16 +103,6 @@ public static class MusicLibraryDatabaseTests
 
     private static async Task MemoryRecords()
     {
-        await Reject(DocumentStoreError.InvalidRequest, () =>
-        {
-            _ = new MusicLibraryDatabase("");
-            return Task.CompletedTask;
-        });
-        await Reject(DocumentStoreError.InvalidRequest, () =>
-        {
-            _ = new MusicLibraryDatabase(null!);
-            return Task.CompletedTask;
-        });
         await using var database = MusicLibraryDatabase.CreateMemory();
         var before = await database.ReadAsync(Scope);
         Check(before.Revision == MusicLibraryRevision.Empty && before.Areas.Count == 0 && database.SongIds().Count == 0);
@@ -124,24 +128,21 @@ public static class MusicLibraryDatabaseTests
         using var folder = new Folder();
         var song = Song("wy", "reopen");
         var revision = Next(MusicLibraryRevision.Empty);
-        var database = new MusicLibraryDatabase(folder.Root);
-        Check(!File.Exists(folder.Database));
-        await database.ReadAsync(Scope);
-        await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision,
-            Changes([song], new JsonObject { ["selected"] = Id(song) }));
-        await database.DisposeAsync();
+        await folder.Library.ReadAsync(Scope);
+        await folder.Library.CommitAsync(Scope, MusicLibraryRevision.Empty, revision,
+            Changes([song], new JsonObject { ["schema"] = 1, ["mode"] = 2 }));
+        await folder.CloseAsync();
         using (var inspect = Inspect(folder.Database))
         {
-            Check((long)Sql(inspect, "SELECT count(*) FROM songs")! == 1);
-            Check((long)Sql(inspect, "SELECT count(*) FROM song_sources")! == 1);
-            Check((long)Sql(inspect, "SELECT count(*) FROM songs WHERE json_type(data,'$.sources') IS NOT NULL")! == 0);
+            Check((long)Sql(inspect, "SELECT count(*) FROM music_songs")! == 1);
+            Check((long)Sql(inspect, "SELECT count(*) FROM music_song_sources")! == 1);
+            Check((string)Sql(inspect, "PRAGMA journal_mode")! == "wal");
         }
-        await using var reopened = new MusicLibraryDatabase(folder.Root);
+        var reopened = folder.Library;
         var snapshot = await reopened.ReadAsync(Scope);
         Check(snapshot.Revision == revision && JsonNode.DeepEquals(reopened.ReadSong(Id(song)), song));
-        snapshot.Areas["control"]!["selected"] = "caller";
-        Check((await reopened.ReadAsync(Scope)).Areas["control"]!["selected"]!.GetValue<string>() == Id(song));
-        Check(new FileInfo(folder.Database + "-journal").Exists);
+        snapshot.Areas["playback-settings"]!["mode"] = 3;
+        Check(LJ.I((await reopened.ReadAsync(Scope)).Areas["playback-settings"]!["mode"]) == 2);
     }
 
     private static async Task Generations()
@@ -151,7 +152,7 @@ public static class MusicLibraryDatabaseTests
         var revision = Next(initial.Revision);
         await database.CommitAsync(Scope, initial.Revision, revision, Changes([Song("wy", "generation")]));
         await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, initial.Revision, Next(initial.Revision), Changes()));
-        await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, revision with { Receipt = "wrong" }, Next(revision), Changes()));
+        await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, revision with { Receipt = Guid.NewGuid().ToString("D") }, Next(revision), Changes()));
         await Reject(DocumentStoreError.InvalidRequest, () => database.CommitAsync(Scope, revision, revision with { Generation = revision.Generation + 1 }, Changes()));
         await Reject(DocumentStoreError.InvalidRequest, () => database.CommitAsync(Scope, revision, new(revision.Generation + 2, "different"), Changes()));
         await Reject(DocumentStoreError.Conflict, () => database.ReadAsync("wrong-scope"));
@@ -162,31 +163,33 @@ public static class MusicLibraryDatabaseTests
     {
         using var folder = new Folder();
         string root = Path.Combine(folder.Root, "new-root");
-        await using var database = new MusicLibraryDatabase(root);
-        Check(!Directory.Exists(root));
+        await using var storage = new NativeDatabase(root);
+        await using var database = new MusicLibraryDatabase(storage);
         var snapshot = await database.ReadAsync(Scope);
         Check(snapshot.Revision == MusicLibraryRevision.Empty && database.SongIds().Count == 0);
+        Check(File.Exists(storage.DatabasePath));
     }
 
     private static async Task AtomicSourceConflict()
     {
         using var folder = new Folder();
-        await using var database = new MusicLibraryDatabase(folder.Root);
+        await using var database = folder.Library;
         await database.ReadAsync(Scope);
         var first = Song("wy", "bound");
         var revision = Next(MusicLibraryRevision.Empty);
         await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision,
-            Changes([first], new JsonObject { ["selected"] = "before" }));
+            Changes([first], new JsonObject { ["schema"] = 1, ["mode"] = 1 }));
         var unrelated = Song("kw", "unrelated");
         var conflict = Song("wy", "bound");
         await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, revision, Next(revision),
-            Changes([unrelated, conflict], new JsonObject { ["selected"] = "after" })));
+            Changes([unrelated, conflict], new JsonObject { ["schema"] = 1, ["mode"] = 2 })));
         var after = await database.ReadAsync(Scope);
-        Check(after.Revision == revision && after.Areas["control"]!["selected"]!.GetValue<string>() == "before");
+        Check(after.Revision == revision && LJ.I(after.Areas["playback-settings"]!["mode"]) == 1);
         Check(database.FindSource(Key(first)) == Id(first) && database.FindSource(Key(unrelated)) is null);
         Check(database.ReadSong(Id(unrelated)) is null && database.ReadSong(Id(conflict)) is null && database.SongIds().Count == 1);
         await database.DisposeAsync();
-        await using var reopened = new MusicLibraryDatabase(folder.Root);
+        await folder.CloseAsync();
+        await using var reopened = folder.Library;
         Check((await reopened.ReadAsync(Scope)).Revision == revision && reopened.SongIds().Count == 1 &&
             reopened.FindSource(Key(first)) == Id(first) && reopened.ReadSong(Id(unrelated)) is null);
     }
@@ -232,36 +235,31 @@ public static class MusicLibraryDatabaseTests
     private static async Task ActualChanges()
     {
         using var folder = new Folder();
-        await using var database = new MusicLibraryDatabase(folder.Root);
+        var database = folder.Library;
         await database.ReadAsync(Scope);
-        using (var inspect = Inspect(folder.Database))
-            _ = Sql(inspect, """
-                CREATE TABLE audit(kind TEXT PRIMARY KEY,writes INTEGER NOT NULL);
-                INSERT INTO audit VALUES('songs',0),('sources',0);
-                CREATE TRIGGER audit_song_insert AFTER INSERT ON songs BEGIN UPDATE audit SET writes=writes+1 WHERE kind='songs'; END;
-                CREATE TRIGGER audit_song_update AFTER UPDATE ON songs BEGIN UPDATE audit SET writes=writes+1 WHERE kind='songs'; END;
-                CREATE TRIGGER audit_source_insert AFTER INSERT ON song_sources BEGIN UPDATE audit SET writes=writes+1 WHERE kind='sources'; END;
-                CREATE TRIGGER audit_source_update AFTER UPDATE ON song_sources BEGIN UPDATE audit SET writes=writes+1 WHERE kind='sources'; END;
-                """);
+        await folder.Storage.WriteAsync(db => db.Execute("""
+            CREATE TEMP TABLE audit(kind TEXT PRIMARY KEY,writes INTEGER NOT NULL);
+            INSERT INTO audit VALUES('songs',0),('sources',0);
+            CREATE TEMP TRIGGER audit_song_insert AFTER INSERT ON music_songs BEGIN UPDATE audit SET writes=writes+1 WHERE kind='songs'; END;
+            CREATE TEMP TRIGGER audit_song_update AFTER UPDATE ON music_songs BEGIN UPDATE audit SET writes=writes+1 WHERE kind='songs'; END;
+            CREATE TEMP TRIGGER audit_source_insert AFTER INSERT ON music_source_info BEGIN UPDATE audit SET writes=writes+1 WHERE kind='sources'; END;
+            CREATE TEMP TRIGGER audit_source_update AFTER UPDATE ON music_source_info BEGIN UPDATE audit SET writes=writes+1 WHERE kind='sources'; END;
+            """));
         var song = Song("wy", "actual-changes");
         var revision = Next(MusicLibraryRevision.Empty);
         await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes([song]));
         var next = Next(revision);
         await database.CommitAsync(Scope, revision, next, Changes([song]));
-        using (var inspect = Inspect(folder.Database))
-            Check((long)Sql(inspect, "SELECT writes FROM audit WHERE kind='songs'")! == 1 &&
-                (long)Sql(inspect, "SELECT writes FROM audit WHERE kind='sources'")! == 1);
+        Check(await Counts() == (1L, 1L));
         song["album"] = "New album";
         revision = next; next = Next(revision);
         await database.CommitAsync(Scope, revision, next, Changes([song]));
-        using (var inspect = Inspect(folder.Database))
-            Check((long)Sql(inspect, "SELECT writes FROM audit WHERE kind='songs'")! == 2 &&
-                (long)Sql(inspect, "SELECT writes FROM audit WHERE kind='sources'")! == 1);
+        Check(await Counts() == (2L, 1L));
         song["sources"]![0]!["musicInfo"]!["albumName"] = "New source album";
         await database.CommitAsync(Scope, next, Next(next), Changes([song]));
-        using (var inspect = Inspect(folder.Database))
-            Check((long)Sql(inspect, "SELECT writes FROM audit WHERE kind='songs'")! == 2 &&
-                (long)Sql(inspect, "SELECT writes FROM audit WHERE kind='sources'")! == 2);
+        Check(await Counts() == (2L, 2L));
+        Task<(long, long)> Counts() => folder.Storage.ReadAsync(db =>
+            (db.Scalar<long>("SELECT writes FROM audit WHERE kind='songs'"), db.Scalar<long>("SELECT writes FROM audit WHERE kind='sources'")));
     }
 
     private static async Task Cancellation()
@@ -290,32 +288,28 @@ public static class MusicLibraryDatabaseTests
     private static async Task Drain()
     {
         using var folder = new Folder();
-        var database = new MusicLibraryDatabase(folder.Root);
+        var database = folder.Library;
         await database.ReadAsync(Scope);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            File.Move(folder.Database, Path.Combine(folder.Root, "must-not-move.sqlite3"));
-            throw new InvalidOperationException("Open database did not pin its file name");
+            var blocker = folder.Storage.WriteAsync(_ => { entered.TrySetResult(); release.Task.GetAwaiter().GetResult(); return true; });
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var song = Song("wy", "drained");
+            var next = Next(MusicLibraryRevision.Empty);
+            var commit = database.CommitAsync(Scope, MusicLibraryRevision.Empty, next, Changes([song]));
+            var closing = database.DisposeAsync().AsTask();
+            Check(!commit.IsCompleted && !closing.IsCompleted);
+            await Reject(DocumentStoreError.Closed, () => database.ReadAsync(Scope));
+            release.TrySetResult();
+            await Task.WhenAll(blocker, commit, closing);
+            Check(await folder.Storage.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM music_songs")) == 1,
+                "Releasing a borrowed library must not dispose the App database.");
+            await folder.CloseAsync();
+            Check((await folder.Library.ReadAsync(Scope)).Revision == next && folder.Library.ContainsSong(Id(song)));
         }
-        catch (IOException) { }
-        var song = Song("wy", "drain");
-        var next = Next(MusicLibraryRevision.Empty);
-        var commit = database.CommitAsync(Scope, MusicLibraryRevision.Empty, next, Changes([song]));
-        var second = Song("tx", "drain-second");
-        var last = Next(next);
-        var queued = database.CommitAsync(Scope, next, last, Changes([second]));
-        var dispose = database.DisposeAsync().AsTask();
-        await Reject(DocumentStoreError.Closed, () => database.ReadAsync(Scope));
-        Check(await commit == next);
-        Check(await queued == last);
-        await dispose;
-        await database.DisposeAsync();
-        // Deletion denied by the pins during use must now be possible.
-        string moved = Path.Combine(folder.Root, "released.sqlite3");
-        File.Move(folder.Database, moved);
-        File.Move(moved, folder.Database);
-        await using var reopen = new MusicLibraryDatabase(folder.Root);
-        Check((await reopen.ReadAsync(Scope)).Revision == last && reopen.ContainsSong(Id(song)) && reopen.ContainsSong(Id(second)));
+        finally { release.TrySetResult(); }
     }
 
     private static async Task Corrupt()
@@ -324,106 +318,87 @@ public static class MusicLibraryDatabaseTests
         {
             using var folder = new Folder();
             File.WriteAllBytes(folder.Database, bytes);
-            await using var database = new MusicLibraryDatabase(folder.Root);
+            var database = folder.Library;
             await Reject(DocumentStoreError.Corrupt, () => database.ReadAsync(Scope));
             Check(File.ReadAllBytes(folder.Database).SequenceEqual(bytes));
+            await Reject(DocumentStoreError.Corrupt, folder.CloseAsync);
         }
     }
 
     private static async Task Recovery()
     {
-        if (Environment.GetEnvironmentVariable(CrashRootEnvironment) is { } crashRoot)
+        if (Environment.GetEnvironmentVariable(CrashRootEnvironment) is { } childRoot)
         {
-            string path = TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Path.Combine(crashRoot, DatabaseName));
-            // A child deliberately leaves a hot native SQLite journal. Never
-            // call the library or dispose this connection before process exit.
-            using var connection = Inspect(path);
-            _ = Sql(connection, """
-                PRAGMA synchronous=FULL;
-                PRAGMA cache_size=1;
-                BEGIN IMMEDIATE;
-                UPDATE songs SET data=json_set(data,'$.album','uncommitted');
-                """);
-            using var insert = connection.CreateCommand();
-            insert.CommandText = "INSERT INTO crash_scratch(data) VALUES($data)";
-            insert.Parameters.AddWithValue("$data", new string('x', 4000));
-            for (int i = 0; i < 1000; i++) _ = insert.ExecuteNonQuery();
-            Environment.Exit(0);
-            throw new InvalidOperationException("Crash fixture unexpectedly continued");
+            string path = TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Path.Combine(childRoot, DatabaseName));
+            using var inspect = Inspect(path);
+            Sql(inspect, "PRAGMA cache_size=8; BEGIN IMMEDIATE; UPDATE music_songs SET title='uncommitted synthetic value'");
+            Console.WriteLine("WAL_WRITE_READY"); Console.Out.Flush();
+            await Task.Delay(Timeout.InfiniteTimeSpan);
+            return;
         }
         using var folder = new Folder();
-        var song = Song("wy", "recovery");
+        var songs = Enumerable.Range(0, 256).Select(i => Song("wy", "wal-" + i)).ToArray();
+        await folder.Library.ReadAsync(Scope);
         var revision = Next(MusicLibraryRevision.Empty);
-        await using (var database = new MusicLibraryDatabase(folder.Root))
-        {
-            await database.ReadAsync(Scope);
-            await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes([song]));
-        }
-        using (var inspect = Inspect(folder.Database))
-            _ = Sql(inspect, "CREATE TABLE crash_scratch(data TEXT NOT NULL)");
-        string executable = Environment.ProcessPath ?? throw new InvalidOperationException("Missing child executable");
-        var start = new ProcessStartInfo(executable)
-        { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-        if (Path.GetFileNameWithoutExtension(executable).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
-            start.ArgumentList.Add(typeof(MusicLibraryDatabaseTests).Assembly.Location);
+        await folder.Library.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes(songs));
+        await folder.CloseAsync();
+        var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false,
+            RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = TestWorkspace.SourceRoot };
+        if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
         start.ArgumentList.Add("--case"); start.ArgumentList.Add(RecoveryCase);
         start.Environment[CrashRootEnvironment] = folder.Root;
-        using var child = Process.Start(start) ?? throw new InvalidOperationException("Unable to start crash fixture");
-        var output = child.StandardOutput.ReadToEndAsync();
+        using var child = Process.Start(start)!;
         var errors = child.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        try { await child.WaitForExitAsync(timeout.Token); }
-        catch (OperationCanceledException)
+        try
         {
-            child.Kill(entireProcessTree: true);
-            await child.WaitForExitAsync();
-            await Task.WhenAll(output, errors);
-            throw new InvalidOperationException("Crash fixture did not settle");
+            string? line;
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            do { line = await child.StandardOutput.ReadLineAsync(deadline.Token); } while (line is not null && line != "WAL_WRITE_READY");
+            Check(line == "WAL_WRITE_READY", "The crash fixture did not reach its current WAL write.");
+            child.Kill(entireProcessTree: true); await child.WaitForExitAsync(deadline.Token);
         }
-        await Task.WhenAll(output, errors);
-        Check(child.ExitCode == 0, "Crash fixture failed");
-        var journal = Bytes(folder.Database + "-journal");
-        Check(journal.Length > 512 && journal.AsSpan(0, 8).SequenceEqual(new byte[] { 0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7 }),
-            "Crash fixture did not leave a hot SQLite journal");
-        await using var recovered = new MusicLibraryDatabase(folder.Root);
-        Check((await recovered.ReadAsync(Scope)).Revision == revision);
-        Check(JsonNode.DeepEquals(recovered.ReadSong(Id(song)), song));
-        using var reopened = Inspect(folder.Database);
-        Check((long)Sql(reopened, "SELECT count(*) FROM crash_scratch")! == 0);
+        finally { if (!child.HasExited) { child.Kill(entireProcessTree: true); await child.WaitForExitAsync(); } }
+        Check((await folder.Library.ReadAsync(Scope)).Revision == revision);
+        Check(folder.Library.ReadSong(Id(songs[0]))!["title"]!.GetValue<string>() == "Recording");
+        Check(await folder.Storage.ReadAsync(db => db.Scalar<string>("PRAGMA quick_check")) == "ok");
     }
 
     private static async Task UnknownFormat()
     {
-        foreach (string change in new[] { "PRAGMA user_version=99", "UPDATE header SET format=99" })
+        foreach (string change in new[] { "PRAGMA user_version=99", "PRAGMA application_id=99" })
         {
             using var folder = new Folder();
-            await using (var database = new MusicLibraryDatabase(folder.Root)) await database.ReadAsync(Scope);
+            await folder.Library.ReadAsync(Scope);
+            await folder.CloseAsync();
             using (var inspect = Inspect(folder.Database)) _ = Sql(inspect, change);
             var original = SHA256.HashData(Bytes(folder.Database));
-            await using var reopened = new MusicLibraryDatabase(folder.Root);
+            var reopened = folder.Library;
             await Reject(DocumentStoreError.UnsupportedVersion, () => reopened.ReadAsync(Scope));
             Check(SHA256.HashData(Bytes(folder.Database)).SequenceEqual(original));
+            await Reject(DocumentStoreError.UnsupportedVersion, folder.CloseAsync);
         }
     }
 
     private static async Task UnsafeFiles()
     {
-        foreach (string suffix in new[] { "", "-journal" })
+        foreach (string suffix in new[] { "", "-wal", "-shm", "-journal" })
         {
             using var folder = new Folder();
             string target = Path.Combine(folder.Root, "ordinary-target");
             File.WriteAllBytes(target, [1, 2, 3, 4]);
             Check(CreateHardLinkW(folder.Database + suffix, target, IntPtr.Zero), "Unable to prepare hardlink fixture");
-            await using var database = new MusicLibraryDatabase(folder.Root);
+            var database = folder.Library;
             await Reject(DocumentStoreError.UnsafePath, () => database.ReadAsync(Scope));
             Check(File.ReadAllBytes(target).SequenceEqual(new byte[] { 1, 2, 3, 4 }));
+            await Reject(DocumentStoreError.UnsafePath, folder.CloseAsync);
         }
     }
 
     private static async Task Scale()
     {
         using var folder = new Folder();
-        await using var database = new MusicLibraryDatabase(folder.Root);
+        await using var database = folder.Library;
         await database.ReadAsync(Scope);
         var songs = Enumerable.Range(0, 10000).Select(index =>
         {
@@ -435,8 +410,11 @@ public static class MusicLibraryDatabaseTests
         var revision = Next(MusicLibraryRevision.Empty);
         await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes(songs));
         using (var inspect = Inspect(folder.Database))
-            Check((long)Sql(inspect, "SELECT count(*) FROM song_sources")! == 50000);
-        var before = Bytes(folder.Database);
+            Check((long)Sql(inspect, "SELECT count(*) FROM music_song_sources")! == 50000);
+        string beforePath = Path.Combine(folder.Root, "snapshots", "before", "meowfilm.sqlite3");
+        Directory.CreateDirectory(Path.GetDirectoryName(beforePath)!);
+        await folder.Storage.BackupAsync(beforePath);
+        var before = Bytes(beforePath);
         string soughtKey = Key(songs[7654], 4), soughtId = Id(songs[7654]);
         // Warm provider/type initialization before measuring repeated indexed reads.
         Check(database.FindSource(soughtKey) == soughtId);
@@ -447,11 +425,18 @@ public static class MusicLibraryDatabaseTests
         watch.Stop();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
         Check(allocated < 64L * 1024 * 1024, "Indexed hot reads allocated a library-scale snapshot");
-        Check((await database.ReadAsync(Scope)).Revision == revision && Bytes(folder.Database).SequenceEqual(before));
+        Check((await database.ReadAsync(Scope)).Revision == revision);
+        string readPath = Path.Combine(folder.Root, "snapshots", "read", "meowfilm.sqlite3");
+        Directory.CreateDirectory(Path.GetDirectoryName(readPath)!);
+        await folder.Storage.BackupAsync(readPath);
+        Check(Bytes(readPath).SequenceEqual(before), "Hot reads changed the database snapshot");
         var changed = songs[7654].DeepClone().AsObject();
         changed["album"] = "Updated album";
         await database.CommitAsync(Scope, revision, Next(revision), Changes([changed]));
-        var after = Bytes(folder.Database);
+        string afterPath = Path.Combine(folder.Root, "snapshots", "after", "meowfilm.sqlite3");
+        Directory.CreateDirectory(Path.GetDirectoryName(afterPath)!);
+        await folder.Storage.BackupAsync(afterPath);
+        var after = Bytes(afterPath);
         int pageSize;
         using (var inspect = Inspect(folder.Database)) pageSize = Convert.ToInt32(Sql(inspect, "PRAGMA page_size"));
         int pages = 0;
@@ -469,7 +454,7 @@ public static class MusicLibraryDatabaseTests
     private static async Task OwnerScale()
     {
         using var folder = new Folder();
-        await using var database = new MusicLibraryDatabase(folder.Root);
+        await using var database = folder.Library;
         await database.ReadAsync(Scope);
         var songs = Enumerable.Range(0, 10000).Select(index =>
         {
@@ -490,7 +475,7 @@ public static class MusicLibraryDatabaseTests
         await database.CommitAsync(Scope, saved.Revision, Next(saved.Revision),
             new(new Dictionary<string, JsonObject> { ["library"] = control }, new Dictionary<string, JsonObject>()));
         var measured = new MeasuredStore(database);
-        await using var owner = new MusicLibraryOwner(measured, Scope);
+        await using var owner = new MusicLibraryOwner(measured, Scope, database: folder.Storage);
         _ = await owner.ReadLibrarySyncAsync();
         var incoming = JsonSerializer.SerializeToElement(new { items = songs.Take(10).ToArray() });
         _ = await owner.AdoptPlatformResultAsync(incoming, default);

@@ -12,24 +12,16 @@ public static partial class FilmLibraryTests
     private static TestCase Test(string name, Func<Task> run) => new("film-library: " + name, run);
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Test("App composition registers the sole favorite document namespace", () =>
-        {
-            Check(AppIdentity.NativeNamespaces.Contains(FilmLibrary.DocumentNamespace),
-                "the official App document store must admit the native favorite owner");
-            return Task.CompletedTask;
-        });
         yield return Test("official App storage writes favorites and restores them through a fresh owner", async () =>
         {
             string path = TestWorkspace.DataPath("film-library", Guid.NewGuid().ToString("N"));
             try
             {
                 Directory.CreateDirectory(path);
-                await using (var store = new LocalDocumentStore(path, AppIdentity.NativeNamespaces,
-                    AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces))
+                await using (var store = new NativeDatabase(path))
                 await using (var library = new FilmLibrary(store))
                     await library.SetFavoriteAsync(Card(), true);
-                await using (var store = new LocalDocumentStore(path, AppIdentity.NativeNamespaces,
-                    AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces))
+                await using (var store = new NativeDatabase(path))
                 await using (var library = new FilmLibrary(store))
                     Check((await library.ReadAsync()).Single().PlaybackContext!.Target.Id == Card().Id,
                         "actual official namespace admission and durable restore");
@@ -80,12 +72,12 @@ public static partial class FilmLibraryTests
                 !bytes.Contains("private-file-reference", StringComparison.Ordinal) &&
                 !bytes.Contains("original-query", StringComparison.Ordinal), "no short-lived private reference is serialized");
         });
-        yield return Test("raw roots records nested extensions exact keys and numbers survive unrelated edits and cold reopen", RawPersistence);
-        yield return Test("bad and ambiguous favorite records stay isolated and unchanged through unrelated writes", IsolatedRecords);
-        yield return Test("duplicate identity members fence every candidate without last-member guessing", AmbiguousIdentityMembers);
-        yield return Test("real favorite CAS conflicts never overwrite another writer or publish success", CasConflict);
+        yield return Test("typed favorite fields and exact source identities survive independent edits and cold reopen", TypedPersistence);
+        yield return Test("corrupt favorite rows remain unchanged by unrelated writes and cannot be silently reset", CorruptRow);
+        yield return Test("favorite identity foreign key and type constraints roll back the entire transaction", IdentityConstraints);
+        yield return Test("independent favorite writers never overwrite each other with a stale collection", ConcurrentWriters);
         yield return Test("group favorites keep member identities without persisting source or search credentials", GroupPrivacy);
-        yield return Test("failed CAS never publishes a favorite and corrupt documents are not silently reset", async () =>
+        yield return Test("failed transactions never publish favorites and corrupt roots are not silently reset", async () =>
         {
             var store = new FilmMemoryStore();
             await using var library = new FilmLibrary(store);
@@ -97,11 +89,12 @@ public static partial class FilmLibraryTests
             catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Storage) { }
             Check(publications == 1 && store.Data!.SequenceEqual(original) && (await library.ReadAsync()).Count == 1,
                 "a failed durable write is not successful data or a Changed event");
-            store.FailWrite = false; store.Data = Encoding.UTF8.GetBytes("{broken");
-            int writes = store.Writes;
+            store.FailWrite = false;
+            await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_film_library SET version=2"));
+            byte[] damaged = store.Data!;
             await Error("CORRUPT_STORAGE", () => library.ReadAsync());
             await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(), false));
-            Check(store.Writes == writes && Encoding.UTF8.GetString(store.Data!) == "{broken",
+            Check(store.Data!.SequenceEqual(damaged),
                 "bad storage remains available for recovery rather than being replaced with an empty collection");
         });
         yield return Test("an admitted favorite settles after caller cancellation and close waits its real write receipt", async () =>
@@ -173,25 +166,23 @@ public static partial class FilmLibraryTests
         finally { store.Finish.TrySetResult(); await module.AbortAsync(); }
     }
 
-    private sealed class RefreshStore : IDocumentStore
+    private sealed class RefreshStore : NativeTestDatabase
     {
-        private readonly FilmMemoryStore inner = new();
         internal bool HoldRead;
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Finish = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public async Task<DocumentSnapshot> ReadAsync(string key, CancellationToken token = default)
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default)
         {
             if (HoldRead) { Entered.TrySetResult(); await Finish.Task; }
-            return await inner.ReadAsync(key, token);
+            return await base.ReadAsync(read, token);
         }
-        public async Task<DocumentFingerprint> WriteAsync(string key, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            var receipt = await inner.WriteAsync(key, data, expected, token);
+            var receipt = await base.WriteAsync(write, token, retainedBytes, commit);
             HoldRead = true;
             return receipt;
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class ReleaseSource : IFilmHomeSource

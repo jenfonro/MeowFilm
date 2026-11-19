@@ -12,7 +12,7 @@ contract: cat.script.v2
 
 `createCatScriptModule({dataRoot,configuration?})` 接收受信调用方选定的稳定绝对数据目录。公共独立入口见 [Runtime HTTP](runtime-bridge.md)；模块负责完整源码候选、安装、Node Worker、私有卷、服务端口、Cat 调用和关闭。未注入 `configuration` 时也拥有来源设置；注入后的边界见[原生来源意图](#原生来源意图注入)。iOS 接入见[影视设置](../ios/film-settings.md#猫源与公共宿主)，Windows 接入见[平台接入](../windows/app-runtime.md)；不提供旧 wire 兼容。
 
-以下导入、管理事务及 version 1 设置文件描述未注入 `configuration` 的默认装配。iOS／Windows 正式 App 注入原生来源配置后，`install/import/edit/enable/uninstall` 返回 `PERMISSION_DENIED`；新增、编辑、启停与删除由原生唯一提交，`update` 只接受 installationId，从当前来源读取输入，不消费 sourceRevision。`start/status/refresh/restart/invoke` 仍消费公共 Cat owner；refresh 可按最新来源意图下载、加载和替换。版本 2 文件只保存运行器安装事实，列表结果另带 `inputRevision`；共同边界见[原生来源意图注入](#原生来源意图注入)，Windows 接线见[原生设置](../windows/native-settings.md#猫源意图与安装事实)，不把默认导入回滚承诺套用到已提交的原生来源变更。
+以下导入与管理事务描述未注入 `configuration` 的默认装配，来源设置和安装事实保存于同一 SQLite 库的声明关系表。iOS／Windows 正式 App 注入原生来源配置后，`install/import/edit/enable/uninstall` 返回 `PERMISSION_DENIED`；新增、编辑、启停与删除由原生唯一提交，`update` 只接受 installationId，从当前来源读取输入，不消费 sourceRevision。`start/status/refresh/restart/invoke` 仍消费公共 Cat owner；refresh 可按最新来源意图下载、加载和替换。注入模式下运行器只保存安装事实，列表结果另带 `inputRevision`；共同边界见[原生来源意图注入](#原生来源意图注入)，Windows 接线见[原生设置](../windows/native-settings.md#猫源意图与安装事实)，不把默认导入回滚承诺套用到已提交的原生来源变更。
 
 ## HTTP 与完整导入
 
@@ -23,7 +23,7 @@ contract: cat.script.v2
 | operation | 作用 |
 | --- | --- |
 | `start/status` | 启动运行器并读取当前设置，或返回当前状态；`start` 不等待各脚本实例就绪 |
-| `refresh` | 重新读取同一设置文件，校验设置结构后按目标实例应用 |
+| `refresh` | 重新读取当前 owner 的设置关系，校验结构后按目标实例应用 |
 | `install` | 使用完整上传的 sourceRevision 导入或明确重新导入一个 installation |
 | `import` | 由运行器下载 HTTP(S) 源码并导入或明确重新导入 |
 | `edit` | 修改名称，网络源还可修改下载 URL |
@@ -54,7 +54,7 @@ contract: cat.script.v2
 | `restart` | `installationId` | 一个 instance |
 | `enable` | `installationId,enabled` | 一个 instance |
 | `uninstall` | `installationId` | `{applied,failures:[{installationId,code}]}` |
-| `start/status` | 空对象 | `{settingsPath,aggregate:{origin},instances:[...]}` |
+| `start/status` | 空对象 | `{aggregate:{origin},instances:[...]}` |
 
 `config` 为 JSON object，`sourceRevision` 选择同 installation 的完整上传；网络下载使用 `import`。`sourceType` 只允许 `local`、`network`；本地 `sourceUrl` 为 `null`，网络为 HTTP(S) URL 字符串。安装调用可省略可选元数据。新安装缺省名称为 installationId、类型为 local、URL 为 null、config 为 `{}`、version 为 `0.0.0`。
 
@@ -78,55 +78,23 @@ Cat 工厂启动参数提供当前网站／账户协议的默认命名空间：`
 
 非法 raw 上传在受理阶段立即拒绝，不改变安装或消耗已有候选；runtime Buffer/network 的已受理更新发生编码错误，仍持久记录 failed/updateError。首次安装失败或取消不留下源码、卷或安装记录；在途 starting 可观察但不发布候选 sourceHash/sites。停用抢占首次安装后若目标不存在，返回 NOT_FOUND；卸载可清空返回。显式管理取消为 CANCELLED，实际替换为 STALE_SESSION。
 
-## 设置文件
+## 持久设置
 
-无 `configuration` 注入时，`<dataRoot>/settings.json` 是唯一持久设置事实来源：
+Cat 的网关配置、provider 映射和安装事实由运行器 owner 保存在 App 数据根的共享 SQLite typed tables/relations 中；注入模式下可编辑来源意图仍由原生 owner 持有，运行器只保存实际安装事实。Node runtime 与原生 UI 通过受限设置能力与 revision 协作，不再使用 `settings.json` 文件。
 
-```json
-{
-  "version": 1,
-  "port": 0,
-  "providers": {
-    "baidu": true,
-    "quark": true,
-    "uc": true,
-    "tianyi": true,
-    "yidong": true
-  },
-  "mappings": [
-    { "provider": "quark", "aliases": ["夸克"] }
-  ],
-  "scripts": [
-    {
-      "installationId": "source-1",
-      "sourceHash": "<sha256>",
-      "enabled": true,
-      "version": "1.0.0",
-      "config": {},
-      "name": "我的猫源",
-      "sourceType": "network",
-      "sourceUrl": "https://example.invalid/cat.js",
-      "importedAt": 1790000000000,
-      "updatedAt": null,
-      "updateState": "idle",
-      "updateError": null,
-      "sites": []
-    }
-  ]
-}
-```
+`port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。原生设置提交成功后可通知运行器重读当前数据库快照；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖有效快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变实例不重读源码、不重新启动。
 
-`port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。客户端可原子改写该文件后调用 `refresh`；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖文件，也不替换当前有效运行快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变的正常实例不重读源码、不重新启动。provider、映射和聚合端口变更通过设置快照发布，不要求全量重读源码。冷启动设置损坏明确返回存储错误。
+无 `configuration` 注入的独立运行器也由 Cat owner 将网关设置、provider 开关、映射、安装管理事实及节点化配置写入 SQLite typed tables/relations。它与注入模式使用不同 owner rows；原生注入模式的来源意图由原生 owner 持有，运行器只保留实际安装状态。没有 JSON 文档文件或整文档 JSON 数据库字段作为内部设置存储。
 
-安装管理元数据、启用意图和最后成功的 sites 由 Node 持久化；原生客户端不保存第二份安装权威。客户端视频源开关、排序、检测结果和删除标记不进入此文件。普通管理应调用上表方法；`refresh` 只应用磁盘设置，不下载网络源，也不提供 `update` 的候选失败恢复事务。
+`port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。注入模式下原生数据库提交后可通知运行器重读当前快照；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖有效快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变实例不重读源码、不重新启动。provider、映射和聚合端口变更通过 owner 的数据库视图发布，不要求全量重读源码。冷启动数据库错误明确返回存储错误。
 
-独立入口使用当前 version 1 文档，不为旧五字段记录回填管理信息。读取只解释当前根结构；不因未使用的管理成员或扩展字段预检整库。未修改的扩展成员和数字原材料在保存时保持。端口、选中来源身份与源码、provider 开关及线路映射分别在真正监听、载入或增强操作中消费。
+安装管理元数据、启用状态及最后成功的 sites 由运行器 owner 持久化；原生客户端不保存第二份安装权威。客户端视频源开关、排序、检测结果和删除标记由对应原生 owner 负责。普通管理应调用上表方法；`refresh` 只应用当前数据库状态，不下载网络源，也不提供 `update` 的候选失败恢复事务。
 
 importedAt 和 updatedAt 均为 epoch 毫秒或 null。新安装成功时记录 importedAt，updatedAt 初始为 null；显示修改时间取 `updatedAt ?? importedAt`。内容成功改变才记录 updatedAt；编辑、无变化、失败、启停和重启不刷新。updateState 只允许 idle/updated/unchanged/failed，updateError 在 failed 时为错误码字符串，其余为 null。首次成功导入为 idle，成功重新导入按内容是否改变为 updated/unchanged。
 
 `start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后在各自 Worker 启动；慢实例不阻止另一实例或 status，不增加并发数量配置。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。无注入模式允许合法手工编辑后重新启用或冷启动运行；运行中不监视文件变化。注入模式还校验来源文件摘要，不能用改写旧文件代替保存新意图。
 
-每个 enabled installation 使用独立 worker thread 直接运行 CatSession、Node 脚本、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、设置文件与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。同 installation 的安装、启用、刷新目标和卸载有序，设置提交按发布顺序处理；不以全局初始化队列阻塞其他 installation。与目标一致的实例不重复启动。每次切换先等旧 Worker 和资源真实退出，再在同卷启动候选；update 失败恢复旧源码，refresh 失败则报告真实 failed。正常运行变量自然保留，不保存/恢复执行内存，不新增闲置回收。
+每个 enabled installation 使用独立 worker thread 直接运行 CatSession、Node 脚本、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、SQLite 设置 owner 与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。同 installation 的安装、启用、刷新目标和卸载有序，设置提交按发布顺序处理；不以全局初始化队列阻塞其他 installation。与目标一致的实例不重复启动。每次切换先等旧 Worker 和资源真实退出，再在同卷启动候选；update 失败恢复旧源码，refresh 失败则报告真实 failed。正常运行变量自然保留，不保存/恢复执行内存，不新增闲置回收。
 
 ## 原生来源意图注入
 
@@ -134,9 +102,9 @@ App 可注入受信 `configuration:{read,reload}`。`read()` 返回已读取的�
 
 原生文档为 `{version:1,port,providers,mappings,scripts}`。每条 script 的当前输入为 `installationId,name,sourceType,sourceUrl,localPath,localHash,enabled,inputRevision`；`inputRevision` 为正安全整数。网络源使用 HTTP(S) `sourceUrl`，不读取无关 `localPath/localHash`；本地源持 SHA-256 `localHash`、空 `sourceUrl`，可由受信平台提供绝对 `localPath`。iOS 固定 `localPath:null`，获准输入交接到同一运行器的 `sources/<localHash>.js`，不另建源码或安装仓库。
 
-意图及安装事实按结构值比较，JSON 对象成员的编码顺序不构成来源变化；源码摘要与原生文档 CAS 指纹仍按各自原始字节计算。
+意图及安装事实按结构值比较，JSON 对象成员的编码顺序不构成来源变化；源码摘要按实际源码字节计算，原生设置提交使用数据库 revision CAS。
 
-注入模式下 `<dataRoot>/settings.json` 为 `{version:2,scripts:[...]}` 安装事实，仅保存 `installationId,sourceHash,version,config,loadedIdentity,importedAt,updatedAt,updateState,updateError,sites`。来源名称、类型、地址、启用意图、聚合配置不在此形成第二份可编辑值。`loadedIdentity` 绑定实际采用的类型、输入 revision 及 URL／本地摘要，和当前意图分别保存；公开状态增加 `inputRevision`，不公开 `localPath/localHash`。
+注入模式下安装事实只记录运行器实际装载的源码身份、版本、私有配置、装载状态与站点投影；来源名称、类型、地址、启用意图仍归原生配置 owner。`loadedIdentity` 绑定实际采用的类型、输入 revision 及 URL／本地摘要，和当前意图分别保存；公开状态增加 `inputRevision`，不公开 `localPath/localHash`。这些事实保存在共享数据库，不生成内部 JSON 文件。
 
 冷启动及 `cat.sources` 通知重读意图。已启用项尚无实际源码、输入身份改变或文件缺失时，由 Node 按当前意图读取本地输入或下载网络来源，再验证并装载；本地切网络不会拿旧本地文件冒充新网络输入。通知发起的实际应用归模块生命周期管理，不因短通知请求结束而取消；迟到结果核对最新输入身份，不能覆盖后保存意图。原生保存成功不代表安装或 ready，客户端清单仅采用匹配当前 `inputRevision` 的 ready 状态。
 
@@ -273,7 +241,7 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 
 更新先停止该 installation 的旧 generation，再装载并启动新 generation，避免两个 generation 并发写同一私有卷。若脚本 stop 返回 Promise，运行器在有界清理时限内等待其完成，以便关闭服务并落盘；超时或失败后仍强制回收实例自有资源。停用、卸载和关闭回收 listener、socket、timer、流、fd、代理身份和 Worker 内存。
 
-卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；冷启动后未执行过的 disabled 记录同样保留该引用，外部删除设置项后的 refresh 也会完成上述清理。状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。App 提供的 `dataRoot` 以及运行器自有 `settings.json`、`sources` 接受系统／App 管理的目录或文件链接，保留格式、资源大小、I/O 及原子提交语义，不做祖先目录或文件身份审查。脚本私有卷仍保留目录身份、卷内路径、符号链接和硬链接隔离检查。卸载后同一 installationId 再次安装从空卷开始；尚未卸载的同 ID 明确重新导入保留私有卷。若上次删除失败留有残卷，新的安装先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
+卸载或刷新时脚本从配置移除，实例停止、资源回收后在同一次调用内递归删除 `volumes/<installationId>`，并删除不再被任何 installation 引用的 `sources/<importhash>.js`；更新成功后也清理不再引用的旧源码文件，返回时删除已完成。删除依据设置中的原始文件引用，不使用 host 的实际执行内容摘要；冷启动后未执行过的 disabled 记录同样保留该引用，外部删除设置项后的 refresh 也会完成上述清理。状态中的 `sourceHash` 在已有 host revision 时报告该实际摘要，手工编辑后可与设置引用不同。共享引用仍保留，未知文件不扫描删除。App 提供的 `dataRoot` 以及运行器自有 `sources` 接受系统／App 管理的目录或文件链接，保留格式、资源大小、I/O 及原子提交语义，不做祖先目录或文件身份审查。脚本私有卷仍保留目录身份、卷内路径、符号链接和硬链接隔离检查。卸载后同一 installationId 再次安装从空卷开始；尚未卸载的同 ID 明确重新导入保留私有卷。若上次删除失败留有残卷，新的安装先删除，仍失败则安装失败、不启动。停止、停用、更新、端口变化、进程重启均保留私有卷。删除失败如实进入 `failures`，实例仍算已卸载，不影响其他实例；删除只作用于已校验的卷目录，不跟随符号链接。运行器启动和冷启动不扫描或清理 `volumes`。
 
 `refresh`／`uninstall` 在各自变更全部处理完后返回 `applied`／`failures`，其他安装管理方法在目标实例处理完后返回其状态，错误包装见上文。设置快照发布不等于实例变更已应用；refresh 在逐安装队列中取消后，下次 refresh 仍会补应用未完成的变更，元数据编辑或更新结果的持久化不会冒充该执行变更已经完成。取消管理请求会终止下载与该操作拥有的候选初始化，不终止已开始的独立旧源恢复；停用／卸载同时取消该安装尚未完成的管理操作，但未提交的命令不改变旧安装的持久启用意图。失败更新先恢复原先启用的旧版本，后续成功停用／卸载再在同一安装队列中落地；后续命令取消或保存失败时，旧源仍可调用，迟到结果不能覆盖已提交的停用／卸载。关闭不为恢复重新启动脚本，并终止已开始的恢复。关闭时取消尚未开始的启动事务，先向已有及正在初始化的实例发停止，再等待在途事务、真实线程退出和 server 回收，不先等完整初始化截止时间；后台启动失败记入 `failures`，不产生未处理 rejection。
 

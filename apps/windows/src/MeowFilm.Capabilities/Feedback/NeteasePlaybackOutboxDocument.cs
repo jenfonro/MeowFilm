@@ -47,17 +47,17 @@ internal static class NeteasePlaybackOutboxDocument
     internal static byte[] Encode(IEnumerable<NeteasePlaybackPending> entries) =>
         JsonSerializer.SerializeToUtf8Bytes(new Document(1, entries.Where(e => e.Count > 0).ToArray()), Json);
 
-    internal static NeteasePlaybackPending[] Decode(DocumentSnapshot snapshot)
+    internal static NeteasePlaybackPending[] Decode(RecordSnapshot snapshot)
     {
         if (snapshot.Data is null)
         {
-            FeedbackProtocolRules.Require(snapshot.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE");
+            FeedbackProtocolRules.Require(snapshot.Revision == StorageRevision.Empty, "CORRUPT_STORAGE");
             return [];
         }
         try
         {
             FeedbackProtocolRules.Require(snapshot.Data.Length <= MaximumBytes &&
-                snapshot.Fingerprint == DocumentFingerprint.FromBytes(snapshot.Data), "CORRUPT_STORAGE");
+                snapshot.Revision.Revision >= 0, "CORRUPT_STORAGE");
             using var syntax = JsonDocument.Parse(snapshot.Data, new() { MaxDepth = 8 });
             UniqueProperties(syntax.RootElement);
             var document = JsonSerializer.Deserialize<Document>(snapshot.Data, Json);

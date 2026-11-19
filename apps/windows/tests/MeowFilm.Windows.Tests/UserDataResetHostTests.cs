@@ -9,6 +9,8 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
+using MeowFilm.Capabilities.Accounts;
+using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
@@ -65,7 +67,7 @@ public static class UserDataResetHostTests
             var modules = new List<ProbeModule>();
             var shells = new List<ShellWindow>();
             var attachments = new List<Attachment>();
-            CacheDocumentStore? cacheStore = null;
+            NativeTestDatabase? cacheStore = null;
             int disposals = 0, pid = Environment.ProcessId;
             Exception? failure = null;
             var guard = new DispatcherTimer { Interval = TimeSpan.FromSeconds(35) };
@@ -78,19 +80,13 @@ public static class UserDataResetHostTests
             try
             {
                 AppLauncher.Run(paths,
-                    new(AppIdentity.RuntimeId, AppIdentity.ScriptModules, AppIdentity.NativeNamespaces,
-                        AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces),
+                    new(AppIdentity.RuntimeId, AppIdentity.ScriptModules),
                     (runtime, store, owners) =>
                     {
                         Check(modules.All(module => module.Released), "old owners release before replacement construction");
                         Check(cacheStore is null, "old App-owned cache must release before replacement construction");
-                        cacheStore = new CacheDocumentStore(() =>
-                        {
-                            Directory.CreateDirectory(paths.Caches);
-                            return new LocalDocumentStore(paths.Caches, AppIdentity.CacheNamespaces,
-                                protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
-                        });
-                        var module = new ProbeModule(store, runtime, cacheStore, Path.Combine(paths.Documents, "music-library"));
+                        cacheStore = new NativeTestDatabase(store);
+                        var module = new ProbeModule(store, runtime, cacheStore, paths.Documents);
                         modules.Add(module); owners.Add(module);
                     },
                     async () =>
@@ -115,10 +111,12 @@ public static class UserDataResetHostTests
                                 Check(disposals == generation - 1 &&
                                     attachments.Take(generation - 1).All(item => item.Disposals == 1), "one release per generation");
                                 Check(!Directory.Exists(paths.Caches), "all old native caches were removed before replacement");
-                                foreach (string ns in AppIdentity.CacheNamespaces)
-                                    Check((await module.Cache.ReadAsync(ns)).Data is null, "new cache owner cannot reuse old bytes");
-                                Check((await module.Store.ReadAsync("film.library.v1")).Data is null, "late old writes cannot survive reset");
-                                Check((await module.Store.ReadAsync("music.accounts.v2")).Data is null, "previous account bytes were removed");
+                                Check(await module.Store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_home")) == 0,
+                                    "New cache owner cannot reuse previous rows.");
+                                Check(await module.Store.ReadAsync(db => db.Revision("reset-probe")) == StorageRevision.Empty,
+                                    "Late writes cannot survive reset.");
+                                Check(await module.Store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_music_accounts")) == 0,
+                                    "Previous account rows were removed.");
                                 var library = await module.Native.ExecuteAsync("music.library.list", new { });
                                 Check(library.GetProperty("ok").GetBoolean() && library.GetProperty("total").GetInt32() == 1,
                                     "new native library contains only the default favorites");
@@ -144,17 +142,17 @@ public static class UserDataResetHostTests
                                 Check(created.GetProperty("ok").GetBoolean());
                                 await appearance.SaveAsync("#ABCDEF");
                                 Check(appearance.ThemeColor == "#ABCDEF");
-                                await module.Store.WriteAsync("music.accounts.v2", "corrupt current credentials"u8.ToArray(),
-                                    DocumentFingerprint.Missing);
-                                foreach (string directory in new[] { "script-runtime", "music-playback-cache",
-                                    "script-runtime/film-metadata", "script-runtime/film-media", "script-runtime/volumes/fixture/tmp" })
+                                await module.Store.WriteAsync(db =>
+                                {
+                                    AccountStorageRecords.Account.Save(db, new JsonObject { ["version"] = 2, ["generation"] = 1 },
+                                        AccountStorageRecords.Account.Read(db, ["wy"]), ["wy"]);
+                                    return true;
+                                });
+                                foreach (string directory in new[] { "script-runtime/volumes/fixture/tmp", "resources-v1/audio" })
                                 {
                                     Directory.CreateDirectory(Path.Combine(root, directory));
                                     File.WriteAllText(Path.Combine(root, directory, "unknown.bin"), "synthetic private data");
                                 }
-                                foreach (string ns in AppIdentity.CacheNamespaces)
-                                    module.Cache.Save(ns, "synthetic private cache"u8.ToArray());
-                                await module.Cache.DrainAsync();
                                 Directory.CreateDirectory(Path.Combine(paths.Caches, "audio"));
                                 File.WriteAllText(Path.Combine(paths.Caches, "audio", "unknown.bin"), "synthetic native audio");
                                 ((StackPanel)settings.FindName("Areas")).Children.OfType<RadioButton>()
@@ -183,13 +181,13 @@ public static class UserDataResetHostTests
                 {
                     try
                     {
-                        module.Store.ReadAsync("film.library.v1").GetAwaiter().GetResult();
+                        module.Store.ReadAsync(db => db.Revision("reset-probe")).GetAwaiter().GetResult();
                         throw new InvalidOperationException("retired store admitted a read");
                     }
                     catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Closed) { }
                     try
                     {
-                        module.Cache.ReadMemory(MusicHomeSnapshotStore.Namespace);
+                        module.Cache.ReadAsync(db => db.Revision(MusicHomeSnapshotStore.Namespace)).GetAwaiter().GetResult();
                         throw new InvalidOperationException("retired cache admitted a read");
                     }
                     catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Closed) { }
@@ -213,15 +211,15 @@ public static class UserDataResetHostTests
 
     private sealed class ProbeModule : IDesktopModule
     {
-        public IDocumentStore Store { get; }
-        public CacheDocumentStore Cache { get; }
+        public IStorageDatabase Store { get; }
+        public NativeTestDatabase Cache { get; }
         public MusicNativeApplication Native { get; }
         public MusicRecordTestStore Records { get; }
         public bool Released { get; private set; }
-        public ProbeModule(IDocumentStore store, IRuntimeClient runtime, CacheDocumentStore cache, string databaseRoot)
+        public ProbeModule(IStorageDatabase store, IRuntimeClient runtime, NativeTestDatabase cache, string databaseRoot)
         {
             Store = store; Cache = cache; Records = MusicTestStores.Use(store, databaseRoot);
-            Native = new MusicNativeApplication(store, Records, runtime, cache);
+            Native = new MusicNativeApplication(store, Records, runtime);
         }
         public string Id => "probe";
         public string Title => "测试";
@@ -243,9 +241,12 @@ public static class UserDataResetHostTests
         {
             if (Released) return;
             await Native.AbortAsync();
-            var snapshot = await Store.ReadAsync("film.library.v1");
-            await Store.WriteAsync("film.library.v1", "late old generation write"u8.ToArray(), snapshot.Fingerprint);
-            Cache.Save(MusicHomeSnapshotStore.Namespace, "late old generation cache"u8.ToArray());
+            await Store.WriteAsync(db =>
+            {
+                HomeStorageRecords.Home.Save(db, new JsonObject { ["platform"] = "wy", ["pages"] = new JsonArray() },
+                    HomeStorageRecords.Home.Read(db, ["device"]), ["device"]);
+                return db.CommitRevision("reset-probe", db.Revision("reset-probe"), Guid.NewGuid().ToString("D"));
+            });
             await Records.DisposeAsync();
             Released = true;
         }

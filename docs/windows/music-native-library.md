@@ -14,8 +14,8 @@
 ## 公开边界
 
 ```csharp
-MusicLibraryOwner(IMusicLibraryStore store, IDocumentStore? cacheStore = null)
-MusicLibraryOwner(IMusicLibraryStore store, string scope, IDocumentStore? cacheStore = null)
+MusicLibraryOwner(IMusicLibraryStore store)
+MusicLibraryOwner(IMusicLibraryStore store, string scope)
 
 Task<JsonElement> ExecuteAsync(
     string method,
@@ -55,20 +55,20 @@ ValueTask DisposeAsync();
 
 ## 唯一当前数据库
 
-官方 `Microsoft.Data.Sqlite` 10.0.15／SQLitePCLRaw 2.1.13 提供 SQLite，标准 NuGet win-x64 资产发布，无 ORM、自制日志或 VFS。数据库 `user_version=1`，四表：
+音乐原生 owner 借用 App 唯一 `NativeDatabase`，由官方 `Microsoft.Data.Sqlite` 10.0.15／SQLitePCLRaw 2.1.13 的 NuGet 资产提供 SQLite；不单建音乐数据库。当前统一 schema 见[共享存储契约](../common/settings-storage.md)。
 
-| 表 | 内容与索引 |
+| 关系 | 内容与索引 |
 | --- | --- |
-| `header` | 单行 format／scope／generation／receipt，真实变更事务推进 generation 并写唯一回执 |
-| `songs` | 永久 UUID、单曲元数据 JSON；来源不内嵌；录音 fingerprint＋固定 baseline_duration、本地 locator、封面 URL 与精确查询索引 |
-| `song_sources` | source_key 主键，song_id 外键、平台／原生 ID／必要变体、顺序及单来源 JSON；已登记来源不可删除或重绑 |
-| `areas` | name 主键及小型控制 JSON，不内嵌 songs |
+| `music_owner_state` | scope、revision 与唯一 receipt；真实变更同事务推进 |
+| `music_songs` | 永久 UUID、类型化单曲字段、录音 fingerprint、固定 baseline_duration、本地 locator、封面 URL 与精确查询索引 |
+| `music_song_sources` 及来源资料子关系 | 来源稳定键、song_id 外键、平台／原生 ID／必要变体和顺序；已登记来源不可删除或重绑 |
+| 队列、历史、集合及偏好专属关系 | 类型化控制字段、按身份组织的有序成员和引用；不嵌入歌曲实体 |
 
-单连接、Pooling=false、FULL 同步、PERSIST rollback journal；一次短 SQL 事务写实际变更歌曲／来源／控制与回执。主库与固定 journal 复用平台 no-follow／单链接 pins，初始化在原生 exclusive locking 中完成热 journal 恢复，再恢复 normal locking；不删除热日志或关闭耐久。路径及同权限恶意并发限制见[存储安全](protected-storage.md#music-record-database)。
+所有连接使用 WAL／FULL，同库原生和 Node writer 以短事务及 owner revision CAS 协作。一次提交只更新本轮实际改变的歌曲、来源、控制关系与回执；路径、维护锁、备份和故障语义见[存储](protected-storage.md)。
 
 普通读只取得控制状态或按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。
 
-- 控制与单记录 JSON 保留实际字节／深度预算及重复属性检查，不要求重新编码后字节全等。未消费的 area、集合、队列／历史和歌曲／来源扩展随本次保存保留，包括未转换的大整数与高精度小数。数据库 header 仍须满足当前 format／scope／generation／receipt。
+- 控制与单记录的内存／协议投影保留实际字节和深度预算；数据库使用固定字段及关系，允许的动态扩展拆为类型节点，不保存整份 JSON。owner 状态仍须满足 scope／generation／receipt。
 - 仅在实际 getter／command 处校验当前动作涉及的 area；未知 area 不获得命令权限，也不阻断其他 area，未修改值原样保留。脚本实例私有存储不在此库。
 - 缺少可选 area 表示该 area 尚未创建；已有 `null`、错误类型或错误 schema 不是空状态，在实际消费时明确失败，不写回修复或覆盖为空库。
 - 不在加载／每次提交时遍历所有 area 或要求歌曲等于 Normalize 投影。所选歌曲身份、录音唯一 owner、队列引用／current、修订与账号绑定仍须成立；持久化的非法策略不当作用户写入参数返回。整库同步仍核对其实际遍历的集合／绑定／journal 关系。
@@ -232,7 +232,7 @@ Catalog 的 `music.catalog.playlist.save` 只转交上述元信息命令，不�
 - `MusicSongSession` 按 SQL 来源／本地定位／录音候选索引取得单曲，仅维护命令内真实变化的索引；新记录只在实际采用时分配 UUID。`MusicSongRepository` 在 library owner 的事务边界采用平台资料。
 - `localFileId` 是本地文件授权定位，不从永久 songId 反解文件。已登记本地 locator 复用其歌曲记录。
 - 选定封面及来源字段保存在仓库；采用、明确设置重选及实际图片失败由同一 owner 更新。成功提交后发布携带变更 ID 集合的 `SongMetadataChanged`，呈现只重投影受影响资料，不重建队列或联网证明内容。正常图片成功无需读取或复制歌曲库。
-- `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态和排除，不复制完整 Song 或重新生成身份。同步检查点只含控制 JSON，引擎按来源键／永久 ID 读取当前歌曲，单次匹配只采用对应记录。
+- `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态和排除，不复制完整 Song 或重新生成身份。同步检查点只保存类型化控制关系，引擎按来源键／永久 ID 读取当前歌曲，单次匹配只采用对应记录。
 
 ## 当前命令
 

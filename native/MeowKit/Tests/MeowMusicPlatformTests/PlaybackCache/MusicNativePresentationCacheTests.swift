@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import MeowMusicFeature
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicPlatform
 
 final class MusicNativePresentationCacheTests: XCTestCase {
@@ -13,12 +14,11 @@ final class MusicNativePresentationCacheTests: XCTestCase {
             .init(time: -0.09, duration: 0, text: "B")
         ]), .init(index: 1, time: 1, end: 1, text: "整句")]
     }
-    private func fixture() throws -> (URL, DocumentStore, MusicNativePresentationCache, MusicAccountTestClock) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: root, namespace: MusicNativePresentationCache.namespace)
-        let clock = MusicAccountTestClock()
-        return (root, store, MusicNativePresentationCache(storeFactory: { store }, clock: { clock.now() }), clock)
+    private func fixture() throws -> (URL, SQLiteDatabase, MusicNativePresentationCache, MusicAccountTestClock) {
+        let database = try storageTestDatabase(self), clock = MusicAccountTestClock()
+        let cache = MusicNativePresentationCache(database: database, clock: { clock.now() })
+        addTeardownBlock { await cache.close() }
+        return (database.dataRoot, database, cache, clock)
     }
     private func artwork() throws -> Data {
         try XCTUnwrap(Data(base64Encoded:
@@ -30,50 +30,44 @@ final class MusicNativePresentationCacheTests: XCTestCase {
     }
 
     func testCurrentResourcesRoundTripThroughASeparateColdOwnerWithoutSongImageCopies() async throws {
-        let (root, store, cache, clock) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+        let (root, database, cache, clock) = try fixture()
         let image = try artwork(), otherSong = UUID().uuidString.lowercased()
         _ = await cache.store(image, for: imageURL, revision: cache.revision)
         await lyrics(cache); await lyrics(cache, song: otherSong)
-        let cold = MusicNativePresentationCache(storeFactory: { store }, clock: { clock.now() })
+        await cache.close()
+        let cold = MusicNativePresentationCache(database: database, clock: { clock.now() })
+        addTeardownBlock { await cold.close() }
         let hit = await cold.read(imageURL), first = await cold.lyrics(songID: songID, authorization: .init())
         let second = await cold.lyrics(songID: otherSong, authorization: .init())
         XCTAssertEqual(hit?.data, image)
         XCTAssertEqual(first?.lines, lines); XCTAssertEqual(second?.lines, lines)
         XCTAssertEqual(first?.sourceKey, "native"); XCTAssertTrue(first?.lines[1].words.isEmpty == true)
-        let leaves = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(
-            MusicNativePresentationCache.namespace), includingPropertiesForKeys: nil)
-        XCTAssertEqual(leaves.filter { $0.lastPathComponent.hasPrefix("image-") }.count, 1)
-        XCTAssertEqual(leaves.filter { $0.lastPathComponent.hasPrefix("lyrics-") }.count, 2)
+        let rows = try await database.snapshot { try $0.query("SELECT song_id FROM ios_music_lyrics") }
+        XCTAssertEqual(rows.count, 2)
+        let leaves = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("resources-v1/music-images"), includingPropertiesForKeys: nil)
+        XCTAssertEqual(leaves.filter { $0.pathExtension == "bin" }.count, 1)
     }
 
     func testFullResourceQueriesRemainIndependentAndLyricsNeverContainImageBytes() async throws {
-        let (root, store, cache, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+        let (_, database, cache, _) = try fixture()
         let otherURL = URL(string: "https://images.invalid/artwork?size=512&public=one")!
         let image = try artwork()
         _ = await cache.store(image, for: imageURL, revision: cache.revision)
         await lyrics(cache)
-        let missing = await cache.read(otherURL)
-        XCTAssertNil(missing)
+        let missing = await cache.read(otherURL); XCTAssertNil(missing)
         let other = image + Data([0])
         _ = await cache.store(other, for: otherURL, revision: cache.revision)
         let first = await cache.read(imageURL), second = await cache.read(otherURL)
         XCTAssertEqual(first?.data, image); XCTAssertEqual(second?.data, other)
-        let leaves = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(
-            MusicNativePresentationCache.namespace), includingPropertiesForKeys: nil)
-        let lyric = try XCTUnwrap(leaves.first { $0.lastPathComponent.hasPrefix("lyrics-") })
-        let value = try JSONDecoder().decode(MusicLyricDisplaySnapshot.self, from: Data(contentsOf: lyric))
-        XCTAssertEqual(value.songID, songID); XCTAssertEqual(value.lines, lines)
-        XCTAssertNotNil(try store.read(key: "index"))
+        let rows = try await database.snapshot { try $0.query("SELECT text FROM ios_music_lyric_lines ORDER BY position") }
+        XCTAssertEqual(try rows.map { try $0.text("text") }, lines.map(\.text))
+        let columns = try await database.snapshot { try $0.query("PRAGMA table_info(ios_music_lyrics)") }
+        XCTAssertFalse(try columns.contains { try $0.text("type") == "BLOB" })
     }
 
-    func testImageClearRevokesOldWritersWithoutDeletingLyricsOrUserDocuments() async throws {
-        let (root, _, cache, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let library = try DocumentStore(baseURL: root, namespace: "user-library")
-        let userDocument = Data(#"{"songId":"permanent","queue":["occurrence"]}"#.utf8)
-        try library.write(userDocument, key: "songs")
+    func testImageClearRevokesOldWritersWithoutDeletingLyricsOrOtherOwners() async throws {
+        let (_, database, cache, _) = try fixture()
+        try await database.transaction { try $0.execute("INSERT INTO owner_revisions VALUES('durable-fixture',1,'receipt')") }
         let image = try artwork(), imageRevision = cache.revision, lyricRevision = cache.lyricRevision
         _ = await cache.store(image, for: imageURL, revision: imageRevision)
         await lyrics(cache)
@@ -82,24 +76,23 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         let staleWrite = await cache.store(image, for: imageURL, revision: imageRevision)
         let cleared = await cache.read(imageURL), healthy = await cache.lyrics(songID: songID, authorization: .init())
         XCTAssertNil(staleWrite); XCTAssertNil(cleared); XCTAssertEqual(healthy?.lines, lines)
-        XCTAssertEqual(try library.read(key: "songs"), userDocument)
         _ = await cache.store(image, for: imageURL, revision: cache.revision)
         await cache.clearLyrics()
         let retainedImage = await cache.read(imageURL), removedLyrics = await cache.lyrics(songID: songID, authorization: .init())
         XCTAssertEqual(retainedImage?.data, image); XCTAssertNil(removedLyrics)
         await cache.clear()
-        let removedImage = await cache.read(imageURL)
-        XCTAssertNil(removedImage); XCTAssertEqual(try library.read(key: "songs"), userDocument)
+        let removedImage = await cache.read(imageURL); XCTAssertNil(removedImage)
+        let durable = try await database.snapshot { try $0.query("SELECT revision FROM owner_revisions WHERE owner='durable-fixture'").first!.integer("revision") }
+        XCTAssertEqual(durable, 1)
     }
 
     func testRealWordTimingIsPreservedButInvalidMediaTimingsCannotReplaceHealthyLyrics() async throws {
-        let (root, _, cache, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+        let (_, _, cache, _) = try fixture()
         await lyrics(cache)
         for invalid in [
             [MusicLyricLine(index: 0, time: -0.1, end: 1, text: "invalid")],
-            [MusicLyricLine(index: 0, time: 0, end: 1, text: "invalid",
-                words: [.init(time: 0, duration: -0.01, text: "invalid")])]
+            [MusicLyricLine(index: 0, time: 0, end: 1, text: "invalid", words: [.init(time: 0, duration: -0.01, text: "invalid")])],
+            [MusicLyricLine(index: 0, time: 2, end: 2, text: "later"), MusicLyricLine(index: 1, time: 1, end: 1, text: "earlier")]
         ] {
             await cache.storeLyrics(invalid, sourceKey: "invalid", songID: songID,
                 revision: cache.lyricRevision, authorization: .init())
@@ -107,36 +100,32 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         let hit = await cache.lyrics(songID: songID, authorization: .init())
         XCTAssertEqual(hit?.lines, lines); XCTAssertEqual(hit?.sourceKey, "native")
         let revoked = MusicQueueAuthorization(); revoked.revoke()
-        let denied = await cache.lyrics(songID: songID, authorization: revoked)
-        XCTAssertNil(denied)
+        let denied = await cache.lyrics(songID: songID, authorization: revoked); XCTAssertNil(denied)
     }
 
-    func testDamagedCurrentLyricLeafDoesNotDiscardAnIndependentImage() async throws {
-        let (root, _, cache, clock) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+    func testDamagedCurrentLyricRowsDoNotDiscardAnIndependentImage() async throws {
+        let (_, database, cache, clock) = try fixture()
         let image = try artwork()
         await lyrics(cache); _ = await cache.store(image, for: imageURL, revision: cache.revision)
-        let leaves = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(
-            MusicNativePresentationCache.namespace), includingPropertiesForKeys: nil)
-        let leaf = try XCTUnwrap(leaves.first { $0.lastPathComponent.hasPrefix("lyrics-") })
-        try Data("invalid current document".utf8).write(to: leaf)
-        let cold = MusicNativePresentationCache(storeFactory: {
-            try DocumentStore(baseURL: root, namespace: MusicNativePresentationCache.namespace)
-        }, clock: { clock.now() })
+        await cache.close()
+        let id = songID
+        try await database.transaction { try $0.execute("DELETE FROM ios_music_lyric_lines WHERE song_id=?", [.text(id)]) }
+        let cold = MusicNativePresentationCache(database: database, clock: { clock.now() })
+        addTeardownBlock { await cold.close() }
         let missing = await cold.lyrics(songID: songID, authorization: .init()), healthy = await cold.read(imageURL)
         XCTAssertNil(missing); XCTAssertEqual(healthy?.data, image)
     }
 
     func testOnlyActualPlaybackRenewsThirtyDayRetentionAndDisplayReadsDoNot() async throws {
-        let (root, _, cache, clock) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let image = try artwork(), other = URL(string: "https://images.invalid/not-played")!
-        let start = clock.now()
+        let (_, database, cache, clock) = try fixture()
+        let image = try artwork(), other = URL(string: "https://images.invalid/not-played")!, start = clock.now()
         _ = await cache.store(image, for: imageURL, revision: cache.revision)
         _ = await cache.store(image, for: other, revision: cache.revision); await lyrics(cache)
         clock.advance(29 * 86_400)
-        let warm = await cache.read(imageURL); XCTAssertNotNil(warm)
-        let displayOnly = await cache.read(other); XCTAssertNotNil(displayOnly)
+        let warm = await cache.read(imageURL), displayOnly = await cache.read(other)
+        XCTAssertNotNil(warm); XCTAssertNotNil(displayOnly)
+        let before = try await database.snapshot { try $0.query("SELECT updated_at FROM ios_music_images") }
+        XCTAssertTrue(try before.allSatisfy { try $0.double("updated_at") == start.timeIntervalSince1970 })
         await cache.played(songID: songID, artwork: imageURL, confirmedAt: clock.now())
         clock.advance(2 * 86_400)
         let retained = await cache.read(imageURL), expired = await cache.read(other)
@@ -148,37 +137,28 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         XCTAssertNil(gone); XCTAssertNil(oldLyrics)
     }
 
-    func testDecodedCurrentLyricLeafWithNegativeSeekDoesNotDiscardAnIndependentImage() async throws {
-        let (root, _, cache, clock) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let image = try artwork()
+    func testCurrentSchemaRejectsNegativeSeekWithoutDiscardingAnIndependentImage() async throws {
+        let (_, database, cache, _) = try fixture()
+        let image = try artwork(), id = songID
         await lyrics(cache); _ = await cache.store(image, for: imageURL, revision: cache.revision)
-        let leaves = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(
-            MusicNativePresentationCache.namespace), includingPropertiesForKeys: nil)
-        let leaf = try XCTUnwrap(leaves.first { $0.lastPathComponent.hasPrefix("lyrics-") })
-        let invalid = MusicLyricDisplaySnapshot(songID: songID, sourceKey: "native",
-            lines: [.init(index: 0, time: -0.1, end: 1, text: "invalid seek")])
-        let data = try JSONEncoder().encode(invalid)
-        let decoded = try JSONDecoder().decode(MusicLyricDisplaySnapshot.self, from: data)
-        XCTAssertEqual(decoded.lines.first?.time, -0.1, "The current document remains decodable")
-        try data.write(to: leaf)
-        let cold = MusicNativePresentationCache(storeFactory: {
-            try DocumentStore(baseURL: root, namespace: MusicNativePresentationCache.namespace)
-        }, clock: { clock.now() })
-        let missing = await cold.lyrics(songID: songID, authorization: .init()), healthy = await cold.read(imageURL)
-        XCTAssertNil(missing); XCTAssertEqual(healthy?.data, image)
+        await storageTestThrows({ try await database.transaction { try $0.execute("UPDATE ios_music_lyric_lines SET time=-0.1 WHERE song_id=?", [.text(id)]) } }) {
+            XCTAssertEqual($0 as? SQLiteStorageError, .constraint)
+        }
+        let lyric = await cache.lyrics(songID: songID, authorization: .init()), healthy = await cache.read(imageURL)
+        XCTAssertEqual(lyric?.lines, lines); XCTAssertEqual(healthy?.data, image)
     }
 
     func testPersistenceFailureDoesNotTurnDecodedNetworkBytesIntoAFailure() async throws {
-        let image = try artwork(), cache = MusicNativePresentationCache(storeFactory: { throw DocumentStoreError.storageFailure })
-        let accepted = await cache.store(image, for: imageURL, revision: cache.revision)
+        let (_, database, cache, _) = try fixture()
+        try storageTestReadOnly(database, true)
+        let image = try artwork(), accepted = await cache.store(image, for: imageURL, revision: cache.revision)
         XCTAssertEqual(accepted?.data, image)
         let coldMiss = await cache.read(imageURL); XCTAssertNil(coldMiss)
+        try storageTestReadOnly(database, false)
     }
 
-    func testImagesAndLyricsShareTheExistingRealDiskBudgetIncludingIndex() async throws {
-        let (root, _, cache, clock) = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
+    func testImagesAndLyricsShareTheLogicalContentBudget() async throws {
+        let (root, database, cache, clock) = try fixture()
         var image = try artwork()
         image.append(Data(repeating: 0, count: 4 * 1024 * 1024 - image.count))
         for index in 0..<63 {
@@ -191,10 +171,10 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         let oldest = await cache.read(URL(string: "https://images.invalid/0")!), latest = await cache.read(newest)
         let lyric = await cache.lyrics(songID: songID, authorization: .init())
         XCTAssertNil(oldest); XCTAssertEqual(latest?.data.count, image.count); XCTAssertEqual(lyric?.lines, lines)
-        let files = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent(
-            MusicNativePresentationCache.namespace), includingPropertiesForKeys: [.fileSizeKey])
-        let bytes = try files.reduce(0) { try $0 + $1.resourceValues(forKeys: [.fileSizeKey]).fileSize! }
-        XCTAssertLessThanOrEqual(bytes, 256 * 1024 * 1024)
-        XCTAssertGreaterThan(bytes, 252 * 1024 * 1024)
+        let bytes = try await database.snapshot { try $0.query("SELECT (SELECT sum(bytes) FROM ios_music_images)+(SELECT sum(bytes) FROM ios_music_lyrics) AS bytes").first!.integer("bytes") }
+        XCTAssertLessThanOrEqual(bytes, 256 * 1024 * 1024); XCTAssertGreaterThan(bytes, 252 * 1024 * 1024)
+        let files = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("resources-v1/music-images"), includingPropertiesForKeys: [.fileSizeKey])
+        let rawBytes = try files.filter { $0.pathExtension == "bin" }.reduce(0) { try $0 + $1.resourceValues(forKeys: [.fileSizeKey]).fileSize! }
+        XCTAssertLessThanOrEqual(rawBytes, bytes)
     }
 }

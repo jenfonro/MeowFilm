@@ -50,9 +50,9 @@ test('loader enforces bundle identity on iOS and preserves desktop byte-hash adm
         artifact: platform === 'ios'
           ? { path: '.cache/ios-native/iphonesimulator-' + target.xcframeworkArchitecture + '/MeowScriptHost.framework/MeowScriptHost' }
           : { path: nativePath, bytes: artifact.length, sha256: sha(artifact) },
-        target, bindingIdentity: identity };
+        target, bindingIdentity: identity, sqlite: { version: '3.53.4' } };
       edit(manifest);
-      const loaded = { abi: 1, napi: 8, bindingIdentity: identity, ...loadedTarget,
+      const loaded = { abi: 1, napi: 8, bindingIdentity: identity, storageSQLiteVersion: '3.53.4', ...loadedTarget,
         create() { creates++; throw Object.assign(new Error('loaded'), { code: 'FIXTURE_LOADED' }); },
         duplicateBootstrapDescriptor(descriptor) {
           copies.push(descriptor);
@@ -65,8 +65,8 @@ test('loader enforces bundle identity on iOS and preserves desktop byte-hash adm
         lstatSync(value) {
           const name = convert(value);
           return { isDirectory: () => name.endsWith('/') || !/\\.(?:node|json|js)$/.test(name)
-              && !name.endsWith('/MeowScriptHost'),
-            isFile: () => /\\.(?:node|json|js)$/.test(name) || name.endsWith('/MeowScriptHost'),
+              && !name.endsWith('/MeowScriptHost') && !name.endsWith('/MeowSQLite'),
+            isFile: () => /\\.(?:node|json|js)$/.test(name) || name.endsWith('/MeowScriptHost') || name.endsWith('/MeowSQLite'),
             isSymbolicLink: () => linked && name.endsWith(linked) };
         },
         readFileSync(value) {
