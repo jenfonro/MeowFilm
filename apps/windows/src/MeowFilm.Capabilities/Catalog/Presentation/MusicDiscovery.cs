@@ -9,9 +9,9 @@ public sealed record MusicDiscoverySong(SongRow Song, string ChartId, long Gener
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
     public string Title => Song.Title;
     public string Artist => Song.Artist;
-    internal void RefreshSong(System.Text.Json.JsonElement? value)
+    internal void RefreshSong(System.Text.Json.JsonElement? value, long publication = -1)
     {
-        if (!Song.ApplyRepository(value)) return;
+        if (!Song.ApplyRepository(value, publication)) return;
         PropertyChanged?.Invoke(this, new(nameof(Title)));
         PropertyChanged?.Invoke(this, new(nameof(Artist)));
     }

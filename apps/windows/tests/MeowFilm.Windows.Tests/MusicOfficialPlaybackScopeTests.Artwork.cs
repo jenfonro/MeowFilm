@@ -613,9 +613,13 @@ public static partial class MusicOfficialPlaybackScopeTests
                 platform = "wy", more = false, continuation = (object?)null,
                 sections = call.Parameters.GetProperty("id").GetString() == "cache-a" ? new object[]
                 {
-                    new { id = "songs", title = "Songs", type = "songs", items = new[] { original } },
-                    new { id = "rankings", title = "Rankings", type = "rankings", layout = "ranked-songs",
-                        items = new[] { new { id = "rank", name = "Rank", kind = "playlist",
+                    new { id = "songs", title = "Songs", layout = "song-list", items = new[]
+                        { new { id = "cached", title = "Catalog title", subtitle = "Catalog subtitle",
+                            cover = "https://images.example.test/catalog.png", kind = "song", song = original,
+                            action = new { type = "song", id = "cached" } } } },
+                    new { id = "rankings", title = "Rankings", layout = "ranked-songs",
+                        items = new[] { new { id = "rank", title = "Rank", kind = "playlist",
+                            action = new { type = "playlist", id = "rank" },
                             preview = new[] { new { song = original, rank = 1 } } } } }
                 } : Array.Empty<object>()
             })),
@@ -636,12 +640,17 @@ public static partial class MusicOfficialPlaybackScopeTests
         int requests = f.Runtime.Requests.Count, writes = f.Store.Writes;
         await f.Module.NavigateAsync("catalog-channel/wy/cache-a", default);
         var restored = f.Module.CatalogSections.SelectMany(section => section.Items).Single(item => item.Song is not null);
-        Check(ReferenceEquals(restored, card) && restored.Song!.Id == id &&
-            restored.Title == "Current title" && restored.Subtitle == "Current artist" &&
+        Check(ReferenceEquals(restored, card) && restored.Song!.Id == id,
+            "cache restoration retains the card and permanent song identity");
+        Check(restored.Title == "Catalog title" && restored.Subtitle == "Catalog subtitle" &&
+            restored.Cover == "https://images.example.test/catalog.png",
+            "a canonical catalog card retains its independent display label and cover");
+        Check(restored.Song!.Title == "Current title" && restored.Song.Artist == "Current artist" &&
             restored.Song.Album == "Current album" && restored.Song.Duration == "1:43" &&
-            restored.Cover == "https://images.example.test/current.png" &&
-            ranking.PreviewSongs.Single().Song!.Id == id && ranking.PreviewSongs.Single().Title == restored.Title &&
-            ranking.FirstPreviewCover == restored.Cover);
+            restored.Song.Cover == "https://images.example.test/current.png" &&
+            ranking.PreviewSongs.Single().Song!.Id == id && ranking.PreviewSongs.Single().Title == restored.Song.Title &&
+            ranking.FirstPreviewCover == restored.Song.Cover,
+            "the permanent song and ranking preview restore current repository metadata");
         Check(f.Runtime.Requests.Count == requests && f.Store.Writes == writes,
             "cache restoration only projects permanent references; no adoption or request");
         var after = await f.Ok("music.queue.get");
@@ -656,17 +665,20 @@ public static partial class MusicOfficialPlaybackScopeTests
         await using var f = await ArtworkScene.Create();
         var source = ArtworkSong("wy", "template", "https://images.example.test/template-1.png");
         var respond = f.Runtime.OnRequest;
-        f.Runtime.OnRequest = (call, token) => call.Operation switch
-        {
-            "channel" => Task.FromResult(Element(new { platform = "wy", items = new[] { source }, more = false })),
-            "song" => Task.FromResult(Element(source)),
-            _ => respond(call, token)
-        };
-        await f.Module.NavigateAsync("catalog-channel/wy/template", default);
-        var card = f.Module.CatalogSections.Single().Items.Single();
+        f.Runtime.OnRequest = (call, token) => call.Operation == "song"
+            ? Task.FromResult(Element(source)) : respond(call, token);
+        var admitted = await MusicSongFixture.AdoptAsync(f.App, source);
+        var card = MusicCatalogDto.SearchResults(Element(new[] { admitted }), "songs").Single();
         var view = new MusicCatalogView();
-        var content = (FrameworkElement)((DataTemplate)DesktopVisual.Resource(view, "Catalog.SongRow")).LoadContent();
+        var content = new MusicCatalogCardView { Presentation = MusicCatalogCardLayout.Song,
+            VerticalAlignment = VerticalAlignment.Top };
         content.DataContext = card; view.Content = content;
+        async Task RefreshRepositorySong()
+        {
+            await f.Ok("music.catalog.song", new { platform = "wy", id = "template", refresh = true });
+            var snapshot = await f.App.SongSnapshotsAsync([card.Song!.Id]);
+            card.RefreshSong(snapshot.Songs[card.Song.Id], snapshot.Publication);
+        }
         using var controlled = new ControlledArtwork();
         ArtworkScope.SetLoader(view, controlled);
         var window = DesktopTestUi.CreateWindow(view, 430, 130);
@@ -675,31 +687,39 @@ public static partial class MusicOfficialPlaybackScopeTests
             window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout();
             await Until(() => controlled.Calls.Count == 1);
             var image = ArtworkDescendants<ArtworkImage>(view).Single();
-            Check(image.DisplayIdentity == card.Song!.Id);
-            var initial = new ArtworkTestLease(); controlled.Calls[0].Completion.TrySetResult(initial);
+            Check(image.DisplayIdentity == card.Song!.Id,
+                "the real song component binds artwork to its permanent song identity");
+            var initial = new ArtworkTestLease();
+            var initialPixels = initial.Image.GetSource(image.DispatcherQueue);
+            controlled.Calls[0].Completion.TrySetResult(initial);
             await Until(() => image.Source is not null);
             source = ArtworkSong("wy", "template", "https://images.example.test/template-2.png");
-            await f.Ok("music.catalog.song", new { platform = "wy", id = "template", refresh = true });
+            await RefreshRepositorySong();
             await Until(() => controlled.Calls.Count == 2);
-            Check(ReferenceEquals(image.Source, initial.Image) && !initial.Disposed);
+            Check(ReferenceEquals(image.Source, initialPixels) && !initial.Disposed,
+                "a pending same-song repository update retains the successful pixels and their lease");
             controlled.Calls[1].Completion.TrySetException(new ArtworkException("ARTWORK_NETWORK"));
             await Until(() => ToolTipService.GetToolTip(image) is not null);
-            Check(ReferenceEquals(image.Source, initial.Image), "real template keeps success on replacement failure");
+            Check(ReferenceEquals(image.Source, initialPixels), "real template keeps success on replacement failure");
             source = ArtworkSong("wy", "template", "https://images.example.test/template-3.png");
-            await f.Ok("music.catalog.song", new { platform = "wy", id = "template", refresh = true });
+            await RefreshRepositorySong();
             await Until(() => controlled.Calls.Count == 3);
-            Check(ReferenceEquals(image.Source, initial.Image));
-            var replacement = new ArtworkTestLease(); controlled.Calls[2].Completion.TrySetResult(replacement);
-            await Until(() => ReferenceEquals(image.Source, replacement.Image));
-            Check(initial.Disposed);
+            Check(ReferenceEquals(image.Source, initialPixels),
+                "a subsequent pending replacement still retains the original successful BitmapSource");
+            var replacement = new ArtworkTestLease();
+            var replacementPixels = replacement.Image.GetSource(image.DispatcherQueue);
+            controlled.Calls[2].Completion.TrySetResult(replacement);
+            await Until(() => ReferenceEquals(image.Source, replacementPixels));
+            Check(initial.Disposed, "publishing replacement pixels releases the previous successful image lease");
             var other = await MusicSongFixture.AdoptAsync(f.App,
                 ArtworkSong("wy", "different-template-song", "https://images.example.test/different-template.png"));
             var otherRow = SongRow.Read(Element(other));
             content.DataContext = new MusicCatalogCard(otherRow.Id, otherRow.Title, otherRow.Artist, otherRow.Cover,
                 "song", "wy", otherRow);
-            await Until(() => image.DisplayIdentity == otherRow.Id &&
-                image.Address == otherRow.Cover && controlled.Calls.Any(call => call.Address == otherRow.Cover));
-            Check(image.Source is null && replacement.Disposed, "recycled template cannot show another song's successful pixels");
+            await Until(() => ArtworkDescendants<ArtworkImage>(content).Any(next => next.DisplayIdentity == otherRow.Id &&
+                next.Address == otherRow.Cover) && controlled.Calls.Any(call => call.Address == otherRow.Cover));
+            var recycled = ArtworkDescendants<ArtworkImage>(content).Single();
+            Check(recycled.Source is null && replacement.Disposed, "recycled template cannot show another song's successful pixels");
         }
         finally { window.Content = null; window.Close(); }
     }

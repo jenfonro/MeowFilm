@@ -42,6 +42,17 @@ public sealed partial class MusicCapability
             .GetProperty("settings");
         if (generation != metadataGeneration || stopping || disposed) return;
         PublishMetadataSettings(settings);
+        await RefreshMetadataArtworkAsync(generation, token);
+    }
+    private async Task RefreshMetadataArtworkAsync(long generation, CancellationToken token)
+    {
+        if (generation != metadataGeneration || stopping || disposed || current is not { } song ||
+            application is not MusicNativeApplication owner) return;
+        var snapshot = await owner.SongSnapshotsAsync([song.Id], token);
+        token.ThrowIfCancellationRequested();
+        if (generation != metadataGeneration || stopping || disposed || current?.Id != song.Id) return;
+        current.ApplyRepository(snapshot.Songs.GetValueOrDefault(song.Id), snapshot.Publication);
+        RefreshCurrentArtwork();
     }
     private void RetireMetadataSettings()
     {
@@ -123,6 +134,7 @@ public sealed partial class MusicCapability
                     new { ifRevision = revision, platforms, enabled }, lifetime.Token);
                 if (generation != metadataGeneration || stopping || disposed) return;
                 PublishMetadataSettings(result.GetProperty("settings"));
+                await RefreshMetadataArtworkAsync(generation, lifetime.Token);
             }
             catch
             {

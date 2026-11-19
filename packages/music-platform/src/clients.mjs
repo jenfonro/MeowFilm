@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Anonymous client recipes from the pinned QQMusicApi / KuGouMusicApi sources.
 import { constants, publicEncrypt, randomInt, randomUUID } from 'node:crypto';
-import { createAnonymousClientStore } from './client-store.mjs';
+import { anonymousClient, createAnonymousClientStore } from './client-store.mjs';
 import { aes, decrypt, hex, kgPublicKey, kgRequest, kgSuccess, md5, responseCookies, txRequest, txSuccess } from './protocols.mjs';
 import { decodeJSON, object, required } from './model.mjs';
 import { fail, MusicPlatformError } from './errors.mjs';
@@ -66,6 +66,7 @@ const chinaDay = time => Math.floor((time + 8 * 3600000) / 86400000);
 export function createClientContexts({ dataRoot, clientStore, transport, clock }) {
   const store = clientStore ?? createAnonymousClientStore(dataRoot);
   let state, loading, uncertain = false, writes = Promise.resolve();
+  const selected = new Set();
   const flights = new Map(), lifetime = new AbortController();
   function ready() {
     if (state && !uncertain) return Promise.resolve();
@@ -80,7 +81,7 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
         try { await store.initialize(current); }
         catch (error) { uncertain = true; fail(commitCode(error)); }
       }
-      state = current; uncertain = false;
+      state = current; selected.clear(); uncertain = false;
     }).finally(() => { loading = undefined; });
     loading.catch(() => {});
     return loading;
@@ -95,12 +96,23 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
     if (!state || uncertain) fail('STORAGE_ERROR');
     return state;
   }
+  function get(platform) {
+    const current = load()[platform];
+    if (platform === 'kw' || platform === 'mg') return current;
+    if (!selected.has(platform)) {
+      try { state = {...state,[platform]:anonymousClient(platform, current, 'CORRUPT_STORAGE')}; }
+      catch { fail('CORRUPT_STORAGE'); }
+      selected.add(platform);
+    }
+    return state[platform];
+  }
   function save(platform, proposed) {
     const work = writes.then(async () => {
       await ready(); lifetime.signal.throwIfAborted();
-      const value = typeof proposed === 'function' ? proposed(load()[platform]) : proposed;
-      if (value === undefined) return load()[platform];
-      try { await store.writePlatform(platform, value); }
+      const current = get(platform), next = typeof proposed === 'function' ? proposed(current) : proposed;
+      if (next === undefined) return current;
+      let value;
+      try { value = anonymousClient(platform, next, 'INVALID_REQUEST'); await store.writePlatform(platform, value); }
       catch (error) { uncertain = true; fail(commitCode(error)); }
       state = {...state,[platform]:value};
       return value;
@@ -109,7 +121,7 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
     return work;
   }
   async function prepare(platform, signal) {
-    let client = load()[platform];
+    let client = get(platform);
     if (platform !== 'tx') return client;
     const now = clock();
     if (!client.qimei || client.qimei.savedAt > now || now - client.qimei.savedAt >= 86400000) {
@@ -145,10 +157,10 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
   }
   return {
     get ready() { return ready(); },
-    get(platform) { return load()[platform]; },
+    get,
     prepare(platform) { return shared(platform, signal => prepare(platform, signal)); },
     registerKg(device) { return shared(device ? 'kg-candidate:' + device.seed : 'kg-registration', async signal => {
-      const client = device ?? load().kg;
+      const client = device ?? get('kg');
       if (client.dfid) return client;
       const secret = Array.from({ length: 6 }, () => '0123456789abcdefghijklmnopqrstuvwxyz'[randomInt(36)]).join('');
       const digest = md5(secret), key = digest.slice(0, 16), iv = digest.slice(16);

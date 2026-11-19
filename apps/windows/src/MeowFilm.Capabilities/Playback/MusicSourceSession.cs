@@ -9,14 +9,14 @@ public sealed partial class MusicCapability
 {
     private long exclusionsRevision, selectionSourcesRevision;
     private JsonElement KnownOfficialSong(SongRow song, JsonElement? snapshot = null) =>
-        application is MusicNativeApplication owner ? owner.SongSnapshot(song.Id) ?? snapshot ?? song.Raw : snapshot ?? song.Raw;
+        snapshot ?? song.Raw;
     private void AcceptOfficialSong(SongRow song, MusicOnlineTarget? target)
     {
         if (target?.RecordingSong is null) return;
         if (current?.EntryId == song.EntryId && current?.Id == song.Id) RefreshCurrentArtwork();
     }
     // The stable queue song is never replaced by a cross-platform search result.
-    // Refresh, chorus and feedback project current metadata from the same repository.
+    // Refresh, chorus and feedback use the row published from the same repository.
     private JsonElement PlaybackSong(SongRow song) =>
         KnownOfficialSong(song);
     private JsonElement FeedbackSong(SongRow song)
@@ -102,13 +102,42 @@ public sealed partial class MusicCapability
         private readonly bool OfficialOnly = officialOnly;
         private HashSet<SourceExclusion> exclusions = [];
         private long exclusionsRevision = -1;
-        private JsonElement expanded = owner.KnownOfficialSong(song);
+        private JsonElement expanded = song.Raw;
+        private long expandedPublication = song.RepositoryPublication;
+        private void AcceptSong(JsonElement value, long publication)
+        {
+            if (publication < expandedPublication) return;
+            expandedPublication = publication;
+            if (JsonElement.DeepEquals(value, expanded)) return;
+            expanded = value.Clone();
+            official.Clear(); exhausted.Clear();
+        }
         private void RefreshSong()
         {
-            var current = owner.KnownOfficialSong(Song, expanded);
-            if (JsonElement.DeepEquals(current, expanded)) return;
-            expanded = current;
-            official.Clear(); exhausted.Clear();
+            // A completed platform reply can be newer than the row whose UI event
+            // is still queued. Only a later repository publication may replace it.
+            if (Song.RepositoryPublication > expandedPublication)
+                AcceptSong(Song.Raw, Song.RepositoryPublication);
+        }
+        internal async Task RefreshSongAsync(CancellationToken token)
+        {
+            RefreshSong();
+            if (owner.application is not MusicNativeApplication native) return;
+            var snapshot = await native.SongSnapshotsAsync([Song.Id], token);
+            token.ThrowIfCancellationRequested();
+            if (snapshot.Publication > expandedPublication && snapshot.Songs.GetValueOrDefault(Song.Id) is { } value)
+                AcceptSong(value, snapshot.Publication);
+        }
+        private async Task AcceptReplyAsync(JsonElement value, CancellationToken token)
+        {
+            if (owner.application is not MusicNativeApplication native)
+            {
+                AcceptSong(value, Math.Max(expandedPublication, Song.RepositoryPublication));
+                return;
+            }
+            var snapshot = await native.SongSnapshotsAsync([Song.Id], token);
+            token.ThrowIfCancellationRequested();
+            AcceptSong(snapshot.Songs.GetValueOrDefault(Song.Id) ?? value, snapshot.Publication);
         }
         private string[] preference = [];
         private bool completed, historyLoaded;
@@ -139,7 +168,8 @@ public sealed partial class MusicCapability
         internal string? Failure;
         internal void Inherit(MusicSourceSession previous)
         {
-            expanded = previous.expanded;
+            if (previous.expandedPublication >= expandedPublication)
+                AcceptSong(previous.expanded, previous.expandedPublication);
             foreach (var pair in previous.Attempts.Where(pair => pair.Value.State == SourceAttemptState.Ok && Fresh(pair.Value) &&
                 (!pair.Value.Target.Official || previous.Signature == Signature &&
                     pair.Value.Target.AccountScope is { } scope &&
@@ -238,8 +268,7 @@ public sealed partial class MusicCapability
             MusicDto.Require(MusicDto.Text(reply, "qualityPolicySignature") == Signature);
             var decorated = SongRow.Read(reply.GetProperty("song"), Song.EntryId);
             MusicDto.Require(decorated.Id == Song.Id);
-            expanded = decorated.Raw.Clone();
-            RefreshSong();
+            await AcceptReplyAsync(decorated.Raw, token);
             var candidates = reply.GetProperty("candidates").EnumerateArray().ToArray();
             if (preference.Length == 0) preference = candidates.Select(row => MusicDto.Text(row, "sourceKey")).ToArray();
             var targets = candidates.Select(row => new MusicOnlineTarget(null, MusicDto.Text(row, "platform"),
@@ -414,8 +443,7 @@ public sealed partial class MusicCapability
             token.ThrowIfCancellationRequested();
             var merged = SongRow.Read(reply.GetProperty("song"), Song.EntryId);
             MusicDto.Require(merged.Id == Song.Id);
-            expanded = merged.Raw.Clone();
-            RefreshSong();
+            await AcceptReplyAsync(merged.Raw, token);
             // Cancelled/failed requests are not a completed negative search.
             completed = true;
             checkedContent.UnionWith(failures);
@@ -431,6 +459,7 @@ public sealed partial class MusicCapability
             await selection.WaitAsync(token);
             try
             {
+                await RefreshSongAsync(token);
                 await LoadExclusionsAsync(token);
                 await LoadHistoryAsync(token);
                 if (!collect && Known(tier, exact) is { } history) return history;
@@ -479,7 +508,7 @@ public sealed partial class MusicCapability
         private async Task<ResolvedMusic> RefreshTargetAsync(MusicOnlineTarget target, CancellationToken token)
         {
             await LoadExclusionsAsync(token);
-            RefreshSong();
+            await RefreshSongAsync(token);
             target = target with { RecordingSong = expanded };
             if (Excluded(target)) throw new MusicOperationException("SOURCE_EXCLUDED");
             ResolvedMusic media;
@@ -539,13 +568,13 @@ public sealed partial class MusicCapability
         /// <summary>The next manual-browser group, independent of automatic preference or enablement.</summary>
         internal async Task<bool> ExpandAsync(CancellationToken token)
         {
-            RefreshSong();
+            await RefreshSongAsync(token);
             var tier = MusicQualityPolicy.SourceTiers.FirstOrDefault(value => !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
             if (tier is null) return false;
             await TierAsync(tier, collect: true, complete: true, token, exact: true, manualSource: true);
             return true;
         }
-        internal bool CanExpand => !JsonElement.DeepEquals(owner.KnownOfficialSong(Song, expanded), expanded) ||
+        internal bool CanExpand => Song.RepositoryPublication > expandedPublication && !JsonElement.DeepEquals(Song.Raw, expanded) ||
             MusicQualityPolicy.SourceTiers.Any(value =>
                 !exhausted.Contains(value.Category + ":" + string.Join(",", value.Levels)));
         internal void Exclude(string provider, string platform)
@@ -582,6 +611,7 @@ public sealed partial class MusicCapability
         string? platform = recordingPlatforms.GetValueOrDefault(song.Id);
         string? key = platform is null ? null : recordingChoices.GetValueOrDefault(song.Id + "\0" + platform);
         var session = new MusicSourceSession(this, song, signature, policy, scripts, enabled, officialOnly, platform, key, explicitRecordings.Contains(song.Id));
+        await session.RefreshSongAsync(token);
         await session.LoadExclusionsAsync(token);
         return session;
     }

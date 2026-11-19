@@ -424,6 +424,53 @@ test('WY artist list, new songs and logged-in artist activity consume their own 
   await f.close();
 });
 
+test('WY response status follows the selected root or data payload and preserves nested refusals without payload', async t => {
+  const protocol = { pages: [{ componentName: 'Grid', children: [
+    { componentName: 'Playlist', props: { id: '123', name: 'Current' } },
+  ] }] };
+  const recipes = [
+    { name: 'artists', operation: 'channel', params: { id: 'artist' }, suffix: '/artist/list',
+      payload: { artists: [{ id: '123', name: 'Current' }] },
+      check: value => assert.equal(value.sections[0].items[0].id, '123') },
+    { name: 'cube', operation: 'channel', params: { id: 'current', pageCode: 'PAGE' }, suffix: '/cube/render/page/protocol',
+      payload: { pageProtocol: protocol }, check: value => assert.equal(value.sections[0].items[0].id, '123') },
+    { name: 'tags', operation: 'channel', params: { id: 'current', pageCode: 'PAGE' }, suffix: '/tag/tab/tags',
+      payload: { algTagInfos: [{ algTagId: '123', algTagName: 'Current' }] },
+      check: value => assert.equal(value.sections.at(-1).tags.at(-1).id, '123') },
+    { name: 'vip', operation: 'channel', params: { id: 'vip' }, suffix: '/viptab/recommend/song/list',
+      payload: { songInfoList: [wySong('123')] }, check: value => assert.equal(idOf(value.sections[0].items[0]), '123') },
+    { name: 'daily', operation: 'daily', params: {}, suffix: '/discovery/recommend/songs',
+      payload: { recommend: [wySong('123')] }, nested: { dailySongs: [wySong('123')] },
+      check: value => assert.equal(idOf(value.items[0]), '123') },
+  ];
+  for (const recipe of recipes) for (const [placement, code] of [
+    ['root', 'unconsumed-extension'], ['root', 403], ['nested', 301], ['missing', 301],
+  ]) await t.test(recipe.name + ':' + placement + ':' + code, async t => {
+    const server = recipe.name === 'daily' ? xeapi() : null;
+    const raw = { code: 200,
+      ...(placement === 'missing' ? {} : recipe.payload),
+      data: { code, ...(placement === 'nested' ? recipe.nested ?? recipe.payload : {}) } };
+    const f = fixture(request => {
+      const path = new URL(request.url).pathname;
+      if (path === '/api/bsr/sk/get') return server.key(request);
+      if (path.endsWith(recipe.suffix)) {
+        if (server) { server.open(request); return server.reply(raw); }
+        return response(raw);
+      }
+      if (recipe.name === 'tags' && path.endsWith('/cube/render/page/protocol')) return response({ code: 200,
+        data: { pageProtocol: { pages: [{ componentName: 'Root', props: { songList: { ruleId: 'rule' } } }] } } });
+      if (recipe.name === 'tags' && path.endsWith('/tag/tab/alg/recommends')) return response({ code: 200, data: { songs: [] } });
+      if (recipe.name === 'vip' && path.endsWith('/toplist/detail/v2')) return response({ code: 500 });
+      assert.fail(path);
+    }); seedClients(f); t.after(() => f.close());
+    if (server) await f.session('wy');
+    const work = f.request('wy', recipe.operation, recipe.params);
+    if (placement === 'root') recipe.check(await work);
+    else await assert.rejects(work, { code: 'AUTH_REQUIRED' });
+    assert.equal(f.requests.filter(request => new URL(request.url).pathname.endsWith(recipe.suffix)).length, 1);
+  });
+});
+
 test('WY search discovery uses actual hot-tab continuation and isolates optional component failures', async () => {
   const f = fixture(request => {
     const { path, data } = eapi(request);

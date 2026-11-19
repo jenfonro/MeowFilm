@@ -66,6 +66,33 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     internal PlaybackCache.MusicPresentationCache PresentationCache => library.PresentationCache;
     internal Task ArtworkLoadCompletedAsync(string address, bool succeeded) =>
         library.ArtworkLoadCompletedAsync(address, succeeded);
+    internal async Task<MusicLibraryOwner.SongSnapshotBatch> SongSnapshotsAsync(IEnumerable<string> ids,
+        CancellationToken cancellationToken = default)
+    {
+        CancellationToken generation;
+        lock (gate)
+        {
+            if (stopping || closed) throw new MusicOperationException("CLOSED");
+            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            generation = lifetime.Token;
+        }
+        try
+        {
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
+            return await library.SongSnapshotsAsync(ids, request.Token).ConfigureAwait(false);
+        }
+        catch (MusicLibraryException error) { throw new MusicOperationException(error.Code); }
+        catch (DocumentStoreException error)
+        {
+            throw new MusicOperationException(error.Error switch
+            {
+                DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",
+                DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
+                _ => "STORAGE"
+            });
+        }
+        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
+    }
     internal JsonElement? SongSnapshot(string id) => library.SongSnapshot(id);
     internal event Action<IReadOnlySet<string>>? SongMetadataChanged
     {

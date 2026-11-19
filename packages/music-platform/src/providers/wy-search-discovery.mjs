@@ -15,13 +15,13 @@ export async function wySearchDiscovery(c, { components = ['hot', 'charts', 'sug
     }
     const [hot, top, suggested] = await Promise.all([
       components.includes('hot') ? capture('hot', null, async () => {
-        const root = await c.wy('/api/search/pc/chart/list', {}), data = record(root?.data);
+        const root = await c.wy('/api/search/pc/chart/list', {}, false, { dataStatus: true }), data = record(root?.data);
         c.observe('tabInfo.list', data.tabInfo?.list);
         const selected = array(data.tabInfo?.list).find(row => row?.id === 'HOT_SEARCH_SONG#@#');
         if (!selected) return { items: [], canPlay: false };
         let source = data.items?.[selected.id];
         if (source == null || Array.isArray(source) && !source.length)
-          source = (await c.wy('/api/search/pc/chart/detail', { id: selected.id }))?.data?.itemList;
+          source = (await c.wy('/api/search/pc/chart/detail', { id: selected.id }, false, { dataStatus: true }))?.data?.itemList;
         c.observe('hot.items', source);
         const items = array(source).map(record).map((row, index) => ({
           keyword: text(row.searchWord), rank: index + 1, score: optionalNumber(row.score),
@@ -35,7 +35,7 @@ export async function wySearchDiscovery(c, { components = ['hot', 'charts', 'sug
       }) :
         { value: null, failure: null },
       components.includes('suggestions') ? capture('default', null, async () =>
-        text((await c.wy('/api/search/defaultkeyword/get', {}))?.data?.realkeyword)) : { value: null, failure: null },
+        text((await c.wy('/api/search/defaultkeyword/get', {}, false, { dataStatus: true }))?.data?.realkeyword)) : { value: null, failure: null },
     ]);
     if (hot.failure && top.failure) fail(hot.failure.code);
     return { hot: hot.value?.items ?? [], hotCanPlay: hot.value?.canPlay ?? false,

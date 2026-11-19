@@ -165,7 +165,8 @@ export function createSyncOperations() {
           case 'create':
             raw = await c.wy('/api/playlist/create', { name: input(name), privacy: 10, type: 'NORMAL' }, true, callbacks);
             return { createdId: required(first(raw.id, raw.playlist?.id)), createdName: text(first(raw.playlist?.name, name)) };
-          case 'delete': raw = await c.wy('/api/playlist/remove', { ids: JSON.stringify([input(id ?? remote?.id)]) }, true, callbacks); break;
+          case 'delete': raw = await c.wy('/api/playlist/remove', { ids: JSON.stringify([input(id ?? remote?.id)]) }, true,
+            { ...callbacks, dataStatus: true }); break;
           case 'rename':
             raw = await c.wy('/api/batch', { '/api/playlist/update/name': JSON.stringify({ id: input(id ?? remote?.id), name: input(name) }) }, false, callbacks);
             try { wySuccess(raw['/api/playlist/update/name'] ?? {}); }

@@ -67,7 +67,7 @@ test('an unknown QIMEI save reloads the applied value or actual durable winner, 
   }
 });
 
-test('anonymous context rejects unknown internal fields and cold reload keeps fixed identity and session rows', async t => {
+test('anonymous context projects consumed identity fields and cold reload keeps fixed identity and session rows', async t => {
   const f = fixture(request => qq(request).req_0.method === 'GetSession' ?
     rpc({ session: { uid: 'new-uid', sid: 'new-sid' } }) :
     rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } }));
@@ -75,10 +75,21 @@ test('anonymous context rejects unknown internal fields and cold reload keeps fi
   seedClients(f);
   const state = (await f.clientState()); state.tx.session = null;
   const before = await f.clientState();
-  const invalid = structuredClone(state); invalid.tx.extension = { number: '9007199254740995' };
-  await assert.rejects(f.setClientState(invalid), { code: 'INVALID_REQUEST' });
-  assert.deepEqual(await f.clientState(), before);
+  state.extension = { number: '9007199254740995' };
+  state.wy.extension = { unrelated: false };
+  state.wy.cookies.unrelated = { ignored: true };
+  state.wy.cookies.MUSIC_U = 'synthetic-account-credential';
+  state.wy.cookies.__csrf = 'synthetic-account-csrf';
+  state.kg.extension = { unrelated: false };
+  state.tx.extension = { unrelated: false };
+  state.tx.qimei.extension = { unrelated: false };
   await f.setClientState(state);
+  const projected = await f.clientState();
+  assert.equal(projected.extension, undefined); assert.deepEqual(projected.wy, before.wy);
+  assert.deepEqual(projected.kg, before.kg); assert.deepEqual(projected.tx.qimei, before.tx.qimei);
+  assert.equal(projected.tx.extension, undefined);
+  assert.deepEqual(await f.database.query(
+    "SELECT cookie_name FROM music_anonymous_wy_cookies WHERE cookie_name IN ('MUSIC_U','__csrf','unrelated')"), []);
   await f.request('tx', 'search', { keyword: 'x' });
   const saved = await f.clientState();
   assert.deepEqual(saved.wy, before.wy); assert.deepEqual(saved.kg, before.kg);

@@ -29,11 +29,11 @@ FM 封面需求使用既有 `operation:"fm", params:{preview:true,...}`：规则
 
 ## 数据与生命周期
 
-默认文档 port 为 `PrivateDocuments(dataRoot, "music-platform")`，用于当前匿名协议状态；原生凭据安全存储、永久歌曲仓库及图片字节不在此处。包复用 Node 内置能力与公共 JSON 模块，没有新增第三方 npm 运行依赖。
+匿名协议状态保存在同一 App 数据根的 `music_anonymous_*` SQLite 类型表；原生凭据安全存储、永久歌曲仓库及图片字节不在此处。读取快照不预检未选平台：所选身份在实际消费前检查，缺失／损坏报 `CORRUPT_STORAGE`，不重新生成安装身份。普通扩展不阻断请求，写入只投影匿名协议字段；网易账号凭据不进入匿名 Cookie 表。CAS、未知提交回执后的重读与关闭排空保持原职责。包复用 Node 内置能力与公共 JSON 模块，没有新增第三方 npm 运行依赖。
 
 QQ 匿名 prepare 只保存实际请求使用的 q36 与保存时间，不要求或保存 q16；UID／SID、时效、保存确认和关闭排空保持原职责。
 
-匿名文档读写及 API 缓存复制使用公共 `@meowfilm/runtime-bridge/json`，无关状态更新保留未消费扩展的精确数字；HTTP 请求中的精确数字定位在音乐实际参数消费处转为字符串或协议整数，不对 rawJSON 使用 `structuredClone`。
+API 缓存复制使用公共 `@meowfilm/runtime-bridge/json`；HTTP 请求中的精确数字定位在音乐实际参数消费处转为字符串或协议整数，不对 rawJSON 使用 `structuredClone`。网易根业务状态仍要求数字整数；配方显式消费 `data` 状态层时检查该层，搜索等读取 `result` 的配方不检查未消费兄弟 `data.code`。已有根／嵌套字段选择的配方跟随实际使用层：仅使用根结果时忽略兄弟状态，使用嵌套字段或没有根结果时保留嵌套失败。真实认证、限流、业务拒绝及写入子回执继续按原错误分类返回，不能用空内容代替失败。
 
 request 将 HTTP `context.signal` 交给 owner。普通目录读取退订与物理工作分别跟踪；媒体／认证等实际取消、session 失效、已派发写回执和 close 由共同 owner 管理。session 更新等待应退休工作物理结算；close 停止新准入、取消未提交工作并等待真实结束，运行器不把 owner 关闭失败伪报成功。原生设置未知提示见[设置回执](../common/music/settings-receipts.md)。
 

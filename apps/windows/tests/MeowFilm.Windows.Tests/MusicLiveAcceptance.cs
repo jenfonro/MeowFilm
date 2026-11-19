@@ -60,7 +60,7 @@ internal static class MusicLiveAcceptance
         string data = TestWorkspace.ValidatePath(root, Path.Combine(root, "data"));
         Directory.CreateDirectory(data);
         Require(!Directory.EnumerateFileSystemEntries(data).Any(), "STORAGE_CONFLICT");
-        NativeDatabase? store = null, cacheBacking = null;
+        NativeDatabase? store = null;
         NativeTestDatabase? cache = null;
         NodeRuntime? runtime = null;
         NativeAudioPlayback? player = null;
@@ -79,8 +79,7 @@ internal static class MusicLiveAcceptance
             Directory.CreateDirectory(Path.Combine(data, "native"));
             Directory.CreateDirectory(Path.Combine(data, "cache"));
             store = new(Path.Combine(data, "native"));
-            cacheBacking = store;
-            cache = new(cacheBacking);
+            cache = new(store);
             await store.Ready;
             runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, AppIdentity.ScriptModules,
                 store.ProductRoot!, settingsStore: new MeowFilm.Capabilities.FilmRuntimeSettings(store));
@@ -214,7 +213,6 @@ internal static class MusicLiveAcceptance
             { await runtime.DisposeAsync(); await runtime.Completion; return 1; });
             if (cache is not null) closed &= await report.StepAsync("close.cache-drain", async () =>
             { await cache.DisposeAsync(); return 1; });
-            if (cacheBacking is not null) closed &= await report.StepAsync("close.cache-store", async () => { await cacheBacking.DisposeAsync(); return 1; });
             if (store is not null) closed &= await report.StepAsync("close.native-store", async () => { await MusicTestStores.For(store).DisposeAsync(); await store.DisposeAsync(); return 1; });
             if (window is not null) window.Close();
             // Only this newly created data subtree, and only after every owner has physically closed.

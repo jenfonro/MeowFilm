@@ -232,6 +232,8 @@ Catalog 的 `music.catalog.playlist.save` 只转交上述元信息命令，不�
 - `MusicSongSession` 按 SQL 来源／本地定位／录音候选索引取得单曲，仅维护命令内真实变化的索引；新记录只在实际采用时分配 UUID。`MusicSongRepository` 在 library owner 的事务边界采用平台资料。
 - `localFileId` 是本地文件授权定位，不从永久 songId 反解文件。已登记本地 locator 复用其歌曲记录。
 - 选定封面及来源字段保存在仓库；采用、明确设置重选及实际图片失败由同一 owner 更新。成功提交后发布携带变更 ID 集合的 `SongMetadataChanged`，呈现只重投影受影响资料，不重建队列或联网证明内容。正常图片成功无需读取或复制歌曲库。
+- UI 目录发布、缓存回访及歌曲变更通知使用 `MusicLibraryOwner.SongSnapshotsAsync`，只读取当前所需 ID。快照强制转入后台，在同一 repository 锁下取得已确认资料与 publication；每个歌曲行独立拒绝较旧 publication，未读取的 ID 不推进版本。读取计入 library 与 application 的 accepted 操作，关闭先封住新读取，再等待实际读取结束；取消不会提前报告排空。后台官方播放与脚本 owner 保留同步权威读取，未知提交期间仍读取对应记录的已确认版本。
+- 资料设置的明确读取／保存完成边界会等待当前歌曲 ID 的异步投影，按设置代次与当前歌曲身份检查后更新封面；操作完成不依赖稍后投递的 metadata 事件。播放器显示、歌词／反馈投影及来源展开 getter 读取已发布歌曲行。来源 session 在异步选择／刷新边界取得所需歌曲快照，完成结果与继承状态同时携带 publication，旧显示行不能覆盖刚完成的扩展资料。
 - `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态和排除，不复制完整 Song 或重新生成身份。同步检查点只保存类型化控制关系，引擎按来源键／永久 ID 读取当前歌曲，单次匹配只采用对应记录。
 
 ## 当前命令

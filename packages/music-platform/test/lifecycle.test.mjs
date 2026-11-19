@@ -34,21 +34,36 @@ test('a fresh guest keeps one durable protocol identity through home actions, de
   await restarted.close();
 });
 
-test('anonymous state must really save before dispatch and corrupt current storage is not reset', async () => {
+test('anonymous state must really save before dispatch', async () => {
   const f = fixture(() => assert.fail('unconfirmed device state must not be used'));
   f.failWrites();
   await assert.rejects(f.request('wy', 'fm'), { code: 'STORAGE_ERROR' });
   assert.equal(f.requests.length, 0); assert.equal(await f.clientState(), null);
   await f.close();
-  const corrupt = fixture(() => assert.fail('corrupt storage must not dispatch'));
-  seedClients(corrupt);
-  await corrupt.clientState();
-  await corrupt.database.execute("UPDATE music_anonymous_kg SET mid='invalid-current-mid'");
-  await assert.rejects(corrupt.request('wy', 'fm'), { code: 'CORRUPT_STORAGE' });
-  assert.equal(corrupt.writes.length, 0);
-  await assert.rejects(corrupt.clientState(), { code: 'CORRUPT_STORAGE' });
-  assert.deepEqual(await corrupt.database.query('SELECT mid FROM music_anonymous_kg'), [{ mid: 'invalid-current-mid' }]);
-  await corrupt.close();
+});
+
+test('only the selected anonymous identity is checked and missing or corrupt identity is never reset', async t => {
+  for (const [platform, corruptSQL] of [
+    ['wy', "DELETE FROM music_anonymous_wy_cookies WHERE cookie_name='deviceId'"],
+    ['kg', "UPDATE music_anonymous_kg SET mid='invalid-current-mid'"],
+    ['kg', 'DELETE FROM music_anonymous_kg'],
+    ['tx', "UPDATE music_anonymous_tx SET installation_id='invalid-current-installation'"],
+    ['tx', 'DELETE FROM music_anonymous_tx'],
+  ]) await t.test(platform + ':' + corruptSQL.split(' ')[0], async () => {
+    const healthy = platform === 'wy' ? 'kg' : 'wy';
+    const f = fixture(request => {
+      if (healthy === 'wy') return response({ code: 200, data: [] });
+      return response({ status: 1, error_code: 0, data: { lists: [], total: 0 } });
+    }); seedClients(f);
+    await f.clientState(); await f.database.execute(corruptSQL);
+    const stored = await f.clientState();
+    await f.request(healthy, healthy === 'wy' ? 'fm' : 'search', { keyword: 'x' });
+    await assert.rejects(f.request(platform, platform === 'wy' ? 'fm' : 'search', { keyword: 'x' }),
+      { code: 'CORRUPT_STORAGE' });
+    assert.equal(f.requests.length, 1); assert.equal(f.writes.length, 0);
+    assert.deepEqual(await f.clientState(), stored);
+    await f.close();
+  });
 });
 
 test('parallel WY cookie exchanges merge into the current anonymous owner and ordinary cookies expire without rotating the device', async t => {

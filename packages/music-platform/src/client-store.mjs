@@ -3,6 +3,7 @@ import { upsert } from '@meowfilm/storage/statements';
 import { createHash } from 'node:crypto';
 
 const kgColumns = ['seed','mid','dfid'];
+const wyCookies = ['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','__remember_me','NMTID','MUSIC_A'];
 const txColumns = ['installation_id','android_id','open_udid','open_udid2','imei',
   'qimei_q36','qimei_saved_at_ms','session_uid','session_sid','session_saved_at_ms'];
 const txValues = value => [value.installationId,value.androidId,value.openUdid,value.openUdid2,value.imei,
@@ -11,25 +12,30 @@ const txValues = value => [value.installationId,value.androidId,value.openUdid,v
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const text = value => typeof value === 'string' && value.length > 0 && !/[\0\r\n]/.test(value);
 const timestamp = value => Number.isSafeInteger(value) && value >= 0;
-function validate(platform, value, code) {
+export function anonymousClient(platform, value, code) {
   const require = valid => { if (!valid) throw Object.assign(new Error(code), { code }); };
-  const keys = (item, names) => object(item) && Object.keys(item).every(key => names.includes(key));
   if (platform === 'wy') {
-    require(keys(value, ['cookies']) && keys(value.cookies,
-      ['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','__remember_me','NMTID','MUSIC_A']));
-    require(['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','__remember_me'].every(key => text(value.cookies[key])) &&
-      Object.values(value.cookies).every(text));
+    require(object(value) && object(value.cookies));
+    const cookies = Object.fromEntries(wyCookies.filter(key => Object.hasOwn(value.cookies, key))
+      .map(key => [key,value.cookies[key]]));
+    require(['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','__remember_me'].every(key => text(cookies[key])) &&
+      Object.values(cookies).every(text));
+    return {cookies};
   } else if (platform === 'kg') {
-    require(keys(value, kgColumns) && /^[0-9a-f]{32}$/.test(value.seed) && text(value.mid) &&
+    require(object(value) && /^[0-9a-f]{32}$/.test(value.seed) && text(value.mid) &&
       (value.dfid === null || text(value.dfid)));
     require(value.mid === BigInt('0x' + createHash('md5').update(value.seed).digest('hex')).toString());
+    return Object.fromEntries(kgColumns.map(key => [key,value[key]]));
   } else {
-    require(platform === 'tx' && keys(value, ['installationId','androidId','openUdid','openUdid2','imei','qimei','session']));
+    require(platform === 'tx' && object(value));
     require(['installationId','androidId','openUdid','openUdid2','imei'].every(key => text(value[key])) &&
       /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value.installationId));
-    require(value.qimei === null || keys(value.qimei, ['q36','savedAt']) && text(value.qimei.q36) && timestamp(value.qimei.savedAt));
-    require(value.session === null || keys(value.session, ['uid','sid','savedAt']) &&
+    require(value.qimei === null || object(value.qimei) && text(value.qimei.q36) && timestamp(value.qimei.savedAt));
+    require(value.session === null || object(value.session) &&
       text(value.session.uid) && text(value.session.sid) && timestamp(value.session.savedAt));
+    return {...Object.fromEntries(['installationId','androidId','openUdid','openUdid2','imei'].map(key => [key,value[key]])),
+      qimei:value.qimei === null ? null : {q36:value.qimei.q36,savedAt:value.qimei.savedAt},
+      session:value.session === null ? null : {uid:value.session.uid,sid:value.session.sid,savedAt:value.session.savedAt}};
   }
 }
 
@@ -49,18 +55,17 @@ export function createAnonymousClientStore(dataRoot) {
       if (cookies.length || kg || tx) throw Object.assign(new Error('CORRUPT_STORAGE'), { code:'CORRUPT_STORAGE' });
       return null;
     }
-    if (!kg || !tx) throw Object.assign(new Error('CORRUPT_STORAGE'),{code:'CORRUPT_STORAGE'});
-    const value = {wy:{cookies:Object.fromEntries(cookies.map(row => [row.cookie_name,row.cookie_value]))},
-      kg:Object.fromEntries(kgColumns.map(key => [key,kg[key]])), tx:{
+    const value = {wy:cookies.length ? {cookies:Object.fromEntries(cookies.filter(row => wyCookies.includes(row.cookie_name))
+      .map(row => [row.cookie_name,row.cookie_value]))} : null,
+      kg:kg ? Object.fromEntries(kgColumns.map(key => [key,kg[key]])) : null, tx:tx ? {
         installationId:tx.installation_id,androidId:tx.android_id,openUdid:tx.open_udid,openUdid2:tx.open_udid2,imei:tx.imei,
         qimei:tx.qimei_q36 === null ? null : {q36:tx.qimei_q36,savedAt:tx.qimei_saved_at_ms},
         session:tx.session_uid === null ? null : {uid:tx.session_uid,sid:tx.session_sid,savedAt:tx.session_saved_at_ms},
-      }};
-    for (const [platform, item] of Object.entries(value)) validate(platform, item, 'CORRUPT_STORAGE');
+      } : null};
     return value;
   }
   function statements(platform,value) {
-    validate(platform, value, 'INVALID_REQUEST');
+    value = anonymousClient(platform, value, 'INVALID_REQUEST');
     if (platform === 'wy') return [
       {sql:'DELETE FROM music_anonymous_wy_cookies WHERE cookie_name NOT IN (' +
         Object.keys(value.cookies).map(() => '?').join(',') + ')',params:Object.keys(value.cookies)},
@@ -78,9 +83,9 @@ export function createAnonymousClientStore(dataRoot) {
   }
   return {read,
     initialize: value => {
-      if (!object(value) || Object.keys(value).sort().join(',') !== 'kg,tx,wy')
+      if (!object(value))
         throw Object.assign(new Error('INVALID_REQUEST'), { code:'INVALID_REQUEST' });
-      return commit(Object.entries(value).flatMap(([platform,item]) => statements(platform,item)));
+      return commit(['wy','kg','tx'].flatMap(platform => statements(platform,value[platform])));
     },
     writePlatform: (platform,value) => commit(statements(platform,value)),
     close: () => database.close(),

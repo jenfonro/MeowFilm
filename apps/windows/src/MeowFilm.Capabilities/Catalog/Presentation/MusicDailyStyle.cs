@@ -128,17 +128,21 @@ public sealed partial class MusicCapability
             if (!CanPublishSave()) return;
             if (result.Readback is null && result.Status is (MusicDailyStyleWriteStatus.NotSent or MusicDailyStyleWriteStatus.Rejected) && previousPage is not null)
             {
-                catalogPages[1] = previousPage;
-                PublishCatalog(location.Route, "", "wy", "歌曲", 1, previousPage);
+                if (!await PublishCatalogAsync(location.Route, "", "wy", "歌曲", 1, previousPage,
+                    token: lifetime.Token, isCurrent: CanPublishSave,
+                    beforePublish: () => catalogPages[1] = previousPage)) return;
             }
             if (result.Readback is { } reply)
             {
                 var sections = MusicCatalogDto.Read(reply, "wy", "daily", "风格推荐", "songs").ToArray();
                 var state = new CatalogPageState(sections, [], "", "风格推荐", MusicCatalogDto.Text(reply, "cover"), false, null,
                     sections.Sum(s => s.Items.Count), Target: catalogLoadedTarget, AccountStamp: saveAccount, ExpiresAt: CatalogExpiry(reply), DailySelection: DailySelectionSnapshot(reply));
-                catalogPages.Clear(); catalogPages[1] = state;
-                PublishDailyStyleSelection(reply);
-                PublishCatalog(location.Route, "", "wy", "歌曲", 1, state);
+                if (!await PublishCatalogAsync(location.Route, "", "wy", "歌曲", 1, state,
+                    token: lifetime.Token, isCurrent: CanPublishSave, beforePublish: () =>
+                    {
+                        catalogPages.Clear(); catalogPages[1] = state;
+                        PublishDailyStyleSelection(reply);
+                    })) return;
                 if (result.Status == MusicDailyStyleWriteStatus.Confirmed && result.SelectionMatches == true) RetireDailyStyleEditor();
             }
             if (result.Status == MusicDailyStyleWriteStatus.Unknown || result.Status == MusicDailyStyleWriteStatus.Confirmed && result.Readback is null)

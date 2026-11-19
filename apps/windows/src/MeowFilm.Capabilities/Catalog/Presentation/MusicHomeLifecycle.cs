@@ -87,12 +87,14 @@ public sealed partial class MusicCapability
             return;
         }
         RetireCatalogLoad();
-        catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
         if (publishedHomeState is { } published && homePlatform == catalogSourcePlatform)
         {
-            catalogCursors.Clear(); catalogCursors.AddRange(homeCursors);
-            PublishCatalog("catalog-home", "", homePlatform, "歌曲", homePage, published,
-                initializeEntries: !homeRefreshRequired);
+            if (!await PublishCatalogAsync("catalog-home", "", homePlatform, "歌曲", homePage, published,
+                initializeEntries: !homeRefreshRequired, token: token, beforePublish: () =>
+                {
+                    catalogPages.Clear();
+                    catalogCursors.Clear(); catalogCursors.AddRange(homeCursors);
+                })) return;
         }
         else if (homeSnapshot is { } saved && saved.Platform == catalogSourcePlatform)
         {
@@ -101,9 +103,13 @@ public sealed partial class MusicCapability
                 sections = MergeCatalogSections(sections, MusicCatalogDto.Read(page, saved.Platform, "home", "发现音乐").ToArray());
             var state = new CatalogPageState(sections, [], "", "发现音乐", "", false, null,
                 sections.Sum(section => section.Items.Count));
-            homePlatform = saved.Platform;
-            homeContentPages.Clear(); homeContentPages.AddRange(saved.Pages);
-            PublishCatalog("catalog-home", "", homePlatform, "歌曲", 1, state, initializeEntries: false);
+            if (!await PublishCatalogAsync("catalog-home", "", saved.Platform, "歌曲", 1, state,
+                initializeEntries: false, token: token, beforePublish: () =>
+                {
+                    catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
+                    homePlatform = saved.Platform;
+                    homeContentPages.Clear(); homeContentPages.AddRange(saved.Pages);
+                })) return;
         }
         if (publishedHomeState is { } current && homePlatform == catalogSourcePlatform)
         {
@@ -112,6 +118,7 @@ public sealed partial class MusicCapability
             else StartHomeContinuation();
             return;
         }
+        catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
         homeRefreshRequired = false;
         var first = LoadCatalogAsync("catalog-home", "", 1, null, token, refresh: true);
         HomeRefresh = Finish();

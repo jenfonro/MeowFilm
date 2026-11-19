@@ -82,10 +82,10 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
                 PropertyChanged?.Invoke(this, new(property));
         }
     }
-    internal void RefreshSong(JsonElement? value)
+    internal void RefreshSong(JsonElement? value, long publication = -1)
     {
         if (Song is null || value is null) return;
-        Song.ApplyRepository(value);
+        Song.ApplyRepository(value, publication);
         foreach (var name in new[] { nameof(Title), nameof(Subtitle), nameof(Cover), nameof(CanAlbum), nameof(Caption) })
             PropertyChanged?.Invoke(this, new(name));
     }
@@ -114,11 +114,11 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
             nameof(FirstPreviewIdentity), nameof(SecondPreviewIdentity), nameof(ThirdPreviewIdentity) })
             PropertyChanged?.Invoke(this, new(name));
     }
-    internal void RefreshPreview(Func<string, JsonElement?> read)
+    internal void RefreshPreview(Func<string, JsonElement?> read, long publication = -1)
     {
         bool changed = false;
         foreach (var preview in PreviewSongs)
-            if (preview.Song is { } song) changed |= song.ApplyRepository(read(song.Id));
+            if (preview.Song is { } song) changed |= song.ApplyRepository(read(song.Id), publication);
         if (changed)
             foreach (var name in new[] { nameof(PreviewSongs), nameof(PreviewTitles),
                 nameof(FirstPreviewCover), nameof(SecondPreviewCover), nameof(ThirdPreviewCover),
