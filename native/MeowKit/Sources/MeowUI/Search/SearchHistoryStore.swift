@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
+import MeowStorage
 #if os(iOS) || os(macOS)
 import Combine
 
@@ -11,35 +12,64 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
 }
 
 /// Device-local keyword history, not music platform/account preferences.
-/// Only this key is read/written; former development keys are not imported.
+/// Its typed keyword rows are independent of platform search preferences.
 @MainActor public final class SearchHistoryStore: ObservableObject {
-    public static let storageKey = "search.history"
     @Published public private(set) var entries: [SearchHistoryEntry] = []
-    private let defaults: UserDefaults
+    @Published public private(set) var persistenceError: String?
+    private var database: SQLiteDatabase?
+    private var epoch = UUID()
+    private var closed = false
 
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults; reload()
+    public init(database: SQLiteDatabase? = nil) { self.database = database }
+    public func bind(database: SQLiteDatabase) async {
+        guard self.database == nil, !closed else { return }
+        self.database = database; await reload()
     }
-    public func reload() {
-        guard let data = defaults.data(forKey: Self.storageKey),
-              let saved = try? JSONDecoder().decode([SearchHistoryEntry].self, from: data) else {
-            entries = []; return
-        }
-        var seen = Set<String>()
-        entries = saved.filter { !$0.text.isEmpty && seen.insert($0.id).inserted }
+    nonisolated private static func load(_ db: SQLiteConnection) throws -> [SearchHistoryEntry] {
+        try db.query("SELECT text FROM ios_search_history ORDER BY used_at DESC,text").map { .init(text: try $0.text("text")) }
     }
-    public func record(_ keyword: String) {
+    public func reload() async {
+        guard !closed, let database else { return }
+        let ticket = UUID(); epoch = ticket
+        do {
+            let result = try await database.read(Self.load)
+            guard epoch == ticket, !closed else { return }
+            entries = result; persistenceError = nil
+        } catch { if epoch == ticket, !closed { persistenceError = "搜索历史读取失败" } }
+    }
+    public func record(_ keyword: String) async {
         let keyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !keyword.isEmpty else { return }
-        reload()
-        let entry = SearchHistoryEntry(text: keyword)
-        entries.removeAll { $0.id == entry.id }
-        entries.insert(entry, at: 0)
-        save()
+        guard !closed, !keyword.isEmpty else { return }
+        let ticket = UUID(); epoch = ticket
+        do {
+            let result: [SearchHistoryEntry]
+            if let database {
+                result = try await database.transaction(ownedBytes: keyword.utf8.count) { db in
+                    try db.execute("INSERT INTO ios_search_history(text,used_at) VALUES(?,?) " +
+                        "ON CONFLICT(text) DO UPDATE SET used_at=excluded.used_at", [.text(keyword), .optional(Date())])
+                    return try Self.load(db)
+                }
+            } else {
+                let entry = SearchHistoryEntry(text: keyword)
+                result = [entry] + entries.filter { $0.id != entry.id }
+            }
+            if epoch == ticket, !closed { entries = result; persistenceError = nil }
+        } catch { if epoch == ticket, !closed { persistenceError = "搜索历史保存失败" } }
     }
-    public func clear() { entries = []; save() }
-    private func save() {
-        if let data = try? JSONEncoder().encode(entries) { defaults.set(data, forKey: Self.storageKey) }
+    public func clear() async {
+        guard !closed else { return }
+        let ticket = UUID(); epoch = ticket
+        do {
+            if let database { try await database.transaction { try $0.execute("DELETE FROM ios_search_history") } }
+            if epoch == ticket, !closed { entries = []; persistenceError = nil }
+        } catch { if epoch == ticket, !closed { persistenceError = "搜索历史清除失败" } }
+    }
+    public func flush() async throws {
+        if let database { try await database.flush() }
+    }
+    public func close() async throws {
+        closed = true; epoch = UUID()
+        try await flush()
     }
 }
 #endif

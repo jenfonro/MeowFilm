@@ -3,6 +3,7 @@ import XCTest
 import MeowAccounts
 import MeowMusicFeature
 import MeowStorage
+import MeowStorageTestSupport
 import MeowRuntime
 @testable import MeowMusicPlatform
 
@@ -220,12 +221,8 @@ import MeowRuntime
     }
 
     private func neteaseFeedbackFixture() async throws -> MusicNativeFixture {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let f = try MusicNativeFixture(platform: .netease, feedbackOutboxStoreFactory: {
-            try DocumentStore(baseURL: root, namespace: "feedback-protocol")
-        })
+        let database = try storageTestDatabase(self)
+        let f = try MusicNativeFixture(platform: .netease, database: database)
         try await f.enable()
         try await f.service.configurePlaybackFeedback(.init(revision: 1,
             platforms: [.netease: .init(enabled: true, generation: 1)]))

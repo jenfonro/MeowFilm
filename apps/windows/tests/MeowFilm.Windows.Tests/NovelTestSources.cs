@@ -24,36 +24,39 @@ internal static class NovelTestSources
         }, NovelJson.Options));
 }
 
-internal sealed class NovelSourceMemoryStore : IDocumentStore
+internal sealed class NovelSourceMemoryStore : NativeTestDatabase
 {
-    internal byte[]? Bytes;
-    internal Func<CancellationToken, Task>? BeforeRead;
     internal TaskCompletionSource? Accepted, Hold;
     internal bool FailWrite;
-    internal int Reads, Writes;
+    internal byte[]? Bytes
+    {
+        get
+        {
+            if (Project(NovelStorageRecords.Sources, "device") is not { } value) return null;
+            foreach (var row in value["sources"]!.AsArray().OfType<System.Text.Json.Nodes.JsonObject>())
+                row["definition"] = row["definition"]!.ToJsonString();
+            return JsonSerializer.SerializeToUtf8Bytes(value);
+        }
+        set
+        {
+            var root = System.Text.Json.Nodes.JsonNode.Parse(value!)!.AsObject();
+            foreach (var row in root["sources"]!.AsArray().OfType<System.Text.Json.Nodes.JsonObject>())
+                if (row["definition"] is System.Text.Json.Nodes.JsonValue text)
+                    row["definition"] = System.Text.Json.Nodes.JsonNode.Parse(text.GetValue<string>());
+            Seed(NovelStorageRecords.Sources, root, "device");
+        }
+    }
     internal void Seed(IEnumerable<NovelSource> sources)
     {
-        using var previous = Bytes is null ? null : JsonDocument.Parse(Bytes);
-        long revision = previous is null ? 1 : previous.RootElement.GetProperty("revision").GetInt64() + 1;
+        long revision = (Project(NovelStorageRecords.Sources, "device")?["revision"]?.GetValue<long>() ?? 0) + 1;
         Bytes = JsonSerializer.SerializeToUtf8Bytes(new NovelSourceConfigurationSnapshot(1, revision,
             sources.Select(NovelTestSources.Definition).ToArray()), NovelJson.Options);
     }
-    public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+    public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+        int retainedBytes = 0, Action<Action>? commit = null) => base.WriteAsync(db =>
     {
-        if (ns != NovelSourceConfiguration.DocumentNamespace) throw new InvalidOperationException("Unexpected source namespace");
-        Reads++; if (BeforeRead is not null) await BeforeRead(token);
-        token.ThrowIfCancellationRequested();
-        return new(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes));
-    }
-    public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected,
-        CancellationToken token = default)
-    {
-        token.ThrowIfCancellationRequested(); var copy = data.ToArray(); Accepted?.TrySetResult();
-        if (Hold is not null) await Hold.Task;
+        Accepted?.TrySetResult(); Hold?.Task.GetAwaiter().GetResult();
         if (FailWrite) throw new DocumentStoreException(DocumentStoreError.Storage);
-        if (expected != (Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)))
-            throw new DocumentStoreException(DocumentStoreError.Conflict);
-        Bytes = copy; Writes++; return DocumentFingerprint.FromBytes(copy);
-    }
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        return write(db);
+    }, token, retainedBytes, commit);
 }

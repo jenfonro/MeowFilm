@@ -25,7 +25,7 @@ test('candidate verification performs only real authentication, does not read ri
     assert.equal(verified.profile.avatar, null); assert.equal(verified.entitlements.membership.vip, null);
     assert.equal(f.requests.length, platform === 'tx' ? 2 : 1);
     await assert.rejects(f.request(platform, 'account.profile'), { code: 'AUTH_REQUIRED' });
-    assert.ok(!f.files.get('clients.json').toString().includes('synthetic-key'));
+    assert.ok(!JSON.stringify(await f.clientState()).includes('synthetic-key'));
     await f.close();
   });
 });
@@ -49,10 +49,10 @@ test('QQ candidate authentication preserves ordinary denials and the previously 
       t.after(() => f.close()); seedClients(f);
       const original = 'musicid=99; musickey=synthetic-current-key; encrypt_uin=synthetic-current-uin';
       await f.session('tx', '99', original);
-      const before = Buffer.from(f.files.get('clients.json'));
+      const before = await f.clientState();
       await assert.rejects(candidate(f, 'tx', 'account.verify'), { code: expected });
       assert.equal(f.requests.length, method === 'GetLoginUserInfo' ? 1 : 2);
-      assert.deepEqual(f.files.get('clients.json'), before); assert.equal(f.writes.length, 0);
+      assert.deepEqual(await f.clientState(), before); assert.equal(f.writes.length, 0);
       rejecting = false;
       const current = await f.request('tx', 'account.verify');
       assert.equal(current.userId, '99'); assert.equal(current.cookie, original);
@@ -246,10 +246,10 @@ test('SMS real invalid-phone/invalid-code and KG account-selection details survi
     ['kg', 'sms.login', { status: 1, data: {} }, 'INVALID_RESPONSE'],
   ]) {
     const f = fixture(() => response(raw)); seedClients(f);
-    const original = Buffer.from(f.files.get('clients.json'));
+    const original = await f.clientState();
     await assert.rejects(f.request(platform, operation, { phone: '10000000000', captcha: '000000' }), { code });
     assert.equal(f.requests.length, 1); assert.equal(f.writes.length, 0);
-    assert.deepEqual(f.files.get('clients.json'), original);
+    assert.deepEqual(await f.clientState(), original);
     await assert.rejects(f.request(platform, 'account.profile'), { code: 'AUTH_REQUIRED' });
     if (operation === 'sms.send') {
       await assert.rejects(f.request(platform, operation, { phone: '10000000000' }), { code: 'RATE_LIMITED' });

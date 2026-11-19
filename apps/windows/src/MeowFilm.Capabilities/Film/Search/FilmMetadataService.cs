@@ -16,9 +16,9 @@ public sealed record FilmDoubanSettings(string ApiBase, string SearchBase, strin
     string ApiProxy, string ImageProxy, string Cookie);
 
 /// <summary>Native settings owner; upstream metadata requests remain in the runtime.</summary>
-public sealed class FilmMetadataService(IRuntimeClient runtime, IDocumentStore store) : IAsyncDisposable
+public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase database) : IAsyncDisposable
 {
-    private readonly SettingsDocument tmdb = new(store, "film.tmdb.v1"), douban = new(store, "film.douban.v1");
+    private readonly SettingsDocument tmdb = new(new(database, "film.tmdb.v1", FilmStorageRecords.TMDB)), douban = new(new(database, "film.douban.v1", FilmStorageRecords.Douban));
     private static readonly JsonElement TmdbDefaults = FilmJson.Encode(new
     {
         apiBase = "https://api.themoviedb.org/3", imageBase = "https://image.tmdb.org",
@@ -84,12 +84,12 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IDocumentStore s
             using var request = patch is null ? CancellationTokenSource.CreateLinkedTokenSource(token, reads.Token) : null;
             JsonElement settings;
             if (patch is null)
-                settings = (await document.ReadAsync(request!.Token))?.GetProperty("settings") ?? defaults;
+                settings = ReadSettings(await document.ReadAsync(request!.Token), defaults);
             else
             {
                 var saved = await document.UpdateAsync(current =>
                 {
-                    var next = current?.GetProperty("settings") ?? defaults;
+                    var next = ReadSettings(current, defaults);
                     foreach (var (key, value) in patch)
                     {
                         if (!defaults.TryGetProperty(key, out var fallback)) continue;
@@ -105,6 +105,23 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IDocumentStore s
             }
             return receive(settings);
         }
+    }
+
+    private static JsonElement ReadSettings(JsonElement? current, JsonElement defaults)
+    {
+        if (current is null) return defaults;
+        var root = current.Value;
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var version) ||
+            version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int number) || number != 1 ||
+            !root.TryGetProperty("settings", out var settings) || settings.ValueKind != JsonValueKind.Object)
+            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        foreach (var field in defaults.EnumerateObject())
+            if (!settings.TryGetProperty(field.Name, out var value) ||
+                (field.Value.ValueKind is JsonValueKind.True or JsonValueKind.False
+                    ? value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+                    : value.ValueKind != field.Value.ValueKind))
+                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        return settings;
     }
 
     private static JsonElement NormalizeSettings(JsonElement value, JsonElement defaults, bool tmdb)

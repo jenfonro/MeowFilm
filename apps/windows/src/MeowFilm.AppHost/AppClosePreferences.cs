@@ -5,11 +5,12 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.AppHost;
 
-public sealed class AppClosePreferences(IDocumentStore store) : IDesktopClosePreferences, IDesktopShutdownParticipant
+public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClosePreferences, IDesktopShutdownParticipant
 {
+    private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.Window);
     public const string DocumentNamespace = "app.window.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, busy, stopping;
     public WindowCloseBehavior Behavior { get; private set; } = WindowCloseBehavior.Ask;
     public string Status { get; private set; } = "";
@@ -22,7 +23,7 @@ public sealed class AppClosePreferences(IDocumentStore store) : IDesktopClosePre
     }
     private async Task Read()
     {
-        var snapshot = await store.ReadAsync(DocumentNamespace);
+        var snapshot = await store.ReadAsync();
         var behavior = WindowCloseBehavior.Ask;
         if (snapshot.Data is { } bytes)
         {
@@ -40,7 +41,7 @@ public sealed class AppClosePreferences(IDocumentStore store) : IDesktopClosePre
                 _ => throw new DocumentStoreException(DocumentStoreError.Corrupt)
             };
         }
-        fingerprint = snapshot.Fingerprint;
+        storageRevision = snapshot.Revision;
         Behavior = behavior;
         loaded = true;
     }
@@ -77,7 +78,7 @@ public sealed class AppClosePreferences(IDocumentStore store) : IDesktopClosePre
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new { schema = 1, closeBehavior = saved });
             try
             {
-                fingerprint = await store.WriteAsync(DocumentNamespace, bytes, fingerprint);
+                storageRevision = await store.WriteAsync(bytes, storageRevision);
                 Behavior = behavior;
                 return true;
             }

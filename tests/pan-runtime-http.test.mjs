@@ -1,19 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPanRuntime, createRuntimeClient } from '../apps/runtime/pan-entry.mjs';
 import { createRuntime } from '../apps/runtime/entry.mjs';
 import { contracts } from '../apps/runtime/contracts.mjs';
 import { deferred, rawRequest, turn } from '../packages/runtime-bridge/test/http-fixture.js';
+import { withTestDatabase } from './storage-test-fixture.mjs';
 
 function root(t) {
   const area = fileURLToPath(new URL('../tmp/test-results/pan-runtime-http/', import.meta.url));
   mkdirSync(area, { recursive: true });
   const path = mkdtempSync(join(area, 'case-'));
-  t.after(() => rmSync(path, { recursive: true, force: true }));
   return path;
 }
 async function connect(t, handler = () => assert.fail('unexpected upstream I/O')) {
@@ -23,7 +23,7 @@ async function connect(t, handler = () => assert.fail('unexpected upstream I/O')
     pan: { transport: { request: handler, async close() { closes++; } } } });
   await runtime.start();
   const client = createRuntimeClient({ baseUrl: runtime.baseUrl });
-  t.after(async () => { await client.close(); await runtime.close(); });
+  t.after(async () => { await client.close(); await runtime.close(); rmSync(dataRoot, { recursive: true, force: true }); });
   return { client, runtime, dataRoot, identity: { sessionId }, get closes() { return closes; } };
 }
 
@@ -107,7 +107,10 @@ test('HTTP shutdown cancels and physically drains upstream work without publishi
   const { client } = fixture;
   assert.equal((await client.call('pan.settings.set', { provider: 'quark',
     credentials: { cookie: 'session=synthetic-account' } })).ok, true);
-  const path = join(fixture.dataRoot, 'pan/accounts.json'), saved = readFileSync(path);
+  let saved;
+  await withTestDatabase(fixture.dataRoot, async database => {
+    [saved] = await database.query('SELECT * FROM pan_standalone_accounts WHERE provider=?', ['quark']);
+  });
   const pending = assert.rejects(client.call('pan.refresh', { provider: 'quark' }), { code: 'CLOSED' });
   await entered.promise;
   let completed = false;
@@ -121,7 +124,10 @@ test('HTTP shutdown cancels and physically drains upstream work without publishi
     value: { closed: true, cleanupComplete: true } });
   await pending;
   assert.equal(fixture.closes, 1);
-  assert.deepEqual(readFileSync(path), saved, 'shutdown must not persist the late Cookie rotation');
+  await withTestDatabase(fixture.dataRoot, async database => {
+    const [current] = await database.query('SELECT * FROM pan_standalone_accounts WHERE provider=?', ['quark']);
+    assert.deepEqual(current, saved, 'shutdown must not persist the late Cookie rotation');
+  });
 });
 
 test('default aggregate stays three modules and explicit pan shares that same HTTP owner', async t => {
@@ -139,6 +145,6 @@ test('default aggregate stays three modules and explicit pan shares that same HT
       if (pan === undefined) assert.deepEqual(await client.call('pan.providers'),
         { ok: false, contract: 'runtime.http.v1', code: 'METHOD_NOT_FOUND' });
       else assert.equal((await client.call('pan.providers')).value.providers.length, 5);
-    } finally { await client.close(); await runtime.close(); }
+    } finally { await client.close(); await runtime.close(); rmSync(dataRoot, { recursive: true, force: true }); }
   }
 });

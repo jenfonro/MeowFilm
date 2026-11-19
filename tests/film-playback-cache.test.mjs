@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import { stringifyJSONValue, isRawJSON, rawJSON } from '@meowfilm/runtime-bridge/json';
 import test from 'node:test';
 import assert from 'node:assert/strict';

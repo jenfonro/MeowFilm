@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -64,6 +65,13 @@ function fixture({ details = {}, pages = {}, shares = {}, metadata, onResolve } 
       mutator(draft);
       document = draft;
     },
+    async history(targetId) { return structuredClone(document.history.find(row => row?.targetId === targetId)); },
+    async saveHistory(value) {
+      document.history = document.history.filter(row => row?.targetId !== value.targetId);
+      document.history.push(structuredClone(value));
+    },
+    async list() { return {...structuredClone(document),historyAfter:null}; },
+    async removeHistory(targetId) { document.history = targetId == null ? [] : document.history.filter(row => row?.targetId !== targetId); },
   };
   const data = {
     async targetMetadata(target) {
@@ -538,8 +546,8 @@ test('F11 a missing season has no selectable coordinates or invented global offs
   const beforeInvalidSelection = requests(f);
   await assert.rejects(f.command(sessionId, 'select.target', { target: { ...f.snapshot(sessionId).metadataSources[0].playbackTarget, season: 2, episode: 1 } }), { code: 'NOT_FOUND' });
   await f.command(sessionId, 'browse.season', { season: 2 });
-  await until(() => f.snapshot(sessionId).browsing.error === 'NOT_FOUND');
-  assert.equal(f.snapshot(sessionId).browsing.loading, false);
+  await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).browsing.error === 'NOT_FOUND');
+  assert.deepEqual(f.snapshot(sessionId).browsing.episodes, []);
   assert.deepEqual(requests(f).slice(beforeInvalidSelection.length).map(call => call.type), ['season', 'metadata']);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   await f.command(sessionId, 'media.ended', { attemptId: current.id });

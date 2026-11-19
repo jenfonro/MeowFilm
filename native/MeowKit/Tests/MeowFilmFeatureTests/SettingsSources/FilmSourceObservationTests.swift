@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowRuntime
 @testable import MeowFilmFeature
 
@@ -9,9 +10,10 @@ final class FilmSourceObservationTests: XCTestCase {
         -> (FilmSourceService, FilmSettingsDocument, URL) {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let settings = try sourceTestSettings(base)
+        let store = try storageTestDatabase(self, root: base)
+        let settings = try sourceTestSettings(store)
         let service = FilmSourceService(transport: unavailableCatTransport("MUST_NOT_START"),
-            storeFactory: { try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace) },
+            database: store,
             settingsDocument: settings, runtimeSourceRoot: base.appendingPathComponent("cat"),
             observeConnection: connection)
         return (service, settings, base)
@@ -24,10 +26,9 @@ final class FilmSourceObservationTests: XCTestCase {
         let peer = SourceObservationHTTPFixture()
         defer { peer.remove() }
         let client = try peer.connection()
-        defer { try? FileManager.default.removeItem(at: base) }
         let saved = try await service.editCat("a", name: "Offline saved")
         XCTAssertEqual(saved.name, "Offline saved")
-        XCTAssertEqual(try settings.read()?.catField("scripts")?.catArray?.first?.catField("name"), .string("Offline saved"))
+        storageTestEqual(try await settings.read()?.catField("scripts")?.catArray?.first?.catField("name"), .string("Offline saved"))
         await fulfillment(of: [entered], timeout: 5)
         let drained = expectation(description: "existing launch borrow drained")
         drained.isInverted = true
@@ -49,7 +50,6 @@ final class FilmSourceObservationTests: XCTestCase {
         defer { peer.remove() }
         let client = try peer.connection()
         let (service, settings, base) = try fixture { client }
-        defer { try? FileManager.default.removeItem(at: base) }
         try await service.initialize()
         await wait(service) { $0.cats.allSatisfy(\.canDetect) && $0.videos.count == 2 }
         let deleted = FilmSourceKey(installationId: "a", siteKey: "same")
@@ -61,7 +61,7 @@ final class FilmSourceObservationTests: XCTestCase {
         try await service.deleteCat("b")
         XCTAssertEqual(saved.inputRevision, 2)
         XCTAssertEqual(saved.generation, 0)
-        let intent = try settings.read()
+        let intent = try await settings.read()
         peer.replace([SourcesRuntimeFixture.cat("a", generation: 4)])
         peer.finish()
         // Neither the captured old response nor a later mismatching revision
@@ -94,7 +94,7 @@ final class FilmSourceObservationTests: XCTestCase {
         peer.finish()
         let final = await service.snapshot
         XCTAssertEqual(final.cats.first?.generation, 5)
-        XCTAssertEqual(try settings.read(), intent)
+        storageTestEqual(try await settings.read(), intent)
         XCTAssertFalse(client.isClosed, "The source owner must not close its borrowed client")
         await service.close()
         await client.close()
@@ -106,12 +106,11 @@ final class FilmSourceObservationTests: XCTestCase {
         peer.replace([.object(["invalid": .bool(true)])])
         let client = try peer.connection()
         let (service, settings, base) = try fixture { client }
-        defer { try? FileManager.default.removeItem(at: base) }
         let saved = try await service.editCat("a", name: "Committed")
         XCTAssertEqual(saved.name, "Committed")
-        let intent = try settings.read()
+        let intent = try await settings.read()
         await wait(service) { $0.runtimeError == "INVALID_RESPONSE" }
-        XCTAssertEqual(try settings.read(), intent)
+        storageTestEqual(try await settings.read(), intent)
         await service.close()
         await client.close()
     }
@@ -125,13 +124,12 @@ final class FilmSourceObservationTests: XCTestCase {
             peer.holdNext { entered.fulfill() }
             let client = try peer.connection()
             let (service, settings, base) = try fixture { client }
-            defer { try? FileManager.default.removeItem(at: base) }
-            try await service.initialize()
+                try await service.initialize()
             await fulfillment(of: [entered], timeout: 5)
             _ = try await service.enableCat("a", enabled: false)
             let saved = try await service.enableCat("a", enabled: true)
             XCTAssertEqual(saved.inputRevision, 1)
-            let intent = try settings.read()
+            let intent = try await settings.read()
             peer.replace([SourcesRuntimeFixture.cat("a", generation: 3), SourcesRuntimeFixture.cat("b", generation: 3)])
             peer.finish()
             let next = expectation(description: "old response discarded before next request")
@@ -143,7 +141,7 @@ final class FilmSourceObservationTests: XCTestCase {
             XCTAssertNil(pending.runtimeError)
             peer.finish()
             await wait(service) { $0.cats.allSatisfy { $0.generation == 3 && $0.canDetect } }
-            XCTAssertEqual(try settings.read(), intent)
+            storageTestEqual(try await settings.read(), intent)
             await service.close()
             await client.close()
         }
@@ -157,10 +155,9 @@ final class FilmSourceObservationTests: XCTestCase {
         peer.holdNext(started: { entered.fulfill() }, stopped: { stopped.fulfill() })
         let client = try peer.connection()
         let (service, settings, base) = try fixture { client }
-        defer { try? FileManager.default.removeItem(at: base) }
         try await service.initialize()
         await fulfillment(of: [entered], timeout: 5)
-        let intent = try settings.read()
+        let intent = try await settings.read()
         await service.prepareShutdown()
         await fulfillment(of: [stopped], timeout: 5)
         let cancelled = await service.snapshot
@@ -171,7 +168,7 @@ final class FilmSourceObservationTests: XCTestCase {
         try await service.resume()
         await wait(service) { $0.videos.count == 2 }
         await service.close()
-        XCTAssertEqual(try settings.read(), intent)
+        storageTestEqual(try await settings.read(), intent)
         let final = await service.snapshot
         XCTAssertEqual(final.videos.count, 2)
         await client.close()

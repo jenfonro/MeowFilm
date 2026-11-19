@@ -12,7 +12,7 @@ import MeowPlayback
 final class MusicUIKitRegressionTests: XCTestCase {
     func testAdditionalSearchCategoryIsLazyAndTargetSubmissionAlwaysSelectsRequestedCategory() async throws {
         let service = MusicUIKitRegressionService()
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         await model.load()
         await service.allowResultSearch {}
         let additional = SearchCategoryUIKitFixture()
@@ -66,7 +66,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testNewMusicSubmissionDuringPendingAdditionalSwipeDoesNotStartSupersededDomain() async throws {
         let service = MusicUIKitRegressionService()
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         await model.load()
         await service.allowResultSearch {}
         let content = SearchCategoryUIKitFixture()
@@ -93,12 +93,11 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testGlobalSearchAddsAllFiveCategoriesWhenMusicPlaylistSearchIsDisabled() async throws {
-        let key = MusicSearchPreferencesStore.preferencesKey
-        let previous = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.set(try JSONEncoder().encode(MusicSearchPreferences(searchPlaylists: false)), forKey: key)
-        defer { UserDefaults.standard.set(previous, forKey: key) }
+        let database = try appStorageTestDatabase()
         let service = MusicUIKitRegressionService()
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
+        let preferencesSaved = await model.searchPreferences.update(.init(searchPlaylists: false))
+        XCTAssertTrue(preferencesSaved)
         await model.load()
         let content = SearchCategoryUIKitFixture(), novel = SearchCategoryUIKitFixture()
         let page = MusicSearchResultsViewController(model: model, query: "影视词", appearance: MusicAppearancePreferencesStore(),
@@ -120,7 +119,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
     func testThreeTargetsKeepIndependentDomainConsumersAndCancelHiddenCategoryWithoutLosingSession() async throws {
         let service = MusicUIKitRegressionService()
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         await model.load(); await service.allowResultSearch {}
         let film = SearchCategoryUIKitFixture(), novel = SearchCategoryUIKitFixture()
         let root = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(), router: MusicUIKitRegressionRouter(),
@@ -159,7 +158,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testPlaybackModeMenuMergesEligibleEntrancesAndOrdinaryChoices() async throws {
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
         let quality = try resultButton(id: "music.player.quality", in: fixture.page.view)
@@ -195,7 +194,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testPlaybackModeFailureAndHeartbeatFailureKeepCommittedChoice() async throws {
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         let model = fixture.content.model
         let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
@@ -230,7 +229,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testPlaybackModeLayoutReclaimsIndependentButtonSpaceAndKeepsTransport() async throws {
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         await fixture.service.configureNavigation(fixture.content.model.queue)
         fixture.content.model.playbackState.state = await fixture.service.state()
@@ -287,7 +286,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testPlaybackRecommendationMenuStartsResumesAndRestoresCheckpoint() async throws {
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         let model = fixture.content.model
         let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
@@ -326,7 +325,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             (.songRoaming, "漫游模式", .fm, []),
             (.artistRoaming, "漫游模式", .fm, [])
         ] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let snapshot = playbackSourceSnapshot(provider: provider)
             await fixture.service.configurePlaybackSource(similar: snapshot)
@@ -358,7 +357,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testSearchRecommendationAndFMChoicesDoNotInventReturnOrChannelActions() async throws {
         for active in [false, true] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let snapshot = playbackSearchSnapshot(active: active)
             let original = model.queue.map(\.id)
@@ -380,7 +379,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             await model.close()
             release(fixture.root, window: fixture.window)
         }
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         let model = fixture.content.model
         let snapshot = MusicFMPlaybackSnapshot(id: UUID(), action: MusicFMModeChoice.main[2].action,
@@ -405,7 +404,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testPlaybackModeMenuExcludesLoadingRetryAndReadbackWhileQueueKeepsRecovery() async throws {
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         let model = fixture.content.model
         let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
@@ -482,7 +481,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testPlaybackSpecialActionsRejectReplacedSearchAndFMSessionTokens() async throws {
         for fm in [false, true] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let id = UUID()
             if fm {
@@ -514,7 +513,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testPlaybackEntryActionsRejectRevokedEligibilityBusyOrMiniLayout() async throws {
         for change in ["recommendationQualification", "heartbeatQualification", "changing", "layout"] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
             let old = try modeActions(mode)
@@ -541,7 +540,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     func testPlaybackModeOldSessionActionsRejectLiveStateBeforeRendering() async throws {
         for change in ["occurrence", "attempt", "queue", "settings", "account", "snapshot", "command",
                        "fm", "continuation", "provider", "loading", "errorID", "changing", "unavailable", "layout", "hidden"] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let snapshot = playbackSourceSnapshot(provider: .queueRecommendations, status: .error,
                 canRetry: true, error: .upstreamFailed, errorID: UUID())
@@ -587,7 +586,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     func testQueueRetryRejectsRetiredSourceAndErrorBeforeTaskRuns() async throws {
         for search in [false, true] {
             for change in ["account", "command", "errorID", "snapshot", "hidden"] {
-                let fixture = await makeModePlayer()
+                let fixture = try await makeModePlayer()
                 let model = fixture.content.model, id = UUID(), errorID = UUID()
                 if search {
                     await fixture.service.configurePlaybackSource(recommendations: playbackSearchSnapshot(id: id,
@@ -624,7 +623,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testQueueUnconfirmedReadbackRejectsRetiredRequestBeforeTaskRuns() async throws {
         for change in ["account", "command", "errorID", "snapshot", "hidden"] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let snapshot = playbackSourceSnapshot(provider: .queueRecommendations, status: .error,
                 canRetry: true, error: .commitUnconfirmed, errorID: UUID())
@@ -654,7 +653,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testPlaybackModeOldEntranceActionsRejectLiveIdentityChangesBeforeRendering() async throws {
         for change in ["occurrence", "attempt", "queue", "settings", "account", "snapshot", "command", "fm", "hidden"] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
             let old = try modeActions(mode)
@@ -682,7 +681,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testPlaybackModeCommandRejectsReplacedSessionAfterMenuAdmission() async throws {
         for title in ["列表循环", "推荐模式", "心动模式"] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             let mode = try resultButton(id: "music.player.mode", in: fixture.page.view)
             invoke(try XCTUnwrap(try modeActions(mode).first { $0.title == title }))
@@ -697,7 +696,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testFMHeaderOpensCurrentChannelSelectorAndPreservesModeMenu() async throws {
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         let model = fixture.content.model
         let source = try resultButton(id: "music.player.fmSource", in: fixture.page.view)
@@ -768,7 +767,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testFMSelectorEdgeCancellationAndCompletionPreserveTheCorrectPageLifetime() async throws {
-        let fixture = await makeModePlayer()
+        let fixture = try await makeModePlayer()
         defer { release(fixture.root, window: fixture.window) }
         let model = fixture.content.model
         model.playbackState.isFMActive = true
@@ -820,7 +819,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testFMSelectorAccountLossDuringPresentationOrInteractiveReturnDrainsItsClose() async throws {
         for whilePresenting in [true, false] {
-            let fixture = await makeModePlayer()
+            let fixture = try await makeModePlayer()
             let model = fixture.content.model
             model.playbackState.isFMActive = true
             model.playbackState.activeHomeFM = MusicFMModeChoice.main[0].action
@@ -870,7 +869,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             ], layout: .featureRail)
         ]))
         await service.enableHeartbeat()
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
         let home = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: appearance, router: router, embedded: true)
@@ -905,7 +904,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     func testFMSelectorUsesExistingHostingChoicesAndClosesOnExitOrAccountChange() async throws {
         for accountChange in [false, true] {
             let service = MusicUIKitRegressionService()
-            let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+            let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
             model.playbackState.isFMActive = true
             model.playbackState.activeHomeFM = MusicFMModeChoice.main[0].action
             let appearance = MusicAppearancePreferencesStore(), root = UIViewController()
@@ -950,7 +949,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(browse: home("initial"))
         let changeProcessed = expectation(description: "hidden same-source home change processed")
         await service.observeHomeChangeCompletion { changeProcessed.fulfill() }
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         addTeardownBlock { await model.close() }
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
         let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
@@ -1020,7 +1019,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let detailGate = MusicUIKitSearchGate { detailEntered.fulfill() }
         await service.holdHome(homeGate)
         await service.holdDetail(cursor: nil, gate: detailGate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         addTeardownBlock {
             await homeGate.release(); await detailGate.release()
             await model.close()
@@ -1108,7 +1107,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let refreshing = expectation(description: "cached home waits for refresh")
         let gate = MusicUIKitSearchGate { refreshing.fulfill() }
         await service.holdHome(gate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         addTeardownBlock { await gate.release(); await model.close() }
         let router = MusicUIKitRegressionRouter()
         var opened: [MusicPublicBrowseCollection] = []
@@ -1161,7 +1160,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             let gate = MusicUIKitSearchGate { refreshing.fulfill() }
             await service.holdHome(gate)
             await service.failNextHome(failure)
-            let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+            let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
             addTeardownBlock {
                 await gate.release()
                 await model.close()
@@ -1214,7 +1213,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             .init(id: "cards", title: "", items: [card("retained", previews: [])], layout: .playlistRail),
         ]))
         await service.holdHome(gate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
         let page = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: appearance, router: router, embedded: true)
@@ -1255,9 +1254,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testChannelCatalogueAndFirstChannelUseSkeletonWithoutObscuringLoadedContent() async throws {
-        let key = "music.ui.lastChannel", saved = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.removeObject(forKey: key)
-        defer { UserDefaults.standard.set(saved, forKey: key) }
+        let database = try appStorageTestDatabase()
         let first = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
         let chart = MusicPublicBrowseChannel(id: "chart", title: "排行榜", kind: .rankings)
         let service = MusicUIKitRegressionService(browse: .init(sections: [
@@ -1272,7 +1269,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let directoryGate = MusicUIKitSearchGate { directoryEntered.fulfill() }
         let channelGate = MusicUIKitSearchGate { channelEntered.fulfill() }
         await service.holdCatalogue(directoryGate); await service.holdChannel(channelGate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
         let router = MusicUIKitRegressionRouter()
         let controller = MusicChannelsViewController(model: model, browser: service,
             appearance: MusicAppearancePreferencesStore(), router: router)
@@ -1311,7 +1308,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let initial = expectation(description: "local initial tracks entered")
         let gate = MusicUIKitSearchGate { initial.fulfill() }
         await service.holdLocalTracks(gate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let page = MusicCollectionViewModel(model: model, collectionID: "playlist:1")
         let controller = MusicCollectionViewController(model: model, page: page,
             appearance: MusicAppearancePreferencesStore(), router: MusicUIKitRegressionRouter())
@@ -1349,7 +1346,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let gate = MusicUIKitSearchGate { entered.fulfill() }, nextGate = MusicUIKitSearchGate { next.fulfill() }
         await service.holdDetail(cursor: nil, gate: gate)
         await service.holdDetail(cursor: "next", gate: nextGate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let controller = MusicCollectionViewController(model: model, collection: collection, browser: service,
             appearance: MusicAppearancePreferencesStore(), router: MusicUIKitRegressionRouter())
         let window = mount(controller)
@@ -1378,11 +1375,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testSearchSkeletonsRemainIndependentStopWhileHiddenAndNewPageReusesResults() async throws {
-        let restore = try useSearchResultPreferences()
-        defer { restore() }
-        let suite = "MusicUIKitRegressionTests.skeleton-search." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let database = try appStorageTestDatabase()
         let service = MusicUIKitRegressionService(discovery: [
             .init(hot: [], charts: [], validUntil: Date().addingTimeInterval(600)),
         ])
@@ -1395,10 +1388,11 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let listsGate = MusicUIKitSearchGate { listsEntered.fulfill() }
         await service.blockResultPage(.songs, page: 1, gate: songsGate)
         await service.blockResultPage(.playlists, page: 1, gate: listsGate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
+        try useSearchResultPreferences(model)
         let appearance = MusicAppearancePreferencesStore()
         let root = MusicSearchViewController(model: model, appearance: appearance,
-            router: MusicUIKitRegressionRouter(), history: SearchHistoryStore(defaults: defaults))
+            router: MusicUIKitRegressionRouter(), history: try appStorageTestHistory(database))
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([root], animated: false)
         let window = mount(navigation)
@@ -1474,18 +1468,16 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testSearchDiscoveryFirstEmptyLoadUsesSkeletonAndHiddenCompletionDoesNotReload() async throws {
-        let suite = "MusicUIKitRegressionTests.skeleton-discovery." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+        let database = try appStorageTestDatabase()
         let entered = expectation(description: "discovery initial read entered")
         let gate = MusicUIKitSearchGate { entered.fulfill() }
         let service = MusicUIKitRegressionService(discovery: [
             .init(hot: [.init(keyword: "热词", rank: 1)], charts: [], validUntil: Date().addingTimeInterval(600)),
         ], discoveryGate: gate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
         let appearance = MusicAppearancePreferencesStore()
         let controller = MusicSearchViewController(model: model, appearance: appearance,
-            router: MusicUIKitRegressionRouter(), history: SearchHistoryStore(defaults: defaults))
+            router: MusicUIKitRegressionRouter(), history: try appStorageTestHistory(database))
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([controller], animated: false)
         let window = mount(navigation)
@@ -1524,8 +1516,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testHiddenChannelCatalogueDefersReplacementAndRevokesTheOldChild() async throws {
-        let remembered = UserDefaults.standard.object(forKey: "music.ui.lastChannel")
-        defer { UserDefaults.standard.set(remembered, forKey: "music.ui.lastChannel") }
+        let database = try appStorageTestDatabase()
         let channel = MusicPublicBrowseChannel(id: "chart", title: "排行榜", kind: .rankings)
         let directory = MusicPublicBrowsePage(sections: [
             .init(id: "directory", title: "", items: [
@@ -1535,7 +1526,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(browse: directory, channelBrowse: .init(sections: [
             .init(id: "cards", title: "", items: [card("kept", previews: [])], layout: .playlistRail),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
         let controller = MusicChannelsViewController(model: model, browser: service,
             appearance: appearance, router: router)
@@ -1588,7 +1579,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testBrowseReusesHeaderStatusAndHomeMenuAcrossRefreshButRejectsActionsAfterNavigation() async throws {
         let service = MusicUIKitRegressionService()
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         addTeardownBlock { await model.close() }
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
         let page = MusicBrowseViewController(title: "推荐", model: model, browser: service,
@@ -1691,7 +1682,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                              title: index == 1999 ? "needle" : "song \(index)")
         }
         let service = MusicUIKitRegressionService(localTracks: tracks)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let page = MusicCollectionViewModel(model: model, collectionID: "playlist:1")
         await page.appear()?.value
         let router = MusicUIKitRegressionRouter()
@@ -1733,7 +1724,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 
     func testModalSettingsOwnTheirCloseAndDoneControls() async throws {
         let service = MusicUIKitRegressionService()
-        let owner = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let owner = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let appearance = MusicAppearancePreferencesStore()
         let browse = MusicPublicBrowseViewModel(service: service, request: .discovery(.home))
         let source = MusicRemoteQueueSource(
@@ -1874,7 +1865,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 .init(id: "roaming", title: "私人漫游", content: .action(action)),
             ], layout: .featureRail),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         addTeardownBlock { await model.close() }
         await model.load()
         let router = MusicUIKitRegressionRouter()
@@ -1922,7 +1913,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             ], layout: .featureRail),
         ]))
         await service.observeFMChoice {}
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         addTeardownBlock { await model.close() }
         await model.load()
         let appearance = MusicAppearancePreferencesStore(), router = MusicUIKitRegressionRouter()
@@ -1971,7 +1962,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 .init(id: "fm", title: "私人 FM", content: .action(action)),
             ], layout: .featureRail),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: appearance, router: MusicUIKitRegressionRouter(), embedded: true)
         let window = mount(controller)
@@ -2071,12 +2062,10 @@ final class MusicUIKitRegressionTests: XCTestCase {
             title: "榜单"))
         let hot = (1...8).map { MusicSearchHotKeyword(keyword: "保留热词\($0)", rank: $0) }
         let until = Date().addingTimeInterval(3600)
-        let suite = "MusicUIKitRegressionTests.search." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let history = SearchHistoryStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let history = try appStorageTestHistory(database)
         for index in (1...8).reversed() {
-            history.record("较长的搜索历史关键词 \(index)")
+            _ = try appStorageTestWait { await history.record("较长的搜索历史关键词 \(index)") }
         }
         let discoveryEntered = expectation(description: "partial discovery waits for page presentation")
         let discoveryGate = MusicUIKitSearchGate { discoveryEntered.fulfill() }
@@ -2086,7 +2075,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                   failures: [.init(component: .charts, error: .networkOffline)], validUntil: until),
             .init(hot: [], charts: [chart], validUntil: until),
         ], details: [chart.id: [detail]], discoveryGate: discoveryGate)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
         addTeardownBlock {
             await discoveryGate.release()
             await model.close()
@@ -2179,10 +2168,8 @@ final class MusicUIKitRegressionTests: XCTestCase {
             MusicSearchDiscoveryChart(collection: .init(platform: .netease, nativeID: "two", title: "榜单二")),
         ]
         let hot = (1...20).map { MusicSearchHotKeyword(keyword: "热词\($0)", rank: $0) }
-        let suite = "MusicUIKitRegressionTests.search-demand." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let history = SearchHistoryStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let history = try appStorageTestHistory(database)
         let entered = expectation(description: "search discovery entered")
         let gate = MusicUIKitSearchGate { entered.fulfill() }
         let service = MusicUIKitRegressionService(
@@ -2193,7 +2180,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             ],
             discoveryGate: gate
         )
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
                                                    router: MusicUIKitRegressionRouter(), history: history)
         controller.loadViewIfNeeded()
@@ -2272,13 +2259,11 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testSearchResultsPagePushesOnceAndKeepsSingleHistoryEntry() async throws {
-        let suite = "MusicUIKitRegressionTests.search-access." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let history = SearchHistoryStore(defaults: defaults)
-        history.record("原关键词")
+        let database = try appStorageTestDatabase()
+        let history = try appStorageTestHistory(database)
+        _ = try appStorageTestWait { await history.record("原关键词") }
         let service = MusicUIKitRegressionService()
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
                                                    router: MusicUIKitRegressionRouter(), history: history)
         let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
@@ -2307,17 +2292,14 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testSearchResultsResubmitsRetainedKeywordWithoutAddingHistoryAfterAccountChange() async throws {
-        let suite = "MusicUIKitRegressionTests.search-resubmit." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let restorePreferences = try useSearchResultPreferences()
-        defer { restorePreferences() }
-        let history = SearchHistoryStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let history = try appStorageTestHistory(database)
         let service = MusicUIKitRegressionService()
         let firstReads = expectation(description: "initial song and playlist searches")
         firstReads.expectedFulfillmentCount = 2
         await service.allowResultSearch { firstReads.fulfill() }
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
+        try useSearchResultPreferences(model)
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
                                                    router: MusicUIKitRegressionRouter(), history: history)
         let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
@@ -2332,8 +2314,8 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertEqual(history.entries.map(\.text), ["原关键词"])
         XCTAssertEqual(results.query, "原关键词")
         results.query = "尚未提交的新关键词"
-        history.record("较新的关键词")
-        let entries = history.entries, storedHistory = defaults.data(forKey: SearchHistoryStore.storageKey)
+        _ = try appStorageTestWait { await history.record("较新的关键词") }
+        let entries = history.entries, storedHistory = try appStorageTestRows(database, "SELECT * FROM ios_search_history ORDER BY sequence")
         var historyChanges = 0
         let historyObservation = history.$entries.dropFirst().sink { _ in historyChanges += 1 }
         defer { historyObservation.cancel() }
@@ -2351,21 +2333,18 @@ final class MusicUIKitRegressionTests: XCTestCase {
         XCTAssertTrue(results.isPageActive)
         XCTAssertEqual(results.query, "尚未提交的新关键词")
         XCTAssertEqual(history.entries, entries)
-        XCTAssertEqual(defaults.data(forKey: SearchHistoryStore.storageKey), storedHistory)
+        XCTAssertEqual(try appStorageTestRows(database, "SELECT * FROM ios_search_history ORDER BY sequence"), storedHistory)
         XCTAssertEqual(historyChanges, 0)
         await model.close()
     }
     func testUnavailableActiveSearchResultsClearAndOnlyResubmitAfterAccessReturns() async throws {
-        let suite = "MusicUIKitRegressionTests.search-unavailable." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let restorePreferences = try useSearchResultPreferences()
-        defer { restorePreferences() }
-        let history = SearchHistoryStore(defaults: defaults), service = MusicUIKitRegressionService()
+        let database = try appStorageTestDatabase()
+        let history = try appStorageTestHistory(database), service = MusicUIKitRegressionService()
         let firstReads = expectation(description: "initial search reads")
         firstReads.expectedFulfillmentCount = 2
         await service.allowResultSearch { firstReads.fulfill() }
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
+        try useSearchResultPreferences(model)
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
                                                    router: MusicUIKitRegressionRouter(), history: history)
         let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
@@ -2383,7 +2362,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             }
         }, evaluatedWith: table)
         await fulfillment(of: [loaded], timeout: 2)
-        history.record("较新的关键词")
+        _ = try appStorageTestWait { await history.record("较新的关键词") }
         let reads = await service.resultReads(), entries = history.entries
         results.query = "尚未提交的新关键词"
         model.setAvailable(false)
@@ -2423,16 +2402,13 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
     func testInactiveSearchResultsDoNotResubmitAfterAccountGenerationChanges() async throws {
-        let suite = "MusicUIKitRegressionTests.search-inactive." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let restorePreferences = try useSearchResultPreferences()
-        defer { restorePreferences() }
-        let history = SearchHistoryStore(defaults: defaults), service = MusicUIKitRegressionService()
+        let database = try appStorageTestDatabase()
+        let history = try appStorageTestHistory(database), service = MusicUIKitRegressionService()
         let firstReads = expectation(description: "initial search reads")
         firstReads.expectedFulfillmentCount = 2
         await service.allowResultSearch { firstReads.fulfill() }
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
+        try useSearchResultPreferences(model)
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
                                                    router: MusicUIKitRegressionRouter(), history: history)
         let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
@@ -2473,18 +2449,15 @@ final class MusicUIKitRegressionTests: XCTestCase {
         await model.close()
     }
     func testPlaylistStaleResultFooterUsesTheUnifiedRetryLabel() async throws {
-        let suite = "MusicUIKitRegressionTests.search-retry." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let restorePreferences = try useSearchResultPreferences()
-        defer { restorePreferences() }
+        let database = try appStorageTestDatabase()
         let service = MusicUIKitRegressionService()
         let firstReads = expectation(description: "song result and stale playlist failure")
         firstReads.expectedFulfillmentCount = 2
         await service.allowResultSearch(playlistFailure: .staleResult) { firstReads.fulfill() }
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
+        try useSearchResultPreferences(model)
         let controller = MusicSearchViewController(model: model, appearance: MusicAppearancePreferencesStore(),
-            router: MusicUIKitRegressionRouter(), history: SearchHistoryStore(defaults: defaults))
+            router: MusicUIKitRegressionRouter(), history: try appStorageTestHistory(database))
         let navigation = PageNavigationController(themeProvider: MusicAppearancePreferencesStore())
         navigation.setViewControllers([controller], animated: false)
         let window = mount(navigation)
@@ -2764,9 +2737,9 @@ final class MusicUIKitRegressionTests: XCTestCase {
             let songs = try await self.selectResultTab(1, in: results)
             let playlists = try await self.selectResultTab(2, in: results)
             XCTAssertLessThan(playlists.numberOfRows(inSection: 1), 8)
-            appearance.set(\.playlistView, .list)
+            _ = try appStorageTestWait { await appearance.set(\.playlistView, .list) }
             await self.waitForResult { playlists.numberOfRows(inSection: 1) == 8 }
-            appearance.set(\.playlistView, .grid)
+            _ = try appStorageTestWait { await appearance.set(\.playlistView, .grid) }
             await self.waitForResult { playlists.numberOfRows(inSection: 1) < 8 }
 
             model.setAvailable(false)
@@ -2846,7 +2819,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 .init(id: $0.identity, title: $0.title, content: .channel($0))
             }, layout: .playlistRail),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let router = MusicUIKitRegressionRouter()
         let appearance = MusicAppearancePreferencesStore()
         let host = PageViewController(themeProvider: appearance)
@@ -2885,7 +2858,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 .init(id: $0.identity, title: $0.title, content: .channel($0))
             }, layout: .playlistRail),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let controller = MusicChannelsViewController(
             model: model, browser: service, appearance: MusicAppearancePreferencesStore(),
             router: MusicUIKitRegressionRouter()
@@ -2936,11 +2909,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     }
 
     func testChannelPagerLoadsOnlyShownPagesAndReusesContentOnReturn() async throws {
-        let remembered = UserDefaults.standard.object(forKey: "music.ui.lastChannel")
-        defer {
-            if let remembered { UserDefaults.standard.set(remembered, forKey: "music.ui.lastChannel") }
-            else { UserDefaults.standard.removeObject(forKey: "music.ui.lastChannel") }
-        }
+        let database = try appStorageTestDatabase()
         let channels: [MusicPublicBrowseChannel] = [
             .init(id: "chart", title: "排行榜", kind: .rankings),
             .init(id: "electronic", title: "电音", kind: .cube),
@@ -2952,7 +2921,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         ]), channelBrowse: .init(sections: [
             .init(id: "cards", title: "动态栏目", items: [card("content", previews: [])], layout: .playlistRail),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
         let router = MusicUIKitRegressionRouter()
         let controller = MusicChannelsViewController(
             model: model, browser: service, appearance: MusicAppearancePreferencesStore(), router: router
@@ -3290,7 +3259,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             ], layout: .list),
         ])
         let service = MusicUIKitRegressionService(browse: .init(sections: [], cursor: "public", consumed: 1), nextBrowse: page)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let controller = MusicBrowseViewController(title: "推荐", model: model, browser: service,
             request: .discovery(.home), appearance: MusicAppearancePreferencesStore(),
             router: MusicUIKitRegressionRouter(), embedded: true)
@@ -3414,7 +3383,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 let service = MusicUIKitRegressionService(browse: .init(sections: [
                     .init(id: "cards", title: "推荐歌单", items: [card], layout: style),
                 ]))
-                let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+                let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
                 let controller = MusicBrowseViewController(
                     title: "欧美", model: model, browser: service, request: request,
                     appearance: MusicAppearancePreferencesStore(), router: MusicUIKitRegressionRouter(), embedded: true
@@ -3487,7 +3456,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(browse: .init(sections: [
             .init(id: "vip:rankings", title: "黑胶VIP 排行榜", items: cards, layout: .vipRankedSongs),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let controller = MusicBrowseViewController(
             title: "VIP", model: model, browser: service,
             request: .discovery(.channel(.init(id: "vip", title: "VIP", kind: .cube), tag: "")),
@@ -3536,7 +3505,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             sections: [.init(id: "cards", title: "推荐歌单", items: [card], layout: .playlistRail)],
             filters: filters, selectedFilter: "all"
         ))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let controller = MusicBrowseViewController(
             title: "欧美", model: model, browser: service,
             request: .discovery(.channel(.init(id: "western", title: "欧美", kind: .cube), tag: "")),
@@ -3580,7 +3549,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                     .init(id: "display-only-banner", title: "无动作横幅", content: .unavailable),
                 ], layout: .banner),
             ], filters: values, selectedFilter: values.first?.id ?? ""))
-            let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+            let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
             let controller = MusicBrowseViewController(
                 title: "电音", model: model, browser: service,
                 request: .discovery(.channel(.init(id: "electronic", title: "电音", kind: .cube), tag: "")),
@@ -3634,7 +3603,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 )),
             ], layout: .banner),
         ], filters: filters, selectedFilter: filters[0].id))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let controller = MusicBrowseViewController(
             title: "电音", model: model, browser: service,
             request: .discovery(.channel(.init(id: "electronic", title: "电音", kind: .cube), tag: "")),
@@ -3753,7 +3722,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(browse: directory, channelBrowse: .init(sections: [
             .init(id: "cards", title: "动态栏目", items: [card("content", previews: [])], layout: .playlistRail),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let router = MusicUIKitRegressionRouter()
         let controller = MusicChannelsViewController(
             model: model, browser: service, appearance: MusicAppearancePreferencesStore(),
@@ -3816,7 +3785,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                 .init(id: destination.id, title: destination.title, content: .collection(destination)),
             ], layout: .playlistRail, channel: channel),
         ]))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let router = MusicUIKitRegressionRouter()
         var selected: [MusicPublicBrowseChannel] = [], opened: [MusicPublicBrowseCollection] = []
         router.onChannel = { selected.append($0) }; router.onCollection = { opened.append($0) }
@@ -3856,7 +3825,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             .init(id: "unchanged", title: "保留", items: [untouched], layout: .rankedSongs),
         ])
         let service = MusicUIKitRegressionService(browse: page)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let router = MusicUIKitRegressionRouter()
         let controller = MusicBrowseViewController(title: "频道", model: model, browser: service,
             request: .discovery(.channel(.init(id: "channel", title: "频道", kind: .cube), tag: "")),
@@ -4092,7 +4061,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             cursor: nil
         )
         let service = MusicUIKitRegressionService(detail: firstPage, nextDetail: nextPage)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let appearance = MusicAppearancePreferencesStore()
         let controller = MusicCollectionViewController(
             model: model,
@@ -4257,7 +4226,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
                              title: "慢慢听", artist: "房东的猫", album: "世界"),
         ]
         let service = MusicUIKitRegressionService(localTracks: tracks)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let page = MusicCollectionViewModel(
             model: model,
             collectionID: "playlist:1",
@@ -4385,7 +4354,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(localTracks: ["a", "b", "c", "d"].map {
             .init(ref: .init(kind: .library, id: $0), songId: $0, title: $0)
         })
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let page = MusicCollectionViewModel(model: model, collectionID: "playlist:1")
         await page.appear()?.value
         let draft = try XCTUnwrap(page.beginEditing(presentationID: page.presentationID))
@@ -4507,7 +4476,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(localTracks: ["a", "b"].map {
             .init(ref: .init(kind: .library, id: $0), songId: $0, title: $0)
         })
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let page = MusicCollectionViewModel(model: model, collectionID: "playlist:1")
         await page.appear()?.value
         let draft = try XCTUnwrap(page.beginEditing(presentationID: page.presentationID))
@@ -4545,7 +4514,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(localTracks: ["a", "b"].map {
             .init(ref: .init(kind: .library, id: $0), songId: $0, title: $0)
         })
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         let appearance = MusicAppearancePreferencesStore()
         let root = MusicCollectionViewController(model: model, collectionID: "playlist:1",
                                                  appearance: appearance, router: MusicUIKitRegressionRouter())
@@ -4603,7 +4572,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
     func testQueueConsumesSharedFavoritesWithoutSuspendingThemOnRemoval() async throws {
         let saved = track("favorite")
         let service = MusicUIKitRegressionService(localTracks: [saved], collectionKind: "favorites")
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         await model.load()
         let favorites = model.favorites
         await favorites.flush()
@@ -4638,7 +4607,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         return .init(ref: .init(kind: .library, id: permanentID), songId: permanentID, title: id)
     }
 
-    private func makeModePlayer() async -> (
+    private func makeModePlayer() async throws -> (
         service: MusicUIKitRegressionService, content: MusicPlayerContentModel,
         page: MusicPlayerViewController, root: UIViewController, window: UIWindow
     ) {
@@ -4647,7 +4616,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
             songId: "wy:1", title: "测试歌曲", artist: "测试歌手",
             sources: [.init(sourceKey: "wy:1", platform: "wy", nativeId: "1")]))
         await service.configurePlaybackModes(entry)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         model.playbackState.state = await service.state()
         model.playbackState.queue = [entry]
         model.playbackState.canEnterSimilarMode = true
@@ -4831,20 +4800,15 @@ final class MusicUIKitRegressionTests: XCTestCase {
     private func withSearchResults(_ service: MusicUIKitRegressionService,
         preferences: MusicSearchPreferences = .init(songPlatforms: [.qq], playlistPlatforms: [.qq]),
         run: (SearchPageViewController, MusicViewModel, MusicAppearancePreferencesStore) async throws -> Void) async throws {
-        let suite = "MusicUIKitRegressionTests.result-update." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        let key = MusicSearchPreferencesStore.preferencesKey, saved = UserDefaults.standard.object(forKey: key)
-        UserDefaults.standard.set(try JSONEncoder().encode(preferences), forKey: key)
-        defer {
-            UserDefaults.standard.set(saved, forKey: key)
-            defaults.removePersistentDomain(forName: suite)
-        }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()), database: database)
+        let preferencesSaved = await model.searchPreferences.update(preferences)
+        XCTAssertTrue(preferencesSaved)
         await model.load()
         await service.allowResultSearch {}
         let root = MusicSearchViewController(model: model, appearance: appearance,
-            router: MusicUIKitRegressionRouter(), history: SearchHistoryStore(defaults: defaults))
+            router: MusicUIKitRegressionRouter(), history: try appStorageTestHistory(database))
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([root], animated: false)
         let window = mount(navigation)
@@ -4880,12 +4844,9 @@ final class MusicUIKitRegressionTests: XCTestCase {
         catch { await model.close(); throw error }
         await model.close()
     }
-    private func useSearchResultPreferences() throws -> @MainActor () -> Void {
-        let defaults = UserDefaults.standard, key = MusicSearchPreferencesStore.preferencesKey
-        let saved = defaults.object(forKey: key)
-        defaults.set(try JSONEncoder().encode(MusicSearchPreferences(songPlatforms: [.netease],
-            playlistPlatforms: [.netease])), forKey: key)
-        return { defaults.set(saved, forKey: key) }
+    private func useSearchResultPreferences(_ model: MusicViewModel) throws {
+        XCTAssertTrue(try appStorageTestWait { await model.searchPreferences.update(.init(
+            songPlatforms: [.netease], playlistPlatforms: [.netease])) })
     }
     private func withSourceSelectionPage(gate: MusicUIKitSearchGate,
         run: (MusicSourcesViewController, MusicViewModel, UITableView, UIButton,
@@ -4895,7 +4856,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
         let service = MusicUIKitRegressionService(sourceSelection: (
             entry: .init(id: "source-occurrence", track: track), session: session
         ))
-        let model = MusicViewModel(service: service, player: MusicUIKitRegressionPlayer())
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, player: MusicUIKitRegressionPlayer()))
         await model.load()
         XCTAssertNil(model.error); XCTAssertEqual(model.current?.id, "source-occurrence")
         let appearance = MusicAppearancePreferencesStore()
@@ -4965,7 +4926,7 @@ final class MusicUIKitRegressionTests: XCTestCase {
 final class MusicPlayerContentModelTests: XCTestCase {
     func testChorusFailureDoesNotHotRetryAndNextExplicitOpenCanReadAgain() async throws {
         let service = MusicUIKitRegressionService(), playback = PlaybackController()
-        let model = MusicViewModel(service: service, playback: playback)
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, playback: playback))
         try select("retry", model: model, playback: playback)
         await service.failNextChorus(.timeout)
         let presentation = MusicMiniPlayerPresentation()
@@ -4989,7 +4950,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
 
     func testSettledEmptyChorusSurvivesCloseReopenAndUnrelatedRevisions() async throws {
         let service = MusicUIKitRegressionService(), playback = PlaybackController()
-        let model = MusicViewModel(service: service, playback: playback)
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, playback: playback))
         try select("first", model: model, playback: playback)
         let presentation = MusicMiniPlayerPresentation()
         let content = MusicPlayerContentModel(model: model, playback: playback,
@@ -5011,7 +4972,7 @@ final class MusicPlayerContentModelTests: XCTestCase {
 
     func testChangedChorusIdentityDrainsOldRequestBeforeReadingItsReplacement() async throws {
         let service = MusicUIKitRegressionService(), playback = PlaybackController()
-        let model = MusicViewModel(service: service, playback: playback)
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, playback: playback))
         try select("old", model: model, playback: playback)
         let entered = expectation(description: "old chorus entered")
         let gate = MusicUIKitChorusGate { entered.fulfill() }
@@ -6456,14 +6417,14 @@ final class MusicPlayerContentModelTests: XCTestCase {
                           artworkImages: MusicArtworkImages = .shared)
         throws -> (MusicPlayerContentModel, MusicPlayerSurface) {
         let playback = PlaybackController()
-        let model = MusicViewModel(service: service, playback: playback)
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, playback: playback))
         try select("dock", model: model, playback: playback)
         model.playbackState.queue = [.init(id: "dock", track: .init(ref: .init(kind: .queue, id: "dock"),
             songId: "dock", title: "Goodbye", artist: "Ramsey"))]
         model.playbackState.phase = .paused
         model.clock.position = 30
         let content = MusicPlayerContentModel(model: model, playback: playback,
-            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            appearance: try appStorageTestAppearance(),
             presentation: MusicMiniPlayerPresentation(), artworkImages: artworkImages)
         let surface = MusicPlayerSurface(content: content)
         surface.frame = CGRect(x: 0, y: 0, width: 408, height: surface.dockHeight)

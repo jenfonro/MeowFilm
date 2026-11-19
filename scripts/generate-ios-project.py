@@ -56,10 +56,11 @@ def generate():
     app_sources = source_paths(ROOT, APPLICATION_DIRECTORIES)
     test_sources = source_paths(ROOT, ("UITests",))
     runtime_test_sources = source_paths(ROOT, ("RuntimeTests",))
+    shared_test_sources = source_paths(ROOT, ("TestSupport",))
     all_sources = {p.relative_to(ROOT / "apps/ios").as_posix()
                    for p in (ROOT / "apps/ios").rglob("*.swift")
                    if p.relative_to(ROOT / "apps/ios").parts[0] != ".cache"}
-    if all_sources != set(app_sources + test_sources + runtime_test_sources):
+    if all_sources != set(app_sources + test_sources + runtime_test_sources + shared_test_sources):
         raise ValueError("App Swift sources must belong to an application responsibility or a test directory")
     bundle_identifier = "dev.meowfilm.aggregate"
     base_info = plistlib.loads((ROOT / "apps/ios/Info.plist").read_bytes())
@@ -107,6 +108,10 @@ def generate():
     app_references, app_builds = source_objects(app_sources)
     test_references, test_builds = source_objects(test_sources)
     runtime_test_references, runtime_test_builds = source_objects(runtime_test_sources)
+    shared_test_references, shared_test_builds = source_objects(shared_test_sources)
+    test_references += shared_test_references
+    test_builds += shared_test_builds
+    runtime_test_builds += shared_test_builds
     obj("assets", 'isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>";')
     obj("assetsBuild", f"isa = PBXBuildFile; fileRef = {ids['assets']};")
     # The embedded runtime: the pinned Node Mobile framework (linked, embedded and
@@ -130,7 +135,7 @@ def generate():
     obj("projectLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['projectLicense']};")
     obj("nodeLicenseBuild", f"isa = PBXBuildFile; fileRef = {ids['nodeLicense']};")
     media_license_references, media_license_builds = [], []
-    for filename in VIDEO_LICENSES + AUDIO_LICENSES + AETHER_LICENSES:
+    for filename in VIDEO_LICENSES + AUDIO_LICENSES + AETHER_LICENSES + ("sqlite-LICENSE.md",):
         reference, build = identifier(f"{product}:license:{filename}"), identifier(f"{product}:license-build:{filename}")
         media_license_references.append(reference)
         media_license_builds.append(build)

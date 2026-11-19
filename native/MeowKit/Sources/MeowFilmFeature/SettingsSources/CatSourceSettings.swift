@@ -44,27 +44,17 @@ struct CatSourceSettings: Sendable {
         "mappings": .array([]), "scripts": .array([])
     ])
 
-    func read() throws -> [CatSourceConfiguration] { try Self.parse(document.read() ?? Self.empty) }
+    func read() async throws -> [CatSourceConfiguration] { try await Self.parse(document.read() ?? Self.empty) }
 
-    func change(_ edit: ([CatSourceConfiguration]) throws -> [CatSourceConfiguration]) throws -> [CatSourceConfiguration] {
-        let saved = try document.update { original in
+    func change(_ edit: @escaping @Sendable ([CatSourceConfiguration]) throws -> [CatSourceConfiguration]) async throws -> [CatSourceConfiguration] {
+        let saved = try await document.update { original in
             let value = original ?? Self.empty
             let previous = try Self.parse(value)
             let next = try edit(previous)
             guard case .object(var root) = value else { throw FilmSourceError(code: "INVALID_DOCUMENT") }
-            var remaining = next
-            let rows = root["scripts"]!.catArray!.compactMap { row -> RuntimeValue? in
-                guard let id = row.catField("installationId")?.catText,
-                      let before = previous.first(where: { $0.installationId.utf8.elementsEqual(id.utf8) }) else { return row }
-                guard let index = remaining.firstIndex(where: { $0.installationId.utf8.elementsEqual(id.utf8) }) else { return nil }
-                return row.applyingChanges(from: before.value, to: remaining.remove(at: index).value)
-            }
-            root["scripts"] = .array(rows + remaining.map(\.value))
+            root["scripts"] = .array(next.map(\.value))
             let result = RuntimeValue.object(root)
-            let projected = try Self.parse(result)
-            guard Set(projected.map { Data($0.installationId.utf8) }) == Set(next.map { Data($0.installationId.utf8) }) else {
-                throw FilmSourceError(code: "STORAGE_CONFLICT")
-            }
+            _ = try Self.parse(result)
             return result
         }
         return try Self.parse(saved)
@@ -114,36 +104,37 @@ struct CatSourceSettings: Sendable {
 
     private static func parse(_ value: RuntimeValue) throws -> [CatSourceConfiguration] {
         func invalid() -> FilmSourceError { .init(code: "INVALID_DOCUMENT") }
-        guard case .object(let root) = value, root["version"] == .number(1),
-              let scripts = root["scripts"]?.catArray else { throw invalid() }
-        let identities = scripts.compactMap { $0.catField("installationId")?.catText }
-        let counts = Dictionary(grouping: identities, by: { Data($0.utf8) }).mapValues(\.count)
-        let result = scripts.compactMap { script -> CatSourceConfiguration? in
-            do {
-                guard case .object(let fields) = script,
-                      let id = fields["installationId"]?.catText, validID(id), counts[Data(id.utf8)] == 1,
-                      let name = fields["name"]?.catText, let type = fields["sourceType"]?.catText,
-                      case .bool(let enabled)? = fields["enabled"],
-                      let revision = fields["inputRevision"]?.catInteger, revision > 0 else { throw invalid() }
-                func nullableText(_ key: String) throws -> String? {
-                    if fields[key] == nil || fields[key] == .null { return nil }
-                    guard let text = fields[key]?.catText else { throw invalid() }
-                    return text
-                }
-                let url = try (type == "network" ? nullableText("sourceUrl") : nil)
-                let path = try (type == "local" ? nullableText("localPath") : nil)
-                let hash = try (type == "local" ? nullableText("localHash") : nil)
-                do { try validateSource(name: name, type: type, url: url) }
-                catch { throw invalid() }
-                if type == "local" {
-                    guard let hash, digest(hash), path == nil ||
-                        (path!.hasPrefix("/") && !hasControls(path!)) else { throw invalid() }
-                }
-                return .init(installationId: id, name: name, sourceType: type, sourceUrl: url,
-                    localPath: path, localHash: hash, enabled: enabled, inputRevision: Int64(revision))
-            } catch { return nil }
+        guard case .object(let root) = value, Set(root.keys) == ["version", "port", "providers", "mappings", "scripts"],
+              root["version"] == .number(1), let port = root["port"]?.catInteger, (0...65535).contains(port),
+              case .object(let providers)? = root["providers"], let mappings = root["mappings"]?.catArray,
+              let scripts = root["scripts"]?.catArray,
+              providers.allSatisfy({ key, value in !key.isEmpty && { if case .bool = value { return true }; return false }() }),
+              mappings.allSatisfy({ row in
+                  guard case .object(let fields) = row, Set(fields.keys) == ["provider", "aliases"],
+                        fields["provider"]?.catText?.isEmpty == false, let aliases = fields["aliases"]?.catArray else { return false }
+                  return aliases.allSatisfy { $0.catText != nil }
+              }) else { throw invalid() }
+        var identities = Set<Data>()
+        return try scripts.map { script in
+            guard case .object(let fields) = script,
+                  Set(fields.keys) == ["installationId", "name", "sourceType", "sourceUrl", "localPath", "localHash", "enabled", "inputRevision"],
+                  let id = fields["installationId"]?.catText, validID(id), identities.insert(Data(id.utf8)).inserted,
+                  let name = fields["name"]?.catText, let type = fields["sourceType"]?.catText,
+                  case .bool(let enabled)? = fields["enabled"],
+                  let revision = fields["inputRevision"]?.catInteger, revision > 0 else { throw invalid() }
+            func nullableText(_ key: String) throws -> String? {
+                if fields[key] == .null { return nil }
+                guard let text = fields[key]?.catText else { throw invalid() }
+                return text
+            }
+            let url = try nullableText("sourceUrl"), path = try nullableText("localPath"), hash = try nullableText("localHash")
+            do { try validateSource(name: name, type: type, url: url) } catch { throw invalid() }
+            if type == "local" {
+                guard let hash, digest(hash), path == nil ||
+                    (path!.hasPrefix("/") && !hasControls(path!)) else { throw invalid() }
+            } else if path != nil || hash != nil { throw invalid() }
+            return .init(installationId: id, name: name, sourceType: type, sourceUrl: url,
+                localPath: path, localHash: hash, enabled: enabled, inputRevision: Int64(revision))
         }
-        guard scripts.isEmpty || !result.isEmpty else { throw invalid() }
-        return result
     }
 }

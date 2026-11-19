@@ -4,25 +4,27 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Storage;
-using Microsoft.Data.Sqlite;
 
 namespace MeowFilm.Windows.Tests;
 
-/// <summary>Test-owned SQLite companions. Documents remain separate from music records.</summary>
+/// <summary>All test repositories borrow the same current App database.</summary>
 internal static class MusicTestStores
 {
     private static ConditionalWeakTable<object, MusicRecordTestStore> companions = new();
-    private static readonly List<MusicRecordTestStore> owned = [];
+    private static readonly List<IAsyncDisposable> owned = [];
     internal static MusicRecordTestStore For(object fixture)
     {
         if (fixture is MusicRecordTestStore records) return records;
-        lock (owned) return companions.GetValue(fixture, _ => new MusicRecordTestStore());
+        lock (owned) return companions.GetValue(fixture, value =>
+            new MusicRecordTestStore(value as IStorageDatabase));
     }
     internal static MusicRecordTestStore Use(object fixture, string root)
     {
         lock (owned)
         {
-            var records = new MusicRecordTestStore(root);
+            if (fixture is not IStorageDatabase database || database.ProductRoot != root)
+                throw new InvalidOperationException("The fixture must use one current App database root.");
+            var records = new MusicRecordTestStore(database);
             companions.Remove(fixture); companions.Add(fixture, records); return records;
         }
     }
@@ -30,12 +32,22 @@ internal static class MusicTestStores
     {
         lock (owned) { companions.Remove(fixture); companions.Add(fixture, records); return records; }
     }
-    internal static void Register(MusicRecordTestStore store) { lock (owned) owned.Add(store); }
+    internal static void Register(IAsyncDisposable store) { lock (owned) owned.Add(store); }
+    internal static async ValueTask ReleaseCompanionAsync(object fixture)
+    {
+        MusicRecordTestStore? store;
+        lock (owned)
+        {
+            companions.TryGetValue(fixture, out store);
+            companions.Remove(fixture);
+        }
+        if (store is not null) await store.DisposeAsync();
+    }
     internal static async Task ReleaseAsync()
     {
-        MusicRecordTestStore[] stores;
+        IAsyncDisposable[] stores;
         lock (owned) { stores = owned.ToArray(); owned.Clear(); companions = new(); }
-        foreach (var store in stores) await store.DisposeAsync();
+        foreach (var store in stores.Reverse()) await store.DisposeAsync();
     }
 }
 
@@ -45,6 +57,8 @@ internal class MusicRecordTestStore : IMusicLibraryStore
     internal const string RecordScope = "local";
     internal readonly string RootPath;
     internal readonly MusicLibraryDatabase Database;
+    internal readonly IStorageDatabase Storage;
+    private readonly bool ownsStorage;
     private string scope = RecordScope;
     private bool initialized;
     internal DocumentStoreError ReadError = DocumentStoreError.Storage;
@@ -56,12 +70,14 @@ internal class MusicRecordTestStore : IMusicLibraryStore
     internal Func<MusicLibraryChanges, CancellationToken, Task>? BeforeCommit, AfterCommit;
     internal DocumentStoreError? ReadFailure;
     internal MusicLibraryRevision? WriteReceipt;
-    internal MusicRecordTestStore(string? root = null)
+    internal MusicRecordTestStore(IStorageDatabase? storage = null)
     {
-        RootPath = root ?? TestWorkspace.DataPath("music-records-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(RootPath);
-        Database = new(RootPath); MusicTestStores.Register(this);
+        Storage = storage ?? new NativeDatabase(TestWorkspace.DataPath("music-records-" + Guid.NewGuid().ToString("N")));
+        ownsStorage = storage is null;
+        RootPath = Storage.ProductRoot!;
+        Database = new(Storage); MusicTestStores.Register(this);
     }
+    internal MusicRecordTestStore(string root) : this(new NativeDatabase(root)) => ownsStorage = true;
     public async Task<MusicLibrarySnapshot> ReadAsync(string scope, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested(); Reads++;
@@ -119,31 +135,13 @@ internal class MusicRecordTestStore : IMusicLibraryStore
         get
         {
             if (!initialized) { _ = Snapshot(); initialized = true; }
-            using var connection = RawConnection();
-            using var header = connection.CreateCommand();
-            header.CommandText = "SELECT generation,receipt FROM header WHERE singleton=1";
-            using var reader = header.ExecuteReader(); reader.Read();
-            long generation = reader.GetInt64(0); string receipt = reader.GetString(1); reader.Close();
+            var saved = Snapshot();
             var areas = new JsonObject(); var songs = new JsonObject();
-            using var controls = connection.CreateCommand(); controls.CommandText = "SELECT name,data FROM areas ORDER BY name";
-            using var values = controls.ExecuteReader();
-            while (values.Read()) areas[values.GetString(0)] = JsonNode.Parse(values.GetString(1));
-            values.Close();
+            foreach (var pair in saved.Areas) areas[pair.Key] = pair.Value?.DeepClone();
             foreach (string id in Database.SongIds()) songs[id] = Database.ReadSong(id);
-            return new JsonObject { ["schema"] = 3, ["generation"] = generation,
-                ["receipt"] = receipt, ["areas"] = areas, ["songs"] = songs };
+            return new JsonObject { ["schema"] = 3, ["generation"] = saved.Revision.Generation,
+                ["receipt"] = saved.Revision.Receipt, ["areas"] = areas, ["songs"] = songs };
         }
-    }
-    private SqliteConnection RawConnection()
-    {
-        var connection = new SqliteConnection(new SqliteConnectionStringBuilder
-            { DataSource = Path.Combine(RootPath, "music-library.sqlite3"), Pooling = false }.ToString());
-        connection.Open();
-        using var journal = connection.CreateCommand();
-        journal.CommandText = "PRAGMA journal_mode=PERSIST";
-        if (!string.Equals(journal.ExecuteScalar() as string, "persist", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The fixture must retain the pinned persistent journal.");
-        return connection;
     }
     internal byte[]? Data
     {
@@ -160,34 +158,21 @@ internal class MusicRecordTestStore : IMusicLibraryStore
         if (snapshot["schema"]?.GetValue<int>() != 3 || snapshot["areas"] is not JsonObject areas ||
             snapshot["songs"] is not JsonObject songs) throw new InvalidOperationException("New-format diagnostic snapshot required.");
         if (!initialized) { _ = Snapshot(); initialized = true; }
-        MusicLibraryRevision beforeRevision;
-        using (var raw = RawConnection())
-        using (var read = raw.CreateCommand())
+        Storage.WriteAsync(db =>
         {
-            read.CommandText = "SELECT generation,receipt FROM header WHERE singleton=1";
-            using var row = read.ExecuteReader(); row.Read();
-            beforeRevision = new(row.GetInt64(0), row.GetString(1));
-        }
-        if (songs.Count > 0)
-        {
-            var next = new MusicLibraryRevision(beforeRevision.Generation + 1, Guid.NewGuid().ToString("D"));
-            Database.CommitAsync(scope, beforeRevision, next, new(new Dictionary<string, JsonObject>(),
-                songs.ToDictionary(pair => pair.Key, pair => pair.Value!.AsObject()))).GetAwaiter().GetResult();
-        }
-        using var connection = RawConnection(); using var transaction = connection.BeginTransaction();
-        using var clear = connection.CreateCommand(); clear.Transaction = transaction;
-        clear.CommandText = "DELETE FROM areas"; clear.ExecuteNonQuery();
-        foreach (var pair in areas)
-        {
-            using var command = connection.CreateCommand(); command.Transaction = transaction;
-            command.CommandText = "INSERT INTO areas(name,data) VALUES($name,$data)";
-            command.Parameters.AddWithValue("$name", pair.Key);
-            command.Parameters.AddWithValue("$data", pair.Value?.ToJsonString() ?? "null"); command.ExecuteNonQuery();
-        }
-        using var header = connection.CreateCommand(); header.Transaction = transaction;
-        header.CommandText = "UPDATE header SET generation=generation+1,receipt=$receipt WHERE singleton=1";
-        header.Parameters.AddWithValue("$receipt", Guid.NewGuid().ToString("D")); header.ExecuteNonQuery();
-        transaction.Commit();
+            foreach (var pair in songs)
+                MusicStorageRecords.Song.Save(db, pair.Value!.AsObject(),
+                    MusicStorageRecords.Song.Read(db, [pair.Key]), [pair.Key]);
+            foreach (var pair in areas)
+            {
+                var record = MusicStorageRecords.Areas[pair.Key];
+                record.Save(db, pair.Value!.AsObject(), record.Read(db, [scope]), [scope]);
+            }
+            db.Execute("INSERT INTO music_owner_state(scope,revision,receipt) VALUES($scope,1,$receipt) " +
+                "ON CONFLICT(scope) DO UPDATE SET revision=revision+1,receipt=excluded.receipt",
+                ("$scope", scope), ("$receipt", Guid.NewGuid().ToString("D")));
+            return true;
+        }).GetAwaiter().GetResult();
     }
     internal void SetArea(string name, JsonNode? value)
     {
@@ -195,31 +180,24 @@ internal class MusicRecordTestStore : IMusicLibraryStore
     }
     internal string RawSong(string id)
     {
-        using var connection = RawConnection(); using var command = connection.CreateCommand();
-        command.CommandText = "SELECT data FROM songs WHERE song_id=$id";
-        command.Parameters.AddWithValue("$id", id); return (string)command.ExecuteScalar()!;
+        return Storage.ReadAsync(db => MusicStorageRecords.Song.Read(db, [id])!.ToJsonString(LJ.Json)).GetAwaiter().GetResult();
     }
     internal void CorruptSong(string id, Action<JsonObject> change)
     {
         var song = JsonNode.Parse(RawSong(id))!.AsObject(); change(song);
-        using var connection = RawConnection(); using var command = connection.CreateCommand();
-        command.CommandText = "UPDATE songs SET data=$data WHERE song_id=$id";
-        command.Parameters.AddWithValue("$id", id); command.Parameters.AddWithValue("$data", song.ToJsonString());
-        if (command.ExecuteNonQuery() != 1) throw new InvalidOperationException("Expected the actual SQL song row.");
+        Storage.WriteAsync(db =>
+        {
+            MusicStorageRecords.Song.Save(db, song, MusicStorageRecords.Song.Read(db, [id]), [id]);
+            return true;
+        }).GetAwaiter().GetResult();
     }
     internal void SetAreaJson(string name, string json)
     {
-        if (!initialized) { _ = Snapshot(); initialized = true; }
-        using var connection = RawConnection(); using var transaction = connection.BeginTransaction();
-        using var command = connection.CreateCommand(); command.Transaction = transaction;
-        command.CommandText = "INSERT INTO areas(name,data) VALUES($name,$data) ON CONFLICT(name) DO UPDATE SET data=excluded.data";
-        command.Parameters.AddWithValue("$name", name); command.Parameters.AddWithValue("$data", json); command.ExecuteNonQuery();
-        using var header = connection.CreateCommand(); header.Transaction = transaction;
-        header.CommandText = "UPDATE header SET generation=generation+1,receipt=$receipt WHERE singleton=1";
-        header.Parameters.AddWithValue("$receipt", Guid.NewGuid().ToString("D")); header.ExecuteNonQuery(); transaction.Commit();
+        SetArea(name, JsonNode.Parse(json));
     }
     public async ValueTask DisposeAsync()
     {
         if (Disposed) return; Disposed = true; Release?.TrySetResult(); await Database.DisposeAsync();
+        if (ownsStorage) await Storage.DisposeAsync();
     }
 }

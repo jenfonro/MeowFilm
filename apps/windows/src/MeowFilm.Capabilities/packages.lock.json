@@ -253,7 +253,8 @@
       "meowfilm.platform": {
         "type": "Project",
         "dependencies": {
-          "MeowFilm.Core": "[1.0.0, )"
+          "MeowFilm.Core": "[1.0.0, )",
+          "Microsoft.Data.Sqlite": "[10.0.15, 10.0.15]"
         }
       }
     },

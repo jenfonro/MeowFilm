@@ -9,7 +9,7 @@ final class NativeMusicCredentialRecoveryTests: XCTestCase {
         let f = try MusicUpdateFixture(); try await f.enable()
         _ = try await f.service.validate(platform: .qq)
         let before = f.store.peek(f.identity)
-        f.store.failRead(.interactionNotAllowed)
+        f.store.failRead(.unavailable)
         do { _ = try await f.service.refresh(platform: .qq); XCTFail("Read denial bypassed") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
         let counts = await f.provider.counts()

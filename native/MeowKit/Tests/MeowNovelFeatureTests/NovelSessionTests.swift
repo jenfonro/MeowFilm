@@ -3,25 +3,35 @@ import XCTest
 import Combine
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowNovelFeature
 
 @MainActor
 final class NovelSessionTests: XCTestCase {
     private var roots: [URL] = []
+    private var databases: [SQLiteDatabase] = []
     private var ruleFixtures: [NovelRulesRPCFixture] = []
     override func tearDown() async throws {
         for fixture in ruleFixtures { await fixture.close() }; ruleFixtures = []
+        for database in databases { try await database.close() }; databases = []
         for root in roots { try? FileManager.default.removeItem(at: root) }; roots = []
         try await super.tearDown()
     }
-    private func fixture(_ runtime: NovelSessionRuntime = .init()) async throws -> (NovelFeature, NovelSessionRuntime, DocumentStore) {
+    private func fixture(_ runtime: NovelSessionRuntime = .init()) async throws -> (NovelFeature, NovelSessionRuntime, SQLiteDatabase) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true); roots.append(root)
-        let store = try DocumentStore(baseURL: root, namespace: NovelLibrary.namespace)
+        let store = try storageTestOpen(root); databases.append(store)
         let rpc = try await NovelRulesRPCFixture.start(); ruleFixtures.append(rpc)
-        let feature = NovelFeature(library: NovelLibrary(store: store), rules: rpc.rules, runtime: runtime)
+        let feature = NovelFeature(library: NovelLibrary(database: store), rules: rpc.rules, runtime: runtime)
         try await feature.reloadLocal(); try await feature.refreshSources()
         return (feature, runtime, store)
+    }
+    private func libraryRows(_ database: SQLiteDatabase) async throws -> [String: [SQLiteRow]] {
+        try await database.snapshot { db in
+            let tables = ["ios_novel_books", "ios_novel_progress", "ios_novel_variable_nodes",
+                "ios_novel_reading_settings", "ios_novel_rules", "owner_revisions"]
+            return try Dictionary(uniqueKeysWithValues: tables.map { ($0, try db.query("SELECT * FROM \($0) ORDER BY rowid")) })
+        }
     }
     private func wait(_ condition: @escaping @MainActor () -> Bool, file: StaticString = #filePath, line: UInt = #line) async {
         let done = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { condition() } }, evaluatedWith: nil)
@@ -179,19 +189,25 @@ final class NovelSessionTests: XCTestCase {
         XCTAssertEqual(reader.content?.blocks.first?.text, "已购正文")
         await feature.close()
     }
-    func testSaveFailureIsVisibleAndAcceptedCloseDrainsWithoutOverwritingExternalBytes() async throws {
+    func testSaveFailureIsVisibleAndAcceptedCloseDrainsWithoutChangingDurableRows() async throws {
         let (feature, _, store) = try await fixture()
         let reader = feature.makeReader(book: .init(installationId: "a", bookUrl: "book-a", name: "猫"))
         reader.start(); await wait { reader.content != nil && !reader.loading }
-        let external = Data("external".utf8); try store.write(external, key: "library")
-        reader.display(try XCTUnwrap(reader.anchor)); await reader.flush()
+        await reader.flush()
+        let saved = try await store.read { try $0.query("SELECT * FROM ios_novel_progress ORDER BY book_id") }
+        _ = try await store.read { try $0.execute("PRAGMA query_only=ON") }
+        var changed = try XCTUnwrap(reader.anchor); changed.utf16Offset += 1; changed.ratio = 0.2
+        reader.display(changed); await reader.flush()
         XCTAssertTrue(reader.error?.hasPrefix("阅读进度保存失败") == true)
-        XCTAssertEqual(try store.read(key: "library"), external)
+        let afterFailure = try await store.read { try $0.query("SELECT * FROM ios_novel_progress ORDER BY book_id") }
+        XCTAssertEqual(afterFailure, saved)
         async let first: Void = feature.close()
         async let second: Void = feature.close()
         _ = await (first, second)
         XCTAssertTrue(reader.closed)
-        XCTAssertEqual(try store.read(key: "library"), external)
+        let afterClose = try await store.read { try $0.query("SELECT * FROM ios_novel_progress ORDER BY book_id") }
+        XCTAssertEqual(afterClose, saved)
+        _ = try await store.read { try $0.execute("PRAGMA query_only=OFF") }
     }
     func testCancelledChapterCompletesPhysicalWorkBeforeCloseAndCannotReplaceBody() async throws {
         let (feature, runtime, _) = try await fixture()
@@ -215,14 +231,17 @@ final class NovelSessionTests: XCTestCase {
         reader.start(); await wait { reader.content != nil && !reader.loading }
         let anchor = try XCTUnwrap(reader.anchor)
         reader.display(anchor); await reader.flush()
-        let bytes = try store.read(key: "library"), readAt = feature.local.books(history: true).first?.readAt
+        let rows = try await store.read { try $0.query("SELECT * FROM ios_novel_progress ORDER BY book_id") }
+        let readAt = feature.local.books(history: true).first?.readAt
         for _ in 0..<6 { reader.display(anchor); await reader.flush() }
         try await Task.sleep(nanoseconds: 850_000_000)
-        XCTAssertEqual(try store.read(key: "library"), bytes)
+        let unchanged = try await store.read { try $0.query("SELECT * FROM ios_novel_progress ORDER BY book_id") }
+        XCTAssertEqual(unchanged, rows)
         XCTAssertEqual(feature.local.books(history: true).first?.readAt, readAt)
         var moved = anchor; moved.utf16Offset = 2; moved.ratio = 0.2
         reader.display(moved); await reader.flush()
-        XCTAssertNotEqual(try store.read(key: "library"), bytes)
+        let movedRows = try await store.read { try $0.query("SELECT * FROM ios_novel_progress ORDER BY book_id") }
+        XCTAssertNotEqual(movedRows, rows)
         await feature.close()
     }
     func testInfoTocContentAndPayPreserveAllRuleVisibleFieldsAndVariableTypes() async throws {
@@ -625,7 +644,7 @@ final class NovelSessionTests: XCTestCase {
         XCTAssertNil(reader.error); XCTAssertNil(feature.error)
         let after = await runtime.calls; XCTAssertEqual(after, calls)
         await feature.close()
-        let reopened = NovelLibrary(store: store)
+        let reopened = NovelLibrary(database: store)
         let restored = try await reopened.snapshot()
         XCTAssertEqual(restored.entries, snapshot.entries)
         await reopened.close()
@@ -645,14 +664,14 @@ final class NovelSessionTests: XCTestCase {
         try await feature.setShelf(sameLocator, present: true)
         XCTAssertEqual(feature.local.entries.count, 1)
         XCTAssertEqual(feature.local.entries.first, before, "Membership alone cannot replace metadata, identity or the displayed anchor")
-        let bytes = try store.read(key: "library")
+        let bytes = try await libraryRows(store)
         do {
             try await feature.setShelf(.init(installationId: "new", bookUrl: "new-book", name: "新书"), present: true)
             XCTFail("A new identity still requires the Node rule owner")
         } catch { XCTAssertEqual(error as? NovelError, .closed) }
-        XCTAssertEqual(try store.read(key: "library"), bytes)
+        storageTestEqual(try await libraryRows(store), bytes)
         await feature.close()
-        let reopened = NovelLibrary(store: store), restored = try await reopened.snapshot()
+        let reopened = NovelLibrary(database: store), restored = try await reopened.snapshot()
         XCTAssertEqual(restored.entries, [before]); await reopened.close()
     }
     func testPreparedSourceIdentityPersistsLocallyAndStillMatchesAThirdSource() async throws {
@@ -677,7 +696,7 @@ final class NovelSessionTests: XCTestCase {
         XCTAssertEqual(saved.onShelf, old.onShelf); XCTAssertEqual(saved.pinnedAt, old.pinnedAt)
         XCTAssertEqual(saved.addedAt, old.addedAt); XCTAssertNil(reader.error)
         await feature.close()
-        let reopened = NovelLibrary(store: store)
+        let reopened = NovelLibrary(database: store)
         let matched = try await reopened.retain(third, identity: thirdIdentity)
         XCTAssertEqual(matched.id, old.id)
         let restored = try await reopened.snapshot()
@@ -692,13 +711,13 @@ final class NovelSessionTests: XCTestCase {
         reader.jump(1); await wait { !reader.loading && reader.chapterIndex == 1 }
         reader.display(try XCTUnwrap(reader.anchor)); await reader.flush()
         let book = reader.book, chapters = reader.chapters, body = reader.content, anchor = reader.anchor
-        let bytes = try store.read(key: "library")
+        let bytes = try await libraryRows(store)
         await runtime.setCatalog([.init(name: "第2章：夜", chapterUrl: "moved-night", index: 0)])
         await runtime.failNextBody()
         reader.refreshCatalog(); await wait { !reader.loading && reader.error != nil }
         XCTAssertEqual(reader.book, book); XCTAssertEqual(reader.chapters, chapters)
         XCTAssertEqual(reader.content, body); XCTAssertEqual(reader.chapterIndex, 1); XCTAssertEqual(reader.anchor, anchor)
-        await reader.flush(); XCTAssertEqual(try store.read(key: "library"), bytes)
+        await reader.flush(); storageTestEqual(try await libraryRows(store), bytes)
         reader.error = nil; await runtime.blockBody()
         reader.refreshCatalog(); await runtime.waitForBody()
         reader.suspend(); await runtime.releaseBody(); reader.resume()
@@ -717,13 +736,13 @@ final class NovelSessionTests: XCTestCase {
         reader.start(); await wait { !reader.loading && reader.content != nil }
         reader.display(try XCTUnwrap(reader.anchor)); await reader.flush()
         let book = reader.book, chapters = reader.chapters, content = reader.content, anchor = reader.anchor
-        let bytes = try store.read(key: "library")
+        let bytes = try await libraryRows(store)
         await runtime.setCatalog([.init(name: "第1章：猫", chapterUrl: "moved-cat", index: 0)])
         await processor.failNext()
         reader.refreshCatalog(); await wait { !reader.loading && reader.error != nil }
         XCTAssertEqual(reader.book, book); XCTAssertEqual(reader.chapters, chapters)
         XCTAssertEqual(reader.content, content); XCTAssertEqual(reader.anchor, anchor)
-        await reader.flush(); XCTAssertEqual(try store.read(key: "library"), bytes)
+        await reader.flush(); storageTestEqual(try await libraryRows(store), bytes)
         await feature.close()
     }
     func testAcceptedPurchaseBodyFailureKeepsOldDisplayAndExplicitRefreshNeverRepays() async throws {
@@ -733,14 +752,14 @@ final class NovelSessionTests: XCTestCase {
         reader.start(); await wait { !reader.loading && reader.content != nil }
         reader.display(try XCTUnwrap(reader.anchor)); await reader.flush()
         let book = reader.book, chapters = reader.chapters, body = reader.content, anchor = reader.anchor
-        let bytes = try store.read(key: "library"), chapter = try XCTUnwrap(reader.purchasableChapter)
+        let bytes = try await libraryRows(store), chapter = try XCTUnwrap(reader.purchasableChapter)
         await runtime.failNextBody()
         reader.confirmPurchase(chapter: chapter, bookID: book.id)
         await wait { !reader.loading && reader.error != nil }
         let paid = await runtime.purchaseCount(); XCTAssertEqual(paid, 1)
         XCTAssertEqual(reader.book, book); XCTAssertEqual(reader.chapters, chapters)
         XCTAssertEqual(reader.content, body); XCTAssertEqual(reader.chapterIndex, 0); XCTAssertEqual(reader.anchor, anchor)
-        await reader.flush(); XCTAssertEqual(try store.read(key: "library"), bytes)
+        await reader.flush(); storageTestEqual(try await libraryRows(store), bytes)
         reader.error = nil; reader.suspend(); reader.resume()
         let resumed = await runtime.purchaseCount(); XCTAssertEqual(resumed, 1)
         XCTAssertEqual(reader.content, body); XCTAssertFalse(reader.loading)
@@ -766,7 +785,7 @@ final class NovelSessionTests: XCTestCase {
         reader.start(); await wait { !reader.loading && reader.content != nil }
         reader.display(try XCTUnwrap(reader.anchor)); await reader.flush()
         let book = reader.book, chapters = reader.chapters, body = reader.content, anchor = reader.anchor
-        let bytes = try store.read(key: "library"), chapter = try XCTUnwrap(reader.purchasableChapter)
+        let bytes = try await libraryRows(store), chapter = try XCTUnwrap(reader.purchasableChapter)
         await runtime.blockBody()
         reader.confirmPurchase(chapter: chapter, bookID: book.id); await runtime.waitForBody()
         reader.suspend()
@@ -774,7 +793,7 @@ final class NovelSessionTests: XCTestCase {
         XCTAssertEqual(reader.chapterIndex, 0); XCTAssertEqual(reader.anchor, anchor)
         await runtime.releaseBody(); reader.resume()
         let paid = await runtime.purchaseCount(); XCTAssertEqual(paid, 1)
-        await reader.flush(); XCTAssertEqual(try store.read(key: "library"), bytes)
+        await reader.flush(); storageTestEqual(try await libraryRows(store), bytes)
         reader.confirmPurchase(chapter: chapter, bookID: book.id)
         await wait { !reader.loading && reader.purchasableChapter == nil }
         let final = await runtime.purchaseCount(); XCTAssertEqual(final, 1, "A second confirmation after an accepted payment only refreshes")
@@ -790,13 +809,13 @@ final class NovelSessionTests: XCTestCase {
         reader.start(); await wait { !reader.loading && reader.content != nil }
         reader.display(try XCTUnwrap(reader.anchor)); await reader.flush()
         let book = reader.book, chapters = reader.chapters, content = reader.content, anchor = reader.anchor
-        let bytes = try store.read(key: "library"), chapter = try XCTUnwrap(reader.purchasableChapter)
+        let bytes = try await libraryRows(store), chapter = try XCTUnwrap(reader.purchasableChapter)
         await runtime.advancePaidBodyContext(); await processor.failNext()
         reader.confirmPurchase(chapter: chapter, bookID: book.id)
         await wait { !reader.loading && reader.error != nil }
         XCTAssertEqual(reader.book, book); XCTAssertEqual(reader.chapters, chapters)
         XCTAssertEqual(reader.content, content); XCTAssertEqual(reader.chapterIndex, 0); XCTAssertEqual(reader.anchor, anchor)
-        await reader.flush(); XCTAssertEqual(try store.read(key: "library"), bytes)
+        await reader.flush(); storageTestEqual(try await libraryRows(store), bytes)
         let paid = await runtime.purchaseCount(); XCTAssertEqual(paid, 1)
 
         reader.error = nil; reader.jump(0, ratio: 0.4)

@@ -1,4 +1,5 @@
-import test from 'node:test';
+import './storage-test-fixture.mjs';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,7 +10,10 @@ import { connectFilmPlayback, createAppRuntime, createRuntimeClient } from '../a
 const source = { key: 'cache-fixture', engine: 'cat', installationId: 'script',
   siteId: 'fixture', generation: 1, name: 'Cache fixture' };
 const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
+const roots = new Set();
+after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
 async function setup(t, dataRoot) {
+  roots.add(dataRoot);
   let failure = false, revision = 1;
   const calls = [];
   const module = (id, contract, methods) => ({
@@ -45,14 +49,14 @@ async function setup(t, dataRoot) {
   return { calls, close, rpc: (operation, input) => client.call(`film.${operation}`, input),
     setFailure: value => { failure = value; }, setRevision: value => { revision = value; } };
 }
-function directory(t) {
-  const path = mkdtempSync(join(tmpdir(), 'film-cache-http-'));
-  t.after(() => rmSync(path, { recursive: true, force: true }));
-  return path;
+function directory() {
+  const root = mkdtempSync(join(tmpdir(), 'film-cache-http-'));
+  roots.add(root);
+  return root;
 }
 
 test('cache HTTP catalog keeps raw output and refreshes only the exact process-owned request', async t => {
-  const f = await setup(t, directory(t));
+  const f = await setup(t, directory());
   const home = { source, action: 'home', payload: {} };
   const first = okay(await f.rpc('data.catalog', home));
   f.setRevision(2);
@@ -68,7 +72,7 @@ test('cache HTTP catalog keeps raw output and refreshes only the exact process-o
 });
 
 test('cache HTTP metadata entry preserves stale success, rejects stale handoff and replaces valid empty results', async t => {
-  const f = await setup(t, directory(t));
+  const f = await setup(t, directory());
   const input = { provider: 'douban', path: '/rexxar/api/v2/subject/recent_hot/movie',
     query: { start: 0, limit: 12, category: '热门', type: '全部' } };
   const first = okay(await f.rpc('data.metadata.entry', input));
@@ -91,7 +95,7 @@ test('cache HTTP metadata entry preserves stale success, rejects stale handoff a
 });
 
 test('cache HTTP runtime recreation reuses durable metadata but never the previous process catalog', async t => {
-  const root = directory(t), f = await setup(t, root);
+  const root = directory(), f = await setup(t, root);
   const input = { provider: 'douban', path: '/rexxar/api/v2/subject/recent_hot/movie', query: { start: 0, limit: 12 } };
   const first = okay(await f.rpc('data.metadata.entry', input));
   const home = { source, action: 'home' };
@@ -107,7 +111,7 @@ test('cache HTTP runtime recreation reuses durable metadata but never the previo
 
 test('cache management clears providers independently or together without removing settings or playback records', async t => {
   const { createTMDBDataModule, createDoubanDataModule } = await import('../apps/runtime/modules/metadata-data.mjs');
-  const root = directory(t), calls = { tmdb: 0, douban: 0 };
+  const root = directory(), calls = { tmdb: 0, douban: 0 };
   const modules = ['tmdb', 'douban'].map(provider => (provider === 'tmdb' ? createTMDBDataModule : createDoubanDataModule)({
     dataRoot: root,
     request: async () => {

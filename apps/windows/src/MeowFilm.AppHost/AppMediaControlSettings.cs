@@ -7,11 +7,12 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.AppHost;
 
-public sealed class AppMediaControlSettings(IDocumentStore store) : IDesktopMediaControlSettings, IDesktopShutdownParticipant
+public sealed class AppMediaControlSettings(IStorageDatabase database) : IDesktopMediaControlSettings, IDesktopShutdownParticipant
 {
+    private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.MediaControls);
     public const string DocumentNamespace = "app.media-controls.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, busy, stopping, disposed;
     public MediaControlPreferences Preferences { get; private set; } = MediaControlDefaults.Preferences;
     public bool IsAvailable => loaded && !stopping && !disposed;
@@ -42,9 +43,9 @@ public sealed class AppMediaControlSettings(IDocumentStore store) : IDesktopMedi
 
     private async Task Read()
     {
-        var snapshot = await store.ReadAsync(DocumentNamespace);
+        var snapshot = await store.ReadAsync();
         var preferences = snapshot.Data is { } bytes ? Decode(bytes) : MediaControlDefaults.Preferences;
-        fingerprint = snapshot.Fingerprint;
+        storageRevision = snapshot.Revision;
         loaded = true;
         Publish(preferences);
     }
@@ -81,7 +82,7 @@ public sealed class AppMediaControlSettings(IDocumentStore store) : IDesktopMedi
             busy = true; Status = ""; StateChanged();
             try
             {
-                fingerprint = await store.WriteAsync(DocumentNamespace, Encode(draft), fingerprint);
+                storageRevision = await store.WriteAsync(Encode(draft), storageRevision);
                 Publish(draft);
             }
             catch

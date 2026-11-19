@@ -1,6 +1,7 @@
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 final class PanAccountServiceTests: XCTestCase {
@@ -60,8 +61,8 @@ final class PanAccountServiceTests: XCTestCase {
         })
         do { _ = try await service.refresh(.baidu); XCTFail("An error row cannot confirm an account") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("CORRUPT_STORAGE")) }
-        XCTAssertEqual(try service.accounts()[0].status, .unverified)
-        XCTAssertEqual(try service.accounts()[0].revision, 4)
+        storageTestEqual(try await service.accounts()[0].status, .unverified)
+        storageTestEqual(try await service.accounts()[0].revision, 4)
         XCTAssertEqual(try storage.read(), before)
         XCTAssertEqual(storage.changes.values, [])
     }
@@ -157,34 +158,34 @@ final class PanAccountServiceTests: XCTestCase {
             throw RuntimeHTTPError.closed
         })
         XCTAssertEqual(service.providers().count, 5)
-        XCTAssertTrue(try service.accounts().allSatisfy { $0.configured == false && $0.status == .signedOut })
-        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: storage.root.path).isEmpty)
+        storageTestTrue(try await service.accounts().allSatisfy { $0.configured == false && $0.status == .signedOut })
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storage.database.url.path))
         for provider in PanProviderID.allCases {
-            let saved = try service.replace(provider, credentials: panSyntheticCredentials(provider))
+            let saved = try await service.replace(provider, credentials: panSyntheticCredentials(provider))
             XCTAssertEqual(saved.revision, 1); XCTAssertEqual(saved.configured, true)
             XCTAssertEqual(saved.status, .unverified)
         }
-        let reopenedDocument = FilmSettingsDocument(block: .panAccounts, storage: .protected { storage.store })
+        let reopenedDocument = FilmSettingsDocument(block: .panAccounts, database: storage.database)
         let reopened = PanAccountService(document: reopenedDocument, request: { _, _, _ in
             XCTFail("Reopening native settings cannot request runtime"); throw RuntimeHTTPError.closed
         })
-        XCTAssertEqual(try reopened.accounts().map(\.revision), Array(repeating: 1, count: 5))
-        XCTAssertTrue(try reopened.accounts().allSatisfy { $0.status == .unverified })
+        storageTestEqual(try await reopened.accounts().map(\.revision), Array(repeating: 1, count: 5))
+        storageTestTrue(try await reopened.accounts().allSatisfy { $0.status == .unverified })
         XCTAssertEqual(storage.changes.values, Array(repeating: "pan.accounts", count: 5))
-        let cleared = try service.clear(.tianyi)
+        let cleared = try await service.clear(.tianyi)
         XCTAssertEqual(cleared.revision, 2); XCTAssertEqual(cleared.configured, false)
         XCTAssertEqual(cleared.status, .signedOut)
-        XCTAssertEqual(try reopened.accounts()[3], cleared)
+        storageTestEqual(try await reopened.accounts()[3], cleared)
         XCTAssertEqual(connections.values, [])
         await Task.yield()
         XCTAssertEqual(connections.values, [], "Offline settings must not leave connection work queued")
         do { _ = try await service.refresh(.baidu); XCTFail("An explicit upstream operation is still offline") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .closed) }
         XCTAssertEqual(connections.values, ["connection"])
-        XCTAssertEqual(try service.accounts()[0].status, .unverified)
+        storageTestEqual(try await service.accounts()[0].status, .unverified)
     }
 
-    func testConsumedCredentialsAreValidatedLocallyBeforeCommit() throws {
+    func testConsumedCredentialsAreValidatedLocallyBeforeCommit() async throws {
         let storage = try PanTestStorage()
         let service = PanAccountService(document: storage.document, request: { _, _, _ in
             XCTFail("Credential validation is local"); throw RuntimeHTTPError.closed
@@ -204,23 +205,23 @@ final class PanAccountServiceTests: XCTestCase {
             (.yidong, .object(["refreshedAt": .number(9_007_199_254_740_992)])),
         ]
         for (provider, value) in invalid {
-            XCTAssertThrowsError(try service.replace(provider, credentials: value)) {
+            await storageTestThrows({ try await service.replace(provider, credentials: value) }) {
                 XCTAssertEqual($0 as? RuntimeHTTPError, .remote("INVALID_REQUEST"))
             }
         }
-        XCTAssertNil(try storage.document.read())
+        XCTAssertNil(try storage.document.readForTest())
         XCTAssertEqual(storage.changes.values, [])
         let credentials: RuntimeValue = .object(["username": .string(" synthetic-user "),
             "password": .string(" \r\nsynthetic password\n "), "cookie": .string("")])
-        _ = try service.replace(.tianyi, credentials: credentials)
+        _ = try await service.replace(.tianyi, credentials: credentials)
         XCTAssertEqual(try storage.credentials(.tianyi), credentials)
-        let zero = try service.replace(.yidong, credentials: .object(["refreshedAt": .number(0), "authorization": .string("")]))
+        let zero = try await service.replace(.yidong, credentials: .object(["refreshedAt": .number(0), "authorization": .string("")]))
         XCTAssertEqual(zero.configured, false); XCTAssertEqual(zero.fields, []); XCTAssertEqual(zero.status, .signedOut)
-        _ = try service.replace(.yidong, credentials: .object(["refreshedAt": .number(9_007_199_254_740_991)]))
+        _ = try await service.replace(.yidong, credentials: .object(["refreshedAt": .number(9_007_199_254_740_991)]))
         XCTAssertEqual(try storage.credentials(.yidong)?.panField("refreshedAt"), .number(9_007_199_254_740_991))
     }
 
-    func testDocumentRootAndSelectedCredentialFailuresRemainExplicit() throws {
+    func testDocumentRootAndSelectedCredentialFailuresRemainExplicit() async throws {
         for value: RuntimeValue in [.null, .array([]), .object([:]),
             .object(["version": .number(2), "accounts": .object([:])])] {
             XCTAssertThrowsError(try PanAccountService.validateSettingsDocument(value)) {
@@ -230,78 +231,84 @@ final class PanAccountServiceTests: XCTestCase {
         let storage = try PanTestStorage()
         let service = PanAccountService(document: storage.document, request: { _, _, _ in throw RuntimeHTTPError.closed })
         let opaque = try RuntimeJSON.decode(Data(#"{"n":1e400,"é":1,"e\u0301":2}"#.utf8))
-        _ = try storage.document.update { _ in .object(["version": .number(1), "extra": opaque,
-            "accounts": .object(["unknown": opaque])]) }
-        let account = try service.replace(.baidu, credentials: .object(["unknown": opaque]))
+        await storageTestThrows({
+            try await storage.document.update { _ in .object(["version": .number(1), "extra": opaque,
+                "accounts": .object(["unknown": opaque])]) }
+        }) { XCTAssertEqual($0 as? FilmSettingsStorageError, .invalidDocument) }
+        XCTAssertNil(try storage.document.readForTest())
+        let account = try await service.replace(.baidu, credentials: .object(["unknown": opaque]))
         XCTAssertEqual(account.configured, false)
         XCTAssertEqual(try storage.credentials(.baidu), .object([:]))
         let saved = try storage.read()
-        XCTAssertEqual(saved.panField("extra"), opaque)
-        XCTAssertEqual(saved.panField("accounts")?.panField("unknown"), opaque)
+        XCTAssertNil(saved.panField("extra"))
+        XCTAssertNil(saved.panField("accounts")?.panField("unknown"))
     }
 
-    func testCASConflictDoesNotRetryOverwriteCompetitorOrNotify() throws {
-        let storage = try PanTestStorage(), competitor = try PanTestStorage()
+    func testRuntimeProviderCASDoesNotRetryOverwriteCompetitorOrNotify() async throws {
+        let storage = try PanTestStorage()
         try storage.seed(.baidu, credentials: panSyntheticCredentials(.baidu))
-        try competitor.seed(.baidu, credentials: .object(["cookie": .string("synthetic-newer")]), revision: 2)
-        try competitor.seed(.uc, credentials: panSyntheticCredentials(.uc))
-        let destination = try encryptedFile(storage.root)
-        let replacement = try Data(contentsOf: encryptedFile(competitor.root))
-        storage.keys.onNextRead { try replacement.write(to: destination, options: .atomic) }
-        let service = PanAccountService(document: storage.document, request: { _, _, _ in
-            XCTFail("CAS cannot fall back to runtime"); throw RuntimeHTTPError.closed
-        })
-        XCTAssertThrowsError(try service.replace(.baidu, credentials: .object(["cookie": .string("synthetic-stale")]))) {
-            XCTAssertEqual($0 as? RuntimeHTTPError, .remote("STALE_ACCOUNT"))
+        let expected = try await storage.document.snapshot()
+        let row = try XCTUnwrap(expected.document?.panField("accounts")?.panField("baidu"))
+        let competitor = try storageTestOpen(storage.root)
+        let competingDocument = FilmSettingsDocument(block: .panAccounts, database: competitor)
+        let competingService = PanAccountService(document: competingDocument, request: { _, _, _ in throw RuntimeHTTPError.closed })
+        _ = try await competingService.replace(.baidu, credentials: .object(["cookie": .string("synthetic-newer")]))
+        _ = try await competingService.replace(.uc, credentials: panSyntheticCredentials(.uc))
+        let before = try storage.read()
+        let stale: RuntimeValue = .object(["provider": .string("baidu"), "mode": .string("replace"),
+            "rowRevision": row.panField("rowRevision")!, "accountRevision": row.panField("revision")!,
+            "credentials": .object(["cookie": .string("synthetic-stale")])])
+        XCTAssertThrowsError(try storageTestIO { try storage.document.updatePanSync(stale) }) {
+            XCTAssertEqual($0 as? FilmSettingsStorageError, .conflict)
         }
-        XCTAssertEqual(try storage.read(), try competitor.read())
+        XCTAssertEqual(try storage.read(), before)
         XCTAssertEqual(storage.changes.values, [])
-        XCTAssertEqual(try service.accounts()[0].revision, 2)
+        XCTAssertEqual(try storage.read().panField("accounts")?.panField("baidu")?.panField("revision"), .number(2))
+        try await competitor.close()
     }
 
-    func testFailedCommitPreservesPriorDocumentAndMaxRevisionCannotWrap() throws {
+    func testFailedCommitPreservesPriorDocumentAndMaxRevisionCannotWrap() async throws {
         let storage = try PanTestStorage()
         try storage.seed(.baidu, credentials: panSyntheticCredentials(.baidu), revision: 7)
         let before = try storage.read()
         let service = PanAccountService(document: storage.document, request: { _, _, _ in throw RuntimeHTTPError.closed })
-        storage.committer.fail(true)
-        XCTAssertThrowsError(try service.clear(.baidu)) {
+        try storage.failWrites(true)
+        await storageTestThrows({ try await service.clear(.baidu) }) {
             XCTAssertEqual($0 as? RuntimeHTTPError, .remote("STORAGE_ERROR"))
         }
         XCTAssertEqual(try storage.read(), before); XCTAssertEqual(storage.changes.values, [])
-        storage.committer.fail(false)
+        try storage.failWrites(false)
         try storage.seed(.baidu, credentials: panSyntheticCredentials(.baidu), revision: 9_007_199_254_740_991)
-        XCTAssertThrowsError(try service.clear(.baidu)) {
+        await storageTestThrows({ try await service.clear(.baidu) }) {
             XCTAssertEqual($0 as? RuntimeHTTPError, .remote("STORAGE_ERROR"))
         }
-        XCTAssertEqual(try service.accounts()[0].revision, 9_007_199_254_740_991)
+        storageTestEqual(try await service.accounts()[0].revision, 9_007_199_254_740_991)
         XCTAssertEqual(storage.changes.values, [])
     }
 
-    func testBadAccountIsExplicitWhileHealthySiblingCanCommit() throws {
+    func testBadAccountIsExplicitWhileHealthySiblingCanCommit() async throws {
         let storage = try PanTestStorage()
-        try storage.store.write(Data(#"{"version":1,"accounts":{"baidu":{"revision":0,"credentials":{}}}}"#.utf8),
-                                key: FilmSettingsDocument.key)
-        let before = try storage.store.read(key: FilmSettingsDocument.key)
+        try storage.seed(.baidu, credentials: .object([:]), revision: -1)
+        let before = try storage.read().panField("accounts")?.panField("baidu")
         let service = PanAccountService(document: storage.document, request: { _, _, _ in throw RuntimeHTTPError.closed })
-        let bad = try service.accounts()[0]
+        let bad = try await service.accounts()[0]
         XCTAssertEqual(bad.provider, .baidu); XCTAssertEqual(bad.errorCode, .corruptStorage)
         XCTAssertNil(bad.revision); XCTAssertNil(bad.configured)
         XCTAssertNil(bad.status); XCTAssertNil(bad.fields)
-        XCTAssertThrowsError(try service.replace(.baidu, credentials: panSyntheticCredentials(.baidu))) {
+        await storageTestThrows({ try await service.replace(.baidu, credentials: panSyntheticCredentials(.baidu)) }) {
             XCTAssertEqual($0 as? RuntimeHTTPError, .remote("CORRUPT_STORAGE"))
         }
-        XCTAssertThrowsError(try service.clear(.baidu)) {
+        await storageTestThrows({ try await service.clear(.baidu) }) {
             XCTAssertEqual($0 as? RuntimeHTTPError, .remote("CORRUPT_STORAGE"))
         }
-        XCTAssertEqual(try storage.store.read(key: FilmSettingsDocument.key), before)
-        let healthy = try service.replace(.uc, credentials: panSyntheticCredentials(.uc))
+        XCTAssertEqual(try storage.read().panField("accounts")?.panField("baidu"), before)
+        let healthy = try await service.replace(.uc, credentials: panSyntheticCredentials(.uc))
         XCTAssertEqual(healthy.revision, 1); XCTAssertEqual(healthy.configured, true)
         XCTAssertEqual(healthy.status, .unverified); XCTAssertNil(healthy.errorCode)
-        XCTAssertEqual(try service.accounts()[2], healthy)
-        XCTAssertEqual(try service.accounts()[0], bad)
+        storageTestEqual(try await service.accounts()[2], healthy)
+        storageTestEqual(try await service.accounts()[0], bad)
         XCTAssertEqual(try storage.read().panField("accounts")?.panField("baidu"),
-            .object(["revision": .number(0), "credentials": .object([:])]))
+            before)
         XCTAssertEqual(storage.changes.values, ["pan.accounts"])
     }
 
@@ -309,12 +316,12 @@ final class PanAccountServiceTests: XCTestCase {
         let runtime = try PanTestRuntime(), service = runtime.service
         try await runtime.setAccount(.baidu, status: .signedIn, revision: 3)
         _ = try await service.refresh(.baidu)
-        XCTAssertEqual(try service.accounts()[0].status, .signedIn)
-        try runtime.storage.seed(.baidu, credentials: .object(["cookie": .number(7)]), revision: 3)
-        XCTAssertEqual(try service.accounts()[0].errorCode, .corruptStorage)
+        storageTestEqual(try await service.accounts()[0].status, .signedIn)
+        try runtime.storage.seed(.baidu, credentials: .object(["cookie": .string("synthetic\ninvalid")]), revision: 3)
+        storageTestEqual(try await service.accounts()[0].errorCode, .corruptStorage)
         try runtime.storage.seed(.baidu, credentials: panSyntheticCredentials(.baidu), revision: 3)
-        XCTAssertEqual(try service.accounts()[0].status, .unverified)
-        XCTAssertNil(try service.accounts()[0].errorCode)
+        storageTestEqual(try await service.accounts()[0].status, .unverified)
+        storageTestNil(try await service.accounts()[0].errorCode)
     }
 
     func testRuntimeWritebackIsVisibleAndConfirmedCannotPrecedePersistence() async throws {
@@ -325,22 +332,17 @@ final class PanAccountServiceTests: XCTestCase {
         })
         do { _ = try await service.poll("synthetic-session", provider: .baidu); XCTFail("Not yet committed") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("STALE_ACCOUNT")) }
-        let expected = try storage.document.snapshot().fingerprint
+        let expected = try await storage.document.snapshot()
         try storage.persist(account, expected: expected)
-        XCTAssertEqual(try service.accounts()[0].status, .unverified)
+        storageTestEqual(try await service.accounts()[0].status, .unverified)
         let receipt = try await service.poll("synthetic-session", provider: .baidu)
         XCTAssertEqual(receipt.progress, .confirmed)
-        XCTAssertEqual(try service.accounts()[0].status, .signedIn)
-        _ = try service.replace(.baidu, credentials: .object(["cookie": .string("synthetic-newer")]))
+        storageTestEqual(try await service.accounts()[0].status, .signedIn)
+        _ = try await service.replace(.baidu, credentials: .object(["cookie": .string("synthetic-newer")]))
         do { _ = try await service.poll("synthetic-session", provider: .baidu); XCTFail("Retired receipt") }
         catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("STALE_ACCOUNT")) }
-        XCTAssertEqual(try service.accounts()[0].status, .unverified)
-        XCTAssertEqual(try service.accounts()[0].revision, 2)
-    }
-
-    private func encryptedFile(_ root: URL) throws -> URL {
-        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
-        return try XCTUnwrap(files.compactMap { $0 as? URL }.first { $0.pathExtension == "meowenc" })
+        storageTestEqual(try await service.accounts()[0].status, .unverified)
+        storageTestEqual(try await service.accounts()[0].revision, 2)
     }
 
     func testUnknownFailureCannotExposeUnderlyingErrorOrCredentialsInNotice() {

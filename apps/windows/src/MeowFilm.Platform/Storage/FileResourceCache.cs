@@ -470,9 +470,12 @@ public sealed class FileResourceCache : IAsyncDisposable
     private static void ValidateGroup(string group)
     {
         // Canonical case prevents group aliases on the Windows filesystem.
-        if (!DocumentRules.ValidNamespace(group) || group != group.ToLowerInvariant())
+        if (!ValidGroup(group))
             throw new ArgumentException("A lowercase ordinary resource group is required.", nameof(group));
     }
+    private static bool ValidGroup(string group) => group.Length is >= 1 and <= 128 &&
+        char.IsAsciiLetterOrDigit(group[0]) && !group.Contains("..", StringComparison.Ordinal) &&
+        group.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-');
     private static string Name(string group, string resource)
     {
         ValidateGroup(group);
@@ -485,8 +488,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         if (!name.StartsWith("r-", StringComparison.Ordinal) || !name.EndsWith(".resource", StringComparison.Ordinal) ||
             name.Length < 77 || name[^74] != '-') return false;
         group = name[2..^74];
-        return DocumentRules.ValidNamespace(group) && group == group.ToLowerInvariant() &&
-            DocumentRules.ValidHash(name[^73..^9]);
+        return ValidGroup(group) && name[^73..^9].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
     }
     private static TaskCompletionSource Completed()
     {

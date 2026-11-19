@@ -4,7 +4,7 @@ import { cloneJSONValue as clone, parseJSONText, stringifyJSONValue, rawJSON } f
 import { createPanService } from '../src/service.js';
 
 const empty = () => ({ version: 1, accounts: {} });
-const record = (revision, credentials) => ({ revision, credentials });
+const record = (revision, credentials, rowRevision = revision) => ({ revision, rowRevision, credentials });
 const response = (input, value, headers = {}) => ({
   url: input.url, status: 200, headers, body: Buffer.from(JSON.stringify(value)),
 });
@@ -15,17 +15,20 @@ function deferred() {
   return { promise, resolve };
 }
 function casStore(initial = empty()) {
-  let disk = clone(initial), observed = stringifyJSONValue(disk), closed = false;
+  let disk = clone(initial), closed = false;
   const writes = [];
   return {
     writes,
     read: () => clone(disk),
-    async reload() { observed = stringifyJSONValue(disk); return clone(disk); },
-    async write(document) {
+    async reload() { return clone(disk); },
+    async update({ provider, mode, accountRevision, rowRevision, credentials }) {
       if (closed) throw Object.assign(new Error('CLOSED'), { code: 'CLOSED' });
-      if (observed !== stringifyJSONValue(disk))
+      const previous = disk.accounts[provider] ?? record(0, {});
+      if (previous.revision !== accountRevision || previous.rowRevision !== rowRevision)
         throw Object.assign(new Error('STORAGE_CONFLICT'), { code: 'STORAGE_CONFLICT' });
-      disk = clone(document); observed = stringifyJSONValue(disk); writes.push(clone(document));
+      disk.accounts[provider] = { ...previous, ...record(accountRevision + Number(mode === 'replace'),
+        clone(credentials), rowRevision + 1) };
+      writes.push(provider);
       return clone(disk);
     },
     native(document) { disk = clone(document); },
@@ -100,7 +103,7 @@ test('native reload cancels changed account sessions, not unrelated accounts', a
   assert.equal((await account(service, 'uc')).configured, false);
 });
 
-test('CAS conflict from an unrelated native edit never overwrites either account or blind-retries', async t => {
+test('an unrelated native edit and a Cookie refresh commit independently without replay', async t => {
   const store = casStore({ version: 1, accounts: { quark: record(1, cookie) } });
   const entered = deferred(), release = deferred();
   t.after(() => release.resolve());
@@ -109,17 +112,15 @@ test('CAS conflict from an unrelated native edit never overwrites either account
     if (++calls === 1) { entered.resolve(); await release.promise; }
     return rotation(input);
   });
-  const refresh = assert.rejects(service.invoke('refresh', { provider: 'quark' }), { code: 'STALE_ACCOUNT' });
+  const refresh = service.invoke('refresh', { provider: 'quark' });
   await entered.promise;
   const latest = { version: 1, accounts: {
     quark: record(1, cookie), baidu: record(2, { cookie: 'synthetic-new-native' }),
   } };
   store.native(latest);
   release.resolve(); await refresh;
-  assert.deepEqual(store.saved(), latest);
-  assert.equal(store.writes.length, 0);
+  assert.equal(calls, 1);
   assert.equal((await account(service, 'baidu')).revision, 2);
-  await service.invoke('refresh', { provider: 'quark' });
   assert.equal(store.writes.length, 1);
   assert.deepEqual(store.saved().accounts.baidu, latest.accounts.baidu);
   assert.equal(store.saved().accounts.quark.credentials.cookie, 'session=synthetic-rotated');
@@ -181,9 +182,9 @@ test('QR confirmation checks its original account again when a queued replacemen
   const store = casStore({ version: 1, accounts: { quark: record(1, cookie) } });
   const entered = deferred(), release = deferred(), polling = deferred(), pollRelease = deferred();
   t.after(() => { release.resolve(); pollRelease.resolve(); });
-  const write = store.write;
-  store.write = async value => {
-    if (value.accounts.quark.credentials.cookie === 'session=synthetic-rotated' && !entered.done) {
+  const write = store.update;
+  store.update = async value => {
+    if (value.provider === 'quark' && value.credentials.cookie === 'session=synthetic-rotated' && !entered.done) {
       entered.done = true; entered.resolve(); await release.promise;
     }
     return write(value);
@@ -213,6 +214,7 @@ test('reload rejects corrupt roots without publishing old state or overwriting a
   const initial = { version: 1, accounts: { baidu: record(1, { cookie: 'synthetic-old' }) } };
   const store = casStore(initial);
   const { service, requests } = setup(t, store);
+  await service.ready;
   for (const invalid of [
     [], {}, { version: 2, accounts: {} }, { version: 1, accounts: [] },
   ]) {
@@ -441,8 +443,8 @@ test('cancel and close fence queued writes but shutdown drains a previously admi
   const store = casStore();
   const entered = deferred(), release = deferred();
   t.after(() => release.resolve());
-  const original = store.write;
-  store.write = async document => { entered.resolve(); await release.promise; return original(document); };
+  const original = store.update;
+  store.update = async document => { entered.resolve(); await release.promise; return original(document); };
   const { service } = setup(t, store);
   const admitted = service.invoke('settings.set', { provider: 'baidu', credentials: { cookie: 'synthetic-admitted' } });
   await entered.promise;
@@ -455,7 +457,7 @@ test('cancel and close fence queued writes but shutdown drains a previously admi
   // Hold a second admitted receipt across shutdown.
   const nextEntered = deferred(), nextRelease = deferred();
   t.after(() => nextRelease.resolve());
-  store.write = async document => { nextEntered.resolve(); await nextRelease.promise; return original(document); };
+  store.update = async document => { nextEntered.resolve(); await nextRelease.promise; return original(document); };
   const second = service.invoke('settings.clear', { provider: 'baidu' });
   await nextEntered.promise;
   let finished = false;
@@ -470,7 +472,7 @@ test('cancel and close fence queued writes but shutdown drains a previously admi
 
 test('failed native write preserves credentials and reports a fixed storage error, never raw secrets', async t => {
   const store = casStore({ version: 1, accounts: { baidu: record(1, { cookie: 'synthetic-old' }) } });
-  store.write = async () => { throw new Error('synthetic-private-details'); };
+  store.update = async () => { throw new Error('synthetic-private-details'); };
   const { service } = setup(t, store);
   const before = await account(service, 'baidu');
   for (const operation of ['settings.set', 'settings.clear']) {
@@ -483,11 +485,12 @@ test('failed native write preserves credentials and reports a fixed storage erro
 test('native read write and close failures expose fixed lifecycle errors only', async t => {
   const store = casStore();
   store.read = () => { throw Object.assign(new Error('synthetic-private-path'), { code: 'STORAGE_ERROR' }); };
-  assert.throws(() => createPanService({ store }), error =>
-    error.code === 'STORAGE_ERROR' && error.message === 'STORAGE_ERROR');
+  const unreadable = createPanService({ store });
+  await assert.rejects(unreadable.ready, { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
+  await unreadable.close();
   store.read = () => empty();
   const { service } = setup(t, store);
-  store.write = async () => { throw Object.assign(new Error('synthetic-closed-pipe'), { code: 'CLOSED' }); };
+  store.update = async () => { throw Object.assign(new Error('synthetic-closed-pipe'), { code: 'CLOSED' }); };
   await assert.rejects(service.invoke('settings.clear', { provider: 'baidu' }), { code: 'CLOSED', message: 'CLOSED' });
   store.reload = async () => { throw Object.assign(new Error('synthetic-closed-pipe'), { code: 'CLOSED' }); };
   await assert.rejects(service.settingsChanged(), { code: 'CLOSED', message: 'CLOSED' });

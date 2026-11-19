@@ -3,6 +3,8 @@ using System.Text.Json;
 using MeowFilm.AppHost;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Runtime;
+using MeowFilm.Platform.Storage;
+using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -11,6 +13,7 @@ internal sealed class NovelRuleRuntimeFixture : IRuntimeClient, IAsyncDisposable
 {
     private readonly object gate = new();
     private Task<NodeRuntime>? starting;
+    private NativeDatabase? database;
     private Task? disposal;
     public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
@@ -25,13 +28,16 @@ internal sealed class NovelRuleRuntimeFixture : IRuntimeClient, IAsyncDisposable
         var runtime = await startup.WaitAsync(cancellationToken).ConfigureAwait(false);
         return await runtime.CallAsync(method, parameters, cancellationToken).ConfigureAwait(false);
     }
-    private static async Task<NodeRuntime> StartAsync()
+    private async Task<NodeRuntime> StartAsync()
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("A real eight-module Windows runtime bundle is required.");
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId);
+        string root = TestWorkspace.DataPath("novel-rule-rpc", Guid.NewGuid().ToString("N"));
+        database = new NativeDatabase(root);
+        await database.Ready.ConfigureAwait(false);
         return await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, AppIdentity.ScriptModules,
-            Path.Combine(TestWorkspace.DataPath("novel-rule-rpc", Guid.NewGuid().ToString("N")), "script-runtime")).ConfigureAwait(false);
+            root, settingsStore: new FilmRuntimeSettings(database)).ConfigureAwait(false);
     }
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
         ReadOnlyMemory<byte> source, string? basename = null, CancellationToken cancellationToken = default) =>
@@ -42,10 +48,14 @@ internal sealed class NovelRuleRuntimeFixture : IRuntimeClient, IAsyncDisposable
     }
     private async Task CloseAsync()
     {
-        if (starting is { } startup)
+        try
         {
-            var runtime = await startup.ConfigureAwait(false);
-            await runtime.DisposeAsync().ConfigureAwait(false);
+            if (starting is { } startup)
+            {
+                var runtime = await startup.ConfigureAwait(false);
+                await runtime.DisposeAsync().ConfigureAwait(false);
+            }
         }
+        finally { if (database is not null) await database.DisposeAsync().ConfigureAwait(false); }
     }
 }

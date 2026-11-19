@@ -1,6 +1,7 @@
 import XCTest
 import MeowMusicFeature
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicNativeService
 
 final class NativeMusicBusinessTests: XCTestCase {
@@ -84,24 +85,20 @@ final class NativeMusicBusinessTests: XCTestCase {
         let lyrics = try await service.lyrics(occurrenceId: XCTUnwrap(queued.currentId), sourceKey: tracks[0].sources[0].sourceKey)
         XCTAssertEqual(lyrics.state, .ready)
     }
-    func testPassiveLockedStartupAndFactoryFailureNeverCreateEmptyLibrary() async throws {
-        final class Counter: @unchecked Sendable {
-            let lock = NSLock(); var value = 0
-            func hit() { lock.lock(); value += 1; lock.unlock() }
-            func count() -> Int { lock.lock(); defer { lock.unlock() }; return value }
-        }
-        let counter = Counter()
-        let document = MusicNativeLibraryDatabase(urlFactory: { counter.hit(); throw MusicServiceError.accessUnavailable })
+    func testPassiveAccessDenialAndClosedDatabaseNeverCreateEmptyLibrary() async throws {
+        let database = try storageTestDatabase(self)
+        let document = MusicNativeLibraryDatabase(database: database)
         let service = NativeMusicService(database: document, platformClient: try NativeMusicFixture.client())
-        XCTAssertEqual(counter.count(), 0)
-        do { _ = try await service.state(); XCTFail("locked") } catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
-        XCTAssertEqual(counter.count(), 0)
+        do { _ = try await service.state(); XCTFail("access denied") } catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
+        let before = try await database.snapshot { try $0.query("SELECT scope FROM music_owner_state") }
+        XCTAssertTrue(before.isEmpty)
         try await service.setAccess(available: true, generation: 1)
+        try await database.close()
         for _ in 0..<2 {
-            do { _ = try await service.state(); XCTFail("failed factory cannot become nil") }
-            catch { XCTAssertEqual(error as? MusicServiceError, .accessUnavailable) }
+            do { _ = try await service.state(); XCTFail("closed database cannot become an empty library") }
+            catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
         }
-        XCTAssertEqual(counter.count(), 2)
+        await service.close()
     }
     func testNativeCompleteLocalChainAndColdQueueRestoration() async throws {
         let store = NativeMusicTestLibrary(), scripts = NativeMusicScriptFixture()

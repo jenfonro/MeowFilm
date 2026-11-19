@@ -220,11 +220,8 @@ final class FilmCatPanBridgeConsumerTests: XCTestCase {
     }
 
     private func detailPage(_ model: FilmPlaybackModel) throws -> FilmDetailViewController {
-        let suite = "FilmCatPanBridgeConsumerTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         return FilmDetailViewController(detail: .init(item: .init(sourceID: "fixture", id: "bridge-detail", title: "Bridge Series")),
-            library: FilmLibrary(defaults: defaults),
+            library: try appStorageTestFilmLibrary(),
             images: ArtworkImages(maximumBytes: 1_024) { _ in
                 XCTFail("This directory has no artwork"); throw URLError(.resourceUnavailable)
             }, themeProvider: FilmPlaybackUIKitTheme(), model: model)

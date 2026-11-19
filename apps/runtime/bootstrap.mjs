@@ -76,7 +76,7 @@ export function createAppRuntime({ sessionId,
     if (method === 'POST' && url.pathname === '/v1/close' && !url.search) {
       return { contract: HTTP_PROTOCOL, codes: publicCodes, contentType: 'application/json',
         validate(input) {
-          if (input === null || typeof input !== 'object' || Array.isArray(input)) invalid();
+          if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) invalid();
         }, handler: async (_input, context) => {
         await (shutdown ??= (async () => {
           const drained = server.abortActive(context.requestId);
@@ -148,7 +148,12 @@ export function createAppRuntime({ sessionId,
     get state() { return server.state; },
     async start() {
       if (disposed) throw new BridgeError('CLOSED');
-      try { await server.start(); return runtime; }
+      try {
+        await Promise.all(modules.map(module => module.ready));
+        if (disposed) throw new BridgeError('CLOSED');
+        await server.start();
+        return runtime;
+      }
       catch (error) { await dispose().catch(() => {}); throw error; }
     },
     close() {

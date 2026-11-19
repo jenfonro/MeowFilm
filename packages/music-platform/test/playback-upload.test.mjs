@@ -138,7 +138,7 @@ test('NCBL public semantic upload retains original milliseconds, separate media/
     for (const absent of ['mainsite', 'mainsiteWeb', 'refer', 'deviceId', 'wifi', 'osver', 'resolution']) assert.equal(value[absent], undefined);
   }
   assert.equal(draws.length, 2); assert.equal(f.requests.length, 1);
-  assert.ok(!f.files.get('clients.json').toString().includes('never-imported-response')); await f.close();
+  assert.ok(!JSON.stringify(await f.clientState()).includes('never-imported-response')); await f.close();
 });
 
 test('NCBL frames preserve records and metadata above former byte quotas across Zstandard blocks', async t => {
@@ -228,10 +228,10 @@ test('default Node upload transport distinguishes actual refused connections fro
     if (reset) { reply.socket.destroy(); return; }
     reply.end(JSON.stringify({ code: 200, data: { successfiles: [filename] } }));
   });
-  const files = new Map(); seedClients({ files });
-  const owner = createMusicPlatform({ clock: () => now, documents: {
-    read: key => files.get(key), write: (key, bytes) => files.set(key, Buffer.from(bytes)),
-  } });
+  const storage = fixture(() => assert.fail('storage setup cannot dispatch'));
+  seedClients(storage); await storage.clientState();
+  t.after(() => storage.close());
+  const owner = createMusicPlatform({ dataRoot: storage.root, clock: () => now });
   try {
     await owner.sessionUpdate({ platform: 'wy', session: { scope: 'synthetic', generation: 1, userId: '42',
       cookie: 'MUSIC_U=synthetic-music-u; __csrf=synthetic-csrf' } });

@@ -23,7 +23,13 @@ for (const [location, manifest] of packages) {
     if (!manifest.name?.startsWith('@meowfilm/') || !manifest.scripts?.test) {
       throw new Error(`Package ${location} must have an identity and tests`);
     }
-    const files = ['test', 'tests'].flatMap(directory => testFiles(resolve(cwd, directory))).sort();
+    let files = ['test', 'tests'].flatMap(directory => testFiles(resolve(cwd, directory))).sort();
+    // Film playback owns the shared root integration suite. Keeping those tests
+    // at the root avoids a second copy of the same cross-package fixtures.
+    if (!files.length && location === 'packages/film-playback') {
+      files = testFiles(resolve(windowsRoot, 'tests'))
+        .filter(path => /(?:film-playback|film-metadata-cache)\.test\.mjs$/.test(path));
+    }
     if (files.length === 0) throw new Error(`Package ${location} has no test cases`);
     console.log(`\n=== ${manifest.name} ===`);
     // Each new package uses the built-in test runner; never execute a reference repo's scripts.

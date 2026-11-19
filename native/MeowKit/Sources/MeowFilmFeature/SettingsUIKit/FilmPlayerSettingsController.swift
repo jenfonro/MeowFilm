@@ -20,12 +20,12 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
         super.viewDidLoad()
         table.accessibilityIdentifier = area == .settings ? "film.player.settings" : "film.player.controls"
         observe(owner) { [weak self] in self?.update() }
-        owner.reload()
+        Task { await owner.reload() }
         update()
     }
 
     override func pageDidFinishAppearing() {
-        owner.reload()
+        Task { await owner.reload() }
         update()
         super.pageDidFinishAppearing()
     }
@@ -87,7 +87,7 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
             failure(NSError(domain: "FilmPlayerPreferences", code: 1,
                             userInfo: [NSLocalizedDescriptionKey: error]), retry: { [weak self] in
                 self?.displayedError = nil
-                self?.owner.reload()
+                Task { await self?.owner.reload() }
                 self?.update()
             })
         } else { displayedError = nil }
@@ -111,8 +111,7 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
                      attributes: owner.persistenceError == nil ? [] : .disabled,
                      state: owner.preferences[keyPath: keyPath] == value ? .on : .off) { [weak self] _ in
                 guard let self else { return }
-                owner.set(keyPath, value)
-                update()
+                Task { await self.owner.set(keyPath, value); self.update() }
             }
         })
         return .init(title: title, detail: value, id: "film.player." + id,
@@ -123,8 +122,7 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
                            keyPath: WritableKeyPath<FilmPlayerPreferences, Bool>) -> FilmSettingsRow {
         filmSwitchRow(title, id: "film.player." + id, isOn: owner.preferences[keyPath: keyPath],
                       enabled: owner.persistenceError == nil) { [weak self] value in
-            self?.owner.set(keyPath, value)
-            self?.update()
+            Task { await self?.owner.set(keyPath, value); self?.update() }
         }
     }
 }

@@ -64,11 +64,21 @@ final class MusicNativeLibraryAccessReader: MusicNativeLibraryReading, @unchecke
     let database: any MusicNativeLibraryReading
     let access: MusicNativeAccess
     init(database: any MusicNativeLibraryReading, access: MusicNativeAccess) { self.database = database; self.access = access }
-    func readSnapshot() throws -> MusicNativeLibrarySnapshot { try access.perform { try database.readSnapshot() } }
-    func songData(id: String) throws -> Data? { try access.perform { try database.songData(id: id) } }
-    func containsSong(id: String) throws -> Bool { try access.perform { try database.containsSong(id: id) } }
-    func sourceOwner(key: String) throws -> String? { try access.perform { try database.sourceOwner(key: key) } }
-    func candidateIDs(lookupKey: String) throws -> [String] { try access.perform { try database.candidateIDs(lookupKey: lookupKey) } }
-    func querySongIDs(query: String) throws -> [String] { try access.perform { try database.querySongIDs(query: query) } }
-    func allSongIDs() throws -> [String] { try access.perform { try database.allSongIDs() } }
+    private func read<T>(_ action: () throws -> T) throws -> T {
+        try access.check()
+        let value = try action()
+        // Never hold the grant lock while waiting for the database lane, which
+        // acquires the same lock only for an actual commit.
+        return try access.perform { value }
+    }
+    func readRevision() throws -> MusicNativeLibraryRevision { try read { try database.readRevision() } }
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot { try read { try database.readSnapshot() } }
+    func songData(id: String) throws -> Data? { try read { try database.songData(id: id) } }
+    func containsSong(id: String) throws -> Bool { try read { try database.containsSong(id: id) } }
+    func sourceOwner(key: String) throws -> String? { try read { try database.sourceOwner(key: key) } }
+    func sourceOwners(keys: Set<String>) throws -> [String: String] { try read { try database.sourceOwners(keys: keys) } }
+    func candidateIDs(lookupKey: String) throws -> [String] { try read { try database.candidateIDs(lookupKey: lookupKey) } }
+    func candidateIDs(lookupKeys: Set<String>) throws -> [String: [String]] { try read { try database.candidateIDs(lookupKeys: lookupKeys) } }
+    func querySongIDs(query: String) throws -> [String] { try read { try database.querySongIDs(query: query) } }
+    func allSongIDs() throws -> [String] { try read { try database.allSongIDs() } }
 }

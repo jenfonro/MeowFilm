@@ -4,6 +4,7 @@ import Combine
 import MeowContracts
 import MeowPlayback
 import MeowStorage
+import MeowUI
 
 /// Only time-dependent presentation observes this clock. Progress does not
 /// invalidate navigation, browse catalogues, artwork owners or queue lists.
@@ -76,6 +77,17 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
 /// Product lifetime, not page lifetime. Products bind PlaybackEvent and system
 /// navigation once and retain this model while another domain is visible.
 @MainActor public final class MusicViewModel {
+    public let searchPreferences = MusicSearchPreferencesStore()
+    public let searchHistory = SearchHistoryStore()
+    public let channelSelection = MusicChannelSelection()
+    public func bindPreferences(database: SQLiteDatabase) async throws {
+        await searchPreferences.bind(database: database)
+        await searchHistory.bind(database: database)
+        try await channelSelection.bind(database: database)
+        guard searchPreferences.persistenceError == nil, searchHistory.persistenceError == nil else {
+            throw MusicServiceError.storageFailed
+        }
+    }
     public let accessState = MusicAccessState()
     public let libraryState = MusicLibraryState()
     public let playbackState = MusicPlaybackFeatureState()
@@ -555,6 +567,9 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         await closingTask?.value
     }
     private func completeClose(attemptID: String?) async {
+        await searchPreferences.close()
+        do { try await searchHistory.close() } catch { self.error = "搜索历史关闭失败" }
+        await channelSelection.close()
         await feedbackConsumer.flush()
         await eventTail?.value
         await feedbackConsumer.finish(reason: .interrupt)

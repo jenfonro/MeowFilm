@@ -160,15 +160,29 @@ extension NativeMusicService: MusicCollectionMembershipServing {
             c["name"] = .string(name)
         }
         let before = Set(previous.map { Data($0.utf8) }), after = Set(next.map { Data($0.utf8) })
-        var intents = c["intents"]
-        for id in previous + next where before.contains(Data(id.utf8)) != after.contains(Data(id.utf8)) {
-            try musicRequire(intents.isObject && c["bindings"].isArray, .corruptDocument)
-            let present = after.contains(Data(id.utf8))
-            // An unbound local removal must not become a future account's delete.
-            if !present, c["bindings"].array.isEmpty { intents.remove(id) }
-            else { intents[id] = .obj([("present", .bool(present)), ("pending", .bool(true)), ("origin", .string("local"))]) }
+        let changed = before.symmetricDifference(after)
+        if !changed.isEmpty {
+            let intents = c["intents"], bindings = c["bindings"]
+            try musicRequire(intents.isObject && bindings.isArray, .corruptDocument)
+            func intent(_ present: Bool) -> MJ {
+                .obj([("present", .bool(present)), ("pending", .bool(true)), ("origin", .string("local"))])
+            }
+            // Rebuild the ordered object once. Updating an array-backed MJ member for
+            // every added song scans and copies the growing object for each song.
+            var remaining = changed
+            var fields: [(String, MJ)] = []
+            for (id, value) in intents.fields {
+                let key = Data(id.utf8)
+                guard remaining.remove(key) != nil else { fields.append((id, value)); continue }
+                if after.contains(key) || !bindings.array.isEmpty { fields.append((id, intent(after.contains(key)))) }
+            }
+            for id in previous + next where remaining.remove(Data(id.utf8)) != nil {
+                let present = after.contains(Data(id.utf8))
+                if present || !bindings.array.isEmpty { fields.append((id, intent(present))) }
+            }
+            c["intents"] = .obj(fields)
         }
-        c["intents"] = intents; c["order"] = .strings(next); c["manualOrder"] = .bool(true)
+        c["order"] = .strings(next); c["manualOrder"] = .bool(true)
         c["revision"] = .n(c["revision"].int + 1); try saveCollection(c, &d)
         try recordAutomaticLibraryMutation(&d, collectionID: c["id"].string, orderOnly: before == after)
     }

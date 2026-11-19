@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import { randomUUID } from 'node:crypto';
 import { createAppRuntime } from '../apps/runtime/bootstrap.mjs';
 import { createRuntimeClient } from '../apps/runtime/client.mjs';

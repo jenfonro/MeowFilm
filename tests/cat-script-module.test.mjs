@@ -1,10 +1,11 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { createCatRuntime, ScriptHostError } from '@meowfilm/script-host';
+import { readCatFacts, editCatFacts } from './storage-test-fixture.mjs';
 import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { deferred, until, turn } from '../packages/runtime-bridge/test/http-fixture.js';
@@ -111,7 +112,6 @@ test('Cat RPC reports one abort-listener cleanup failure and preserves the opera
 
 test('Cat RPC exposes starting status and preserves STARTING from invocation', async () => {
   const snapshot = {
-    settingsPath: join(temporary, 'settings.json'),
     aggregate: { origin: 'http://127.0.0.1:1', access: 'fixture' },
     instances: [{ installationId: 'pending', state: 'starting' }],
   };
@@ -358,12 +358,13 @@ test('real HTTP refresh disconnect reports failed A after real exit and keeps B 
     const a = await install('a', catFixture('old-a')), b = await install('b', catFixture('b'));
     const oldOwner = runtime().getSession('a');
     assert.deepEqual(okay(await invoke('a', a.generation)), { marker: 'old-a', count: 1 });
-    const settingsPath = okay(await rpc('status')).settingsPath;
-    const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    const settings = await readCatFacts(runtime().productRoot);
     const spec = settings.scripts.find(script => script.installationId === 'a');
-    writeFileSync(join(runtime().dataRoot, 'sources', spec.sourceHash + '.js'), gatedCat(gate.url));
+    const nextSource = gatedCat(gate.url);
+    spec.sourceHash = createHash('sha256').update(nextSource).digest('hex');
+    writeFileSync(join(runtime().dataRoot, 'sources', spec.sourceHash + '.js'), nextSource);
     spec.version = '2.0.0';
-    writeFileSync(settingsPath, JSON.stringify(settings));
+    await editCatFacts(runtime().productRoot, () => settings);
     const controller = new AbortController();
     const refreshing = rpc('refresh', {}, { signal: controller.signal });
     const response = await gate.entered.promise;

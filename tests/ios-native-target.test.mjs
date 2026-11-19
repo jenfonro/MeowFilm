@@ -2,12 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols } from '../scripts/quickjs/ios-target.mjs';
 
-function executable({ sdk = 'iphonesimulator', arch = 'x64', minimum = 0x00110000,
-  dependency = '@rpath/NodeMobile.framework/NodeMobile', platform, kind = 6 } = {}) {
+function executable({ sdk = 'iphonesimulator', arch = 'x64', minimum = 0x00120000,
+  dependency = '@rpath/NodeMobile.framework/NodeMobile',
+  storageDependency = '@rpath/MeowSQLite.framework/MeowSQLite', platform, kind = 6 } = {}) {
   const target = iosTarget(sdk, arch);
-  const dylib = Buffer.alloc(Math.ceil((24 + Buffer.byteLength(dependency) + 1) / 8) * 8);
-  dylib.writeUInt32LE(0xc); dylib.writeUInt32LE(dylib.length, 4);
-  dylib.writeUInt32LE(24, 8); dylib.write(dependency, 24);
+  const dylibs = [dependency, storageDependency].filter(Boolean).map(name => {
+    const dylib = Buffer.alloc(Math.ceil((24 + Buffer.byteLength(name) + 1) / 8) * 8);
+    dylib.writeUInt32LE(0xc); dylib.writeUInt32LE(dylib.length, 4);
+    dylib.writeUInt32LE(24, 8); dylib.write(name, 24);
+    return dylib;
+  });
   const version = Buffer.alloc(24);
   version.writeUInt32LE(0x32); version.writeUInt32LE(version.length, 4);
   version.writeUInt32LE(platform ?? (target.variant === null ? 2 : 7), 8);
@@ -15,15 +19,15 @@ function executable({ sdk = 'iphonesimulator', arch = 'x64', minimum = 0x0011000
   const header = Buffer.alloc(32);
   header.writeUInt32LE(0xfeedfacf);
   header.writeUInt32LE(target.xcframeworkArchitecture === 'x86_64' ? 0x01000007 : 0x0100000c, 4);
-  header.writeUInt32LE(kind, 12); header.writeUInt32LE(2, 16);
-  header.writeUInt32LE(version.length + dylib.length, 20);
-  return Buffer.concat([header, version, dylib]);
+  header.writeUInt32LE(kind, 12); header.writeUInt32LE(1 + dylibs.length, 16);
+  header.writeUInt32LE(version.length + dylibs.reduce((sum, dylib) => sum + dylib.length, 0), 20);
+  return Buffer.concat([header, version, ...dylibs]);
 }
 
 test('iOS targets and framework paths use the shared native target policy', () => {
   assert.deepEqual(iosTarget('iphonesimulator', 'x64'),
     { sdk: 'iphonesimulator', arch: 'x64', platform: 'ios', variant: 'simulator',
-      xcframeworkArchitecture: 'x86_64', minimumOS: '17.0' });
+      xcframeworkArchitecture: 'x86_64', minimumOS: '18.0' });
   assert.equal(iosArtifacts(iosTarget('iphonesimulator', 'x64')).artifact,
     '.cache/ios-native/iphonesimulator-x86_64/MeowScriptHost.framework/MeowScriptHost');
   for (const [sdk, arch] of [['iphoneos', 'arm64'], ['iphonesimulator', 'arm64'], ['iphonesimulator', 'x64']]) {
@@ -45,6 +49,8 @@ for (const [name, input] of [
   ['a Node addon bundle in place of a framework', { kind: 8 }],
   ['a shared crypto dependency', { dependency: '/usr/local/lib/libcrypto.dylib' }],
   ['a system zlib dependency', { dependency: '/usr/lib/libz.1.dylib' }],
+  ['a system SQLite dependency', { storageDependency: '/usr/lib/libsqlite3.dylib' }],
+  ['a missing shared SQLite dependency', { storageDependency: null }],
 ]) test(`iOS format admission rejects ${name}`, () => {
   assert.throws(() => checkIOSMachO(executable(input), iosTarget('iphonesimulator', 'x64')),
     { code: 'NATIVE_TARGET_MISMATCH' });

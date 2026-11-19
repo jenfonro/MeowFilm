@@ -53,11 +53,11 @@ test('XEAPI distinguishes malformed handshake status from explicit refusal befor
       return response(value);
     }); seedClients(f);
     t.after(() => f.close());
-    const before = Buffer.from(f.files.get('clients.json'));
+    const before = await f.clientState();
     await assert.rejects(resolve(f), { code });
     assert.deepEqual(f.requests.map(r => new URL(r.url).pathname), ['/eapi/song/music/detail/get', '/api/bsr/sk/get']);
     assert.equal(f.writes.length, 0);
-    assert.deepEqual(f.files.get('clients.json'), before);
+    assert.deepEqual(await f.clientState(), before);
   });
 });
 
@@ -172,14 +172,14 @@ test('QQ preparation consumes q36 without requiring or saving unused q16', async
       response({ data: JSON.stringify({ data: { q36: 'new-q36', q16 } }) }) : qqReply(request));
     t.after(() => f.close());
     await search(f);
-    assert.deepEqual(JSON.parse(f.files.get('clients.json')).tx.qimei, { q36: 'new-q36', savedAt: now });
+    assert.deepEqual((await f.clientState()).tx.qimei, { q36: 'new-q36', savedAt: now });
     assert.deepEqual(f.requests.map(method), ['GetQimei', 'GetSession', 'DoSearchForQQMusicMobile']);
   }
   for (const q36 of [undefined, {}, '']) {
     const f = fixture(() => response({ data: JSON.stringify({ data: { q36, q16: 'unused' } }) }));
     t.after(() => f.close());
     await assert.rejects(search(f), { code: 'INVALID_RESPONSE' });
-    assert.equal(f.requests.length, 1); assert.equal(JSON.parse(f.files.get('clients.json')).tx.qimei, null);
+    assert.equal(f.requests.length, 1); assert.equal((await f.clientState()).tx.qimei, null);
   }
 });
 
@@ -197,17 +197,17 @@ test('QIMEI optional status separates conversion failures and explicit refusals 
     const f = fixture(request => method(request) === 'GetQimei' ? response(reply) : qqReply(request));
     seedClients(f);
     t.after(() => f.close());
-    const state = JSON.parse(f.files.get('clients.json')); state.tx.qimei = null; state.tx.session = null;
-    const before = Buffer.from(JSON.stringify(state)); f.files.set('clients.json', before);
+    const state = (await f.clientState()); state.tx.qimei = null; state.tx.session = null;
+    const before = structuredClone(state); await f.setClientState(state);
     if (code) {
       await assert.rejects(search(f), { code });
       assert.deepEqual(f.requests.map(method), ['GetQimei']);
       assert.equal(f.writes.length, 0);
-      assert.deepEqual(f.files.get('clients.json'), before);
+      assert.deepEqual(await f.clientState(), before);
     } else {
       assert.deepEqual((await search(f)).items, []);
       assert.deepEqual(f.requests.map(method), ['GetQimei', 'GetSession', 'DoSearchForQQMusicMobile']);
-      const saved = JSON.parse(f.files.get('clients.json')).tx;
+      const saved = (await f.clientState()).tx;
       assert.deepEqual(saved.qimei, { q36: 'new-q36', savedAt: now });
       assert.deepEqual(saved.session, { uid: 'new-uid', sid: 'new-sid', savedAt: now });
     }
@@ -216,14 +216,14 @@ test('QIMEI optional status separates conversion failures and explicit refusals 
 
 test('QIMEI expires exactly at 24h, backward clocks refresh real state and stable anonymous identity never rotates', async () => {
   const f = fixture(qqReply); seedClients(f);
-  const identity = JSON.parse(f.files.get('clients.json')).tx;
+  const identity = (await f.clientState()).tx;
   f.advance(86399999); await search(f);
   assert.equal(f.requests.filter(r => method(r) === 'GetQimei').length, 0);
   f.advance(1); await search(f);
   assert.equal(f.requests.filter(r => method(r) === 'GetQimei').length, 1);
   f.advance(-60000); await search(f);
   assert.equal(f.requests.filter(r => method(r) === 'GetQimei').length, 2);
-  const current = JSON.parse(f.files.get('clients.json')).tx;
+  const current = (await f.clientState()).tx;
   for (const key of ['installationId', 'androidId', 'openUdid', 'openUdid2', 'imei']) assert.equal(current[key], identity[key]);
   assert.equal(f.requests.filter(r => method(r) === 'GetSession').length, 3);
   await f.close();
@@ -253,18 +253,18 @@ test('delayed QIMEI or GetSession cannot extend the TTL or relabel the session a
       return qqReply(request);
     }); seedClients(f);
     t.after(async () => { held.release(); await f.close(); });
-    const state = JSON.parse(f.files.get('clients.json')); state.tx.qimei = null; state.tx.session = null;
-    f.files.set('clients.json', Buffer.from(JSON.stringify(state)));
+    const state = (await f.clientState()); state.tx.qimei = null; state.tx.session = null;
+    await f.setClientState(state);
     const day = 86400000, start = (Math.floor((now + 8 * 3600000) / day) + 1) * day - 8 * 3600000 - 1000;
     f.advance(start - now);
     const work = search(f); await held.entered; f.advance(2000); held.release(); await work;
-    let saved = JSON.parse(f.files.get('clients.json')).tx;
+    let saved = (await f.clientState()).tx;
     assert.equal(saved.qimei.savedAt, start); assert.equal(saved.session.savedAt, start);
     await search(f);
     assert.equal(f.requests.filter(r => method(r) === 'GetSession').length, 2);
     assert.equal(f.requests.filter(r => method(r) === 'GetQimei').length, 1);
     f.advance(day - 2000); await search(f);
-    saved = JSON.parse(f.files.get('clients.json')).tx;
+    saved = (await f.clientState()).tx;
     assert.equal(saved.qimei.savedAt, start + day);
     assert.equal(f.requests.filter(r => method(r) === 'GetQimei').length, 2);
   });
@@ -279,13 +279,13 @@ test('partial preparation failures cold-reload only committed state and invalid 
     });
     await assert.rejects(search(failed), { code: stage === 'invalid-session' ? 'INVALID_RESPONSE' : 'UPSTREAM_HTTP' });
     assert.ok(!failed.requests.some(r => method(r) === 'DoSearchForQQMusicMobile'));
-    const saved = JSON.parse(failed.files.get('clients.json')).tx;
+    const saved = (await failed.clientState()).tx;
     assert.equal(saved.session, null);
     assert.equal(saved.qimei === null, stage === 'GetQimei');
     await failed.close();
-    const cold = fixture(qqReply, { files: failed.files });
+    const cold = fixture(qqReply, { dataRoot: failed.root });
     await search(cold);
-    const current = JSON.parse(cold.files.get('clients.json')).tx;
+    const current = (await cold.clientState()).tx;
     assert.equal(current.openUdid, saved.openUdid);
     assert.equal(cold.requests.filter(r => method(r) === 'GetQimei').length, stage === 'GetQimei' ? 1 : 0);
     assert.equal(cold.requests.filter(r => method(r) === 'GetSession').length, 1); await cold.close();

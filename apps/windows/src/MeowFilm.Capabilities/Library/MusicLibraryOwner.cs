@@ -11,9 +11,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     public const string ContractVersion = "0.7.0";
     private readonly IMusicLibraryStore store;
     private readonly string scope;
-    private readonly CacheDocumentStore displayCache;
     internal MusicPresentationCache PresentationCache { get; }
-    private readonly bool ownsDisplayCache;
     private readonly SemaphoreSlim gate = new(1, 1);
     private MusicLibraryData? document;
     private MusicLibraryRevision revision = MusicLibraryRevision.Empty;
@@ -49,14 +47,12 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         IReadOnlyDictionary<(string SongId, string Platform), long>? Observations = null,
         QueueNavigation? BeforeQueue = null, QueueNavigation? AfterQueue = null);
 
-    public MusicLibraryOwner(IMusicLibraryStore store, IDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
-        : this(store, "local", cacheStore, presentationCacheRoot) { }
-    public MusicLibraryOwner(IMusicLibraryStore store, string scope, IDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
+    public MusicLibraryOwner(IMusicLibraryStore store, IStorageDatabase? database = null) : this(store, "local", database) { }
+    public MusicLibraryOwner(IMusicLibraryStore store, string scope, IStorageDatabase? database = null)
     {
         ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope;
-        ownsDisplayCache = cacheStore is not CacheDocumentStore;
-        displayCache = cacheStore as CacheDocumentStore ?? (cacheStore is null ? new() : new(cacheStore));
-        PresentationCache = new(presentationCacheRoot);
+        var shared = database ?? (store as MusicLibraryDatabase)?.Database ?? throw new ArgumentException("SHARED_DATABASE_REQUIRED", nameof(database));
+        PresentationCache = new(shared);
     }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
@@ -309,8 +305,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         await EnterAsync(cancellationToken).ConfigureAwait(false);
         try { lock (repositoryGate) closed = true; ClearRecommendations(); InvalidateOfficialSources(); } finally { gate.Release(); }
         await PresentationCache.DisposeAsync().ConfigureAwait(false);
-        await displayCache.DrainAsync().ConfigureAwait(false);
-        if (ownsDisplayCache) await displayCache.DisposeAsync().ConfigureAwait(false);
     }
     public async ValueTask DisposeAsync()
     { if (!closed) await PrepareShutdownAsync().ConfigureAwait(false); await AbortAsync().ConfigureAwait(false); }

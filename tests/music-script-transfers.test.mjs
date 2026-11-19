@@ -1,7 +1,9 @@
+import { withTestDatabase } from './storage-test-fixture.mjs';
+import { decodeValueNodes } from '@meowfilm/storage/values';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ScriptHostError } from '@meowfilm/script-host';
@@ -19,6 +21,7 @@ const idOf = name => { if (!ids.has(name)) ids.set(name, randomUUID()); return i
 const input = (id = 'one', sourceRevision = 1) => ({ installationId: idOf(id), sourceRevision });
 const request = (instance, payload) => ({ installationId: instance.installationId,
   siteId: 'kw', operation: 'musicUrl', payload });
+const cleanupsByRoot = new Map();
 function setup(t, options = {}) {
   const state = { invokes: [], closed: 0, records: [], installs: 0 };
   let generation = 0;
@@ -43,8 +46,20 @@ function setup(t, options = {}) {
     async close() { state.closed++; state.records = []; await options.close?.(); return { cleanupComplete: true }; },
   };
   const dataRoot = options.dataRoot ?? mkdtempSync(join(tmpdir(), 'music-http-values-'));
-  if (!options.dataRoot) t.after(() => rmSync(dataRoot, { recursive: true, force: true }));
+  if (!cleanupsByRoot.has(dataRoot)) {
+    const modules = [];
+    cleanupsByRoot.set(dataRoot, modules);
+    t.after(async () => {
+      for (const module of modules) {
+        const result = await module.close();
+        if (options.closeFailure) failure(result, 'SCRIPT_CLEANUP'); else success(result);
+      }
+      cleanupsByRoot.delete(dataRoot);
+      rmSync(dataRoot, { recursive: true, force: true });
+    });
+  }
   const module = createMusicScriptModule({ dataRoot, hostFactory: input => { state.storage = input.storage; return host; } });
+  cleanupsByRoot.get(dataRoot).push(module);
   const rpc = moduleHttp(t, module);
   return { state, module, rpc, dataRoot };
 }
@@ -130,9 +145,14 @@ test('exact declaration extensions survive HTTP snapshots, canonical comparison 
   const first = setup(t, { capabilities });
   const item = await load(first.rpc);
   assert.equal(stringifyJSONValue(item.capabilities), text);
-  const path = join(first.dataRoot, 'music', 'catalog.json');
-  const stored = () => parseJSONText(readFileSync(path, 'utf8')).installations[0].declared.capabilities;
-  assert.equal(stringifyJSONValue(stored()), text);
+  const stored = () => withTestDatabase(first.dataRoot, async db => {
+    const nodes = await db.query('SELECT * FROM music_script_declared_nodes WHERE installation_id=? AND site_id=? ORDER BY node_id',
+      [item.installationId, 'kw']);
+    const actions = await db.query('SELECT action FROM music_script_declared_actions WHERE installation_id=? AND site_id=? ORDER BY position',
+      [item.installationId, 'kw']);
+    return {kw:{actions:actions.map(row => row.action),...decodeValueNodes(nodes,{rawNumbers:true})}};
+  });
+  assert.equal(stringifyJSONValue(await stored()), text);
   const revision = success(await first.rpc('sources.list')).revision;
   first.state.records[0].capabilities = parseJSONText('{"kw":{"extra":{"huge":1e400,' +
     '"fraction":0.123456789012345678901,"id":9007199254740993},"actions":["musicUrl"]}}');
@@ -141,17 +161,17 @@ test('exact declaration extensions survive HTTP snapshots, canonical comparison 
   first.state.records[0].capabilities.kw.extra.id = { rawJSON: '9007199254740993' };
   success(await first.rpc('sources.enable', { installationId: item.installationId }));
   assert.equal(success(await first.rpc('sources.list')).revision, revision + 1);
-  assert.deepEqual(stored().kw.extra.id, { rawJSON: '9007199254740993' });
+  assert.deepEqual((await stored()).kw.extra.id, { rawJSON: '9007199254740993' });
   first.state.records[0].capabilities = capabilities;
   success(await first.rpc('sources.enable', { installationId: item.installationId }));
   success(await first.rpc('sources.edit', { installationId: item.installationId, name: 'edited' }));
-  assert.equal(stringifyJSONValue(stored()), text);
+  assert.equal(stringifyJSONValue(await stored()), text);
   success(await first.module.close());
   const reopened = setup(t, { dataRoot: first.dataRoot });
   const cold = success(await reopened.rpc('sources.detail', { installationId: item.installationId })).item;
   assert.equal(stringifyJSONValue(cold.capabilities), text);
   success(await reopened.rpc('sources.edit', { installationId: item.installationId, name: 'cold edit' }));
-  assert.equal(stringifyJSONValue(stored()), text);
+  assert.equal(stringifyJSONValue(await stored()), text);
   assert.equal(stringifyJSONValue(capabilities), text);
 });
 
@@ -429,7 +449,7 @@ test('main fifty-millisecond HTTP deadline cancels one invocation without replay
 });
 
 test('close reports host cleanup failure once while another module remains usable', async t => {
-  const { module, rpc, state } = setup(t, { close: () => { throw new ScriptHostError('SCRIPT_CLEANUP'); } });
+  const { module, rpc, state } = setup(t, { closeFailure: true, close: () => { throw new ScriptHostError('SCRIPT_CLEANUP'); } });
   await load(rpc);
   failure(await module.close(), 'SCRIPT_CLEANUP'); failure(await module.close(), 'SCRIPT_CLEANUP');
   assert.equal(state.closed, 1);

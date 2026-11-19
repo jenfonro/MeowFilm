@@ -4,13 +4,14 @@ import MeowRuntime
 
 @MainActor
 final class PanAccountsModelTests: XCTestCase {
-    func testCorruptRowHasExplicitStatusWhileHealthySiblingRemainsEditable() throws {
+    func testCorruptRowHasExplicitStatusWhileHealthySiblingRemainsEditable() async throws {
         let runtime = try PanTestRuntime()
-        try runtime.storage.seed(.baidu, credentials: .object(["cookie": .number(1)]))
+        try runtime.storage.seed(.baidu, credentials: .object(["cookie": .string("synthetic\ninvalid")]))
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
         defer { model.close() }
-        XCTAssertEqual(model.rows.count, 7)
+        XCTAssertEqual(model.rows.count, PanProviderID.allCases.count)
         XCTAssertEqual(model.rows[0].account?.errorCode, .corruptStorage)
         XCTAssertEqual(model.rows[0].statusTitle, "账号数据损坏")
         XCTAssertEqual(model.rows[0].actions, [])
@@ -20,11 +21,12 @@ final class PanAccountsModelTests: XCTestCase {
         login.selectMethod(.manual); login.setVisible(true)
         login.draft = ["cookie": "synthetic-healthy"]
         login.save()
+        await panEventually(self) { !login.busy }
         XCTAssertTrue(login.saved)
         XCTAssertEqual(model.rows[2].statusTitle, "未验证")
         XCTAssertEqual(model.rows[2].account?.revision, 1)
         XCTAssertEqual(model.rows[0].account?.errorCode, .corruptStorage)
-        XCTAssertEqual(try runtime.storage.credentials(.baidu), .object(["cookie": .number(1)]))
+        XCTAssertEqual(try runtime.storage.credentials(.baidu), .object(["cookie": .string("synthetic\ninvalid")]))
     }
 
     func testEntryReadsAllProvidersLocallyWithoutLoadingOrAutomaticValidation() async throws {
@@ -33,6 +35,7 @@ final class PanAccountsModelTests: XCTestCase {
         try await runtime.setAccount(.quark, status: .expired)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
         defer { model.close() }
         XCTAssertEqual(model.rows.map(\.id), PanProviderID.allCases)
         XCTAssertEqual(model.rows.map(\.account?.status), [.unverified, .unverified, .signedOut, .signedOut, .signedOut])
@@ -42,7 +45,7 @@ final class PanAccountsModelTests: XCTestCase {
         XCTAssertEqual(model.rows[1].account?.fields, ["cookie"])
         XCTAssertFalse(model.rows.contains(where: \.busy)); XCTAssertNil(model.notice)
         model.close(); model.start()
-        await Task.yield()
+        await panEventually(self) { model.rows.allSatisfy { $0.account != nil } }
         let calls = await runtime.calls
         XCTAssertTrue(calls.isEmpty)
     }
@@ -54,6 +57,7 @@ final class PanAccountsModelTests: XCTestCase {
         await runtime.setRefresh(.quark, error: .remote("AUTH_FAILED"))
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
         await model.refresh(.baidu)?.value
         await model.refresh(.quark)?.value
         XCTAssertEqual(model.rows[0].account?.status, .signedIn)
@@ -73,6 +77,7 @@ final class PanAccountsModelTests: XCTestCase {
             try await runtime.setAccount(.baidu, status: .signedIn, revision: 7)
             let model = PanAccountsModel(service: runtime.service)
             model.start()
+            await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
             if status == .expired { await runtime.setRefresh(.baidu, error: .remote("AUTH_FAILED")) }
             await model.refresh(.baidu)?.value
             await runtime.setRefresh(.baidu, error: .remote("NETWORK_ERROR"))
@@ -82,6 +87,7 @@ final class PanAccountsModelTests: XCTestCase {
             XCTAssertEqual(model.rows.first?.account?.fields, ["cookie"])
             XCTAssertEqual(model.notice?.message, "网盘网络请求失败")
             model.start()
+            await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
             XCTAssertEqual(model.rows.first?.account?.status, status)
             model.close()
         }
@@ -92,6 +98,7 @@ final class PanAccountsModelTests: XCTestCase {
         for provider in PanProviderID.allCases { try await runtime.setAccount(provider, status: .signedIn) }
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
         for provider in PanProviderID.allCases { await model.refresh(provider)?.value }
         XCTAssertEqual(model.rows.count, 5)
         XCTAssertTrue(model.rows.allSatisfy { $0.account?.status == .signedIn && !$0.busy })
@@ -106,6 +113,7 @@ final class PanAccountsModelTests: XCTestCase {
         try await runtime.setAccount(.baidu, status: .signedIn)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
         let entered = expectation(description: "refresh entered")
         let gate = PanTestGate { entered.fulfill() }
         await runtime.gate("refresh.baidu", gate)
@@ -113,6 +121,7 @@ final class PanAccountsModelTests: XCTestCase {
         await fulfillment(of: [entered], timeout: 2)
         XCTAssertNil(model.refresh(.baidu))
         model.logout(.baidu)
+        await panEventually(self) { model.rows.first { $0.id == .baidu }?.account?.status == .signedOut && !model.rows.contains { $0.id == .baidu && $0.busy } }
         XCTAssertEqual(model.rows[0].account?.status, .signedOut)
         let revision = model.rows[0].account?.revision
         XCTAssertEqual(revision, 2)
@@ -128,6 +137,7 @@ final class PanAccountsModelTests: XCTestCase {
         try await runtime.setAccount(.baidu, status: .signedIn)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await panEventually(self) { model.rows.count == PanProviderID.allCases.count && model.rows.allSatisfy { $0.account != nil } }
         let entered = expectation(description: "refresh held")
         let gate = PanTestGate { entered.fulfill() }
         await runtime.gate("refresh.baidu", gate)
@@ -136,6 +146,7 @@ final class PanAccountsModelTests: XCTestCase {
         model.close()
         try runtime.storage.seed(.baidu, credentials: .object(["cookie": .string("synthetic-runtime-rotation")]), revision: 2)
         model.start()
+        await panEventually(self) { model.rows[0].account?.revision == 2 && model.rows[0].account?.status == .unverified }
         XCTAssertEqual(model.rows[0].account?.revision, 2)
         XCTAssertEqual(model.rows[0].account?.status, .unverified)
         XCTAssertFalse(model.rows[0].busy)
@@ -149,6 +160,7 @@ final class PanAccountsModelTests: XCTestCase {
         let runtime = try PanTestRuntime()
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
+        await panEventually(self) { owner.rows.count == PanProviderID.allCases.count && owner.rows.allSatisfy { $0.account != nil } }
         let login = try XCTUnwrap(owner.openLogin(.baidu))
         XCTAssertNil(owner.openLogin(.quark))
         XCTAssertNil(owner.refresh(.baidu))
@@ -164,13 +176,16 @@ final class PanAccountsModelTests: XCTestCase {
         let runtime = try PanTestRuntime()
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
+        await panEventually(self) { owner.rows.count == PanProviderID.allCases.count && owner.rows.allSatisfy { $0.account != nil } }
         let login = try XCTUnwrap(owner.openLogin(.tianyi))
         login.setVisible(true); login.draft = ["cookie": "synthetic-cookie"]
         login.save()
+        await panEventually(self) { !login.busy }
         XCTAssertTrue(login.saved); XCTAssertFalse(login.confirmed)
         XCTAssertEqual(owner.rows[3].account?.revision, 1)
         XCTAssertEqual(owner.rows[3].account?.status, .unverified)
         owner.logout(.tianyi)
+        await panEventually(self) { owner.rows.first { $0.id == .tianyi }?.account?.status == .signedOut && !owner.rows.contains { $0.id == .tianyi && $0.busy } }
         XCTAssertEqual(owner.rows[3].account?.status, .signedOut)
         XCTAssertEqual(owner.rows[3].account?.revision, 2)
         XCTAssertEqual(owner.rows[3].account?.configured, false)
@@ -188,15 +203,18 @@ final class PanAccountsModelTests: XCTestCase {
         let runtime = try PanTestRuntime()
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
+        await panEventually(self) { owner.rows.count == PanProviderID.allCases.count && owner.rows.allSatisfy { $0.account != nil } }
         var old: PanLoginModel? = try XCTUnwrap(owner.openLogin(.tianyi))
         weak var retired = old
         old?.setVisible(true); old?.draft = ["cookie": "synthetic-old-cookie"]
         old?.save()
+        await panEventually(self) { old?.saved == true }
         owner.closeLogin(); old = nil
         XCTAssertNil(retired)
         let next = try XCTUnwrap(owner.openLogin(.tianyi))
         next.setVisible(true); next.draft = ["username": "synthetic-user", "password": " synthetic-next-password "]
         next.save()
+        await panEventually(self) { !next.busy }
         XCTAssertEqual(try runtime.storage.credentials(.tianyi), .object([
             "username": .string("synthetic-user"), "password": .string(" synthetic-next-password ")]))
         XCTAssertTrue(next.saved); XCTAssertFalse(next.confirmed)
@@ -207,20 +225,23 @@ final class PanAccountsModelTests: XCTestCase {
         owner.close()
     }
 
-    func testNativeClearFailurePreservesSnapshotAndPageReentryHasNoRPC() throws {
+    func testNativeClearFailurePreservesSnapshotAndPageReentryHasNoRPC() async throws {
         let runtime = try PanTestRuntime()
         try runtime.storage.seed(.tianyi, credentials: panSyntheticCredentials(.tianyi), revision: 5)
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
-        runtime.storage.committer.fail(true)
+        await panEventually(self) { owner.rows.count == PanProviderID.allCases.count && owner.rows.allSatisfy { $0.account != nil } }
+        try runtime.storage.failWrites(true)
         owner.logout(.tianyi)
+        await panEventually(self) { owner.notice != nil && !owner.rows.contains { $0.id == .tianyi && $0.busy } }
         XCTAssertEqual(owner.rows[3].account?.revision, 5)
         XCTAssertEqual(owner.rows[3].account?.status, .unverified)
         XCTAssertEqual(owner.rows[3].account?.configured, true)
         XCTAssertEqual(owner.notice?.message, "网盘账号保存失败")
         XCTAssertFalse(owner.rows[3].busy)
-        runtime.storage.committer.fail(false)
+        try runtime.storage.failWrites(false)
         owner.logout(.tianyi)
+        await panEventually(self) { owner.rows.first { $0.id == .tianyi }?.account?.status == .signedOut && !owner.rows.contains { $0.id == .tianyi && $0.busy } }
         owner.close(); owner.start()
         XCTAssertEqual(owner.rows[3].account?.status, .signedOut)
         XCTAssertEqual(owner.rows[3].account?.revision, 6)
@@ -231,6 +252,7 @@ final class PanAccountsModelTests: XCTestCase {
         let runtime = try PanTestRuntime()
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
+        await panEventually(self) { owner.rows.count == PanProviderID.allCases.count && owner.rows.allSatisfy { $0.account != nil } }
         let login = try XCTUnwrap(owner.openLogin(.baidu))
         let entered = expectation(description: "QR start held before receipt")
         let gate = PanTestGate { entered.fulfill() }
@@ -239,11 +261,13 @@ final class PanAccountsModelTests: XCTestCase {
         await fulfillment(of: [entered], timeout: 2)
         let starting = login.start()
         owner.logout(.baidu)
+        await panEventually(self) { owner.rows.first { $0.id == .baidu }?.account?.status == .signedOut && !owner.rows.contains { $0.id == .baidu && $0.busy } }
         XCTAssertEqual(owner.rows[0].account?.status, .signedOut)
         XCTAssertEqual(owner.rows[0].account?.revision, 1)
         let next = try XCTUnwrap(owner.openLogin(.baidu))
         next.selectMethod(.manual); next.setVisible(true); next.draft = ["cookie": "synthetic-latest"]
         next.save()
+        await panEventually(self) { !next.busy }
         XCTAssertTrue(next.saved)
         XCTAssertEqual(owner.rows[0].account?.revision, 2)
         await gate.release(); await starting?.value; await owner.closing?.value

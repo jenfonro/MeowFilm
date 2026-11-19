@@ -216,7 +216,7 @@ public static class MusicSearchMatchObservationTests
     private static async Task KnownEmpty()
     {
         await using var f = new Fixture();
-        await using var cacheStore = new CacheDocumentStore(f.Store);
+        await using var cacheStore = new NativeTestDatabase(f.Store);
         int supplements = 0;
         var facts = new MusicSongMatcher(f.Library, new(cacheStore), (request, _) =>
         { supplements++; return Task.FromResult(Page(request, [])); }, f.Clock);
@@ -236,7 +236,7 @@ public static class MusicSearchMatchObservationTests
     private static async Task KnownProjection()
     {
         await using var f = new Fixture();
-        await using var cacheStore = new CacheDocumentStore(f.Store);
+        await using var cacheStore = new NativeTestDatabase(f.Store);
         var facts = new MusicSongMatcher(f.Library, new(cacheStore), (_, _) =>
             throw new InvalidOperationException("search projection cannot supplement"), f.Clock);
         var wy = MusicSongFixture.Online("wy", "original", "Synthetic recording", "Artist", duration: 180);
@@ -526,7 +526,7 @@ public static class MusicSearchMatchObservationTests
         internal readonly MusicSearchCoordinator Search;
         internal Fixture()
         {
-            Library = new(MusicTestStores.For(Store));
+            Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage);
             Search = new(Catalog, Clock, async (request, token) =>
             {
                 long observation = Library.BeginSongObservation();

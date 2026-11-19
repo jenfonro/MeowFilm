@@ -10,10 +10,8 @@ import MeowPlayback
 @MainActor
 final class MusicPaletteTransitionTests: XCTestCase {
     func testFullPlayerAndHomeCardConsumeCoverChangesWithoutReplacingRecordsOrLyrics() async throws {
-        let name = "MusicPaletteTransitionTests.owner.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let playback = PlaybackController()
         let model = MusicViewModel(service: PaletteTransitionService(), playback: playback)
         let track = MusicRemoteTrack(ref: .init(kind: .queue, id: "palette"), songId: "palette", title: "Palette")
@@ -160,10 +158,8 @@ final class MusicPaletteTransitionTests: XCTestCase {
     }
 
     func testHomePageSongAndCoverColorsRedirectWithoutLayoutRestart() async throws {
-        let name = "MusicPaletteTransitionTests.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let page = WindowGradientView(themeProvider: appearance)
         try await withVisible(page) {
             let gradient = try self.gradient(in: page.layer)
@@ -206,7 +202,7 @@ final class MusicPaletteTransitionTests: XCTestCase {
             XCTAssertTrue(appearance.applyCover(rgba: [240, 20, 20, 255], ticket: secondTicket))
             await self.display()
             XCTAssertNotNil(gradient.animation(forKey: "page.colorway"))
-            XCTAssertTrue(appearance.selectFixedPalette(.preset(.sky)))
+            XCTAssertTrue(try appStorageTestWait { await appearance.selectFixedPalette(.preset(.sky)) })
             await self.display()
             XCTAssertNil(gradient.animation(forKey: "page.colorway"),
                          "A synchronous preference update must retire the earlier song transition")

@@ -1,4 +1,5 @@
-import test from 'node:test';
+import '../../../tests/storage-test-fixture.mjs';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as diagnostics from 'node:diagnostics_channel';
 import * as nativeTimers from 'node:timers';
@@ -18,9 +19,11 @@ import { serverFor } from './http-fixture.js';
 
 function rootFor(t) {
   const root = mkdtempSync(join(tmpdir(), 'meowfilm-cat-callbacks-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  roots.add(root);
   return root;
 }
+const roots = new Set();
+after(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
 
 async function sessionFor(t, source) {
   const dataRoot = rootFor(t);
@@ -542,7 +545,7 @@ test('Cat probe listener removal and terminal callbacks preserve cooperative sto
     await runtime.setEnabled('a', false);
     assert.deepEqual(await exited, [0]);
     assert.equal(a.cleanupError, null);
-    assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'volumes', 'a', 'close.json'), 'utf8')),
+    assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'cat', 'volumes', 'a', 'close.json'), 'utf8')),
       { closes: 1, removed: 0, receiver: true });
     assert.equal(runtime.getSession('b'), b);
     assert.deepEqual(await invoke(runtime, 'b', 'home'), { count: 1 });
@@ -969,7 +972,7 @@ test('Cat held Writable callbacks preserve backpressure, retired failure identit
     await runtime.setEnabled('a', false);
     assert.deepEqual(await exited, [0]);
     assert.equal(a.cleanupError, null);
-    assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'volumes', 'a', 'terminal.json'), 'utf8')), {
+    assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'cat', 'volumes', 'a', 'terminal.json'), 'utf8')), {
       writes: 1, ends: 1, writeError: 'CANCELLED', endError: 'CANCELLED', writeReceiver: true,
     });
     assert.equal(runtime.getSession('b'), b);
@@ -1401,7 +1404,7 @@ test('Cat prebound primary listen keeps invocation attribution, callback identit
       const exited = once(worker, 'exit');
       await runtime.close();
       assert.deepEqual(await exited, [0]);
-      assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'volumes', 'a', 'listen-stop.json'), 'utf8')),
+      assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'cat', 'volumes', 'a', 'listen-stop.json'), 'utf8')),
         { before: true, after: false });
       assert.equal(a.cleanupError, null);
     });
@@ -1705,12 +1708,12 @@ test('Cat held pipeline and finished deliver native terminal completions to coop
     const exited = once(worker, 'exit');
     await runtime.setEnabled('a', false);
     assert.deepEqual(await exited, [0]);
-    assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'volumes', 'a', 'stream-stop.json'), 'utf8')), {
+    assert.deepEqual(JSON.parse(readFileSync(join(dataRoot, 'cat', 'volumes', 'a', 'stream-stop.json'), 'utf8')), {
       pipeline: { calls: 1, receiver: true, argc: 2, code: 'CANCELLED', value: true },
       finished: { calls: 1, receiver: true, argc: 1, code: 'CANCELLED', value: true },
       closed: true,
     });
-    assert.equal(existsSync(join(dataRoot, 'volumes', 'a', 'unexpected-background.txt')), false);
+    assert.equal(existsSync(join(dataRoot, 'cat', 'volumes', 'a', 'unexpected-background.txt')), false);
     assert.equal(worker.threadId, -1);
     assert.equal(a.worker, null);
     assert.equal(a.cleanupError, null);

@@ -3,6 +3,7 @@ import XCTest
 import MeowAccounts
 import MeowMusicFeature
 import MeowStorage
+import MeowStorageTestSupport
 import MeowRuntime
 @testable import MeowMusicPlatform
 
@@ -11,28 +12,25 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
     private struct Fixture {
         let identity: AccountIdentity
         let credentials = MusicUpdateStore()
-        let document: DocumentStore
+        let document: SQLiteDatabase
         let clock = MusicAccountTestClock()
         let provider = MusicAccountFeedbackProviderFixture()
         let service: NativeMusicAccountService
-        init(document: DocumentStore) throws {
+        init(document: SQLiteDatabase) throws {
             identity = try MusicAccountFixture.identity("wy"); self.document = document
             credentials.seed(try MusicAccountFixture.credential(42, platform: .netease), for: identity)
             service = .init(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-                providers: [.netease: provider], feedbackOutboxStoreFactory: { [document] in document }, clock: { [clock] in clock.now() })
+                providers: [.netease: provider], database: document, clock: { [clock] in clock.now() })
         }
         func cold() -> NativeMusicAccountService {
             .init(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-                providers: [.netease: provider], feedbackOutboxStoreFactory: { [document] in document }, clock: { [clock] in clock.now() })
+                providers: [.netease: provider], database: document, clock: { [clock] in clock.now() })
         }
     }
     private let settings = MusicPlaybackFeedbackSettings(revision: 1,
         platforms: [.netease: .init(enabled: true, generation: 1)])
-    private func fixture(maximumBytes: Int = 8 * 1024 * 1024) throws -> Fixture {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        return try .init(document: .init(baseURL: root, namespace: "feedback-owner", maximumDocumentBytes: maximumBytes))
+    private func fixture() throws -> Fixture {
+        try .init(document: storageTestDatabase(self))
     }
     private func ready(_ owner: NativeMusicAccountService) async throws {
         _ = try await owner.setAccess(available: true, generation: 1)
@@ -45,47 +43,39 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
     }
     func testClearingIndependentCacheKeepsPendingFeedbackForColdRecovery() async throws {
         let f = try fixture()
-        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: cacheRoot, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: cacheRoot) }
-        let cache = try DocumentStore(baseURL: cacheRoot, namespace: "account-cache")
         let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: f.credentials),
-            scopes: [.netease: f.identity], providers: [.netease: f.provider], urlCacheStore: cache,
-            feedbackOutboxStoreFactory: { [document = f.document] in document }, clock: { [clock = f.clock] in clock.now() })
+            scopes: [.netease: f.identity], providers: [.netease: f.provider], database: f.document,
+            clock: { [clock = f.clock] in clock.now() })
         try await ready(owner)
         await f.provider.setUploadOutcome(.notSent)
         let lease = try await owner.beginPlaybackFeedback(platform: .netease, authorization: .init())
         _ = try await lease.report(report(.start, instance: UUID()))
         await owner.flushPendingPlaybackFeedback()
-        let pending = try XCTUnwrap(f.document.read(key: MusicNeteaseFeedbackOutbox.key))
-        XCTAssertNil(try cache.read(key: MusicNeteaseFeedbackOutbox.key))
+        let pending = try XCTUnwrap(musicFeedbackData(f.document))
+        XCTAssertTrue(try storageTestRows(f.document, "SELECT * FROM ios_music_audio_urls").isEmpty)
         _ = await owner.close()
-        try FileManager.default.removeItem(at: cacheRoot)
-        XCTAssertEqual(try f.document.read(key: MusicNeteaseFeedbackOutbox.key), pending)
+        try storageTestAsync { try await f.document.transaction { try $0.execute("DELETE FROM ios_music_audio_urls") } }
+        XCTAssertEqual(try musicFeedbackData(f.document), pending)
         let before = await f.provider.uploads().count
         await f.provider.setUploadOutcome(.confirmed)
         let cold = f.cold()
         try await ready(cold)
         let after = await f.provider.uploads().count
         XCTAssertEqual(after, before + 1)
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         _ = await cold.close()
     }
     func testUnavailableFeedbackStoreDoesNotPreventAccountPreparationOrValidation() async throws {
         let f = try fixture()
-        let opened = expectation(description: "Feedback store opens only when feedback is configured")
+        try storageTestReadOnly(f.document, true)
         let owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: f.credentials),
-            scopes: [.netease: f.identity], providers: [.netease: f.provider],
-            feedbackOutboxStoreFactory: {
-                opened.fulfill()
-                throw DocumentStoreError.storageFailure
-            }, clock: { [clock = f.clock] in clock.now() })
+            scopes: [.netease: f.identity], providers: [.netease: f.provider], database: f.document,
+            clock: { [clock = f.clock] in clock.now() })
         _ = try await owner.setAccess(available: true, generation: 1)
         try await owner.prepareLocalAccounts()
         _ = try await owner.validate(platform: .netease)
         do { try await owner.configurePlaybackFeedback(settings); XCTFail("Feedback cannot configure an unavailable business store") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
-        await fulfillment(of: [opened], timeout: 3)
         _ = try await owner.validate(platform: .netease)
         await owner.flushPendingPlaybackFeedback()
         let calls = await f.provider.uploads()
@@ -116,7 +106,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         XCTAssertEqual(try sent.map { try RuntimeJSON.decode($0)[music: "event"] }, [.string("start"), .string("end")])
         XCTAssertEqual(try sent.map { try RuntimeJSON.decode($0)[music: "occurredAt"] },
                        [.number(1_800_000_000), .number(1_800_000_001.25)])
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         XCTAssertEqual(f.credentials.peek(f.identity)?.revision, credentials?.revision)
         _ = await f.service.close()
     }
@@ -132,7 +122,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         await f.service.flushPendingPlaybackFeedback()
         await f.service.preparePlaybackFeedbackForClose()
         _ = await f.service.close()
-        XCTAssertNotNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNotNil(try musicFeedbackData(f.document))
         let before = await f.provider.uploads().count
         await f.provider.setUploadOutcome(.confirmed)
         let cold = f.cold()
@@ -147,7 +137,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         let recovered = Array((await f.provider.uploads()).dropFirst(before))
         XCTAssertEqual(recovered.count, 2)
         XCTAssertEqual(try recovered.map { try RuntimeJSON.decode($0)[music: "event"] }, [.string("start"), .string("end")])
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         _ = await cold.close()
     }
     func testActualEndTriggersOneBoundedRecoveryAfterConnectionReturns() async throws {
@@ -168,7 +158,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         let recovered = Array((await f.provider.uploads()).dropFirst(offline))
         XCTAssertEqual(recovered.count, 2)
         XCTAssertEqual(try recovered.map { try RuntimeJSON.decode($0)[music: "event"] }, [.string("start"), .string("end")])
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         _ = await f.service.close()
     }
     func testColdDisabledSettingClearsPendingBeforeAccountBecomesReady() async throws {
@@ -184,7 +174,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
             platforms: [.netease: .init(enabled: false, generation: 2)]))
         _ = try await cold.validate(platform: .netease)
         await cold.flushPendingPlaybackFeedback()
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         let after = await f.provider.uploads().count; XCTAssertEqual(before, after)
         _ = await cold.close()
     }
@@ -212,7 +202,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
                     let failure = error as? MusicServiceError
                     XCTAssertTrue(failure == .staleAccess || failure == .cancelled)
                 }
-                XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+                XCTAssertNil(try musicFeedbackData(f.document))
             } else {
                 _ = try await lease.report(value(.start))
                 await f.service.flushPendingPlaybackFeedback()
@@ -261,7 +251,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
                 await f.service.flushPendingPlaybackFeedback()
                 let calls = await f.provider.uploads()
                 XCTAssertEqual(calls.count, event == .start ? 1 : 2)
-                XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+                XCTAssertNil(try musicFeedbackData(f.document))
                 _ = await f.service.close()
             }
         }
@@ -285,7 +275,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         let recoveredEnd = try RuntimeJSON.decode(recovered[0])
         XCTAssertEqual(recoveredEnd[music: "event"], .string("end"))
         XCTAssertEqual(recoveredEnd[music: "occurredAt"], .number(1_800_000_001.25))
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         _ = await cold.close()
     }
     func testDisableLogoutAccountReplacementAndAccessRevocationClearPendingWithoutCrossAccountRecovery() async throws {
@@ -295,7 +285,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
             let lease = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init())
             _ = try await lease.report(report(.start, instance: UUID()))
             await f.service.flushPendingPlaybackFeedback()
-            XCTAssertNotNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+            XCTAssertNotNil(try musicFeedbackData(f.document))
             let before = await f.provider.uploads().count
             switch change {
             case "disable":
@@ -310,7 +300,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
             default: f.service.cancelPendingPlaybackFeedback(platform: .netease)
             }
             await f.service.flushPendingPlaybackFeedback()
-            XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key), change)
+            XCTAssertNil(try musicFeedbackData(f.document), change)
             let count = await f.provider.uploads().count; XCTAssertEqual(count, before, change)
             _ = await f.service.close()
         }
@@ -328,7 +318,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         let replacement = f.cold()
         try await ready(replacement)
         let count = await f.provider.uploads().count; XCTAssertEqual(count, before)
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         _ = await replacement.close()
     }
     func testCloseCancelsHeldPhysicalUploadWithoutWaitingOrRetainingItsAmbiguousPair() async throws {
@@ -343,14 +333,15 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         _ = try await lease.report(report(.end, instance: instance))
         let closed = await f.service.close()
         XCTAssertFalse(closed.cleanupComplete); XCTAssertEqual(closed.inFlight, 1)
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         await gate.release(); await f.service.flushPendingPlaybackFeedback()
         let calls = await f.provider.uploads(); XCTAssertEqual(calls.count, 1)
         let complete = await f.service.close(); XCTAssertTrue(complete.cleanupComplete)
     }
     func testStorageAdmissionFailureNeverReturnsRegisteredOrStartsPhysicalUpload() async throws {
-        let f = try fixture(maximumBytes: 16)
+        let f = try fixture()
         try await ready(f.service)
+        try storageTestReadOnly(f.document, true)
         let lease = try await f.service.beginPlaybackFeedback(platform: .netease, authorization: .init())
         let instance = UUID(), start = report(.start, instance: instance)
         do { _ = try await lease.report(start); XCTFail("Unpersisted start must not register") }
@@ -362,7 +353,7 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         await f.service.flushPendingPlaybackFeedback()
         let calls = await f.provider.uploads()
         XCTAssertTrue(calls.isEmpty)
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         _ = await f.service.close()
     }
     func testDisableCancelsHeldUploadAndLateACKCannotRestoreEventsUnderNewSetting() async throws {
@@ -373,14 +364,14 @@ final class MusicNeteaseFeedbackOwnerTests: XCTestCase {
         let instance = UUID()
         _ = try await lease.report(report(.start, instance: instance))
         await fulfillment(of: [gate.entered], timeout: 3)
-        let before = try XCTUnwrap(f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        let before = try XCTUnwrap(musicFeedbackData(f.document))
         XCTAssertTrue(String(decoding: before, as: UTF8.self).contains("\"state\":\"inflight\""))
         f.service.cancelPendingPlaybackFeedback(platform: .netease)
         try await f.service.configurePlaybackFeedback(.init(revision: 2,
             platforms: [.netease: .init(enabled: false, generation: 2)]))
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         await gate.release(); await f.service.flushPendingPlaybackFeedback()
-        XCTAssertNil(try f.document.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(f.document))
         do { _ = try await lease.report(report(.end, instance: instance)); XCTFail("Disabled old lease") }
         catch { XCTAssertEqual(error as? MusicServiceError, .cancelled) }
         try await f.service.configurePlaybackFeedback(.init(revision: 3,

@@ -15,7 +15,7 @@ import { LegadoAdapter, parseLegadoRequestParts } from './legado.js';
 import { QysgAdapter } from './qysg.js';
 import { readStaticRuleString, readStaticRuleValues } from './rules.js';
 import { transformCapabilityScript } from './script-transform.js';
-import { parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const adapters = Object.freeze({
   legado: LegadoAdapter,
@@ -180,7 +180,9 @@ class SessionKernel {
     this.nextRoute = 0;
     this.adapterTasks = new Set();
     this.invocations = new Map();
-    this.sourceValues = { values: {}, variable: String(source.variable ?? source.bookSourceVariable ?? '') };
+    this.sourceValues = new Map();
+    this.sourceVariable = String(source.variable ?? source.bookSourceVariable ?? '');
+    this.sourceRevision = 0;
     this.sourceFlush = Promise.resolve();
   }
 
@@ -278,30 +280,22 @@ class SessionKernel {
 
   async restoreSourceValues() {
     try {
-      const saved = await this.capabilities.call('storage.get', {
-        version: hostApiVersion, profile: `${this.profile}:storage`, key: 'reader.source.values',
+      const saved = await this.capabilities.call('reader.values.read', {
+        version: hostApiVersion, profile: `${this.profile}:reader`,
       }, this.startupContext());
-      if (saved !== null && saved !== undefined) this.sourceValues = saved;
+      sourceRequire(Number.isSafeInteger(saved?.revision) && saved.revision >= 0 && Array.isArray(saved.entries), 'STORAGE_ERROR');
+      const values = new Map();
+      for (const pair of saved.entries) {
+        sourceRequire(Array.isArray(pair) && pair.length === 2 && typeof pair[0] === 'string' && !values.has(pair[0]), 'STORAGE_ERROR');
+        values.set(pair[0], pair[1]);
+      }
+      this.sourceValues = values;
+      if (Object.hasOwn(saved, 'variable')) this.sourceVariable = saved.variable;
+      this.sourceRevision = saved.revision;
     } catch (error) {
       if (this.signal.aborted) throw error;
       this.sourceValuesError = error;
     }
-  }
-
-  sourceValueDocument() {
-    if (this.sourceValuesError) throw this.sourceValuesError;
-    if (typeof this.sourceValues === 'string') {
-      try { this.sourceValues = parseJSONText(this.sourceValues); }
-      catch { throw sourceFault('STORAGE_ERROR'); }
-    }
-    sourceRequire(!isRawJSON(this.sourceValues), 'STORAGE_ERROR');
-    return sourceObject(this.sourceValues, 'STORAGE_ERROR');
-  }
-
-  sourceValueMap() {
-    const values = this.sourceValueDocument().values;
-    sourceRequire(!isRawJSON(values), 'STORAGE_ERROR');
-    return sourceObject(values, 'STORAGE_ERROR');
   }
 
   flushSourceValues(invocation) {
@@ -309,19 +303,17 @@ class SessionKernel {
     if (!entry.sourceWrites.size && entry.sourceVariable === undefined) return Promise.resolve();
     const work = this.sourceFlush.then(async () => {
       sourceRequire(!invocation.signal.aborted, 'CANCELLED');
-      const saved = this.sourceValueDocument();
-      const next = { ...saved };
-      if (entry.sourceWrites.size) {
-        next.values = { ...this.sourceValueMap(), ...Object.fromEntries(entry.sourceWrites) };
-      }
-      if (entry.sourceVariable !== undefined) next.variable = entry.sourceVariable;
+      if (this.sourceValuesError) throw this.sourceValuesError;
       if (this.metadata.persistentSource) {
-        await this.capabilities.call('storage.set', {
-          version: hostApiVersion, profile: `${this.profile}:storage`, key: 'reader.source.values',
-          value: stringifyJSONValue(next),
+        const revision = await this.capabilities.call('reader.values.apply', {
+          version: hostApiVersion, profile: `${this.profile}:reader`, revision: this.sourceRevision,
+          entries: [...entry.sourceWrites], ...(entry.sourceVariable === undefined ? {} : { variable: entry.sourceVariable }),
         }, this.capabilityContext(this.invocationContext(invocation)));
+        sourceRequire(Number.isSafeInteger(revision) && revision === this.sourceRevision + 1, 'STORAGE_ERROR');
+        this.sourceRevision = revision;
       }
-      this.sourceValues = next;
+      for (const [key, value] of entry.sourceWrites) this.sourceValues.set(key, value);
+      if (entry.sourceVariable !== undefined) this.sourceVariable = entry.sourceVariable;
     });
     this.sourceFlush = work.catch(() => {});
     return work;
@@ -414,8 +406,8 @@ class SessionKernel {
       case 'legado.sourceGet': {
         const writes = this.invocations.get(context.invocationId)?.sourceWrites;
         if (writes?.has(input.key)) return writes.get(input.key);
-        const values = this.sourceValueMap();
-        return Object.hasOwn(values, input.key) ? JSON.parse(stringifyJSONValue(values[input.key])) : null;
+        if (this.sourceValuesError) throw this.sourceValuesError;
+        return this.sourceValues.has(input.key) ? JSON.parse(stringifyJSONValue(this.sourceValues.get(input.key))) : null;
       }
       case 'legado.sourceSet':
         sourceRequire(this.invocations.has(context.invocationId), 'PERMISSION_DENIED');
@@ -424,7 +416,8 @@ class SessionKernel {
       case 'legado.sourceVariableGet': {
         const pending = this.invocations.get(context.invocationId)?.sourceVariable;
         if (pending !== undefined) return pending;
-        const variable = this.sourceValueDocument().variable;
+        if (this.sourceValuesError) throw this.sourceValuesError;
+        const variable = this.sourceVariable;
         sourceRequire(typeof variable === 'string', 'STORAGE_ERROR');
         return variable;
       }

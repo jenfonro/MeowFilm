@@ -182,13 +182,13 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         translationToggle.accessibilityIdentifier = "music.player.lyricTranslation"
         translationToggle.addAction(UIAction { [weak content] _ in
             guard let content else { return }
-            content.appearance.set(\.lyricTranslation, !content.appearance.preferences.lyricTranslation)
+            Task { await content.appearance.set(\.lyricTranslation, !content.appearance.preferences.lyricTranslation) }
         }, for: .touchUpInside)
         backgroundToggle.setImage(PageIcon.image(.image, size: 21), for: .normal)
         backgroundToggle.accessibilityIdentifier = "music.player.lyricBackground"
         backgroundToggle.addAction(UIAction { [weak content] _ in
             guard let content else { return }
-            content.appearance.set(\.lyricBackground, !content.appearance.preferences.lyricBackground)
+            Task { await content.appearance.set(\.lyricBackground, !content.appearance.preferences.lyricBackground) }
         }, for: .touchUpInside)
 
         addGestureRecognizer(contentTap)

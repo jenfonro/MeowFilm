@@ -26,7 +26,7 @@
 - 平台账号列表不再显示正文分组标题，导航保留「平台账号」；列表底部提供「导入账号」「导出账号」。文件格式、字段和逐平台结算遵循[共同账号文件契约](../common/music/account-transfer.md)。导入使用系统文件选择与 `ImportedFileReader`，分块读取至 EOF 并检测文件修改，不限制总字节；冲突只对当前批次选择一次跳过／覆盖／取消，最终统一汇总。
 - 账号文件读取只消费当前格式、版本、平台、账号身份和许可凭据字段；根对象／账号行的额外字段不阻断导入，未选凭据字段不进入 Cookie。重复 JSON 成员、重复平台、必需凭据类型及 Cookie 分隔边界仍在导入处处理；联网验证与 replacement lease 确认真实目标后才替换账号。
 - `NativeMusicAccountService` 使用原生账号协调器保存／撤销当前凭据，通过共同 Node provider 执行候选认证；安全保存确认后发布给 `MusicPlatformClient`。外部文件和冲突处理遵循共同账号文件契约，文件材料不作为本地安装文档或旧数据兼容入口。
-- 导出只读取未撤销的本地已保存凭据（包括待验证状态），不联网、不生成设备身份；经不透明文件 payload 写入应用自有受保护临时目录，再由系统导出选择最终文件位置。完成／取消／离页清理本次临时目录，用户目的文件不归应用删除；正常 Keychain 保护保持不变。
+- 导出只读取未撤销的本地已保存凭据（包括待验证状态），不联网、不生成设备身份；经临时文件写入外部导出流程，再由系统导出选择最终文件位置。完成／取消／离页清理本次临时目录，用户目的文件不归应用删除；
 
 ## 音源管理
 
@@ -48,7 +48,7 @@
 所有权、内容动作、同步触发与排序规则以[共同契约](../common/music/playlist-ownership.md)为准，本端存储及请求如下。
 
 - `MusicCollection.networkReference` 携带公开平台、真实远端 ID 和作者展示名；`canEdit` 区分内容管理资格，`remoteCollection` 为网络详情路由提供身份。“我的”曲库用「我的歌单／网络歌单」分组，网络行显示平台，打开已有公开详情；长按网络行提供取消收藏，不走 `removePlaylist`。
-- 自管集合控制状态在 `areas.library.collections`，歌曲实体在 `songs`／`song_sources`；独立 `networkReferences` 的本地 ID 为 `network:` 加 `[platform, remoteID]` 的 JSON。引用只保存名称、作者、封面、数量、revision、`present/pending` 和可选账号关系 `accountId/baseline/relationID`。酷狗 `relationID` 是当前账号的 `1:listid`，不是作者歌单 ID；酷我／咪咕不持有账号关系或待官方同步状态。
+- 自管集合保存在 `music_collections` 及成员关系，歌曲实体在 `music_songs`／`music_song_sources`；独立 `networkReferences` 的本地 ID 为 `network:` 加 `[platform, remoteID]` 的 JSON。引用只保存名称、作者、封面、数量、revision、`present/pending` 和可选账号关系 `accountId/baseline/relationID`。酷狗 `relationID` 是当前账号的 `1:listid`，不是作者歌单 ID；酷我／咪咕不持有账号关系或待官方同步状态。
 - 公开详情收藏直接调用 `MusicNetworkPlaylistServing.saveNetworkPlaylist`，不准备 playback source。`saveRemoteCollection` 的必要消费者也只验证显式公开歌单身份、来源授权与操作意图后保存引用；完整 source 读取仅用于播放和筛选。`MusicPublicBrowseViewModel` 每次重新打开歌单时调用 `refreshPublicCollection` 失效详情缓存，再按真实身份读取；专辑没有新增自动失效行为。
 - `MusicLibrarySyncSnapshot` 分开可写 `collections` 与零成员 `subscriptions`。仅由网络操作形成的自动轮次由持久 `relationshipPlatforms` 缩窄到所属平台，只调用 `readLibrarySubscriptions`；合并了自管编辑意图的轮次，以及显式设置／手动／定时同步继续沿原自管同步流程。两者共用 `NativeMusicService`、原协调器、账号会话检查、library CAS、持久 fence 和读回确认；本地引用保存结果与 `librarySyncState` 的官方同步结果分开。
 - `MusicNodeAccountProvider` 经 `sync.read/target/write` 消费规范目录、关系 locator 和真实写回执；平台 HTTP 与签名不在 Swift 重建。订阅专用读取及关系预检不取得无用成员，破坏性写仍保留实际 baseline、账号授权、持久 fence 与效果读回。
@@ -134,15 +134,15 @@
 
 ## 当前持久数据与服务契约
 
-`NativeMusicService` 通过唯一 `MusicNativeLibraryDatabase` 读写 Application Support 下 `meowfilm/documents/music-library-v1/music-library-v1.sqlite3`。使用系统 sqlite3 和 SwiftPM `CSQLite` 系统模块；不是 ORM 或整库 JSON。`songs` 保存单曲资料及匹配／专用搜索查询索引，`song_sources` 保存唯一 sourceKey、永久歌曲归属、原有顺序及该来源 musicInfo。已登记来源先查唯一来源索引，只有未知来源才按既定录音算法查候选；永久 UUID、酷狗变体、固定基准时长和来源不重绑规则不变。
+`NativeMusicService` 通过 `MusicNativeLibraryDatabase` 借用 App 唯一 `SQLiteDatabase`，读写 Application Support 下 `meowfilm/storage-v1/meowfilm.sqlite3`。Swift 与内嵌 Node 同时链接锁定的 `MeowSQLite.framework`；不使用系统 sqlite3 或第二个音乐数据库。`music_songs` 保存类型化单曲资料及匹配／专用搜索索引，`music_song_sources` 与子关系保存唯一 sourceKey、永久歌曲归属、原有顺序和来源 musicInfo。已登记来源先查唯一来源索引，只有未知来源才按既定录音算法查候选；永久 UUID、酷狗变体、固定基准时长和来源不重绑规则不变。
 
-小型 `areas` 保存 library／queue／history／playback／catalogSource 控制状态的现行 JSON，library 行不内嵌歌曲。歌曲、来源、实际变化的控制 areas、revision 和提交 receipt 进入同一短 SQLite 事务。只读与重复采用不写行，不重建全库索引；K 条资料变化只读取／验证／维护相关记录。显式整库封面策略重选才枚举歌曲。候选只在本事务内可见，失败或提交前取消回滚；真正 COMMIT 由既有 access fence 准入，提交后取消／回执丢失报 `commitUnconfirmed`，读取持久 receipt 对账，不自动重放远端写。
+library／queue／history／playback／catalogSource 控制状态分别保存在类型化关系中，不存控制 JSON。歌曲、来源、实际变化的控制关系、revision 和提交 receipt 进入同一短 SQLite 事务。只读与重复采用不写行，不重建全库索引；K 条资料变化只读取／验证／维护相关记录。显式整库封面策略重选才枚举歌曲。候选只在本事务内可见，失败或提交前取消回滚；真正 COMMIT 由既有 access fence 准入，提交后取消／回执丢失报 `commitUnconfirmed`，读取持久 receipt 对账，不自动重放远端写。
 
-队列条目持久为 `{id,songId,context}`，播放历史和集合也保存永久引用。`repositoryTracks(songIDs:)` 与返回 `AsyncStream<Set<String>>` 的 `songChanges()` 供当前播放器、历史、集合、浏览和搜索按当前引用的交集更新；单批缓冲合并未消费 ID，不遗漏较早更新。`MusicCollectionMembershipServing` 只读取集合引用并以捕获的 revision 提交成员增删，收藏状态不持有完整歌曲资料。实际事务提交后才发布变化，资料更新不修改 queue revision 或媒体位置。文件和 WAL 由 SQLite 管理，采用 WAL、FULL synchronous、foreign_keys；关闭在本地事实和物理工作排空后关闭数据库，新 owner 可重开同一路径。
+队列条目持久为 `{id,songId,context}`，播放历史和集合也保存永久引用。`repositoryTracks(songIDs:)` 与返回 `AsyncStream<Set<String>>` 的 `songChanges()` 供当前播放器、历史、集合、浏览和搜索按当前引用的交集更新；单批缓冲合并未消费 ID，不遗漏较早更新。`MusicCollectionMembershipServing` 只读取集合引用并以捕获的 revision 提交成员增删，收藏状态不持有完整歌曲资料。实际事务提交后才发布变化，资料更新不修改 queue revision 或媒体位置。文件和 WAL 由 SQLite 管理，采用 WAL、FULL synchronous、foreign_keys；音乐 owner 排空后释放借用，App 在全部 owner 和 Node 排空后关闭数据库。
 
 控制状态加载只核对数据库结构与提交身份，不验证未消费 area。实际集合、队列、同步及设置读取／操作在对应边界校验；普通事务只对新增关系查询真实歌曲，保留未消费字段。数据库确认已提交但回调丢失时，先结算本地事实、会话位置与歌曲通知，再报告 `commitUnconfirmed`；无法核对的提交保留精确前后身份，读取对账，不重放原 mutation。
 
-仅保存公开图片 URL 与来源选择信息，图片字节／解码资源仍由独立 URL 图片缓存拥有，不写入歌曲数据库。新库只接受当前 SQLite schema，未知／损坏库失败，旧 JSON 不探测、读取、转换、回退或自动删除。
+仅保存公开图片 URL 与来源选择信息，图片字节／解码资源仍由独立 URL 图片缓存拥有，不写入歌曲数据库。图片／歌词原始资源仍使用文件，索引与展示缓存关系接入共享 SQLite。新库只接受当前 SQLite schema，未知／损坏库失败，旧 JSON 不探测、读取、转换、回退或自动删除。
 
 冷读不遍历证明所有歌曲源、队列、同步 fence、历史和设置；局部写入保留未消费记录及扩展字段。集合列表按可展示的独立行读取；真正打开或编辑时核对所选唯一身份、revision、歌曲引用和排序成员集。歌曲登记对实际采用的来源确认唯一永久 owner，不能由重复 sourceKey 选首项覆盖。UI 不重复校验整批数量或 count 镜像，页面绑定、编辑 ticket 和实际提交回执继续约束迟到结果。局部集合编辑只更新自动同步意图所需字段，不解码或重写无关 fence。
 
@@ -192,13 +192,13 @@
 
 `MeowfilmResources`／`MeowfilmAssembly` 注入一个 actor `MusicPlatformClient`。客户端经 `.musicPlatform` 调共同 `request/session.update`，以 `expectedSession` 关联当前授权，原生账号安全保存后发布。旧 Swift 分平台 HTTP、Clients／Transport、客户端设备文档和专有 crypto 已由共同 Node 配方替代。
 
-Node 保管匿名设备及 prepare；Swift 账号 owner 保留 Keychain、安全保存、credential lease 与最终撤销。候选认证和外部文件经当前 Node account ports 交接。实际 publication／close 仍等待物理工作，不把页面取消当作写回滚；当前账号并发收口由主会话负责，本文不声明其已测试。
+Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite typed fields、credential lease 与最终撤销。候选认证和外部文件经当前 Node account ports 交接。实际 publication／close 仍等待物理工作，不把页面取消当作写回滚；当前账号并发收口由主会话负责，本文不声明其已测试。
 
 ## 设置保存回执
 
-通用外观及音乐搜索偏好直接使用 UserDefaults；音质、官方源、metadata、首页来源、播放反馈和自动同步选择由 `NativeMusicService` 的原生音乐 SQLite 控制 areas 事务保存，账号凭据由原生 Keychain owner 保存，具体保护见[本地存储](storage.md)。这些存储入口不通过运行器，本地设置保存回执不等待歌词读取、账号绑定或后续同步。账号资料补全和真实同步仍是各自 owner 的在线业务；音乐脚本的安装、来源及执行仍归运行器，不迁入这份原生设置。配置与执行的共同边界见[设置存储契约](../common/settings-storage.md)。
+外观、音乐搜索偏好、音质、官方源、metadata、首页来源、播放反馈、自动同步选择与账号凭据均由对应原生 owner 保存在共享 SQLite typed rows/relations 中，具体保护见[本地存储](storage.md)。这些存储入口不通过运行器，本地设置保存回执不等待歌词读取、账号绑定或后续同步。账号资料补全和真实同步仍是各自 owner 的在线业务；音乐脚本的安装、来源及执行仍归运行器，不迁入这份原生设置。配置与执行的共同边界见[设置存储契约](../common/settings-storage.md)。
 
-`MusicSettingsReceiptOwner` 由稳定原生存储范围持有，公开 `begin/settle/submit/flush`，`unknown` 由 Coordinator 接到现有全局错误呈现。quality、official、metadata、home、feedback、自动同步和脚本设置使用各自字段 key；FM 交回真实设置范围。Appearance 的同步 UserDefaults 没有 unknown 回执。共同结算及因果规则见[设置回执](../common/music/settings-receipts.md)。
+`MusicSettingsReceiptOwner` 由稳定原生存储范围持有，公开 `begin/settle/submit/flush`，`unknown` 由 Coordinator 接到现有全局错误呈现。quality、official、metadata、home、feedback、自动同步和脚本设置使用各自字段 key；FM 交回真实设置范围。共同结算及因果规则见[设置回执](../common/music/settings-receipts.md)。
 
 `MusicViewModel.updateSettings` 保留真实提交后的权威状态回读及失败回执；活跃歌曲的歌词刷新经 `beginPlaybackMetadata(refreshSources: true)` 交给既有 `playbackMetadata`，不等待其 `flush`。禁用歌词使旧结果失效；歌词读取、缓存及关闭时的取消／实际排空仍由原 metadata owner 管理，不因保存提前结算而省略。
 

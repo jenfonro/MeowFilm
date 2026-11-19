@@ -76,10 +76,9 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
     }
 
     func testSettingsFirstContentMatchesSearchPurificationForTitledUntitledAndNestedPages() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "SettingsTopSpacing." + UUID().uuidString, isDirectory: true)
+        let database = try appStorageTestDatabase()
         let rules = FilmRuleService(settingsDocument: FilmSettingsDocument(
-            block: .rules, storage: .plain { try DocumentStore(baseURL: directory, namespace: FilmSettingsBlock.rules.namespace) }
+            block: .rules, database: database
         ), request: { _, _ in
             XCTFail("Measuring native settings must not execute rules")
             throw FilmRuleServiceError.closed
@@ -87,7 +86,7 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         let owner = FilmRulesDraft(service: rules)
         try await owner.load()
         let panModel = PanAccountsModel(service: PanAccountService(document: FilmSettingsDocument(
-            block: .panAccounts, storage: .plain { try DocumentStore(baseURL: directory, namespace: FilmSettingsBlock.panAccounts.namespace) }
+            block: .panAccounts, database: database
         ), request: { _, _, _ in
             XCTFail("Measuring the account list must not validate accounts")
             throw FilmRuleServiceError.closed
@@ -95,12 +94,11 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         addTeardownBlock { @MainActor in
             panModel.close(); await panModel.closing?.value
             await rules.close()
-            try? FileManager.default.removeItem(at: directory)
         }
         let domain = "SettingsTopTheme." + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
         defer { defaults.removePersistentDomain(forName: domain) }
-        let store = MusicAppearancePreferencesStore(defaults: defaults)
+        let store = try appStorageTestAppearance(database)
         let reference = FilmRulePageViewController(owner: owner, group: .search, themeProvider: store)
         let root = MeowfilmSettingsViewController(themeProvider: store)
         let novel = NovelTablePage(themeProvider: store)
@@ -254,11 +252,9 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
     }
 
     func testPreferencesColorPageAndNativePickerCancelAndCommit() throws {
-        let domain = "SettingsColorUI." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let store = MusicAppearancePreferencesStore(defaults: defaults)
-        store.selectFixedPalette(.preset(.mint))
+        let database = try appStorageTestDatabase()
+        let store = try appStorageTestAppearance(database)
+        _ = try appStorageTestWait { await store.selectFixedPalette(.preset(.mint)) }
         let preference = MusicAppearanceSettingsViewController(store: store)
         let navigation = PageNavigationController(themeProvider: store)
         navigation.setViewControllers([preference], animated: false)
@@ -277,7 +273,7 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         picker.selectedColor = .red
         picker.colorPickerViewController(picker, didSelect: .red, continuously: true)
         XCTAssertEqual(store.pagePalette, .custom(0xff0000))
-        XCTAssertEqual(MusicAppearancePreferencesStore(defaults: defaults).pagePalette, .preset(.mint))
+        XCTAssertEqual(try appStorageTestAppearance(database).pagePalette, .preset(.mint))
         picker.cancel()
         waitUntil { page.presentedViewController == nil }
         XCTAssertEqual(store.pagePalette, .preset(.mint))
@@ -290,7 +286,7 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         second.colorPickerViewControllerDidFinish(second)
         waitUntil { page.presentedViewController == nil }
         XCTAssertEqual(store.pagePalette, .preset(.mint), "Closing the system picker is not explicit confirmation")
-        XCTAssertEqual(MusicAppearancePreferencesStore(defaults: defaults).pagePalette, .preset(.mint))
+        XCTAssertEqual(try appStorageTestAppearance(database).pagePalette, .preset(.mint))
         page.showCustomColor()
         let finalSheet = try XCTUnwrap(page.presentedViewController as? UINavigationController)
         let confirmed = try XCTUnwrap(finalSheet.topViewController as? MusicCustomColorPickerController)
@@ -300,16 +296,14 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         confirmed.commit()
         waitUntil { page.presentedViewController == nil }
         XCTAssertEqual(store.pagePalette, .custom(0x0000ff))
-        XCTAssertEqual(MusicAppearancePreferencesStore(defaults: defaults).pagePalette, .custom(0x0000ff))
+        XCTAssertEqual(try appStorageTestAppearance(database).pagePalette, .custom(0x0000ff))
         attach(page, "settings-custom-color-saved")
     }
 
     func testSettingsRootAndColorOptionsFitNarrowLargeTypeAndDarkAppearance() throws {
-        let domain = "SettingsColorGeometry." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let store = MusicAppearancePreferencesStore(defaults: defaults)
-        store.set(\.colorMode, .fixed)
+        let database = try appStorageTestDatabase()
+        let store = try appStorageTestAppearance(database)
+        _ = try appStorageTestWait { await store.set(\.colorMode, .fixed) }
         for (width, dark, category) in [(CGFloat(320), false, UIContentSizeCategory.extraExtraExtraLarge),
                                         (CGFloat(430), true, UIContentSizeCategory.accessibilityExtraExtraExtraLarge)] {
             let page = MeowfilmSettingsViewController(themeProvider: store, resetUserData: {})
@@ -343,10 +337,8 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
     }
 
     func testRootAndNovelSettingsUseStableColorsWhileTheirBackgroundStillFollowsThePalette() throws {
-        let domain = "SettingsSemanticColors." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let store = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let store = try appStorageTestAppearance(database)
         let root = MeowfilmSettingsViewController(themeProvider: store, resetUserData: {})
         let novel = NovelTablePage(themeProvider: store)
         novel.pageTitle = "小说设置"
@@ -359,7 +351,7 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
             novel.traitOverrides.userInterfaceStyle = dark ? .dark : .light
             waitUntil { root.theme.dark == dark && novel.theme.dark == dark }
             for palette in [PagePalette.preset(.coral), .custom(0xffff00)] {
-                store.selectFixedPalette(palette)
+                _ = try appStorageTestWait { await store.selectFixedPalette(palette) }
                 root.applyTheme(); novel.applyTheme()
                 let colors = SettingsTheme(dark: dark)
                 XCTAssertEqual(root.theme.palette, palette)

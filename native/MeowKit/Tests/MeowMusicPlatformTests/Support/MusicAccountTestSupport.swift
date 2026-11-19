@@ -4,6 +4,7 @@ import MeowContracts
 import MeowMusicFeature
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 import MeowMusicTestSupport
 @testable import MeowMusicPlatform
 
@@ -17,7 +18,7 @@ final class MusicAccountTestStore: CredentialStore, @unchecked Sendable {
     func fail(_ operation: String?) { lock.lock(); failure = operation; lock.unlock() }
     func read(for identity: AccountIdentity) throws -> CredentialRecord? {
         lock.lock(); defer { lock.unlock() }; events.append("read")
-        if failure == "read" { throw CredentialStoreError.interactionNotAllowed }
+        if failure == "read" { throw CredentialStoreError.unavailable }
         return records[identity]
     }
     func write(_ record: CredentialRecord, for identity: AccountIdentity) throws {
@@ -164,14 +165,14 @@ struct MusicNativeFixture {
     let accounts: AccountSessionCoordinator
     let service: NativeMusicAccountService
     init(platform accountPlatform: MusicAccountPlatform = .qq, restored: Bool = true,
-         feedbackOutboxStoreFactory: (@Sendable () throws -> DocumentStore)? = nil) throws {
+         database: SQLiteDatabase? = nil) throws {
         self.accountPlatform = accountPlatform
         identity = try MusicAccountFixture.identity(accountPlatform.rawValue)
         platform = MusicAccountRuntimePeer(clock: clock)
         runtime = try MusicPlatformFixture { [platform] in try await platform.respond($0) }
         accounts = AccountSessionCoordinator(store: store)
         service = NativeMusicAccountService(accounts: accounts, scopes: [accountPlatform: identity],
-            platformClient: runtime.makeClient(), feedbackOutboxStoreFactory: feedbackOutboxStoreFactory,
+            platformClient: runtime.makeClient(), database: database,
             clock: { [clock] in clock.now() })
         if restored { try store.write(CredentialRecord(credential:
             MusicAccountFixture.credential(platform: accountPlatform)), for: identity) }
@@ -257,4 +258,10 @@ actor MusicAccountTestProvider: MusicAccountProvider, MusicAccountSMSProvider {
     func tracks(collectionID: String) -> [RuntimeValue] { [] }
     func capabilities(mid: String) -> [String] { ["128k"] }
     func resolve(mid: String, quality: String) -> RuntimeValue { .null }
+}
+
+func musicFeedbackData(_ database: SQLiteDatabase) throws -> Data? {
+    guard let data = try storageTestRowData(database, "SELECT * FROM ios_music_feedback_outbox ORDER BY occurredAt,id",
+        booleans: ["heartbeat", "startConfirmed"]) else { return nil }
+    return try JSONSerialization.data(withJSONObject: ["entries": JSONSerialization.jsonObject(with: data)], options: [.sortedKeys])
 }

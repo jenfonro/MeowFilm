@@ -50,7 +50,7 @@ public static class MusicScriptIntegrationTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly string Path;
-        internal readonly LocalDocumentStore Store;
+        internal readonly NativeDatabase Store;
         internal readonly MusicLibraryOwner Library;
         internal readonly AppRuntimeClient Runtime;
         internal readonly MusicScriptOwner Owner;
@@ -58,9 +58,9 @@ public static class MusicScriptIntegrationTests
         internal Fixture(string path)
         {
             Path = path;
-            Store = new(path, ["music.files.v2"], []);
-            MusicTestStores.Use(Store, System.IO.Path.Combine(path, "music-records"));
-            Library = new(MusicTestStores.For(Store));
+            Store = new(path);
+            MusicTestStores.Use(Store, path);
+            Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage);
             Runtime = new(async token =>
             {
                 string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
@@ -68,15 +68,15 @@ public static class MusicScriptIntegrationTests
                 string node = Environment.GetEnvironmentVariable("MEOWFILM_TEST_NODE")
                     ?? throw new InvalidOperationException("Verified Node required.");
                 RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
+                await Store.Ready;
                 return Child = await NodeRuntime.StartAsync(node,
                     RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate"),
                     modules,
-                    System.IO.Path.Combine(path, "script-runtime"), token);
+                    path, token, settingsStore: new MeowFilm.Capabilities.FilmRuntimeSettings(Store));
             });
             Owner = new(Library, Runtime);
             Runtime.Start();
         }
-        internal string ModuleData => System.IO.Path.Combine(Path, "script-runtime", "music");
         public async ValueTask DisposeAsync()
         {
             try { await Owner.DisposeAsync(); }
@@ -110,8 +110,9 @@ public static class MusicScriptIntegrationTests
         Check(!result.GetProperty("playbackVerified").GetBoolean() && !result.GetProperty("qualityVerified").GetBoolean());
         return result.GetProperty("url").GetString()!;
     }
-    private static JsonNode StoredData(Fixture f, string id) =>
-        JsonNode.Parse(File.ReadAllText(System.IO.Path.Combine(f.ModuleData, "data", id + ".json")))!;
+    private static Task<long> StoredCount(Fixture f, string id) => f.Store.ReadAsync(db => db.Scalar<long>(
+        "SELECT int_value FROM music_script_kv_nodes WHERE installation_id=$id AND site_id='wy' AND entry_key='count' AND node_id=0 AND kind='integer'",
+        ("$id", id)));
     private static async Task TwoInstances()
     {
         await using var f = new Fixture(Data());
@@ -119,11 +120,12 @@ public static class MusicScriptIntegrationTests
         Check((await Resolve(f, first)).EndsWith("/first/1.mp3", StringComparison.Ordinal));
         Check((await Resolve(f, second)).EndsWith("/second/1.mp3", StringComparison.Ordinal));
         Check((await Resolve(f, first)).EndsWith("/first/2.mp3", StringComparison.Ordinal));
-        Check(StoredData(f, second)["sites"]!["wy"]![0]!["value"]!.GetValue<int>() == 1, "module-owned private storage");
-        Check(StoredData(f, first)["sites"]!["wy"]![0]!["value"]!.GetValue<int>() == 2);
+        Check(await StoredCount(f, second) == 1, "module-owned private storage");
+        Check(await StoredCount(f, first) == 2);
         var library = await f.Library.ExecuteAsync("music.library.list");
-        Check(library.GetProperty("ok").GetBoolean() && !File.ReadAllText(System.IO.Path.Combine(f.ModuleData, "catalog.json"))
-            .Contains("media.invalid", StringComparison.Ordinal), "resolved media URLs are never persisted");
+        Check(library.GetProperty("ok").GetBoolean() && await f.Store.ReadAsync(db => db.Scalar<long>(
+            "SELECT count(*) FROM music_script_kv_nodes WHERE text_value LIKE '%media.invalid%'")) == 0,
+            "resolved media URLs are never persisted in source state");
         var unavailable = false;
         try { await f.Runtime.CallAsync("music.library.list", new { }); }
         catch (BridgeException e) when (e.Code == "METHOD_UNAVAILABLE") { unavailable = true; }

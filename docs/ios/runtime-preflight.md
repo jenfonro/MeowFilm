@@ -53,11 +53,11 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 | 方向 | 帧 |
 | --- | --- |
 | Node → Swift 读 | `{kind:"settings.read",id,block}` |
-| Node → Swift 写 | `{kind:"settings.write",id,block,document,expected}`，仅 `pan.accounts` |
-| Swift → Node 成功 | `{kind:"settings.result",id,ok:true,document,fingerprint}` |
+| Node → Swift 写 | `{kind:"settings.pan.update",id,block,command}`，仅 `pan.accounts` |
+| Swift → Node 成功 | `{kind:"settings.result",id,ok:true,document,revision}` |
 | Swift → Node 失败 | `{kind:"settings.result",id,ok:false,code}` |
 
-帧仅消费各动作需要的字段，extra 不阻断 ready/read/write，不增加写入权限。`id` 为本连接递增正安全整数；不存在的文档用 `null` 表示。`fingerprint`／写入 `expected` 为 `{exists,length,sha256}`，绑定**原生明文字节**的存在性、长度及 SHA-256；缺失为 `false/0/null`。CAS 在原生 owner 内重读并核对内容身份，敏感块仅在同一 owner 内解密／加密，Node 不读取 Keychain 或密文文件。冲突返回 `STORAGE_CONFLICT`，存储错误返回 `STORAGE_ERROR`，不回传路径或异常正文。
+帧仅消费各动作需要的字段，extra 不增加写入权限。`id` 为本连接递增正安全整数；不存在的设置投影用 `null` 表示。读回的 `revision` 绑定设置块的 owner 版本；账号更新 `command` 包含 `provider`、`mode`、`accountRevision`、`rowRevision` 和 `credentials`，原生在同一事务核对所选 provider 的账号及行版本再更新。读取和 provider 更新经原生 repository 执行，Node 不取得任意 SQL 或整库写权限。凭据是共享 SQLite 中所属业务行的明文 typed fields。冲突返回 `STORAGE_CONFLICT`，存储错误返回 `STORAGE_ERROR`，不回传路径或异常正文。
 
 Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通道并清理所有 pending，运行器按既有关闭路径排空。Swift 保留唯一 reader 到 EOF，关闭后不接纳设置请求，不在阻塞读取期间另关／复用 descriptor。它是受信能力通道，不是公开反向脚本存储 RPC。
 

@@ -21,7 +21,7 @@ public static class MusicMetadataPolicyTests
         {
             var reverse = Platforms.Reverse().ToArray();
             Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = reverse, enabled = Array.Empty<string>() }));
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var settings = Ok(await reopened.ExecuteAsync("music.metadata.settings.get")).GetProperty("settings");
             Equal(string.Join(',', reverse), string.Join(',', settings.GetProperty("platforms").EnumerateArray().Select(x => x.GetString())));
             Equal(0, settings.GetProperty("enabled").GetArrayLength()); Equal(1L, settings.GetProperty("revision").GetInt64());
@@ -73,7 +73,7 @@ public static class MusicMetadataPolicyTests
             var listed = detail.GetProperty("songs")[0];
             Equal(selected, listed.GetProperty("cover_url").GetString());
             Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { listed }, index = 0 }));
-            await using var cold = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var cold = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var current = Ok(await cold.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song");
             Equal(listed.GetProperty("songId").GetString(), current.GetProperty("songId").GetString());
             Equal(selected, current.GetProperty("cover_url").GetString());
@@ -96,7 +96,7 @@ public static class MusicMetadataPolicyTests
             var entry = document["areas"]!.AsObject().Single().Value!;
             entry["enabled"] = new JsonArray("not-a-platform");
             store.Data = Encoding.UTF8.GetBytes(document.ToJsonString());
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             Code(await reopened.ExecuteAsync("music.metadata.settings.get"), "CORRUPT_STORAGE");
         });
         yield return Case("local lyrics use an exact local identity with no online source key", async (owner, _) =>
@@ -170,7 +170,7 @@ public static class MusicMetadataPolicyTests
     private static TestCase Case(string name, Func<MusicLibraryOwner, Store, Task> body) =>
         new("Native metadata policy " + name, async () =>
         {
-            await using var store = new Store(); var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var store = new Store(); var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             try { await body(owner, store); } finally { await owner.AbortAsync(); }
         });
     private static JsonElement LocalSong(string id = "one") =>

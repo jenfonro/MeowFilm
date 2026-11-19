@@ -16,6 +16,8 @@ LOCAL_PRODUCTS = {
     "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
     "MeowAetherKernel": ("aetherkernel", "../AetherKernel"),
 }
+BINARY_TARGETS = {"MeowSQLite": ("../SQLite/.cache/Artifacts/MeowSQLite.xcframework", {"MeowStorage"})}
+
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
     failures = []
@@ -29,6 +31,9 @@ def application_membership(base, project_text):
         elif relative.parts[0] == "UITests":
             expected_test.add(relative.as_posix())
         elif relative.parts[0] == "RuntimeTests":
+            expected_runtime.add(relative.as_posix())
+        elif relative.parts[0] == "TestSupport":
+            expected_test.add(relative.as_posix())
             expected_runtime.add(relative.as_posix())
         else:
             failures.append("Unowned App source: " + relative.as_posix())
@@ -181,12 +186,16 @@ def check(root):
         folder = "Tests" if kind == "test" else "Sources"
         declared = package / (declaration.get("path") or folder + "/" + name)
         directory = Path(os.path.abspath(declared))
+        if kind == "binary":
+            directories[name] = directory
+            continue
         if declared.resolve() != directory or not directory.is_relative_to(package):
             return failures + ["Linked or escaped target directory: " + name]
         directories[name] = directory
     sources = {name for name, kind in kinds.items() if kind == "regular"}
     tests = {name for name, kind in kinds.items() if kind == "test"}
     systems = {name for name, kind in kinds.items() if kind == "system"}
+    binaries = {name for name, kind in kinds.items() if kind == "binary"}
     for name in systems:
         directory = directories[name]
         modulemap = directory / "module.modulemap"
@@ -226,6 +235,16 @@ def check(root):
             if (not re.search(r'\blink\s+"sqlite3"', text)
                     or not sdk_header):
                 failures.append("Invalid system module: " + name)
+    if not binaries <= BINARY_TARGETS.keys():
+        failures.append("Unapproved binary target")
+    for declaration in manifest["targets"]:
+        name = declaration["name"]
+        if name not in binaries:
+            continue
+        if name in BINARY_TARGETS and (declaration.get("path") != BINARY_TARGETS[name][0]
+                or declaration.get("url") or declaration.get("checksum") or targets[name]
+                or directories[name].resolve() != directories[name]):
+            failures.append("Invalid binary target: " + name)
     if not sources:
         failures.append("No package source targets")
     for folder, expected in (("Sources", sources | systems), ("Tests", tests)):
@@ -248,8 +267,14 @@ def check(root):
         if not linked or not linked <= sources:
             failures.append("Invalid package product targets: " + name)
     for target, dependencies in targets.items():
-        if not dependencies <= sources | external | systems:
+        if not dependencies <= sources | external | systems | binaries:
             failures.append("Non-source dependency: " + target)
+        for binary in dependencies & binaries:
+            if target not in BINARY_TARGETS.get(binary, (None, set()))[1]:
+                failures.append("Unapproved binary dependency: " + target)
+        if target in binaries:
+            continue
+        folder = "Sources" if target in sources | systems else "Tests"
         imported = set()
         for path in directories[target].rglob("*.swift"):
             if path.is_symlink() or not path.resolve().is_relative_to(directories[target].resolve()):
@@ -290,8 +315,8 @@ def check(root):
         except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
             failures.append("Cannot evaluate Aether package boundary: " + str(error))
     for parent in (root / "apps/ios", package / "Sources", package / "Tests", *(
-            directory for directory in directories.values()
-            if not directory.is_relative_to(package / "Sources") and not directory.is_relative_to(package / "Tests"))):
+            directory for name, directory in directories.items()
+            if name not in binaries and not directory.is_relative_to(package / "Sources") and not directory.is_relative_to(package / "Tests"))):
         for path in parent.rglob("*"):
             if parent == root / "apps/ios" and path.relative_to(parent).parts[0] == ".cache":
                 continue

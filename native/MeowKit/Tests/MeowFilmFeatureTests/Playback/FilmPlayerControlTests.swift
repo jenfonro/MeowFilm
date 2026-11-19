@@ -2,6 +2,7 @@ import XCTest
 import Combine
 import MeowContracts
 import MeowRuntime
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 #if os(iOS)
 import UIKit
@@ -14,13 +15,13 @@ final class FilmPlayerControlTests: XCTestCase {
         let (model, media, _) = try await open(store: store)
         let token = try XCTUnwrap(model.beginTemporaryRate())
         let commands = media.temporaryCommands.count
-        store.reload()
-        XCTAssertTrue(store.set(\.holdRate, store.preferences.holdRate))
-        XCTAssertTrue(store.set(\.showsControlCenter, false))
-        XCTAssertTrue(store.set(\.defaultRate, 1.25))
+        await store.reload()
+        storageTestTrue(await store.set(\.holdRate, store.preferences.holdRate))
+        storageTestTrue(await store.set(\.showsControlCenter, false))
+        storageTestTrue(await store.set(\.defaultRate, 1.25))
         XCTAssertEqual(media.temporaryCommands.count, commands)
         XCTAssertEqual(model.mediaState.rate, 2)
-        XCTAssertTrue(store.set(\.holdRate, 3))
+        storageTestTrue(await store.set(\.holdRate, 3))
         XCTAssertNil(media.temporaryCommands.last?.rate)
         let after = media.temporaryCommands.count
         model.endTemporaryRate(token)
@@ -46,7 +47,7 @@ final class FilmPlayerControlTests: XCTestCase {
 
     func testActualEngineFiltersMenuAndClampsHoldRegardlessOfPreferredEngine() async throws {
         let store = makeStore()
-        XCTAssertTrue(store.set(\.holdRate, 8))
+        storageTestTrue(await store.set(\.holdRate, 8))
         let (model, media, _) = try await open(engine: .aether, store: store)
         XCTAssertEqual(model.playerPreferences.engine, .ksPlayer)
         XCTAssertEqual(model.actualEngine, .aether)
@@ -102,7 +103,7 @@ final class FilmPlayerControlTests: XCTestCase {
         model.setPresentationVisible(false, owner: owner)
         XCTAssertEqual(model.mediaState.rate, 1.5)
         _ = model.beginTemporaryRate()
-        XCTAssertTrue(store.set(\.seekStep, 30))
+        storageTestTrue(await store.set(\.seekStep, 30))
         XCTAssertEqual(model.mediaState.rate, 1.5)
         _ = model.beginTemporaryRate()
         media.base.systemOwner = true
@@ -114,7 +115,7 @@ final class FilmPlayerControlTests: XCTestCase {
 
     func testStepClampsAtEdgesAndRejectsNonFiniteControlValues() async throws {
         let store = makeStore()
-        XCTAssertTrue(store.set(\.seekStep, 30))
+        storageTestTrue(await store.set(\.seekStep, 30))
         let (model, media, _) = try await open(store: store)
         media.move(to: 590)
         model.seekByStep(forward: true)
@@ -243,10 +244,7 @@ final class FilmPlayerControlTests: XCTestCase {
               initialVolume: 0.5, initialBrightness: 0.5)
     }
     private func makeStore() -> FilmPlayerPreferencesStore {
-        let suite = "FilmPlayerControlTests.\(UUID())"
-        let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
-        return FilmPlayerPreferencesStore(defaults: defaults)
+        FilmPlayerPreferencesStore()
     }
     private func open(engine: PlaybackVideoEngine = .ksPlayer, store: FilmPlayerPreferencesStore? = nil) async throws
         -> (FilmPlaybackModel, FilmPlayerControlMedia, FilmPlaybackWireServer) {

@@ -7,9 +7,10 @@ namespace MeowFilm.Capabilities.Feedback;
 /// One borrowed native document, one serial uploader. Local admission is not a
 /// server receipt. Nothing marked inflight is ever recovered as retryable work.
 /// </summary>
-internal sealed class NeteasePlaybackOutbox(IDocumentStore store, MusicFeedbackSettingsOwner settings,
+internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeedbackSettingsOwner settings,
     IMusicPlatformSessionSource accounts, NeteasePlaybackTransport transport, TimeProvider clock) : IAsyncDisposable
 {
+    private readonly TypedRecordRepository store = new(database, NeteasePlaybackOutboxDocument.Namespace, FeedbackStorageRecords.Outbox);
     private readonly object sync = new();
     private readonly SemaphoreSlim disk = new(1, 1);
     private readonly Dictionary<Guid, NeteasePlaybackPending> entries = [];
@@ -17,7 +18,7 @@ internal sealed class NeteasePlaybackOutbox(IDocumentStore store, MusicFeedbackS
     private readonly HashSet<Task> work = [];
     private readonly HashSet<Task> localWork = [];
     private CancellationTokenSource network = new();
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, suspended, closed, draining, requested, loadingPreferences, pendingAccountChange;
     private string? storageError, uploadError;
     private Task? disposal;
@@ -347,9 +348,9 @@ internal sealed class NeteasePlaybackOutbox(IDocumentStore store, MusicFeedbackS
         if (loaded) return;
         try
         {
-            var snapshot = await store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace).ConfigureAwait(false);
+            var snapshot = await store.ReadAsync().ConfigureAwait(false);
             var saved = NeteasePlaybackOutboxDocument.Decode(snapshot);
-            fingerprint = snapshot.Fingerprint;
+            storageRevision = snapshot.Revision;
             entries.Clear();
             foreach (var value in saved) entries.Add(value.PlaybackId, value);
             loaded = true;
@@ -383,11 +384,9 @@ internal sealed class NeteasePlaybackOutbox(IDocumentStore store, MusicFeedbackS
         try
         {
             var data = NeteasePlaybackOutboxDocument.Encode(entries.Values);
-            var expected = DocumentFingerprint.FromBytes(data);
-            var receipt = await store.WriteAsync(NeteasePlaybackOutboxDocument.Namespace, data, fingerprint,
+            var receipt = await store.WriteAsync(data, storageRevision,
                 CancellationToken.None).ConfigureAwait(false);
-            FeedbackProtocolRules.Require(receipt == expected, "COMMIT_UNKNOWN");
-            fingerprint = receipt;
+            storageRevision = receipt;
         }
         catch
         {

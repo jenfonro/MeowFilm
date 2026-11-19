@@ -1,5 +1,6 @@
 import XCTest
 import MeowMusicFeature
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 final class MusicNativeLibraryTests: XCTestCase {
@@ -196,5 +197,5 @@ private struct MembershipReadBudgetWriter: MusicNativeLibraryWriting {
     func querySongIDs(query: String) throws -> [String] { try base.querySongIDs(query: query) }
     func allSongIDs() throws -> [String] { budget.enumerate(); return try base.allSongIDs() }
     func saveSong(_ data: Data) throws { budget.write(); try base.saveSong(data) }
-    func saveArea(_ area: String, data: Data) throws { try base.saveArea(area, data: data) }
+    func saveArea(_ area: String, value: RuntimeValue) throws { try base.saveArea(area, value: value) }
 }

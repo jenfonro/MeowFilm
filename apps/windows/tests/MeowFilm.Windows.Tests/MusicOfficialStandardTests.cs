@@ -6,6 +6,7 @@ using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
+using MeowFilm.Platform.Storage;
 using static MeowFilm.Windows.Tests.MusicOfficialAudioTests;
 
 namespace MeowFilm.Windows.Tests;
@@ -22,7 +23,7 @@ public static class MusicOfficialStandardTests
             await using var runtime = AudioPeer(1, f.Bytes.Length, "128k");
             var app = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), runtime);
             await using var player = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
-            await using var module = new MusicCapability(app, f.Store, player, playbackCacheRoot: f.Root, cacheStore: f.CacheStore);
+            await using var module = new MusicCapability(app, f.Store, player, playbackCacheRoot: f.Root);
             await module.InitializeAsync(default);
             await module.ActivateQualitySettingsAsync();
             await module.SetPlaybackQualityRequestAsync("128k");
@@ -74,7 +75,7 @@ public static class MusicOfficialStandardTests
             string scope = result.GetProperty("scope").GetString()!;
             long generation = result.GetProperty("generation").GetInt64();
             Check(app.IsOfficialPlaybackCurrent("wy", scope, generation));
-            Check(!store.Data.ContainsKey(MusicAccountOwner.DocumentNamespace), "guest must not manufacture an account");
+            Check((await store.ReadAccountsAsync()).Revision == StorageRevision.Empty, "guest must not manufacture an account");
             Check((await app.ExecuteAsync("music.official.confirm", input)).GetProperty("ok").GetBoolean());
             Check(runtime.Requests.Count == 1, "confirmation does not fetch a second URL");
             Check((await app.ExecuteAsync("music.accounts.logout", new { platform = "wy" })).GetProperty("ok").GetBoolean());

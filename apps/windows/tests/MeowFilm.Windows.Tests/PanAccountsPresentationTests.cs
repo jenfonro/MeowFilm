@@ -34,10 +34,7 @@ public static class PanAccountsPresentationTests
         new("pan-accounts-ui: " + name, () => TestUiHost.InvokeAsync(run));
     private static async Task CorruptRows()
     {
-        await using var scene = await Scene.Create(runtime => runtime.SetDocument("""
-            {"version":1,"accounts":{"baidu":{"revision":"broken","credentials":false},
-             "tianyi":{"revision":4,"credentials":{"cookie":"synthetic"}}}}
-            """));
+        await using var scene=await Scene.Create(runtime=>{runtime.Account("baidu",1,"signedIn","cookie");runtime.Corrupt("baidu");runtime.Account("tianyi",4,"signedIn","cookie");});
         var broken = scene.Model.Rows[0];
         var healthy = scene.Model.Rows.Single(row => row.Provider == "tianyi");
         Check(Visuals(scene.View).OfType<TextBlock>().Any(text => ReferenceEquals(text.DataContext, broken) &&
@@ -105,10 +102,7 @@ public static class PanAccountsPresentationTests
         var password = fields.Children.OfType<PasswordBox>().Single(box => ((PanCredentialField)box.Tag).Id == "password");
         password.Password = "  synthetic password  ";
         fields.Children.OfType<TextBox>().Single().Text = "synthetic-user";
-        scene.Runtime.WriteOverride = (bytes, expected, _) =>
-        {
-            return Task.FromResult(scene.Runtime.Commit(bytes, expected));
-        };
+        scene.Runtime.WriteOverride=(commit,_)=>{commit();return Task.CompletedTask;};
         Click((Button)scene.View.FindName("SaveCredentials"));
         await Until(() => !row.IsBusy && !IsOpen(scene.View, popup));
         var saved = scene.Runtime.Saved.GetProperty("accounts").GetProperty("tianyi").GetProperty("credentials");
@@ -211,7 +205,7 @@ public static class PanAccountsPresentationTests
     private static async Task Entry()
     {
         var runtime = new PanAccountFixture();
-        await using var store = new QualityFixture.DocumentStore();
+        await using var store = new QualityFixture.Database();
         runtime.Overrides["film.rules.get"] = (_, _) => Task.FromResult(FilmRuntimeProbe.Ok(
             JsonSerializer.SerializeToElement(new { rules = new FilmRuleSet(), revision = "fixture-rules" }, Json)));
         await using var rules = new FilmRuleService(runtime, store);

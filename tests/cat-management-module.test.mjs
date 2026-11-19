@@ -4,6 +4,7 @@ import http from 'node:http';
 import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { readCatFacts } from './storage-test-fixture.mjs';
 import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { deferred } from '../packages/runtime-bridge/test/http-fixture.js';
@@ -183,7 +184,7 @@ test('Cat module close cancels a pending network update and leaves the accepted 
     await module.close();
     assert.deepEqual(await update, { ok: false, contract: 'cat.script.v2', code: 'CANCELLED' });
     await disconnected;
-    const saved = JSON.parse(readFileSync(join(dataRoot, 'settings.json'), 'utf8')).scripts[0];
+    const saved = (await readCatFacts(dataRoot)).scripts[0];
     assert.equal(saved.sourceHash, original.sourceHash);
     assert.equal(saved.updatedAt, null);
     assert.equal(saved.updateState, 'failed');
@@ -292,7 +293,7 @@ for (const operation of ['describe', 'sync']) {
           'let count=0; module.exports={home(){return {count:++count}}};') }));
       const invoke = installationId => call('invoke', { installationId, siteId: 'default', operation: 'home' });
       assert.deepEqual(result(call, await invoke('healthy')), { count: 1 });
-      const file = join(dataRoot, 'volumes', 'managed', 'credentials.json');
+      const file = join(dataRoot, 'cat', 'volumes', 'managed', 'credentials.json');
       const before = readFileSync(file);
       const controller = new AbortController();
       const pending = call('management.' + operation, {
@@ -330,7 +331,7 @@ test('Cat management HTTP sync returns saved only after its one PUT has a durabl
     const { call, dataRoot } = moduleFor(t);
     const installed = result(call, await call('install', { installationId: 'managed',
       sourceRevision: await upload(call, 'managed', 1, credentialSource(gates.origin)) }));
-    const file = join(dataRoot, 'volumes', 'managed', 'credentials.json');
+    const file = join(dataRoot, 'cat', 'volumes', 'managed', 'credentials.json');
     let settled = false, savedBytes;
     const pending = call('management.sync', { installationId: 'managed', generation: installed.generation,
       provider: 'quark', credentials: { cookie: 'new' } }).then(reply => {

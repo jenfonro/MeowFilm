@@ -50,7 +50,7 @@ final class FilmRuleLifecycleTests: XCTestCase {
         await rpc.release.release(); await closing.value
         await filmRuleCancelled { try await preview.value }
         let saved = try await local.value
-        XCTAssertEqual(try FilmRuleSettings.read(store.document.read()), saved,
+        XCTAssertEqual(try FilmRuleSettings.read(store.document.readForTest()), saved,
                        "A late preview or close cannot overwrite the native commit")
         XCTAssertEqual(store.notifications, ["film.rules", "film.rules", "film.rules"])
     }
@@ -73,7 +73,7 @@ final class FilmRuleLifecycleTests: XCTestCase {
         await rpc.release.release(); await preparation.value
         await filmRuleCancelled { try await running.value }
         await filmRuleFailure(FilmRuleServiceError.notInitialized) { try await service.savedSnapshot() }
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         try await service.resume()
         let saved = try await service.save(.movie, rules: [.init(pattern: "acknowledged")])
         XCTAssertEqual(saved.movieRules, [.init(pattern: "acknowledged")])
@@ -94,7 +94,7 @@ final class FilmRuleLifecycleTests: XCTestCase {
         await filmRuleCancelled { try await running.value }
         await filmRuleFailure(FilmRuleServiceError.notInitialized) { try await service.savedSnapshot() }
         let revision = await service.revision
-        XCTAssertNil(revision); XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(revision); XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         let saved = try await service.save(.movie, rules: [.init(pattern: "recovered")])
         XCTAssertEqual(saved.movieRules, [.init(pattern: "recovered")])
         let calls = await rpc.calls
@@ -119,7 +119,7 @@ final class FilmRuleLifecycleTests: XCTestCase {
         XCTAssertEqual(next.text.displayString, "preview")
         let calls = await rpc.invocations
         XCTAssertEqual(calls, 2)
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         await service.close()
     }
 
@@ -164,16 +164,18 @@ final class FilmRuleLifecycleTests: XCTestCase {
         await filmRuleFailure(FilmRuleServiceError.closed) { try await service.clearData() }
         let borrowed = try await rpc.call("rules.preview", .object([:]))
         XCTAssertEqual(borrowed, response)
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
     }
 
     func testMalformedNativeDocumentDoesNotPublishAndCanRecoverWithoutFallback() async throws {
         let store = try FilmNativeSettingsStore(self, block: .rules), rpc = FilmRuleRPC()
-        try store.seed(.object([:]))
+        try await store.seed(store.envelope(try filmRuleValue(FilmRuleSet(movieRules: [.init(pattern: "saved")])), key: "rules"))
+        try await store.damageRules(true)
         let service = rpc.service(store.document)
         await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await service.initialize() }
         await filmRuleFailure(FilmRuleServiceError.notInitialized) { try await service.savedSnapshot() }
-        try store.seed(store.envelope(try filmRuleValue(FilmRuleSet()), key: "rules"))
+        try await store.damageRules(false)
+        try await store.seed(store.envelope(try filmRuleValue(FilmRuleSet()), key: "rules"))
         try await service.initialize()
         let saved = try await service.savedSnapshot()
         XCTAssertEqual(saved, FilmRuleSet())
@@ -192,7 +194,7 @@ final class FilmRuleLifecycleTests: XCTestCase {
         let clearing = Task { try await service.clearData() }
         await fulfillment(of: [cancelled], timeout: 5)
         await filmRuleFailure(FilmRuleServiceError.shuttingDown) { try await service.resume() }
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         await rpc.release.release(); try await clearing.value
         await filmRuleCancelled { try await preview.value }
         let saved = try await service.savedSnapshot(), revision = await service.revision
@@ -227,7 +229,7 @@ final class FilmRuleLifecycleTests: XCTestCase {
         await filmRuleFailure(FilmRuleServiceError.closed) { try await clearing.value }
         await filmRuleFailure(FilmRuleServiceError.closed) { try await service.savedSnapshot() }
         let revision = await service.revision
-        XCTAssertNil(revision); XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(revision); XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         let calls = await rpc.invocations
         XCTAssertEqual(calls, 1)
     }

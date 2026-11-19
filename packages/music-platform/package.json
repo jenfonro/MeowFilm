@@ -4,9 +4,20 @@
   "private": true,
   "type": "module",
   "license": "GPL-3.0-only",
-  "engines": { "node": "^24.0.0" },
-  "exports": { ".": "./src/index.mjs" },
-  "files": ["src"],
-  "dependencies": { "@meowfilm/runtime-bridge": "0.2.0" },
-  "scripts": { "test": "node --test test/*.test.mjs" }
+  "engines": {
+    "node": "^24.0.0"
+  },
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@meowfilm/runtime-bridge": "0.2.0",
+    "@meowfilm/storage": "0.1.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
 }

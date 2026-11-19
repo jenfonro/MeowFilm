@@ -36,7 +36,7 @@ public final class MusicSearchViewController: SearchPageViewController,
                 primaryTarget: SearchTargetOption = .init(id: "music", title: "音乐", placeholder: "搜索歌曲、歌手、歌单"),
                 additionalCategories: [SearchResultCategory] = [], initialTargetID: String? = nil) {
         self.model = model; self.appearance = appearance; self.router = router
-        self.history = history ?? SearchHistoryStore()
+        self.history = history ?? model.searchHistory
         self.additionalCategories = additionalCategories; self.primaryTarget = primaryTarget
         if let provider = model.searchDiscoveryProvider, let browser = model.publicBrowser {
             discoveryPage = MusicSearchDiscoveryModel(
@@ -146,7 +146,7 @@ public final class MusicSearchViewController: SearchPageViewController,
         let additional = additionalCategories.first { $0.target.id == searchTargetID }
         guard additional != nil || (model.isAvailable && !model.isClosed) else { return }
         model.query = keyword
-        history.record(keyword)
+        Task { await history.record(keyword) }
         query = keyword
         searchField.resignFirstResponder()
         navigationController?.pushViewController(MusicSearchResultsViewController(
@@ -206,7 +206,7 @@ public final class MusicSearchViewController: SearchPageViewController,
             onToggle: { [weak self] in
                 guard let self else { return }
                 self.historyExpanded.toggle(); self.render()
-            }, onClear: { [weak self] in self?.history.clear() })
+            }, onClear: { [weak self] in Task { await self?.history.clear() } })
             renderedHistory = historyIDs; renderedExpanded = historyExpanded
         }
         if themeChanged || suggestionIDs != renderedSuggestions {
@@ -404,7 +404,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         self.history = history
         self.additionalCategories = additionalCategories; self.primaryTarget = primaryTarget
         selected = additionalCategories.first(where: { $0.target.id == initialTargetID }).map { .additional($0.target.id) } ?? .all
-        preferences = MusicSearchPreferencesStore()
+        preferences = model.searchPreferences
         actions = MusicSearchActions(model: model)
         results = MusicSearchResultsModel(owner: model)
         super.init(themeProvider: appearance, query: query)
@@ -488,7 +488,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     }
 
     public override func pageDidBecomeActive() {
-        preferences.reload()
+        Task { await preferences.reload() }
         _ = results.setAccess(available: model.isAvailable && !model.isClosed,
                               generation: model.searchAccessGeneration)
         actions.setActive(true)
@@ -607,7 +607,6 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             additionalContents[id]?.submit(submittedKeyword)
         } else if model.isAvailable, !model.isClosed {
             if !results.query.utf8.elementsEqual(submittedKeyword.utf8) {
-                preferences.reload()
                 results.disappear()
                 results.submit(submittedKeyword, preferences: preferences.preferences)
                 results.appear()
@@ -738,7 +737,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             for content in additionalContents.values { content.cancel() }
         }
         submittedKeyword = query
-        history.record(query)
+        Task { await history.record(query) }
         model.query = query
         actions.suspend()
         actions.setActive(true)
@@ -749,7 +748,6 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         let keyword = submittedKeyword
         guard results.setAccess(available: available, generation: model.searchAccessGeneration) else { return }
         if isPageActive, available, !selected.isAdditional, !keyword.isEmpty {
-            preferences.reload()
             results.submit(keyword, preferences: preferences.preferences)
             results.holdPagination()
         }

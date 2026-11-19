@@ -1,4 +1,11 @@
 import assert from 'node:assert/strict';
+import { after } from 'node:test';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { openDatabase } from '@meowfilm/storage';
+import '../../../tests/storage-test-fixture.mjs';
+import { createAnonymousClientStore } from '../src/client-store.mjs';
 import { createCipheriv, createDecipheriv, createHash, createHmac, createPublicKey, diffieHellman, generateKeyPairSync } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import crypto from 'node:crypto';
@@ -108,22 +115,62 @@ export async function nativeHTTP(t, handler) {
   t.after(close);
   return { origin, requests, close, check() { if (failure) throw failure; } };
 }
-export function fixture(handler, { tokenProvider, files = new Map(), documentIO } = {}) {
-  let time = now, failure = null;
+const ownedFixtures = [], ownedRoots = [];
+after(async () => {
+  for (const fixture of ownedFixtures) await fixture.close();
+  for (const root of ownedRoots) rmSync(root, { recursive: true, force: true });
+});
+export function fixture(handler, { tokenProvider, dataRoot, beforeRead, beforeWrite, afterWrite } = {}) {
+  let time = now, failure = null, seed, seedWork;
   const reads = [], writes = [], requests = [];
-  const documents = {
-    read(key) { reads.push(key); return documentIO ? documentIO.read(key) : files.get(key); },
-    write(key, data) {
-      writes.push(key); if (failure) throw failure;
-      if (documentIO) documentIO.write(key, Buffer.from(data)); else files.set(key, Buffer.from(data));
+  const parent = fileURLToPath(new URL('../../../tmp/music-platform-tests/', import.meta.url));
+  mkdirSync(parent, { recursive: true });
+  const root = dataRoot ?? mkdtempSync(join(parent, 'clients-'));
+  if (!dataRoot) ownedRoots.push(root);
+  const backing = createAnonymousClientStore(root), database = openDatabase(root);
+  async function prepareSeed() {
+    if (seed && !seedWork) seedWork = backing.initialize(seed);
+    await seedWork;
+  }
+  const clientStore = {
+    async read() {
+      reads.push('anonymous');
+      if (beforeRead) await beforeRead();
+      await prepareSeed();
+      return backing.read();
     },
+    async initialize(value) {
+      writes.push('initialize');
+      if (failure) throw failure;
+      if (beforeWrite) await beforeWrite('initialize', value, backing);
+      await backing.initialize(value);
+      if (afterWrite) await afterWrite('initialize', value, backing);
+    },
+    async writePlatform(platform, value) {
+      writes.push(platform);
+      if (failure) throw failure;
+      if (beforeWrite) await beforeWrite(platform, value, backing);
+      await backing.writePlatform(platform, value);
+      if (afterWrite) await afterWrite(platform, value, backing);
+    },
+    close: () => backing.close(),
   };
   const transport = createMusicTransport({ fetch: async (url, options) => {
     const request = { url: String(url), ...options }; requests.push(request);
     return handler(request, requests.length);
   } });
-  const owner = createMusicPlatform({ documents, transport, clock: () => time, tokenProvider });
-  return { owner, files, reads, writes, requests, advance(ms) { time += ms; }, failWrites(error = Error('synthetic write')) { failure = error; },
+  const owner = createMusicPlatform({ clientStore, transport, clock: () => time, tokenProvider });
+  let closing;
+  const result = { owner, root, database, reads, writes, requests,
+    advance(ms) { time += ms; },
+    failWrites(error = Object.assign(Error('synthetic write'), { code: 'STORAGE_READONLY' })) { failure = error; },
+    seedClientState(value) { assert.equal(seedWork, undefined); seed = structuredClone(value); },
+    async clientState() { await prepareSeed(); return backing.read(); },
+    async setClientState(value) {
+      await prepareSeed();
+      await backing.read();
+      await backing.initialize(value);
+    },
     request(platform, operation, params = {}, options) { return owner.request({ platform, operation, params }, options); },
     session(platform, userId = '42', cookie, scope = 'test:' + userId) {
       const cookies = cookie ?? ({ wy: 'MUSIC_U=synthetic-music-u; __csrf=synthetic-csrf',
@@ -131,17 +178,20 @@ export function fixture(handler, { tokenProvider, files = new Map(), documentIO 
         kg: `userid=${userId}; token=synthetic-token` })[platform];
       return owner.sessionUpdate({ platform, session: { scope, generation: 1, userId, cookie: cookies } });
     },
-    close() { return owner.close(); } };
+    close() { return closing ??= (async () => { await owner.close(); await database.close(); })(); },
+  };
+  ownedFixtures.push(result);
+  return result;
 }
 export function seedClients(f) {
-  f.files.set('clients.json', Buffer.from(JSON.stringify({
+  f.seedClientState({
     wy: { cookies: { deviceId: 'SYNTHETIC_DEVICE', _ntes_nuid: 'synthetic-nuid', _ntes_nnid: 'synthetic-nuid,1800000000000',
       WNMCID: 'abcdef.1800000000000.01.0', __remember_me: 'true' } },
     kg: { seed: '0123456789abcdef0123456789abcdef', mid: '176905054734845483393488264506404844848', dfid: 'synthetic-dfid' },
     tx: { installationId: '11111111-1111-4111-8111-111111111111', androidId: 'synthetic-android', openUdid: 'synthetic-open',
       openUdid2: 'synthetic-open-2', imei: '123456789012345', qimei: { q36: 'synthetic-q36', savedAt: now },
       session: { uid: 'synthetic-uid', sid: 'synthetic-sid', savedAt: now } },
-  })));
+  });
 }
 export function krc(value) {
   const key = Buffer.from([64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105]), bytes = deflateSync(Buffer.from(value));

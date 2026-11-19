@@ -194,14 +194,13 @@ public static class MusicAccountUiTests
             return Task.FromResult(BridgeCodec.Value(new { ok = true }));
         }
     }
-    private sealed class NoStore : IDocumentStore
+    private sealed class NoStore : NativeTestDatabase
     {
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("No document operation expected");
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default) =>
-            throw new InvalidOperationException("No document operation expected");
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public override Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) =>
+            throw new InvalidOperationException("No database operation expected");
+        public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null) =>
+            throw new InvalidOperationException("No database operation expected");
     }
     private sealed class Dialogs : IMusicDialogs
     {

@@ -136,7 +136,7 @@ class PrepareIOSRuntimeTests(unittest.TestCase):
         selected = prepare.target("iphonesimulator", "x86_64")
         self.assertEqual(selected, {
             "sdk": "iphonesimulator", "arch": "x64", "platform": "ios", "variant": "simulator",
-            "xcframeworkArchitecture": "x86_64", "minimumOS": "17.0",
+            "xcframeworkArchitecture": "x86_64", "minimumOS": "18.0",
         })
         self.assertEqual(prepare.runtime_path(selected), ROOT / ".cache/ios-runtime/iphonesimulator-x86_64/Runtime")
         self.assertEqual(prepare.target("iphonesimulator", "arm64")["arch"], "arm64")

@@ -1,8 +1,9 @@
 import Foundation
 import CryptoKit
 import MeowRuntime
+import MeowStorage
 
-/// The document is the credential authority. This cache holds only online
+/// Typed account rows are the credential authority. This cache holds only online
 /// display outcomes, bound to the exact native record, and is never persisted.
 final class PanSettingsStore: @unchecked Sendable {
     private struct Verified {
@@ -16,8 +17,8 @@ final class PanSettingsStore: @unchecked Sendable {
 
     init(document: FilmSettingsDocument) { self.document = document }
 
-    func accounts() throws -> [PanAccount] {
-        let root = try read()
+    func accounts() async throws -> [PanAccount] {
+        let root = try await read()
         return try PanProviderID.allCases.map { id in
             let account: PanAccount, signature: Data
             do {
@@ -36,7 +37,7 @@ final class PanSettingsStore: @unchecked Sendable {
         }
     }
 
-    func replace(_ provider: PanProviderID, credentials: RuntimeValue) throws -> PanAccount {
+    func replace(_ provider: PanProviderID, credentials: RuntimeValue) async throws -> PanAccount {
         guard let supplied = credentials.panObject else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
         let fields = PanProvider.all.first { $0.id == provider }!.credentialFields
         let credentials = RuntimeValue.object(RuntimeObject(uniqueKeysWithValues: fields.compactMap { field in
@@ -45,63 +46,54 @@ final class PanSettingsStore: @unchecked Sendable {
         try Self.validateCredentials(provider, credentials)
         let root: RuntimeValue
         do {
-            root = try document.update { value in
-                let root = value ?? Self.empty
-                try Self.validate(root)
-                var accounts = root.panField("accounts")!.panObject!
-                guard let revision = try Self.snapshot(root, provider).revision else {
-                    throw RuntimeHTTPError.remote("CORRUPT_STORAGE")
-                }
-                guard revision < 9_007_199_254_740_991 else { throw RuntimeHTTPError.remote("STORAGE_ERROR") }
-                var record = accounts[provider.rawValue]?.panObject ?? RuntimeObject()
-                record["revision"] = .number(Double(revision + 1)); record["credentials"] = credentials
-                accounts[provider.rawValue] = .object(record)
-                var envelope = root.panObject!
-                envelope["accounts"] = .object(accounts)
-                return .object(envelope)
-            }
+            root = try await document.replacePan(provider, credentials: credentials).document!
         } catch { throw Self.storageError(error) }
         return try Self.snapshot(root, provider)
     }
 
-    func signature(_ provider: PanProviderID) throws -> Data { try Self.signature(read(), provider) }
+    func signature(_ provider: PanProviderID) async throws -> Data { try await Self.signature(read(), provider) }
 
     /// The runtime's success is not sufficient: its credential CAS must already
-    /// be visible in this same document, at the receipt's revision and fields.
-    func accept(_ account: PanAccount) throws -> PanAccount {
+    /// be visible in these same rows, at the receipt's revision and fields.
+    func accept(_ account: PanAccount) async throws -> PanAccount {
         if let error = account.errorCode { throw RuntimeHTTPError.remote(error.rawValue) }
         guard let fields = account.fields else { throw PanAccountError.unconfirmed }
-        let root = try read(), current = try Self.snapshot(root, account.provider)
+        let root = try await read(), current = try Self.snapshot(root, account.provider)
         guard current.revision == account.revision else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
         guard current.configured == account.configured, let currentFields = current.fields,
               Set(currentFields) == Set(fields) else {
             throw PanAccountError.unconfirmed
         }
         let signature = try Self.signature(root, account.provider)
-        lock.lock(); defer { lock.unlock() }
-        verified[account.provider] = Verified(signature: signature, account: account)
+        lock.withLock { verified[account.provider] = Verified(signature: signature, account: account) }
         return account
     }
 
-    func expire(_ provider: PanProviderID, expected: Data) throws {
-        let root = try read()
+    func expire(_ provider: PanProviderID, expected: Data) async throws {
+        let root = try await read()
         guard try Self.signature(root, provider) == expected else { throw RuntimeHTTPError.remote("STALE_ACCOUNT") }
         let current = try Self.snapshot(root, provider)
         guard current.configured == true, let revision = current.revision, let fields = current.fields else { return }
         let account = PanAccount(provider: provider, revision: revision, fields: fields, status: .expired)
-        lock.lock(); defer { lock.unlock() }
-        verified[provider] = Verified(signature: expected, account: account)
+        lock.withLock { verified[provider] = Verified(signature: expected, account: account) }
     }
 
-    private func read() throws -> RuntimeValue {
+    private func read() async throws -> RuntimeValue {
         do {
-            let root = try document.read() ?? Self.empty
+            let root = try await document.read() ?? Self.empty
             try Self.validate(root)
             return root
         } catch { throw Self.storageError(error) }
     }
 
     private static func storageError(_ error: Error) -> Error {
+        if let error = error as? SQLiteStorageError {
+            switch error {
+            case .conflict: return RuntimeHTTPError.remote("STALE_ACCOUNT")
+            case .invalidSchema, .corrupt, .invalidValue: return RuntimeHTTPError.remote("CORRUPT_STORAGE")
+            default: return RuntimeHTTPError.remote("STORAGE_ERROR")
+            }
+        }
         guard let error = error as? FilmSettingsStorageError else { return error }
         switch error {
         case .conflict: return RuntimeHTTPError.remote("STALE_ACCOUNT")
@@ -133,7 +125,7 @@ final class PanSettingsStore: @unchecked Sendable {
         }
     }
 
-    private static func snapshot(_ root: RuntimeValue, _ provider: PanProviderID) throws -> PanAccount {
+    static func snapshot(_ root: RuntimeValue, _ provider: PanProviderID) throws -> PanAccount {
         let record = root.panField("accounts")?.panField(provider.rawValue)
         if let record {
             guard record.panField("revision")?.panInteger.map({ $0 > 0 }) == true,

@@ -107,13 +107,20 @@ def build(simulator_only=False):
                 or artifact["path"] != (native / "MeowScriptHost").relative_to(ROOT).as_posix()
                 or artifact["sha256"] != PREPARE["sha256"](native / "MeowScriptHost")):
             raise ValueError("Native framework does not match the prepared target payload")
+        sqlite_target = "ios-simulator" if sdk == "iphonesimulator" else "ios-arm64"
+        sqlite = ROOT / f"native/SQLite/.cache/Artifacts/{sqlite_target}/MeowSQLite.framework"
+        sqlite_binary = sqlite / "MeowSQLite"
+        if (receipt["sqlite"]["artifact"]["path"] != sqlite_binary.relative_to(ROOT).as_posix()
+                or receipt["sqlite"]["artifact"]["sha256"] != PREPARE["sha256"](sqlite_binary)):
+            raise ValueError("SQLite framework differs from the script host build input")
         app = WORK / name / "NodePreflight.app"
         app.mkdir(parents=True, exist_ok=True)
         framework = dependency / slice_name / "NodeMobile.framework"
         embedded = app / "Frameworks/NodeMobile.framework"
-        if app.is_symlink() or native.is_symlink():
+        if app.is_symlink() or native.is_symlink() or sqlite.is_symlink():
             raise ValueError("Linked preflight build input")
-        for source, destination in ((framework, embedded), (native, app / "Frameworks/MeowScriptHost.framework")):
+        for source, destination in ((framework, embedded), (native, app / "Frameworks/MeowScriptHost.framework"),
+                                    (sqlite, app / "Frameworks/MeowSQLite.framework")):
             if destination.is_symlink():
                 raise ValueError("Linked preflight framework")
             if destination.exists():
@@ -148,6 +155,7 @@ def build(simulator_only=False):
              "-F", framework.parent, "-Wl,-rpath,@executable_path/Frameworks",
              INPUTS / "Host.m", "-o", app / "NodePreflight"])
         run(["codesign", "--force", "--sign", "-", "--timestamp=none", embedded])
+        run(["codesign", "--force", "--sign", "-", "--timestamp=none", app / "Frameworks/MeowSQLite.framework"])
         run(["codesign", "--force", "--sign", "-", "--timestamp=none", app / "Frameworks/MeowScriptHost.framework"])
         run(["codesign", "--force", "--sign", "-", "--timestamp=none", app])
         run(["codesign", "--verify", "--deep", "--strict", app])

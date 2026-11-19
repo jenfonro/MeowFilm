@@ -35,7 +35,9 @@ final class CredentialStoreTests: XCTestCase {
         let credential = try AccountCredential(data: bytes)
         let record = CredentialRecord(credential: credential)
         XCTAssertEqual(credential.dataRepresentation(), bytes)
-        XCTAssertEqual(try CredentialRecordCodec.decode(CredentialRecordCodec.encode(record)), record)
+        let store = InMemoryCredentialStore(), identity = try AccountFixtures.identity()
+        try store.write(record, for: identity)
+        XCTAssertEqual(try store.read(for: identity), record)
     }
 
     func testCredentialAndRecordDescriptionsAndReflectionAreRedacted() throws {
@@ -112,25 +114,9 @@ final class CredentialStoreTests: XCTestCase {
         }
     }
 
-    func testPersistenceEnvelopeRoundTripAndRevision() throws {
+    func testCredentialRevisionIsSeparateFromTheValue() throws {
         let record = try AccountFixtures.record()
-        let encoded = CredentialRecordCodec.encode(record)
-        XCTAssertEqual(try CredentialRecordCodec.decode(encoded), record)
         XCTAssertNotEqual(CredentialRecord(credential: record.credential).revision, record.revision)
-    }
-
-    func testCorruptAndFutureEnvelopesAreRejected() throws {
-        let record = try AccountFixtures.record()
-        let encoded = CredentialRecordCodec.encode(record)
-        var future = encoded
-        future[3] = 0x32
-        for invalid in [Data(), Data(encoded.prefix(40)), Data(repeating: 0, count: 50), future] {
-            XCTAssertThrowsError(try CredentialRecordCodec.decode(invalid)) {
-                XCTAssertEqual($0 as? CredentialStoreError, .corruptItem)
-            }
-        }
-        var invalidUUID = encoded
-        invalidUUID.replaceSubrange(4..<40, with: Data(repeating: 120, count: 36))
-        XCTAssertThrowsError(try CredentialRecordCodec.decode(invalidUUID))
+        XCTAssertEqual(CredentialRecord(revision: record.revision, credential: record.credential), record)
     }
 }

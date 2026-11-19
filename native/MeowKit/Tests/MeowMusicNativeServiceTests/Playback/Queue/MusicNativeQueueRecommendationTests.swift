@@ -1,28 +1,31 @@
 import XCTest
 import MeowMusicFeature
 import MeowStorage
+import MeowStorageTestSupport
 import MeowMusicTestSupport
 @testable import MeowMusicNativeService
 
 final class MusicNativeQueueRecommendationTests: XCTestCase {
     func testPreviewAdoptsRepositoryMetadataWithoutQueryEvidenceOrPersistingNonmemberChecks() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let metadataDocument = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument })
+        let seed = try NativeMusicFixture.storedSong(SimilarModeAccountFixture.track("100"))
+        let database = try musicDiscoveryTestDatabase(self, songs: [seed])
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database)
         let owner = SimilarModeAccountFixture([["301"]])
         let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([SimilarModeAccountFixture.track("100")], platform: "wy")])
-        let store = NativeMusicTestLibrary(try document(["100"]))
+        var document = try MusicDocument(nil, runID: "fixture")
+        document.library["library"]["songs"] = .obj([(seed["songId"].string, seed)])
+        document.queue["entries"] = .array([.obj([("id", .string("entry-1")), ("songId", seed["songId"]),
+            ("context", .obj([("sourceType", .string("daily")), ("sourceTitle", .string("原始推荐"))]))])])
+        document.queue["currentId"] = .string("entry-1"); document.queue["serial"] = .n(1)
+        document.queue["source"] = .obj([("sourceType", .string("search-song")), ("sourceTitle", .string("搜索")), ("seedEntryId", .string("entry-1"))])
+        let store = NativeMusicTestLibrary(try document.encode(changed: ["library", "queue", "playback", "history"]))
         let service = try await NativeMusicFixture.service(store, accounts: owner, platform: peer, sourceDiscovery: cache)
         let searched = try await service.search(platform: "wy", query: "Song 100 Synthetic", page: 1, limit: 30)
         let localID = try XCTUnwrap(searched.items.first).songId
         _ = try await service.createPlaylist(name: "Saved", refs: [.init(kind: .queue, id: "entry-1")])
         await service.flushSourceDiscoveryPersist()
-        let persisted = try XCTUnwrap(metadataDocument.read(key: "checks"))
-        let file = root.appendingPathComponent(MusicNativePersistentSourceDiscoveryCache.namespace)
-            .appendingPathComponent("checks.json")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+        let persisted = try await musicDiscoveryTestRows(database)
+        XCTAssertEqual(persisted.array.count, 1)
         _ = try await startPlaying(service)
         let before = try await service.read()
 
@@ -56,8 +59,9 @@ final class MusicNativeQueueRecommendationTests: XCTestCase {
         XCTAssertEqual(state.queue, before.queue); XCTAssertEqual(state.playback, before.playback); XCTAssertEqual(state.history, before.history)
 
         await service.flushSourceDiscoveryPersist()
-        XCTAssertEqual(try metadataDocument.read(key: "checks"), persisted)
-        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { metadataDocument })
+        let unchanged = try await musicDiscoveryTestRows(database)
+        XCTAssertEqual(unchanged, persisted)
+        let reopened = MusicNativePersistentSourceDiscoveryCache(database: database)
         let unsaved = await reopened.entries(songID: id)
         XCTAssertTrue(unsaved.isEmpty)
         let saved = await reopened.entries(songID: localID)

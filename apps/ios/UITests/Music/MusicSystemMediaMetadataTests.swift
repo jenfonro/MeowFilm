@@ -5,6 +5,7 @@ import MediaPlayer
 import Combine
 import MeowContracts
 import MeowPlayback
+import MeowStorage
 @testable import MeowMusicFeature
 
 /// Real UIKit decoding, shared image caching and the existing Now Playing
@@ -169,7 +170,7 @@ final class MusicSystemMediaMetadataTests: XCTestCase {
         let attempt = try fixture.select(song)
         await fulfillment(of: [started], timeout: 3)
         NotificationCenter.default.post(name: UIApplication.willResignActiveNotification, object: nil)
-        let colors = fixture.defaults.data(forKey: MusicAppearancePreferencesStore.songColorsKey)
+        let colors = try appStorageTestRows(fixture.database, "SELECT * FROM ios_music_song_palettes ORDER BY song_key")
         cover.finish()
         await fixture.content.flushArtwork()
         await wait("Background artwork published") {
@@ -179,7 +180,7 @@ final class MusicSystemMediaMetadataTests: XCTestCase {
         XCTAssertNotNil(UIImage(data: data))
         let published = try XCTUnwrap(systemArtwork)
         XCTAssertGreaterThan(published.image(at: CGSize(width: 64, height: 64))?.size.width ?? 0, 0)
-        XCTAssertEqual(fixture.defaults.data(forKey: MusicAppearancePreferencesStore.songColorsKey), colors,
+        XCTAssertEqual(try appStorageTestRows(fixture.database, "SELECT * FROM ios_music_song_palettes ORDER BY song_key"), colors,
                        "Background system encoding must not sample the foreground palette")
 
         fixture.model.metadataState.artworkURL = song.artwork
@@ -202,7 +203,7 @@ final class MusicSystemMediaMetadataTests: XCTestCase {
         XCTAssertEqual(fixture.playback.nowPlayingMetadata?.title, "原文二")
         fixture.model.clock.position = 4
         await wait("Position returns to preceding lyric") { fixture.playback.nowPlayingMetadata?.title == "原文一" }
-        fixture.appearance.set(\.lockLyric, false)
+        _ = try appStorageTestWait { await fixture.appearance.set(\.lockLyric, false) }
         await wait("Disabled lyrics restore song and artist") {
             fixture.playback.nowPlayingMetadata?.title == "歌曲 first" && fixture.playback.nowPlayingMetadata?.artist == "歌手"
         }
@@ -576,21 +577,23 @@ private final class SystemMusicMetadataFixture {
     let appearance: MusicAppearancePreferencesStore
     let content: MusicPlayerContentModel
     let bridge: MusicSystemMetadataCoordinator
-    let defaults: UserDefaults
+    let database: SQLiteDatabase
     let media: URL
-    private let suite: String
+    private let root: URL
 
     init(images: MusicArtworkImages, service: SystemMusicMetadataService = SystemMusicMetadataService()) throws {
-        let suite = "MusicSystemMediaMetadataTests." + UUID().uuidString
-        let defaults = UserDefaults(suiteName: suite)!
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("system-metadata-" + UUID().uuidString)
+        let database = try appStorageTestOpen(root)
+        let appearance = MusicAppearancePreferencesStore()
+        try appStorageTestWait { try await appearance.bind(database: database) }
         let playback = PlaybackController()
         let model = MusicViewModel(service: service, playback: playback)
+        try appStorageTestWait { try await model.bindPreferences(database: database) }
         let bridge = MusicSystemMetadataCoordinator(model: model, playback: playback, appearance: appearance)
         let content = MusicPlayerContentModel(model: model, playback: playback, appearance: appearance,
             presentation: MusicMiniPlayerPresentation(), artworkImages: images)
-        let media = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".wav")
-        self.suite = suite; self.defaults = defaults; self.appearance = appearance
+        let media = root.appendingPathComponent("silent.wav")
+        self.root = root; self.database = database; self.appearance = appearance
         self.playback = playback; self.model = model; self.bridge = bridge; self.content = content; self.media = media
         var data = Data()
         func text(_ value: String) { data.append(contentsOf: value.utf8) }
@@ -625,8 +628,10 @@ private final class SystemMusicMetadataFixture {
 
     func dispose() {
         bridge.close(); playback.stop()
-        defaults.removePersistentDomain(forName: suite)
-        try? FileManager.default.removeItem(at: media)
+        do {
+            try appStorageTestWait { await self.model.close(); await self.appearance.close(); try await self.database.close() }
+            try FileManager.default.removeItem(at: root)
+        } catch { XCTFail("Metadata fixture cleanup failed: \(error)") }
     }
 }
 

@@ -24,9 +24,9 @@ test('a fresh guest keeps one durable protocol identity through home actions, de
   await f.request('wy', 'audio', { id: '1' });
   assert.ok(f.requests.at(-1).headers.Cookie.includes('MUSIC_A=synthetic-guest'));
   assert.ok(!f.requests.at(-1).headers.Cookie.includes('MUSIC_U='));
-  assert.ok(!f.files.get('clients.json').toString().includes('synthetic-music-u'));
+  assert.ok(!JSON.stringify(await f.clientState()).includes('synthetic-music-u'));
   await f.close();
-  const restarted = fixture(() => response({ code: 200, data: [wySong('2')] }), { files: f.files });
+  const restarted = fixture(() => response({ code: 200, data: [wySong('2')] }), { dataRoot: f.root });
   await restarted.request('wy', 'fm');
   assert.ok(restarted.requests[0].headers.Cookie.includes('deviceId=' + device));
   assert.ok(restarted.requests[0].headers.Cookie.includes('MUSIC_A=synthetic-guest'));
@@ -37,14 +37,17 @@ test('a fresh guest keeps one durable protocol identity through home actions, de
 test('anonymous state must really save before dispatch and corrupt current storage is not reset', async () => {
   const f = fixture(() => assert.fail('unconfirmed device state must not be used'));
   f.failWrites();
-  await assert.rejects(f.request('wy', 'fm'), { code: 'COMMIT_UNKNOWN' });
-  assert.equal(f.requests.length, 0); assert.equal(f.files.size, 0);
+  await assert.rejects(f.request('wy', 'fm'), { code: 'STORAGE_ERROR' });
+  assert.equal(f.requests.length, 0); assert.equal(await f.clientState(), null);
   await f.close();
   const corrupt = fixture(() => assert.fail('corrupt storage must not dispatch'));
-  corrupt.files.set('clients.json', Buffer.from('not-json'));
+  seedClients(corrupt);
+  await corrupt.clientState();
+  await corrupt.database.execute("UPDATE music_anonymous_kg SET mid='invalid-current-mid'");
   await assert.rejects(corrupt.request('wy', 'fm'), { code: 'CORRUPT_STORAGE' });
   assert.equal(corrupt.writes.length, 0);
-  assert.equal(corrupt.files.get('clients.json').toString(), 'not-json');
+  await assert.rejects(corrupt.clientState(), { code: 'CORRUPT_STORAGE' });
+  assert.deepEqual(await corrupt.database.query('SELECT mid FROM music_anonymous_kg'), [{ mid: 'invalid-current-mid' }]);
   await corrupt.close();
 });
 
@@ -61,9 +64,9 @@ test('parallel WY cookie exchanges merge into the current anonymous owner and or
   const a = f.request('wy', 'search', { keyword: 'first' }), b = f.request('wy', 'search', { keyword: 'second' });
   await Promise.all([first.entered, second.entered]);
   first.release(); await a;
-  assert.equal(JSON.parse(f.files.get('clients.json')).wy.cookies.NMTID, 'last');
+  assert.equal((await f.clientState()).wy.cookies.NMTID, 'last');
   second.release(); await b;
-  const cookies = JSON.parse(f.files.get('clients.json')).wy.cookies;
+  const cookies = (await f.clientState()).wy.cookies;
   assert.equal(cookies._ntes_nuid, 'exchange-a'); assert.equal(cookies.WNMCID, 'exchange-b');
   assert.equal(cookies.NMTID, undefined); assert.equal(cookies.deviceId, 'SYNTHETIC_DEVICE');
 });
@@ -76,9 +79,9 @@ test('WY cookie scope/device/authentication failures never partially accept an e
     [301, ['NMTID=not-partial'], 'AUTH_REQUIRED'],
   ]) {
     const f = fixture(() => response({ code, data: [] }, { cookies })); seedClients(f);
-    const before = Buffer.from(f.files.get('clients.json'));
+    const before = await f.clientState();
     await assert.rejects(f.request('wy', 'fm'), { code: expected });
-    assert.deepEqual(f.files.get('clients.json'), before); assert.equal(f.writes.length, 0);
+    assert.deepEqual(await f.clientState(), before); assert.equal(f.writes.length, 0);
     assert.equal(f.requests.length, 1); await f.close();
   }
   const f = fixture(() => response({ code: 200, data: [] }, { cookies: [
@@ -86,7 +89,7 @@ test('WY cookie scope/device/authentication failures never partially accept an e
     'MUSIC_A=anonymous-current; Domain=music.163.com', 'unrelated=ignored',
   ] })); seedClients(f);
   await f.request('wy', 'fm');
-  const cookies = JSON.parse(f.files.get('clients.json')).wy.cookies;
+  const cookies = (await f.clientState()).wy.cookies;
   assert.equal(cookies.NMTID, undefined); assert.equal(cookies.MUSIC_A, 'anonymous-current');
   assert.equal(cookies.unrelated, undefined); await f.close();
 });
@@ -104,7 +107,7 @@ test('QQ QIMEI and session preparation are single-flight and save before busines
     }
     const value = qq(request), call = value.req_0;
     if (call.method === 'GetSession') {
-      assert.ok(f.files.get('clients.json').toString().includes('fresh-q36'));
+      assert.ok(JSON.stringify(await f.clientState()).includes('fresh-q36'));
       return rpc({ session: { uid: 'fresh-uid', sid: 'fresh-sid' } });
     }
     assert.equal(value.comm.QIMEI36, 'fresh-q36');
@@ -125,9 +128,9 @@ test('QQ QIMEI and session preparation are single-flight and save before busines
 test('QQ preparation save failure cannot dispatch GetSession or business HTTP', async () => {
   const f = fixture(() => response({ code: 0, data: JSON.stringify({ code: 0, data: { q36: 'fresh-q36' } }) }));
   seedClients(f);
-  const clients = JSON.parse(f.files.get('clients.json')); clients.tx.qimei = null; clients.tx.session = null;
-  f.files.set('clients.json', Buffer.from(JSON.stringify(clients))); f.failWrites();
-  await assert.rejects(f.request('tx', 'search', { keyword: 'x' }), { code: 'COMMIT_UNKNOWN' });
+  const clients = (await f.clientState()); clients.tx.qimei = null; clients.tx.session = null;
+  await f.setClientState(clients); f.failWrites();
+  await assert.rejects(f.request('tx', 'search', { keyword: 'x' }), { code: 'STORAGE_ERROR' });
   assert.equal(f.requests.length, 1);
   await f.close();
 });

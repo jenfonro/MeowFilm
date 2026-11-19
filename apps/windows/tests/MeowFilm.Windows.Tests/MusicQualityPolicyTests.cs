@@ -87,7 +87,7 @@ public static class MusicQualityPolicyTests
     }
     private static async Task Corrupt()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         await using (var seed = new QualityFixture(store))
             await seed.Ok("music.quality.settings.save", await seed.SaveParameters("master"));
         var document = MusicTestStores.For(store).Root;
@@ -119,12 +119,13 @@ public static class MusicQualityPolicyTests
         stale["ifRevision"] = 0;
         await f.Error("music.quality.settings.save", stale, "REVISION_CONFLICT");
         Check(MusicTestStores.For(f.Store).Writes == 2);
-        Check(f.Store.WriteNames.Count == 0, "music settings must not write document namespaces");
+        Check(await f.Store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_music_account")) == 0,
+            "music settings do not write account rows");
         Check(MusicTestStores.For(f.Store).Snapshot().Areas.ContainsKey("native-quality-policy"), "quality control record is durable");
     }
     private static async Task Restart()
     {
-        var store = new QualityFixture.DocumentStore(); string signature;
+        var store = new QualityFixture.Database(); string signature;
         await using (var f = new QualityFixture(store))
         {
             var p = await f.SaveParameters("auto");
@@ -313,7 +314,7 @@ public static class MusicQualityPolicyTests
     }
     private static async Task WyCatalogUnknown()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         var prior = MusicSongFixture.Online("wy", "11", "合成歌曲", "合成艺人", "合成专辑", 120,
             native: new JsonObject { ["artistNames"] = new JsonArray("合成艺人"), ["qualityKnown"] = true,
                 ["types"] = new JsonArray(new JsonObject { ["type"] = "128k" }) });
@@ -419,10 +420,10 @@ public static class MusicQualityPolicyTests
 
 internal sealed class QualityFixture : IAsyncDisposable
 {
-    internal DocumentStore Store { get; }
+    internal Database Store { get; }
     internal ScriptRuntime Runtime { get; } = new();
     internal MusicNativeApplication App { get; }
-    internal QualityFixture(DocumentStore? store = null)
+    internal QualityFixture(Database? store = null)
     {
         Store = store ?? new(); App = new(Store, MusicTestStores.For(Store), Runtime);
     }
@@ -470,45 +471,26 @@ internal sealed class QualityFixture : IAsyncDisposable
         Runtime.Release.TrySetResult(); MusicTestStores.For(Store).Release?.TrySetResult(); Store.Release.TrySetResult();
         await App.DisposeAsync();
     }
-    internal sealed class DocumentStore : IDocumentStore
+    internal sealed class Database : NativeTestDatabase
     {
-        private readonly object gate = new();
-        internal readonly Dictionary<string, byte[]> Data = [];
-        internal readonly HashSet<string> Names = [];
-        internal readonly HashSet<string> WriteNames = [];
-        internal int Writes;
-        internal bool Fault, FaultAfter, Disposed;
-        internal string? FaultNamespace, HoldNamespace;
+        internal bool Fault, HoldWrites;
+        internal bool FaultAfter { get; set; }
+        internal bool Disposed => Disposals != 0;
         internal readonly TaskCompletionSource Entered = Gate(), Release = Gate();
-        internal void Put(string ns, JsonObject value) { lock (gate) Data[ns] = JsonSerializer.SerializeToUtf8Bytes(value); }
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write,
+            CancellationToken token = default, int retainedBytes = 0, Action<Action>? commit = null)
         {
-            token.ThrowIfCancellationRequested();
-            lock (gate)
+            bool fault = Fault; Fault = false;
+            var result = await Inner.WriteAsync(db =>
             {
-                Names.Add(ns); var bytes = Data.GetValueOrDefault(ns)?.ToArray();
-                return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
-            }
+                Interlocked.Increment(ref Writes);
+                if (HoldWrites) { Entered.TrySetResult(); Release.Task.GetAwaiter().GetResult(); }
+                if (fault && !FaultAfter) throw new DocumentStoreException(DocumentStoreError.Storage);
+                return write(db);
+            }, token, retainedBytes, commit).ConfigureAwait(false);
+            if (fault) throw new DocumentStoreException(DocumentStoreError.Storage);
+            return result;
         }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
-        {
-            if (ns == HoldNamespace)
-            { Check(!token.CanBeCanceled, "CAS must physically settle"); Entered.TrySetResult(); await Release.Task; }
-            lock (gate)
-            {
-                Names.Add(ns); WriteNames.Add(ns); Writes++;
-                bool fault = Fault && ns == FaultNamespace;
-                if (fault) Fault = false;
-                if (fault && !FaultAfter) throw new InvalidOperationException("synthetic before CAS receipt loss");
-                var before = Data.GetValueOrDefault(ns);
-                if ((before is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(before)) != expected)
-                    throw new DocumentStoreException(DocumentStoreError.Conflict);
-                Data[ns] = bytes.ToArray();
-                if (fault) throw new InvalidOperationException("synthetic after CAS receipt loss");
-                return DocumentFingerprint.FromBytes(bytes.Span);
-            }
-        }
-        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
     }
     internal sealed class ScriptRuntime : IRuntimeClient
     {

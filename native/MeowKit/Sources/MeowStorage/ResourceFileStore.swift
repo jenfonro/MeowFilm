@@ -23,16 +23,16 @@ public final class ResourceFileStore: @unchecked Sendable {
         guard let directory = try files.openDirectory(creating: false) else { return [] }
         defer { Darwin.close(directory) }
         let copy = fcntl(directory, F_DUPFD_CLOEXEC, 0)
-        guard copy >= 0 else { throw DocumentStoreError.storageFailure }
+        guard copy >= 0 else { throw ResourceFileError.storageFailure }
         guard let stream = fdopendir(copy) else {
-            Darwin.close(copy); throw DocumentStoreError.storageFailure
+            Darwin.close(copy); throw ResourceFileError.storageFailure
         }
         defer { closedir(stream) }
         var result: [Metadata] = []
         while true {
             errno = 0
             guard let entry = readdir(stream) else {
-                guard errno == 0 else { throw DocumentStoreError.storageFailure }
+                guard errno == 0 else { throw ResourceFileError.storageFailure }
                 break
             }
             let name = withUnsafePointer(to: &entry.pointee.d_name) {
@@ -42,7 +42,7 @@ public final class ResourceFileStore: @unchecked Sendable {
             }
             let stageKey = Self.stageKey(name)
             let key = stageKey ?? (name.hasSuffix(".bytes") ? String(name.dropLast(6)) : "")
-            guard DocumentStore.validIdentifier(key) else { continue }
+            guard OrdinaryFileDirectory.validIdentifier(key) else { continue }
             var info = stat()
             guard fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
                   Self.ordinary(info) else { continue }
@@ -67,7 +67,7 @@ public final class ResourceFileStore: @unchecked Sendable {
         let name = try fileName(key)
         lock.lock(); defer { lock.unlock() }
         guard let directory = try files.openDirectory(creating: true) else {
-            throw DocumentStoreError.storageFailure
+            throw ResourceFileError.storageFailure
         }
         defer { Darwin.close(directory) }
         try files.replace(name, with: data, in: directory, modifiedAt: modifiedAt, retainedStage: { stage, bytes in
@@ -85,12 +85,12 @@ public final class ResourceFileStore: @unchecked Sendable {
         let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else {
             if errno == ENOENT { return nil }
-            throw errno == ELOOP ? DocumentStoreError.unsafePath : DocumentStoreError.storageFailure
+            throw errno == ELOOP ? ResourceFileError.unsafePath : ResourceFileError.storageFailure
         }
         defer { Darwin.close(fd) }
         var info = stat()
-        guard fstat(fd, &info) == 0 else { throw DocumentStoreError.storageFailure }
-        guard Self.ordinary(info) else { throw DocumentStoreError.unsafePath }
+        guard fstat(fd, &info) == 0 else { throw ResourceFileError.storageFailure }
+        guard Self.ordinary(info) else { throw ResourceFileError.unsafePath }
         let current = Self.metadata(key: key, info: info).modifiedAt
         guard modifiedAt > current else { return current }
         try commit { try OrdinaryFileDirectory.setModifiedAt(modifiedAt, fd: fd) }
@@ -102,7 +102,7 @@ public final class ResourceFileStore: @unchecked Sendable {
     }
 
     public func removeStage(name: String) throws {
-        guard Self.stageKey(name) != nil else { throw DocumentStoreError.invalidKey }
+        guard Self.stageKey(name) != nil else { throw ResourceFileError.invalidKey }
         try removeFile(name)
     }
 
@@ -111,12 +111,12 @@ public final class ResourceFileStore: @unchecked Sendable {
         guard let directory = try files.openDirectory(creating: false) else { return }
         defer { Darwin.close(directory) }
         guard unlinkat(directory, name, 0) == 0 || errno == ENOENT else {
-            throw DocumentStoreError.storageFailure
+            throw ResourceFileError.storageFailure
         }
     }
 
     private func fileName(_ key: String) throws -> String {
-        guard DocumentStore.validIdentifier(key) else { throw DocumentStoreError.invalidKey }
+        guard OrdinaryFileDirectory.validIdentifier(key) else { throw ResourceFileError.invalidKey }
         return key + ".bytes"
     }
     private static func ordinary(_ info: stat) -> Bool {
@@ -127,7 +127,7 @@ public final class ResourceFileStore: @unchecked Sendable {
         let body = String(name.dropFirst().dropLast(6))
         guard let separator = body.range(of: ".bytes.", options: .backwards) else { return nil }
         let key = String(body[..<separator.lowerBound]), identity = String(body[separator.upperBound...])
-        guard DocumentStore.validIdentifier(key), UUID(uuidString: identity)?.uuidString.lowercased() == identity else {
+        guard OrdinaryFileDirectory.validIdentifier(key), UUID(uuidString: identity)?.uuidString.lowercased() == identity else {
             return nil
         }
         return key

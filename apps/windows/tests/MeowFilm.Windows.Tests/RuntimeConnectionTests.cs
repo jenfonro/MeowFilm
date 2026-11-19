@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Runtime;
+using MeowFilm.Capabilities;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
 
 namespace MeowFilm.Windows.Tests;
@@ -15,7 +16,10 @@ public static class RuntimeConnectionTests
         var modules = RuntimeHttpClientTests.Modules;
         var bundle = RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"), "aggregate");
         string root = Path.Combine(Required("MEOWFILM_TEST_DATA_ROOT"), Guid.NewGuid().ToString("N"), "script-runtime");
-        return await NodeRuntime.StartAsync(Required("MEOWFILM_TEST_NODE"), bundle, modules, root, startup, owner);
+        var database = new NativeTestDatabase(root);
+        await database.Ready;
+        return await NodeRuntime.StartAsync(Required("MEOWFILM_TEST_NODE"), bundle, modules, root, startup, owner,
+            new FilmRuntimeSettings(database));
     }
     public static IEnumerable<TestCase> Cases()
     {

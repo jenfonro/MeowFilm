@@ -110,6 +110,7 @@ public static partial class MusicNativeSyncTests
         Check(PreparationFailureCode(NetworkSync(saved)) == "SDK_FAILURE" && server.Preparations == 1 && server.SubscriptionWrites == 0);
         Ok(await app.ExecuteAsync("music.accounts.list")); Ok(await app.ExecuteAsync("music.library.list")); Ok(await app.ExecuteAsync("music.queue.get")); Check(server.Preparations == 1);
         server.Prepare = null; Ok(await app.ExecuteAsync("music.librarySync.run")); Check(server.Preparations == 2 && server.SubscriptionWrites == 1 && server.MemberReads == 0);
-        foreach (string ns in AppIdentity.NativeNamespaces) { var snapshot = await store.ReadAsync(ns); Check(snapshot.Data is null || !Encoding.UTF8.GetString(snapshot.Data).Contains("synthetic-preparation-2", StringComparison.Ordinal)); }
+        Check(!MusicTestStores.For(store).Root.ToJsonString().Contains("synthetic-preparation-2", StringComparison.Ordinal));
+        Check(!store.Accounts().ToJsonString().Contains("synthetic-preparation-2", StringComparison.Ordinal));
     }
 }

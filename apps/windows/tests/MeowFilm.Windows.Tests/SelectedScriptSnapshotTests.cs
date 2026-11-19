@@ -30,7 +30,7 @@ public static class SelectedScriptSnapshotTests
             {
                 await File.WriteAllTextAsync(path, "// replaced after selection");
                 var runtime = new SnapshotRuntime(original, snapshot.Bytes);
-                await using var library = new MusicLibraryOwner(MusicTestStores.For(new QualityFixture.DocumentStore()));
+                await using var library = new MusicLibraryOwner(MusicTestStores.For(new QualityFixture.Database()));
                 await using var owner = new MusicScriptOwner(library, runtime);
                 var receipt = await owner.ImportSourceAsync(snapshot.Bytes, snapshot.Basename);
                 Check(receipt.GetProperty("ok").GetBoolean() && runtime.Uploads == 1 && runtime.Installs == 1);

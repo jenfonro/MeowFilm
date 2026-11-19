@@ -38,16 +38,16 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest(),
   method('settings.get', () => store.get());
   method('settings.update', input => store.update(input));
   method('request', async (input, signal) => {
-    const settings = store.read();
+    const settings = await store.read();
     return (id === 'douban' ? (await import('./metadata/douban.mjs')).requestDouban : requestTMDB)(input,
       { settings, request, signal });
   });
   if (id === 'douban') method('search', async (input, signal) => {
-    const settings = store.read();
+    const settings = await store.read();
     return (await import('./metadata/douban.mjs')).searchDouban(input, { settings, request, signal });
   });
   return Object.freeze({
-    id, version: spec.version, contract: spec.contract, methods,
+    id, version: spec.version, contract: spec.contract, methods, ready: store.ready,
     settingsChanged() {
       store.invalidate();
       configuration.abort();
@@ -57,7 +57,7 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest(),
       return track((async () => {
         try {
           const signal = signalFor(context);
-          const settings = store.read();
+          const settings = await store.read();
           const target = (id === 'douban' ? (await import('./metadata/douban.mjs')).doubanImageTarget
             : tmdbImageTarget)(path, settings);
           const result = await images.open(target, signal);
@@ -82,7 +82,7 @@ function createMetadataModule(id, { dataRoot, request = createMetadataRequest(),
         lifetime.abort();
         await Promise.allSettled([...active]);
         const results = await Promise.allSettled([
-          ...[...streams].map(dispose => Promise.resolve().then(dispose)), images.close(),
+          ...[...streams].map(dispose => Promise.resolve().then(dispose)), images.close(), store.close(),
         ]);
         if (cleanupFailure || results.some(result => result.status === 'rejected')) {
           throw metadataFailure('NETWORK_ERROR');

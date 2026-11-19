@@ -1,142 +1,76 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
-
 namespace MeowFilm.Platform.Files;
 
 public sealed record GrantedFile(string Id, string Path, string Title);
 
-/// <summary>Paths explicitly chosen in native file UI. Never expose this namespace to script RPC.</summary>
+/// <summary>Explicit native file grants. Ordinary playback resolves one typed row, not the full collection.</summary>
 public sealed class GrantedMediaFiles
 {
-    private readonly IDocumentStore store;
-    private readonly string documentNamespace;
+    private readonly IStorageDatabase database;
     private readonly HashSet<string> extensions;
-    private readonly SemaphoreSlim gate = new(1, 1);
-
-    public GrantedMediaFiles(IDocumentStore store, string documentNamespace, IEnumerable<string> extensions)
+    public GrantedMediaFiles(IStorageDatabase database, IEnumerable<string> extensions)
     {
-        this.store = store ?? throw new ArgumentNullException(nameof(store));
-        this.documentNamespace = !DocumentRules.ValidNamespace(documentNamespace)
-            ? throw new ArgumentException(nameof(documentNamespace)) : documentNamespace;
-        this.extensions = (extensions ?? throw new ArgumentNullException(nameof(extensions)))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (this.extensions.Count == 0 || this.extensions.Any(extension => !IsValidExtension(extension)))
-            throw new ArgumentException(nameof(extensions));
+        this.database = database;
+        this.extensions = extensions.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (this.extensions.Count == 0 || this.extensions.Any(extension => !IsValidExtension(extension))) throw new ArgumentException(nameof(extensions));
     }
-
     public async Task<IReadOnlyList<GrantedFile>> GrantAsync(IEnumerable<string> selectedPaths, CancellationToken cancellationToken = default)
     {
         var selected = selectedPaths?.ToArray() ?? throw new InvalidDataException("FILE_LIMIT");
         if (selected.Length == 0) throw new InvalidDataException("FILE_LIMIT");
-        var files = selected.Select(Grant).DistinctBy(file => file.Id).ToArray();
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        var files = await Task.Run(() => selected.Select(Grant).DistinctBy(file => file.Id).ToArray(), cancellationToken).ConfigureAwait(false);
+        try { await database.WriteAsync(db =>
         {
-            var (current, fingerprint) = await ReadLockedAsync(cancellationToken).ConfigureAwait(false);
-            var known = current.ToDictionary(file => file.Id, StringComparer.Ordinal);
-            foreach (var file in files) known[file.Id] = file;
-            await WriteLockedAsync(known.Values, fingerprint, cancellationToken).ConfigureAwait(false);
-        }
-        finally { gate.Release(); }
+            ValidateSchema(db);
+            if (db.Scalar<long>("SELECT count(*) FROM windows_file_grants WHERE scope_key='device'") == 0)
+                FileGrantRecords.Files.Save(db, new System.Text.Json.Nodes.JsonObject { ["Schema"] = 1, ["Items"] = new System.Text.Json.Nodes.JsonArray() }, null, ["device"]);
+            long count = db.Scalar<long>("SELECT count(*) FROM windows_file_grants_Items WHERE scope_key='device'");
+            foreach (var file in files)
+            {
+                if (Find(db, file.Id) is { } previous) ValidateCurrent(previous);
+                db.Execute("INSERT INTO windows_file_grants_Items(scope_key,Items_key,ordinal,shape_mask,null_mask,Path,Title) " +
+                    "VALUES('device',$id,$ordinal,3,0,$path,$title) ON CONFLICT(scope_key,Items_key) DO UPDATE SET Path=excluded.Path,Title=excluded.Title",
+                    ("$id", file.Id), ("$ordinal", count++), ("$path", file.Path), ("$title", file.Title));
+            }
+            return true;
+        }, cancellationToken, files.Sum(file => (file.Id.Length + file.Path.Length + file.Title.Length) * 2)).ConfigureAwait(false); }
+        catch (DocumentStoreException error) when (error.Error is DocumentStoreError.Storage or DocumentStoreError.Io)
+        { throw new InvalidDataException("COMMIT_UNKNOWN"); }
         return files;
     }
-
     public async Task<Uri> ResolveAsync(string id, CancellationToken cancellationToken = default)
     {
-        GrantedFile? file;
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var (items, _) = await ReadLockedAsync(cancellationToken).ConfigureAwait(false);
-            file = items.SingleOrDefault(item => item.Id == id);
-        }
-        finally { gate.Release(); }
+        var file = await database.ReadAsync(db => { ValidateSchema(db); return Find(db, id); }, cancellationToken).ConfigureAwait(false);
         if (file is null) throw new InvalidDataException("FILE_UNAVAILABLE");
-        try
+        ValidateCurrent(file);
+        return await Task.Run(() =>
         {
             if (!File.Exists(file.Path)) throw new InvalidDataException("FILE_UNAVAILABLE");
             RuntimeBundle.EnsureOrdinaryAncestors(file.Path);
-        }
-        catch (InvalidDataException) { throw; }
-        catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException
-            or NotSupportedException or BridgeException)
-        { throw new InvalidDataException("FILE_UNAVAILABLE"); }
-        return new Uri(file.Path);
+            return new Uri(file.Path);
+        }, cancellationToken).ConfigureAwait(false);
     }
-
-    public async Task<IReadOnlyList<GrantedFile>> ListAsync(CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<GrantedFile>> ListAsync(CancellationToken cancellationToken = default) => database.ReadAsync(db =>
     {
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var (items, _) = await ReadLockedAsync(cancellationToken).ConfigureAwait(false);
-            return items.ToArray();
-        }
-        finally { gate.Release(); }
-    }
-
-    private async Task<(List<GrantedFile> Items, DocumentFingerprint Fingerprint)> ReadLockedAsync(CancellationToken token)
+        ValidateSchema(db);
+        var files = db.Query("SELECT Items_key,Path,Title FROM windows_file_grants_Items WHERE scope_key='device' ORDER BY ordinal,Items_key",
+            row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)));
+        foreach (var file in files) ValidateCurrent(file);
+        return files;
+    }, cancellationToken);
+    private static GrantedFile? Find(DatabaseSession db, string id) => db.Query(
+        "SELECT Items_key,Path,Title FROM windows_file_grants_Items WHERE scope_key='device' AND Items_key=$id",
+        row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)), ("$id", id)).SingleOrDefault();
+    private static void ValidateSchema(DatabaseSession db)
     {
-        var saved = await store.ReadAsync(documentNamespace, token).ConfigureAwait(false);
-        return (Decode(saved), saved.Fingerprint);
+        var schemas = db.Query("SELECT Schema FROM windows_file_grants WHERE scope_key='device'", row => row.GetInt64(0));
+        if (schemas.Count > 0 && schemas[0] != 1)
+            throw Corrupt();
     }
-
-    private List<GrantedFile> Decode(DocumentSnapshot document)
-    {
-        if (document.Data is null)
-        {
-            if (document.Fingerprint != DocumentFingerprint.Missing) throw Corrupt();
-            return [];
-        }
-        if (document.Data.Length == 0) throw Corrupt();
-        try
-        {
-            using var json = JsonDocument.Parse(document.Data, new JsonDocumentOptions { MaxDepth = 4 });
-            CheckJson(json.RootElement);
-            RequireFields(json.RootElement, "Schema", "Items");
-            var schema = json.RootElement.GetProperty("Schema");
-            if (schema.ValueKind != JsonValueKind.Number || schema.GetRawText() != "1") throw Corrupt();
-            var rawItems = json.RootElement.GetProperty("Items");
-            if (rawItems.ValueKind != JsonValueKind.Array) throw Corrupt();
-            var ids = new HashSet<string>(StringComparer.Ordinal);
-            var result = new List<GrantedFile>(rawItems.GetArrayLength());
-            foreach (var raw in rawItems.EnumerateArray())
-            {
-                RequireFields(raw, "Id", "Path", "Title");
-                var item = new GrantedFile(Text(raw.GetProperty("Id"), 70),
-                    Text(raw.GetProperty("Path"), 32767), Text(raw.GetProperty("Title"), 32767));
-                ValidateCurrent(item);
-                if (!ids.Add(item.Id)) throw Corrupt();
-                result.Add(item);
-            }
-            return result;
-        }
-        catch (InvalidDataException) { throw; }
-        catch { throw Corrupt(); }
-    }
-
-    private async Task WriteLockedAsync(IEnumerable<GrantedFile> values, DocumentFingerprint before, CancellationToken token)
-    {
-        var items = values.ToArray();
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        var array = new JsonArray();
-        foreach (var item in items)
-        {
-            ValidateCurrent(item);
-            if (!ids.Add(item.Id)) throw Corrupt();
-            array.Add(new JsonObject { ["Id"] = item.Id, ["Path"] = item.Path, ["Title"] = item.Title });
-        }
-        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(new JsonObject { ["Schema"] = 1, ["Items"] = array });
-        var expected = DocumentFingerprint.FromBytes(bytes);
-        var written = await store.WriteAsync(documentNamespace, bytes, before, token).ConfigureAwait(false);
-        if (written != expected) throw new InvalidDataException("COMMIT_UNKNOWN");
-    }
-
     private void ValidateCurrent(GrantedFile file)
     {
         if (file.Id.Length != 70 || !file.Id.StartsWith("local:", StringComparison.Ordinal) ||
@@ -186,41 +120,5 @@ public sealed class GrantedMediaFiles
         return true;
     }
 
-    private static void CheckJson(JsonElement value)
-    {
-        if (value.ValueKind == JsonValueKind.Object)
-        {
-            var names = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var property in value.EnumerateObject())
-            {
-                if (!names.Add(property.Name)) throw Corrupt();
-                CheckJson(property.Value);
-            }
-        }
-        else if (value.ValueKind == JsonValueKind.Array)
-            foreach (var item in value.EnumerateArray()) CheckJson(item);
-    }
-
-    private static void RequireFields(JsonElement value, params string[] fields)
-    {
-        if (value.ValueKind != JsonValueKind.Object) throw Corrupt();
-        var names = value.EnumerateObject().Select(property => property.Name).ToArray();
-        if (names.Length != fields.Length || fields.Any(field => !names.Contains(field, StringComparer.Ordinal)))
-            throw Corrupt();
-    }
-
-    private static string Text(JsonElement value, int maximum)
-    {
-        if (value.ValueKind != JsonValueKind.String || value.GetString() is not { Length: > 0 } text ||
-            text.Length > maximum) throw Corrupt();
-        for (int i = 0; i < text.Length; i++)
-        {
-            char c = text[i];
-            if (c < 32 || c == 127 || char.IsLowSurrogate(c)) throw Corrupt();
-            if (char.IsHighSurrogate(c) && (++i >= text.Length || !char.IsLowSurrogate(text[i]))) throw Corrupt();
-        }
-        return text;
-    }
-
-    private static InvalidDataException Corrupt() => new("CORRUPT_DOCUMENT");
+    private static InvalidDataException Corrupt() => new("CORRUPT_STORAGE");
 }

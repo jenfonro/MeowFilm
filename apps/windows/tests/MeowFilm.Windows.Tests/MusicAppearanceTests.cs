@@ -37,7 +37,7 @@ public static class MusicAppearanceTests
             foreach (var palette in MusicAppearancePalette.Options)
                 await f.Ok("music.appearance.save", Draft(revision++, palette.Key));
             await f.Ok("music.appearance.save", Draft(revision++, "#12ABEF"));
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             var restored = await reopened.ExecuteAsync("music.appearance.get");
             Check(restored.GetProperty("ok").GetBoolean() &&
                 restored.GetProperty("settings").GetProperty("revision").GetInt64() == revision);
@@ -76,7 +76,7 @@ public static class MusicAppearanceTests
             var entry = doc["areas"]!.AsObject().Single().Value!;
             entry["colorMode"] = "corrupt";
             MusicTestStores.For(f.Store).Seed(doc);
-            await using var owner = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             Code(await owner.ExecuteAsync("music.appearance.get"), "CORRUPT_STORAGE");
             entry["colorMode"] = "fixed";
             MusicTestStores.For(f.Store).Seed(doc);
@@ -93,7 +93,7 @@ public static class MusicAppearanceTests
             int writes = MusicTestStores.For(f.Store).Writes;
             await f.Ok("music.device.settings.save", new { ifRevision = 1, volume = 37 });
             Check(MusicTestStores.For(f.Store).Writes == writes);
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             var volume = await reopened.ExecuteAsync("music.device.settings.get");
             Check(volume.GetProperty("settings").GetProperty("volume").GetInt32() == 37);
             Check((await reopened.ExecuteAsync("music.appearance.get")).GetProperty("settings")

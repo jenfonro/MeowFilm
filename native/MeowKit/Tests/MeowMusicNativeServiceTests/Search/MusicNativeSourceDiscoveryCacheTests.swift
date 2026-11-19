@@ -5,7 +5,28 @@ import MeowMusicPlatform
 import MeowMusicTestSupport
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicNativeService
+
+func musicDiscoveryTestDatabase(_ test: XCTestCase, songs: [MJ]) throws -> SQLiteDatabase {
+    let database = try storageTestDatabase(test)
+    try storageTestIO {
+        let library = MusicNativeLibraryDatabase(database: database)
+        try library.withTransaction { writer in
+            for song in songs { try writer.saveSong(song.bytes) }
+        }
+    }
+    return database
+}
+
+func musicDiscoveryTestRows(_ database: SQLiteDatabase) async throws -> MJ {
+    let values = try await database.snapshot {
+        db in try db.query("SELECT song_id FROM music_source_discovery ORDER BY song_id").compactMap {
+            try MusicStorageRecords.music_source_discovery.read(db, key: [$0["song_id"]])
+        }
+    }
+    return try MJ.parse(RuntimeJSON.encode(.array(values)))
+}
 
 private actor MusicNativeMalformedDiscoveryQQ: MusicPlatformFixtureResponding {
     func respond(_ request: MusicPlatformFixture.Request) async throws -> RuntimeValue {
@@ -51,15 +72,6 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
     }
     private func recording(_ song: MJ) -> String {
         song["songId"].string
-    }
-    private func recordsFile(_ root: URL) -> URL {
-        root.appendingPathComponent(MusicNativePersistentSourceDiscoveryCache.namespace, isDirectory: true)
-            .appendingPathComponent("checks.json")
-    }
-    private func temporaryRoot() throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        return root
     }
     /// The discovery queue fixture with the same recording saved in favorites.
     private func favoriteStore(_ song: MJ) throws -> NativeMusicTestLibrary {
@@ -138,20 +150,18 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
     }
 
     func testCheckPersistenceContainsReferencesAndEvidenceNotSongOrMusicInfoCopies() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { store })
         let value = try row(), key = stored(value.source)
+        let database = try musicDiscoveryTestDatabase(self, songs: [value.song])
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database)
         await record(cache, song: value.song, sources: [key])
         await cache.persist(retaining: [recording(value.song)])
-        let data = try XCTUnwrap(store.read(key: "checks"))
-        let document = try MJ.parse(data)
-        let saved = document["records"][recording(value.song)]["wy"]
+        let rows = try await musicDiscoveryTestRows(database)
+        let saved = try XCTUnwrap(rows.array.first)["platforms"]["wy"]
         XCTAssertEqual(saved["sourceKeys"].strings, [key])
         XCTAssertEqual(saved["observations"].array.count, 1)
-        XCTAssertNil(String(data: data, encoding: .utf8)?.range(of: "musicInfo"))
-        XCTAssertNil(String(data: data, encoding: .utf8)?.range(of: "qqSongId"))
+        XCTAssertFalse(rows.json.contains("musicInfo")); XCTAssertFalse(rows.json.contains("qqSongId"))
+        let columns = try await database.snapshot { try $0.query("PRAGMA table_info(music_source_discovery)") }
+        XCTAssertEqual(try Set(columns.map { try $0.text("name") }), ["song_id", "ordinal", "shape_mask", "null_mask", "storedBytes"])
     }
 
     func testNewerStartedEvidenceWinsEvenWhenOlderRequestFinishesLater() async throws {
@@ -186,120 +196,107 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         XCTAssertEqual(retained["wy"]?.sourceKeys.count, 1)
     }
 
-    func testPersistentCacheRoundTripsOnlyRetainedRecordingsThroughItsPlainNamespace() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+    func testPersistentCacheRoundTripsOnlyRetainedRecordingsThroughTheAppDatabase() async throws {
+        let kept = try row(), temporary = try row(id: "2", title: "Temporary recording")
+        let database = try musicDiscoveryTestDatabase(self, songs: [kept.song, temporary.song])
         func make() -> MusicNativePersistentSourceDiscoveryCache {
-            MusicNativePersistentSourceDiscoveryCache(storeFactory: {
-                try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-            })
+            MusicNativePersistentSourceDiscoveryCache(database: database)
         }
-        let kept = try row(), temporary = try row(id: "2", title: "Temporary recording"), first = make()
+        let first = make()
         await record(first, song: kept.song, sources: [stored(kept.source)])
         await record(first, song: temporary.song, sources: [stored(temporary.source)])
         let unpersisted = await entry(make(), kept.song)
         XCTAssertTrue(unpersisted.isEmpty, "records live in memory until persisted")
         await first.persist(retaining: [recording(kept.song)])
-        let reopened = make()
+        let connection = try storageTestOpen(database.dataRoot)
+        addTeardownBlock { try await connection.close() }
+        let reopened = MusicNativePersistentSourceDiscoveryCache(database: connection)
         let hit = await entry(reopened, kept.song), dropped = await entry(reopened, temporary.song)
         XCTAssertEqual(hit["wy"]?.sourceKeys, [stored(kept.source)])
         XCTAssertTrue(dropped.isEmpty, "a recording outside the retained set stays in memory only")
-        XCTAssertEqual(MusicNativePersistentSourceDiscoveryCache.namespace, "music.source-checks.v1")
-        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: recordsFile(root))) as? [String: Any])
-        XCTAssertEqual((saved["records"] as? [String: Any])?.count, 1)
+        let saved = try await musicDiscoveryTestRows(connection)
+        XCTAssertEqual(saved.array.count, 1)
     }
 
-    func testPersistentLoadedEnvelopeIsReusedAndOnlyChangedRetainedBytesAreWritten() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
+    func testPersistentLoadedRecordsAreReusedAndUnchangedReadsAndPersistsDoNotWrite() async throws {
         let clock = NativeMusicFixtureClock()
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let initial = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
         let value = try row(), source = stored(value.source)
+        let database = try musicDiscoveryTestDatabase(self, songs: [value.song])
+        let initial = MusicNativePersistentSourceDiscoveryCache(database: database)
         await record(initial, song: value.song, sources: [source])
         await initial.persist(retaining: [recording(value.song)])
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database)
         let loaded = await entry(cache, value.song)
         XCTAssertEqual(loaded["wy"]?.sourceKeys, [source])
-        // A reload would now read an absent document and lose the loaded record.
-        try document.remove(key: "checks")
+        try await database.transaction { try $0.execute("DELETE FROM music_source_discovery") }
         for platform in ["wy", "tx", "kg", "kw", "mg"] {
             await record(cache, song: value.song, platform: platform, sources: platform == "wy" ? [source] : [])
             let saved = await entry(cache, value.song)
             XCTAssertNotNil(saved[platform]); XCTAssertEqual(saved["wy"]?.sourceKeys, [source])
         }
-        XCTAssertNil(try document.read(key: "checks"), "records stay in memory until persisted")
+        let unpersisted = try await musicDiscoveryTestRows(database)
+        XCTAssertTrue(unpersisted.array.isEmpty, "records stay in memory until persisted")
         await cache.persist(retaining: [recording(value.song)])
-        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: recordsFile(root))) as? [String: Any])
-        let records = try XCTUnwrap(saved["records"] as? [String: [String: Any]])
-        XCTAssertEqual(Set((records.values.first ?? [:]).keys),
-                       ["wy", "tx", "kg", "kw", "mg"])
-        let fileID = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: recordsFile(root).path)[.systemFileNumber] as? NSNumber)
+        let saved = try await musicDiscoveryTestRows(database)
+        XCTAssertEqual(Set(try XCTUnwrap(saved.array.first)["platforms"].fields.map(\.0)), ["wy", "tx", "kg", "kw", "mg"])
+        let changes = try await database.read { try $0.query("SELECT total_changes() AS changes").first!.integer("changes") }
         await cache.persist(retaining: [recording(value.song)])
-        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: recordsFile(root).path)[.systemFileNumber] as? NSNumber,
-                       fileID, "unchanged bytes are not replaced")
+        let unchanged = try await database.read { try $0.query("SELECT total_changes() AS changes").first!.integer("changes") }
+        XCTAssertEqual(unchanged, changes, "unchanged rows are not replaced")
         clock.advance(30 * 24 * 60 * 60)
         let old = await entry(cache, value.song)
         XCTAssertEqual(old["wy"]?.sourceKeys, [source]); XCTAssertEqual(Set(old.keys), ["wy", "tx", "kg", "kw", "mg"])
-        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: recordsFile(root).path)[.systemFileNumber] as? NSNumber,
-                       fileID, "reading old positive records does not write")
+        let readChanges = try await database.read { try $0.query("SELECT total_changes() AS changes").first!.integer("changes") }
+        XCTAssertEqual(readChanges, changes, "reading old positive records does not write")
     }
 
     func testPersistentWriteFailureKeepsMemoryAndFailedLoadsCanRetry() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
         let value = try row(), source = stored(value.source), retained = [recording(value.song)]
+        let database = try musicDiscoveryTestDatabase(self, songs: [value.song])
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database)
         await record(cache, song: value.song, sources: [source])
         await cache.persist(retaining: retained)
-        let committed = try Data(contentsOf: recordsFile(root))
+        let committed = try await musicDiscoveryTestRows(database)
         await record(cache, song: value.song, platform: "tx", sources: [])
-        // A directory in place of the document makes reads and replacement fail.
-        try FileManager.default.removeItem(at: recordsFile(root))
-        try FileManager.default.createDirectory(at: recordsFile(root), withIntermediateDirectories: false)
+        try storageTestReadOnly(database, true)
         await cache.persist(retaining: retained)
         let memory = await entry(cache, value.song)
         XCTAssertEqual(Set(memory.keys), ["wy", "tx"], "a failed write keeps serving memory")
-        try FileManager.default.removeItem(at: recordsFile(root))
-        try committed.write(to: recordsFile(root))
+        let unchanged = try await musicDiscoveryTestRows(database)
+        XCTAssertEqual(unchanged, committed)
+        try storageTestReadOnly(database, false)
         await cache.persist(retaining: retained)
-        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
+        let reopened = MusicNativePersistentSourceDiscoveryCache(database: database)
         let durable = await entry(reopened, value.song)
         XCTAssertEqual(Set(durable.keys), ["wy", "tx"], "the next persist retries the failed write")
-        let bytes = try Data(contentsOf: recordsFile(root))
-        try FileManager.default.removeItem(at: recordsFile(root))
-        try FileManager.default.createDirectory(at: recordsFile(root), withIntermediateDirectories: false)
-        let fresh = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
+        try await database.transaction { try $0.execute("ALTER TABLE music_source_discovery RENAME TO unavailable_discovery") }
+        let fresh = MusicNativePersistentSourceDiscoveryCache(database: database)
         let miss = await entry(fresh, value.song)
         XCTAssertTrue(miss.isEmpty)
-        try FileManager.default.removeItem(at: recordsFile(root))
-        try bytes.write(to: recordsFile(root))
+        try await database.transaction { try $0.execute("ALTER TABLE unavailable_discovery RENAME TO music_source_discovery") }
         let recovered = await entry(fresh, value.song)
         XCTAssertEqual(recovered, durable, "a failed load must remain retryable")
     }
 
     func testPersistentByteBudgetEvictionSurvivesReopening() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
         let clock = NativeMusicFixtureClock(), maximum = 20_000
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document }, maximumBytes: maximum)
-        var songs: [MJ] = []
+        let songs = try (0..<60).map { try row(id: String($0), title: "Persistent recording \($0)").song }
+        let database = try musicDiscoveryTestDatabase(self, songs: songs)
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database, maximumBytes: maximum)
         for index in 0..<60 {
-            let value = try row(id: String(index), title: "Persistent recording \(index)")
-            songs.append(value.song)
-            await record(cache, song: value.song, at: clock.now().timeIntervalSince1970 * 1000,
-                         sources: [stored(value.source)])
+            await record(cache, song: songs[index], at: clock.now().timeIntervalSince1970 * 1000,
+                         sources: [stored(try XCTUnwrap(songs[index]["sources"].array.first))])
             clock.advance(1)
         }
         let cachedOld = await entry(cache, songs[0]), cachedLatest = await entry(cache, songs[59])
         XCTAssertTrue(cachedOld.isEmpty)
         XCTAssertEqual(cachedLatest["wy"]?.sourceKeys.count, 1)
         await cache.persist(retaining: songs.map(recording))
-        let data = try XCTUnwrap(document.read(key: "checks"))
-        XCTAssertLessThanOrEqual(data.count, maximum)
-        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document }, maximumBytes: maximum)
+        let bytes = try await database.snapshot { try $0.query("SELECT coalesce(sum(storedBytes),0) AS bytes FROM music_source_discovery").first!.integer("bytes") }
+        XCTAssertLessThanOrEqual(bytes, maximum)
+        let connection = try storageTestOpen(database.dataRoot)
+        addTeardownBlock { try await connection.close() }
+        let reopened = MusicNativePersistentSourceDiscoveryCache(database: connection, maximumBytes: maximum)
         let old = await entry(reopened, songs[0]), latest = await entry(reopened, songs[59])
         XCTAssertTrue(old.isEmpty)
         XCTAssertEqual(latest["wy"]?.sourceKeys.count, 1)
@@ -654,13 +651,11 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
     }
 
     func testOnlyLibraryRecordingsReachDiskAndSavingPersistsEarlierMemory() async throws {
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        func reopened() -> MusicNativePersistentSourceDiscoveryCache {
-            MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
-        }
         let seed = try MusicNativeCandidateDiscoveryFixture.song()
+        let database = try musicDiscoveryTestDatabase(self, songs: [seed])
+        func reopened() -> MusicNativePersistentSourceDiscoveryCache {
+            MusicNativePersistentSourceDiscoveryCache(database: database)
+        }
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: seed), cache = reopened()
         let service = try await NativeMusicFixture.service(store,
             scripts: MusicNativeCandidateDiscoveryScripts(),
@@ -672,7 +667,8 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         await service.flushSourceDiscoveryPersist()
         let temporary = await entry(reopened(), seed)
         XCTAssertTrue(temporary.isEmpty, "a temporary queue song is not written to disk")
-        XCTAssertTrue((try document.read(key: "checks")).map { (try? MJ.parse($0)["records"].fields.isEmpty) == true } ?? true)
+        let rows = try await musicDiscoveryTestRows(database)
+        XCTAssertTrue(rows.array.isEmpty)
         let collections = try await service.collections()
         var favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
         favorites = try await service.editPlaylist(favorites, name: nil, refs: [.init(kind: .queue, id: "entry-1")], order: nil)
@@ -688,21 +684,16 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         await service.close()
     }
 
-    func testPersistentReadFailureServesMemoryAndNeverOverwritesTheUnreadDocument() async throws {
+    func testPersistentReadFailureServesMemoryAndNeverOverwritesUnreadRows() async throws {
         let seed = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try favoriteStore(seed)
-        let root = try temporaryRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let initial = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
+        let database = try musicDiscoveryTestDatabase(self, songs: [seed])
+        let initial = MusicNativePersistentSourceDiscoveryCache(database: database)
         await record(initial, song: seed, at: NativeMusicFixture.date.timeIntervalSince1970 * 1000 - 3_600_000, sources: [])
         await initial.persist(retaining: [recording(seed)])
-        let bytes = try Data(contentsOf: recordsFile(root))
-        // A second hard link makes the store refuse to read the document, while a
-        // replacement write would still succeed.
-        let alias = root.appendingPathComponent("records-alias.json")
-        try FileManager.default.linkItem(at: recordsFile(root), to: alias)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
+        let committed = try await musicDiscoveryTestRows(database)
+        try await database.transaction { try $0.execute("ALTER TABLE music_source_discovery RENAME TO unavailable_discovery") }
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database)
         let scripts = MusicNativeCandidateDiscoveryScripts()
         let service = try await NativeMusicFixture.service(store,
             scripts: scripts,
@@ -713,14 +704,15 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         XCTAssertEqual(Set(snapshot.track.sources.map(\.platform)), ["wy", "tx", "kg", "kw", "mg"])
         let queue = try await service.queue(), memory = await entry(cache, seed)
         XCTAssertEqual(queue.revision, 1)
-        XCTAssertEqual(Set(memory.keys), ["wy", "tx", "kg", "kw", "mg"], "an unreadable document does not hide this run's checks")
+        XCTAssertEqual(Set(memory.keys), ["wy", "tx", "kg", "kw", "mg"], "unreadable rows do not hide this run's checks")
         let target = try XCTUnwrap(MusicNativeCandidateDiscoveryFixture.target(snapshot))
         let candidate = try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
         XCTAssertEqual(candidate.occurrenceId, "entry-1")
         await session.close(retainingAttemptID: nil)
         await service.flushSourceDiscoveryPersist()
-        XCTAssertEqual(try Data(contentsOf: recordsFile(root)), bytes, "a document that was never merged is not overwritten")
-        try FileManager.default.removeItem(at: alias)
+        try await database.transaction { try $0.execute("ALTER TABLE unavailable_discovery RENAME TO music_source_discovery") }
+        let unchanged = try await musicDiscoveryTestRows(database)
+        XCTAssertEqual(unchanged, committed, "rows that were never merged are not overwritten")
         let merged = await entry(cache, seed)
         XCTAssertEqual(merged["wy"]?.sourceKeys.isEmpty, false, "newer memory evidence wins over the older stored check")
         await service.close()
@@ -729,11 +721,9 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
     func testPersistentWriteFailureDoesNotRejectDiscoveryOrPlayback() async throws {
         let seed = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try favoriteStore(seed)
-        // An absent base reads as no document but cannot accept a replacement.
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let document = try DocumentStore(baseURL: root, namespace: MusicNativePersistentSourceDiscoveryCache.namespace)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
+        let database = try musicDiscoveryTestDatabase(self, songs: [seed])
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database)
+        try storageTestReadOnly(database, true)
         let scripts = MusicNativeCandidateDiscoveryScripts()
         let service = try await NativeMusicFixture.service(store,
             scripts: scripts,
@@ -746,13 +736,14 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
         let queue = try await service.queue(), memory = await entry(cache, seed)
         XCTAssertEqual(queue.revision, 1)
         XCTAssertEqual(Set(memory.keys), ["wy", "tx", "kg", "kw", "mg"], "a failed write keeps serving memory")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+        let rows = try await musicDiscoveryTestRows(database)
+        XCTAssertTrue(rows.array.isEmpty)
         let target = try XCTUnwrap(MusicNativeCandidateDiscoveryFixture.target(snapshot))
         let candidate = try await session.resolve(target, attemptID: UUID().uuidString.lowercased())
         XCTAssertEqual(candidate.occurrenceId, "entry-1")
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try storageTestReadOnly(database, false)
         await cache.persist(retaining: [recording(seed)])
-        let reopened = MusicNativePersistentSourceDiscoveryCache(storeFactory: { document })
+        let reopened = MusicNativePersistentSourceDiscoveryCache(database: database)
         let durable = await entry(reopened, seed)
         XCTAssertEqual(Set(durable.keys), ["wy", "tx", "kg", "kw", "mg"], "the library recording is written once storage works")
         await session.close(retainingAttemptID: nil); await service.close()
@@ -761,9 +752,9 @@ final class MusicNativeSourceDiscoveryCacheTests: XCTestCase {
     func testPersistentStoreFailureIsAMissAndDoesNotRejectPlaybackDiscovery() async throws {
         let seed = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: seed)
-        let cache = MusicNativePersistentSourceDiscoveryCache(storeFactory: {
-            throw DocumentStoreError.storageFailure
-        })
+        let database = try musicDiscoveryTestDatabase(self, songs: [seed])
+        try await database.close()
+        let cache = MusicNativePersistentSourceDiscoveryCache(database: database)
         let service = try await NativeMusicFixture.service(store,
             platform: NativeMusicFixture.routes(primary: MusicNativeCandidateDiscoveryQQ(), others: MusicNativeDiscoveryPlatforms()),
             sourceDiscovery: cache)

@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -56,7 +57,7 @@ public static class FilmCatSettingsTests
     private static async Task RawInputs()
     {
         var store = new Store();
-        store.Documents[CatNamespace] = Encoding.UTF8.GetBytes("""
+        store.CatBytes = Encoding.UTF8.GetBytes("""
             {"version":1,"port":{"future":1},"providers":false,"mappings":17,"future":1e400,"future":9007199254740993,
              "scripts":[{"installationId":"cat","name":"网络","sourceType":"network","sourceUrl":"https://fixture.invalid/old.js",
               "localPath":{"unused":true},"localHash":false,"enabled":true,"inputRevision":1,"future":0.12345678901234567890123456789},
@@ -91,8 +92,8 @@ public static class FilmCatSettingsTests
         Check(script.GetProperty("localPath").GetString() == first.Path &&
             script.GetProperty("localHash").GetString() == Hash(first.Path) &&
             script.GetProperty("name").GetString() == "文件猫" && script.GetProperty("sourceUrl").ValueKind == JsonValueKind.Null &&
-            !Encoding.UTF8.GetString(store.Documents[CatNamespace]).Contains("module.exports", StringComparison.Ordinal) &&
-            !store.Documents.ContainsKey(FilmSourceService.DocumentNamespace),
+            !Encoding.UTF8.GetString(store.CatBytes).Contains("module.exports", StringComparison.Ordinal) &&
+            !store.HasSourceSnapshot,
             "native settings contain selected path/hash, never a second source body or video configuration owner");
         await service.EditCatAsync("cat", "改名");
         Check(service.Cats.Single().InputRevision == 1 && Input(store).GetProperty("localHash").GetString() == Hash(first.Path),
@@ -118,7 +119,7 @@ public static class FilmCatSettingsTests
         using var file = new SourceFile("module.exports = {};");
         await using var service = new FilmSourceService(runtime, store);
         await service.ImportNetworkAsync("已有", "https://fixture.invalid/kept.js", "cat");
-        byte[] before = store.Documents[CatNamespace].ToArray();
+        byte[] before = store.CatBytes.ToArray();
         await Code(() => service.ImportLocalAsync("覆盖", file.Path, "cat"), "STORAGE_CONFLICT");
         await Code(() => service.ImportNetworkAsync("覆盖", "https://fixture.invalid/new.js", "cat"), "STORAGE_CONFLICT");
         await Code(() => service.EditCatAsync("cat", "缺文件", "local", null, null), "INVALID_ARGUMENT");
@@ -131,7 +132,7 @@ public static class FilmCatSettingsTests
             throw new InvalidOperationException("Expected cancellation");
         }
         catch (OperationCanceledException) { }
-        Check(store.Documents[CatNamespace].SequenceEqual(before) && service.Cats.Single().Name == "已有" &&
+        Check(store.CatBytes.SequenceEqual(before) && service.Cats.Single().Name == "已有" &&
             runtime.Calls.Count == 0, "failed validation duplicate IDs and pre-admission cancellation leave intent unchanged");
     }
 
@@ -145,21 +146,14 @@ public static class FilmCatSettingsTests
             await using var service = new FilmSourceService(runtime, store);
             await service.ImportNetworkAsync("已有", "https://fixture.invalid/kept.js", "cat");
             runtime.State = RuntimeConnectionState.Ready;
-            byte[] before = store.Documents[CatNamespace].ToArray();
-            store.OnWrite = (_, _, _, _) =>
+            byte[] before = store.CatBytes.ToArray();
+            store.BeforeWrite = _ =>
             {
-                if (fault == "receipt") return Task.FromResult(DocumentFingerprint.Missing);
-                if (fault == "conflict")
-                {
-                    store.Documents[CatNamespace] = Encoding.UTF8.GetBytes("""
-                        {"version":1,"port":0,"providers":{},"mappings":[],"scripts":[
-                         {"installationId":"external","name":"外部","sourceType":"network","sourceUrl":"https://fixture.invalid/external.js",
-                          "localPath":null,"localHash":null,"enabled":false,"inputRevision":1}]}
-                        """);
-                }
-                return Task.FromException<DocumentFingerprint>(new DocumentStoreException(
-                    fault == "conflict" ? DocumentStoreError.Conflict : DocumentStoreError.Storage));
+                if(fault=="conflict")store.CatBytes=JsonSerializer.SerializeToUtf8Bytes(new {version=1,port=0,providers=new{},mappings=Array.Empty<object>(),
+                    scripts=new[]{new {installationId="external",name="外部",sourceType="network",sourceUrl="https://fixture.invalid/external.js",localPath=(string?)null,localHash=(string?)null,enabled=false,inputRevision=1}}});
+                return Task.CompletedTask;
             };
+            store.WriteError=fault=="conflict"?DocumentStoreError.Conflict:DocumentStoreError.Storage;
             try
             {
                 Task change = operation switch
@@ -180,7 +174,7 @@ public static class FilmCatSettingsTests
             Check(service.Cats.Single().Name == "已有" && runtime.Captures == 0 && runtime.Calls.Count == 0,
                 "no uncommitted input is published or notified");
             Check(fault == "conflict" ? Input(store).GetProperty("installationId").GetString() == "external" :
-                store.Documents[CatNamespace].SequenceEqual(before), "a conflicting writer is never overwritten");
+                store.CatBytes.SequenceEqual(before), "a conflicting writer is never overwritten");
         }
     }
 
@@ -190,12 +184,12 @@ public static class FilmCatSettingsTests
         var runtime = new Runtime(store);
         var admitted = Signal(); var release = Signal();
         using var cancel = new CancellationTokenSource();
-        store.OnWrite = async (ns, data, expected, token) =>
+        store.Writing = async token =>
         {
             Check(!token.CanBeCanceled, "admitted native storage receives owner-controlled settlement, not the page token");
             admitted.TrySetResult();
             await release.Task;
-            return store.Commit(ns, data, expected);
+
         };
         await using var service = new FilmSourceService(runtime, store);
         var save = service.ImportNetworkAsync("已提交", "https://fixture.invalid/cat.js", "cat", cancel.Token);
@@ -259,11 +253,7 @@ public static class FilmCatSettingsTests
         var runtime = new Runtime(store);
         await using (var service = new FilmSourceService(runtime, store))
         {
-            store.OnWrite = (ns, bytes, expected, _) =>
-            {
-                store.Commit(ns, bytes, expected);
-                return Task.FromException<DocumentFingerprint>(new DocumentStoreException(DocumentStoreError.Storage));
-            };
+            store.AfterWrite=()=>throw new DocumentStoreException(DocumentStoreError.Storage);
             try
             {
                 await service.ImportNetworkAsync("实际提交", "https://fixture.invalid/committed.js", "cat");
@@ -273,7 +263,7 @@ public static class FilmCatSettingsTests
             Check(service.Cats.Count == 0 && runtime.Captures == 0 && runtime.Calls.Count == 0,
                 "an uncertain native receipt does not fabricate success or replay the operation through Node");
         }
-        store.OnWrite = null;
+        store.AfterWrite = null;
         await using var reopened = new FilmSourceService(runtime, store);
         await reopened.InitializeAsync();
         await Code(() => reopened.ImportNetworkAsync("重复", "https://fixture.invalid/replayed.js", "cat"), "STORAGE_CONFLICT");
@@ -369,32 +359,24 @@ public static class FilmCatSettingsTests
         public void Dispose() => File.Delete(Path);
     }
 
-    private sealed class Store : IDocumentStore
+    private sealed class Store : NativeTestDatabase
     {
-        internal readonly Dictionary<string, byte[]> Documents = [];
-        internal Func<string, ReadOnlyMemory<byte>, DocumentFingerprint, CancellationToken, Task<DocumentFingerprint>>? OnWrite;
+        internal DocumentStoreError? WriteError;
+        internal Func<CancellationToken,Task>? Writing;
         internal bool Disposed;
-        internal JsonElement Cat => JsonSerializer.Deserialize<JsonElement>(Documents[CatNamespace]);
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal byte[] CatBytes
         {
-            token.ThrowIfCancellationRequested();
-            Check(ns is CatNamespace or FilmSourceService.DocumentNamespace, "known Film storage namespace");
-            Documents.TryGetValue(ns, out var bytes);
-            return Task.FromResult(new DocumentSnapshot(bytes?.ToArray(),
-                bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
+            get=>JsonSerializer.SerializeToUtf8Bytes(Project(FilmStorageRecords.Cat,"device"));
+            set=>Seed(FilmStorageRecords.Cat,JsonNode.Parse(value)!.AsObject(),"device");
         }
-        internal DocumentFingerprint Commit(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected)
-        {
-            Documents.TryGetValue(ns, out var before);
-            if ((before is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(before)) != expected)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
-            Documents[ns] = data.ToArray();
-            return DocumentFingerprint.FromBytes(data.Span);
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default) =>
-            OnWrite?.Invoke(ns, data, expected, token) ?? Task.FromResult(Commit(ns, data, expected));
-        public ValueTask DisposeAsync() { Disposed = true; return ValueTask.CompletedTask; }
+        internal bool HasSourceSnapshot=>Project(FilmStorageRecords.Sources,"device") is not null;
+        internal JsonElement Cat=>JsonSerializer.Deserialize<JsonElement>(CatBytes);
+        public override Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)=>base.WriteAsync(db=>{
+                Writing?.Invoke(CancellationToken.None).GetAwaiter().GetResult();
+                if(WriteError is { } error)throw new DocumentStoreException(error);return write(db);
+            },token,retainedBytes,commit);
+        public override async ValueTask DisposeAsync(){Disposed=true;await base.DisposeAsync();}
     }
 
     private sealed record Call(string Method, JsonElement Input);

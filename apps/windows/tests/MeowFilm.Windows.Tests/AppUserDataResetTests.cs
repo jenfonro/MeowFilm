@@ -1,5 +1,7 @@
 using System.IO;
+using System.Text.Json;
 using MeowFilm.AppHost;
+using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
@@ -14,8 +16,8 @@ public static partial class AppUserDataResetTests
         yield return new("User data reset: release failure retains data and cannot reopen", ReleaseFailure);
         yield return new("User data reset: deletion failure retries without reviving or releasing old owners twice", ClearFailure);
         yield return new("User data reset: replacement failure does not erase newly created data on retry", ReopenFailure);
-        yield return new("User data reset: both roots wait for accepted cache writes and preserve replacement data", CacheDrain);
-        yield return new("User data reset: real aggregate closes before all native owners and clears both roots",
+        yield return new("User data reset: single root waits for accepted cache writes and preserves replacement data", CacheDrain);
+        yield return new("User data reset: real aggregate closes before all native owners and clears the root",
             () => MusicQualityConsumerTests.Sta(NativeOwnersReset));
     }
 
@@ -99,24 +101,26 @@ public static partial class AppUserDataResetTests
         Directory.CreateDirectory(paths.Documents);
         Directory.CreateDirectory(paths.Caches);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var owner = new UserDataDirectory(paths.Documents, paths.Caches);
+        var owner = new UserDataDirectory(paths.Documents);
         owner.Open();
-        var business = new LocalDocumentStore(paths.Documents, ["test.business"]);
-        var backing = new HeldCacheBacking(new LocalDocumentStore(paths.Caches, ["test.cache"]));
-        var cache = new CacheDocumentStore(() => backing);
-        Task? resetting = null;
+        var business = new NativeDatabase(paths.Documents);
+        var backing = new HeldCacheBacking(business);
+        var cache = new TypedRecordRepository(backing, MusicHomeSnapshotStore.Namespace, HomeStorageRecords.Home);
+        Task? resetting = null, writing = null;
         try
         {
-            cache.Save("test.cache", "synthetic late cache"u8.ToArray());
+            await business.WriteAsync(db => db.CommitRevision("reset-test", StorageRevision.Empty, Guid.NewGuid().ToString("D")));
+            writing = cache.UpdateAsync(_ => JsonSerializer.SerializeToElement(new { platform = "wy", pages = new[] {
+                new { platform = "wy", entries = Array.Empty<object>() } } }));
             await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await business.WriteAsync("test.business", "synthetic business"u8.ToArray(), DocumentFingerprint.Missing);
-            string businessFile = Directory.GetFiles(paths.Documents, "document.json", SearchOption.AllDirectories).Single();
+            string businessFile = business.DatabasePath!;
             var shutdown = new AppShutdown([], [
                 new(async () =>
                 {
                     var closing = cache.DisposeAsync().AsTask();
                     entered.TrySetResult();
                     await closing;
+                    await backing.DisposeAsync();
                 }),
                 new(() => business.DisposeAsync())
             ]);
@@ -132,7 +136,7 @@ public static partial class AppUserDataResetTests
                 () =>
                 {
                     Check(!Directory.Exists(paths.Documents) && !Directory.Exists(paths.Caches),
-                        "Both old roots must be gone before replacement.");
+                        "The current root must be gone before replacement.");
                     owner.Open();
                     Directory.CreateDirectory(paths.Documents);
                     Directory.CreateDirectory(paths.Caches);
@@ -145,15 +149,16 @@ public static partial class AppUserDataResetTests
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(!resetting.IsCompleted && !shutdown.IsReleased && !backing.Committed && !backing.Disposed);
             Check(File.Exists(businessFile) && Directory.Exists(paths.Caches) &&
-                File.Exists(Path.Combine(parent, ".aggregate.reset-pending")), "Slow cache disposal must retain both roots and intent.");
-            using (var blocked = new UserDataDirectory(paths.Documents, paths.Caches))
+                File.Exists(Path.Combine(parent, ".aggregate.reset-pending")), "Slow cache disposal must retain the root and intent.");
+            using (var blocked = new UserDataDirectory(paths.Documents))
             {
                 try { blocked.Open(); throw new InvalidOperationException("Pending reset admitted a new generation."); }
                 catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Storage) { }
             }
-            try { cache.Save("test.cache", new byte[] { 1 }); throw new InvalidOperationException("Retiring cache admitted a write."); }
-            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Closed) { }
+            try { await cache.UpdateAsync(_ => default); throw new InvalidOperationException("Retiring cache admitted a write."); }
+            catch (ObjectDisposedException) { }
             backing.Release.TrySetResult();
+            await writing.WaitAsync(TimeSpan.FromSeconds(5));
             await resetting.WaitAsync(TimeSpan.FromSeconds(5));
             await reset.ResetAsync();
             Check(reopened == 1 && File.ReadAllText(Path.Combine(paths.Documents, "new")) == "new business" &&
@@ -165,6 +170,8 @@ public static partial class AppUserDataResetTests
             backing.Release.TrySetResult();
             if (resetting is not null)
                 try { await resetting; } catch { /* The original failure remains with the test. */ }
+            if (writing is not null)
+                try { await writing; } catch { /* The original failure remains with the test. */ }
             await cache.DisposeAsync();
             await backing.DisposeAsync();
             await business.DisposeAsync();
@@ -173,26 +180,23 @@ public static partial class AppUserDataResetTests
         }
     }
 
-    private sealed class HeldCacheBacking(LocalDocumentStore inner) : IDocumentStore
+    private sealed class HeldCacheBacking(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool Committed, Disposed;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            Entered.TrySetResult();
-            await Release.Task;
-            var receipt = await inner.WriteAsync(ns, data, expected, token);
-            Committed = receipt == DocumentFingerprint.FromBytes(data.Span);
-            return receipt;
+            var receipt = await base.WriteAsync(db =>
+            {
+                Entered.TrySetResult();
+                Release.Task.GetAwaiter().GetResult();
+                return write(db);
+            }, token, retainedBytes, commit);
+            Committed = true; return receipt;
         }
-        public async ValueTask DisposeAsync()
-        {
-            await inner.DisposeAsync();
-            Disposed = true;
-        }
+        public override async ValueTask DisposeAsync() { await base.DisposeAsync(); Disposed = true; }
     }
 
     private sealed class Participant(Func<Task> abort) : IDesktopShutdownParticipant

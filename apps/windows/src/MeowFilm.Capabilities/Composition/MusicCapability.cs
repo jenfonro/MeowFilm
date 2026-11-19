@@ -21,10 +21,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private readonly GrantedMediaFiles files;
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
-    private readonly CacheDocumentStore cacheStore;
+    private readonly IStorageDatabase database;
     private readonly PlaybackCache.MusicPresentationCache presentationCache;
     internal MeowFilm.Desktop.Artwork.ArtworkService ArtworkLoader { get; }
-    private readonly bool ownsCacheStore;
+    private readonly bool ownsPresentationCache;
     private readonly CancellationTokenSource lifetime = new();
     internal MusicPresentation Presentation { get; }
     private readonly MusicPlaybackPresentation playbackPresentation;
@@ -41,33 +41,31 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
     private string? openedEntry;
 
-    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicLibraryStore libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null,
-        CacheDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
-        : this(new MusicNativeApplication(store, libraryStore, runtime, null, null,
-                cacheStore: cacheStore, presentationCacheRoot: presentationCacheRoot),
-            store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot, cacheStore: cacheStore) { }
+    public MusicCapability(IRuntimeClient runtime, IStorageDatabase store, IMusicLibraryStore libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null)
+        : this(new MusicNativeApplication(store, libraryStore, runtime),
+            store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot) { }
 
-    public MusicCapability(IMusicApplication application, IDocumentStore store, NativeAudioPlayback playback,
-        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
-        : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot, cacheStore) { }
+    public MusicCapability(IMusicApplication application, IStorageDatabase store, NativeAudioPlayback playback,
+        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
+        : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot) { }
 
-    public MusicCapability(IRuntimeClient runtime, IDocumentStore store, IMusicLibraryStore libraryStore, IMusicPlayback playback,
+    public MusicCapability(IRuntimeClient runtime, IStorageDatabase store, IMusicLibraryStore libraryStore, IMusicPlayback playback,
         IMusicDialogs? dialogs = null)
         : this(new MusicNativeApplication(store, libraryStore, runtime), store, playback, dialogs) { }
 
-    public MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
-        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null, CacheDocumentStore? cacheStore = null)
-        : this(application, store, playback, null, dialogs, cacheStore, playbackCacheRoot) { }
+    public MusicCapability(IMusicApplication application, IStorageDatabase store, IMusicPlayback playback,
+        IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
+        : this(application, store, playback, null, dialogs, playbackCacheRoot) { }
 
-    internal MusicCapability(IMusicApplication application, IDocumentStore store, IMusicPlayback playback,
+    internal MusicCapability(IMusicApplication application, IStorageDatabase store, IMusicPlayback playback,
         PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
-        CacheDocumentStore? cacheStore = null, string? playbackCacheRoot = null)
+        string? playbackCacheRoot = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
-        this.cacheStore = cacheStore ?? new CacheDocumentStore();
-        ownsCacheStore = cacheStore is null;
-        presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new();
+        database = store;
+        ownsPresentationCache = application is not MusicNativeApplication;
+        presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new(store);
         ArtworkLoader = new(byteCache: presentationCache, loadCompleted:
             application is MusicNativeApplication artworkOwner ? artworkOwner.ArtworkLoadCompletedAsync : null);
         if (application is MusicNativeApplication repositoryOwner)
@@ -75,10 +73,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         Presentation = new(this);
         playbackPresentation = new(this, property => Changed(property));
         audioFileCache = playbackCache ?? (playbackCacheRoot is null ? null :
-            new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, this.cacheStore));
-        persistentChorus = new(this.cacheStore);
-        homeSnapshotStore = new(this.cacheStore);
-        files = new(store, "music.files.v2", [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
+            new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, store));
+        persistentChorus = new(store);
+        homeSnapshotStore = new(store);
+        files = new(store, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
         vipPage = new(application, System.Windows.Threading.Dispatcher.CurrentDispatcher);
@@ -1061,7 +1059,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         catch (Exception error) { failure ??= error; }
         try { await application.PrepareShutdownAsync(); }
         catch (Exception error) { failure ??= error; }
-        await cacheStore.DrainAsync();
+        await database.DrainAsync();
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
     public ValueTask DisposeAsync()
@@ -1128,9 +1126,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (application is MusicNativeApplication repositoryOwner)
             repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
         try { await ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-        if (application is not MusicNativeApplication)
+        if (ownsPresentationCache)
             try { await presentationCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-        if (ownsCacheStore) await cacheStore.DisposeAsync();
         UnsubscribeSearch();
         UnsubscribeDiscovery();
         ReleaseRecommendations();
@@ -1166,9 +1163,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
                 repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
             try { await ArtworkLoader.DisposeAsync(); }
             catch (Exception error) { failure ??= error; }
-            if (application is not MusicNativeApplication)
-                try { await presentationCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-            if (ownsCacheStore) await cacheStore.DisposeAsync();
+            if (ownsPresentationCache)
+            try { await presentationCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
             // The capability owns its application. Runtime, store and playback remain App-owned.
         }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();

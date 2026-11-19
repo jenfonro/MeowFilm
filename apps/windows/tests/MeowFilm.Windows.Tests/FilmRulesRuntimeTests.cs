@@ -46,8 +46,8 @@ public static class FilmRulesRuntimeTests
                 JsonSerializer.SerializeToElement(new { rules = new FilmRuleSet() }, FilmRuleService.Json));
             Check(!denied.GetProperty("ok").GetBoolean() && denied.GetProperty("code").GetString() == "PERMISSION_DENIED",
                 "the real runtime refuses a second authoritative rules writer");
-            Check(savedRevision != original && savedRevision == DocumentFingerprint.FromBytes(
-                JsonSerializer.SerializeToUtf8Bytes(draft, FilmRuleService.Json)).Sha256 &&
+            Check(savedRevision != original && savedRevision == Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(
+                JsonSerializer.SerializeToUtf8Bytes(draft, FilmRuleService.Json))) &&
                 applied.GetProperty("revision").GetString()!.Length > 0 && rules.GetSavedSnapshot().EpisodeRules.Count == 0 &&
                 (await rules.ProcessAsync(new(FilmRuleSection.Search, "[草稿]银河"))).ProcessedText == "银河",
                 "successful save commits exactly the whole draft and saved preview uses that owner snapshot");

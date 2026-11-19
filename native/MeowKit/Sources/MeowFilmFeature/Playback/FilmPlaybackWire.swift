@@ -286,28 +286,34 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
 
     init(_ value: RuntimeValue) throws {
         let fields = try value.filmRequiredObject()
-        ruleOrder = (fields["ruleOrder"]?.filmArray ?? []).compactMap {
-            $0.filmText.flatMap(FilmPreferenceDimension.init(rawValue:))
+        guard Set(fields.keys) == ["ruleOrder", "panOrder", "keywords", "siteCleanKeywords", "iosAutoPrepare", "metadataViewProvider"],
+              let ruleValues = fields["ruleOrder"]?.filmArray, let panValues = fields["panOrder"]?.filmArray,
+              let keywordValues = fields["keywords"]?.filmArray, let cleanValues = fields["siteCleanKeywords"]?.filmArray,
+              case .bool(let autoPrepare)? = fields["iosAutoPrepare"] else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
+        ruleOrder = try ruleValues.map {
+            guard let text = $0.filmText, let value = FilmPreferenceDimension(rawValue: text) else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
+            return value
         }
-        panOrder = (fields["panOrder"]?.filmArray ?? []).compactMap {
-            $0.filmText.flatMap(FilmPanProvider.init(rawValue:))
+        panOrder = try panValues.map {
+            guard let text = $0.filmText, let value = FilmPanProvider(rawValue: text) else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
+            return value
         }
-        keywords = (fields["keywords"]?.filmArray ?? []).compactMap(\.filmText)
-        siteCleanKeywords = (fields["siteCleanKeywords"]?.filmArray ?? []).compactMap(\.filmText)
-        iosAutoPrepare = fields["iosAutoPrepare"] == .bool(true)
-        if let value = fields["metadataViewProvider"] {
-            guard let provider = value.filmText.flatMap(FilmMetadataProvider.init(rawValue:)) else {
-                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
-            }
-            metadataViewProvider = provider
-        } else { metadataViewProvider = .tmdb }
+        func strings(_ values: [RuntimeValue]) throws -> [String] {
+            try values.map { guard let value = $0.filmText else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }; return value }
+        }
+        guard Set(ruleOrder).count == ruleOrder.count, Set(panOrder).count == panOrder.count else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
+        keywords = try strings(keywordValues); siteCleanKeywords = try strings(cleanValues)
+        iosAutoPrepare = autoPrepare
+        guard let provider = fields["metadataViewProvider"]?.filmText.flatMap(FilmMetadataProvider.init(rawValue:)) else {
+            throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+        }
+        metadataViewProvider = provider
         original = fields
     }
 
     public static func == (lhs: Self, rhs: Self) -> Bool { lhs.value == rhs.value }
 
-    /// Only deliberate edits replace raw JSON. Unconsumed entries, unknown
-    /// types and missing fields survive an unrelated settings edit.
+    /// Field edits preserve other validated preferences for transactional rebase.
     var editedValues: RuntimeObject {
         let typed: RuntimeObject = [
             "ruleOrder": .array(ruleOrder.map { .string($0.rawValue) }),

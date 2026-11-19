@@ -12,10 +12,10 @@ struct MusicAccountChorusCache {
         let duration: Double
     }
     struct Entry: Codable { let key: Key; let point: MusicChorusPoint; let expires: Date }
-    private let store: DocumentStore?
+    private let database: SQLiteDatabase?
     private var loaded = false
     private var entries: [Entry] = []
-    init(store: DocumentStore?) { self.store = store }
+    init(database: SQLiteDatabase?) { self.database = database }
     mutating func value(_ key: Key, actualDuration: Double, at now: Date) -> MusicChorusPoint? {
         load(at: now)
         return entries.first { $0.key == key &&
@@ -26,15 +26,29 @@ struct MusicAccountChorusCache {
         entries.removeAll { $0.key == key }
         entries.append(.init(key: key, point: point, expires: now.addingTimeInterval(30 * 86_400)))
         entries = Array(entries.suffix(100))
-        if let data = try? JSONEncoder().encode(entries), data.count <= 128 * 1024 {
-            try? store?.write(data, key: "music.platform-chorus")
+        if let database {
+            try? database.transactionSync { db in
+                try db.upsert("ios_music_chorus", columns: ["scope", "platform", "native_id", "recording_duration", "start", "end", "expires_at"],
+                    values: [.text(key.scope), .text(key.platform), .text(key.nativeID), .real(key.duration),
+                             .real(point.start), .real(point.end), .optional(now.addingTimeInterval(30 * 86_400))],
+                    key: ["scope", "platform", "native_id", "recording_duration"])
+                try db.execute("DELETE FROM ios_music_chorus WHERE expires_at<=?", [.optional(now)])
+                try db.execute("DELETE FROM ios_music_chorus WHERE (scope,platform,native_id,recording_duration) IN " +
+                    "(SELECT scope,platform,native_id,recording_duration FROM ios_music_chorus ORDER BY expires_at DESC LIMIT -1 OFFSET 100)")
+            }
         }
     }
     private mutating func load(at now: Date) {
         if !loaded {
             loaded = true
-            if let data = try? store?.read(key: "music.platform-chorus"), data.count <= 128 * 1024,
-               let values = try? JSONDecoder().decode([Entry].self, from: data), values.count <= 100 {
+            if let database, let values = try? database.readSync({ db in
+                try db.query("SELECT * FROM ios_music_chorus ORDER BY expires_at LIMIT 100").map { row in
+                    Entry(key: .init(scope: try row.text("scope"), platform: try row.text("platform"),
+                                    nativeID: try row.text("native_id"), duration: try row.double("recording_duration")),
+                          point: .init(start: try row.double("start"), end: try row.double("end")),
+                          expires: Date(timeIntervalSince1970: try row.double("expires_at")))
+                }
+            }) {
                 entries = values
             }
         }

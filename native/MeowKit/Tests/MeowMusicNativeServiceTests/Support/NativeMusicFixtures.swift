@@ -3,6 +3,8 @@ import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicTestSupport
 import MeowRuntime
+import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicNativeService
 
 // Synthetic snapshots are test data, not a production serialization port.
@@ -11,23 +13,29 @@ import MeowRuntime
 final class NativeMusicTestLibrary: MusicNativeLibraryStoring, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let root = FileManager.default.temporaryDirectory.appendingPathComponent("meow-music-sqlite-" + UUID().uuidString, isDirectory: true)
-    private lazy var backing = makeBacking()
+    private var backing: MusicNativeLibraryDatabase?
+    private var database: SQLiteDatabase?
     private var seed: Data?
     private var initialized = false
     private var failure: MusicServiceError?
     private var reads = 0, writes = 0
     private var revisionOffset = 0, importedRevision = 0
     init(_ value: Data? = nil) { seed = value }
-    deinit { try? backing.close(); try? FileManager.default.removeItem(at: root) }
-    private func makeBacking() -> MusicNativeLibraryDatabase {
-        let root = self.root
-        return MusicNativeLibraryDatabase(urlFactory: {
-            try MusicNativeLibraryDatabase.canonicalSystemBaseURL(root.deletingLastPathComponent())
-                .appendingPathComponent(root.lastPathComponent, isDirectory: true)
-                .appendingPathComponent(MusicNativeLibraryDatabase.filename)
-        })
+    deinit {
+        try? storageTestIO { [backing] in try backing?.close() }
+        if let database { try? storageTestAsync { try await database.close() } }
+        try? FileManager.default.removeItem(at: root)
+    }
+    private func actualBacking() throws -> MusicNativeLibraryDatabase {
+        if let backing { return backing }
+        let database = try storageTestOpen(root)
+        self.database = database
+        let backing = MusicNativeLibraryDatabase(database: database)
+        self.backing = backing
+        return backing
     }
     private func storage() throws -> MusicNativeLibraryDatabase {
+        let backing = try actualBacking()
         if initialized { return backing }
         if let seed {
             let raw = try MJ.parse(seed)
@@ -37,7 +45,7 @@ final class NativeMusicTestLibrary: MusicNativeLibraryStoring, @unchecked Sendab
                     try MusicLibraryValidation.validateSong(song, id: id)
                     try writer.saveSong(song.bytes)
                 }
-                for (name, data) in raw["areas"].fields { try writer.saveArea(name, data: data.bytes) }
+                for (name, data) in raw["areas"].fields { try writer.saveArea(name, value: try data.storageValue) }
             }
         }
         if let seed { revisionOffset = try MJ.parse(seed)["revision"].int - backing.readSnapshot().revision }
@@ -73,6 +81,7 @@ final class NativeMusicTestLibrary: MusicNativeLibraryStoring, @unchecked Sendab
     func read() throws -> Data? {
         lock.lock(); defer { lock.unlock() }
         guard initialized else { return seed }
+        let backing = try storage()
         let snapshot = try backing.readSnapshot()
         if snapshot.revision == importedRevision, let seed { return seed }
         if snapshot.revision == 0 && snapshot.areas.isEmpty { return nil }
@@ -87,8 +96,10 @@ final class NativeMusicTestLibrary: MusicNativeLibraryStoring, @unchecked Sendab
     }
     func replace(_ value: Data?) {
         lock.lock(); defer { lock.unlock() }
-        try? backing.close(); try? FileManager.default.removeItem(at: root)
-        backing = makeBacking()
+        try? storageTestIO { [backing] in try backing?.close() }
+        if let database { try? storageTestAsync { try await database.close() } }
+        try? FileManager.default.removeItem(at: root)
+        backing = nil; database = nil
         initialized = false; seed = value; revisionOffset = 0
     }
     func snapshot() -> (Data?, Int, Int) {
@@ -109,7 +120,7 @@ private struct NativeMusicFixtureWriter: MusicNativeLibraryWriting {
     func querySongIDs(query: String) throws -> [String] { try base.querySongIDs(query: query) }
     func allSongIDs() throws -> [String] { try base.allSongIDs() }
     func saveSong(_ data: Data) throws { try base.saveSong(data) }
-    func saveArea(_ area: String, data: Data) throws { try base.saveArea(area, data: data) }
+    func saveArea(_ area: String, value: RuntimeValue) throws { try base.saveArea(area, value: value) }
 }
 
 /// Only fixture setup/inspection materializes all songs. Production does not

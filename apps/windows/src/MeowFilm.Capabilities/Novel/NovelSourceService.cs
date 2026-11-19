@@ -11,7 +11,7 @@ internal sealed class NovelSourceProjectionChange(IReadOnlySet<string> retired) 
 }
 
 /// <summary>Native source configuration and revision-bound execution through the runtime.</summary>
-public sealed class NovelSourceService(IRuntimeClient runtime, IDocumentStore store)
+public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase store)
 {
     private readonly NovelSourceConfiguration configuration = new(store);
     private readonly NovelWork work = new();

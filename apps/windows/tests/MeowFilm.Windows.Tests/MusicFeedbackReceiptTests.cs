@@ -291,56 +291,30 @@ public static partial class MusicUiTests
 
     // Only the feedback namespace is gated. All results still come from the
     // real feedback owner and native document CAS, never a replacement owner.
-    private sealed class FeedbackReceiptStore(IDocumentStore inner) : IDocumentStore
+    private sealed class FeedbackReceiptStore(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
-        private readonly object sync = new();
-        private readonly List<FeedbackStorePause> pauses = [];
-        private FeedbackStorePause? nextRead, nextWrite;
-        private int reads, writes;
-        public int Reads => Volatile.Read(ref reads);
-        public int Writes => Volatile.Read(ref writes);
-        public FeedbackStorePause HoldRead(bool failure = false)
+        private readonly object sync=new();private readonly List<FeedbackStorePause> pauses=[];
+        private FeedbackStorePause? nextRead,nextWrite;
+        public FeedbackStorePause HoldRead(bool failure=false){lock(sync){var pause=new FeedbackStorePause(failure);pauses.Add(pause);return nextRead=pause;}}
+        public FeedbackStorePause HoldWrite(bool unknown=false,bool applied=true){lock(sync){var pause=new FeedbackStorePause(unknown,applied);pauses.Add(pause);return nextWrite=pause;}}
+        public void ReleaseAll(){lock(sync)foreach(var pause in pauses)pause.Release();}
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)
         {
-            lock (sync) { var pause = new FeedbackStorePause(failure); pauses.Add(pause); return nextRead = pause; }
+            FeedbackStorePause? pause;lock(sync){pause=nextRead;nextRead=null;}
+            var result=await base.ReadAsync(read,token);
+            if(pause is not null){await pause.Wait(token);if(pause.Fail)throw new DocumentStoreException(DocumentStoreError.Unavailable);}
+            return result;
         }
-        public FeedbackStorePause HoldWrite(bool unknown = false, bool applied = true)
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)
         {
-            lock (sync) { var pause = new FeedbackStorePause(unknown, applied); pauses.Add(pause); return nextWrite = pause; }
+            FeedbackStorePause? pause;lock(sync){pause=nextWrite;nextWrite=null;}
+            var result=await base.WriteAsync(db=>{
+                if(pause is not null){pause.Wait(CancellationToken.None).GetAwaiter().GetResult();if(!pause.Applied)throw new DocumentStoreException(DocumentStoreError.Unavailable);}
+                return write(db);
+            },token,retainedBytes,commit);
+            if(pause?.Fail==true)throw new DocumentStoreException(DocumentStoreError.Unavailable);return result;
         }
-        public void ReleaseAll()
-        { lock (sync) foreach (var pause in pauses) pause.Release(); }
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            if (ns != MusicFeedbackSettingsOwner.DocumentNamespace) return await inner.ReadAsync(ns, token);
-            Interlocked.Increment(ref reads);
-            FeedbackStorePause? pause;
-            lock (sync) { pause = nextRead; nextRead = null; }
-            var snapshot = await inner.ReadAsync(ns, token);
-            if (pause is not null)
-            {
-                await pause.Wait(token);
-                if (pause.Fail) throw new DocumentStoreException(DocumentStoreError.Unavailable);
-            }
-            return snapshot;
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default)
-        {
-            if (ns != MusicFeedbackSettingsOwner.DocumentNamespace)
-                return await inner.WriteAsync(ns, data, expected, token);
-            Interlocked.Increment(ref writes);
-            FeedbackStorePause? pause;
-            lock (sync) { pause = nextWrite; nextWrite = null; }
-            if (pause is not null)
-            {
-                await pause.Wait(token);
-                if (!pause.Applied) throw new DocumentStoreException(DocumentStoreError.Unavailable);
-            }
-            var receipt = await inner.WriteAsync(ns, data, expected, token);
-            if (pause?.Fail == true) throw new DocumentStoreException(DocumentStoreError.Unavailable);
-            return receipt;
-        }
-        public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
 
     private sealed class FeedbackStorePause(bool fail, bool applied = true)

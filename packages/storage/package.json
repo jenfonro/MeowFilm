@@ -1,0 +1,25 @@
+{
+  "name": "@meowfilm/storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "^18.20.4 || ^24.0.0"
+  },
+  "exports": {
+    ".": "./src/database.js",
+    "./values": "./src/value-nodes.js",
+    "./statements": "./src/statements.js"
+  },
+  "files": [
+    "src",
+    "schema.sql"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@meowfilm/runtime-bridge": "0.2.0"
+  }
+}

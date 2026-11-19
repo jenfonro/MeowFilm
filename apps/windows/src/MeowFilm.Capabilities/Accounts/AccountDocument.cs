@@ -26,20 +26,20 @@ internal sealed class AccountDocument
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
     private readonly JsonObject root;
-    internal DocumentFingerprint Fingerprint { get; }
-    private AccountDocument(JsonObject root, DocumentFingerprint fingerprint)
-    { this.root = root; Fingerprint = fingerprint; }
+    internal StorageRevision Revision { get; }
+    private AccountDocument(JsonObject root, StorageRevision revision)
+    { this.root = root; Revision = revision; }
     internal static string Key(string platform) => $"[\"meowfilm\",\"music\",1,\"platform-account\",\"{platform}\"]";
-    internal static AccountDocument Decode(DocumentSnapshot document)
+    internal static AccountDocument Decode(RecordSnapshot document)
     {
         try
         {
             if (document.Data is null)
             {
-                AccountRules.Require(document.Fingerprint == DocumentFingerprint.Missing, "CORRUPT_STORAGE");
-                return new(new JsonObject { ["version"] = 1, ["entries"] = new JsonArray() }, document.Fingerprint);
+                AccountRules.Require(document.Revision == StorageRevision.Empty, "CORRUPT_STORAGE");
+                return new(new JsonObject { ["version"] = 1, ["entries"] = new JsonArray() }, document.Revision);
             }
-            AccountRules.Require(DocumentFingerprint.FromBytes(document.Data) == document.Fingerprint, "CORRUPT_STORAGE");
+            AccountRules.Require(document.Revision.Revision >= 0, "CORRUPT_STORAGE");
             using var json = JsonDocument.Parse(document.Data, new JsonDocumentOptions { MaxDepth = 64 });
             // Reject ambiguous duplicate properties, rather than normalizing a corrupt document on save.
             CheckJson(json.RootElement);
@@ -47,7 +47,7 @@ internal sealed class AccountDocument
             AccountRules.Require(AccountRules.Integer(json.RootElement.GetProperty("version")) == 1, "CORRUPT_STORAGE");
             var entries = json.RootElement.GetProperty("entries");
             AccountRules.Require(entries.ValueKind == JsonValueKind.Array, "CORRUPT_STORAGE");
-            return new AccountDocument(JsonNode.Parse(document.Data)!.AsObject(), document.Fingerprint);
+            return new AccountDocument(JsonNode.Parse(document.Data)!.AsObject(), document.Revision);
         }
         catch { throw new MusicAccountException("CORRUPT_STORAGE"); }
         finally { if (document.Data is not null) CryptographicOperations.ZeroMemory(document.Data); }

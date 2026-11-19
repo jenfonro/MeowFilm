@@ -88,6 +88,15 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         XCTAssertEqual(try MJ.parse(large.bytes), large)
     }
 
+    func testRelationalValuesPreserveExactNumbersAndDistinctUTF8Members() throws {
+        let raw = #"{"é":1,"e\u0301":2,"big":9007199254740993,"precise":1.234567890123456789,"unused":1e400,"nested":[true,null,"text",-0.25]}"#
+        let value = try MJ.parse(Data(raw.utf8))
+        XCTAssertEqual(try value.storageValue, try RuntimeJSON.decode(value.bytes))
+        let reopened = try MJ.parse(RuntimeJSON.encode(value.storageValue))
+        XCTAssertEqual(reopened.stable, value.stable)
+        XCTAssertThrowsError(try MJ.number(.infinity).storageValue)
+    }
+
     func testNativeJSONRetainsUnconsumedNumericLexemesAndExactIntegerConversions() throws {
         let raw = #"{"id":7,"nested":[{"notPic":18446744073709551617},-18446744073709551617,1e999999999999999999999999,9007199254740993.5],"tail":"still present"}"#
         let parsed = try MJ.parse(Data(raw.utf8))

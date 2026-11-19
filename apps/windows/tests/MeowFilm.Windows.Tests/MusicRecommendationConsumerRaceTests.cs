@@ -312,10 +312,10 @@ public static partial class MusicUiTests
     // Only app/source/media ports are substituted. Queue versions, occurrences,
     // persistence flags and all library/history reads and writes use one actual
     // MusicLibraryOwner. No Node, network, reflection or second writer.
-    private sealed class RecommendationRaceApplication(IDocumentStore store) : MusicApplicationTestDouble
+    private sealed class RecommendationRaceApplication(IStorageDatabase store) : MusicApplicationTestDouble
     {
         private const long Generation = 1;
-        private readonly MusicLibraryOwner library = new(MusicTestStores.For(store));
+        private readonly MusicLibraryOwner library = new(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         private MusicRecommendationCoordinator? coordinator;
         private MusicRecommendationQueuePort? queue;
         private readonly HashSet<Task> selections = [];

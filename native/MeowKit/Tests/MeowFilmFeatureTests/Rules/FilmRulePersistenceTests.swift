@@ -4,20 +4,17 @@ import MeowRuntime
 @testable import MeowFilmFeature
 
 final class FilmRulePersistenceTests: XCTestCase {
-    func testGroupSaveMergesLatestNativeRulesAndPreservesOtherRawGroups() async throws {
+    func testGroupSaveMergesLatestNativeRulesAndPreservesOtherGroups() async throws {
         let store = try FilmNativeSettingsStore(self, block: .rules), rpc = FilmRuleRPC()
         var initial = try filmRuleValue(FilmRuleSet(episodeRules: [.init(pattern: "from another consumer")])).filmRequiredObject()
-        initial["future"] = .object(["preserved": .bool(true)])
-        initial["episodeRules"] = .array([.object(["pattern": .string("from another consumer"), "future": .number(7)])])
-        try store.seed(store.envelope(.object(initial), key: "rules"))
+        try await store.seed(store.envelope(.object(initial), key: "rules"))
         let service = rpc.service(store.document)
         let rows = [FilmMatchRule(pattern: "  raw  ", replace: " preserve ", flags: " g ")]
         let saved = try await service.save(.movie, rules: rows)
         XCTAssertEqual(saved.movieRules, [.init(pattern: "raw", replace: " preserve ", flags: "g")])
         XCTAssertEqual(saved.episodeRules, [.init(pattern: "from another consumer")])
-        let document = try XCTUnwrap(store.document.read())
+        let document = try XCTUnwrap(store.document.readForTest())
         XCTAssertEqual(document.filmObject?["rules"]?.filmObject?["episodeRules"], initial["episodeRules"])
-        XCTAssertEqual(document.filmObject?["rules"]?.filmObject?["future"], initial["future"])
         let acknowledged = try await service.savedSnapshot()
         XCTAssertEqual(acknowledged, saved)
         let calls = await rpc.calls
@@ -26,15 +23,17 @@ final class FilmRulePersistenceTests: XCTestCase {
     }
 
     func testCleanGroupFailureRetainsSnapshotAndRetryDoesNotReplaceOtherGroups() async throws {
-        let store = try FilmNativeSettingsStore(self, block: .rules, maximumBytes: 4096), rpc = FilmRuleRPC()
+        let store = try FilmNativeSettingsStore(self, block: .rules), rpc = FilmRuleRPC()
         let service = rpc.service(store.document)
         try await service.initialize()
         let original = try await service.savedSnapshot()
-        let rows = [FilmMatchRule(pattern: String(repeating: "x", count: 20_000))]
+        let rows = [FilmMatchRule(pattern: "pending")]
+        try store.readOnly(true)
         await filmRuleFailure(FilmSettingsStorageError.storageFailure) { try await service.save(.search, rules: rows) }
         let unchanged = try await service.savedSnapshot()
         XCTAssertEqual(unchanged, original)
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
+        try store.readOnly(false)
         let saved = try await service.save(.search, rules: [.init(pattern: "  retry  ")])
         XCTAssertEqual(saved.aggregateRegexRules, ["retry"])
         XCTAssertEqual(saved.movieRules, original.movieRules)
@@ -51,7 +50,7 @@ final class FilmRulePersistenceTests: XCTestCase {
         let restoredMatch = try await service.defaults(.episode)
         XCTAssertEqual(restoredMatch.count, 3)
         await filmRuleFailure(FilmRuleServiceError.notInitialized) { try await service.savedSnapshot() }
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         try await service.initialize()
         let initial = try await service.savedSnapshot()
         XCTAssertEqual(initial, FilmRuleSettings.initial); XCTAssertEqual(initial.episodeRules.count, 2)
@@ -99,18 +98,22 @@ final class FilmRulePersistenceTests: XCTestCase {
         let store = try FilmNativeSettingsStore(self, block: .rules), rpc = FilmRuleRPC()
         let service = rpc.service(store.document)
         _ = try await service.save(.init(movieRules: [.init(pattern: "saved")]))
-        let original = try await service.savedSnapshot(), before = try XCTUnwrap(store.document.read())
+        let original = try await service.savedSnapshot(), before = try XCTUnwrap(store.document.readForTest())
         var wrongRow = try filmRuleValue(original).filmRequiredObject()
         wrongRow["movieRules"] = .array([.object(["pattern": .string("x"), "flags": .number(1)])])
         for invalid: RuntimeValue in [.object([:]), .object(["version": .number(2), "rules": try filmRuleValue(original)]),
                                      store.envelope(.object(wrongRow), key: "rules")] {
-            try store.seed(invalid)
-            await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await service.initialize() }
-            await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await service.save(.init()) }
+            await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await store.seed(invalid) }
+            XCTAssertEqual(try store.document.readForTest(), before, "Malformed proposals cannot change typed rows")
             let unchanged = try await service.savedSnapshot()
             XCTAssertEqual(unchanged, original)
         }
-        try store.seed(before)
+        try await store.damageRules(true)
+        await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await service.initialize() }
+        await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await service.save(.init()) }
+        let unchanged = try await service.savedSnapshot()
+        XCTAssertEqual(unchanged, original)
+        try await store.damageRules(false)
         let draft = FilmRuleSet(aggregateRegexRules: [String(repeating: "x", count: 20_000)])
         let saved = try await service.save(draft)
         XCTAssertEqual(saved, draft, "The consumer imposes no arbitrary rule length limit")
@@ -163,10 +166,9 @@ final class FilmRulePersistenceTests: XCTestCase {
         let service = rpc.service(store.document)
         _ = try await service.save(.init(movieRules: [.init(pattern: "first")]))
         let external = store.envelope(try filmRuleValue(FilmRuleSet(movieRules: [.init(pattern: "external")])), key: "rules")
-        XCTAssertThrowsError(try store.document.update { _ in
-            try store.seed(external)
-            return store.envelope(try filmRuleValue(FilmRuleSet()), key: "rules")
-        }) { XCTAssertEqual($0 as? FilmSettingsStorageError, .conflict) }
+        try await store.seed(external)
+        do { _ = try await service.save(FilmRuleSet()); XCTFail("stale complete rule draft committed") }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .conflict) }
         let old = try await service.savedSnapshot()
         XCTAssertEqual(old.movieRules.first?.pattern, "first")
         try await service.initialize()

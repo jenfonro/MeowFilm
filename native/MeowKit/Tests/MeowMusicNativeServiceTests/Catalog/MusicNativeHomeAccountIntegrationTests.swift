@@ -15,7 +15,7 @@ import MeowRuntime
             let fixture = try HomeAccountIntegrationFixture()
             addTeardownBlock { await fixture.close() }
             try await fixture.enable()
-            if failure == .storageFailed { fixture.credentials.failReads(.interactionNotAllowed) }
+            if failure == .storageFailed { fixture.credentials.failReads(.unavailable) }
             do {
                 try await fixture.owner.prepareLocalAccounts()
                 if failure == .storageFailed { XCTFail("Failed local preparation was accepted") }

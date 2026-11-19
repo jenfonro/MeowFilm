@@ -47,7 +47,7 @@ Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器
 `AppIdentity` 集中定义产品名称、当前数据/运行时身份和当前原生命名空间：
 
 - 名称：`meowfilm`。
-- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；音乐账号、网盘、元数据凭据及猫源意图按 `AppIdentity.ProtectedNamespaces` 使用绑定目录身份的 CurrentUser DPAPI，独立缓存根的 `music.account-details.v2` 也受保护，匿名平台状态由 Node 维护而非原生设备会话文档；普通文档和脚本源码以明文文件保存，原子写入、CAS 和文件隔离独立保留，准确 namespace 见[本地文档存储](protected-storage.md)。
+- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；应用内部结构化业务数据和缓存索引使用共享 SQLite `storage-v1/meowfilm.sqlite3`，原生客户端与 Node runtime 连接同一数据库。凭据以所属业务表中的明文 typed fields 保存；图片、歌词、音频、脚本源码等原始资源仍由各自 owner 管理文件目录。具体 schema 与 owner 见[本地存储](protected-storage.md)。
 - 脚本协议/清单字段 `product` 等于 `aggregate`，是当前 wire 身份。
 - 活动产品只读取和写入 `AppIdentity.NativeNamespaces` 列出的当前格式。
 - 当前提供可淘汰的播放缓存，未提供用户下载管理。
@@ -80,7 +80,7 @@ App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能�
 
 通用设置的清除操作由 `AppLauncher` 注入，不由音乐或影视模块互相清理数据。`UserDataDirectory` 的一次待清理请求同时覆盖 `AppDataPaths.Documents`（`aggregate`）与 `AppDataPaths.Caches`（`aggregate-cache`）；前者包含全部 Node 元数据／媒体／脚本缓存，后者包含全部原生缓存文档、账号展示快照及音频文件，不按命名空间清单筛选。两根仍保留独立存储队列和根锁；普通启动只取得 App 准入，不打开或创建可选缓存根。
 
-`AppUserDataReset` 串行持有一次已确认操作的阶段：记录待清理请求、真实释放旧代、删除两根自有数据、重新装配；失败显式重试只继续未成功的阶段。旧窗口取消导航并锁定交互，媒体设置先封住系统输入，随后使用 `AppShutdown.ForceReleaseAsync` 退役全部所有者，包含实际排空的 `CacheDocumentStore` 与其 backing store。内存缓存随旧代释放；缓存落盘尚未结算、任一根删除失败或释放超时，都不能放行新代启动。删除前两根均取得排他删除句柄，任一仍有存储占用则不开始删另一根。
+`AppUserDataReset` 串行持有一次已确认操作的阶段：记录待清理请求、真实释放旧代、删除两根自有数据、重新装配；失败显式重试只继续未成功的阶段。旧窗口取消导航并锁定交互，媒体设置先封住系统输入，随后使用 `AppShutdown.ForceReleaseAsync` 退役全部所有者，包含共享 SQLite 与可选资源目录的 owner。内存缓存随旧代释放；缓存落盘尚未结算、任一根删除失败或释放超时，都不能放行新代启动。删除前两根均取得排他删除句柄，任一仍有存储占用则不开始删另一根。
 
 强制释放先确认共享运行器真实退役；原生消费者通过[运行器关闭回执](app-runtime.md#所有权与关闭)完成本地排空，不向退役宿主再次请求会话重置或图片释放，真实关闭失败仍阻断删除与替代代次。清除失败后的托盘退出与浮层退出复用同一单飞 abort 路径；尚未确认、清除中或退出中不接纳竞争动作，也不改走普通保存关闭。
 

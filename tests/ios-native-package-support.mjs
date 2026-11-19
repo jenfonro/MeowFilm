@@ -33,11 +33,12 @@ export function fixture(t) {
       receipt.frameworkInfo.path, receipt.exports.path,
       ...receipt.inputs.map(input => input.path)])) copy(path);
     for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-      'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules']) {
+      'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules', 'storage']) {
       copy(`packages/${name}/package.json`);
       for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
         : name === 'film-search' ? ['film-search.js']
         : name === 'novel-rules' ? ['index.js', 'novel-rules.js'] : ['src']) copy(`packages/${name}/${file}`);
+      if (name === 'storage') copy('packages/storage/schema.sql');
       const installed = join(root, 'node_modules/@meowfilm', name);
       mkdirSync(dirname(installed), { recursive: true });
       symlinkSync(join(root, 'packages', name), installed, process.platform === 'win32' ? 'junction' : 'dir');

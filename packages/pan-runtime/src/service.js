@@ -65,12 +65,13 @@ function readDocument(value) {
 }
 function accountValue(document, id) {
   const present = Object.hasOwn(document.accounts, id);
-  const record = present ? document.accounts[id] : { revision: 0, credentials: {} };
-  return { present, revision: record?.revision, credentials: record?.credentials };
+  const record = present ? document.accounts[id] : { revision: 0, rowRevision: 0, credentials: {} };
+  return { present, revision: record?.revision, rowRevision: record?.rowRevision, credentials: record?.credentials };
 }
 function accountRevision(account) {
   requireValue(integer(account.revision) && (account.present ? account.revision > 0 : account.revision === 0),
     'CORRUPT_STORAGE');
+  requireValue(integer(account.rowRevision), 'CORRUPT_STORAGE');
 }
 
 /** One in-process owner. Neither script engines nor platform credential bridges are required. */
@@ -78,18 +79,20 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
   requireValue(typeof now === 'function' && (transport === undefined ||
     typeof transport?.request === 'function' && typeof transport?.close === 'function'));
   const store = suppliedStore ?? new PanStore(dataRoot);
-  requireValue(typeof store.read === 'function' && typeof store.write === 'function' &&
+  requireValue(typeof store.read === 'function' && typeof store.update === 'function' &&
     typeof store.close === 'function' && (store.reload === undefined || typeof store.reload === 'function'));
-  let document;
-  try {
-    document = readDocument(store.read());
-  } catch (error) {
-    throw error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
-  }
+  let document = { version: 1, accounts: {} };
   const http = transport ?? createTransport();
   const accounts = new Map([...providers.keys()].map(id => [id, accountValue(document, id)]));
   const pending = new Set(), controllers = new Set(), shared = new Map(), logins = new Map(), loginStarts = new Map();
   let closed = false, closing, settingsError, changes = Promise.resolve();
+  const ready = Promise.resolve().then(async () => {
+    document = readDocument(await store.read());
+    for (const id of providers.keys()) accounts.set(id, accountValue(document, id));
+  }).catch(error => {
+    throw error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
+  });
+  ready.catch(() => {});
 
   function assertCurrent(id, account, signal) {
     requireValue(!closed, 'CLOSED');
@@ -131,7 +134,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     for (const id of providers.keys()) {
       const next = accountValue(latest, id);
       const old = accounts.get(id);
-      if (old.present === next.present && old.revision === next.revision &&
+      if (old.present === next.present && old.revision === next.revision && old.rowRevision === next.rowRevision &&
         stable(old.credentials) === stable(next.credentials)) continue;
       accounts.set(id, next);
       invalidate(id, old);
@@ -148,9 +151,12 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
   }
   async function persist(id, next) {
     if (settingsError) throw settingsError;
-    const nextDocument = { ...document, accounts: { ...document.accounts,
-      [id]: { ...document.accounts[id], revision: next.revision, credentials: clone(next.credentials) } } };
-    try { await store.write(nextDocument); }
+    const old = accounts.get(id);
+    let saved;
+    try {
+      saved = readDocument(await store.update({ provider: id, mode: next.revision === old.revision ? 'refresh' : 'replace',
+        accountRevision: old.revision, rowRevision: old.rowRevision, credentials: clone(next.credentials) }));
+    }
     catch (error) {
       if (error?.code === 'STORAGE_CONFLICT') {
         await reload();
@@ -158,7 +164,19 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       }
       throw error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
     }
-    document = nextDocument;
+    const receipt = accountValue(saved, id);
+    accountRevision(receipt);
+    requireValue(receipt.revision === next.revision && receipt.rowRevision === old.rowRevision + 1 &&
+      stable(receipt.credentials) === stable(next.credentials), 'STORAGE_ERROR');
+    next.rowRevision = receipt.rowRevision;
+    document = saved;
+    for (const other of providers.keys()) {
+      if (other === id) continue;
+      const current = accounts.get(other), latest = accountValue(saved, other);
+      if (current.rowRevision === latest.rowRevision) continue;
+      accounts.set(other, latest);
+      invalidate(other, current);
+    }
   }
   function replace(id, credentials, signal, expected, completedLogin) {
     return change(async () => {
@@ -203,6 +221,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
           const credentials = { ...account.credentials, ...update };
           await persist(id, { revision: account.revision, credentials });
           account.credentials = credentials;
+          account.rowRevision = accountValue(document, id).rowRevision;
         });
         assertCurrent(id, account, signal);
       },
@@ -455,9 +474,10 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     }
   }
   return Object.freeze({
-    settingsChanged: () => change(reload),
+    ready,
+    settingsChanged: () => ready.then(() => change(reload)),
     invoke(operation, params = {}, { signal } = {}) {
-      return track(Promise.resolve().then(() => {
+      return track(ready.then(() => {
         requireValue(signal === undefined || signal instanceof AbortSignal);
         return dispatch(operation, params, signal);
       }).catch(error => { throw failure(error); }));
@@ -467,7 +487,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
         closed = true;
         for (const owner of controllers) owner.controller.abort();
         for (const login of logins.values()) cancelLogin(login, 'cancelled');
-        const results = await Promise.allSettled([Promise.resolve().then(() => http.close()), ...pending]);
+        const results = await Promise.allSettled([Promise.resolve().then(() => http.close()), ready, ...pending]);
         logins.clear();
         shared.clear();
         try { await store.close(); }

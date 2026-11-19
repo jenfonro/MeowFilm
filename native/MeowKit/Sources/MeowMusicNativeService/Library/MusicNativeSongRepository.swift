@@ -5,14 +5,26 @@ extension NativeMusicService {
     /// The only persistent song store. Sources keep their first registered
     /// owner; new sources match one candidate against its fixed baseline.
     func registerSongs(_ input: [MJ], library: inout MJ, authoritative: Bool = false, playback: MJ? = nil,
-                       acceptObservation: ((String) -> Bool)? = nil) throws -> [String] {
+                       acceptObservation: ((String) -> Bool)? = nil,
+                       project: ((String, MJ) -> Void)? = nil) throws -> [String] {
         guard !input.isEmpty else { return [] }
         let preferences = try playback ?? read().playback
         guard let writer = activeSongWriter else { throw MusicServiceError.storageConflict }
         let store = MusicNativeLibraryAccessReader(database: writer, access: access)
+        let proposedInput = try input.map(MusicModel.cleanSong)
+        var sourceOwners = try store.sourceOwners(keys: Set(proposedInput.flatMap { $0["sources"].array.map { $0["sourceKey"].string } }))
+        let evidenceByInput = proposedInput.map { raw -> MusicRecordingIdentity? in
+            guard !raw["sources"].array.isEmpty else { return nil }
+            return MusicModel.descriptor(raw)
+        }
+        let lookupKeys = Set(proposedInput.indices.compactMap { index -> String? in
+            guard proposedInput[index]["sources"].array.allSatisfy({ sourceOwners[$0["sourceKey"].string] == nil }) else { return nil }
+            return evidenceByInput[index]?.lookupKey
+        })
+        var candidateIDs = try writer.candidateIDs(lookupKeys: lookupKeys)
         var result: [String] = []
         var previous: (input: MJ, id: String)?
-        for raw in input {
+        for (inputIndex, raw) in input.enumerated() {
             // Only adjacent identical registered observations are idempotent:
             // A/B/A must still apply the last A after B changes the source.
             if acceptObservation == nil, let previous, previous.input == raw {
@@ -20,25 +32,27 @@ extension NativeMusicService {
                 result.append(previous.id)
                 continue
             }
-            let proposed = try MusicModel.cleanSong(raw), incoming = proposed["sources"].array
+            let proposed = proposedInput[inputIndex], incoming = proposed["sources"].array
             // A retained projection is a reference, not a new observation.
             // Reading it must never restore fields removed by a newer result.
             let explicit = proposed["songId"].string
             if !authoritative, !explicit.isEmpty, let data = try store.songData(id: explicit) {
                 let stored = try MJ.parse(data)
-                try musicRequire(UUID(uuidString: explicit) != nil && musicSame(stored["songId"].string, explicit), .songIDConflict)
+                try MusicLibraryValidation.validateSong(stored, id: explicit)
+                project?(explicit, stored)
                 result.append(explicit)
                 previous = (raw, explicit)
                 continue
             }
-            let knownOwner = try incoming.compactMap { try store.sourceOwner(key: $0["sourceKey"].string) }.first
-            let evidence = MusicModel.descriptor(proposed)
+            let owners = incoming.map { sourceOwners[$0["sourceKey"].string] }
+            let knownOwner = owners.compactMap { $0 }.first
+            let evidence = evidenceByInput[inputIndex] ?? MusicModel.descriptor(proposed)
             let id: String
             if let knownOwner { id = knownOwner }
             else if try !explicit.isEmpty && store.containsSong(id: explicit) { id = explicit }
             else {
                 let matches = try evidence.lookupKey.map { key in
-                    try store.candidateIDs(lookupKey: key).filter { candidate in
+                    try candidateIDs[key, default: []].filter { candidate in
                         guard let data = try store.songData(id: candidate) else { return false }
                         return MusicModel.descriptor(try MJ.parse(data)).matches(evidence)
                     }
@@ -48,16 +62,17 @@ extension NativeMusicService {
 
             let existing = try store.songData(id: id).map { try MJ.parse($0) } ?? .null
             if existing != .null && acceptObservation?(id) == false {
+                project?(id, existing)
                 result.append(id)
                 continue
             }
             var song = existing == .null ? proposed : existing
             song["songId"] = .string(id)
-            let ownedSources = try incoming.filter { try store.sourceOwner(key: $0["sourceKey"].string).map { $0 == id } ?? true }
+            let ownedSources = zip(incoming, owners).compactMap { source, owner in owner == nil || owner == id ? source : nil }
             let changedArtwork = ownedSources.filter { incoming in
                 existing["sources"].array.first { $0["sourceKey"] == incoming["sourceKey"] }?["musicInfo"]["img"] != incoming["musicInfo"]["img"]
             }
-            song = try MusicModel.mergeSources(song, adding: ownedSources, preferIncoming: authoritative)
+            song = MusicModel.mergeCleanSources(song, adding: ownedSources, preferIncoming: authoritative)
             let currentPrimary = existing["sources"].array.first?["sourceKey"].string
             let incomingPrimary = incoming.first?["sourceKey"].string
             let updatesPrimary = authoritative && currentPrimary == incomingPrimary
@@ -70,8 +85,13 @@ extension NativeMusicService {
             }
             if song["baselineDuration"] == .null, let duration = evidence.duration { song["baselineDuration"] = .number(duration) }
             selectSongArtwork(&song, playback: preferences, freshSources: authoritative ? changedArtwork : [])
-            if song != existing { try writer.saveSong(song.bytes) }
+            if existing == .null || song.stable != existing.stable {
+                try writer.saveSong(song.bytes)
+                for source in ownedSources { sourceOwners[source["sourceKey"].string] = id }
+            }
+            project?(id, song)
             result.append(id)
+            if existing == .null { candidateIDs[evidence.lookupKey ?? "", default: []].append(id) }
             // Source-less inputs may have no matching evidence or stable ID.
             previous = incoming.isEmpty ? nil : (raw, id)
         }
@@ -108,14 +128,13 @@ extension NativeMusicService {
         guard !input.isEmpty else { return [] }
         return try transaction(["library"], reportingCancellationAfterCommit: false) { state in
             var library = state.library["library"]
-            let ids = try registerSongs(input, library: &library, authoritative: authoritative, playback: state.playback)
-            state.library["library"] = library
             var projected: [String: MJ] = [:]
+            let ids = try registerSongs(input, library: &library, authoritative: authoritative, playback: state.playback,
+                                        project: { projected[$0] = $1 })
+            state.library["library"] = library
             return try ids.map { id in
                 try access.check()
-                if let song = projected[id] { return song }
-                let song = try repositorySong(id, state)
-                projected[id] = song
+                guard let song = projected[id] else { throw MusicServiceError.storageConflict }
                 return song
             }
         }

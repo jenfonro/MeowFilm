@@ -1,6 +1,7 @@
+import { readPanFacts } from '../../../tests/storage-test-fixture.mjs';
 import assert from 'node:assert/strict';
 import { constants, generateKeyPairSync, privateDecrypt } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -673,13 +674,12 @@ test('Tianyi account refresh distinguishes submitted authentication failure from
     cookie: 'session=synthetic-old', username: 'synthetic-user', password: f.password,
   } });
   const state = async () => (await service.invoke('settings.get')).accounts.find(item => item.provider === 'tianyi');
-  const path = join(root, 'pan/accounts.json');
   for (const status of ['signedIn', 'expired']) {
     if (status === 'expired') {
       failure = { stage: 'submission', value: response('', 401) };
-      const before = readFileSync(path);
+      const before = await readPanFacts(root);
       await assert.rejects(service.invoke('refresh', { provider: 'tianyi' }), { code: 'AUTH_REQUIRED' });
-      assert.deepEqual(readFileSync(path), before);
+      assert.deepEqual(await readPanFacts(root), before);
     }
     const snapshot = await state();
     assert.equal(snapshot.status, status);
@@ -692,10 +692,10 @@ test('Tianyi account refresh distinguishes submitted authentication failure from
         [response({ result: -2, msg: '验证码 required' }), 'CHALLENGE_REQUIRED'],
       ]) {
         failure = { stage, value };
-        const before = readFileSync(path);
+        const before = await readPanFacts(root);
         await assert.rejects(service.invoke('refresh', { provider: 'tianyi' }), { code });
         assert.deepEqual(await state(), snapshot);
-        assert.deepEqual(readFileSync(path), before);
+        assert.deepEqual(await readPanFacts(root), before);
       }
     }
   }
@@ -704,7 +704,7 @@ test('Tianyi account refresh distinguishes submitted authentication failure from
   assert.equal(result.refreshed, true);
   assert.equal(result.account.status, 'signedIn');
   assert.equal(result.account.revision, 1);
-  const saved = JSON.parse(readFileSync(path)).accounts.tianyi;
+  const saved = (await readPanFacts(root)).accounts.tianyi;
   assert.equal(saved.credentials.password, f.password);
   assert.match(saved.credentials.cookie, /session=fresh/);
   assert.equal(JSON.stringify(result).includes(f.password), false);
@@ -847,17 +847,17 @@ test('Tianyi service Cookie persistence and list/play references survive reopeni
     return response('', 206);
   });
   const first = createPanService({ dataRoot, transport: f.transport });
-  t.after(() => rmSync(dataRoot, { recursive: true, force: true }));
+  let reopened;
+  t.after(async () => { await first.close(); await reopened?.close(); rmSync(dataRoot, { recursive: true, force: true }); });
   await first.invoke('settings.set', { provider: 'tianyi', credentials: { cookie: 'session=synthetic' } });
   const listed = await first.invoke('list', { provider: 'tianyi', share });
   const reference = listed.files[0].file;
   assert.equal(reference.provider, 'tianyi');
   assert.equal(reference.fileId, file.fileId);
   await first.close();
-  const saved = JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'));
+  const saved = (await readPanFacts(dataRoot));
   assert.equal(saved.accounts.tianyi.credentials.cookie, 'session=synthetic');
-  const reopened = createPanService({ dataRoot, transport: f.transport });
-  t.after(async () => reopened.close());
+  reopened = createPanService({ dataRoot, transport: f.transport });
   const result = await reopened.invoke('play', { provider: 'tianyi', file: reference, mode: 'download' });
   assert.equal(result.url, 'https://media.invalid/file');
   assert.equal(result.mode, 'download');
@@ -875,7 +875,7 @@ test('Tianyi service stores exact plaintext password and only patches Cookie aft
   const refreshed = await service.invoke('refresh', { provider: 'tianyi' });
   assert.equal(refreshed.refreshed, true);
   assert.equal(JSON.stringify(refreshed).includes(f.password), false);
-  const saved = JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8'));
+  const saved = (await readPanFacts(dataRoot));
   assert.equal(saved.accounts.tianyi.credentials.password, f.password);
   assert.match(saved.accounts.tianyi.credentials.cookie, /session=fresh/);
   assert.deepEqual(f.submitted, [{ username: 'synthetic-user', password: f.password }]);
@@ -930,7 +930,7 @@ test('Tianyi service replacement during password completion never persists the o
   await rejected;
   await drained.promise;
   await service.close();
-  const saved = JSON.parse(readFileSync(join(dataRoot, 'pan/accounts.json'), 'utf8')).accounts.tianyi;
+  const saved = (await readPanFacts(dataRoot)).accounts.tianyi;
   assert.equal(saved.revision, 2);
   assert.deepEqual(saved.credentials, next);
   assert.equal(f.submitted.length, 1);

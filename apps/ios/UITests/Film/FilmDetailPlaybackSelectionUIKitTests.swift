@@ -616,14 +616,11 @@ final class FilmDetailPlaybackSelectionUIKitTests: XCTestCase {
         return model
     }
     private func detailPage(_ model: FilmPlaybackModel) throws -> FilmDetailViewController {
-        let suite = "FilmDetailPlaybackSelectionUIKitTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let images = ArtworkImages(maximumBytes: 1_024 * 1_024) { _ in
             XCTFail("This fixture contains no artwork"); throw URLError(.resourceUnavailable)
         }
         return FilmDetailViewController(detail: .init(item: .init(sourceID: "fixture", id: "19", title: "星海航线")),
-            library: FilmLibrary(defaults: defaults), images: images,
+            library: try appStorageTestFilmLibrary(), images: images,
             themeProvider: FilmDetailSelectionTheme(), model: model)
     }
     private func button(_ id: String, _ root: UIView) throws -> UIButton {

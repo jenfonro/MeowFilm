@@ -6,6 +6,8 @@ import { createPanRuntimeModule } from './modules/pan-runtime.mjs';
 import { createTMDBDataModule, createDoubanDataModule } from './modules/metadata-data.mjs';
 import { createFilmPlaybackModule } from './modules/film-playback.mjs';
 import { createMusicPlatformModule } from './modules/music-platform.mjs';
+import { configureStandaloneStorage } from '@meowfilm/storage';
+import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule };
 export { createPanRuntime, startPanRuntime } from './pan-entry.mjs';
@@ -57,6 +59,7 @@ export function connectFilmPlayback(modules, options) {
 
 export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan, tmdb, douban, film, musicPlatform,
   ...config } = {}) {
+  configureStandaloneStorage(createDesktopStorageDriver);
   return createAppRuntime({ ...config, product: 'aggregate', assemble: () => {
     const modules = [];
     try {

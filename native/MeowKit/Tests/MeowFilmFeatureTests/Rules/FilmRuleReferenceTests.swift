@@ -38,7 +38,7 @@ final class FilmRuleReferenceTests: XCTestCase {
         XCTAssertEqual(cleanMatch, #"/\s+/g"#)
         let retainedNEL = try await service.normalizeNewMatchRule("\u{0085}x\u{0085}")
         XCTAssertEqual(retainedNEL?.pattern, "\u{0085}x\u{0085}")
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         let offlineCalls = await rpc.calls
         XCTAssertTrue(offlineCalls.isEmpty)
         await rpc.setFailure(.remote("CAPABILITY_UNAVAILABLE"))

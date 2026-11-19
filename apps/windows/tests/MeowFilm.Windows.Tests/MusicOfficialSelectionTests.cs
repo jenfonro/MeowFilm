@@ -19,7 +19,7 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection uses the fixed recording basis including non-official mappings", async () =>
         {
             await using var store = new MemoryStore();
-            await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             JsonObject Track(string platform, string id, double duration) =>
                 MusicSongFixture.Online(platform, id, "Pairwise", "Artist", duration: duration);
             var song = Track("wy", "root", 103);
@@ -76,7 +76,7 @@ public static class MusicOfficialSelectionTests
             settings.Remove("schema"); settings.Remove("revision"); settings["request"] = "128k";
             await scene.Ok("music.quality.settings.save", settings);
             var output = new Output();
-            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs(), cacheStore: scene.CacheStore);
+            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs());
             await module.InitializeAsync(default);
             await scene.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
             await scene.Ok("music.queue.replace", new { songs = new[] { original }, index = 0 });
@@ -88,7 +88,7 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection recordings reject other editions and duration conflicts", async () =>
         {
             await using var store = new MemoryStore();
-            await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var song = await MusicSongFixture.AdoptAsync(library, SongObject("wy", "1"));
             var merged = Merged(song, SongObject("tx", "FixtureMID"), SongObject("tx", "Live", title: "Same Song (Live)"),
                 SongObject("tx", "Long", duration: 160), SongObject("tx", "Unknown", duration: 0));
@@ -102,7 +102,7 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection source history is account policy request generation and TTL bound without touching reads", async () =>
         {
             await using var store = new MemoryStore(); var clock = new Clock();
-            await using var cacheStore = new CacheDocumentStore(store);
+            await using var cacheStore = new NativeTestDatabase(store);
             var cache = new MusicSourceCache(cacheStore, clock);
             var song = SongObject("tx", "FixtureMID");
             string signature = Hash('a'), policy = Hash('b');
@@ -112,7 +112,7 @@ public static class MusicOfficialSelectionTests
             await cache.ConfirmAsync("account", "song", signature, info, default);
             await cacheStore.DrainAsync();
             int writes = store.Writes;
-            await using var reopened = new CacheDocumentStore(store);
+            await using var reopened = new NativeTestDatabase(store);
             var restarted = new MusicSourceCache(reopened, clock);
             var hit = await restarted.ReadHistoryAsync("account", "song", policy, "auto", 7, default);
             Check(hit is not null && hit["recording"] is not null && hit["confirmedAt"]!.GetValue<long>() == clock.Now);
@@ -128,7 +128,7 @@ public static class MusicOfficialSelectionTests
         yield return new("Official selection remembers compatible confirmed source before primary but not foreign history", async () =>
         {
             await using var store = new MemoryStore();
-            await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var song = await MusicSongFixture.AdoptAsync(library, SongObject("wy", "1")); var other = SongObject("tx", "FixtureMID");
             var row = other["sources"]![0]!.AsObject();
             var history = new JsonObject { ["platform"] = "tx", ["sourceKey"] = row["sourceKey"]!.DeepClone(),
@@ -172,14 +172,14 @@ public static class MusicOfficialSelectionTests
             Check(!scene.App.IsOfficialPlaybackCurrent("tx", scope, generation));
             var policy = await scene.Ok("music.quality.settings.get");
             int calls = scene.Handler.Calls, writes = (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes), vkeys = scene.Handler.Vkeys;
-            byte[] cached = scene.CacheBacking.Data[MusicSourceCache.Namespace].ToArray();
+            byte[] cached = JsonSerializer.SerializeToUtf8Bytes(scene.CacheBacking.Root(MusicSourceCache.Namespace));
             var candidates = await scene.Candidates(song, policy, true);
             Check(candidates.GetProperty("candidates").GetArrayLength() == 0 && scene.Handler.Searches == 0);
             foreach (string method in new[] { "resolve", "cacheContext", "confirm" })
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
             await scene.CacheStore.DrainAsync();
             Check(scene.Handler.Calls == calls && scene.Handler.Vkeys == vkeys && (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes) == writes);
-            Check(scene.CacheBacking.Data[MusicSourceCache.Namespace].SequenceEqual(cached),
+            Check(JsonSerializer.SerializeToUtf8Bytes(scene.CacheBacking.Root(MusicSourceCache.Namespace)).SequenceEqual(cached),
                 "disabled cache entry points cannot create candidates, authorization or confirmation");
             await scene.Ok("music.officialSources.settings.save",
                 new { ifRevision = 1, enabled = new[] { "wy", "tx", "kg" } });
@@ -239,7 +239,7 @@ public static class MusicOfficialSelectionTests
             string songId = (await scene.Candidates(input.song, await scene.Ok("music.quality.settings.get"), false))
                 .GetProperty("song").GetProperty("songId").GetString()!;
             await scene.CacheStore.DrainAsync();
-            await using var reopened = new CacheDocumentStore(scene.CacheBacking);
+            await using var reopened = new NativeTestDatabase(scene.CacheBacking);
             // An empty invalidation may persist as a fence; it must not publish a URL or history.
             foreach (var cache in new[] { new MusicSourceCache(scene.CacheStore), new MusicSourceCache(reopened) })
             {
@@ -283,13 +283,12 @@ public static class MusicOfficialSelectionTests
                 Code(await scene.App.ExecuteAsync("music.official." + method, input), "OFFICIAL_SOURCE_DISABLED");
             Check(scene.Handler.Calls == calls && MusicTestStores.For(scene.Store).Writes == writes && scene.ScriptCalls == 0);
         });
-        yield return new("Official candidate lookup treats damaged cache as absent without network fallback", async () =>
+        yield return new("Official candidate lookup treats absent current cache as missing without network fallback", async () =>
         {
             await using var scene = await Scene.CreateAsync();
             await scene.Login();
             var policy = await scene.Ok("music.quality.settings.get");
-            byte[] incompatible = "{"u8.ToArray();
-            scene.CacheStore.Save(MusicSourceCache.Namespace, incompatible);
+            await scene.Store.WriteAsync(db => db.Execute("DELETE FROM windows_playback_source"));
             await scene.CacheStore.DrainAsync();
             var song = await MusicSongFixture.AdoptAsync(scene.App, SongObject("wy", "1"));
             int calls = scene.Handler.Calls, writes = (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes);
@@ -300,7 +299,7 @@ public static class MusicOfficialSelectionTests
             Check(result.GetProperty("ok").GetBoolean());
             await scene.CacheStore.DrainAsync();
             Check(scene.Handler.Calls == calls && (scene.Store.Writes + MusicTestStores.For(scene.Store).Writes) == writes &&
-                scene.CacheBacking.Data[MusicSourceCache.Namespace].SequenceEqual(incompatible));
+                await scene.Store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_playback_source")) == 0);
         });
         yield return new("Shared supplementary matching isolates each requested platform account frame", async () =>
         {
@@ -384,8 +383,7 @@ public static class MusicOfficialSelectionTests
         {
             await using var scene = await Scene.CreateAsync();
             var output = new Output();
-            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs(),
-                cacheStore: scene.CacheStore);
+            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs());
             await module.InitializeAsync(default); await scene.Login();
             var original = SongObject("wy", "1");
             await scene.Ok("music.queue.replace", new { songs = new[] { original }, index = 0 });
@@ -445,8 +443,7 @@ public static class MusicOfficialSelectionTests
         {
             await using var scene = await Scene.CreateAsync();
             var output = new Output();
-            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs(),
-                cacheStore: scene.CacheStore);
+            await using var module = new MusicCapability(scene.App, scene.Store, output, new Dialogs());
             await module.InitializeAsync(default); await scene.Login();
             scene.Handler.Member = false;
             scene.Handler.DenyMedia = true;
@@ -483,7 +480,7 @@ public static class MusicOfficialSelectionTests
         internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly Transport Handler = new();
         internal readonly MusicNativeApplication App;
-        internal readonly CacheDocumentStore CacheStore;
+        internal readonly NativeTestDatabase CacheStore;
         internal int ScriptCalls => Runtime.Calls.Count(c => !c.Method.StartsWith("music.platform.", StringComparison.Ordinal) &&
             c.Method != "music.script.sources.list");
         private Scene(MemoryStore store, MemoryStore cacheBacking)
@@ -493,7 +490,7 @@ public static class MusicOfficialSelectionTests
             Runtime.OnOtherCall = (call, _) => call.Method == "music.script.sources.list"
                 ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { ok = true, contract = "music.script.v3", value = new { items = Array.Empty<object>() } }))
                 : throw new InvalidOperationException(call.Method);
-            App = new(Store, MusicTestStores.For(Store), Runtime, CacheStore);
+            App = new(Store, MusicTestStores.For(Store), Runtime);
         }
         internal static Task<Scene> CreateAsync(MemoryStore? store = null, MemoryStore? cacheBacking = null)
         {

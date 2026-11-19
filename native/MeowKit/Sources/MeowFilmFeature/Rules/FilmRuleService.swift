@@ -9,8 +9,10 @@ public actor FilmRuleService {
     private let request: Request
     private let settingsDocument: FilmSettingsDocument
     private var saved: FilmRuleSet?
+    private var savedStorageRevision: Int64?
     public private(set) var revision: RuntimeValue?
     private var tail: Task<Void, Never>?
+    private var settingsTail: Task<Void, Never>?
     private var cancellations: [UUID: @Sendable () -> Void] = [:]
     private var preparation: Task<Void, Never>?
     private var preparationID = UUID()
@@ -32,8 +34,7 @@ public actor FilmRuleService {
     }
 
     public func initialize() async throws {
-        try available()
-        try refresh()
+        try await runSettings { try await $0.refresh() }
     }
 
     public func savedSnapshot() throws -> FilmRuleSet {
@@ -42,16 +43,18 @@ public actor FilmRuleService {
         return saved
     }
 
-    /// Whole-document API retained for existing non-page consumers.
+    /// A complete draft uses the revision of its acknowledged native snapshot.
     public func save(_ draft: FilmRuleSet) async throws -> FilmRuleSet {
-        try available()
-        return try saveLocal(draft)
+        try await runSettings { try await $0.saveLocal(draft) }
     }
 
     /// Merge only this group into the latest native document under its CAS.
     public func save(_ group: FilmRuleGroup, rules: [FilmMatchRule]) async throws -> FilmRuleSet {
-        try available()
-        let document = try settingsDocument.update { current in
+        try await runSettings { try await $0.saveGroup(group, rules: rules) }
+    }
+
+    private func saveGroup(_ group: FilmRuleGroup, rules: [FilmMatchRule]) async throws -> FilmRuleSet {
+        let document = try await settingsDocument.updateSnapshot { current in
             var snapshot = try FilmRuleSettings.read(current)
             snapshot.replace(group, with: rules)
             let normalized = FilmRuleSettings.normalize(snapshot)
@@ -63,7 +66,7 @@ public actor FilmRuleService {
             envelope["rules"] = .object(fields)
             return .object(envelope)
         }
-        return try accept(FilmRuleSettings.read(document))
+        return try accept(FilmRuleSettings.read(document.document), storageRevision: document.revision)
     }
 
     /// Defaults are a draft value; requesting them never writes the document.
@@ -87,8 +90,12 @@ public actor FilmRuleService {
     }
 
     public func restoreDefaults(_ section: FilmRuleSection, draft: FilmRuleSet? = nil) async throws -> FilmRuleSet {
-        try available()
-        let document = try settingsDocument.update { current in
+        try await runSettings { try await $0.restoreLocal(section, draft: draft) }
+    }
+
+    private func restoreLocal(_ section: FilmRuleSection, draft: FilmRuleSet?) async throws -> FilmRuleSet {
+        let expected = draft == nil ? nil : savedStorageRevision
+        let document = try await settingsDocument.updateSnapshot(expectedRevision: expected) { current in
             var snapshot = try draft ?? FilmRuleSettings.read(current)
             let defaults = FilmRuleSettings.restore
             for group in FilmRuleGroup.allCases where group.section == section {
@@ -96,7 +103,7 @@ public actor FilmRuleService {
             }
             return try Self.document(current, rules: FilmRuleSettings.normalize(snapshot))
         }
-        return try accept(FilmRuleSettings.read(document))
+        return try accept(FilmRuleSettings.read(document.document), storageRevision: document.revision)
     }
 
     /// Preview goes directly to Node, with no preliminary get or local execution.
@@ -163,7 +170,7 @@ public actor FilmRuleService {
         // physically drained before native defaults can be committed.
         let work = Task {
             guard !self.closed else { throw FilmRuleServiceError.closed }
-            return try self.saveLocal(FilmRuleSettings.initial)
+            return try await self.saveLocal(FilmRuleSettings.initial)
         }
         clearWork = work
         _ = try await withTaskCancellationHandler {
@@ -182,17 +189,21 @@ public actor FilmRuleService {
         await task.value
     }
 
-    private func refresh() throws {
-        let rules = try FilmRuleSettings.read(settingsDocument.read())
+    private func refresh() async throws {
+        let snapshot = try await settingsDocument.snapshot()
+        let rules = try FilmRuleSettings.read(snapshot.document)
         try Task.checkCancellation()
-        _ = try accept(rules)
+        _ = try accept(rules, storageRevision: snapshot.revision)
     }
 
-    private func saveLocal(_ draft: FilmRuleSet) throws -> FilmRuleSet {
-        let document = try settingsDocument.update { current in
+    private func saveLocal(_ draft: FilmRuleSet) async throws -> FilmRuleSet {
+        let expected: Int64
+        if let savedStorageRevision { expected = savedStorageRevision }
+        else { expected = try await settingsDocument.snapshot().revision }
+        let document = try await settingsDocument.updateSnapshot(expectedRevision: expected) { current in
             try Self.document(current, rules: FilmRuleSettings.normalize(draft))
         }
-        return try accept(FilmRuleSettings.read(document))
+        return try accept(FilmRuleSettings.read(document.document), storageRevision: document.revision)
     }
 
     private static func document(_ current: RuntimeValue?, rules: FilmRuleSet) throws -> RuntimeValue {
@@ -204,11 +215,12 @@ public actor FilmRuleService {
         return .object(envelope)
     }
 
-    private func accept(_ snapshot: FilmRuleSet) throws -> FilmRuleSet {
+    private func accept(_ snapshot: FilmRuleSet, storageRevision: Int64) throws -> FilmRuleSet {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let bytes = try encoder.encode(snapshot)
         revision = .string(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
         saved = snapshot
+        savedStorageRevision = storageRevision
         return snapshot
     }
 
@@ -233,8 +245,26 @@ public actor FilmRuleService {
         try Task.checkCancellation()
     }
 
-    /// Only real previews share this cancellable runtime tail. Native settings
-    /// commit synchronously on the actor without waiting for runtime work.
+    /// Native commits have their own FIFO, independent of slow runtime previews.
+    /// The next complete draft uses this owner's latest acknowledged revision;
+    /// an external owner's edit still conflicts and is never replayed.
+    private func runSettings<Value: Sendable>(
+        _ operation: @escaping @Sendable (isolated FilmRuleService) async throws -> Value
+    ) async throws -> Value {
+        try available()
+        let previous = settingsTail, id = UUID()
+        let work = Task {
+            if let previous { await previous.value }
+            try self.available()
+            return try await operation(self)
+        }
+        cancellations[id] = { work.cancel() }
+        settingsTail = Task { _ = await work.result }
+        defer { cancellations.removeValue(forKey: id) }
+        return try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+    }
+
+    /// Only real previews share this cancellable runtime tail.
     private func run<Value: Sendable>(
         _ operation: @escaping @Sendable (isolated FilmRuleService) async throws -> Value
     ) async throws -> Value {
@@ -258,8 +288,8 @@ public actor FilmRuleService {
 
     private func beginPreparation() -> Task<Void, Never> {
         if let preparation { return preparation }
-        let accepted = tail
-        let drain = Task { if let accepted { await accepted.value } }
+        let accepted = tail, settings = settingsTail
+        let drain = Task { await accepted?.value; await settings?.value }
         preparationID = UUID()
         preparation = drain
         for cancel in cancellations.values { cancel() }

@@ -471,7 +471,7 @@ public static class FilmTrayPlaybackTests
         internal readonly AppMediaControlSettings MediaControls;
         internal readonly AppShutdown Lifecycle;
         private readonly AppClosePreferences preferences;
-        private readonly QualityFixture.DocumentStore store;
+        private readonly QualityFixture.Database store;
         private readonly TaskCompletionSource closed = Gate();
         internal int ShutdownCalls, CancelCalls;
         internal Task? ShutdownWork;
@@ -482,7 +482,7 @@ public static class FilmTrayPlaybackTests
         internal CloseWindowDialog Dialog => ShellElement<CloseWindowDialog>("CloseDialog");
 
         private Scene(AppClosePreferences preferences, AppMediaControlSettings mediaControls,
-            QualityFixture.DocumentStore store, ShutdownReceipt? receipt)
+            QualityFixture.Database store, ShutdownReceipt? receipt)
         {
             this.preferences = preferences; this.store = store; MediaControls = mediaControls;
             Rig = new();
@@ -511,7 +511,7 @@ public static class FilmTrayPlaybackTests
 
         internal static async Task<Scene> Create(ShutdownReceipt? receipt = null, bool systemMediaEnabled = true)
         {
-            var store = new QualityFixture.DocumentStore();
+            var store = new QualityFixture.Database();
             var preferences = new AppClosePreferences(store);
             var mediaControls = new AppMediaControlSettings(store);
             await preferences.LoadAsync();

@@ -59,7 +59,7 @@ public static partial class MusicUiTests
             await f.Module.DeactivateSettingsAsync(); await f.Module.ActivateSettingsAsync();
             Equal("Fresh native name", row.DisplayName); Equal(1, f.Peer.Requests);
             await f.Module.DisposeAsync();
-            await using var cold = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), f.Runtime, f.Cache);
+            await using var cold = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), f.Runtime);
             var cached = await cold.ReadDetailsAsync("wy");
             Equal("saved", cached.State); Equal("Fresh native name", cached.Profile?.DisplayName);
             True(cached.Membership.Vip == true && cached.Generation == 1, "cold cache never creates a verified login");
@@ -104,16 +104,16 @@ public static partial class MusicUiTests
 
     private sealed class DetailsScene : IAsyncDisposable
     {
-        internal readonly LocalDocumentStore Store = ServiceStore();
+        internal readonly NativeDatabase Store = ServiceStore();
         internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly DetailsConsumerPeer Peer = new();
-        internal readonly CacheDocumentStore Cache = new();
+        internal readonly NativeTestDatabase Cache = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
         private DetailsScene()
         {
             Runtime.OnRequest = Peer.Respond;
-            App = new(Store, MusicTestStores.For(Store), Runtime, Cache);
+            App = new(Store, MusicTestStores.For(Store), Runtime);
             Module = new(App, Store, new PlaybackProbe(), new Dialogs());
         }
         internal static async Task<DetailsScene> Create()

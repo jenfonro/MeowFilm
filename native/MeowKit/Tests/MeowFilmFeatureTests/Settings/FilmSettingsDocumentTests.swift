@@ -1,124 +1,110 @@
 import Foundation
 import XCTest
 import MeowStorage
+import MeowStorageTestSupport
 import MeowRuntime
 @testable import MeowFilmFeature
 
-final class FilmSettingsTestKeys: EncryptedDocumentKeyProvider, @unchecked Sendable {
-    private let lock = NSLock()
-    private var keys: [String: Data] = [:]
-    func readKey(namespace: String) throws -> Data? {
-        lock.lock(); defer { lock.unlock() }; return keys[namespace]
-    }
-    func createKeyIfAbsent(namespace: String) throws -> Data {
-        lock.lock(); defer { lock.unlock() }
-        if let key = keys[namespace] { return key }
-        let key = Data(repeating: 37, count: 32); keys[namespace] = key; return key
-    }
-}
-
-final class FilmSettingsTestChanges: @unchecked Sendable {
-    private let lock = NSLock()
-    private var blocks: [String] = []
-    func append(_ block: String) { lock.lock(); blocks.append(block); lock.unlock() }
-    var values: [String] { lock.lock(); defer { lock.unlock() }; return blocks }
-}
-
 final class FilmSettingsDocumentTests: XCTestCase {
-    private func directory() throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        return root
+    private let initialTMDB: RuntimeValue = .object(["version": .number(1), "settings": .object([
+        "apiBase": .string("https://api.themoviedb.org"), "imageBase": .string("https://image.tmdb.org"),
+        "apiKey": .string("synthetic-api-key"), "accessToken": .string(""), "language": .string("zh-CN"),
+        "region": .string("CN"), "includeAdult": .bool(false)
+    ])])
+    private func command(_ provider: String = "baidu", account: Int = 0, row: Int = 0,
+                         mode: String = "replace", cookie: String = "synthetic-cookie") -> RuntimeValue {
+        .object(["provider": .string(provider), "mode": .string(mode), "accountRevision": .number(Double(account)),
+                 "rowRevision": .number(Double(row)), "credentials": .object(["cookie": .string(cookie)])])
     }
-
-    func testLargeSettingsRoundTripWithContentCAS() throws {
-        let root = try directory()
-        let store = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.rules.namespace)
-        let document = FilmSettingsDocument(block: .rules, storage: .plain { store })
-        let value: RuntimeValue = .object(["rules": .string(String(repeating: "x", count: 8 * 1024 * 1024 + 1))])
-        let missing = try document.snapshot()
-        _ = try document.compareAndSwap(expected: missing.fingerprint, document: value)
-        XCTAssertEqual(try document.read(), value)
-        let reopened = FilmSettingsDocument(block: .rules, storage: .plain { store })
-        XCTAssertEqual(try reopened.read(), value)
+    func testPlaintextProviderRowsUseReplacementAndRefreshRevisionsWithoutEchoNotification() async throws {
+        let storage = try FilmNativeSettingsStore(self, block: .panAccounts), document = storage.document
+        let empty = try await document.snapshot()
+        XCTAssertNil(empty.document); XCTAssertEqual(empty.revision, 0)
+        let replace = command()
+        let first = try storageTestIO { try document.updatePanSync(replace) }
+        XCTAssertEqual(first.document?.filmObject?["accounts"]?.filmObject?["baidu"]?.filmObject?["revision"], .number(1))
+        XCTAssertEqual(first.document?.filmObject?["accounts"]?.filmObject?["baidu"]?.filmObject?["rowRevision"], .number(1))
+        let refresh = command(account: 1, row: 1, mode: "refresh", cookie: "synthetic-rotated-cookie")
+        let next = try storageTestIO { try document.updatePanSync(refresh) }
+        XCTAssertEqual(next.document?.filmObject?["accounts"]?.filmObject?["baidu"]?.filmObject?["revision"], .number(1))
+        XCTAssertEqual(next.document?.filmObject?["accounts"]?.filmObject?["baidu"]?.filmObject?["rowRevision"], .number(2))
+        XCTAssertGreaterThan(next.revision, first.revision)
+        XCTAssertTrue(storage.notifications.isEmpty)
+        let row = try await storage.database.read { try $0.query("SELECT cookie FROM ios_pan_accounts WHERE provider='baidu'").first! }
+        XCTAssertEqual(try row.text("cookie"), "synthetic-rotated-cookie")
+        let reopened = storage.makeDocument(), restored = try await reopened.snapshot()
+        XCTAssertEqual(restored.document, next.document); XCTAssertEqual(restored.revision, next.revision)
     }
-
-    func testProtectedCASUsesPlaintextFingerprintAndNotifiesOnlyCommittedChanges() throws {
-        let root = try directory(), changes = FilmSettingsTestChanges(), keys = FilmSettingsTestKeys()
-        let store = try EncryptedDocumentStore(baseURL: root, namespace: FilmSettingsBlock.panAccounts.namespace, keyProvider: keys)
-        let document = FilmSettingsDocument(block: .panAccounts, storage: .protected { store }, changed: changes.append)
-        XCTAssertNil(try document.read())
-        XCTAssertEqual(try document.snapshot().fingerprint,
-            .object(["exists": .bool(false), "length": .number(0), "sha256": .null]))
-        let first: RuntimeValue = .object(["version": .number(1), "accounts": .object([:])])
-        XCTAssertEqual(try document.update { _ in first }, first)
-        let saved = try document.snapshot()
-        _ = try document.update { $0! }
-        XCTAssertEqual(changes.values, ["pan.accounts"])
-        XCTAssertEqual(try document.snapshot().fingerprint, saved.fingerprint)
-        let next: RuntimeValue = .object(["version": .number(1), "accounts": .object(["synthetic": .bool(true)])])
-        _ = try document.compareAndSwap(expected: saved.fingerprint, document: next)
-        XCTAssertEqual(try document.read(), next)
-        XCTAssertEqual(changes.values, ["pan.accounts"], "runtime writes must not echo a change notification")
-        XCTAssertThrowsError(try document.compareAndSwap(expected: saved.fingerprint, document: first)) {
+    func testStaleProviderCommandCannotReplaceAnotherCommitOrBlockAnUnrelatedProvider() async throws {
+        let storage = try FilmNativeSettingsStore(self, block: .panAccounts), document = storage.document
+        let first = command(), second = command(account: 1, row: 1)
+        _ = try storageTestIO { try document.updatePanSync(first) }
+        _ = try storageTestIO { try document.updatePanSync(second) }
+        let saved = try await document.snapshot()
+        XCTAssertThrowsError(try storageTestIO { try document.updatePanSync(second) }) {
             XCTAssertEqual($0 as? FilmSettingsStorageError, .conflict)
         }
-        let reopened = FilmSettingsDocument(block: .panAccounts, storage: .protected { store })
-        XCTAssertEqual(try reopened.read(), next)
-        for case let file as URL in FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])! {
-            if try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
-                XCTAssertNil(try Data(contentsOf: file).range(of: Data("synthetic".utf8)))
+        let unchanged = try await document.snapshot()
+        XCTAssertEqual(unchanged.revision, saved.revision); XCTAssertEqual(unchanged.document, saved.document)
+        let unrelated = command("quark")
+        let result = try storageTestIO { try document.updatePanSync(unrelated) }
+        XCTAssertEqual(result.document?.filmObject?["accounts"]?.filmObject?["baidu"], saved.document?.filmObject?["accounts"]?.filmObject?["baidu"])
+        XCTAssertEqual(result.document?.filmObject?["accounts"]?.filmObject?["quark"]?.filmObject?["revision"], .number(1))
+    }
+    func testNativeEditNoOpAndRejectedFieldsHaveTransactionalNotificationSemantics() async throws {
+        let storage = try FilmNativeSettingsStore(self, block: .tmdb), document = storage.document
+        try await storage.seed(initialTMDB)
+        let before = try await document.snapshot()
+        _ = try await document.update { $0! }
+        XCTAssertEqual(storage.notifications, ["tmdb"])
+        var invalid = initialTMDB.filmObject!; invalid["unknown"] = .object(["entireDocument": .bool(true)])
+        let rejected = RuntimeValue.object(invalid)
+        do { _ = try await document.update { _ in rejected }; XCTFail("unknown internal field admitted") }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .invalidDocument) }
+        let after = try await document.snapshot()
+        XCTAssertEqual(after.document, before.document); XCTAssertEqual(after.revision, before.revision)
+        XCTAssertEqual(storage.notifications, ["tmdb"])
+    }
+    func testIndependentNativeEditsRebaseInsideTheSameCurrentTransaction() async throws {
+        let storage = try FilmNativeSettingsStore(self, block: .tmdb)
+        try await storage.seed(initialTMDB)
+        let first = storage.document, second = storage.makeDocument()
+        _ = try await first.update { current in
+            var root = current!.filmObject!, settings = root["settings"]!.filmObject!
+            settings["language"] = .string("ja-JP"); root["settings"] = .object(settings)
+            return .object(root)
+        }
+        _ = try await second.update { current in
+            var root = current!.filmObject!, settings = root["settings"]!.filmObject!
+            settings["includeAdult"] = .bool(true); root["settings"] = .object(settings)
+            return .object(root)
+        }
+        let saved = try await first.read()
+        XCTAssertEqual(saved?.filmObject?["settings"]?.filmObject?["language"], .string("ja-JP"))
+        XCTAssertEqual(saved?.filmObject?["settings"]?.filmObject?["includeAdult"], .bool(true))
+    }
+    func testReadOnlyFailureDoesNotPublishAndRecoveryUsesTheSameDatabase() async throws {
+        let storage = try FilmNativeSettingsStore(self, block: .tmdb), document = storage.document
+        try await storage.seed(initialTMDB)
+        let before = try await document.snapshot()
+        _ = try await storage.database.read { try $0.execute("PRAGMA query_only=ON") }
+        do {
+            _ = try await document.update { current in
+                var root = current!.filmObject!, settings = root["settings"]!.filmObject!
+                settings["language"] = .string("ja-JP"); root["settings"] = .object(settings)
+                return .object(root)
             }
+            XCTFail("read-only write succeeded")
+        } catch { XCTAssertEqual(error as? SQLiteStorageError, .readOnly) }
+        let failed = try await document.snapshot()
+        XCTAssertEqual(failed.document, before.document); XCTAssertEqual(failed.revision, before.revision)
+        XCTAssertEqual(storage.notifications, ["tmdb"])
+        _ = try await storage.database.read { try $0.execute("PRAGMA query_only=OFF") }
+        _ = try await document.update { current in
+            var root = current!.filmObject!, settings = root["settings"]!.filmObject!
+            settings["language"] = .string("ja-JP"); root["settings"] = .object(settings)
+            return .object(root)
         }
-    }
-
-    func testConcurrentExternalMutationAndFailedDraftNeverNotifyOrReplace() throws {
-        let root = try directory(), changes = FilmSettingsTestChanges()
-        let store = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.rules.namespace)
-        let document = FilmSettingsDocument(block: .rules, storage: .plain { store }, changed: changes.append)
-        let first: RuntimeValue = .object(["version": .number(1), "rules": .object([:])])
-        _ = try document.update { _ in first }
-        let external: RuntimeValue = .object(["version": .number(1), "unknown": .string("external")])
-        XCTAssertThrowsError(try document.update { _ in
-            try store.write(RuntimeJSON.encode(external), key: FilmSettingsDocument.key)
-            return .object(["version": .number(1), "rules": .object(["changed": .bool(true)])])
-        }) { XCTAssertEqual($0 as? FilmSettingsStorageError, .conflict) }
-        XCTAssertEqual(try document.read(), external)
-        XCTAssertThrowsError(try document.update { _ in throw FilmSettingsStorageError.invalidDocument })
-        XCTAssertEqual(changes.values, ["film.rules"])
-        XCTAssertEqual(try document.read(), external)
-    }
-
-    func testUnrelatedEditKeepsExactNumbersAndUTF8KeysAndCASConsumesOnlyFingerprintFields() throws {
-        let root = try directory(), store = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.rules.namespace)
-        let bytes = Data(#"{"version":1,"unknown":{"n":0.12345678901234567890123456789,"é":1,"e\u0301":2}}"#.utf8)
-        try store.write(bytes, key: FilmSettingsDocument.key)
-        let document = FilmSettingsDocument(block: .rules, storage: .plain { store })
-        let original = try XCTUnwrap(try document.read())
-        let saved = try document.update { current in
-            guard case .object(var fields)? = current else { throw FilmSettingsStorageError.invalidDocument }
-            fields["rules"] = .object([:]); return .object(fields)
-        }
-        XCTAssertEqual(saved.catField("unknown"), original.catField("unknown"))
-        guard case .object(var expected) = try document.snapshot().fingerprint else { return XCTFail("fingerprint") }
-        expected["extra"] = .array([])
-        _ = try document.compareAndSwap(expected: .object(expected), document: saved)
-        XCTAssertEqual(try document.read(), saved)
-    }
-
-    func testCorruptStorageAndFailedProtectedFactoryAreNotMissingDocuments() throws {
-        let root = try directory(), changes = FilmSettingsTestChanges()
-        let store = try DocumentStore(baseURL: root, namespace: FilmSettingsBlock.preferences.namespace)
-        try store.write(Data("[]".utf8), key: FilmSettingsDocument.key)
-        let corrupt = FilmSettingsDocument(block: .preferences, storage: .plain { store }, changed: changes.append)
-        XCTAssertThrowsError(try corrupt.read()) { XCTAssertEqual($0 as? FilmSettingsStorageError, .invalidDocument) }
-        XCTAssertThrowsError(try corrupt.update { _ in .object([:]) })
-        let failed = FilmSettingsDocument(block: .tmdb, storage: .protected { throw EncryptedDocumentKeyError.backendFailure },
-                                          changed: changes.append)
-        XCTAssertThrowsError(try failed.read()) { XCTAssertEqual($0 as? FilmSettingsStorageError, .storageFailure) }
-        XCTAssertThrowsError(try failed.update { _ in .object([:]) })
-        XCTAssertTrue(changes.values.isEmpty)
-        XCTAssertEqual(try store.read(key: FilmSettingsDocument.key), Data("[]".utf8))
+        XCTAssertEqual(storage.notifications, ["tmdb", "tmdb"])
     }
 }

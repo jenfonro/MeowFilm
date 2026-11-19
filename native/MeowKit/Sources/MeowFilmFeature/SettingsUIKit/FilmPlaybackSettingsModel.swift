@@ -21,19 +21,19 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
 
     public func loadPreferences() async throws {
         try beginPreferences(); defer { preferencesBusy = false }
-        try reloadPreferences()
+        try await reloadPreferences()
     }
 
-    func reloadPreferences() throws {
-        let value = try FilmPlaybackPreferences(Self.preferences(in: settingsDocument.read()))
+    func reloadPreferences() async throws {
+        let value = try await FilmPlaybackPreferences(Self.preferences(in: settingsDocument.read()))
         try Task.checkCancellation()
         if preferences != value { preferences = value }
         if draft == nil { draft = value }
     }
 
-    func setMetadataViewProvider(_ provider: FilmMetadataProvider) throws {
+    func setMetadataViewProvider(_ provider: FilmMetadataProvider) async throws {
         try beginPreferences(); defer { preferencesBusy = false }
-        let document = try settingsDocument.update { current in
+        let document = try await settingsDocument.update { current in
             var value = try FilmPlaybackPreferences(Self.preferences(in: current))
             value.metadataViewProvider = provider
             var envelope = current?.filmObject ?? ["version": .number(1)]
@@ -47,7 +47,28 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
 
     public func loadLibrary(area: FilmPlaybackLibrary.Area = .manual) async throws {
         try begin(); defer { busy = false }
-        library = try FilmPlaybackLibrary(await transport.call("library.get"), area: area)
+        var fields: RuntimeObject?
+        var history: [RuntimeValue] = []
+        var after: RuntimeValue = .null
+        var seen: [RuntimeValue] = []
+        repeat {
+            var parameters: RuntimeObject = ["limit": .number(500)]
+            if after != .null { parameters["historyAfter"] = after }
+            let page = try await transport.call("library.get", parameters: .object(parameters)).filmRequiredObject()
+            try Task.checkCancellation()
+            if fields == nil { fields = page }
+            if area == .blocks { break }
+            guard let rows = page["history"]?.filmArray, let cursor = page["historyAfter"],
+                  cursor == .null || cursor.filmObject != nil else { throw FilmPlaybackError.invalidResponse }
+            history += rows
+            after = cursor
+            if after != .null {
+                guard !seen.contains(after) else { throw FilmPlaybackError.invalidResponse }
+                seen.append(after)
+            }
+        } while after != .null
+        fields?["history"] = .array(history)
+        library = try FilmPlaybackLibrary(.object(fields!), area: area)
     }
 
     public func edit(_ transform: (inout FilmPlaybackPreferences) -> Void) {
@@ -74,9 +95,10 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         // The settings form does not own the independently saved directory view.
         var patch = try Self.normalize(draft.editedValues)
         patch["metadataViewProvider"] = nil
-        let document = try settingsDocument.update { current in
+        let savedPatch = patch
+        let document = try await settingsDocument.update { current in
             var values = try Self.preferences(in: current).filmRequiredObject()
-            for (key, value) in patch { values[key] = value }
+            for (key, value) in savedPatch { values[key] = value }
             var envelope = current?.filmObject ?? ["version": .number(1)]
             envelope["preferences"] = .object(values)
             return .object(envelope)
@@ -86,7 +108,7 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         preferences = saved; self.draft = saved
     }
 
-    private static func preferences(in document: RuntimeValue?) throws -> RuntimeValue {
+    nonisolated private static func preferences(in document: RuntimeValue?) throws -> RuntimeValue {
         guard let document else { return FilmPlaybackPreferences.defaults.value }
         guard let fields = document.filmObject, fields["version"] == .number(1),
               case .object? = fields["preferences"] else { throw FilmSettingsStorageError.invalidDocument }

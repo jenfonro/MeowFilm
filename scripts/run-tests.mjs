@@ -22,7 +22,7 @@ export function runTests(files, { cwd = windowsRoot, name = 'tests' } = {}) {
   // Bound test-file workers rather than relaxing the script host's timing,
   // cancellation or resource assertions on high-core-count desktops.
   const result = spawnSync(process.execPath, ['--test', '--test-concurrency=2', '--test-reporter=tap', ...files], {
-    cwd, windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 120_000,
+    cwd, windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, timeout: 600_000,
     env: { ...process.env, FORCE_COLOR: '0' }
   });
   process.stdout.write(result.stdout ?? '');

@@ -637,7 +637,7 @@ public static class FilmPlaybackRecoveryTests
     private sealed class Rig : IAsyncDisposable
     {
         private readonly ConcurrentQueue<Epoch> epochs = new();
-        private readonly FilmNativeSettingsFixture storage = new(CatSourceSettings.DocumentNamespace, FilmSourceService.DocumentNamespace);
+        private readonly FilmNativeSettingsFixture storage = new();
         internal readonly AppRuntimeConnectionHost Host;
         internal readonly FilmSourceService Sources;
         internal readonly FilmNativeProbe Native = new();

@@ -14,6 +14,7 @@ using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Media;
 using MeowFilm.Platform.Runtime;
+using MeowFilm.Platform.Storage;
 using Microsoft.Win32.SafeHandles;
 
 namespace MeowFilm.Windows.Tests;
@@ -36,6 +37,8 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     internal readonly FilmPlaybackView View = new();
     internal readonly Window Window;
     internal readonly string DataRoot;
+    internal readonly NativeDatabase Store;
+    private FilmSourceService? sourceOwner;
     private readonly MetadataUpstream metadata = new();
     private readonly Process process;
     private readonly SafeProcessHandle processHandle;
@@ -48,9 +51,9 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     internal int Generation { get; private set; }
     internal int NativeEnded { get; private set; }
 
-    private FilmPlaybackNativeFixture(NodeRuntime runtime, FilmPlayback native, string dataRoot)
+    private FilmPlaybackNativeFixture(NodeRuntime runtime, FilmPlayback native, NativeDatabase store)
     {
-        Runtime = runtime; Native = native; Traffic = new(runtime, native); DataRoot = dataRoot;
+        Runtime = runtime; Native = native; Traffic = new(runtime, native); Store = store; DataRoot = store.ProductRoot!;
         client = new(runtime);
         process = Process.GetProcessById(runtime.ProcessId);
         processHandle = process.SafeHandle; // Pin the actual child, not a potentially reused PID.
@@ -79,27 +82,40 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
             Check(Convert.ToHexStringLower(SHA256.HashData(bytes)) ==
                 "19136344f4cd40b26054f0c502d599875931b9da95334d708ea4c9106021860b", "existing public synthetic ordinary.mp4 input");
         }
-        var runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
-            Path.Combine(root, "script-runtime"));
+        var store = new NativeDatabase(Path.Combine(root, "documents"));
+        NodeRuntime runtime;
+        try
+        {
+            await store.Ready;
+            runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules,
+                store.ProductRoot!, settingsStore: new FilmRuntimeSettings(store));
+        }
+        catch { await store.DisposeAsync(); throw; }
         FilmPlayback? native = null;
         FilmPlaybackNativeFixture? fixture = null;
         try
         {
             // The real Cat receipt owns revocation and release; HTTP input has no origin admission.
             native = new FilmPlayback { Volume = 0 };
-            fixture = new(runtime, native, Path.Combine(root, "script-runtime"));
-            Okay(await runtime.CallAsync("tmdb.data.settings.update",
-                new { apiBase = fixture.metadata.BaseUrl }), "tmdb.data.v1");
-            Okay(await runtime.CallAsync("douban.data.settings.update",
-                new { apiBase = fixture.metadata.BaseUrl, searchBase = fixture.metadata.BaseUrl }), "douban.data.v1");
+            fixture = new(runtime, native, store);
+            await using (var settings = new FilmMetadataService(runtime, store))
+            {
+                await settings.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = fixture.metadata.BaseUrl });
+                await settings.SaveDoubanSettingsAsync(new Dictionary<string, object?>
+                    { ["apiBase"] = fixture.metadata.BaseUrl, ["searchBase"] = fixture.metadata.BaseUrl });
+            }
+            foreach (string block in new[] { "tmdb", "douban" })
+                Okay(await runtime.CallAsync("runtime.settings.changed", new { block }), "runtime.http.v1");
             fixture.connection = await runtime.CaptureConnectionAsync();
             Check(ReferenceEquals(fixture.connection.Client, runtime) &&
                 fixture.connection.Revoked.CanBeCanceled && !fixture.connection.Revoked.IsCancellationRequested,
                 "capture must belong to this actual connected Node epoch");
             byte[] source = Encoding.UTF8.GetBytes(Worker(bytes, headers, reports));
-            Okay(await runtime.UploadSourceAsync("cat", Installation, 1, source), "cat.script.v2");
-            Okay(await runtime.CallAsync("cat.script.install",
-                new { installationId = Installation, sourceRevision = 1, enabled = true }), "cat.script.v2");
+            string sourcePath = Path.Combine(root, "playback-fixture.js");
+            await File.WriteAllBytesAsync(sourcePath, source);
+            fixture.sourceOwner = new FilmSourceService(runtime, store);
+            await fixture.sourceOwner.ImportLocalAsync("本地播放测试", sourcePath, Installation);
+            await fixture.sourceOwner.StartAsync();
             var status = Okay(await runtime.CallAsync("cat.script.status", new { }), "cat.script.v2");
             var state = FilmJson.Array(status, "instances").Single(row => FilmJson.Text(row, "installationId") == Installation);
             Check(FilmJson.Text(state, "state") == "ready" && FilmJson.Integer(state, "generation") is > 0,
@@ -132,12 +148,13 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
             {
                 if (native is not null) await native.DisposeAsync();
                 await runtime.DisposeAsync();
+                await store.DisposeAsync();
             }
             throw;
         }
     }
 
-    internal async Task<PageOwner> OpenAsync(string platform = "windows", string targetId = "film:native-fixture")
+    internal async Task<PageOwner> OpenAsync(string platform = "windows", string targetId = "tmdb:movie:1")
     {
         var session = new FilmPlaybackSession(token =>
         {
@@ -148,7 +165,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         }, new FilmNativeMedia(Native));
         session.OperationFailed += (_, code) => failures.Add(code);
         owners.Add(session);
-        var target = new FilmPlaybackTarget(targetId, "movie", Title, MetadataProvider: "tmdb", MetadataId: "1");
+        var target = new FilmPlaybackTarget(targetId, "movie", Title, MetadataProvider: "tmdb", MetadataId: targetId.Split(':')[2]);
         var request = new FilmPlaybackRequest(target, sources);
         var page = new FilmPlaybackPage(new(targetId, Title, "", "") { PlaybackContext = request }, request, session, null);
         View.DataContext = page;
@@ -312,12 +329,14 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     {
         Check(disposal is { IsCompletedSuccessfully: true } && Runtime.Completion.IsCompletedSuccessfully &&
             connection.Revoked.IsCancellationRequested, "the first fixture and actual process must finish before restart");
-        string path = Path.Combine(DataRoot, "film-playback", "library.json");
-        byte[] before = File.ReadAllBytes(path);
+        await using var store = new NativeDatabase(DataRoot);
+        await store.Ready;
+        var before = await store.RevisionAsync("film.library");
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")!;
         var modules = RuntimeHttpClientTests.Modules;
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate");
-        await using var next = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, DataRoot);
+        await using var next = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, modules, DataRoot,
+            settingsStore: new FilmRuntimeSettings(store));
         using var child = Process.GetProcessById(next.ProcessId);
         _ = child.SafeHandle;
         JsonElement library, preferences;
@@ -329,8 +348,8 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
             var reader = new FilmPlaybackClient(next);
             preferences = await reader.CallAsync("settings.get", new { });
             library = await reader.CallAsync("library.get", new { });
-            Check(before.AsSpan().SequenceEqual(File.ReadAllBytes(path)),
-                "second-process formal reads must not rewrite or replace the original durable library");
+            Check(before == await store.RevisionAsync("film.library"),
+                "second-process formal reads must not rewrite the durable library");
         }
         finally
         {
@@ -342,12 +361,12 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
                 Check(child.HasExited, "the second real process must physically exit too");
             }
         }
-        Check(before.AsSpan().SequenceEqual(File.ReadAllBytes(path)), "read-only restart and close preserve the same durable bytes");
+        Check(before == await store.RevisionAsync("film.library"), "read-only restart and close preserve the durable revision");
         Observe("same-root-restart", new
         {
             firstProcess = Runtime.ProcessId, secondProcess = next.ProcessId, sameDataRoot = true,
             firstDrain = Runtime.Completion.IsCompletedSuccessfully, secondDrain = next.Completion.IsCompletedSuccessfully,
-            libraryUnchanged = true, librarySha256 = Convert.ToHexStringLower(SHA256.HashData(before))
+            libraryUnchanged = true, libraryRevision = before.Revision
         });
         return (library, preferences);
     }
@@ -448,8 +467,10 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         Traffic.Dump();
         View.DataContext = null; Window.Content = null; Window.Close();
         await Drain(Native.DisposeAsync().AsTask(), "film-kernel");
+        if (sourceOwner is not null) await Drain(sourceOwner.DisposeAsync().AsTask(), "film-sources");
         await Drain(Runtime.DisposeAsync().AsTask(), "runtime");
         await Drain(Runtime.Completion.WaitAsync(TimeSpan.FromSeconds(10)), "runtime-drain");
+        await Drain(Store.DisposeAsync().AsTask(), "database");
         await Drain(process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)), "process-exit");
         await Drain(metadata.DisposeAsync().AsTask(), "metadata-upstream");
         bool exited = process.HasExited;
@@ -484,10 +505,11 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
                 await using (exchange)
                 {
                     string path = new Uri(BaseUrl + exchange.Path).AbsolutePath;
-                    if (path == "/3/movie/1")
+                    if (path.StartsWith("/3/movie/", StringComparison.Ordinal) &&
+                        int.TryParse(path[9..], out int movieId) && movieId is >= 1 and <= 3)
                         await exchange.ReplyAsync(JsonSerializer.SerializeToUtf8Bytes(new
                         {
-                            id = 1, title = Title, original_title = Title, runtime = 1, genres = Array.Empty<object>(),
+                            id = movieId, title = Title, original_title = Title, runtime = 1, genres = Array.Empty<object>(),
                             credits = new { cast = Array.Empty<object>(), crew = Array.Empty<object>() },
                             similar = new { results = Array.Empty<object>() },
                             images = new { posters = Array.Empty<object>(), backdrops = Array.Empty<object>() }

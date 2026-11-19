@@ -374,7 +374,7 @@ public static class FilmPlaybackNativeIntegrationTests
         int unmounts = 0;
         RoutedEventHandler unloaded = (_, _) => unmounts++;
         surface.Unloaded += unloaded;
-        var next = await f.OpenAsync(targetId: "film:native-successor");
+        var next = await f.OpenAsync(targetId: "tmdb:movie:2");
         string nextAttempt = await f.OutputAsync(next);
         surface.Unloaded -= unloaded;
         Check(unmounts == 0 && ReferenceEquals(surface.XamlRoot, root) &&
@@ -498,7 +498,7 @@ public static class FilmPlaybackNativeIntegrationTests
     private static async Task DurableRestartAsync()
     {
         await using var f = await FilmPlaybackNativeFixture.CreateAsync(headers: true, longVideo: true);
-        var owner = await f.OpenAsync(targetId: "film:native-durable");
+        var owner = await f.OpenAsync(targetId: "tmdb:movie:3");
         string attempt = await f.OutputAsync(owner);
         var allocation = f.CaptureNative();
         await owner.Page.SeekAsync(7);
@@ -530,9 +530,7 @@ public static class FilmPlaybackNativeIntegrationTests
         Check(allocation.PhysicallyReleased && !f.Native.HasOutput, "actual first-process media and private inputs drain before cold restart");
 
         string root = Path.GetDirectoryName(f.DataRoot)!;
-        Directory.CreateDirectory(Path.Combine(root, "documents"));
-        await using var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
-            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
+        await using var store = new NativeDatabase(Path.Combine(root, "documents"));
         var settings = new FilmPlaybackSettings(f.Runtime, store);
         var preferences = new FilmPreferences(["keyword", "pan", "quality"],
             ["baidu", "uc", "quark", "tianyi", "yidong"], ["原始优先词", "第二关键词"],
@@ -574,7 +572,8 @@ public static class FilmPlaybackNativeIntegrationTests
             FilmJson.Text(FilmJson.Member(share, "share"), "url") == "https://example.invalid/fixture-share" &&
             FilmJson.Text(FilmJson.Member(share, "share"), "password") == "fixture-only",
             "both formal manual variants preserve typed site, synthetic private share and special-season hints");
-        string stored = File.ReadAllText(Path.Combine(f.DataRoot, "film-playback", "library.json"));
+        string stored = before.GetRawText();
+        var storedRevision = await store.RevisionAsync("film.library");
         Check(!stored.Contains("/media/", StringComparison.Ordinal) && !stored.Contains("/proxy/", StringComparison.Ordinal) &&
             !stored.Contains("meowfilm-ffmpeg:", StringComparison.Ordinal) &&
             receipts.All(receipt => !stored.Contains(receipt.Address.AbsoluteUri, StringComparison.Ordinal)) &&
@@ -587,8 +586,8 @@ public static class FilmPlaybackNativeIntegrationTests
         await using var next = await FilmMetadataRuntimeTests.RuntimeHost.OpenAsync(root);
         var restored = (Library: await next.FilmAsync("library.get", new { }),
             Preferences: await next.WaitSettingsAsync("film.preferences"));
-        Check(next.ProcessId != f.Runtime.ProcessId && File.ReadAllText(Path.Combine(f.DataRoot, "film-playback", "library.json")) == stored,
-            "the real cold native-settings runtime has a new process and its read-only business access preserves the durable library bytes");
+        Check(next.ProcessId != f.Runtime.ProcessId && await next.Store.RevisionAsync("film.library") == storedRevision,
+            "the real cold native-settings runtime has a new process and its read-only business access preserves the durable library revision");
         JsonElement Business(JsonElement value) => FilmJson.Encode(value.EnumerateObject()
             .Where(item => item.Name != "preferences").ToDictionary(item => item.Name, item => item.Value.Clone()));
         Check(JsonElement.DeepEquals(Business(before), Business(restored.Library)) &&

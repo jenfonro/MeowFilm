@@ -27,7 +27,7 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
     internal MusicQqFeedbackIntegrationFixture(string? root = null) {
         Root = root ?? TestWorkspace.DataPath("qq-feedback-integration-fixtures", Guid.NewGuid().ToString("N"));
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, Root); Directory.CreateDirectory(Root);
-        Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+        Store = new(new NativeDatabase(Root));
         Runtime.OnRequest = Handler.Respond; App = new(Store, MusicTestStores.For(Store), Runtime);
     }
     internal static void Check(bool condition, string reason = "QQ application invariant") { if (!condition) throw new InvalidOperationException(reason); }
@@ -47,13 +47,22 @@ internal sealed class MusicQqFeedbackIntegrationFixture : IAsyncDisposable
     internal async Task<string> AccountState() { var list = await Call("music.accounts.list"); return list.GetProperty("items").EnumerateArray().Single(row => row.GetProperty("platform").GetString() == "tx").GetProperty("state").GetString()!; }
     internal static void AssertRedacted(string value) => Check(new[] { Key, OtherKey, "SYNTHETIC_EUIN", "musickey=" }.All(secret => !value.Contains(secret, StringComparison.Ordinal)));
     public async ValueTask DisposeAsync() { Handler.ReleaseAll(); try { await App.DisposeAsync(); Check(Store.Disposals == 0, "Borrowed store was released"); } finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); } }
-    internal sealed class StoreProbe(LocalDocumentStore inner) : IDocumentStore {
-        private readonly ConcurrentDictionary<string, int> reads = new(), writes = new(); internal int Disposals;
-        internal int Reads(string ns) => reads.GetValueOrDefault(ns); internal int Writes(string ns) => writes.GetValueOrDefault(ns);
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) { reads.AddOrUpdate(ns, 1, (_, count) => count + 1); return inner.ReadAsync(ns, token); }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default) { var result = await inner.WriteAsync(ns, data, expected, token); writes.AddOrUpdate(ns, 1, (_, count) => count + 1); return result; }
-        internal async Task<DocumentFingerprint> Fingerprint(string ns) { var saved = await ReadAsync(ns); try { return saved.Fingerprint; } finally { if (saved.Data is { } bytes) CryptographicOperations.ZeroMemory(bytes); } }
-        public async ValueTask DisposeAsync() { Interlocked.Increment(ref Disposals); await inner.DisposeAsync(); }
+    internal sealed class StoreProbe(NativeDatabase inner) : NativeTestDatabase(inner, owns: true)
+    {
+        private readonly ConcurrentDictionary<string,int> writes = new();
+        internal int WritesFor(string owner) => writes.GetValueOrDefault(owner);
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)
+        {
+            string[] changed=[];
+            var result=await base.WriteAsync(db=>{
+                var owners=new[]{AccountNamespace,MusicFeedbackSettingsOwner.DocumentNamespace};
+                var previous=owners.ToDictionary(owner=>owner,db.Revision);
+                var value=write(db);changed=owners.Where(owner=>db.Revision(owner)!=previous[owner]).ToArray();return value;
+            },token,retainedBytes,commit);
+            foreach(var owner in changed)writes.AddOrUpdate(owner,1,(_,count)=>count+1);
+            return result;
+        }
     }
     internal sealed class Barrier {
         internal readonly TaskCompletionSource Arrived = Signal(), Release = Signal(), CancelObserved = Signal();

@@ -353,9 +353,7 @@ final class FilmSearchUIKitTests: XCTestCase {
     }
 
     func testRawTypedZeroCardsKeepSeparateNavigationAndRealFavoritesAcrossReload() async throws {
-        let name = "film-search-favorites-" + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
-        defer { defaults.removePersistentDomain(forName: name) }
+        let database = try appStorageTestDatabase()
         let site = FilmSearchSite(cat: .init(installationId: "fixture", name: "fixture", sourceType: "local", generation: 4),
             source: .init(key: .init(installationId: "fixture", siteKey: "site"), name: "同一来源",
                           api: "fixture", actions: ["search"], methods: [:]))
@@ -371,7 +369,7 @@ final class FilmSearchUIKitTests: XCTestCase {
         modes.isOn = true; modes.sendActions(for: .valueChanged)
         let grid = try XCTUnwrap(find("film.search.grid", in: content.view) as? UICollectionView)
         await waitFor { grid.numberOfItems(inSection: 0) == 2 }
-        let library = FilmLibrary(defaults: defaults)
+        let library = try appStorageTestFilmLibrary(database)
         var contexts: [FilmSearchContext] = []
         content.onSelect = { contexts.append($0) }
         for index in 0..<2 { content.collectionView(grid, didSelectItemAt: IndexPath(item: index, section: 0)) }
@@ -393,14 +391,17 @@ final class FilmSearchUIKitTests: XCTestCase {
         let numericFavorite = try XCTUnwrap(find("film.detail.favorite", in: pages[0].view) as? UIButton)
         let stringFavorite = try XCTUnwrap(find("film.detail.favorite", in: pages[1].view) as? UIButton)
         numericFavorite.sendActions(for: .touchUpInside)
+        appStorageTestEventually { library.contains(zero.detail.item) }
         XCTAssertTrue(library.contains(zero.detail.item)); XCTAssertFalse(library.contains(stringZero.detail.item))
         stringFavorite.sendActions(for: .touchUpInside)
+        appStorageTestEventually { library.favorites.count == 2 }
         XCTAssertEqual(library.favorites.count, 2)
-        let restored = FilmLibrary(defaults: defaults)
+        let restored = try appStorageTestFilmLibrary(database)
         XCTAssertTrue(restored.contains(zero.detail.item)); XCTAssertTrue(restored.contains(stringZero.detail.item))
         numericFavorite.sendActions(for: .touchUpInside)
+        appStorageTestEventually { !library.contains(zero.detail.item) }
         XCTAssertFalse(library.contains(zero.detail.item)); XCTAssertTrue(library.contains(stringZero.detail.item))
-        XCTAssertEqual(FilmLibrary(defaults: defaults).favorites, [stringZero.detail.item.identity])
+        XCTAssertEqual(try appStorageTestFilmLibrary(database).favorites, [stringZero.detail.item.identity])
         content.close()
     }
 

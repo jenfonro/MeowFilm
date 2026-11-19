@@ -67,9 +67,11 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
             open: { [weak self] in self?.open($0) },
             setLockLyric: { [weak self] value in
                 guard let self else { return }
-                if !appearance.set(\.lockLyric, value) {
-                    render()
-                    if let message = appearance.persistenceError { showError(message) }
+                Task {
+                    if !(await self.appearance.set(\.lockLyric, value)) {
+                        self.render()
+                        if let message = self.appearance.persistenceError { self.showError(message) }
+                    }
                 }
             },
             selectCatalogSource: { [weak self] in self?.sourceSettings.select($0) }))

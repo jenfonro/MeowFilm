@@ -423,11 +423,12 @@ public static partial class MusicLyricDisplayTests
 
     private static async Task VerifyMultiplePresentations()
     {
-        string directory = NewPresentationRoot();
+        await using var disk = new MusicOfficialAudioTests.MemoryStore();
+        await using var documents = new NativeTestDatabase(disk);
         string[] songs = [Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D")];
         const string image = "https://images.example.test/shared.png?size=original";
         byte[] original = [1, 2, 3, 4]; // Cache stores opaque original bytes; loader tests cover successful decoding.
-        await using (var cache = new MusicPresentationCache(directory))
+        await using (var cache = new MusicPresentationCache(documents))
         {
             foreach (string song in songs)
             {
@@ -440,20 +441,22 @@ public static partial class MusicLyricDisplayTests
             }
             await cache.DrainAsync();
         }
-        await using var cold = new MusicPresentationCache(directory);
+        await documents.DrainAsync();
+        await using var restarted = new NativeTestDatabase(disk);
+        var cold = new MusicPresentationCache(restarted);
+        await cold.LoadAsync(default);
         foreach (string song in songs.Reverse())
         {
-            var saved = await cold.ReadLyricsAsync(song, default);
+            var saved = cold.ReadLyricsAsync(song, default).GetAwaiter().GetResult();
             Equal(song, saved!["lines"]![0]!["text"]!.GetValue<string>());
             Equal("source:" + song, saved["sourceKey"]!.GetValue<string>());
         }
         Check((await cold.ReadAsync(image, default))!.Content.SequenceEqual(original));
-        Check(File.ReadAllBytes(PresentationResourceFile(directory, "image", image)).SequenceEqual(original));
-        Equal(3, Directory.EnumerateFiles(directory, "*.resource").Count()); // Two song-referenced lyrics and one shared image, not per-song images.
+        var entries = await restarted.ReadPresentationEntriesAsync();
+        Equal(3, entries.Count); // Two song-referenced lyrics and one shared image, not per-song images.
         await cold.ClearImagesAsync(default);
-        Check(await cold.ReadAsync(image, default) is null);
-        foreach (string song in songs) Check(await cold.ReadLyricsAsync(song, default) is not null);
+        Check(await cold.ReadAsync(image, default) is null && songs.All(song => cold.ReadLyricsAsync(song, default).GetAwaiter().GetResult() is not null));
         await cold.ClearAllAsync(default);
-        foreach (string song in songs) Check(await cold.ReadLyricsAsync(song, default) is null);
+        Check(songs.All(song => cold.ReadLyricsAsync(song, default).GetAwaiter().GetResult() is null));
     }
 }

@@ -449,9 +449,8 @@ public static partial class MusicUiTests
             }
         }
     }
-    private sealed class RecommendationStore : IDocumentStore
+    private sealed class RecommendationStore : NativeTestDatabase
     {
-        private readonly LocalDocumentStore inner = ServiceStore();
         internal RecommendationStore()
         {
             var records = MusicTestStores.For(this);
@@ -469,10 +468,6 @@ public static partial class MusicUiTests
         }
         internal bool? UnknownNextQueueWrite;
         internal int LibraryWrites, QueueWrites;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => inner.ReadAsync(ns, token);
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken token = default) => inner.WriteAsync(ns, data, expected, token);
-        public ValueTask DisposeAsync() => inner.DisposeAsync();
     }
     private sealed class RecommendationHttp
     {

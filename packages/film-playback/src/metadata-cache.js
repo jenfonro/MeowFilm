@@ -1,17 +1,14 @@
-import fs from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
-import { isAbsolute, join } from 'node:path';
-import { isUtf8 } from 'node:buffer';
-import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { createMetadataStorage } from './metadata-storage.js';
+import { isAbsolute } from 'node:path';
 import { canonicalMetadataRequest, dueComponents, failedMetadata, mergeMetadata, metadataKind,
   metadataRecord, requestedComponents } from './metadata-policy.js';
 import { fail, identity, object, requireValue } from './identity.js';
 
 /** The data owner shares its bounded memory cache with process-only data.
- * Metadata alone has durable documents; there is no second response Map. */
+ * Metadata alone has durable entity rows; there is no second response Map. */
 export function createMetadataCache({ dataRoot, cache, owner, now, normalizeError, decodeValue }) {
   requireValue(dataRoot === undefined || typeof dataRoot === 'string' && isAbsolute(dataRoot));
-  const root = dataRoot === undefined ? undefined : join(dataRoot, 'film-metadata');
+  const storage = dataRoot === undefined ? undefined : createMetadataStorage(dataRoot,now);
   const writes = new Map(), reads = new Map(), generations = new Map(), publications = new Map();
   const invalidated = new Set();
   let closed = false, closing;
@@ -19,54 +16,59 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
   const current = (provider, epoch) => !closed && generation(provider) === epoch;
   function check(provider, epoch) { requireValue(current(provider, epoch), closed ? 'CLOSED' : 'CANCELLED'); }
   const keyOf = request => identity('film-metadata', canonicalMetadataRequest(request));
-  const filename = request => `${request.provider}/${keyOf(request)}.json`;
   const dependencies = request => [owner, { kind: 'metadata', domain: request.provider,
     revision: request.settings.revision }];
   const retention = state => Math.max(0, ...Object.values(state.components).map(row => row.expiresAt ?? 0));
   const readMemory = request => cache.read(keyOf(request), { allowStale: true });
 
-  function enqueue(provider, run) {
-    // Serial publication/cleanup belongs to this owner, not to the business
-    // document queue. Observe every failure without changing a request result.
+  const pendingPublications = new Map();
+  let pendingBytes = 0, flushWork;
+  function cost(value) {
+    if (typeof value === 'string') return Buffer.byteLength(value)+32;
+    if (value && typeof value === 'object') return 64+Object.entries(value).reduce((sum,[key,item]) => sum+cost(key)+cost(item),0);
+    return 16;
+  }
+  function enqueue(provider,run) {
     const work = (writes.get(provider) ?? Promise.resolve()).then(run);
     const observed = work.catch(() => { console.warn('film metadata cache I/O failed'); });
-    writes.set(provider, observed);
-    observed.then(() => { if (writes.get(provider) === observed) writes.delete(provider); });
+    writes.set(provider,observed);
+    observed.then(() => {if (writes.get(provider) === observed) writes.delete(provider);});
     return work;
   }
   function publish(state) {
-    if (!root || closed) return;
-    const { request, attempted, ...durable } = state;
-    const provider = request.provider, epoch = generation(provider);
-    publications.set(provider, (publications.get(provider) ?? 0) + 1);
-    return enqueue(provider, async () => {
-      if (!current(provider, epoch)) return;
-      const parent = join(root, provider), path = join(root, filename(request));
-      await fs.mkdir(parent, { recursive: true });
-      const temporary = join(parent, `.${randomUUID()}.tmp`);
-      try {
-        await fs.writeFile(temporary, stringifyJSONValue({ key: keyOf(request), state: durable }) + '\n',
-          { flag: 'wx', mode: 0o600 });
-        if (current(provider, epoch)) await fs.rename(temporary, path);
-      } finally {
-        await fs.rm(temporary, { force: true });
+    if (!storage || closed || closing) return;
+    const provider = state.request.provider, epoch = generation(provider), key = keyOf(state.request);
+    const bytes = cost(state), previous = pendingPublications.get(key);
+    if (bytes > 16*1024*1024 || pendingPublications.size >= 64 && !previous ||
+        pendingBytes - (previous?.bytes ?? 0) + bytes > 16*1024*1024) {
+      console.warn('film metadata publication budget exceeded');return;
+    }
+    pendingBytes += bytes-(previous?.bytes ?? 0);
+    pendingPublications.set(key,{state,provider,epoch,bytes});
+    publications.set(provider,(publications.get(provider) ?? 0)+1);
+    flushWork ??= Promise.resolve().then(async () => {
+      while (pendingPublications.size) {
+        const [key,item] = pendingPublications.entries().next().value;
+        pendingPublications.delete(key);
+        try {if (current(item.provider,item.epoch)) await enqueue(item.provider,() => storage.save(key,item.state,item.bytes));}
+        catch { /* enqueue retains the observable cache I/O failure. */ }
+        finally {pendingBytes -= item.bytes;}
       }
-    });
+    }).finally(() => {flushWork=undefined;});
+    return flushWork;
   }
   async function read(request) {
     const retained = readMemory(request);
-    if (retained || !root || invalidated.has(request.provider) || writes.has(request.provider)) return retained;
+    if (retained || !storage || invalidated.has(request.provider) || writes.size || pendingPublications.size) return retained;
     const epoch = generation(request.provider), publication = publications.get(request.provider);
     const work = (async () => {
       try {
-        const path = join(root, filename(request));
-        const bytes = await fs.readFile(path);
-        requireValue(isUtf8(bytes));
-        const document = parseJSONText(bytes.toString('utf8'));
-        const state = { ...document.state, request: canonicalMetadataRequest(request) };
+        const saved = await storage.read(keyOf(request));
+        if (!saved) return undefined;
+        const state = {...saved,request:canonicalMetadataRequest(request)};
         // These are the fields consumed by metadata policy, not a separate
         // format/version probe. An unusable decoded object is simply a miss.
-        requireValue(document.key === keyOf(request) && object(state.components) &&
+        requireValue(object(state.components) &&
           Object.values(state.components).every(row =>
             object(row) && ['ready', 'empty', 'missing', 'failed'].includes(row.status) &&
             (row.fetchedAt === undefined ? ['missing', 'failed'].includes(row.status)
@@ -86,7 +88,10 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
         if (publications.get(request.provider) !== publication) return undefined;
         return cache.seed(keyOf(request), state, { completeness: 'complete', expiresAt: retention(state),
           retainStale: true, dependencies: dependencies(request), supersede: false });
-      } catch { return undefined; }
+      } catch (error) {
+        if (['STORAGE_CORRUPT','STORAGE_IO','STORAGE_CLOSED','STORAGE_SCHEMA'].includes(error?.code)) throw fail('STORAGE_ERROR');
+        return undefined;
+      }
     })();
     reads.set(work, request.provider);
     try { return await work; } finally { reads.delete(work); }
@@ -229,20 +234,12 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
       // Even failed deletion must not make a revoked disk value eligible again
       // until cleanup succeeds. New results still use the shared bounded memory cache.
       invalidated.add(provider);
-      if (root) cleanup.push(enqueue(provider, async () => {
-        let names;
-        try { names = await fs.readdir(join(root, provider)); }
-        catch (error) {
-          if (error.code !== 'ENOENT') throw error;
-          if (current(provider, epoch)) invalidated.delete(provider);
-          return;
-        }
-        for (const name of names) {
-          if (!/^[a-f0-9]+\.json$/.test(name)) continue;
-          try { await fs.unlink(join(root, provider, name)); }
-          catch (error) { if (error.code !== 'ENOENT') throw error; }
-        }
-        if (current(provider, epoch)) invalidated.delete(provider);
+      for (const [key,item] of pendingPublications) if (item.provider === provider) {
+        pendingPublications.delete(key);pendingBytes -= item.bytes;
+      }
+      if (storage) cleanup.push(enqueue(provider,async () => {
+        await storage.invalidate(provider);
+        if (current(provider,epoch)) invalidated.delete(provider);
       }));
     }
     return Promise.allSettled([...cleanup, ...selectedReads]).then(results => {
@@ -253,7 +250,11 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
     if (closing) return closing;
     // Accepted publications drain on close; no producer can enqueue new work
     // after the data owner has revoked it. Closing is not cache invalidation.
-    closing = Promise.all([...writes.values(), ...reads.keys()]).then(() => { closed = true; });
+    closing = (async () => {
+      await Promise.all([flushWork,...writes.values(),...reads.keys()]);
+      closed = true;
+      await storage?.close();
+    })();
     return closing;
   }
   return { get, entry, seed, invalidate, close };

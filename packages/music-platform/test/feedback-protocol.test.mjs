@@ -70,11 +70,11 @@ test('QQ Finish repeats live authentication and exact account association before
         Name: { unconsumed: 'synthetic-key' }, Avatar: ['not-used'], optionalRights: null,
       } } });
     });
-    const prepared = await qqStart(f), before = Buffer.from(f.files.get('clients.json'));
+    const prepared = await qqStart(f), before = await f.clientState();
     f.advance(2000); finishing = true;
     const result = await f.request('tx', 'feedback.send', qqEnd(prepared.sessionId));
     assert.deepEqual(result, expected ? { status: 'notSent', errorCode: expected } : { status: 'confirmed', errorCode: null });
-    assert.equal(reports, expected ? 0 : 1); assert.deepEqual(f.files.get('clients.json'), before);
+    assert.equal(reports, expected ? 0 : 1); assert.deepEqual(await f.clientState(), before);
     assert.equal(f.writes.length, 0);
     const methods = f.requests.filter(row => !row.url.includes('imusic_tj')).map(row => qq(row).req_0.method);
     assert.equal(methods.filter(method => method === 'GetLoginUserInfo').length, 2);
@@ -103,14 +103,14 @@ test('QQ prepare and Finish distinguish ordinary auth/profile denials from actua
       await f.session('tx');
       const prepared = phase === 'finish' ? await f.request('tx', 'feedback.prepare',
         { target: { nativeId: 'synthetic-mid' } }) : null;
-      const before = Buffer.from(f.files.get('clients.json'));
+      const before = await f.clientState();
       f.advance(2000); rejecting = true;
       if (prepared)
         assert.deepEqual(await f.request('tx', 'feedback.send', qqEnd(prepared.sessionId)),
           { status: 'notSent', errorCode: expected });
       else await assert.rejects(f.request('tx', 'feedback.prepare', { target: { nativeId: 'synthetic-mid' } }),
         { code: expected });
-      assert.equal(reports, 0); assert.deepEqual(f.files.get('clients.json'), before); assert.equal(f.writes.length, 0);
+      assert.equal(reports, 0); assert.deepEqual(await f.clientState(), before); assert.equal(f.writes.length, 0);
       const methods = f.requests.map(request => qq(request).req_0.method);
       assert.equal(methods.filter(value => value === 'CgiGetTrackInfo').length, prepared ? 1 : 0);
       assert.equal(methods.filter(value => value === 'UrlGetVkey').length, prepared ? 1 : 0);

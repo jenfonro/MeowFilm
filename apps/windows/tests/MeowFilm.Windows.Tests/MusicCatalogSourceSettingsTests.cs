@@ -36,13 +36,13 @@ public static class MusicCatalogSourceSettingsTests
             Equal(3, entry.AsObject().Count);
             Equal(1, entry["schema"]!.GetValue<int>());
             await owner.AbortAsync();
-            await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store)))
+            await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             {
                 Settings(await Ok(reopened, "music.catalogSource.settings.get"), "kg", 1);
                 Equal(1, store.Writes);
                 Settings(await Ok(reopened, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" }), "wy", 2);
             }
-            await using var finalOwner = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var finalOwner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             Settings(await Ok(finalOwner, "music.catalogSource.settings.get"), "wy", 2);
             Equal(2, store.Writes);
         });
@@ -104,7 +104,7 @@ public static class MusicCatalogSourceSettingsTests
             var document = JsonNode.Parse(store.Data!)!.AsObject();
             document["areas"]!["native-catalog-source"]!["extra"] = new JsonObject { ["nested"] = true };
             store.Data = LJ.Bytes(document);
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var restored = await Ok(reopened, "music.catalogSource.settings.get");
             Settings(restored, "kg", 1);
             Check(restored.GetProperty("settings").GetProperty("extra").GetProperty("nested").GetBoolean(), "extension missing from read");
@@ -149,7 +149,7 @@ public static class MusicCatalogSourceSettingsTests
                 document["areas"]!["native-catalog-source"] = JsonNode.Parse(value);
                 store.Data = LJ.Bytes(document);
                 byte[] corrupt = store.Data.ToArray();
-                await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+                await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
                 await Code(reopened, "music.catalogSource.settings.get", null, "CORRUPT_STORAGE");
                 await Code(reopened, "music.catalogSource.settings.save",
                     new { ifRevision = 1, platform = "wy" }, "CORRUPT_STORAGE");
@@ -188,7 +188,7 @@ public static class MusicCatalogSourceSettingsTests
         yield return Case("exact generation conflict remains fenced on get and save", async (owner, store) =>
         {
             await Ok(owner, "music.catalogSource.settings.get");
-            await using var concurrent = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var concurrent = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             await Ok(concurrent, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" });
             byte[] saved = store.Data!.ToArray();
             await Code(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }, "STORAGE_CONFLICT");
@@ -201,7 +201,7 @@ public static class MusicCatalogSourceSettingsTests
         {
             store.FailAfterWrite = true;
             await Code(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }, "COMMIT_UNKNOWN");
-            await using var concurrent = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var concurrent = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             await Ok(concurrent, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" });
             byte[] saved = store.Data!.ToArray();
             await Code(owner, "music.catalogSource.settings.get", null, "STORAGE_CONFLICT");
@@ -290,7 +290,7 @@ public static class MusicCatalogSourceSettingsTests
         await Ok(owner, "music.queue.mode", new { mode = 3 });
         Settings(await Ok(owner, "music.catalogSource.settings.get"), "kg", 1);
         await owner.AbortAsync();
-        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         Settings(await Ok(reopened, "music.catalogSource.settings.get"), "kg", 1);
         Equal("tx", (await Ok(reopened, "music.queue.get")).GetProperty("current").GetProperty("song")
             .GetProperty("sources")[0].GetProperty("source").GetString());
@@ -303,10 +303,10 @@ public static class MusicCatalogSourceSettingsTests
             ?? throw new InvalidOperationException("Isolated test root required"), "catalog-source-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         await using (var store = new MusicRecordTestStore(root))
-        await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store)))
+        await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             Settings(await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }), "kg", 1);
         await using var reopenedStore = new MusicRecordTestStore(root);
-        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(reopenedStore));
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(reopenedStore), database: MusicTestStores.For(reopenedStore).Storage);
         Settings(await Ok(reopened, "music.catalogSource.settings.get"), "kg", 1);
     }
 
@@ -325,7 +325,7 @@ public static class MusicCatalogSourceSettingsTests
         new("catalog source " + name, async () =>
         {
             await using var store = new Store();
-            var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             try { await run(owner, store); }
             finally { await owner.AbortAsync(); }
         });

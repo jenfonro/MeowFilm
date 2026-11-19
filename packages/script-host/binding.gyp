@@ -72,7 +72,7 @@
         "<(quickjs_source)",
         "<(runtime_native)/zlib"
       ],
-      "sources": ["native/addon.cc", "native/engine.cc", "native/value.cc", "native/algorithms.cc"],
+      "sources": ["native/addon.cc", "native/engine.cc", "native/value.cc", "native/algorithms.cc", "native/storage-lock.cc"],
       "cflags_cc!": ["-fno-exceptions", "-fno-rtti"],
       "libraries": ["<(openssl_library)"],
       "conditions": [

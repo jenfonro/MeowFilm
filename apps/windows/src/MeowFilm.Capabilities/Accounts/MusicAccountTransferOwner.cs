@@ -164,10 +164,10 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
                 states[platform].Uncertain = true; admitted = true;
             }
             // Once admitted, settle the physical write/readback. Cancellation never invents a failed receipt.
-            var actual = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, CancellationToken.None).ConfigureAwait(false);
-            AccountRules.Require(actual == DocumentFingerprint.FromBytes(bytes), "COMMIT_UNKNOWN");
+            var actual = await store.WriteAsync(bytes, document.Revision, CancellationToken.None).ConfigureAwait(false);
+            AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
             var readback = await ReadDocument(CancellationToken.None).ConfigureAwait(false);
-            AccountRules.Require(readback.Fingerprint == actual, "COMMIT_UNKNOWN");
+            AccountRules.Require(readback.Revision == actual, "COMMIT_UNKNOWN");
             var committed = readback.Get(platform);
             lock (gate)
             {

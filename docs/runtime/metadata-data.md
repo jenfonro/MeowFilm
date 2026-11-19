@@ -40,23 +40,21 @@ await runtime.start();
 - `settings.get {}`：读取完整设置（包括明文凭据）和不透明配置代次 `revision`。
 - `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的完整设置。
 
-普通 HTTP 操作只消费各自定义的参数。`settings.get` 忽略附加参数，`settings.update` 仅提取当前 provider 的设置字段；未知字段（包括嵌套扩展）不因白名单被拒绝，也不会成为设置或覆盖 `revision`。实际使用的设置值仍须满足 URL、凭据头等要求。恢复和保存不预检未使用的端点或扩展成员；未知持久成员和数字原材料保留。数据、搜索、图片各自在实际请求处解释所需配置，错误不伪装为缺失或空成功。
+普通 HTTP 操作只消费各自定义的参数。`settings.get` 忽略附加参数，`settings.update` 只接受当前 provider 声明的类型化设置字段，未知字段返回 `INVALID_REQUEST`，不能覆盖 `revision`。实际使用的设置值仍须满足 URL、凭据头等要求。数据、搜索、图片各自在实际请求处解释所需配置，错误不伪装为缺失或空成功。
 
 `revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不复制或用明文凭据充当缓存身份。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
 
-无 `nativeSettings` 注入时，运行器独占 `<dataRoot>/tmdb/settings.json` 和 `<dataRoot>/douban/settings.json`，文档格式为 `{version:1,settings:{…}}`。首次访问恢复配置，之后使用内存快照；更新通过运行器完成，不支持绕过运行器并发外部编辑。首次未配置读取默认值，不写空文件。损坏文件明确失败，不当成缺失、不静默重置。
-
-恢复时先严格校验 UTF-8 字节，再解码并解析 JSON；保留 UTF-8 BOM 处理，不依赖内嵌 Node 的 ICU。非法字节返回 `CORRUPT_STORAGE`，不改写原文件。
+无 `nativeSettings` 注入时，独立运行器的 settings owner 将 TMDB／豆瓣配置字段和 revision 写入共享 SQLite schema 的 `metadata_standalone_tmdb` 与 `metadata_standalone_douban` 关系。首次缺少设置行时使用代码默认值；配置变更按字段更新和 revision 事务提交，不生成独立 JSON 文件。损坏或未知 schema 明确失败，不当成缺失、不静默重置。
 
 此独立模式的凭据由运行器保存和使用，调用方不另建持久化事实来源或每次启动回灌；不向外部脚本实例授予此目录。
 
-**文件本身不额外加密**。复用 `PrivateDocuments` 的内部文档命名和原子写入；POSIX 新文件权限为 `0600`。宿主必须提供应用专用 dataRoot 并负责系统沙箱／目录权限，尤其 Windows 的 ACL。运行器自有存储允许系统与 App 管理的目录别名，不执行脚本文件系统的链接隔离检查。能够读取此目录的用户可以读取凭据。日志、调试导出及备份不得公开此目录；这不是 Keychain／DPAPI 保险库。
+设置字段在当前数据库中纯明文保存，不使用 Keychain、DPAPI 或应用层加密。宿主必须提供应用专用 dataRoot 并负责系统沙箱／目录权限；数据库 schema、事务与 owner 规则见[共享 SQLite 契约](../common/settings-storage.md)。运行器只授予受信 owner 相关读写能力，不将权限开放给外部脚本。
 
 ### 原生设置注入
 
-`createTMDBDataModule`／`createDoubanDataModule` 可接收 `nativeSettings`，读取 `tmdb`／`douban` 块的同形文档。此时唯一持久值由原生 owner 保存，不再读取或写入上述 Node 设置文件；HTTP `settings.update` 返回 `PERMISSION_DENIED`，`settings.get` 仍返回当前快照。缺失使用默认值，损坏明确失败，不回退旧文件。
+`createTMDBDataModule`／`createDoubanDataModule` 可接收 `nativeSettings`，读取 `tmdb`／`douban` 块的内存投影。此时唯一持久值由原生 owner 保存，Node 不写独立设置关系；HTTP `settings.update` 返回 `PERMISSION_DENIED`，`settings.get` 仍返回当前快照。缺失使用默认值，损坏明确失败，不回退旧文件。
 
-App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `settingsChanged()`，撤销旧配置在途请求及相关 film 缓存／会话资格。通知不携带凭据、不等待业务应用才结算本地保存。唯一事实来源与通知规则见[共同契约](../common/settings-storage.md)，iOS 的加密文档及生命周期见[存储](../ios/storage.md#影视设置)与[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 的保护与私密能力见[原生设置](../windows/native-settings.md)。未注入的公共入口继续保持上述独立模式。
+App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `settingsChanged()`，撤销旧配置在途请求及相关 film 缓存／会话资格。通知不携带凭据、不等待业务应用才结算本地保存。唯一事实来源与通知规则见[共同契约](../common/settings-storage.md)，iOS 的 SQLite 与生命周期见[存储](../ios/storage.md#数据模型与-owner)与[运行底座](../ios/runtime-preflight.md#原生设置私密通道)，Windows 的私密能力见[原生设置](../windows/native-settings.md)。未注入的公共入口继续保持上述独立模式。
 
 ### TMDB
 
@@ -100,7 +98,7 @@ get 返回 Cookie 原值。域名替换／路径前缀型代理直接配置 base
 
 双端“数据源”设置独立编辑 TMDB／豆瓣；iOS 保留同页 provider 切换。豆瓣数据代理、图片代理默认“无”，不提供服务器代理。数据选择包括 CORS 前缀 `https://ciao-cors.is-an.org/`、CMLiussss 腾讯云／阿里云 API CDN 和自定义包装前缀；API CDN 不伪造网页搜索 CDN，`searchBase` 仍为官方搜索地址。图片选择独立使用官方 `img3.doubanio.com` 直连（“无”）、CMLiussss 腾讯云／阿里云或自定义包装前缀。普通前缀按服务器语义接 `encodeURIComponent(targetURL)`；已有 `{url}`／`{encodedUrl}` 占位形式仍是原始运行器接口能力，不要求表单使用模板。
 
-Cookie 和 API TOKEN 在设置表单中按原值读写，保存失败保留输入和原 saved 快照，成功后回显实际保存值；这不表示持久文件明文存放。界面不再维护 configured 占位或“清除意图”，留空保存就是清空。存储归属依是否注入而定，不复制第二份配置或在启动时回灌；预设只在保存时生效。Cookie 只参与豆瓣数据／搜索请求，图片不从表单附加 Cookie 或 TMDB token。
+Cookie 和 API TOKEN 在设置表单中按原值读写，数据库以明文 typed fields 保存；保存失败保留输入和原 saved 快照，成功后回显实际保存值。界面不再维护 configured 占位或“清除意图”，留空保存就是清空。存储归属依是否注入而定，不复制第二份配置或在启动时回灌；预设只在保存时生效。Cookie 只参与豆瓣数据／搜索请求，图片不从表单附加 Cookie 或 TMDB token。
 
 通用设置的“缓存管理”调用 `film.data.invalidate`，`domain` 分别为 `douban`、`tmdb`；“清空豆瓣与 TMDB 缓存”等待两次失效均结算，任一失败则报告失败。运行器处理内存／持久缓存失效与旧在途排空，客户端不直接删文件、不重启、不清配置／账号／历史／人工匹配／屏蔽／收藏，也不把清缓存冒充配置保存或自动重搜。
 
@@ -245,8 +243,8 @@ Windows 运行器图片 GET 使用独立的可复用 handler；两个 `ReadImage
 | `UPSTREAM_HTTP` | 上游 HTTP 失败或重定向未能终结 |
 | `UPSTREAM_FORMAT` | 响应格式不符或图片入口返回非图片 |
 | `WEB_INTERACTION_REQUIRED` | 豆瓣登录／网页验证要求 |
-| `STORAGE_ERROR` | 持久化读写失败；失败后重新读取真实文件，不承诺已提交 rename 回滚 |
-| `CORRUPT_STORAGE` | 已有配置损坏或版本不支持；保留原文件 |
+| `STORAGE_ERROR` | 数据库读写失败；失败后重新读取当前已提交行，不重放未知提交 |
+| `CORRUPT_STORAGE` | 当前配置、数据库结构或 identity 损坏／不支持；保留现场 |
 | `PERMISSION_DENIED` | 注入原生设置后，拒绝 HTTP 修改配置 |
 
 协议／会话错误仍使用 `runtime.http.v1` 的错误码。来源独立；一方失败不隐式调用另一方或合并数据。
@@ -255,8 +253,8 @@ Windows 运行器图片 GET 使用独立的可复用 handler；两个 `ReadImage
 
 ## Film 元数据缓存边界
 
-`film` 的 data owner 持有 `<dataRoot>/film-metadata/{provider}/{key}.json`，按需异步读取；不在构造时创建或检查目录。按完整请求身份（含设置 revision、query、图片尺寸）直接读取并解码，缺失、读取失败或数据无法使用均为 miss，正常回源；不识别、迁移或兼容历史数据，不增加独立格式预检。有效命中的组件完整度、TTL 和身份规则保持不变。
+`film` 的 data owner 使用共享 SQLite 中的 `metadata_cache_entries`、组件槽、类型化实体、有序关系及受限扩展节点。按完整请求身份（含设置 revision、query、图片尺寸）异步查询；缺失或不可用缓存为 miss，正常回源，不识别、迁移或兼容历史文件。有效命中的组件完整度、TTL 和身份规则保持不变。
 
-首次按需读取后，生产者的成功／失败结算只使用已捕获状态和当前内存，不再次读取磁盘；外部已取得的 seed 也只合并内存状态。成功结果和刷新失败的 stale/error 先在共享有界内存缓存结算，磁盘发布不参与请求结果等待。写入由 metadata owner 按 provider 排序，按需递归创建父目录、同目录异步临时文件原子替换，失败仅输出不含请求／凭据的诊断；不是无主后台任务。读直接读取文件，失效直接枚举 provider 目录并删除当前缓存键对应的目录项，不预检目录、文件或链接类型。App 管理的根与模块目录别名可用；文档链接可以读取，原子保存替换链接目录项，失效删除链接目录项，均不改写其另一端的文件。缓存不授予权限，也不改变业务设置文件的严格读写错误语义。
+首次按需读取后，生产者的成功／失败结算只使用已捕获状态和当前内存；外部已取得的 seed 也只合并内存状态。成功结果和刷新失败的 stale/error 先在共享有界内存缓存结算，持久发布不参与请求结果等待。写入由 metadata owner 按 provider 排序，在单个事务中提交所选缓存项及其组件关系，失败仅输出不含请求／凭据的诊断；不是无主后台任务。失效按 provider 或缓存身份删除关系行，不遍历文件目录。缓存不授予权限，也不改变业务设置的严格事务错误语义。
 
-配置变更先同步撤销旧任务／条目资格，再等待真实生产者、在途读取和已受理写入／删除排空。缓存文件删除失败不否定已经成功的 provider 设置回执；删除失败后，本 owner 不再从该 provider 的磁盘文件恢复数据，直到后续清理确实成功；期间只使用当前内存结果或回源，防止重读未删除的失效文件。显式 `film.data.invalidate` 仍报告实际删除失败，不能把未完成的物理清理宣称为成功。关闭先停止业务准入并撤销生产者，再排空已受理缓存发布；关闭不是清缓存，成功保存的结果可供新 owner 复用。
+配置变更先同步撤销旧任务／条目资格，再等待真实生产者、在途读取和已受理写入／删除排空。缓存行删除失败不否定已经成功的 provider 设置回执；删除失败后，本 owner 不再从该 provider 的持久缓存恢复数据，直到后续清理确实成功；期间只使用当前内存结果或回源，防止重读未删除的失效条目。显式 `film.data.invalidate` 仍报告实际删除失败，不能把未完成的物理清理宣称为成功。关闭先停止业务准入并撤销生产者，再排空已受理缓存发布；关闭不是清缓存，成功保存的结果可供新 owner 复用。

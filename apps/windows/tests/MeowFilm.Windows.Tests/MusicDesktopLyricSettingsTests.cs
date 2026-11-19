@@ -27,7 +27,7 @@ public static class MusicDesktopLyricSettingsTests
                 playerTheme = "starlight", colorMode = "fixed", colorPalette = "mint" });
             await f.Ok("music.library.create", new { name = "Keep" });
             var before = Document(f.Store);
-            await using (var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store)))
+            await using (var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage))
                 Settings((await reader.ExecuteAsync(Get)).GetProperty("settings"), 0, "single", Normal, Highlight);
             int writes = MusicTestStores.For(f.Store).Writes;
             Check(JsonNode.DeepEquals(before, Document(f.Store)), "reading a missing area never writes current state");
@@ -38,7 +38,7 @@ public static class MusicDesktopLyricSettingsTests
                 Check(JsonNode.DeepEquals(current["areas"]![entry.Key], entry.Value),
                     "saving desktop lyrics preserves each independent current area");
             Check(StoredSettings(current).Count == 5, "only schema, revision, layout and two colors are persisted");
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Settings(reopenedSettings, 1, "double", "#12ABEF", "#000000");
             Check(!reopenedSettings.TryGetProperty("geometry", out _), "unset geometry does not acquire a placeholder");
@@ -93,7 +93,7 @@ public static class MusicDesktopLyricSettingsTests
             Check(JsonNode.DeepEquals(JsonNode.Parse(saved.GetProperty("geometry").GetRawText()), geometry),
                 "a color write preserves the independently-owned window geometry");
             Check(MusicTestStores.For(f.Store).Writes == 2);
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Check(JsonNode.DeepEquals(JsonNode.Parse(reopenedSettings.GetProperty("geometry").GetRawText()), geometry));
         });
@@ -116,7 +116,7 @@ public static class MusicDesktopLyricSettingsTests
                     var doc = (JsonObject)original.DeepClone();
                     StoredSettings(doc)[field] = JsonSerializer.SerializeToNode(value);
                     MusicTestStores.For(f.Store).Seed(doc);
-                    await using var invalid = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+                    await using var invalid = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
                     Code(await invalid.ExecuteAsync(Get), "CORRUPT_STORAGE");
                 }
                 var damaged = (JsonObject)original.DeepClone();
@@ -125,7 +125,7 @@ public static class MusicDesktopLyricSettingsTests
                 StoredSettings(damaged)["offset"] = 0;
                 StoredSettings(damaged)["locked"] = false;
                 MusicTestStores.For(f.Store).Seed(damaged);
-                await using var selected = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+                await using var selected = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
                 Check((await selected.ExecuteAsync(Get)).GetProperty("ok").GetBoolean());
                 Check((await selected.ExecuteAsync(Save, Draft(1, layout: "single"))).GetProperty("ok").GetBoolean());
                 Check(StoredSettings(Document(f.Store))["showTranslation"]!.GetValue<bool>());
@@ -158,7 +158,7 @@ public static class MusicDesktopLyricSettingsTests
 
     private static async Task ConsumerRoundTrip()
     {
-        var store = new DocumentStore();
+        var store = new NativeTestDatabase();
         await using (var scene = new Scene(store))
         {
             var module = scene.Module;
@@ -316,7 +316,7 @@ public static class MusicDesktopLyricSettingsTests
     {
         await using var scene = new Scene();
         await scene.Module.EnsureDesktopLyricSettingsAsync();
-        await using var competing = new MusicLibraryOwner(MusicTestStores.For(scene.Store));
+        await using var competing = new MusicLibraryOwner(MusicTestStores.For(scene.Store), database: MusicTestStores.For(scene.Store).Storage);
         var committed = await competing.ExecuteAsync(Save, Draft(normal: "#12ABEF"));
         Check(committed.GetProperty("ok").GetBoolean());
         await scene.Module.SetDesktopLyricLayoutAsync("double");
@@ -369,7 +369,7 @@ public static class MusicDesktopLyricSettingsTests
         Check(value.GetProperty("schema").GetInt32() == 1 && value.GetProperty("revision").GetInt64() == revision &&
             value.GetProperty("layout").GetString() == layout && value.GetProperty("normalColor").GetString() == normal &&
             value.GetProperty("highlightColor").GetString() == highlight);
-    private static JsonObject Document(DocumentStore store) => MusicTestStores.For(store).Root;
+    private static JsonObject Document(NativeTestDatabase store) => MusicTestStores.For(store).Root;
     private static JsonObject Entry(JsonObject doc, string area) => doc["areas"]![area]!.AsObject();
     private static JsonObject StoredSettings(JsonObject doc) => Entry(doc, Area);
 
@@ -411,12 +411,12 @@ public static class MusicDesktopLyricSettingsTests
 
     private sealed class Scene : IAsyncDisposable
     {
-        internal readonly DocumentStore Store;
+        internal readonly NativeTestDatabase Store;
         internal readonly ScriptRuntime Runtime = new();
         internal readonly MusicNativeApplication Native;
         internal readonly Application App;
         internal readonly MusicCapability Module;
-        internal Scene(DocumentStore? store = null)
+        internal Scene(NativeTestDatabase? store = null)
         {
             Store = store ?? new();
             Native = new(Store, MusicTestStores.For(Store), Runtime);
@@ -425,7 +425,7 @@ public static class MusicDesktopLyricSettingsTests
         }
         public async ValueTask DisposeAsync()
         {
-            MusicTestStores.For(Store).Release?.TrySetResult(); Store.Release.TrySetResult(); Runtime.Release.TrySetResult();
+            MusicTestStores.For(Store).Release?.TrySetResult(); Runtime.Release.TrySetResult();
             App.NextRead?.Release.TrySetResult();
             foreach (var hold in App.PendingReads) hold.Release.TrySetResult();
             await Module.AbortAsync();

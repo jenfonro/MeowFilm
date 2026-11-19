@@ -1,6 +1,7 @@
+import { readPanFacts, setTestReadOnly } from '../../../tests/storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPanService, PanError } from '../src/index.js';
@@ -61,14 +62,14 @@ function setup(t, handler = () => assert.fail('account snapshots must not use th
   };
   const service = createPanService({ dataRoot: root, transport, now: () => now });
   t.after(async () => { await service.close(); rmSync(root, { recursive: true, force: true }); });
-  return { root, service, transport, requests, path: join(root, 'pan/accounts.json') };
+  return { root, service, transport, requests };
 }
 async function account(service, provider) {
   return (await service.invoke('settings.get')).accounts.find(item => item.provider === provider);
 }
 
 test('five account snapshots project saved facts and three states without requiring freshness timestamps', async t => {
-  const { service, path, requests } = setup(t);
+  const { service, root, requests } = setup(t);
   assert.deepEqual((await service.invoke('settings.get')).accounts, providerIds.map(provider => ({
     provider, revision: 0, configured: false, fields: [], status: 'signedOut',
   })));
@@ -78,15 +79,15 @@ test('five account snapshots project saved facts and three states without requir
       provider, revision: 1, configured: true, fields: Object.keys(credentials[provider]), status: 'signedIn',
     });
     assert.deepEqual(await account(service, provider), saved);
-    const record = JSON.parse(readFileSync(path)).accounts[provider];
-    assert.deepEqual(record, { revision: 1, credentials: credentials[provider] });
+    const record = (await readPanFacts(root)).accounts[provider];
+    assert.deepEqual(record, { revision: 1, rowRevision: 1, credentials: credentials[provider] });
     for (const value of Object.values(credentials[provider])) {
       assert.equal(JSON.stringify(saved).includes(value), false);
     }
   }
   const replaced = await service.invoke('settings.set', { provider: 'quark', credentials: { cookie: 'session=synthetic-replacement' } });
   assert.deepEqual(replaced.fields, ['cookie']);
-  assert.deepEqual(JSON.parse(readFileSync(path)).accounts.quark.credentials, { cookie: 'session=synthetic-replacement' });
+  assert.deepEqual((await readPanFacts(root)).accounts.quark.credentials, { cookie: 'session=synthetic-replacement' });
   const empty = await service.invoke('settings.set', { provider: 'quark', credentials: {} });
   assert.deepEqual(empty, { provider: 'quark', revision: 3, configured: false, fields: [], status: 'signedOut' });
   for (const provider of providerIds) {
@@ -99,14 +100,14 @@ test('five account snapshots project saved facts and three states without requir
 });
 
 test('expiry is process-local and never erases or rewrites saved credentials', async t => {
-  const { service, root, path, transport } = setup(t, () => response('', 401));
+  const { service, root, transport } = setup(t, () => response('', 401));
   await service.invoke('settings.set', { provider: 'baidu', credentials: cookies });
-  const before = readFileSync(path);
+  const before = await readPanFacts(root);
   await assert.rejects(service.invoke('refresh', { provider: 'baidu' }), { code: 'AUTH_REQUIRED' });
   assert.deepEqual(await account(service, 'baidu'), {
     provider: 'baidu', revision: 1, configured: true, fields: ['cookie'], status: 'expired',
   });
-  assert.deepEqual(readFileSync(path), before);
+  assert.deepEqual(await readPanFacts(root), before);
   await service.close();
   const restarted = createPanService({ dataRoot: root, transport });
   try {
@@ -119,14 +120,14 @@ test('expiry is process-local and never erases or rewrites saved credentials', a
 for (const provider of providerIds) {
   test(`${provider}: refresh confirms or expires the account; ordinary failures retain the last confirmed state`, async t => {
     let result = valid(provider), error;
-    const { service, path } = setup(t, input => { if (error) throw error; return reply(provider, input, result); });
+    const { service, root } = setup(t, input => { if (error) throw error; return reply(provider, input, result); });
     await service.invoke('settings.set', { provider, credentials: refreshCredentials[provider] });
     for (const status of ['signedIn', 'expired']) {
       if (status === 'expired') {
         result = invalid(provider);
-        const before = readFileSync(path);
+        const before = await readPanFacts(root);
         await assert.rejects(service.invoke('refresh', { provider }), { code: authCode(provider) });
-        assert.deepEqual(readFileSync(path), before);
+        assert.deepEqual(await readPanFacts(root), before);
       }
       const snapshot = await account(service, provider);
       assert.equal(snapshot.status, status);
@@ -139,12 +140,12 @@ for (const provider of providerIds) {
         [response('busy', 429), 'UPSTREAM_HTTP'], [response('unavailable', 503), 'UPSTREAM_HTTP'],
         [response(upstreamFailure), provider === 'tianyi' ? 'UPSTREAM_FORMAT' : 'UPSTREAM_ERROR'],
       ]) {
-        const before = readFileSync(path);
+        const before = await readPanFacts(root);
         error = value instanceof Error ? value : undefined;
         if (!error) result = value;
         await assert.rejects(service.invoke('refresh', { provider }), { code });
         assert.deepEqual(await account(service, provider), snapshot);
-        assert.deepEqual(readFileSync(path), before);
+        assert.deepEqual(await readPanFacts(root), before);
       }
       error = undefined;
     }
@@ -170,7 +171,7 @@ for (const provider of providerIds) {
 }
 
 test('Baidu account confirmation uses only the reference read-only loginStatus request and persists successful Cookie rotation', async t => {
-  const { service, requests, path } = setup(t, input => {
+  const { service, requests, root } = setup(t, input => {
     const url = new URL(input.url);
     assert.equal(url.origin, 'https://pan.baidu.com');
     assert.equal(url.pathname, '/api/loginStatus');
@@ -185,21 +186,21 @@ test('Baidu account confirmation uses only the reference read-only loginStatus r
   const refreshed = await service.invoke('refresh', { provider: 'baidu' });
   assert.equal(refreshed.account.status, 'signedIn');
   assert.equal(refreshed.account.revision, 1);
-  assert.equal(JSON.parse(readFileSync(path)).accounts.baidu.credentials.cookie, 'session=synthetic-rotated');
+  assert.equal((await readPanFacts(root)).accounts.baidu.credentials.cookie, 'session=synthetic-rotated');
   assert.equal(requests.length, 1);
   assert.equal(JSON.stringify(refreshed).includes('synthetic-rotated'), false);
 });
 
 test('Baidu loginStatus HTTP200 errno -6 expires the account without persisting response cookies', async t => {
-  const { service, requests, path } = setup(t, () => response({ errno: -6 }, 200,
+  const { service, requests, root } = setup(t, () => response({ errno: -6 }, 200,
     { 'set-cookie': ['session=synthetic-signed-out; Path=/'] }));
   await service.invoke('settings.set', { provider: 'baidu', credentials: cookies });
-  const before = readFileSync(path);
+  const before = await readPanFacts(root);
   await assert.rejects(service.invoke('refresh', { provider: 'baidu' }), { code: 'AUTH_REQUIRED' });
   assert.deepEqual(await account(service, 'baidu'), {
     provider: 'baidu', revision: 1, configured: true, fields: ['cookie'], status: 'expired',
   });
-  assert.deepEqual(readFileSync(path), before);
+  assert.deepEqual(await readPanFacts(root), before);
   assert.equal(requests.length, 1);
   assert.equal(new URL(requests[0].url).pathname, '/api/loginStatus');
 });
@@ -207,7 +208,7 @@ test('Baidu loginStatus HTTP200 errno -6 expires the account without persisting 
 for (const provider of ['quark', 'uc']) {
   test(`${provider}: Cookie confirmation uses only the read-only account-info API`, async t => {
     const endpoint = provider === 'quark' ? 'https://pan.quark.cn/account/info' : 'https://drive.uc.cn/account/info';
-    const { service, requests, path } = setup(t, input => {
+    const { service, requests, root } = setup(t, input => {
       const url = new URL(input.url);
       assert.equal(url.origin + url.pathname, endpoint);
       assert.deepEqual(Object.fromEntries(url.searchParams), { fr: 'pc', platform: 'pc' });
@@ -221,7 +222,7 @@ for (const provider of ['quark', 'uc']) {
     const refreshed = await service.invoke('refresh', { provider });
     assert.equal(refreshed.account.status, 'signedIn');
     assert.equal(refreshed.account.revision, 1);
-    assert.equal(JSON.parse(readFileSync(path)).accounts[provider].credentials.cookie, 'session=synthetic-rotated');
+    assert.equal((await readPanFacts(root)).accounts[provider].credentials.cookie, 'session=synthetic-rotated');
     assert.equal(requests.length, 1);
     assert.equal(JSON.stringify(refreshed).includes('synthetic-display-name'), false);
     assert.equal(JSON.stringify(refreshed).includes('synthetic-rotated'), false);
@@ -229,7 +230,7 @@ for (const provider of ['quark', 'uc']) {
 }
 
 test('Tianyi Cookie confirmation follows the known cloud homepage and saves rotation only after it succeeds', async t => {
-  const { service, requests, path } = setup(t, input => {
+  const { service, requests, root } = setup(t, input => {
     const url = new URL(input.url);
     assert.equal(url.origin, 'https://cloud.189.cn');
     assert.equal(input.method, 'GET');
@@ -249,12 +250,12 @@ test('Tianyi Cookie confirmation follows the known cloud homepage and saves rota
   assert.equal(refreshed.account.status, 'signedIn');
   assert.equal(refreshed.account.revision, 1);
   assert.equal(requests.length, 2);
-  assert.deepEqual(JSON.parse(readFileSync(path)).accounts.tianyi.credentials, { cookie: 'session=synthetic-rotated' });
+  assert.deepEqual((await readPanFacts(root)).accounts.tianyi.credentials, { cookie: 'session=synthetic-rotated' });
 });
 
 test('Tianyi follows intermediate redirects but unknown terminals and unsuccessful homepages retain status and saved Cookie', async t => {
   let initial, homepage;
-  const { service, path, requests } = setup(t, input => {
+  const { service, root, requests } = setup(t, input => {
     const target = new URL(input.url);
     if (target.origin === 'https://cloud.189.cn' && target.pathname === '/api/portal/loginUrl.action') return initial;
     if (target.origin === 'https://cloud.189.cn' && target.pathname === '/web/main') return homepage;
@@ -266,7 +267,7 @@ test('Tianyi follows intermediate redirects but unknown terminals and unsuccessf
       initial = invalid('tianyi');
       await assert.rejects(service.invoke('refresh', { provider: 'tianyi' }), { code: 'AUTH_REQUIRED' });
     }
-    const snapshot = await account(service, 'tianyi'), before = readFileSync(path);
+    const snapshot = await account(service, 'tianyi'), before = await readPanFacts(root);
     assert.equal(snapshot.status, status);
     for (const [value, requestCount] of [
       [response('', 302), 1],
@@ -280,7 +281,7 @@ test('Tianyi follows intermediate redirects but unknown terminals and unsuccessf
       await assert.rejects(service.invoke('refresh', { provider: 'tianyi' }), { code: 'UPSTREAM_FORMAT' });
       assert.equal(requests.length, count + requestCount);
       assert.deepEqual(await account(service, 'tianyi'), snapshot);
-      assert.deepEqual(readFileSync(path), before);
+      assert.deepEqual(await readPanFacts(root), before);
     }
     initial = response('', 302, { location: '/web/main', 'set-cookie': ['session=synthetic-unsaved; Path=/'] });
     for (const [value, code] of [
@@ -291,13 +292,13 @@ test('Tianyi follows intermediate redirects but unknown terminals and unsuccessf
       homepage = value;
       await assert.rejects(service.invoke('refresh', { provider: 'tianyi' }), { code });
       assert.deepEqual(await account(service, 'tianyi'), snapshot);
-      assert.deepEqual(readFileSync(path), before);
+      assert.deepEqual(await readPanFacts(root), before);
     }
   }
 });
 
 test('Tianyi accepts a complete off-domain redirect chain and scopes temporary cookies by domain and path', async t => {
-  const { service, requests, path } = setup(t, input => {
+  const { service, requests, root } = setup(t, input => {
     const target = new URL(input.url), cookie = input.headers.Cookie;
     assert.equal(input.method, 'GET');
     assert.equal(input.redirect, 'manual');
@@ -346,12 +347,12 @@ test('Tianyi accepts a complete off-domain redirect chain and scopes temporary c
   assert.equal(result.account.revision, 1);
   assert.deepEqual(requests.map(input => new URL(input.url).pathname),
     ['/api/portal/loginUrl.action', '/start', '/hop', '/api/logbox/separate/web/index.html', '/relay/return', '/web/main']);
-  assert.deepEqual(JSON.parse(readFileSync(path)).accounts.tianyi.credentials, { cookie: 'session=synthetic-cloud-final' });
+  assert.deepEqual((await readPanFacts(root)).accounts.tianyi.credentials, { cookie: 'session=synthetic-cloud-final' });
 });
 
 test('Tianyi cancels an off-domain confirmation before a late redirect can request or save cloud credentials', async t => {
   const entered = deferred(), release = deferred();
-  const { service, requests, path } = setup(t, async input => {
+  const { service, requests, root } = setup(t, async input => {
     const target = new URL(input.url);
     if (target.origin === 'https://cloud.189.cn') {
       assert.equal(target.pathname, '/api/portal/loginUrl.action');
@@ -364,7 +365,7 @@ test('Tianyi cancels an off-domain confirmation before a late redirect can reque
     return response('', 302, { location: 'https://cloud.189.cn/web/main' });
   });
   await service.invoke('settings.set', { provider: 'tianyi', credentials: cookies });
-  const snapshot = await account(service, 'tianyi'), saved = readFileSync(path);
+  const snapshot = await account(service, 'tianyi'), saved = await readPanFacts(root);
   const controller = new AbortController();
   const pending = assert.rejects(service.invoke('refresh', { provider: 'tianyi' }, { signal: controller.signal }), { code: 'CANCELLED' });
   await entered.promise;
@@ -375,15 +376,15 @@ test('Tianyi cancels an off-domain confirmation before a late redirect can reque
   assert.equal(requests.length, 2);
   assert.equal(requests[1].signal.aborted, true);
   assert.deepEqual(await account(service, 'tianyi'), snapshot);
-  assert.deepEqual(readFileSync(path), saved);
+  assert.deepEqual(await readPanFacts(root), saved);
 });
 
 test('missing or unknown account replies are not evidence of authentication failure', async t => {
   for (const provider of providerIds) await t.test(provider, async t => {
     let value;
-    const { service, path } = setup(t, () => response(value));
+    const { service, root } = setup(t, () => response(value));
     await service.invoke('settings.set', { provider, credentials: refreshCredentials[provider] });
-    const snapshot = await account(service, provider), before = readFileSync(path);
+    const snapshot = await account(service, provider), before = await readPanFacts(root);
     const values = provider === 'baidu'
       ? [{}, { errno: 0 }, { login_info: {} }, { login_info: { bdstoken: '' } }]
       : provider === 'quark' || provider === 'uc'
@@ -394,7 +395,7 @@ test('missing or unknown account replies are not evidence of authentication fail
     for (value of values) {
       await assert.rejects(service.invoke('refresh', { provider }), { code: 'UPSTREAM_FORMAT' });
       assert.deepEqual(await account(service, provider), snapshot);
-      assert.deepEqual(readFileSync(path), before);
+      assert.deepEqual(await readPanFacts(root), before);
     }
   });
 });
@@ -418,7 +419,7 @@ for (const provider of ['baidu', 'quark']) {
     for (const late of ['success', 'authFailure']) {
       test(`${provider}: ${action} fences a late ${late} without changing the new status`, async t => {
         const entered = deferred(), release = deferred();
-        const { service, path } = setup(t, async () => {
+        const { service, root } = setup(t, async () => {
           entered.resolve();
           await release.promise;
           return late === 'success' ? valid(provider) : invalid(provider);
@@ -428,12 +429,12 @@ for (const provider of ['baidu', 'quark']) {
         await entered.promise;
         if (action === 'replace') await service.invoke('settings.set', { provider, credentials: credentials[provider] });
         else await service.invoke('settings.clear', { provider });
-        const current = await account(service, provider), saved = readFileSync(path);
+        const current = await account(service, provider), saved = await readPanFacts(root);
         release.resolve();
         await rejected;
         assert.deepEqual(await account(service, provider), current);
         assert.equal(current.status, action === 'clear' ? 'signedOut' : 'signedIn');
-        assert.deepEqual(readFileSync(path), saved);
+        assert.deepEqual(await readPanFacts(root), saved);
       });
     }
   }
@@ -487,37 +488,33 @@ for (const provider of ['baidu', 'quark']) {
 }
 
 test('failed manual replacement and sign-out writes retain the existing expired account', async t => {
-  const { service, path } = setup(t, () => response('', 401));
+  const { service, root } = setup(t, () => response('', 401));
   await service.invoke('settings.set', { provider: 'baidu', credentials: cookies });
   await assert.rejects(service.invoke('refresh', { provider: 'baidu' }), { code: 'AUTH_REQUIRED' });
-  const expired = await account(service, 'baidu'), saved = readFileSync(path), backup = path + '.held';
-  renameSync(path, backup);
-  mkdirSync(path);
+  const expired = await account(service, 'baidu'), saved = await readPanFacts(root);
+  await setTestReadOnly(root, true);
   await assert.rejects(service.invoke('settings.set', { provider: 'baidu', credentials: { cookie: 'session=synthetic-new' } }),
     { code: 'STORAGE_ERROR' });
   await assert.rejects(service.invoke('settings.clear', { provider: 'baidu' }), { code: 'STORAGE_ERROR' });
   assert.deepEqual(await account(service, 'baidu'), expired);
-  assert.deepEqual(readFileSync(backup), saved);
-  rmSync(path, { recursive: true });
-  renameSync(backup, path);
+  assert.deepEqual(await readPanFacts(root), saved);
+  await setTestReadOnly(root, false);
   assert.equal((await service.invoke('settings.clear', { provider: 'baidu' })).status, 'signedOut');
 });
 
 for (const provider of ['baidu', 'quark']) {
   test(`${provider}: a failed rotated-credential write preserves expiry until the credentials are durably saved`, async t => {
     let result = invalid(provider);
-    const { service, path } = setup(t, () => result);
+    const { service, root } = setup(t, () => result);
     await service.invoke('settings.set', { provider, credentials: credentials[provider] });
     await assert.rejects(service.invoke('refresh', { provider }), { code: authCode(provider) });
-    const expired = await account(service, provider), saved = readFileSync(path), backup = path + '.held';
-    renameSync(path, backup);
-    mkdirSync(path);
+    const expired = await account(service, provider), saved = await readPanFacts(root);
+    await setTestReadOnly(root, true);
     result = { ...valid(provider), headers: { 'set-cookie': ['session=synthetic-rotated; Path=/'] } };
     await assert.rejects(service.invoke('refresh', { provider }), { code: 'STORAGE_ERROR' });
     assert.deepEqual(await account(service, provider), expired);
-    assert.deepEqual(readFileSync(backup), saved);
-    rmSync(path, { recursive: true });
-    renameSync(backup, path);
+    assert.deepEqual(await readPanFacts(root), saved);
+    await setTestReadOnly(root, false);
     assert.equal((await service.invoke('refresh', { provider })).account.status, 'signedIn');
   });
 }

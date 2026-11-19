@@ -360,7 +360,7 @@ public static class AppRuntimeConnectionTests
         {
             int launches = 0;
             EpochSession? session = null;
-            await using var store = new FilmNativeSettingsFixture("film.preferences.v1");
+            await using var store = new FilmNativeSettingsFixture();
             await using var host = new AppRuntimeConnectionHost(owner =>
             {
                 launches++;
@@ -389,7 +389,7 @@ public static class AppRuntimeConnectionTests
             var drain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             int launches = 0;
             EpochSession? first = null, next = null;
-            await using var store = new FilmNativeSettingsFixture("film.preferences.v1");
+            await using var store = new FilmNativeSettingsFixture();
             await using var host = new AppRuntimeConnectionHost(owner =>
             {
                 var session = new EpochSession(owner, ++launches == 1 ? 41002 : 41003);
@@ -437,7 +437,7 @@ public static class AppRuntimeConnectionTests
             var ready = new TaskCompletionSource<IRuntimeSession>(TaskCreationOptions.RunContinuationsAsynchronously);
             int launches = 0;
             EpochSession? session = null;
-            await using var store = new FilmNativeSettingsFixture("film.preferences.v1");
+            await using var store = new FilmNativeSettingsFixture();
             await using var host = new AppRuntimeConnectionHost(owner =>
             {
                 launches++; session = new(owner, 41002); return ready.Task;
@@ -471,7 +471,7 @@ public static class AppRuntimeConnectionTests
             var ready = new TaskCompletionSource<IRuntimeSession>(TaskCreationOptions.RunContinuationsAsynchronously);
             int launches = 0;
             EpochSession? next = null;
-            await using var store = new FilmNativeSettingsFixture("film.preferences.v1");
+            await using var store = new FilmNativeSettingsFixture();
             await using var host = new AppRuntimeConnectionHost(owner => ++launches == 1 ? ready.Task :
                 Task.FromResult<IRuntimeSession>(next = new(owner, 41003)));
             host.Start();
@@ -506,7 +506,7 @@ public static class AppRuntimeConnectionTests
                 var ready = new TaskCompletionSource<IRuntimeSession>(TaskCreationOptions.RunContinuationsAsynchronously);
                 await using var server = new RuntimeHttpClientTests.Server();
                 await using var http = new RuntimeHttpClient(server.BaseUrl);
-                await using var store = new FilmNativeSettingsFixture("film.preferences.v1");
+                await using var store = new FilmNativeSettingsFixture();
                 int launches = 0;
                 EpochSession? session = null;
                 await using var host = new AppRuntimeConnectionHost(owner =>
@@ -620,7 +620,7 @@ public static class AppRuntimeConnectionTests
         {
             await using var server = new RuntimeHttpClientTests.Server();
             await using var http = new RuntimeHttpClient(server.BaseUrl);
-            await using var store = new FilmNativeSettingsFixture("film.preferences.v1");
+            await using var store = new FilmNativeSettingsFixture();
             int launches = 0;
             EpochSession? session = null;
             await using var host = new AppRuntimeConnectionHost(owner =>

@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readCatFacts } from './storage-test-fixture.mjs';
 import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
 
 const temporaryRoot = fileURLToPath(new URL('../tmp/test-results/', import.meta.url));
@@ -45,11 +46,12 @@ async function call(module, operation, input = {}) {
   assert.equal(reply.ok, true, JSON.stringify(reply));
   return reply.value;
 }
-async function state(module, revision, expected = 'ready') {
+async function state(module, revision, expected = 'ready', name) {
   const deadline = Date.now() + 10000;
   for (;;) {
     const current = (await call(module, 'status')).instances.find(value => value.installationId === 'cat');
-    if (current?.inputRevision === revision && current.state === expected) return current;
+    if (current?.inputRevision === revision && current.state === expected &&
+      (name === undefined || current.name === name)) return current;
     assert.ok(Date.now() < deadline, JSON.stringify(current));
     await new Promise(resolve => setTimeout(resolve, 10));
   }
@@ -86,7 +88,7 @@ test('failed native network update records preparation errors without replacing 
     assert.equal(current.updateState, 'failed');
     assert.equal(current.updateError, 'SCRIPT_EXCEPTION');
     assert.deepEqual(await home(module, current), { value: 'accepted' });
-    const facts = JSON.parse(readFileSync(join(f.root, 'settings.json')));
+    const facts = await readCatFacts(f.root, 'native');
     assert.equal(facts.scripts[0].sourceHash, accepted.sourceHash);
     assert.equal(facts.scripts[0].updateState, 'failed');
   });
@@ -136,7 +138,7 @@ test('native Cat source intent replaces immediately and cold start resolves the 
 
     f.latest.scripts[0].name = '已改名';
     await module.settingsChanged();
-    const renamed = await state(module, 2);
+    const renamed = await state(module, 2, 'ready', '已改名');
     assert.equal(renamed.name, '已改名');
     assert.equal(renamed.generation, second.generation);
     assert.equal(downloads, 1, 'a name edit does not fetch or replace the source');
@@ -145,8 +147,8 @@ test('native Cat source intent replaces immediately and cold start resolves the 
     await module.settingsChanged();
     const third = await state(module, 3);
     assert.deepEqual(await home(module, third), { value: 'third' });
-    const facts = JSON.parse(readFileSync(join(f.root, 'settings.json')));
-    assert.equal(facts.version, 2);
+    const facts = await readCatFacts(f.root, 'native');
+    assert.equal(facts.version, 1);
     assert.equal(facts.scripts[0].loadedIdentity, `local:3:${f.latest.scripts[0].localHash}`);
     for (const field of ['name', 'sourceType', 'sourceUrl', 'localPath', 'localHash', 'enabled', 'inputRevision'])
       assert.equal(Object.hasOwn(facts.scripts[0], field), false, field);
@@ -175,9 +177,9 @@ test('a native Cat notification acknowledges scheduling, and a later input revok
     release();
     const latest = await state(module, 3);
     assert.deepEqual(await home(module, latest), { value: 'latest' });
-    const facts = JSON.parse(readFileSync(join(f.root, 'settings.json')));
+    const facts = await readCatFacts(f.root, 'native');
     assert.equal(facts.scripts[0].loadedIdentity, `local:3:${f.latest.scripts[0].localHash}`);
-    assert.equal(existsSync(join(f.root, 'sources', hash(source('late')) + '.js')), false);
+    assert.equal(existsSync(join(f.root, 'cat', 'sources', hash(source('late')) + '.js')), false);
   });
 
 test('native Cat loading failure does not roll back a saved input or report the former installation as ready',
@@ -263,7 +265,7 @@ test('native localHash keeps an uninstalled selected input alive when another in
   { timeout: 30000 }, async t => {
     const f = fixture(t), module = f.start(), first = await state(module, 1);
     const url = await server(t, (_request, response) => response.end(source('network')));
-    const cached = join(f.root, 'sources', first.sourceHash + '.js');
+    const cached = join(f.root, 'cat', 'sources', first.sourceHash + '.js');
     f.latest = configuration(network(f.latest.scripts[0], url, 2));
     f.latest.scripts.push({ installationId: 'retained', name: '保留的本地输入', sourceType: 'local',
       sourceUrl: null, localPath: null, localHash: first.sourceHash, enabled: false, inputRevision: 1 });

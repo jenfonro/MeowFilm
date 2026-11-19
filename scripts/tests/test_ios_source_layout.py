@@ -68,6 +68,7 @@ class IOSSourceLayoutTests(unittest.TestCase):
             self.write(directory + "/Fixture.swift")
         self.write("UITests/Fixture.swift")
         self.write("RuntimeTests/Fixture.swift")
+        self.write("TestSupport/Fixture.swift")
         self.write("Resources/Unexpected.swift")
         with patch.object(generator, "ROOT", self.root):
             with self.assertRaisesRegex(ValueError, "responsibility"):
@@ -75,7 +76,7 @@ class IOSSourceLayoutTests(unittest.TestCase):
         self.assertFalse((self.root / "apps/ios/Meowfilm.xcodeproj").exists())
 
     def test_build_cache_does_not_join_or_block_project_sources(self):
-        directories = generator.APPLICATION_DIRECTORIES + ("UITests", "RuntimeTests")
+        directories = generator.APPLICATION_DIRECTORIES + ("UITests", "RuntimeTests", "TestSupport")
         for directory in directories:
             self.write(directory + "/Fixture.swift")
         self.write(".cache/DerivedData/Meowfilm/Build/DerivedSources/GeneratedAssetSymbols.swift")

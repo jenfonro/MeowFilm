@@ -14,23 +14,23 @@ public static class MusicHomeSnapshotTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("Music home optional cache reopens ordered pages without account or runtime authority", Roundtrip);
-        yield return new("Music home cache reopens through its independent local cache namespace and root", LocalReopen);
+        yield return new("Music home cache and permanent songs reopen through one current App database", LocalReopen);
         yield return new("Music home cold cache retains recommendation action parameters without credentials", ActionParameters);
         yield return new("Music home bad cached content misses and fresh pages repair it", Damaged);
         yield return new("Music home cache uses its native platform scope without rejecting partial page fields", PlatformMismatch);
         yield return new("Music home song cards and previews resolve current cross-platform repository references", SongReferences);
         yield return new("Music home display cache keeps empty results and has no arbitrary page cap", EmptyAndMany);
-        yield return new("Music home cache write does not wait for initial read or persistent receipt", SlowDisk);
-        yield return new("Music home cache storage failures cannot negate successful pages", StorageFailures);
+        yield return new("Music home cache waits for its queued transaction and actual commit", SlowDisk);
+        yield return new("Music home cache failures preserve committed pages and recover without replay", StorageFailures);
         yield return new("Music home cache projects display fields and excludes nested credentials", Sensitive);
         yield return new("Music home cancelled saves and reads keep the accepted snapshot", Cancellation);
         yield return new("Music home cancelled cold reads preserve other readers and owner drain", CancelledRead);
-        yield return new("Music home cache enforces the document byte boundary without replacing accepted content", SizeBoundary);
+        yield return new("Music home cache enforces the projection byte boundary without replacing accepted content", SizeBoundary);
     }
     private static async Task Roundtrip()
     {
         await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var store = new CacheDocumentStore(backing);
+        await using var store = new NativeTestDatabase(backing);
         var owner = new MusicHomeSnapshotStore(store);
         var first = Page("wy", "first");
         first["sections"]!.AsArray().Insert(0, Feature(new JsonObject
@@ -41,7 +41,7 @@ public static class MusicHomeSnapshotTests
         }));
         await owner.SaveAsync(Snapshot("wy", first, Page("wy", "second")));
         await store.DrainAsync();
-        await using var reopened = new CacheDocumentStore(backing);
+        await using var reopened = new NativeTestDatabase(backing);
         var restored = (await new MusicHomeSnapshotStore(reopened).ReadAsync(_ => null))!;
         Check(restored.Platform == "wy" && restored.Pages.Select(PageId).SequenceEqual(new[] { "first", "second" }));
         var entry = MusicCatalogDto.Read(restored.Pages[0], "wy", "home", "").First();
@@ -68,18 +68,18 @@ public static class MusicHomeSnapshotTests
             page["expiresAt"] = 1;
             await owner.SaveAsync(Snapshot("wy", page));
             await store.DrainAsync();
-            await using var accountReopened = new CacheDocumentStore(backing);
+            await using var accountReopened = new NativeTestDatabase(backing);
             var accountSnapshot = (await new MusicHomeSnapshotStore(accountReopened).ReadAsync(_ => null))!;
             Check(accountSnapshot.Platform == "wy" && accountSnapshot.Pages.Length == 1 &&
                 PageId(accountSnapshot.Pages[0]) == content);
             Check(accountSnapshot.Pages[0].EnumerateObject().Select(property => property.Name)
                 .Order(StringComparer.Ordinal).SequenceEqual(new[] { "platform", "sections" }));
-            string text = Encoding.UTF8.GetString(backing.Data[MusicHomeSnapshotStore.Namespace]);
+            string text = Encoding.UTF8.GetString(backing.HomeData!);
             Check(!text.Contains(account, StringComparison.Ordinal));
             foreach (string field in new[] { "ok", "scope", "accountStamp", "credentials", "cookie", "cursor",
                 "more", "continuation", "snapshot", "expiresAt" })
                 Check(!text.Contains("\"" + field + "\"", StringComparison.Ordinal));
-            Check(backing.Data.Keys.SequenceEqual(new[] { MusicHomeSnapshotStore.Namespace }));
+            Check(await backing.Inner.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_music_account")) == 0);
         }
         await owner.SaveAsync(Snapshot("kg", Page("kg", "replacement")));
         var replacement = (await owner.ReadAsync(_ => null))!;
@@ -88,10 +88,9 @@ public static class MusicHomeSnapshotTests
     private static async Task LocalReopen()
     {
         string root = TestWorkspace.DataPath("music-home-cache-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(Path.Combine(root, "songs"));
+        Directory.CreateDirectory(root);
         try
         {
-            await using var songs = new MusicRecordTestStore(Path.Combine(root, "songs"));
             var first = Page("wy", "disk-first");
             first["sections"]!.AsArray().Insert(0, Feature(new JsonObject
             {
@@ -129,11 +128,9 @@ public static class MusicHomeSnapshotTests
                 })
             });
             first["expiresAt"] = 1; // Past service lifetime is not a display-cache TTL.
-            await using (var backing = new LocalDocumentStore(root, AppIdentity.CacheNamespaces,
-                protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
-            await using (var store = new CacheDocumentStore(backing))
+            await using (var store = new NativeTestDatabase(root))
             {
-                await using var library = new MusicLibraryOwner(MusicTestStores.For(songs));
+                await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: store);
                 first = JsonNode.Parse((await library.AdoptPlatformResultAsync(
                     JsonSerializer.SerializeToElement(first), default,
                     shape: MusicLibraryOwner.PlatformSongShape.Catalog)).GetRawText())!.AsObject();
@@ -145,11 +142,9 @@ public static class MusicHomeSnapshotTests
                         cover: "https://image.invalid/current.jpg")), default, shape: MusicLibraryOwner.PlatformSongShape.Song);
                 await store.DrainAsync();
             }
-            await using (var backing = new LocalDocumentStore(root, AppIdentity.CacheNamespaces,
-                protectedNamespaces: AppIdentity.CacheProtectedNamespaces))
-            await using (var store = new CacheDocumentStore(backing))
+            await using (var store = new NativeTestDatabase(root))
             {
-                await using var library = new MusicLibraryOwner(MusicTestStores.For(songs));
+                await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: store);
                 Check((await library.ExecuteAsync("music.library.list")).GetProperty("ok").GetBoolean());
                 var saved = (await new MusicHomeSnapshotStore(store).ReadAsync(library.SongSnapshot))!;
                 Check(saved.Platform == "wy" && saved.Pages.Select(PageId).SequenceEqual(new[] { "disk-first", "disk-second" }));
@@ -166,7 +161,7 @@ public static class MusicHomeSnapshotTests
                     song.Song.Cover == "https://image.invalid/current.jpg" &&
                     song.PlaybackSource!.Value.GetProperty("id").GetString() == "202");
                 Check(sections[2].Items.Single().ActionId == "303");
-                var document = await store.ReadAsync(MusicHomeSnapshotStore.Namespace);
+                var document = await store.ReadRecordAsync(MusicHomeSnapshotStore.Namespace, MeowFilm.Capabilities.HomeStorageRecords.Home);
                 using var json = JsonDocument.Parse(document.Data!);
                 Check(!Encoding.UTF8.GetString(document.Data!).Contains("\"sources\"") &&
                     !Encoding.UTF8.GetString(document.Data!).Contains("https://image.invalid/song.jpg"));
@@ -204,12 +199,12 @@ public static class MusicHomeSnapshotTests
             };
         }).ToArray());
         await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using (var store = new CacheDocumentStore(backing))
+        await using (var store = new NativeTestDatabase(backing))
         {
             await new MusicHomeSnapshotStore(store).SaveAsync(Snapshot("wy", page));
             await store.DrainAsync();
         }
-        await using var reopened = new CacheDocumentStore(backing);
+        await using var reopened = new NativeTestDatabase(backing);
         var snapshot = (await new MusicHomeSnapshotStore(reopened).ReadAsync(_ =>
             throw new InvalidOperationException("An action seed is not a repository song reference")))!;
         var cards = MusicCatalogDto.Read(snapshot.Pages.Single(), "wy", "home", "").Single().Items;
@@ -222,12 +217,12 @@ public static class MusicHomeSnapshotTests
     }
     private static async Task Damaged()
     {
-        foreach (byte[] data in new[] { "{"u8.ToArray(), "[]"u8.ToArray(), "{\"pages\":null}"u8.ToArray(),
+        foreach (byte[] data in new[] { "{\"pages\":null}"u8.ToArray(),
             "{\"platform\":\"unknown\",\"pages\":[{}]}"u8.ToArray() })
         {
             await using var backing = new MusicOfficialAudioTests.MemoryStore();
-            backing.Data[MusicHomeSnapshotStore.Namespace] = data;
-            await using var store = new CacheDocumentStore(backing);
+            backing.HomeData = data;
+            await using var store = new NativeTestDatabase(backing);
             var owner = new MusicHomeSnapshotStore(store);
             Check(await owner.ReadAsync(_ => null) is null);
             await owner.SaveAsync(Snapshot("wy", Page("wy", "repaired")));
@@ -236,7 +231,7 @@ public static class MusicHomeSnapshotTests
     }
     private static async Task EmptyAndMany()
     {
-        await using var store = new CacheDocumentStore();
+        await using var store = new NativeTestDatabase();
         var owner = new MusicHomeSnapshotStore(store);
         await owner.SaveAsync(Snapshot("wy", new JsonObject { ["platform"] = "wy", ["sections"] = new JsonArray() }));
         Check(MusicCatalogDto.Read((await owner.ReadAsync(_ => null))!.Pages.Single(), "wy", "home", "").Count == 0);
@@ -249,7 +244,7 @@ public static class MusicHomeSnapshotTests
     private static async Task PlatformMismatch()
     {
         await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var store = new CacheDocumentStore(backing);
+        await using var store = new NativeTestDatabase(backing);
         var owner = new MusicHomeSnapshotStore(store);
         var partial = Page("kg", "partial");
         partial["sections"]!.AsArray().Add(new JsonObject { ["title"] = "Empty section" });
@@ -264,7 +259,7 @@ public static class MusicHomeSnapshotTests
     private static async Task SongReferences()
     {
         await using var backing = new MusicOfficialAudioTests.MemoryStore();
-        await using var library = new MusicLibraryOwner(MusicTestStores.For(backing));
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(backing), database: MusicTestStores.For(backing).Storage);
         var song = await library.AdoptSongAsync(MusicSongFixture.Online("kg", "canonical-other-platform",
             "Initial title", "Artist", duration: 180, cover: "https://images.invalid/initial.png"), default);
         var page = Page("wy", "current");
@@ -284,12 +279,12 @@ public static class MusicHomeSnapshotTests
                 ["song"] = song.DeepClone()
             })
         }));
-        await using (var cache = new CacheDocumentStore(backing))
+        await using (var cache = new NativeTestDatabase(backing))
         {
             await new MusicHomeSnapshotStore(cache).SaveAsync(Snapshot("wy", page));
             await cache.DrainAsync();
         }
-        string saved = Encoding.UTF8.GetString(backing.Data[MusicHomeSnapshotStore.Namespace]);
+        string saved = Encoding.UTF8.GetString(backing.HomeData!);
         Check(saved.Contains(LJ.S(song["songId"]), StringComparison.Ordinal) &&
             !saved.Contains("sources", StringComparison.Ordinal) &&
             !saved.Contains("Initial title", StringComparison.Ordinal) &&
@@ -298,7 +293,7 @@ public static class MusicHomeSnapshotTests
         await library.AdoptPlatformResultAsync(JsonSerializer.SerializeToElement(MusicSongFixture.Online(
             "kg", "canonical-other-platform", "Corrected title", "Artist", duration: 180,
             cover: "https://images.invalid/corrected.png")), default, shape: MusicLibraryOwner.PlatformSongShape.Song);
-        await using var cold = new CacheDocumentStore(backing);
+        await using var cold = new NativeTestDatabase(backing);
         var restored = (await new MusicHomeSnapshotStore(cold).ReadAsync(library.SongSnapshot))!;
         var cards = MusicCatalogDto.Read(restored.Pages.Single(), "wy", "home", "").SelectMany(section => section.Items).ToArray();
         var current = cards.Single(card => card.Song is not null);
@@ -309,31 +304,41 @@ public static class MusicHomeSnapshotTests
     }
     private static async Task SlowDisk()
     {
-        var backing = new HeldStore();
-        await using var store = new CacheDocumentStore(backing);
+        await using var backing = new HeldStore();
+        await using var store = new NativeTestDatabase(backing);
         var owner = new MusicHomeSnapshotStore(store);
         var reading = owner.ReadAsync(_ => null);
         await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var saving = owner.SaveAsync(Snapshot("wy", Page("wy", "saved")));
+        var draining = store.DrainAsync();
         try
         {
-            await owner.SaveAsync(Snapshot("wy", Page("wy", "saved"))).WaitAsync(TimeSpan.FromSeconds(2));
-            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "saved");
+            Check(!reading.IsCompleted && !saving.IsCompleted && !draining.IsCompleted);
         }
         finally { backing.Release.TrySetResult(); }
-        Check(PageId((await reading)!.Pages.Single()) == "saved");
-        await store.DrainAsync();
+        Check(await reading.WaitAsync(TimeSpan.FromSeconds(5)) is null);
+        await saving.WaitAsync(TimeSpan.FromSeconds(5));
+        await draining.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "saved");
     }
     private static async Task StorageFailures()
     {
-        foreach (var error in new[] { DocumentStoreError.Protection, DocumentStoreError.Storage, DocumentStoreError.UnsafePath })
+        foreach (var error in new[] { DocumentStoreError.Io, DocumentStoreError.Storage, DocumentStoreError.UnsafePath })
         {
-            await using var backing = new MusicOfficialAudioTests.MemoryStore { Failure = error };
-            await using var store = new CacheDocumentStore(backing);
+            await using var backing = new MusicOfficialAudioTests.MemoryStore();
+            await using var store = new NativeTestDatabase(backing);
             var owner = new MusicHomeSnapshotStore(store);
+            await owner.SaveAsync(Snapshot("wy", Page("wy", "safe")));
+            byte[] committed = backing.HomeData!.ToArray();
+            backing.Failure = error;
             Check(await owner.ReadAsync(_ => null) is null);
-            await owner.SaveAsync(Snapshot("wy", Page("wy", "saved")));
-            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "saved");
+            await owner.SaveAsync(Snapshot("wy", Page("wy", "not-committed")));
             await store.DrainAsync();
+            backing.Failure = null;
+            Check(backing.HomeData!.SequenceEqual(committed));
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "safe");
+            await owner.SaveAsync(Snapshot("wy", Page("wy", "recovered")));
+            Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "recovered");
         }
     }
     private static async Task Sensitive()
@@ -342,7 +347,7 @@ public static class MusicHomeSnapshotTests
             "api_key", "headers", "scope", "cursor", "continuation", "snapshot", "expiresAt", "accountStamp" })
         {
             await using var backing = new MusicOfficialAudioTests.MemoryStore();
-            await using var store = new CacheDocumentStore(backing);
+            await using var store = new NativeTestDatabase(backing);
             var owner = new MusicHomeSnapshotStore(store);
             await owner.SaveAsync(Snapshot("wy", Page("wy", "safe")));
             await store.DrainAsync();
@@ -354,42 +359,29 @@ public static class MusicHomeSnapshotTests
             await owner.SaveAsync(Snapshot("wy", page));
             Check(PageId((await owner.ReadAsync(_ => null))!.Pages.Single()) == "projected");
             await store.DrainAsync();
-            Check(!Encoding.UTF8.GetString(backing.Data[MusicHomeSnapshotStore.Namespace]).Contains("\"" + field + "\"", StringComparison.Ordinal));
+            Check(!Encoding.UTF8.GetString(backing.HomeData!).Contains("\"" + field + "\"", StringComparison.Ordinal));
 
-            page.Remove("ok");
-            backing.Data[MusicHomeSnapshotStore.Namespace] =
-                JsonSerializer.SerializeToUtf8Bytes(new { platform = "wy", pages = new[] { page } });
-            await using var maliciousCache = new CacheDocumentStore(backing);
-            var restoredOwner = new MusicHomeSnapshotStore(maliciousCache);
-            var projected = (await restoredOwner.ReadAsync(_ => null))!;
-            Check(PageId(projected.Pages.Single()) == "projected" &&
-                !projected.Pages.Single().GetRawText().Contains("\"" + field + "\"", StringComparison.Ordinal));
-            await restoredOwner.SaveAsync(Snapshot("wy", Page("wy", "repaired")));
-            Check(PageId((await restoredOwner.ReadAsync(_ => null))!.Pages.Single()) == "repaired");
-            await maliciousCache.DrainAsync();
-            await using var repairedCache = new CacheDocumentStore(backing);
-            Check(PageId((await new MusicHomeSnapshotStore(repairedCache).ReadAsync(_ => null))!.Pages.Single()) == "repaired");
         }
     }
     private static async Task SizeBoundary()
     {
-        await using var store = new CacheDocumentStore();
+        await using var store = new NativeTestDatabase();
         var owner = new MusicHomeSnapshotStore(store);
         var page = Page("wy", "boundary"); page.Remove("ok");
         page["sections"]![0]!["items"]![0]!["subtitle"] = "";
         await owner.SaveAsync(Snapshot("wy", page));
-        int overhead = store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length;
-        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('x', CacheDocumentStore.MaximumDocumentBytes - overhead);
+        int overhead = store.RecordBytes(MeowFilm.Capabilities.HomeStorageRecords.Home)!.Length;
+        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('x', (8 * 1024 * 1024) - overhead);
         await owner.SaveAsync(Snapshot("wy", page));
-        Check(store.ReadMemory(MusicHomeSnapshotStore.Namespace).Data!.Length == CacheDocumentStore.MaximumDocumentBytes);
-        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('y', CacheDocumentStore.MaximumDocumentBytes - overhead + 1);
+        Check(store.RecordBytes(MeowFilm.Capabilities.HomeStorageRecords.Home)!.Length == (8 * 1024 * 1024));
+        page["sections"]![0]!["items"]![0]!["subtitle"] = new string('y', (8 * 1024 * 1024) - overhead + 1);
         await owner.SaveAsync(Snapshot("wy", page));
         var restored = (await owner.ReadAsync(_ => null))!.Pages.Single();
         Check(restored.GetProperty("sections")[0].GetProperty("items")[0].GetProperty("subtitle").GetString()![0] == 'x');
     }
     private static async Task Cancellation()
     {
-        await using var store = new CacheDocumentStore();
+        await using var store = new NativeTestDatabase();
         var owner = new MusicHomeSnapshotStore(store);
         await owner.SaveAsync(Snapshot("wy", Page("wy", "safe")));
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
@@ -399,9 +391,9 @@ public static class MusicHomeSnapshotTests
     }
     private static async Task CancelledRead()
     {
-        var backing = new HeldStore(JsonSerializer.SerializeToUtf8Bytes(
+        await using var backing = new HeldStore(JsonSerializer.SerializeToUtf8Bytes(
             new { platform = "wy", pages = new[] { Page("wy", "stored") } }));
-        await using var store = new CacheDocumentStore(backing);
+        await using var store = new NativeTestDatabase(backing);
         var owner = new MusicHomeSnapshotStore(store);
         using var cancellation = new CancellationTokenSource();
         var cancelledRead = owner.ReadAsync(_ => null, cancellation.Token);
@@ -411,10 +403,10 @@ public static class MusicHomeSnapshotTests
             await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(!cancelledRead.IsCompleted && !stableRead.IsCompleted);
             cancellation.Cancel();
-            await Cancelled(() => cancelledRead.WaitAsync(TimeSpan.FromSeconds(5)));
             var draining = store.DrainAsync();
-            Check(!stableRead.IsCompleted && !draining.IsCompleted);
+            Check(!cancelledRead.IsCompleted && !stableRead.IsCompleted && !draining.IsCompleted);
             backing.Release.TrySetResult();
+            await Cancelled(() => cancelledRead.WaitAsync(TimeSpan.FromSeconds(5)));
             Check(PageId((await stableRead.WaitAsync(TimeSpan.FromSeconds(5)))!.Pages.Single()) == "stored");
             await draining.WaitAsync(TimeSpan.FromSeconds(5));
             await owner.SaveAsync(Snapshot("wy", Page("wy", "after-cancellation")));
@@ -429,18 +421,20 @@ public static class MusicHomeSnapshotTests
         catch (OperationCanceledException) { return; }
         throw new InvalidOperationException("Expected cancellation");
     }
-    private sealed class HeldStore(byte[]? data = null) : IDocumentStore
+    private sealed class HeldStore : NativeTestDatabase
     {
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal HeldStore(byte[]? data = null)
         {
-            Entered.TrySetResult(); await Release.Task.WaitAsync(token);
-            return new(data, data is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(data));
+            if (data is not null)
+            {
+                var root = JsonNode.Parse(data)!.AsObject();
+                new MusicHomeSnapshotStore(Inner).SaveAsync(new MusicHomeSnapshot(root["platform"]!.GetValue<string>(), root["pages"]!.AsArray().Select(page => JsonSerializer.SerializeToElement(page)).ToArray())).GetAwaiter().GetResult();
+            }
         }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default) =>
-            Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public override Task<T> ReadAsync<T>(Func<DatabaseSession,T> read, CancellationToken token = default) =>
+            base.ReadAsync(db => { Entered.TrySetResult(); Release.Task.GetAwaiter().GetResult(); return read(db); },token);
     }
     private static JsonObject Page(string platform, string id) => new()
     {

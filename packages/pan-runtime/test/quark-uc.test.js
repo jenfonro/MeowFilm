@@ -1,6 +1,7 @@
+import { readPanFacts, setTestReadOnly } from '../../../tests/storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, mkdir, unlink } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createPanService, PanError } from '../src/index.js';
@@ -54,7 +55,7 @@ async function fixture(t, route, options = {}) {
     service, requests, root,
     set: (provider, credentials) => service.invoke('settings.set', { provider, credentials }),
     list: (config, password) => service.invoke('list', { provider: config.id, share: { url: `https://${config.host}/s/share-A?pwd=url-password`, ...(password === undefined ? {} : { password }) } }),
-    document: async () => JSON.parse(await readFile(join(root, 'pan/accounts.json'), 'utf8')),
+    document: () => readPanFacts(root),
   };
 }
 
@@ -888,7 +889,7 @@ for (const config of ordinary) {
   test(`${config.id}: QR confirmed is withheld when credential persistence fails`, async (t) => {
     const { service, root } = await fixture(t, qrRoute(config, [{ status: 2000000, data: { service_ticket: 'synthetic-ticket' } }]));
     const start = await service.invoke('login.start', { provider: config.id });
-    await mkdir(join(root, 'pan/accounts.json'), { recursive: true });
+    await setTestReadOnly(root, true);
     await assert.rejects(service.invoke('login.poll', { sessionId: start.sessionId }), { code: 'STORAGE_ERROR' });
     const settings = await service.invoke('settings.get');
     assert.equal(settings.accounts.find((item) => item.provider === config.id).configured, false);

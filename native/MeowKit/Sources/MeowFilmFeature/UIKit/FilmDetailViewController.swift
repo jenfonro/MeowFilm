@@ -298,9 +298,11 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         favorite.heightAnchor.constraint(equalToConstant: 48).isActive = true
         favorite.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            do { try self.library.toggle(self.detail.item) }
-            catch { self.showError(error.localizedDescription) }
-            self.renderFavorite()
+            Task {
+                do { try await self.library.toggle(self.detail.item) }
+                catch { self.showError(error.localizedDescription) }
+                self.renderFavorite()
+            }
         }, for: .touchUpInside)
         let favoriteContainer = UIView()
         favoriteContainer.addSubview(favorite)

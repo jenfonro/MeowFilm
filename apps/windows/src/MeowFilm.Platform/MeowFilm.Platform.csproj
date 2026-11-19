@@ -4,6 +4,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="MeowFilm.Windows.Tests" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="[10.0.15]" />
     <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
+    <EmbeddedResource Include="../../../../packages/storage/schema.sql" LogicalName="MeowFilm.Storage.schema.sql" />
   </ItemGroup>
 </Project>

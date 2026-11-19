@@ -6,34 +6,17 @@
 
 - `MusicAccountOwner` 是 `music.accounts.v2` 的唯一 writer，拥有账号会话、登录交接和资料展示；不拥有安装标识、QIMEI 或匿名设备状态。
 - `MusicNativeApplication` 将唯一 `MusicPlatformClient` 注入 `MusicAccountProtocol`。后者以 `account.verify/account.profile/qr.create/qr.poll/qr.cancel/sms.send/sms.login` 消费共同 Node 结果，不保留原生平台 HTTP、签名或设备配方。
-- `IDocumentStore` 由 App 持有并借给账号 owner。构造 owner 不读磁盘或联网。
-- 当前 `music.accounts.v2` 使用 DPAPI；账号展示缓存为 `music.account-details.v2`。不读取、转换或清理旧账号／客户端文档。
+- `NativeDatabase` 由 App 持有并借给账号 owner。构造 owner 不读磁盘或联网。
+- 账号、展示资料及协议状态按明确 owner 保存在共享 SQLite relations。凭据使用明文 typed fields，不使用 DPAPI；不读取或清理旧数据。
 - 页面只调用原生能力接口，不读取 Cookie、设备材料或保护文档，也不拥有第二份账号状态。
 
-## 唯一当前文档
+## 当前账号关系
 
-文档 envelope 读取以下必要容器：
+`MusicAccountRepository` 通过共享数据库保存 `windows_music_account` 与 `windows_music_account_profile`。每个平台一行，当前账号命令选择 `wy`、`tx`、`kg`；字段包括 version、generation、cookie、scope、validatedAt 与关联资料。凭据为明文类型字段，匿名平台设备状态由 Node owner 管理。
 
-```json
-{
-  "version": 1,
-  "entries": [
-    { "key": "[...]", "value": {} }
-  ]
-}
-```
+常规读取只投影所请求平台；列表读取当前三个槽位。`AccountDocument` 是供既有领域逻辑使用的有界内存投影，JSON 不落盘；`ValueFingerprint` 仅绑定内存账号基线，数据库并发由 `StorageRevision` 与事务 CAS 核对。缺少账号表示未登录，损坏字段或当前 schema 错误明确失败，不回退旧数据、不自动重置。
 
-当前账号命令选择 `wy`、`tx`、`kg`；其他 entry 原样保留，不参与所选平台的解码或授权。
-
-账号 key 为 `["meowfilm","music",1,"platform-account","<platform>"]`，值保存当前 version、generation、cookie、profile、scope、validatedAt。`AccountDocument` 校验当前保护文档和 fingerprint；平台私有设备材料不再形成原生第二 writer。namespace 的 `v2` 不等于 envelope 的 version。
-
-- 文档不存在时创建内存中的当前空结构。
-- 坏根、重复 JSON 属性、错误 fingerprint 或超过预算以 `CORRUPT_STORAGE` 失败；所选平台再检查唯一 entry、必需字段、version、generation 与账号关系。数字按数值消费，不要求特定整数拼写。
-- 未消费字段及其他账号／entry 随 CAS 保存保留；未知字段不授予请求能力。单账号动作不预检其他账号，账号列表确实读取三平台，仍会报告其中所选坏值。
-- 失败不触发网络、写回、清理或局部修复，原字节保持不变。
-- 当前文档无法解码时明确失败并保留；不探测或承接历史格式。
-
-完整存储事务规则见[账号存储](music-account-storage.md)。
+提交在原生存储队列内重读最新行，核对 owner revision 与每个变更账号 generation，再只保存实际变化的类型字段／资料关系。完整事务规则见[账号存储](music-account-storage.md)。
 
 ## 账号命令
 
@@ -57,7 +40,7 @@
 
 ## 会话与消费者
 
-- `AcquireAsync` 只从保护存储观察当前账号并签发带平台、用户、scope 和 generation 的会话。
+- `AcquireAsync` 只从共享 SQLite 的账号关系观察当前账号并签发带平台、用户、scope 和 generation 的会话。
 - 需要在注册自身 session 前确认账号初始状态的原生消费者，复用账号 owner 的唯一首次权威观察；一次成功后不因歌曲／歌单切换或同身份请求重复读取整份文档。任一账号 CAS 结果未确认时该复用失效，必须重新观察权威文档。
 - 首次观察的并发等待者共享同一物理读取。调用方取消只停止等待并返回 `CANCELLED`；即使全部退订，owner 仍持有物理观察，后来的消费者可加入，关闭会真正取消并排空。
 - 每个消费者在发布结果或执行敏感请求前使用同一 owner 的 `IsCurrent` 核对会话。
@@ -107,12 +90,12 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 - 账号详情/VIP读取不由最后一个等待者关闭；App 关闭准备显式退休并排空这些读取。VIP签到等用户写事务保持独立语义，不因本次读取调整而重放。
 
 
-- 凭据写入在账号 owner 的物理存储串行边界内重读当前文档、校验完整当前格式并执行整文档 fingerprint CAS。
+- 凭据写入在账号 owner 的存储队列内重读当前账号行、校验当前字段并执行 revision CAS；generation 与凭据在同一事务提交。
 - 同平台基线变化返回 `STORAGE_CONFLICT`；提交结果无法确认返回 `COMMIT_UNKNOWN` 或对应 handoff 未确认错误。两者都不自动重试或重放登录。
 - 调用方取消只撤销尚未进入原子提交点的工作。已准入写入必须等待真实结算，不能把取消解释为回滚。
 - 页面取消已开始的账号核对读取属于取消结算；应用关闭准备等待它完成，不再次取消该确认读取或把正常离页改报为未知提交。
 - 显式重新观察账号状态只读取权威文档；失败 owner 不通过丢弃 pending、影子状态或额外 writer 恢复。
-- 关闭先停止新调用、撤销首次观察和全部已签发会话，再等待网络、协议、存储和通知真实结算；已发布但尚未进入物理存储计数的首次观察同样属于关闭排空范围。最后才释放协议，共享保护存储由 App 在全部 owner 排空后释放。
+- 关闭先停止新调用、撤销首次观察和全部已签发会话，再等待网络、协议、存储和通知真实结算；已发布但尚未进入物理存储计数的首次观察同样属于关闭排空范围。最后才释放协议，共享数据库由 App 在全部 owner 排空后释放。
 - 原生账号读取／安全提交与 Node publication 分别排空；`MusicAccountProtocol.DisposeAsync` 阻止新调用、取消并等待其已登记工作。共同匿名工作随运行器模块关闭，不建立原生设备回执协调器。
 
 ## 安全边界
@@ -130,7 +113,7 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 - 候选通过 `MusicAccountProtocol.ValidateTransferAsync` 进入共同 Node 认证，不先发布为当前账号；失败候选不替换已保存授权，不恢复原生设备 writer。
 - 候选身份与现有登录资料／权益读取完成后，仍由 `MusicAccountOwner` 在同一个物理队列中核对准备值和 epoch、执行文档 CAS 并读回。只有成功读回才推进账号资格，复用 `SessionChanged` 的目录、搜索、歌词、曲库同步、反馈、Chorus 和播放失效链。新账号得到本机生成的新 generation／scope。
 - 文件传输由 `MusicNativeApplication` 的同一 pending/lifetime 关闭边界管理；逐项未知回执会登记 `accountReceiptUnknown`，正常关闭失败，只有显式账号读取可以核对，不自动重试。已准入写入不传页面取消 token，等待真实写入与读回；取消停止后续平台。
-- 明文导出只读取已保存且未撤销的账号，不联网。正常账号文档继续使用 DPAPI。目的文件直接由用户选择，不建立应用自有凭据临时文件。
+- 用户显式导出只读取已保存且未撤销的账号，不联网；JSON 作为用户选择的外部交换文件，不属于内部持久化。
 
 Windows 以 Cookie 字符串承载当前协议凭据；外部文件的字段、别名、数字及字符串语义沿共同 B09 契约，不把它改成内部文档迁移入口。无法安全表达或缺少真实认证材料时逐平台失败，不从其他安装补造。
 

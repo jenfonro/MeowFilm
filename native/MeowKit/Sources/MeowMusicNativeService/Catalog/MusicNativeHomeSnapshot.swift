@@ -1,6 +1,7 @@
 import Foundation
 import MeowMusicFeature
 import MeowStorage
+import MeowRuntime
 
 /// Disposable page display state. Songs are permanent repository references;
 /// no credentials, media bytes or continuation authority are stored here.
@@ -12,31 +13,32 @@ public protocol MusicHomeSnapshotStoring: Sendable {
 
 public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @unchecked Sendable {
     public static let namespace = "music.home.display.v2"
-    private let lock = NSLock()
-    private let factory: @Sendable () throws -> DocumentStore
-    private var store: DocumentStore?
-    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore) { factory = storeFactory }
-    private func storage() throws -> DocumentStore {
-        if let store { return store }
-        let value = try factory(); store = value; return value
-    }
+    private let database: SQLiteDatabase
+    public init(database: SQLiteDatabase) { self.database = database }
     public func read() throws -> Data? {
-        lock.lock(); defer { lock.unlock() }
         do {
-            let data = try storage().read(key: "last-success")
+            let data = try database.readSync { db in
+                try SQLiteDatabase.readSnapshot(db) { db in
+                    try MusicStorageRecords.music_home_display.read(db, key: [.text("display")]).map { try RuntimeJSON.encode($0) }
+                }
+            }
             guard (data?.count ?? 0) <= MusicNativeHomeSnapshot.maximumBytes else { return nil }
             return data
         } catch { throw MusicServiceError.storageFailed }
     }
     public func write(_ data: Data) throws {
         guard data.count <= MusicNativeHomeSnapshot.maximumBytes else { throw MusicServiceError.limit }
-        lock.lock(); defer { lock.unlock() }
-        do { try storage().write(data, key: "last-success") }
+        do {
+            let value = try RuntimeJSON.decode(data), record = MusicStorageRecords.music_home_display
+            try database.transactionSync(ownedBytes: data.count) { db in
+                let key: [SQLiteValue] = [.text("display")]
+                try record.save(db, value: value, previous: record.read(db, key: key), key: key)
+            }
+        }
         catch { throw MusicServiceError.storageFailed }
     }
     public func clear() throws {
-        lock.lock(); defer { lock.unlock() }
-        do { try storage().remove(key: "last-success") }
+        do { try database.transactionSync { try $0.execute("DELETE FROM music_home_display") } }
         catch { throw MusicServiceError.storageFailed }
     }
 }
@@ -148,6 +150,30 @@ private struct HomeTab: Codable {
 private enum HomeContent: Codable {
     case collection(MusicPublicBrowseCollection), record(String), channel(MusicPublicBrowseChannel)
     case daily, unavailable, action(MusicHomeAction)
+    private enum CodingKeys: String, CodingKey { case kind, collection, record, channel, action }
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        switch try fields.decode(String.self, forKey: .kind) {
+        case "collection": self = .collection(try fields.decode(MusicPublicBrowseCollection.self, forKey: .collection))
+        case "record": self = .record(try fields.decode(String.self, forKey: .record))
+        case "channel": self = .channel(try fields.decode(MusicPublicBrowseChannel.self, forKey: .channel))
+        case "action": self = .action(try fields.decode(MusicHomeAction.self, forKey: .action))
+        case "daily": self = .daily
+        case "unavailable": self = .unavailable
+        default: throw MusicServiceError.corruptDocument
+        }
+    }
+    func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .collection(let value): try fields.encode("collection", forKey: .kind); try fields.encode(value, forKey: .collection)
+        case .record(let value): try fields.encode("record", forKey: .kind); try fields.encode(value, forKey: .record)
+        case .channel(let value): try fields.encode("channel", forKey: .kind); try fields.encode(value, forKey: .channel)
+        case .action(let value): try fields.encode("action", forKey: .kind); try fields.encode(value, forKey: .action)
+        case .daily: try fields.encode("daily", forKey: .kind)
+        case .unavailable: try fields.encode("unavailable", forKey: .kind)
+        }
+    }
     init(_ value: MusicNativePublicBrowseContent) throws {
         switch value {
         case .collection(let value):

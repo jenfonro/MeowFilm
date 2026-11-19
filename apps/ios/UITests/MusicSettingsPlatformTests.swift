@@ -13,13 +13,8 @@ import MeowStorage
 @MainActor
 final class MusicSettingsPlatformTests: XCTestCase {
     func testSettingsRowsShareUIKitTypeGeometryAndMatchSearchPurificationTopSpacing() throws {
-        let domain = "MusicSettingsRowGeometry." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(domain, isDirectory: true)
-        let rules = FilmRuleService(settingsDocument: FilmSettingsDocument(
-            block: .rules, storage: .plain { try DocumentStore(baseURL: directory, namespace: FilmSettingsBlock.rules.namespace) }
-        ), request: { _, _ in
+        let database = try appStorageTestDatabase()
+        let rules = FilmRuleService(settingsDocument: FilmSettingsDocument(block: .rules, database: database), request: { _, _ in
             XCTFail("Measuring settings geometry must not execute rules")
             throw FilmRuleServiceError.closed
         })
@@ -35,9 +30,8 @@ final class MusicSettingsPlatformTests: XCTestCase {
             let closed = expectation(description: "reference rules closed")
             Task { await rules.close(); closed.fulfill() }
             wait(for: [closed], timeout: 3)
-            try? FileManager.default.removeItem(at: directory)
         }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let appearance = try appStorageTestAppearance(database)
         let page = HostingPageViewController(themeProvider: appearance,
             content: MusicSettingsContent(theme: PageTheme(palette: .sky)))
         page.pageTitle = "音乐设置"
@@ -375,10 +369,8 @@ final class MusicSettingsPlatformTests: XCTestCase {
     }
 
     func testSettingsControlsKeepStableBlueAcrossPaletteAndAppearanceChanges() throws {
-        let domain = "MusicSettingsSemanticColors." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let service = makeService()
         let owner = makeOwner(service: service, accounts: service)
         defer {
@@ -393,7 +385,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
                 page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
                 waitForSettingsComponent("settings appearance propagated") { page.theme.dark == dark }
                 for palette in [PagePalette.preset(.coral), .custom(0xffff00)] {
-                    appearance.selectFixedPalette(palette)
+                    _ = try appStorageTestWait { await appearance.selectFixedPalette(palette) }
                     try showLockLyricRow(in: page)
                     let accent = SettingsTheme(dark: dark).accent
                     let expected = UIColor(accent)
@@ -423,10 +415,8 @@ final class MusicSettingsPlatformTests: XCTestCase {
     }
 
     func testMusicSettingsLockLyricControlPersistsAndReportsFailedWrites() throws {
-        let domain = "MusicLockLyricSettings." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let service = makeService()
         let owner = makeOwner(service: service, accounts: service)
         defer {
@@ -446,27 +436,26 @@ final class MusicSettingsPlatformTests: XCTestCase {
             XCTAssertTrue(control.isOn)
             control.setOn(false, animated: false); control.sendActions(for: .valueChanged)
             waitForSettingsComponent("lock lyric preference persisted") { !appearance.preferences.lockLyric }
-            XCTAssertFalse(MusicAppearancePreferencesStore(defaults: defaults).preferences.lockLyric)
+            XCTAssertFalse(try appStorageTestAppearance(database).preferences.lockLyric)
 
-            let corrupt = Data("invalid-preferences".utf8)
-            defaults.set(corrupt, forKey: MusicAppearancePreferencesStore.preferencesKey)
+            let committed = try appStorageTestRows(database, "SELECT * FROM ios_music_appearance")
+            try appStorageTestReadOnly(database, true)
             waitForSettingsComponent("music page ready for error feedback") { page.canPresentPageAlert }
             try showLockLyricRow(in: page)
             let current = try XCTUnwrap(settingsDescendants(page.view).compactMap { $0 as? UISwitch }.first)
             current.setOn(true, animated: false); current.sendActions(for: .valueChanged)
             waitForSettingsComponent("failed lock lyric write reported") { page.presentedViewController is UIAlertController }
-            XCTAssertEqual((page.presentedViewController as? UIAlertController)?.message, "音乐偏好读取失败")
+            XCTAssertEqual((page.presentedViewController as? UIAlertController)?.message, "音乐偏好保存失败")
             XCTAssertFalse(appearance.preferences.lockLyric)
-            XCTAssertEqual(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey), corrupt)
+            XCTAssertEqual(try appStorageTestRows(database, "SELECT * FROM ios_music_appearance"), committed)
+            try appStorageTestReadOnly(database, false)
         }
     }
 
     /// A UIKit component host checks geometry and persistence, not App routing.
     func testLibraryPlaylistToggleChangesCellGeometryPreservesScrollAnchorAndPersistsAcrossStores() throws {
-        let domain = "MusicLibraryLayout." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let service = makeService()
         let owner = makeOwner(service: service, accounts: service)
         defer {
@@ -539,7 +528,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
             XCTAssertGreaterThan(collection.contentOffset.y, -collection.adjustedContentInset.top + listAnchor.bounds.height)
             XCTAssertLessThan(collection.contentOffset.y,
                 collection.contentSize.height - collection.bounds.height + collection.adjustedContentInset.bottom - listAnchor.bounds.height)
-            let reopenedList = MusicAppearancePreferencesStore(defaults: try XCTUnwrap(UserDefaults(suiteName: domain)))
+            let reopenedList = try appStorageTestAppearance(database)
             XCTAssertEqual(reopenedList.preferences.playlistView, .list)
 
             page.togglePlaylistAppearance()
@@ -560,7 +549,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
             XCTAssertEqual(gridIDs.count, collection.visibleCells.count)
             XCTAssertTrue(gridIDs.contains(anchorID))
             XCTAssertTrue(Set(gridIDs).isSubset(of: expectedIDs))
-            let reopenedGrid = MusicAppearancePreferencesStore(defaults: try XCTUnwrap(UserDefaults(suiteName: domain)))
+            let reopenedGrid = try appStorageTestAppearance(database)
             XCTAssertEqual(reopenedGrid.preferences.playlistView, .grid)
         }
     }
@@ -569,10 +558,8 @@ final class MusicSettingsPlatformTests: XCTestCase {
         let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
         performAccountPageAction { runner.activate() }
         waitForSettingsComponent("source search host foreground") { UIApplication.shared.applicationState == .active }
-        let domain = "MusicSourceSettings." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let service = makeService(), scripts = MusicSettingsScriptFixture()
         let model = MusicViewModel(service: service, player: MusicSettingsPlayerFixture(), scriptSources: scripts)
         let state = MusicSourceManagementState(model: model)
@@ -688,10 +675,8 @@ final class MusicSettingsPlatformTests: XCTestCase {
     /// Synchronous on purpose: pages released inside a Swift task enter the
     /// back-deployed isolated-deinit path, which UIKit owners never use.
     func testSettingsConsumersUseTheAppOwnedHeaderAndKeepFloatingCards() throws {
-        let domain = "MusicSettingsPlatformTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let service = makeService()
         let owner = makeOwner(service: service, accounts: service)
         let router = MusicSettingsRouterFixture()
@@ -939,7 +924,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
     func testAccountPageKeepsNavigationAndBottomFileActionsWithoutRepeatedSectionTitle() throws {
         let service = makeService()
         let owner = makeOwner(service: service, accounts: service)
-        let appearance = MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let appearance = try appStorageTestAppearance()
         let loaded = expectation(description: "account page service available")
         Task { await owner.load(); loaded.fulfill() }
         wait(for: [loaded], timeout: 3)
@@ -978,7 +963,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
     }
 
     func testAccountImportUsesSingleSystemOpenPickerAndCancelReleasesBusyState() throws {
-        let service = makeService(), appearance = MusicAppearancePreferencesStore(defaults: .standard)
+        let service = makeService(), appearance = try appStorageTestAppearance()
         let owner = makeOwner(service: service, accounts: service)
         let loaded = expectation(description: "account service available")
         Task { await owner.load(); loaded.fulfill() }
@@ -1131,7 +1116,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
     }
 
     func testAccountExportUsesSystemDestinationPickerAndCancelRemovesStaging() throws {
-        let service = makeService(), appearance = MusicAppearancePreferencesStore(defaults: .standard)
+        let service = makeService(), appearance = try appStorageTestAppearance()
         let owner = makeOwner(service: service, accounts: service)
         let loaded = expectation(description: "export service available")
         Task { await owner.load(); loaded.fulfill() }
@@ -1233,7 +1218,7 @@ final class MusicSettingsPlatformTests: XCTestCase {
         Task { await owner.load(); loaded.fulfill() }
         wait(for: [loaded], timeout: 3)
         let page = MusicAccountsViewController(model: owner,
-            appearance: MusicAppearancePreferencesStore(defaults: .standard), router: MusicSettingsRouterFixture())
+            appearance: try appStorageTestAppearance(), router: MusicSettingsRouterFixture())
         try withMountedAccountPage(page) { runner in
             let button = runner.buttons["music.accounts.import"]
             XCTAssertTrue(button.waitForExistence(timeout: 3)); XCTAssertTrue(button.isHittable)

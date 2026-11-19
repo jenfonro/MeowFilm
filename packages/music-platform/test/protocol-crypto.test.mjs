@@ -120,9 +120,9 @@ test('QIMEI carries a full independently decoded CBC device, both signatures and
       }
       return rpc({ body: { item_song: [] }, meta: { sum: 0, nextpage: -1 } });
     }); seedClients(f);
-    const clients = JSON.parse(f.files.get('clients.json'));
+    const clients = (await f.clientState());
     Object.assign(clients.tx, { androidId: 'synthetic-device', qimei: null, session: null });
-    f.files.set('clients.json', Buffer.from(JSON.stringify(clients)));
+    await f.setClientState(clients);
     await f.session('tx');
     await f.request('tx', 'search', { keyword: 'first' }); await f.request('tx', 'search', { keyword: 'second' });
     assert.equal(f.requests.length, 4);
@@ -151,8 +151,8 @@ test('KG registration uses independently decoded base64 CBC and randomized upper
       if (path === '/v5/login_by_token') return response({ status: 1, data: { userid: 42, token: 'synthetic-refreshed' } });
       assert.equal(path, '/v3/get_my_info'); return response({ status: 1, data: { userid: 42 } });
     }); seedClients(f);
-    const clients = JSON.parse(f.files.get('clients.json')); clients.kg.dfid = null;
-    f.files.set('clients.json', Buffer.from(JSON.stringify(clients)));
+    const clients = (await f.clientState()); clients.kg.dfid = null;
+    await f.setClientState(clients);
     assert.equal((await f.owner.request({ platform: 'kg', operation: 'account.refresh',
       candidate: { userId: '42', cookie: 'userid=42; token=synthetic-token' } })).userId, '42');
     assert.equal(f.requests.length, 3); await f.close();

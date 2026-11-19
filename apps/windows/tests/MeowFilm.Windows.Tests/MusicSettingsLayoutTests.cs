@@ -819,10 +819,10 @@ public static partial class MusicUiTests
             True(clear.IsEnabled && DesktopVisual.IsVisible(cache) && !DesktopVisual.IsVisible(f.Module.HomeSourceSettingsView), "cache control belongs to General cache area");
             f.Dialogs.Confirmation = false;
             FilmUiTest.Click(clear); await Until(() => !f.Module.Busy);
-            True(f.Cache.ReadMemory(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace).Data is null, "cancelled confirmation does not create cache metadata");
+            True(f.Cache.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is null, "cancelled confirmation does not create cache metadata");
             f.Dialogs.Confirmation = true;
             FilmUiTest.Click(clear); await Until(() => !f.Module.Busy);
-            True(f.Cache.ReadMemory(MeowFilm.Capabilities.PlaybackCache.MusicAudioFileCache.Namespace).Data is not null, "confirmed action reaches the actual isolated cache owner");
+            True(f.Cache.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null, "confirmed action reaches the actual isolated cache owner");
             Equal("播放缓存文件已清理（当前播放不中断）", f.Module.Status);
             Equal(qualityReads, f.Calls.Count("music.quality.settings.get"));
             True(!f.Runtime.HasStarted && !f.Module.SettingsView.IsLoaded, "General does not activate music accounts sources or scripts");

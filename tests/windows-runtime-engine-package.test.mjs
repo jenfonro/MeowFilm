@@ -80,10 +80,11 @@ function packagingFixture({
     'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt'])
     write(source, `LICENSES/${name}`, readFileSync(join(root, 'LICENSES', name)));
   for (const name of ['runtime-bridge', 'script-host', 'source-runtime', 'pan-runtime',
-    'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules', 'inactive-core']) {
+    'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules', 'storage', 'inactive-core']) {
     const location = `packages/${name}`, installed = `node_modules/@meowfilm/${name}`;
     const pkg = {
       name: `@meowfilm/${name}`, version: '1.0.0', type: 'module', license: 'MIT', exports: './src/index.js',
+      ...(name === 'script-host' ? { exports: { '.': './src/index.js', './storage': './src/storage.js' } } : {}),
       ...(name === 'runtime-bridge' ? { exports: { '.': './src/index.js', './json': './src/json-value.js' } } : {}),
       ...(name === 'script-host' ? { dependencies: { '@meowfilm/source-runtime': '1.0.0' } } : {}),
       ...(name === 'film-playback' ? { dependencies: {
@@ -99,16 +100,18 @@ function packagingFixture({
     }
     if (name === 'runtime-bridge') write(source, `${location}/src/json-value.js`, inert);
     write(source, `${location}/LICENSE`, 'Synthetic fixture license\n');
+    if (name === 'script-host') write(source, `${location}/src/storage.js`, inert);
     lock.packages[location] = { version: pkg.version, ...(pkg.dependencies ? { dependencies: pkg.dependencies } : {}) };
     lock.packages[installed] = { resolved: location, link: true };
     mkdirSync(dirname(join(source, installed)), { recursive: true });
     symlinkSync(join(source, location), join(source, installed), process.platform === 'win32' ? 'junction' : 'dir');
   }
   write(source, 'package-lock.json', lock);
-  for (const file of ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'client.mjs', 'contracts.mjs',
+  for (const file of ['bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs', 'native-settings.mjs', 'client.mjs', 'contracts.mjs',
     'modules/pan-runtime.mjs', 'modules/film-playback.mjs', 'modules/netease-token.mjs', 'modules/music-platform.mjs', 'modules/source-candidates.mjs',
     'modules/source-library.mjs', 'modules/source-web.mjs', 'modules/source-rules.mjs'])
     write(source, `apps/runtime/${file}`, inert);
+  write(source, 'apps/runtime/native-settings.mjs', "import '@meowfilm/storage';\nimport '@meowfilm/script-host/storage';\n" + inert);
   if (!missingCommonModule) {
     write(source, 'apps/runtime/modules/music-script.mjs', inert);
     write(source, 'apps/runtime/modules/cat-script.mjs', inert);
@@ -286,11 +289,15 @@ test('Windows packaging preserves common files byte-for-byte and is reproducible
       [{ path: source, sha256: sha256(readFileSync(join(f.root, source))) }]);
     assert.ok(first.files.some(file => file.path === path));
   }
-  assert.deepEqual(readFileSync(join(f.output, 'app/windows/native-settings.mjs')),
-    readFileSync(join(f.root, 'apps/windows/runtime/native-settings.mjs')));
+  assert.equal(readFileSync(join(f.output, 'app/windows/native-settings.mjs'), 'utf8'),
+    readFileSync(join(f.root, 'apps/windows/runtime/native-settings.mjs'), 'utf8')
+      .replace('../../runtime/native-settings.mjs', '../native-settings.mjs'));
   assert.ok(readFileSync(join(f.output, 'app/windows/bootstrap.mjs'), 'utf8')
     .includes("from './native-settings.mjs'"));
-  assert.ok(first.files.some(file => file.path === 'node_modules/@meowfilm/runtime-bridge/src/json-value.js'));
+  assert.deepEqual(first.relocations.find(item => item.source === 'apps/windows/runtime/native-settings.mjs'), {
+    source: 'apps/windows/runtime/native-settings.mjs', path: 'app/windows/native-settings.mjs',
+    imports: [{ from: '../../runtime/native-settings.mjs', to: '../native-settings.mjs' }],
+  });
 });
 
 test('Windows packaging automatically includes a new shared runtime helper', async () => {
@@ -426,11 +433,12 @@ function nativeFixture(t) {
     for (const path of new Set(['package.json', 'package-lock.json', 'scripts/script-host-native.json',
       artifactPath, receiptPath, sdkPath, ...receipt.inputs.map(input => input.path)])) copy(path);
     for (const name of ['runtime-bridge', 'source-runtime', 'script-host', 'pan-runtime',
-      'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules']) {
+      'film-rules', 'film-search', 'film-playback', 'netease-token', 'music-platform', 'novel-rules', 'storage']) {
       copy(`packages/${name}/package.json`);
       for (const file of name === 'film-rules' ? ['film-rules.js', 'playback-rules.js']
         : name === 'film-search' ? ['film-search.js']
         : name === 'novel-rules' ? ['index.js', 'novel-rules.js'] : ['src']) copy(`packages/${name}/${file}`);
+      if (name === 'storage') copy('packages/storage/schema.sql');
       const installed = join(source, 'node_modules/@meowfilm', name);
       mkdirSync(dirname(installed), { recursive: true });
       symlinkSync(join(source, 'packages', name), installed, process.platform === 'win32' ? 'junction' : 'dir');

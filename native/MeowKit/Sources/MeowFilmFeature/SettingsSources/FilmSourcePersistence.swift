@@ -1,105 +1,14 @@
 import Foundation
 import MeowRuntime
 
-struct FilmSourceDocument: Codable {
-    var version = 2
+struct FilmSourceDocument: Equatable, Sendable {
     var cats: [StoredFilmCat] = []
     var videos: [FilmVideoSource] = []
     var deleted: [FilmSourceKey] = []
-
-    static func read(_ data: Data, configured: [CatSourceConfiguration]) throws -> Self {
-        let raw = try RuntimeJSON.decode(data)
-        guard raw.catField("version") == .number(2),
-              let cats = raw.catField("cats")?.catArray,
-              let videos = raw.catField("videos")?.catArray,
-              let deleted = raw.catField("deleted")?.catArray else { throw FilmSourceError(code: "INVALID_DOCUMENT") }
-        let ids = Set(configured.map { Data($0.installationId.utf8) })
-        let catIDs = cats.compactMap { $0.catField("installationId")?.catText }.map { Data($0.utf8) }
-        let counts = Dictionary(grouping: catIDs, by: { $0 }).mapValues(\.count)
-        let adoptedCats = cats.compactMap { row -> StoredFilmCat? in
-            guard let id = row.catField("installationId")?.catText, ids.contains(Data(id.utf8)),
-                  counts[Data(id.utf8)] == 1,
-                  let cat = try? JSONDecoder().decode(StoredFilmCat.self, from: RuntimeJSON.encode(row)),
-                  cat.inputRevision > 0, cat.inputRevision <= 9_007_199_254_740_991,
-                  cat.sites.allSatisfy({ !$0.key.isEmpty }),
-                  Set(cat.sites.map { Data($0.key.utf8) }).count == cat.sites.count else { return nil }
-            return cat
-        }
-        let removed = deleted.compactMap { try? JSONDecoder().decode(FilmSourceKey.self, from: RuntimeJSON.encode($0)) }
-            .filter { !$0.installationId.isEmpty && !$0.siteKey.isEmpty }
-        let selected = videos.filter {
-            guard let id = $0.catField("key")?.catField("installationId")?.catText else { return true }
-            return ids.contains(Data(id.utf8))
-        }.filter {
-            guard let key = $0.catField("key"),
-                  let decoded = try? JSONDecoder().decode(FilmSourceKey.self, from: RuntimeJSON.encode(key)) else { return true }
-            return !removed.contains(decoded)
-        }
-        let keys = selected.compactMap { row -> FilmSourceKey? in
-            guard let key = row.catField("key") else { return nil }
-            return try? JSONDecoder().decode(FilmSourceKey.self, from: RuntimeJSON.encode(key))
-        }
-        let videoCounts = Dictionary(grouping: keys, by: { $0 }).mapValues(\.count)
-        let adoptedVideos = selected.compactMap { try? JSONDecoder().decode(FilmVideoSource.self, from: RuntimeJSON.encode($0)) }
-            .filter { !$0.key.siteKey.isEmpty && videoCounts[$0.key] == 1 }
-        guard selected.isEmpty || !adoptedVideos.isEmpty,
-              adoptedVideos.filter({ $0.options.aggregateImages }).count <= 1 else {
-            throw FilmSourceError(code: "INVALID_DOCUMENT")
-        }
-        return .init(cats: adoptedCats, videos: adoptedVideos, deleted: removed)
-    }
-
-    func encode(replacing previous: Self, original: Data?) throws -> Data {
-        let next = try RuntimeJSON.decode(JSONEncoder().encode(self))
-        let prior = try RuntimeJSON.decode(JSONEncoder().encode(previous))
-        if next == prior, let original { return original }
-        guard let original, case .object(var root) = try RuntimeJSON.decode(original),
-              case .object(let before) = prior,
-              case .object(let after) = next else { return try RuntimeJSON.encode(next) }
-        func merge(_ original: [RuntimeValue], _ old: [RuntimeValue], _ new: [RuntimeValue],
-                   kind: String) throws -> [RuntimeValue] {
-            if old == new { return original }
-            func identity(_ row: RuntimeValue) -> RuntimeValue? {
-                if kind == "cats" { return row.catField("installationId") }
-                if kind == "sites" { return row.catField("key") }
-                let key = kind == "videos" ? row.catField("key") : row
-                guard let id = key?.catField("installationId")?.catText,
-                      let site = key?.catField("siteKey")?.catText else { return nil }
-                return .array([.string(id), .string(site)])
-            }
-            var remaining = new
-            let rows = try original.compactMap { row -> RuntimeValue? in
-                guard let id = identity(row) else { return row }
-                let prior = old.first(where: { identity($0) == id })
-                guard let index = remaining.firstIndex(where: { identity($0) == id }) else {
-                    return prior == nil ? row : nil
-                }
-                // Live probe metadata can replace one unreadable cache row;
-                // editable video/deletion intent must never be guessed.
-                guard original.filter({ identity($0) == id }).count == 1,
-                      prior != nil || kind == "cats" || kind == "sites" else {
-                    throw FilmSourceError(code: "STORAGE_CONFLICT")
-                }
-                let replacement = remaining.remove(at: index)
-                var merged = row.applyingChanges(from: prior ?? .object([:]), to: replacement)
-                if kind == "cats", let sites = row.catField("sites")?.catArray,
-                   let nextSites = replacement.catField("sites")?.catArray, case .object(var fields) = merged {
-                    fields["sites"] = .array(try merge(sites, prior?.catField("sites")?.catArray ?? [], nextSites, kind: "sites"))
-                    merged = .object(fields)
-                }
-                return merged
-            }
-            return rows + remaining
-        }
-        for key in ["cats", "videos", "deleted"] {
-            root[key] = .array(try merge(root[key]?.catArray ?? [], before[key]!.catArray!, after[key]!.catArray!, kind: key))
-        }
-        return try RuntimeJSON.encode(.object(root))
-    }
 }
 
 /// Read-only installation/probe metadata. No editable intent or script bytes.
-struct StoredFilmCat: Codable {
+struct StoredFilmCat: Codable, Equatable, Sendable {
     let installationId: String
     let inputRevision: Int64
     let importedAt: Int64?
