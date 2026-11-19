@@ -27,6 +27,7 @@ public static class FilmMetadataRuntimeTests
     {
         yield return Case("offline native TMDB Douban and preferences save without launching Node and cold start consumes them", NativeOffline);
         yield return Case("native settings preserve replace clear failed drafts and restore after restart", Settings);
+        yield return Case("unconfigured and unauthorized metadata retain safe errors and initialization refresh recovers", InitializationRecovery);
         yield return Case("ordinary metadata cancellation leaves a late complete response in the Node cache", Cancellation);
         yield return Case("concurrent complete details share the Node producer and exact request keys remain isolated", MetadataKeys);
         yield return Case("settings revocation physically drains old metadata before the new configuration reads", SettingsInvalidation);
@@ -337,6 +338,62 @@ public static class FilmMetadataRuntimeTests
             (await cold.Metadata.GetSettingsAsync()).Language == "ja-JP",
             "the real runtime cannot write or replace the unique native metadata document");
     }
+    private static async Task InitializationRecovery()
+    {
+        await using var upstream = new RuntimeHttpClientTests.Server();
+        await using var host = await RuntimeHost.OpenAsync(NewData());
+        var missing = await host.Client.CallAsync("tmdb.data.request", new { path = "/3/movie/7" });
+        Check(!missing.GetProperty("ok").GetBoolean() && missing.GetProperty("code").GetString() == "NOT_CONFIGURED",
+            "an empty native configuration reports missing credentials without waiting for the public network");
+        await host.Metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["apiBase"] = upstream.BaseUrl });
+        await host.WaitSettingsAsync("tmdb");
+        await host.Metadata.SaveDoubanSettingsAsync(new Dictionary<string, object?> { ["searchBase"] = upstream.BaseUrl });
+        await host.WaitSettingsAsync("douban");
+        var opened = await host.FilmAsync("session.open", new
+        {
+            platform = "test", target = new { id = "tmdb:movie:7", kind = "movie", title = "目标",
+                metadataProvider = "tmdb", metadataId = 7 }, sources = Array.Empty<object>()
+        });
+        string id = opened.GetProperty("sessionId").GetString()!;
+        try
+        {
+            await using (var exchange = await upstream.AcceptAsync())
+            {
+                DetailRequest(exchange, "/3/movie/7");
+                await exchange.ReplyAsync(Json(new { success = false }), 401);
+            }
+            async Task<JsonElement> StateAsync(string field, string expected)
+            {
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                while (true)
+                {
+                    var state = await host.FilmAsync("session.snapshot", new { sessionId = id }, deadline.Token);
+                    if (FilmJson.Text(state, field) == expected) return state;
+                    await Task.Delay(10, deadline.Token);
+                }
+            }
+            var failed = await StateAsync("initializationError", "AUTH_FAILED");
+            Check(FilmJson.Text(failed, "stage") == "error" &&
+                failed.GetProperty("retryMediaAttemptId").ValueKind == JsonValueKind.Null &&
+                failed.GetProperty("attempt").ValueKind == JsonValueKind.Null,
+                "the actual owner reports an initialization error without inventing a failed media candidate");
+            await host.FilmAsync("session.command", new { sessionId = id, action = "browse.refresh" });
+            await using (var exchange = await upstream.AcceptAsync())
+            {
+                DetailRequest(exchange, "/3/movie/7");
+                await exchange.ReplyAsync(Json(DetailPayload("恢复后的完整资料", "movie")));
+            }
+            var recovered = await StateAsync("stage", "unavailable");
+            Check(recovered.GetProperty("initializationError").ValueKind == JsonValueKind.Null &&
+                FilmJson.Text(FilmJson.Member(recovered, "workInfo"), "title") == "目标" &&
+                FilmJson.Text(FilmJson.Member(recovered, "workInfo"), "summary") == "恢复后的完整资料" &&
+                FilmJson.Member(recovered, "browsing").GetProperty("error").ValueKind == JsonValueKind.Null,
+                "explicit refresh loads real metadata; no installed source remains a distinct unavailable state");
+            Console.WriteLine("TMDB_RUNTIME initializationRecovered=true; nativeSettings=true; publicNetwork=false");
+        }
+        finally { await host.FilmAsync("session.release", new { sessionId = id }); }
+    }
+
     private static async Task Settings()
     {
         await using var upstream = new RuntimeHttpClientTests.Server();
@@ -789,6 +846,11 @@ public static class FilmMetadataRuntimeTests
     }
     private static void Layout(FrameworkElement view)
     { view.Measure(new Size(view.Width, view.Height)); view.Arrange(new Rect(0, 0, view.Width, view.Height)); view.UpdateLayout(); }
-    private static DesktopTestUi.Host Mount(FrameworkElement view) =>
-        new(view, (int)view.Width, (int)view.Height);
+    private static DesktopTestUi.Host Mount(FrameworkElement view)
+    {
+        var surface = new DesktopTestUi.Host(view, view.Width, view.Height);
+        DesktopTestUi.MoveWindow(surface.Window, 40, 40);
+        surface.Window.AppWindow.ResizeClient(surface.Window.AppWindow.Size);
+        return surface;
+    }
 }

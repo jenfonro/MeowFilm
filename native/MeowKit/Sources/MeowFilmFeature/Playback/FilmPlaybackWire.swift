@@ -597,6 +597,8 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
     public private(set) var entryResolution: String?
     public let stage: String
     public let error: String?
+    public let initializationError: String?
+    public let retryMediaAttemptID: String?
     public private(set) var workInfo: FilmPlaybackWorkInfo?
     public private(set) var metadata: RuntimeValue
     public private(set) var metadataCache: FilmMetadataCache?
@@ -626,6 +628,8 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         entrySurface = fields["entrySurface"]?.filmText
         entryResolution = fields["entryResolution"]?.filmText
         stage = try fields.filmString("stage"); error = fields["error"]?.filmText
+        initializationError = fields["initializationError"]?.filmText
+        retryMediaAttemptID = fields["retryMediaAttemptId"]?.filmText
         workInfo = try fields.filmOptional("workInfo").map(FilmPlaybackWorkInfo.init)
         metadata = try fields.filmValue("metadata")
         if let cache = fields["metadataCache"], cache != .null {
@@ -775,6 +779,8 @@ public struct FilmPlaybackError: Error, Equatable, Sendable, LocalizedError {
         case "STORAGE_ERROR", "LIBRARY_UPDATE_FAILED": "保存失败"
         case "CORRUPT_STORAGE": "本地播放资料已损坏"
         case "NETWORK_ERROR", "MEDIA_HTTP_NETWORK_FAILED": "网络连接失败"
+        case "NOT_CONFIGURED": "尚未完成数据源配置"
+        case "AUTH_FAILED": "认证失败，请检查凭据"
         case "MEDIA_HTTP_TLS_FAILED": "安全连接失败"
         case "UPSTREAM_HTTP", "UPSTREAM_ERROR", "MEDIA_UPSTREAM_ERROR": "上游服务请求失败"
         case "MEDIA_HTTP_DEADLINE", "MEDIA_UPSTREAM_TIMEOUT": "请求超时"

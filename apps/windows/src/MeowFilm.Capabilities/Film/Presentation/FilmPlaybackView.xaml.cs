@@ -372,6 +372,12 @@ public partial class FilmPlaybackView : UserControl
         if (DataContext is FilmPlaybackPage page)
             await ExecuteAsync(page, page.RetryMediaAsync, "取址失败");
     }
+
+    private async void RetryLoading_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is FilmPlaybackPage page)
+            await ExecuteAsync(page, page.RetryLoadingAsync, "加载失败");
+    }
     private async void Block_Click(object sender, RoutedEventArgs e)
     {
 

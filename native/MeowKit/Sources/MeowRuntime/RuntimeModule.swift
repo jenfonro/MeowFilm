@@ -51,7 +51,7 @@ public enum RuntimeModule: String, Sendable {
     ]
     private static let metadataCodes: Set<String> = [
         "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR", "UPSTREAM_HTTP",
-        "UPSTREAM_FORMAT", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "PERMISSION_DENIED"
+        "UPSTREAM_FORMAT", "NOT_CONFIGURED", "AUTH_FAILED", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "PERMISSION_DENIED"
     ]
     private static let musicCodes: Set<String> = [
         "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT", "SCRIPT_INTEGRITY",

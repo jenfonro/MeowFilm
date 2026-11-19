@@ -403,8 +403,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         let selected = model.executionStage != nil && candidate != nil
         pan.isEnabled = selected; quality.isEnabled = selected
         change.isEnabled = selected; block.isEnabled = selected
-        retryMedia.isEnabled = model.executionStage != nil &&
-            (snapshot?.attempt != nil || snapshot?.current != nil || model.playbackStatus == .failed)
+        retryMedia.isEnabled = model.canRetryMedia
         pan.configuration?.title = candidate?.provider.flatMap(FilmPanProvider.init(rawValue:))?.title ?? candidate?.lineLabel ?? "网盘"
         quality.configuration?.title = candidate?.quality.flatMap(FilmResourceQuality.init(rawValue:))?.title ?? candidate?.quality ?? "画质"
         pan.accessibilityValue = pan.configuration?.title; quality.accessibilityValue = quality.configuration?.title

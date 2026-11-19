@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { requestTMDB, tmdbImageTarget } from '../apps/runtime/modules/metadata/tmdb.mjs';
 
 const defaults = Object.freeze({
-  apiBase: 'https://api.themoviedb.org/3',
+  apiBase: 'https://api-proxy.invalid/3',
   imageBase: 'https://image.tmdb.org/t/p',
   apiKey: '',
   accessToken: '',
@@ -43,7 +43,7 @@ function failure(code) {
 test('TMDB preserves API prefixes, query scalars and the direct business response', async () => {
   const value = { page: 4, total_pages: 90, total_results: 1800, results: [{ id: 123, vote_average: 7.3 }] };
   for (const [apiBase, expected] of [
-    [defaults.apiBase, 'https://api.themoviedb.org/3/search/multi'],
+    ['https://api.themoviedb.org/3', 'https://api.themoviedb.org/3/search/multi'],
     ['https://api-proxy.invalid/', 'https://api-proxy.invalid/3/search/multi'],
     ['https://api-proxy.invalid/tmdb', 'https://api-proxy.invalid/tmdb/search/multi'],
     ['https://api-proxy.invalid/prefix/tmdb///', 'https://api-proxy.invalid/prefix/tmdb/search/multi'],
@@ -51,7 +51,8 @@ test('TMDB preserves API prefixes, query scalars and the direct business respons
     ['http://127.0.0.1:3456/tmdb', 'http://127.0.0.1:3456/tmdb/search/multi'],
     ['http://fixture-user:fixture-password@192.168.1.25/tmdb', 'http://192.168.1.25/tmdb/search/multi'],
   ]) {
-    const { context, calls } = fixture(value, { ...defaults, apiBase });
+    const accessToken = new URL(apiBase).hostname === 'api.themoviedb.org' ? 'fixture-token' : '';
+    const { context, calls } = fixture(value, { ...defaults, apiBase, accessToken });
     assert.deepEqual(await requestTMDB({
       path: '/3/search/multi',
       query: { query: '电影 & api_key=untrusted/#?', language: 'zh-CN', page: 4, include_adult: false },
@@ -66,9 +67,23 @@ test('TMDB preserves API prefixes, query scalars and the direct business respons
     assert.equal(calls[0].followRedirect, true);
     assert.equal(url.username, new URL(apiBase).username);
     assert.equal(url.password, new URL(apiBase).password);
-    assert.deepEqual(calls[0].headers, { Accept: 'application/json' });
+    assert.deepEqual(calls[0].headers, { Accept: 'application/json',
+      ...(accessToken ? { Authorization: 'Bearer fixture-token' } : {}) });
     assert.equal(calls.length, 1);
   }
+});
+
+test('TMDB official requests require credentials while an explicitly configured relay may supply authentication', async () => {
+  const official = fixture({ id: 42 }, { ...defaults, apiBase: 'https://api.themoviedb.org/3' });
+  await assert.rejects(requestTMDB({ path: '/3/movie/42' }, official.context), failure('NOT_CONFIGURED'));
+  assert.equal(official.calls.length, 0);
+  assert.deepEqual(await requestTMDB({ path: '/3/movie/42', query: { api_key: 'fixture-key' } },
+    official.context), { id: 42 });
+  assert.equal(new URL(official.calls[0].url).searchParams.get('api_key'), 'fixture-key');
+  const relay = fixture();
+  assert.deepEqual(await requestTMDB({ path: '/3/movie/42' }, relay.context), { id: 42 });
+  assert.equal(relay.calls[0].headers.Authorization, undefined);
+  assert.equal(new URL(relay.calls[0].url).searchParams.has('api_key'), false);
 });
 
 test('TMDB uses a bearer token in preference to an API key and never sends both', async () => {
@@ -448,7 +463,8 @@ test('TMDB final unsuccessful HTTP responses yield fixed errors without upstream
       status, headers: { 'content-type': 'application/json',
         location: 'https://untrusted.invalid/error?api_key=fixture-secret' },
     });
-    await assert.rejects(requestTMDB({ path: '/3/movie/42' }, context), failure('UPSTREAM_HTTP'));
+    await assert.rejects(requestTMDB({ path: '/3/movie/42' }, context),
+      failure([401, 403].includes(status) ? 'AUTH_FAILED' : 'UPSTREAM_HTTP'));
     assert.equal(calls.length, 1);
     assert.equal(calls[0].followRedirect, true);
   }

@@ -885,6 +885,8 @@ test('Douban seed request failure remains an error and browse.refresh retries it
   const failed = f.snapshot(opened.sessionId);
   assert.equal(failed.error, 'UPSTREAM_HTTP');
   assert.equal(failed.stage, 'error');
+  assert.equal(failed.initializationError, 'UPSTREAM_HTTP');
+  assert.equal(failed.retryMediaAttemptId, null);
   assert.equal(failed.browsing.error, 'UPSTREAM_HTTP');
   assert.deepEqual(failed.target.members, []);
   await assert.rejects(f.command(opened.sessionId, 'search.more'), { code: 'INVALID_REQUEST' });
@@ -895,10 +897,66 @@ test('Douban seed request failure remains an error and browse.refresh retries it
   assert.equal(calls, 2);
   assert.equal(f.snapshot(opened.sessionId).stage, 'unavailable');
   assert.equal(f.snapshot(opened.sessionId).error, null);
+  assert.equal(f.snapshot(opened.sessionId).initializationError, null);
   assert.equal(f.snapshot(opened.sessionId).browsing.error, null);
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
   await f.command(opened.sessionId, 'search.more');
   await until(() => f.calls.some(row => row[0] === 'search'));
+});
+
+test('TMDB initialization and season failures reload through browse.refresh before automatic playback', async t => {
+  for (const phase of ['metadata', 'season']) {
+    let failed = false;
+    const reads = [];
+    const f = fixture({ data: {
+      async targetMetadata(target, options) {
+        reads.push(['metadata', options.refresh]);
+        if (phase === 'metadata' && !failed) { failed = true; throw error('NOT_CONFIGURED'); }
+        return structuredClone(metadata);
+      },
+      async seasonMetadata(target, season, options) {
+        reads.push(['season', options.refresh]);
+        if (phase === 'season' && !failed) { failed = true; throw error('NETWORK_ERROR'); }
+        return structuredClone(metadata.seasons[0]);
+      },
+      async detail() { return detail(['Series.S01E01']); },
+    } });
+    t.after(() => f.service.close());
+    const { sessionId } = await f.open({ platform: 'windows', target: tv, sources: [source('a')] });
+    await until(() => f.snapshot(sessionId).initializationError);
+    assert.equal(f.snapshot(sessionId).retryMediaAttemptId, null);
+    assert.equal(f.snapshot(sessionId).stage, 'error');
+    assert.equal(f.calls.some(row => row[0] === 'resolve'), false);
+    const beforeRefresh = reads.length;
+    await f.command(sessionId, 'browse.refresh');
+    const pending = await f.pending(sessionId);
+    assert.equal(f.snapshot(sessionId).initializationError, null);
+    assert.equal(f.snapshot(sessionId).browsing.error, null);
+    assert.equal(f.snapshot(sessionId).browsing.loading, false);
+    assert.equal(f.snapshot(sessionId).retryMediaAttemptId, pending.id);
+    assert.deepEqual(reads.slice(beforeRefresh, beforeRefresh + 2), [['metadata', true], ['season', true]]);
+    assert.equal(pending.candidate.episode, 1);
+  }
+});
+
+test('metadata initialization recovery after configuration invalidation settles its current browse generation', async t => {
+  let unavailable = false;
+  const f = fixture({ data: { async targetMetadata() {
+    if (unavailable) throw error('NETWORK_ERROR');
+    return { id: 17, title: 'Current metadata' };
+  } } });
+  t.after(() => f.service.close());
+  const { sessionId } = await f.open();
+  await until(() => f.snapshot(sessionId).stage === 'idle');
+  unavailable = true;
+  await f.service.invalidate('tmdb');
+  await until(() => f.snapshot(sessionId).initializationError === 'NETWORK_ERROR');
+  unavailable = false;
+  await f.command(sessionId, 'browse.refresh');
+  await until(() => f.snapshot(sessionId).stage === 'idle' && !f.snapshot(sessionId).browsing.loading);
+  assert.equal(f.snapshot(sessionId).browsing.error, null);
+  assert.equal(f.snapshot(sessionId).initializationError, null);
+  assert.equal(f.snapshot(sessionId).workInfo.title, 'Current metadata');
 });
 
 test('Douban seed match replaces playback identity with TMDB metadata and never creates a Douban playback target', async t => {
@@ -5925,6 +5983,7 @@ test('explicit address retry re-resolves exactly the chosen current file and pre
   const f = fixture(); t.after(() => f.service.close());
   const { sessionId } = await f.open({ platform: 'windows' });
   const current = await f.current(sessionId);
+  assert.equal(f.snapshot(sessionId).retryMediaAttemptId, current.id);
   await f.command(sessionId, 'media.progress', { attemptId: current.id, position: 42, duration: 100, paused: true });
   const searches = f.calls.filter(row => row[0] === 'search').length;
   await f.command(sessionId, 'media.retry', { attemptId: current.id });
@@ -5933,9 +5992,30 @@ test('explicit address retry re-resolves exactly the chosen current file and pre
   assert.equal(replacement.candidate.id, current.candidate.id);
   assert.equal(replacement.position, 42);
   assert.equal(replacement.paused, true);
+  assert.equal(f.snapshot(sessionId).retryMediaAttemptId, replacement.id);
   assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
   assert.deepEqual(f.calls.filter(row => row[0] === 'refreshAddress'), [['refreshAddress', current.candidate.id]]);
   assert.equal(f.calls.filter(row => row[0] === 'search').length, searches);
+});
+
+test('exhausted media retains the last failed retry identity and stop revokes it', async t => {
+  const f = fixture({ data: { async detail() { return detail(['Film.1080p']); } } });
+  t.after(() => f.service.close());
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+  const pending = await f.pending(sessionId);
+  await f.command(sessionId, 'media.failed', { attemptId: pending.id, code: 'MEDIA_UNAVAILABLE' });
+  await until(() => f.snapshot(sessionId).stage === 'unavailable');
+  assert.equal(f.snapshot(sessionId).attempt, null);
+  assert.equal(f.snapshot(sessionId).current, null);
+  assert.equal(f.snapshot(sessionId).retryMediaAttemptId, pending.id);
+  const searches = f.calls.filter(row => row[0] === 'search').length;
+  await f.command(sessionId, 'media.retry', { attemptId: f.snapshot(sessionId).retryMediaAttemptId });
+  const replacement = await f.pending(sessionId);
+  assert.equal(replacement.candidate.id, pending.candidate.id);
+  assert.notEqual(replacement.id, pending.id);
+  assert.equal(f.calls.filter(row => row[0] === 'search').length, searches);
+  await f.command(sessionId, 'stop');
+  assert.equal(f.snapshot(sessionId).retryMediaAttemptId, null);
 });
 
 test('refreshing a browsed source refreshes only its detail and line and keeps old episodes on failure', async t => {

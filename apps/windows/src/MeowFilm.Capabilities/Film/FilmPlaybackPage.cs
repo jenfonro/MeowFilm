@@ -33,7 +33,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         nameof(ShowEpisodeCards), nameof(ShowEpisodeList), nameof(ShowMovieCandidates), nameof(CanBrowseRaw),
         nameof(EntryResolution), nameof(RequiresSourceSearch), nameof(CanStartSourceSearch), nameof(CanSearchMore),
         nameof(ListLoading), nameof(ListError), nameof(ShowListStatus), nameof(ListStatus), nameof(ListMessage),
-        nameof(ShowListMessage), nameof(CanPlay), nameof(CanSelectDirectory), nameof(CanRetryMedia), nameof(PreviewEpisodes),
+        nameof(ShowListMessage), nameof(CanPlay), nameof(CanSelectDirectory), nameof(CanRetryMedia), nameof(CanRetryLoading), nameof(PreviewEpisodes),
         nameof(ConnectionFailed), nameof(ExecutionFailed), nameof(NeedsRecovery), nameof(MetadataAssociationFailed),
         nameof(MetadataAssociationErrorMessage)
     ];
@@ -321,12 +321,14 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public string ListMessage => ListStatus;
     public bool ShowListMessage => ShowListStatus && ListError.Length == 0 && !RequiresSourceSearch;
     public bool CanPlay => HasExecution && !ExecutionFailed && snapshot is not null && !RequiresSourceSearch &&
+        FilmJson.Text(snapshot.Raw, "initializationError").Length == 0 &&
         PlayerStage != "unavailable";
     public bool CanSelectDirectory => HasExecution && !ExecutionFailed && !ShowListStatus &&
         (Episodes.Any(item => item.CanSelect) || Candidates.Any(item => item.PlaybackTarget is not null));
-    public bool CanRetryMedia => CanPlay && session?.SnapshotFor(this) is { } executing &&
-        (executing.AttemptId.Length > 0 || executing.CurrentId.Length > 0 ||
-            FilmJson.Text(executing.Raw, "stage") is "error" or "unavailable");
+    public bool CanRetryMedia => HasExecution && !ExecutionFailed && session?.SnapshotFor(this) is { } executing &&
+        FilmJson.Text(executing.Raw, "retryMediaAttemptId").Length > 0;
+    public bool CanRetryLoading => HasExecution && !ExecutionFailed && !ListLoading &&
+        FilmJson.Text(snapshot?.Raw ?? default, "initializationError").Length > 0;
     internal FilmMetadataCache? MetadataCache => display?.Cache;
     public bool HasOutput => session?.IsCurrentPage(this) == true && session.HasOutput;
     public bool NoOutput => !HasOutput;
@@ -605,9 +607,10 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     internal Task RetryMediaAsync()
     {
         var executing = session?.SnapshotFor(this);
-        string attemptId = executing?.AttemptId is { Length: > 0 } pending ? pending : executing?.CurrentId ?? "";
-        return CommandAsync("media.retry", attemptId.Length > 0 ? new { attemptId } : null);
+        string attemptId = FilmJson.Text(executing?.Raw ?? default, "retryMediaAttemptId");
+        return CanRetryMedia ? CommandAsync("media.retry", new { attemptId }) : Task.CompletedTask;
     }
+    internal Task RetryLoadingAsync() => CanRetryLoading ? CommandAsync("browse.refresh") : Task.CompletedTask;
     internal Task SeekAsync(double value) => RequireSession().SeekAsync(value);
     internal Task RateAsync(double value) => RequireSession().RateAsync(value);
     internal Task AspectAsync(string? value) => RequireSession().AspectAsync(value);

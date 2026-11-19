@@ -68,6 +68,7 @@ public final class FilmPlaybackModel: ObservableObject {
     }
     public var canStartPlayback: Bool {
         guard executionStage != nil, !playbackStatus.busy, !restoringRead, let snapshot,
+              snapshot.initializationError == nil,
               snapshot.entryResolution != "loading", snapshot.entryResolution != "error",
               snapshot.stage != "unavailable", snapshot.stage != "error" else { return false }
         return snapshot.current != nil || snapshot.attempt != nil ||
@@ -77,6 +78,9 @@ public final class FilmPlaybackModel: ObservableObject {
         guard executionStage != nil, !restoringRead, let presentation else { return false }
         return !presentation.browsing.loading && presentation.browsing.error == nil &&
             presentation.entryResolution != "loading" && presentation.entryResolution != "error"
+    }
+    public var canRetryMedia: Bool {
+        executionStage != nil && snapshot?.retryMediaAttemptID != nil
     }
     public var directoryHasNoVideoSource: Bool {
         guard let presentation, canSelectFromPresentation else { return false }
@@ -883,9 +887,9 @@ public final class FilmPlaybackModel: ObservableObject {
     }
     @discardableResult
     public func retryMedia(attemptID: String? = nil) -> Task<Void, Never>? {
-        let id = attemptID ?? snapshot?.attempt?.id ?? snapshot?.current?.attemptID
+        guard let id = attemptID ?? snapshot?.retryMediaAttemptID else { return nil }
         actionError = nil
-        return send("media.retry", parameters: id.map { ["attemptId": .string($0)] } ?? [:])
+        return send("media.retry", parameters: ["attemptId": .string(id)])
     }
     public func browseMetadata(_ id: String) {
         guard !closed, let selected = snapshot?.metadataSources.first(where: { $0.id == id }) else { return }

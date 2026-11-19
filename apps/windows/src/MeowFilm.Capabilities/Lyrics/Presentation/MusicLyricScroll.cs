@@ -20,8 +20,9 @@ internal static class MusicLyricScroll
         var state = new Motion();
         owner.ViewChanged += (_, args) =>
         {
-            if (args.IsIntermediate || !state.Moving || state.Target is not { } target ||
-                Math.Abs(owner.VerticalOffset - Math.Clamp(target, 0, owner.ScrollableHeight)) >= .5) return;
+            if (args.IsIntermediate || !state.Moving) return;
+            // Virtualized rows can revise the extent and anchor while scrolling.
+            // The final native event owns completion; the caller then centers its actual row.
             state.Moving = false; state.Target = null;
             var settled = state.Settled; state.Settled = null; settled?.Invoke();
         };
@@ -45,13 +46,16 @@ internal static class MusicLyricScroll
         Stop(viewer);
         state.Target = target; state.Settled = settled; state.Moving = true;
         var epoch = state.Epoch;
-        if (Math.Abs(viewer.VerticalOffset - target) < .5 || !viewer.ChangeView(null, target, null, !MusicVisuals.CanAnimate(viewer)))
-            viewer.DispatcherQueue.TryEnqueue(() =>
-            {
-                if (epoch != state.Epoch) return;
-                state.Moving = false; state.Target = null;
-                var callback = state.Settled; state.Settled = null; callback?.Invoke();
-            });
+        viewer.DispatcherQueue.TryEnqueue(() =>
+        {
+            // Coalesce requests before handing a motion to the native compositor.
+            // Stop in this dispatcher turn must also retire a not-yet-started ChangeView.
+            if (epoch != state.Epoch) return;
+            if (Math.Abs(viewer.VerticalOffset - target) >= .5 &&
+                viewer.ChangeView(null, target, null, !MusicVisuals.CanAnimate(viewer))) return;
+            state.Moving = false; state.Target = null;
+            var callback = state.Settled; state.Settled = null; callback?.Invoke();
+        });
     }
     internal static void Settle(ScrollViewer viewer, double target)
     {

@@ -88,7 +88,9 @@ internal static class FilmPlaybackFixture
         return FilmJson.Encode(new
         {
             sessionId = id.ToString(), sequence, target = target.Wire(), entryTarget = (entryTarget ?? target).Wire(),
-            entrySurface, entryResolution, stage = "idle", error = (string?)null, metadata,
+            entrySurface, entryResolution, stage = "idle", error = (string?)null, initializationError = (string?)null,
+            retryMediaAttemptId = FilmJson.Text(attempt ?? default, "id") is { Length: > 0 } pendingId ? pendingId :
+                FilmJson.Text(current ?? default, "attemptId") is { Length: > 0 } currentId ? currentId : null, metadata,
             metadataSources,
             workInfo = target.MetadataProvider is not null && target.Kind is ("movie" or "tv") &&
                 metadata.ValueKind == JsonValueKind.Object ? WorkInfo(target, metadata) : JsonSerializer.SerializeToElement<object?>(null),
@@ -268,7 +270,7 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
             {
                 root["current"] = JsonNode.Parse(FilmJson.Encode(new
                 { attemptId = attempt, candidate = pending.GetProperty("candidate"), position = 0d, duration = 600d, paused = false }).GetRawText());
-                root["attempt"] = null; root["stage"] = "playing";
+                root["attempt"] = null; root["stage"] = "playing"; root["retryMediaAttemptId"] = attempt;
             });
         }
         else if (action is "media.failed" or "media.ended")
@@ -281,6 +283,7 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
                 root["stage"] = currentId.Length > 0 ? "playing" : action == "media.ended" ? "ended" : "unavailable";
                 if (root["attempt"]?["id"]?.GetValue<string>() == attempt) root["attempt"] = null;
                 if (root["current"]?["attemptId"]?.GetValue<string>() == attempt) root["current"] = null;
+                root["retryMediaAttemptId"] = pendingId.Length > 0 ? pendingId : currentId.Length > 0 ? currentId : attempt;
             });
         }
         else if (action == "media.progress" && currentId != attempt) return Failure("STALE_SESSION");
@@ -326,7 +329,7 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
         else if (action == "stop")
         {
             pendingId = ""; currentId = "";
-            Change(root => { root["attempt"] = null; root["current"] = null; root["stage"] = "stopped"; });
+            Change(root => { root["attempt"] = null; root["current"] = null; root["stage"] = "stopped"; root["retryMediaAttemptId"] = null; });
         }
         return Ok(Value);
     }
@@ -362,6 +365,7 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
             root["attempt"] = JsonNode.Parse(FilmJson.Encode(new { id, candidate, prepareOnly, position = 0d, paused = false }).GetRawText());
             root["candidates"] = JsonNode.Parse(FilmJson.Encode(new[] { candidate }).GetRawText());
             root["stage"] = prepareOnly ? "prepared" : "pending";
+            root["retryMediaAttemptId"] = id;
         });
     }
     public async IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid id, long after = 0,

@@ -237,6 +237,10 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       metadata: catalog.metadata(selected.provider, path, value, session.entryTarget) };
   }
   function snapshot(session) {
+    const retry = session.pending ?? session.current ?? session.lastFailed;
+    const retryMediaAttemptId = !session.stopped && !session.initializationError && retry &&
+      currentSource(session, retry.candidate.source) &&
+      (retry !== session.lastFailed || ['error', 'unavailable'].includes(session.stage)) ? retry.id : null;
     const unverifiedHints = new Map();
     if (session.browsing.sourceId === null && session.target.metadataProvider) {
       for (const result of session.results) {
@@ -300,7 +304,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       sessionId: session.id, sequence: session.sequence, rulesRevision: session.rules.revision, target: publicTarget(session.target),
       entryTarget: publicTarget(session.entryTarget), entryResolution: session.entryResolution,
       ...(session.entrySurface === undefined ? {} : { entrySurface: session.entrySurface }),
-      stage: session.stage, error: session.error,
+      stage: session.stage, error: session.error, initializationError: session.initializationError,
+      retryMediaAttemptId,
       errorStage: session.error && session.error === session.feedbackFailure?.code ? session.feedbackFailure.stage : null,
       reportError: session.reportError, metadata, workInfo: workInfo(session),
       metadataSources: session.metadataSources.map(row => {
@@ -1350,7 +1355,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     }
   }
   async function initialize(session, cacheEntries, { refresh = false } = {}) {
-    const epoch = session.metadataEpoch;
+    const epoch = session.metadataEpoch, browseGeneration = session.browseGeneration;
     const admitted = () => !session.released && !session.stopped && !closed && session.metadataEpoch === epoch &&
       groupScopeAvailable(session);
     try {
@@ -1382,7 +1387,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       } else {
         if (!session.target.metadataProvider && session.entryTarget.metadataProvider === 'tmdb')
           displayTarget = session.entryTarget;
-        try { entry = await data.targetMetadataEntry(displayTarget, { rules: session.rules, canSchedule: admitted }); }
+        try { entry = await data.targetMetadataEntry(displayTarget, { rules: session.rules, canSchedule: admitted, refresh }); }
         catch (error) {
           if (displayTarget === session.target) throw error;
           displayError = codeOf(error);
@@ -1408,7 +1413,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         initializeEpisode(session, session.generation === 0 ? previous : null);
         if (session.target.metadataProvider === 'tmdb' && session.target.season !== undefined) {
           const target = session.target;
-          const season = await data.seasonMetadataEntry(target, target.season, { rules: session.rules, canSchedule: admitted });
+          const season = await data.seasonMetadataEntry(target, target.season, { rules: session.rules, canSchedule: admitted, refresh });
           if (!admitted()) return;
           const id = session.playbackMetadataSourceId;
           const display = mergeSeason(target, playbackMetadata(session), target.season, season.value);
@@ -1428,14 +1433,14 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
             if (result) {
               session.resumePosition = historyPosition(previous);
               session.resumeCandidateId = previous.candidateId;
-              if (session.browseGeneration === 0)
+              if (session.browseGeneration === browseGeneration)
                 session.browsing = { ...session.browsing, sourceId: result.id, lineId: previous.lineId };
             }
           } else session.resumePosition = historyPosition(previous);
         }
       }
-      if (session.released) return;
-      if (session.browseGeneration === 0) {
+      if (!admitted()) return;
+      if (session.browseGeneration === browseGeneration) {
         if (session.browsing.sourceId !== null)
           await browse(session, session.browsing.sourceId, session.browsing.lineId ?? undefined);
         else session.browsing = { ...session.browsing, loading: false,
@@ -1485,7 +1490,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       if (admitted()) {
         session.restoring = false;
         session.initializationError = codeOf(error);
-        if (session.browseGeneration === 0)
+        if (session.browseGeneration === browseGeneration)
           session.browsing = { ...session.browsing, loading: false, error: codeOf(error) };
         if (session.entryResolution === 'loading') session.entryResolution = 'error';
         if (session.generation === 0 || session.stage === 'loading') {
@@ -1999,10 +2004,11 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     await session.initialization;
     if (session.released || session.stopped || closed || generation !== session.browseGeneration ||
         !groupScopeAvailable(session)) return;
-    if (session.entryTarget.metadataProvider === 'douban' && !session.target.metadataProvider &&
-        (session.entryResolution === 'error' || session.target.kind === 'group' && !session.target.members.length)) {
+    if (session.initializationError || session.entryTarget.metadataProvider === 'douban' &&
+        !session.target.metadataProvider && session.target.kind === 'group' && !session.target.members.length) {
       session.initializationError = null; session.error = null; session.stage = 'loading';
-      session.entryResolution = 'loading';
+      if (session.entryResolution === 'error' || session.entryResolution === 'unmatched')
+        session.entryResolution = 'loading';
       session.browsing = { ...session.browsing, loading: true, error: null };
       session.initialization = tracked(initialize(session, [], { refresh }));
       publish(session);

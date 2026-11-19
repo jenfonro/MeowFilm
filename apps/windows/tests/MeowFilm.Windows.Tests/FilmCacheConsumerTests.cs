@@ -32,9 +32,10 @@ public static class FilmCacheConsumerTests
         yield return Test("rejected address retry preserves the exact accepted output", RetryCurrent);
         yield return Test("accepted address retry reacquires the exact candidate and preserves output until replacement", RetryAccepted);
         yield return Test("rejected pending address retry leaves the admitted native preparation alive", RetryPending);
-        yield return Test("retry without an attempt delegates the most recent failed candidate to owner", RetryLastFailed);
+        yield return Test("exhausted playback retries the last failed identity supplied by owner", RetryLastFailed);
         yield return Test("picture settings retry routes errors through notices", ActionControls);
         yield return Test("failed media exposes picture recovery without covering healthy output", RecoveryControl);
+        yield return Test("initialization failure reloads metadata without retrying nonexistent media", InitializationRecovery);
         yield return Test("runtime-relative Douban image identity uses the existing native artwork cache", ImageCache);
     }
 
@@ -611,9 +612,13 @@ public static class FilmCacheConsumerTests
     {
         await using var rig = new FilmPlaybackRig();
         await rig.OpenAsync();
+        await Play(rig);
+        await rig.Runtime.CallAsync("film.session.command", new { sessionId = rig.Runtime.SessionId,
+            action = "media.failed", attemptId = "cache-current", code = "MEDIA_UNAVAILABLE" });
+        await Until(() => FilmJson.Text(rig.Runtime.Value, "stage") == "unavailable" && rig.Page.CanRetryMedia);
         await rig.Page.RetryMediaAsync();
         var call = rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "media.retry");
-        Check(FilmJson.Member(call.Parameters, "attemptId").ValueKind == JsonValueKind.Undefined &&
+        Check(FilmJson.Text(call.Parameters, "attemptId") == "cache-current" && !rig.Page.CanPlay &&
             !rig.Runtime.Calls.Any(item => FilmJson.Text(item.Parameters, "action") is "play" or "switch" or "search.more"),
             "owner selects the last exact failed candidate without client fallback matching");
     }
@@ -670,18 +675,63 @@ public static class FilmCacheConsumerTests
             var retry = (Button)view.FindName("RetryMediaRecoveryButton");
             Check(!FilmUiTest.Visible(retry) && DesktopVisual.Contains((Grid)view.FindName("PlayerOverlay"), retry),
                 "picture recovery starts hidden when there is no failed or pending media occurrence");
-            rig.Runtime.Change(root => root["stage"] = "error");
+            rig.Runtime.Change(root => { root["stage"] = "error"; root["retryMediaAttemptId"] = "failed-attempt"; });
             await Until(() => FilmUiTest.Visible(retry));
             FilmUiTest.Click(retry);
             await Until(() => rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "media.retry"));
             var call = rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "media.retry");
-            Check(FilmJson.Member(call.Parameters, "attemptId").ValueKind == JsonValueKind.Undefined &&
+            Check(FilmJson.Text(call.Parameters, "attemptId") == "failed-attempt" &&
                 !rig.Runtime.Calls.Any(item => FilmJson.Text(item.Parameters, "action") is "play" or "switch" or "search.more"),
                 "the visible recovery action delegates the exact last failed candidate without rematching");
             await Play(rig);
             await Until(() => !FilmUiTest.Visible(retry));
             Check(rig.Session.HasOutput && rig.Native.Commits == 1,
                 "healthy output removes the central recovery action without replacing or pausing media");
+        }
+        finally { view.DataContext = null; window.Content = null; window.Close(); }
+    }
+
+    private static async Task InitializationRecovery()
+    {
+        await using var rig = new FilmPlaybackRig();
+        await rig.OpenAsync();
+        rig.Runtime.Change(root =>
+        {
+            root["stage"] = "error"; root["error"] = "NOT_CONFIGURED";
+            root["initializationError"] = "NOT_CONFIGURED";
+            root["entryResolution"] = "error";
+            root["metadataSources"] = new JsonArray(); root["metadataSourceId"] = null; root["workInfo"] = null;
+            root["browsing"]!["error"] = "NOT_CONFIGURED";
+        });
+        await Until(() => rig.Page.CanRetryLoading);
+        var view = new FilmPlaybackView { DataContext = rig.Page };
+        var window = FilmUiTest.Window(view, 1150, 850);
+        try
+        {
+            window.Show(); window.Root.UpdateLayout();
+            var reload = (Button)view.FindName("RetryLoadingButton");
+            var retry = (Button)view.FindName("RetryMediaRecoveryButton");
+            await Until(() => FilmUiTest.Visible(reload));
+            Check(!rig.Page.CanPlay && !rig.Page.CanRetryMedia && !FilmUiTest.Visible(retry),
+                "an initialization error with no candidate offers loading recovery only");
+            await rig.Page.RetryMediaAsync();
+            Check(!rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "media.retry"),
+                "a stale media action cannot send a retry without an owned attempt");
+            rig.Runtime.Intercept = (method, input, _) =>
+            {
+                if (method == "film.session.command" && FilmJson.Text(input, "action") == "browse.refresh")
+                    rig.Runtime.Change(root =>
+                    {
+                        root["initializationError"] = null; root["error"] = null; root["stage"] = "loading";
+                        root["browsing"]!["loading"] = true; root["browsing"]!["error"] = null;
+                    });
+                return Task.FromResult(rig.Runtime.Handle(method, input));
+            };
+            FilmUiTest.Click(reload);
+            await Until(() => rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh"));
+            await Until(() => !FilmUiTest.Visible(reload));
+            Check(!rig.Page.CanRetryMedia && rig.Native.Commits == 0,
+                "loading recovery does not invent a media receipt or repeat its action while loading");
         }
         finally { view.DataContext = null; window.Content = null; window.Close(); }
     }

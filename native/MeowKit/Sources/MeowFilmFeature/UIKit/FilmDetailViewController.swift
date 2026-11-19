@@ -655,7 +655,8 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         actions.append(UIMenu(options: .displayInline, children: [
             UIAction(title: snapshot.browsing.sourceID == nil ? "刷新资料" : "刷新目录",
                      identifier: .init("film.detail.refresh")) { [weak model] _ in model?.refreshBrowsing() },
-            UIAction(title: "重试地址", identifier: .init("film.detail.retry-media")) { [weak model] _ in model?.retryMedia() }
+            UIAction(title: "重试地址", identifier: .init("film.detail.retry-media"),
+                     attributes: model?.canRetryMedia == true ? [] : .disabled) { [weak model] _ in model?.retryMedia() }
         ]))
         sourceButton.menu = UIMenu(title: "来源", children: actions)
         let selectedTitle: String?
