@@ -13,12 +13,12 @@ public static class MusicLibraryReceiptIntegrationTests
 
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("Music library receipt W1 After fences older platform and sync observations", ObservationAfter);
-        yield return new("Music library receipt W1 Before does not accept newer platform or sync observations", ObservationBefore);
-        yield return new("Music library receipt W2 Before restores shuffle previous and queue version", QueueBefore);
-        yield return new("Music library receipt W3 preparation closes record reads and cancellation restores queries", PreparationReads);
-        yield return new("Music library receipt W3 Abort closes record reads without disposing borrowed SQLite", AbortReads);
-        yield return new("Music library receipt W4 Before permits a fresh failed artwork callback to commit fallback", ArtworkBefore);
+        yield return new("Music library receipt W1 After fences older platform and sync observations", () => Task.Run(ObservationAfter));
+        yield return new("Music library receipt W1 Before does not accept newer platform or sync observations", () => Task.Run(ObservationBefore));
+        yield return new("Music library receipt W2 Before restores shuffle previous and queue version", () => Task.Run(QueueBefore));
+        yield return new("Music library receipt W3 preparation closes record reads and cancellation restores queries", () => Task.Run(PreparationReads));
+        yield return new("Music library receipt W3 Abort closes record reads without disposing borrowed SQLite", () => Task.Run(AbortReads));
+        yield return new("Music library receipt W4 Before permits a fresh failed artwork callback to commit fallback", () => Task.Run(ArtworkBefore));
     }
 
     private static void Check(bool condition, string message)
@@ -76,7 +76,7 @@ public static class MusicLibraryReceiptIntegrationTests
         foreach (bool sync in new[] { false, true })
         {
             await using var store = new MusicRecordTestStore();
-            await using var owner = new MusicLibraryOwner(store);
+            await using var owner = new MusicLibraryOwner(store, database: store.Storage);
             var registered = await MusicSongFixture.AdoptAsync(owner, Song(InitialImage));
             string id = Text(registered, "songId"), key = SourceKey(registered);
             Check(Guid.TryParseExact(id, "D", out _) &&
@@ -135,7 +135,7 @@ public static class MusicLibraryReceiptIntegrationTests
     private static async Task QueueBefore()
     {
         await using var store = new MusicRecordTestStore();
-        await using var owner = new MusicLibraryOwner(store);
+        await using var owner = new MusicLibraryOwner(store, database: store.Storage);
         var a = Song(InitialImage);
         var b = MusicSongFixture.Online("wy", "710002", "Other recording", "Other artist");
         await Ok(owner, "music.queue.replace", new { songs = new[] { a, b }, index = 0 });
@@ -214,7 +214,7 @@ public static class MusicLibraryReceiptIntegrationTests
     {
         await using var store = new MusicRecordTestStore();
         var reads = new RecordReadCounter(store);
-        await using var owner = new MusicLibraryOwner(reads);
+        await using var owner = new MusicLibraryOwner(reads, database: store.Storage);
         var song = await MusicSongFixture.AdoptAsync(owner, Song(InitialImage));
         OpenQueries(owner, reads, song);
         await owner.PrepareShutdownAsync();
@@ -230,7 +230,7 @@ public static class MusicLibraryReceiptIntegrationTests
     {
         await using var store = new MusicRecordTestStore();
         var reads = new RecordReadCounter(store);
-        await using var owner = new MusicLibraryOwner(reads);
+        await using var owner = new MusicLibraryOwner(reads, database: store.Storage);
         var song = await MusicSongFixture.AdoptAsync(owner, Song(InitialImage));
         OpenQueries(owner, reads, song);
         await owner.AbortAsync();
@@ -245,7 +245,7 @@ public static class MusicLibraryReceiptIntegrationTests
     private static async Task ArtworkBefore()
     {
         await using var store = new MusicRecordTestStore();
-        await using var owner = new MusicLibraryOwner(store);
+        await using var owner = new MusicLibraryOwner(store, database: store.Storage);
         var song = Song(InitialImage);
         var backup = MusicSongFixture.Online("wy", "710003", "Receipt recording", "Receipt artist", cover: BackupImage,
             native: new JsonObject { ["albumId"] = "710004" });

@@ -254,7 +254,7 @@ async function content(c, params, kind, target) {
   const body = { pageCode: kind === 'home' ? 'HOME_RECOMMEND_PAGE' : 'HOME_DISCOVERY_PAGE',
     cursor: protocolInteger(cursor), isFirstScreen: cursor === '0', pageStyleType: 'noCutBlock', refresh: false };
   for (const key of ['blockCodeOrderList', 'loadedPositionCodes']) if (text(prev[key])) body[key] = prev[key];
-  const result = contentPage(await c.wy('/api/link/page/rcmd/resource/show', body), target, c, cursor);
+  const result = contentPage(await c.wy('/api/link/page/rcmd/resource/show', body, false, { dataStatus: true }), target, c, cursor);
   if (result.continuation) {
     const before = array(nested(prev.loadedPositionCodes)), after = array(nested(result.continuation.loadedPositionCodes));
     result.continuation.loadedPositionCodes = JSON.stringify([...new Set([...before, ...after])]);
@@ -263,7 +263,7 @@ async function content(c, params, kind, target) {
 }
 async function directory(c) {
   return c.cached(['channel-directory'], async () => {
-    const raw = await c.wy('/api/link/position/show/resource', { positionCode: 'music_top_tab_full' });
+    const raw = await c.wy('/api/link/position/show/resource', { positionCode: 'music_top_tab_full' }, false, { dataStatus: true });
     const data = record(raw?.data ?? raw), scene = data.generalizedSceneShow ?? data;
     const source = first(scene.generalizedMap?.nowChannelItems, data.nowChannelItems, data.channels);
     c.observe('channels', source);
@@ -439,15 +439,16 @@ export async function wyChannelPage(c, params) {
   let result;
   switch (channel.kind) {
     case 'featured': result = await content(c, params, 'featured', target); break;
-    case 'rankings': result = rankings(await c.wy('/api/toplist/detail/v2', {}, true), target); break;
+    case 'rankings': result = rankings(await c.wy('/api/toplist/detail/v2', {}, true,
+      { dataStatus: raw => first(raw.data) !== undefined || first(raw.list) === undefined }), target); break;
     case 'new-songs': {
-      const raw = await c.wy('/api/v1/discovery/new/songs', { areaId: 0, total: true }, true);
+      const raw = await c.wy('/api/v1/discovery/new/songs', { areaId: 0, total: true }, true, { dataStatus: true });
       result = emptyPage(target); result.sections.push(section(target + ':songs', channel.name, 'songs', array(raw?.data).map(wySong), 'list')); break;
     }
     case 'playlists': {
       const tag = selectedTag || '推荐';
       result = contentPage(await c.wy('/api/playlist/square/block/page', { categoryName: tag, offset: 0, limit: 20,
-        ...(prev.cursor == null ? {} : { cursor: scalar(prev.cursor) }) }, true), target, c, scalar(prev.cursor));
+        ...(prev.cursor == null ? {} : { cursor: scalar(prev.cursor) }) }, true, { dataStatus: true }), target, c, scalar(prev.cursor));
       result.tags = ['推荐', '官方', '华语', '摇滚', '民谣', '电子', '轻音乐'].map(name => ({ id: name, name, group: 'playlist', selected: name === tag }));
       result.selectedTag = tag;
       if (result.continuation) result.continuation.tag = tag;
@@ -456,7 +457,8 @@ export async function wyChannelPage(c, params) {
     case 'artists': {
       const values = input(selectedTag || '-1:-1:-1').split(':').map(value => number(value, undefined, 'INVALID_REQUEST'));
       const [area, type, initial] = values, offset = number(prev.offset, 0, 'INVALID_REQUEST');
-      const raw = await c.wy('/api/v1/artist/list', { area, type, initial, offset, limit: 40, total: true }, true);
+      const raw = await c.wy('/api/v1/artist/list', { area, type, initial, offset, limit: 40, total: true }, true,
+        { dataStatus: raw => first(raw.data?.artists, raw.data?.more) !== undefined || first(raw.artists) === undefined });
       const data = record(raw?.data ?? raw), source = array(first(data.artists, raw?.artists)), more = Boolean(first(data.more, raw?.more));
       result = { ...emptyPage(target), tags: artistTags(values), selectedTag: values.join(':'), more,
         continuation: more ? { offset: offset + 40, tag: values.join(':') } : null };
@@ -466,14 +468,16 @@ export async function wyChannelPage(c, params) {
       break;
     }
     case 'cube': {
-      result = cube(await c.wy('/api/cube/render/page/protocol', { pageCode: input(channel.pageCode), scene: 'music' }, true), target, selectedTag, c);
+      result = cube(await c.wy('/api/cube/render/page/protocol', { pageCode: input(channel.pageCode), scene: 'music' }, true,
+        { dataStatus: raw => first(raw.data?.pageProtocol) !== undefined || first(raw.pageProtocol) === undefined }), target, selectedTag, c);
       const offset = result.feed?.request ? number(prev.offset, 0, 'INVALID_REQUEST') : undefined;
       if (result.feed?.request) {
         const request = result.feed.request, layoutTag = result.tags.some(row => row.id === selectedTag);
         request.algTagIds = layoutTag ? '' : selectedTag;
         let tags = [];
         try {
-          const tagData = await c.wy('/api/tag/tab/tags', { ruleId: request.ruleId, ruleType: 1, tabTagId: '' });
+          const tagData = await c.wy('/api/tag/tab/tags', { ruleId: request.ruleId, ruleType: 1, tabTagId: '' }, false,
+            { dataStatus: raw => first(raw.data?.algTagInfos) !== undefined || first(raw.algTagInfos) === undefined });
           tags = array(first(tagData?.data?.algTagInfos, tagData?.algTagInfos)).map(record).flatMap(row => array(row.children).length ?
             row.children.map(record).map(child => ({ id: scalar(child.algTagId), name: text(child.algTagName), group: text(row.algTagName) })) :
             [{ id: scalar(row.algTagId), name: text(row.algTagName), group: '' }]);
@@ -492,7 +496,7 @@ export async function wyChannelPage(c, params) {
         try {
           const feed = await c.wy('/api/tag/tab/alg/recommends', { ruleType: 1, ruleId: request.ruleId, tabTagId: '',
             algTagIds: request.algTagIds, extMap: JSON.stringify({ pointIds: request.pointIds }),
-            limit: 30, offset, trialMode: 103, source: offset > 0 ? 'nextPage' : 'reset' });
+            limit: 30, offset, trialMode: 103, source: offset > 0 ? 'nextPage' : 'reset' }, false, { dataStatus: true });
           const data = record(feed?.data ?? feed);
           c.observe('feed.songs', data.songs);
           const items = array(data.songs).map(wySong), more = Boolean(data.hasMore);
@@ -513,8 +517,10 @@ export async function wyChannelPage(c, params) {
     case 'vip': {
       result = emptyPage(target);
       const reads = await Promise.allSettled([
-        c.wy('/api/vipnewcenter/app/viptab/recommend/song/list', {}),
-        c.wy('/api/toplist/detail/v2', {}, true),
+        c.wy('/api/vipnewcenter/app/viptab/recommend/song/list', {}, false,
+          { dataStatus: raw => first(raw.data?.songInfoList) !== undefined || text(raw.data?.title) !== '' || first(raw.songInfoList) === undefined }),
+        c.wy('/api/toplist/detail/v2', {}, true,
+          { dataStatus: raw => first(raw.data) !== undefined || first(raw.list) === undefined }),
       ]);
       c.signal.throwIfAborted();
       if (reads.every(row => row.status === 'rejected')) throw reads[0].reason;
@@ -548,10 +554,11 @@ export async function wyCharts(c, { kind, period = 'daily', year }) {
       kind: 'album', action: scalar(row.albumId) ? { type: 'album', id: scalar(row.albumId) } : null }));
     name = kind === 'albums' ? '数字专辑畅销榜' : '数字单曲榜'; type = 'albums'; layout = 'ranking';
   } else if (kind === 'song-sales') {
-    const raw = await c.wy('/api/single/sales-ranking/get', {}, true);
+    const raw = await c.wy('/api/single/sales-ranking/get', {}, true, { dataStatus: true });
     items = await wyDetails(c, array(raw?.data?.itemList).map(row => scalar(row?.songId)).filter(Boolean)); name = '歌曲畅销指数榜';
   } else if (kind === 'user-recommendations') {
-    const raw = await c.wy('/api/charts/user/rcmd/song/detail', { chartCode: 'USER_RCMD_SONG', period: '' }, true);
+    const raw = await c.wy('/api/charts/user/rcmd/song/detail', { chartCode: 'USER_RCMD_SONG', period: '' }, true,
+      { dataStatus: true });
     items = array(raw?.data?.charts).map(row => wySong(row?.songData)); name = '全民热推榜';
   } else fail('UNSUPPORTED');
   result.name = name; result.chartKind = kind; result.count = items.length; result.total = items.length;

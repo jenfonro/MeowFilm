@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, response, seedClients } from './support.mjs';
+import { fixture, response, seedClients, xeapi } from './support.mjs';
 
 // HEAD MusicNeteaseFailureMatrixTests: actual business codes, not ordinary IDs.
-test('WY root and consumed nested codes require numeric integers and preserve real failure classifications', async () => {
+test('WY root and selected FM data status require numeric integers and preserve real failure classifications', async () => {
   const matrix = [[301, 'AUTH_REQUIRED'], [401, 'AUTH_REQUIRED'], [403, 'FORBIDDEN'], [404, 'NOT_FOUND'],
     [429, 'RATE_LIMITED'], [509, 'RATE_LIMITED'], [250, 'VERIFICATION_REQUIRED'],
     [460, 'VERIFICATION_REQUIRED'], [461, 'VERIFICATION_REQUIRED'], [-1, 'UPSTREAM_ERROR'],
@@ -15,10 +15,59 @@ test('WY root and consumed nested codes require numeric integers and preserve re
     await assert.rejects(f.request('wy', 'fm'), { code: error });
     assert.equal(f.requests.length, 1); await f.close();
   }
-  for (const code of [0, 200]) {
+});
+
+test('WY search does not consume sibling data status and selected FM data status still controls success', async () => {
+  for (const code of [0, 200, '200', 'unrelated', false, null, 301, 429]) {
     const f = fixture(() => response({ code: 200, result: { songs: [], songCount: 0 }, data: { code } }));
     assert.equal((await f.request('wy', 'search', { keyword: 'x' })).items.length, 0); await f.close();
   }
+  for (const code of [0, 200]) {
+    const f = fixture(() => response({ code: 200, data: { code, songs: [] } }));
+    assert.equal((await f.request('wy', 'fm')).items.length, 0); await f.close();
+  }
+  const rootString = fixture(() => response({ code: '200', result: { songs: [], songCount: 0 } }));
+  await assert.rejects(rootString.request('wy', 'search', { keyword: 'x' }), { code: 'INVALID_RESPONSE' });
+  await rootString.close();
+});
+
+test('WY selected data failures remain failures for object, array and account recipes', async t => {
+  const recipes = [
+    ['searchHotPlayback', { keywords: ['current'] }], ['playlists', { ids: ['1'] }],
+    ['fm', { ruleId: 'rule' }], ['channel', { id: 'newsong' }], ['channel', { id: 'chart' }],
+    ['chorus', { id: '1' }], ['qr.create', {}],
+    ['heartbeat', { songId: '1', continuation: { playlistId: '10', startMusicId: '1', count: 1 } }],
+    ['audio', { id: '1' }], ['audio', { id: '1', quality: 'flac' }],
+  ];
+  for (const [operation, params] of recipes) for (const [code, expected] of [[301, 'AUTH_REQUIRED'], [false, 'INVALID_RESPONSE']])
+    await t.test(operation + ':' + JSON.stringify(params) + ':' + code, async t => {
+      const server = xeapi();
+      const f = fixture(request => {
+        const path = new URL(request.url).pathname;
+        if (params.quality === 'flac') {
+          if (path.endsWith('/music/detail/get')) return response({ code: 200, data: { sq: {} } });
+          if (path === '/api/bsr/sk/get') return server.key(request);
+          server.open(request); return server.reply({ code: 200, data: { code } });
+        }
+        return response({ code: 200, data: { code } });
+      }); seedClients(f); t.after(() => f.close());
+      if (operation === 'heartbeat') await f.session('wy');
+      await assert.rejects(f.request('wy', operation, params), { code: expected });
+      assert.equal(f.requests.length, params.quality === 'flac' ? 3 : 1);
+    });
+});
+
+test('WY root QR key and chorus results do not consume sibling data failures', async t => {
+  for (const code of ['unconsumed-extension', 403]) for (const operation of ['qr.create', 'chorus'])
+    await t.test(operation + ':' + code, async t => {
+      const f = fixture(() => response({ code: 200, unikey: 'synthetic-key',
+        chorus: [{ startTime: 30000, endTime: 45000 }], data: { code } }));
+      t.after(() => f.close());
+      const value = await f.request('wy', operation, { id: '1' });
+      if (operation === 'chorus') assert.deepEqual(value.point, { start: 30, end: 45 });
+      else assert.ok(value.url.includes('codekey=synthetic-key'));
+      assert.equal(f.requests.length, 1);
+    });
 });
 
 test('WY QR-only codes do not become public-read success and HTTP failure takes precedence over a login-shaped body', async () => {

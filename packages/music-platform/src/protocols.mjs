@@ -95,9 +95,11 @@ export function encryptedWyResponse(bytes) {
     return decodeJSON(plain);
   } catch (error) { fail(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'LIMIT' : 'INVALID_RESPONSE'); }
 }
-export function wySuccess(data) {
-  for (const [code, nested] of [[data.code, false], [data.data?.code, true]]) {
-    if (nested && (data.data == null || !Object.hasOwn(Object(data.data), 'code'))) continue;
+export function wySuccess(data, { dataStatus = false } = {}) {
+  const codes = [[data.code, false]];
+  if ((typeof dataStatus === 'function' ? dataStatus(data) : dataStatus) &&
+      data.data != null && Object.hasOwn(Object(data.data), 'code')) codes.push([data.data.code, true]);
+  for (const [code, nested] of codes) {
     if (!Number.isInteger(code)) fail('INVALID_RESPONSE');
     if (code !== 200 && !(nested && code === 0)) fail(({ 301: 'AUTH_REQUIRED', 401: 'AUTH_REQUIRED', 403: 'FORBIDDEN',
       404: 'NOT_FOUND', 405: 'RATE_LIMITED', 429: 'RATE_LIMITED', 509: 'RATE_LIMITED', 250: 'VERIFICATION_REQUIRED',
