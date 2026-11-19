@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 
 namespace MeowFilm.Capabilities;
 
@@ -913,7 +914,7 @@ public sealed partial class MusicCapability
             finally { publishing = false; }
             ActivateCatalogOptionalReads(route, platform, state, initializeEntries);
             if (append) return;
-            _ = Presentation.Dispatcher.InvokeAsync(() => { if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(state.Scroll); }, DispatcherPriority.Loaded);
+            _ = Presentation.Dispatcher.EnqueueAsync(() => { if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(state.Scroll); }, DispatcherQueuePriority.Low);
         }
     }
 }

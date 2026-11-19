@@ -1,3 +1,5 @@
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -764,7 +766,7 @@ public static class FilmHomeTests
                 var wait = changed.Task;
                 if (Calls.Count >= count) break;
                 await wait;
-                await System.Windows.Threading.Dispatcher.Yield();
+                await OwnerDispatcher.YieldAsync();
             }
         }
 
@@ -844,7 +846,7 @@ public static class FilmHomeTests
                 var wait = changed.Task;
                 if (Calls.Count >= count) break;
                 await wait;
-                await System.Windows.Threading.Dispatcher.Yield();
+                await OwnerDispatcher.YieldAsync();
             }
         }
 

@@ -26,7 +26,9 @@ public sealed partial class NovelView
     private string? CaptureDiscoveryFocus()
     {
         var focused = DesktopVisual.Focused(this);
-        if (discoveryFocus is { } pending && ReferenceEquals(focused, pending.DisplacedFocus)) return pending.Id;
+        // WinUI can move focus onto the content owner again while an intermediate page unloads.
+        if (discoveryFocus is { } pending &&
+            (ReferenceEquals(focused, pending.DisplacedFocus) || ReferenceEquals(focused, body))) return pending.Id;
         for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
         {
             Control? control = node is ComboBox or RadioButton ? (Control)node :
@@ -51,7 +53,8 @@ public sealed partial class NovelView
                 if (!ReferenceEquals(body.Content, replacement) || discoveryFocus is not { } pending) return;
                 discoveryFocus = null;
                 if (!DesktopVisual.IsVisible(replacement) ||
-                    DesktopVisual.Focused(this) is { } focused && !ReferenceEquals(focused, pending.DisplacedFocus)) return;
+                    DesktopVisual.Focused(this) is { } focused && !ReferenceEquals(focused, pending.DisplacedFocus) &&
+                    !ReferenceEquals(focused, body)) return;
                 FindDiscoveryFocus(replacement, pending.Id)?.Focus(FocusState.Programmatic);
             });
         }
@@ -68,7 +71,19 @@ public sealed partial class NovelView
     {
         var text = NovelUi.Text(value, size, muted);
         text.Margin = new(0); text.TextWrapping = TextWrapping.NoWrap; text.TextTrimming = TextTrimming.CharacterEllipsis;
+        DesktopTheme.Observe(text, () => text.Foreground = DesktopTheme.GetIsHighContrast(text)
+            ? new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText))
+            : (Brush)DesktopVisual.Resource(text, muted ? "MeowFilm.Brush.Muted" : "MeowFilm.Brush.Text"));
         return text;
+    }
+    private static void DiscoveryCanvas(Border card)
+    {
+        DesktopTheme.Observe(card, () =>
+        {
+            if (DesktopTheme.GetIsHighContrast(card))
+                card.Background = new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window));
+            else card.ClearValue(Border.BackgroundProperty);
+        });
     }
     private static Viewbox DiscoveryIcon(string data, double size = 14)
     {
@@ -338,6 +353,7 @@ public sealed partial class NovelView
     {
         var card = new Border { Height = 216, Padding = new(30, 22, 30, 22) };
         card.UseResource(StyleProperty, "Novel.Discovery.Feature");
+        DiscoveryCanvas(card);
         AutomationProperties.SetName(card, "选读");
         if (module.DiscoverBooks.FirstOrDefault() is not { } book) return card;
         var layout = new Grid(); layout.ColumnDefinitions.Add(new()); layout.ColumnDefinitions.Add(new() { Width = new(149) });
@@ -372,6 +388,7 @@ public sealed partial class NovelView
     {
         var card = new Border { Height = 216, Padding = new(20) };
         card.UseResource(StyleProperty, "Novel.Discovery.Surface");
+        DiscoveryCanvas(card);
         AutomationProperties.SetName(card, "继续阅读");
         var panel = new DockPanel(); card.Child = panel;
         var last = module.Library.Entries.Where(e => e.ReadAt is not null).OrderByDescending(e => e.ReadAt).FirstOrDefault();

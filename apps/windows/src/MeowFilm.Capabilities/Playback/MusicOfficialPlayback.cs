@@ -96,8 +96,8 @@ public sealed partial class MusicCapability
         Interlocked.Increment(ref selectionSourcesRevision);
         // Native authority is already fenced. Inspect and retire UI-owned resources
         // on their dispatcher, against the authority current when cleanup runs.
-        if (!Presentation.Dispatcher.HasShutdownStarted && !Presentation.Dispatcher.HasShutdownFinished)
-            _ = Presentation.Dispatcher.InvokeAsync(() =>
+        if (!Presentation.Dispatcher.IsClosing)
+            _ = Presentation.Dispatcher.EnqueueAsync(() =>
             {
                 if (stopping || disposed) return;
                 bool Revoked(MusicOnlineTarget? target) =>

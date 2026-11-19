@@ -20,7 +20,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Core.Runtime;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
@@ -2421,7 +2422,7 @@ public static partial class MusicCatalogTests
                 True(!Descendants<TextBlock>(view).Any(t => t.Text == "当前内容需要平台登录"), "no login warning tiles");
                 True(!f.Module.DisplayCatalogSections.SelectMany(s => s.Items).Any(c => c.Kind == "daily"),
                     "hidden account entries are excluded from the display projection");
-                True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WPF card enabled");
+                True(buttons.Any(b => b.Tag is MusicCatalogCard { Song: not null } && b.IsEnabled), "nested song actual WinUI card enabled");
                 True(!loader.Addresses.Contains(privateCover), "hidden account artwork is never requested");
                 Equal(0, f.Client.Count("music.catalog.playlist"));
                 Equal(0, f.Client.Count("music.catalog.daily"));

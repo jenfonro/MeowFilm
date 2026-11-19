@@ -2,7 +2,8 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Media;
 
@@ -13,11 +14,11 @@ public sealed record FilmOutputObservation(NativePlaybackScope Scope, ulong Subm
 /// <summary>Independent film owner. Native commands and retirement share one asynchronous gate.</summary>
 public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposable
 {
-    private readonly Dispatcher dispatcher;
+    private readonly OwnerDispatcher dispatcher;
     private readonly FilmKernelApi kernel;
     private readonly Func<CancellationToken, Task<IDisposable>>? acquireOutput;
     private readonly FilmVideoSurface surface;
-    private readonly DispatcherTimer timer;
+    private readonly DispatcherQueueTimer timer;
     private readonly SemaphoreSlim commands = new(1, 1);
     private readonly object ownership = new();
     private readonly HashSet<Session> sessions = [];
@@ -37,22 +38,21 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     private string? lastError;
     private FilmOutputObservation? output;
 
-    public FilmPlayback(Dispatcher? dispatcher = null,
+    public FilmPlayback(OwnerDispatcher? dispatcher = null,
         Func<CancellationToken, Task<IDisposable>>? acquireOutput = null) :
         this(dispatcher, new FilmKernelApi(), acquireOutput) { }
 
-    internal FilmPlayback(Dispatcher? dispatcher, FilmKernelApi kernel,
+    internal FilmPlayback(OwnerDispatcher? dispatcher, FilmKernelApi kernel,
         Func<CancellationToken, Task<IDisposable>>? acquireOutput = null, FilmVideoSurface? surface = null)
     {
         this.kernel = kernel;
         this.acquireOutput = acquireOutput;
-        this.dispatcher = dispatcher ?? Dispatcher.CurrentDispatcher;
-        if (!this.dispatcher.CheckAccess() || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
+        this.dispatcher = dispatcher ?? OwnerDispatcher.Current;
+        if (!this.dispatcher.HasThreadAccess || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
             throw new PlaybackException(PlaybackError.WrongThread);
         this.surface = surface ?? new FilmVideoSurface();
         this.surface.TargetChanged += SurfaceChanged;
-        timer = new DispatcherTimer(TimeSpan.FromMilliseconds(100), DispatcherPriority.Background,
-            Poll, this.dispatcher);
+        timer = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(100), Poll);
         timer.Stop();
     }
     public FilmVideoSurface VideoView => surface;
@@ -417,7 +417,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         try { await Command(session.Scope, s => FilmKernelNative.Check(kernel.Volume(s.Handle, requested))); }
         catch (Exception error) { if (ReferenceEquals(current, session)) Report(error); }
     }
-    private async void Poll(object? sender, EventArgs args) => await RefreshAsync();
+    private async void Poll() => await RefreshAsync();
 
     internal Task RefreshAsync() => Dispatch(RefreshCoreAsync);
 
@@ -581,17 +581,17 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         field = value; Changed(name); return true;
     }
     private void Changed(string? name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-    private Task Dispatch(Func<Task> action) => dispatcher.CheckAccess() ? action() :
-        dispatcher.InvokeAsync(action).Task.Unwrap();
-    private Task<T> Dispatch<T>(Func<Task<T>> action) => dispatcher.CheckAccess() ? action() :
-        dispatcher.InvokeAsync(action).Task.Unwrap();
+    private Task Dispatch(Func<Task> action) => dispatcher.HasThreadAccess ? action() :
+        dispatcher.EnqueueAsync(action);
+    private Task<T> Dispatch<T>(Func<Task<T>> action) => dispatcher.HasThreadAccess ? action() :
+        dispatcher.EnqueueAsync(action);
 
     public ValueTask DisposeAsync() => new(Dispatch(() => disposal ??= DisposeCoreAsync()));
     private async Task DisposeCoreAsync()
     {
         Session[] owned;
         lock (ownership) { disposing = true; owned = sessions.ToArray(); }
-        timer.Stop(); timer.Tick -= Poll;
+        timer.Stop();
         surface.TargetChanged -= SurfaceChanged;
         pending = null; current = null; ClearOutput();
         foreach (var session in owned) session.Cancel();

@@ -273,10 +273,15 @@ public sealed partial class MusicCapability
     public Task UpdateSourceAsync(MusicSourceRow? row)
     {
         if (row is not { IsScript: true } || !Sources.Contains(row) || !CanEditScripts) return Task.CompletedTask;
-        if (row.Kind == MusicSourceKind.Local)
-            return dialogs.SelectScriptFile() is { } path ? ChangeSourceFilesAsync([path], row) : Task.CompletedTask;
         return RunSourceManagementAsync(async generation =>
         {
+            if (row.Kind == MusicSourceKind.Local)
+            {
+                if (await dialogs.SelectScriptFileAsync(SettingsView) is not { } path) return;
+                if (!SourceManagementCurrent(generation) || !Sources.Contains(row)) return;
+                await ChangeSourceFilesAsync([path], row, generation);
+                return;
+            }
             var request = BeginSourceTransfer();
             try
             {
@@ -288,8 +293,13 @@ public sealed partial class MusicCapability
     }
     public Task ImportSourceAsync()
     {
-        if (!CanEditScripts || dialogs.SelectScriptFiles() is not { Length: > 0 } paths) return Task.CompletedTask;
-        return ChangeSourceFilesAsync(paths, null);
+        if (!CanEditScripts) return Task.CompletedTask;
+        return RunSourceManagementAsync(async generation =>
+        {
+            if (await dialogs.SelectScriptFilesAsync(SettingsView) is not { Length: > 0 } paths) return;
+            if (!SourceManagementCurrent(generation)) return;
+            await ChangeSourceFilesAsync(paths, null, generation);
+        });
     }
     public Task ImportSourceFromUrlAsync(string address)
     {
@@ -301,7 +311,7 @@ public sealed partial class MusicCapability
             finally { EndSourceTransfer(request); await ReloadSources(lifetime.Token, generation); }
         });
     }
-    private Task ChangeSourceFilesAsync(string[] paths, MusicSourceRow? update) => RunSourceManagementAsync(async generation =>
+    private async Task ChangeSourceFilesAsync(string[] paths, MusicSourceRow? update, long generation)
     {
         var request = BeginSourceTransfer();
         try
@@ -327,7 +337,7 @@ public sealed partial class MusicCapability
             if (update is not null) NotifyMusicSourcesChanged();
             await ReloadSources(lifetime.Token, generation);
         }
-    });
+    }
     private CancellationTokenSource BeginSourceTransfer()
     {
         sourceTransfer?.Cancel();

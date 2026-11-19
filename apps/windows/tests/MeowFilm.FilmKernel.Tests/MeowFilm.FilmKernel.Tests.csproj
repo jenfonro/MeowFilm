@@ -10,6 +10,7 @@
     <ProjectReference Include="../../src/MeowFilm.Desktop/MeowFilm.Desktop.csproj" />
     <Compile Include="../MeowFilm.Windows.Tests/NativeDesktopCapture.cs" Link="Shared/NativeDesktopCapture.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/TestDesktopContext.cs" Link="Shared/TestDesktopContext.cs" />
+    <Compile Include="../MeowFilm.Windows.Tests/FixtureImages.cs" Link="Shared/FixtureImages.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/FFmpegVideoFixtures.cs" Link="Shared/FFmpegVideoFixtures.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/FilmKernelIntegrationTests.cs" Link="Shared/FilmKernelIntegrationTests.cs" />
     <Compile Include="../MeowFilm.Windows.Tests/GlobalUsings.cs" Link="Shared/GlobalUsings.cs" />
@@ -32,6 +33,5 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
 </Project>

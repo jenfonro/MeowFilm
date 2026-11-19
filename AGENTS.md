@@ -41,7 +41,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402，Node.js 版本以 `scripts/script-host-native.json` 的 `build.node` 为准。
 - 通用脚本宿主与影视规则共用 Node addon，需要 Python、Perl、NASM 与 MSVC x64 开发环境（`cl`／`nmake` 在 PATH）；首次构建按 `scripts/script-host-native.json` 下载校验依赖，后续复用默认缓存。
 - 随 App 发布的 Node 运行时版本与来源由 `scripts/script-host-native.json` 的 `build.node` 锁定；`scripts/windows/node-runtime.json` 固定运行时文件与许可证哈希，构建时 PATH 上的 `node.exe` 须符合该版本与哈希。
-- 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Desktop Runtime。
+- 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Runtime。
 
 ## 目录
 
@@ -66,6 +66,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟与 D3D11 原生 HDR 输出；固定 KSPlayer 机制来源及静态依赖，不包含上游 UI 或音乐 owner
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
+  - `MeowFilm.Threading` — 无 XAML 依赖的 DispatcherQueue owner 调度、排队取消和计时器机制
   - `MeowFilm.Platform` — 本地 SQLite 与资源文件能力、私密启动管道、HTTP 子进程会话、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
   - `MeowFilm.Audio` — 独立音乐解码、PCM／DSP 与 WASAPI 输出

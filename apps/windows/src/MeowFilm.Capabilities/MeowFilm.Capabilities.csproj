@@ -4,6 +4,7 @@
     <UseWinUI>true</UseWinUI>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../MeowFilm.Threading/MeowFilm.Threading.csproj" />
     <EmbeddedResource Include="Film/Rules/FilmRuleDefaults.json" LogicalName="MeowFilm.FilmRuleDefaults.json" />
     <Content Include="Accounts/Presentation/Assets/*.png" />
     <Content Include="Film/Presentation/Assets/*.jpg" />
@@ -27,6 +28,5 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
 </Project>

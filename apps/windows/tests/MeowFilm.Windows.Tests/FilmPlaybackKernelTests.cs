@@ -2,7 +2,8 @@ using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json.Nodes;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
@@ -283,7 +284,7 @@ public static class FilmPlaybackKernelTests
             preparing.Open();
             await Until(() => rig.Kernel.Values(stopped, "read").Length > 0);
             if (duringAdmission) await admission.Task.WaitAsync(Limit);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             Check(!session.HasOutput && runtime.Calls.Count(call => call.Method == "film.session.attempt") == 1,
                 "the first direct candidate waits for admission or business control with no accepted donor");
             var stop = rig.Playback.StopAsync(); // The same native stop used by music output admission.
@@ -911,7 +912,7 @@ public static class FilmPlaybackKernelTests
         {
             this.owners = owners;
             Kernel = new(owners);
-            Playback = new(Dispatcher.CurrentDispatcher, Kernel, acquireOutput, new SurfaceProbe());
+            Playback = new(OwnerDispatcher.Current, Kernel, acquireOutput, new SurfaceProbe());
         }
         internal Task Prepare(Owner owner, RuntimeMediaPlaybackIntent intent, CancellationToken token = default) =>
             Playback.PrepareAsync(intent, owner.Address, new NativeVideoInput(NativeVideoFormat.Progressive), owner.Lease, token);

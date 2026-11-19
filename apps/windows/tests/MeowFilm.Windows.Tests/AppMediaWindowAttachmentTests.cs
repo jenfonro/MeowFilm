@@ -5,9 +5,8 @@ using Windows.Foundation;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Key = System.Windows.Input.Key;
-using ModifierKeys = System.Windows.Input.ModifierKeys;
-using KeyInterop = System.Windows.Input.KeyInterop;
+using Key = Windows.System.VirtualKey;
+using ModifierKeys = Windows.System.VirtualKeyModifiers;
 using MeowFilm.App;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
@@ -352,7 +351,7 @@ public static class AppMediaWindowAttachmentTests
             void Post(ShortcutNative.Call registration)
             {
                 var gesture = ShortcutFixture.GlobalGesture;
-                nint packed = (nint)((KeyInterop.VirtualKeyFromKey(gesture.Key) << 16) | (int)gesture.Modifiers);
+                nint packed = (nint)(((int)(gesture.Key) << 16) | (int)gesture.Modifiers);
                 Check(DesktopTestUi.WindowRoot(shell).DispatcherQueue.TryEnqueue(() =>
                 {
                     object?[] arguments = [handle, MediaShortcutNative.HotKeyMessage, registration.Id, packed, false];

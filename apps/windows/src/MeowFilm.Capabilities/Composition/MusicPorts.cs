@@ -2,7 +2,6 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
 using MeowFilm.Media;
-using Microsoft.Win32;
 
 namespace MeowFilm.Capabilities;
 
@@ -100,10 +99,10 @@ internal sealed class NativeMusicPlayback(NativeAudioPlayback native) : IMusicPl
 public interface IMusicDialogs
 {
     bool Confirm(string message, string title);
-    string[]? SelectAudioFiles();
-    string[]? SelectScriptFiles() => SelectScriptFile() is { } path ? [path] : null;
-    string? SelectScriptFile() => null;
-    string? SelectLyricFile() => null;
+    Task<string[]?> SelectAudioFilesAsync(FrameworkElement owner);
+    Task<string[]?> SelectScriptFilesAsync(FrameworkElement owner) => Task.FromResult<string[]?>(null);
+    Task<string?> SelectScriptFileAsync(FrameworkElement owner) => Task.FromResult<string?>(null);
+    Task<string?> SelectLyricFileAsync(FrameworkElement owner) => Task.FromResult<string?>(null);
 }
 
 internal sealed class MusicDialogs : IMusicDialogs
@@ -111,23 +110,12 @@ internal sealed class MusicDialogs : IMusicDialogs
     public bool Confirm(string message, string title) => MessageBox(0, message, title, 0x31) == 1;
     [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
     private static extern int MessageBox(nint window, string text, string caption, uint flags);
-    public string[]? SelectAudioFiles()
-    {
-        var dialog = new OpenFileDialog { Multiselect = true, CheckFileExists = true, Title = "添加音乐",
-            Filter = "音频文件|*.mp3;*.flac;*.m4a;*.aac;*.ogg;*.opus;*.wav;*.wma" };
-        return dialog.ShowDialog() == true ? dialog.FileNames : null;
-    }
-    public string[]? SelectScriptFiles()
-    {
-        var dialog = new OpenFileDialog { CheckFileExists = true, Multiselect = true,
-            Title = "导入 LX 音源", Filter = "JavaScript|*.js" };
-        return dialog.ShowDialog() == true ? dialog.FileNames : null;
-    }
-    public string? SelectScriptFile() => Select("更新 LX 音源", "JavaScript|*.js");
-    public string? SelectLyricFile() => Select("导入歌词", "歌词文件|*.lrc;*.qrc;*.yrc;*.txt");
-    private static string? Select(string title, string filter)
-    {
-        var dialog = new OpenFileDialog { CheckFileExists = true, Multiselect = false, Title = title, Filter = filter };
-        return dialog.ShowDialog() == true ? dialog.FileName : null;
-    }
+    public Task<string[]?> SelectAudioFilesAsync(FrameworkElement owner) =>
+        CapabilityFilePicker.OpenMultipleAsync(owner, "添加音乐", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma");
+    public Task<string[]?> SelectScriptFilesAsync(FrameworkElement owner) =>
+        CapabilityFilePicker.OpenMultipleAsync(owner, "导入 LX 音源", ".js");
+    public Task<string?> SelectScriptFileAsync(FrameworkElement owner) =>
+        CapabilityFilePicker.OpenAsync(owner, "更新 LX 音源", ".js");
+    public Task<string?> SelectLyricFileAsync(FrameworkElement owner) =>
+        CapabilityFilePicker.OpenAsync(owner, "导入歌词", ".lrc", ".qrc", ".yrc", ".txt");
 }

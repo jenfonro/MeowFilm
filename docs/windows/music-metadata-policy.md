@@ -84,9 +84,9 @@ native-local-lyrics
 
 ## 共享音乐图片与展示缓存
 
-`MusicPresentationCache` 使用 Caches 下独立 `music-presentation-v2` 目录，图片按完整 URL 保存原网络字节，展示歌词按永久 songId 保存单条 JSON；二者合计按原始资源实际字节沿原 8 MiB／30 天预算。标准逐文件缓存首用只枚举文件长度／时间，后续读取、写入和播放续期只处理本资源，不存 Base64 或全缓存索引文档，也不排队完整缓存快照。旧图片／歌词格式不读取、兼容或自动清理。音乐专用 `ArtworkService` 使用该 byte port，解码缓存沿 32 MiB 像素预算而非固定条数，编码图片缓存单项准入为 4 MiB，普通传输与编码输入解码不设该总量拒绝；实际读取／解码／保存最多 4 项同时执行，排队不预读字节；WPF `ArtworkImage` 与播放器共用此实例。其他业务图片实例不接音乐磁盘 port。
+`MusicPresentationCache` 使用 Caches 下独立 `music-presentation-v2` 目录，图片按完整 URL 保存原网络字节，展示歌词按永久 songId 保存单条 JSON；二者合计按原始资源实际字节沿原 8 MiB／30 天预算。标准逐文件缓存首用只枚举文件长度／时间，后续读取、写入和播放续期只处理本资源，不存 Base64 或全缓存索引文档，也不排队完整缓存快照。旧图片／歌词格式不读取、兼容或自动清理。音乐专用 `ArtworkService` 使用该 byte port，解码缓存沿 32 MiB 像素预算而非固定条数，编码图片缓存单项准入为 4 MiB，普通传输与编码输入解码不设该总量拒绝；实际读取／解码／保存最多 4 项同时执行，排队不预读字节；WinUI `ArtworkImage` 与播放器共用此实例。其他业务图片实例不接音乐磁盘 port。
 
-封面选择写入同一歌曲仓库，`artworkSourceKey/artworkSourceImage/cover_url` 区分平台原图与实际选定 URL。`SongMetadataChanged` 在提交后通知当前搜索、目录、队列和播放投影。具体换图／共享取消／清理语义只在共同资源契约维护；这些接线尚未取得本轮运行验证。
+封面选择写入同一歌曲仓库，`artworkSourceKey/artworkSourceImage/cover_url` 区分平台原图与实际选定 URL。`SongMetadataChanged` 在提交后通知当前搜索、目录、队列和播放投影。具体换图／共享取消／清理语义只在共同资源契约维护。
 
 ## 取消、提交和错误
 

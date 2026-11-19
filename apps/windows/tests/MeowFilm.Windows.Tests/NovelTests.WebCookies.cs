@@ -26,7 +26,7 @@ public static partial class NovelTests
             database.ProductRoot!, deadline.Token, settingsStore: new FilmRuntimeSettings(database));
         var sources = NovelTestSources.Create(runtime);
         await using var rules = new NovelRuleProgram(runtime);
-        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
         try
         {
             foreach (bool domainBefore in new[] { false, true })
@@ -109,7 +109,7 @@ public static partial class NovelTests
     {
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
-        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
         await using var server = new WebFixture();
         try
         {
@@ -148,7 +148,7 @@ public static partial class NovelTests
     {
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var rules = new NovelRuleProgram(ruleRuntime);
-        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
         try
         {
             using var token = new CancellationTokenSource(TimeSpan.FromSeconds(45));

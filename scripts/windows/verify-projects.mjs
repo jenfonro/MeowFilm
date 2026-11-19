@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const shared = new Set(['MeowFilm.Core', 'MeowFilm.Platform', 'MeowFilm.Desktop', 'MeowFilm.Media', 'MeowFilm.Audio', 'MeowFilm.SystemMedia']);
+const shared = new Set(['MeowFilm.Core', 'MeowFilm.Threading', 'MeowFilm.Platform', 'MeowFilm.Desktop', 'MeowFilm.Media', 'MeowFilm.Audio', 'MeowFilm.SystemMedia']);
 const DEFAULT_PROPERTIES = Object.freeze({
   Configuration: 'Release', RuntimeIdentifier: 'win-x64', SelfContained: 'true',
   TargetLatestRuntimePatch: 'true',
@@ -43,8 +43,10 @@ export function verifyWindowsProjects(directory = root, {
     if (shared.has(name) && dependencies.some(item => !shared.has(item.name)))
       fail('shared project depends on application or business: ' + name);
     if ((name === 'MeowFilm.Audio' || name === 'MeowFilm.Media') &&
-        dependencies.some(item => item.name !== 'MeowFilm.Core'))
+        dependencies.some(item => !['MeowFilm.Core', 'MeowFilm.Threading'].includes(item.name)))
       fail('native playback core depends beyond its neutral input boundary: ' + name);
+    if (name === 'MeowFilm.Threading' && dependencies.some(item => item.name !== 'MeowFilm.Core'))
+      fail('owner threading depends beyond its neutral scheduling boundary');
     const entry = { name, assembly };
     graph.set(path, entry);
     visiting.delete(path);
@@ -55,6 +57,26 @@ export function verifyWindowsProjects(directory = root, {
   if (new Set(assemblies).size !== assemblies.length) fail('duplicate assembly identity');
   return { projects: graph.size, properties: { ...properties }, application: { name: app.assembly, dataIdentity: 'aggregate',
     projects: [...graph.values()].map(item => item.name).sort(), assemblies } };
+}
+
+export function verifyRuntimeConfiguration(config, selfContained) {
+  const options = config?.runtimeOptions;
+  let frameworks;
+  if (selfContained) {
+    if (options?.framework !== undefined || options?.frameworks !== undefined)
+      fail('self-contained runtime must include its framework');
+    frameworks = options?.includedFrameworks;
+  } else {
+    if (options?.includedFrameworks !== undefined ||
+        (options?.framework !== undefined && options?.frameworks !== undefined))
+      fail('framework-dependent runtime must declare one framework form');
+    frameworks = options?.framework === undefined ? options?.frameworks : [options.framework];
+  }
+  if (!Array.isArray(frameworks) || frameworks.length !== 1 ||
+      frameworks[0]?.name !== 'Microsoft.NETCore.App' ||
+      typeof frameworks[0]?.version !== 'string' || !frameworks[0].version.trim())
+    fail('runtime framework closure must contain only a versioned Microsoft.NETCore.App');
+  return frameworks[0].version;
 }
 
 export function verifyPublishedGraph(dataIdentity, deps, filenames, policy, publishItems = []) {
@@ -114,6 +136,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
         !['true', 'false'].includes(properties.SelfContained))
       fail('publish verification requires Configuration, RuntimeIdentifier and SelfContained properties');
     const policy = verifyWindowsProjects(root, { properties });
+    const config = JSON.parse(readFileSync(resolve(directory, policy.application.name + '.runtimeconfig.json'), 'utf8'));
+    verifyRuntimeConfiguration(config, properties.SelfContained === 'true');
     const deps = JSON.parse(readFileSync(resolve(directory, policy.application.name + '.deps.json'), 'utf8'));
     const publishItems = JSON.parse(readFileSync(publishPath, 'utf8')).Items.ResolvedFileToPublish;
     const filenames = readdirSync(directory, { recursive: true }).map(path => path.replaceAll('\\', '/'));

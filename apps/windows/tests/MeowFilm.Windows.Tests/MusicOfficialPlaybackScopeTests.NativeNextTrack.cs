@@ -1,7 +1,8 @@
 using System.Buffers.Binary;
 using System.IO;
 using System.Reflection;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Media;
 
@@ -51,7 +52,7 @@ public static partial class MusicOfficialPlaybackScopeTests
                     Check(!f.Files.ReleaseBody.Task.IsCompleted, "the old input has sought beyond the held producer prefix");
                 }
                 Task next = f.Module.StepAsync(true);
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
                 if (waiting)
                 {
                     await Until(Retired);

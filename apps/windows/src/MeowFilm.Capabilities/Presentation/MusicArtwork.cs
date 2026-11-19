@@ -64,8 +64,8 @@ public sealed partial class MusicCapability
 
     private void RepositorySongsChanged(IReadOnlySet<string> ids)
     {
-        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
-        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.IsClosing) return;
+        _ = Presentation.Dispatcher.EnqueueAsync(() =>
         {
             if (stopping || disposed || application is not MusicNativeApplication owner) return;
             var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

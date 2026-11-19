@@ -9,7 +9,8 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Windows.Graphics;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Media;
@@ -419,7 +420,7 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
     internal static async Task Until(Func<bool> predicate, string phase)
     {
         await Until(() => Task.FromResult(predicate()), phase);
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
     }
     internal static async Task Until(Func<Task<bool>> predicate, string phase)
     {

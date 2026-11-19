@@ -2,7 +2,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Media;
 
 namespace MeowFilm.Windows.Tests;
@@ -76,32 +77,10 @@ internal static class AudioCoreFixtures
         await blocked;
     }
 
-    internal static async Task Sta(Func<Task> body)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
-            Exception? failure = null;
-            dispatcher.BeginInvoke(new Action(async () =>
-            {
-                try { await body(); }
-                catch (Exception error) { failure = error; }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Send); }
-            }));
-            Dispatcher.Run();
-            if (failure is null) done.TrySetResult();
-            else done.TrySetException(failure);
-        }) { IsBackground = true, Name = "MeowFilm independent audio fixture" };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        try { await done.Task.WaitAsync(TimeSpan.FromSeconds(40)); }
-        finally { Check(thread.Join(5000), "STA dispatcher and fixture exited"); }
-    }
+    internal static Task Sta(Func<Task> body) => OwnerTestQueue.RunAsync(body, TimeSpan.FromSeconds(40));
 
     internal static NativeAudioPlayback Dummy(Func<CancellationToken, Task<IDisposable>>? acquireOutput = null) =>
-        new(Dispatcher.CurrentDispatcher, acquireOutput, NativeAudioOutput.Dummy);
+        new(OwnerDispatcher.Current, acquireOutput, NativeAudioOutput.Dummy);
 
     internal sealed class Admission : IDisposable
     {

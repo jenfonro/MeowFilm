@@ -24,8 +24,8 @@ public sealed partial class MusicCapability
     {
         // The native coordinator can finish on a pool thread. Coalesce refreshes
         // on the existing UI command lane, never create another library writer.
-        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
-        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.IsClosing) return;
+        _ = Presentation.Dispatcher.EnqueueAsync(() =>
         {
             if (stopping || disposed) return;
             syncRefreshRequested = true;

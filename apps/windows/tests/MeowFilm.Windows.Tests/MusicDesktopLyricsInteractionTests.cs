@@ -1,4 +1,3 @@
-using SystemParameters = System.Windows.SystemParameters;
 using Colors = Microsoft.UI.Colors;
 using Color = global::Windows.UI.Color;
 using System.Diagnostics;
@@ -282,10 +281,16 @@ public static partial class MusicUiTests
                 await words[0].Outline.RenderWork;
                 var glyphs = words[0].Outline.Coverage;
                 True(glyphs is { Length: > 0 }, "native hinted outline coverage was actually rasterized");
+                var inputInk = words[0].Outline.InputInk;
+                True(inputInk is { } inputInkSnapshot && inputInkSnapshot.Width * inputInkSnapshot.Height == inputInkSnapshot.Alpha.Length &&
+                    inputInkSnapshot.Alpha.Any(alpha => alpha == 255) && inputInkSnapshot.Alpha.Any(alpha => alpha == 0),
+                    "the same glyph owner exposes complete fill and outline alpha, including genuine transparent gaps");
                 row.Highlight = (new SolidColorBrush(Microsoft.UI.Colors.LightBlue)); row.Normal = (new SolidColorBrush(Microsoft.UI.Colors.White));
                 await Drain();
                 Equal(.5, words[0].WordProgress);
                 True(ReferenceEquals(glyphs, words[0].Outline.Coverage), "changing colors retains the native glyph cache and progress");
+                True(ReferenceEquals(inputInk!.Value.Alpha, words[0].Outline.InputInk!.Value.Alpha),
+                    "color changes reuse the input coverage instead of rerasterizing or expanding hit geometry");
                 list.Position = 3; await Drain();
                 Equal(1d, words[0].WordProgress); Equal(.5, words[1].WordProgress);
                 await GeneralAppearanceTests.SavePreview(row, "desktop-lyrics-real-words", 700, 120);
@@ -661,8 +666,8 @@ public static partial class MusicUiTests
         await SaveDesktopLyricFixture(f);
         await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
         var window = f.Module.DesktopLyricsWindow!;
-        DesktopTestUi.MoveWindow(window, SystemParameters.WorkArea.Left + 20, DesktopTestUi.WindowPosition(window).Y);
-        DesktopTestUi.MoveWindow(window, DesktopTestUi.WindowPosition(window).X, SystemParameters.WorkArea.Bottom - DesktopTestUi.WindowSize(window).Height - 20);
+        DesktopTestUi.MoveWindow(window, DesktopTestUi.WorkArea.Left + 20, DesktopTestUi.WindowPosition(window).Y);
+        DesktopTestUi.MoveWindow(window, DesktopTestUi.WindowPosition(window).X, DesktopTestUi.WorkArea.Bottom - DesktopTestUi.WindowSize(window).Height - 20);
         await Drain();
         StopDesktopPointerObservation(window);
         string pipeName = "meowfilm-lyric-hit-" + Guid.NewGuid().ToString("N");
@@ -692,29 +697,49 @@ public static partial class MusicUiTests
             True(DesktopInteractionNative.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x13),
                 "place our lyric HWND above our child without activating either");
             window.RefreshHover(new(-100000, -100000)); await Drain();
+            await window.SynchronizeInputRegionAsync();
             DesktopInteractionNative.DwmFlush();
             var glyph = await DesktopOpaqueLyricPoint(window);
             var blank = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(window), new(8, DesktopTestUi.WindowRoot(window).ActualHeight - 8));
             await DesktopHit(glyph, hwnd);
             await DesktopHit(blank, lower);
+            await NativeDesktopCapture.SaveAsync(DesktopTestUi.WindowRoot(window), "desktop-lyrics-transparent", lower);
+            var originalSize = DesktopTestUi.WindowSize(window);
+            var originalRow = f.Module.Lyrics[0];
+            f.Module.Lyrics[0] = originalRow with { Text = "改词后仍按实际笔画命中" };
+            DesktopTestUi.ResizeWindow(window, originalSize.Width - 80, originalSize.Height);
+            await Until(() => Math.Abs(DesktopTestUi.WindowRoot(window).ActualWidth - (originalSize.Width - 80)) <= 1);
+            await window.SynchronizeInputRegionAsync();
+            await DesktopHit(await DesktopOpaqueLyricPoint(window), hwnd);
+            await DesktopHit(NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(window),
+                new(8, DesktopTestUi.WindowRoot(window).ActualHeight - 8)), lower);
+            f.Module.Lyrics[0] = originalRow;
+            DesktopTestUi.ResizeWindow(window, originalSize.Width, originalSize.Height);
+            await Until(() => Math.Abs(DesktopTestUi.WindowRoot(window).ActualWidth - originalSize.Width) <= 1);
+            await window.SynchronizeInputRegionAsync();
+            glyph = await DesktopOpaqueLyricPoint(window);
             DesktopHover(window); await Drain(); DesktopInteractionNative.DwmFlush();
+            await window.SynchronizeInputRegionAsync();
             await DesktopHit(blank, hwnd);
             window.SetLocked(true); await Drain(); DesktopInteractionNative.DwmFlush();
+            await window.SynchronizeInputRegionAsync();
             await DesktopHit(glyph, lower);
             await DesktopHit(blank, lower);
+            await NativeDesktopCapture.SaveAsync(DesktopTestUi.WindowRoot(window), "desktop-lyrics-locked", lower);
             var unlock = window.UnlockWindow!;
             var unlockHandle = WinRT.Interop.WindowNative.GetWindowHandle(unlock);
             var unlockPoint = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(unlock), new(16, 16));
             await DesktopHit(unlockPoint, unlockHandle);
-            var target = System.Windows.Automation.AutomationElement.FromHandle(lower).FindFirst(
-                System.Windows.Automation.TreeScope.Element | System.Windows.Automation.TreeScope.Descendants,
-                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.AutomationIdProperty, "ControlledLyricHitTarget"))
-                ?? throw new InvalidOperationException("Separate-process native target is not exposed to automation");
-            ((System.Windows.Automation.InvokePattern)target.GetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern)).Invoke();
+            DesktopAutomation.Invoke(lower, "ControlledLyricHitTarget");
             await writer.WriteLineAsync("count");
             Equal("1", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
-            Click((Button)unlock.Content); StopDesktopPointerObservation(window);
-            await Drain(); DesktopHover(window); DesktopInteractionNative.DwmFlush();
+            Click((Button)unlock.Content);
+            await Until(() => !window.IsLyricsLocked && window.UnlockWindow is null &&
+                (DesktopInteractionNative.GetWindowLongPtr(hwnd, -20).ToInt64() & 0x00080020) == 0);
+            StopDesktopPointerObservation(window);
+            DesktopHover(window); await window.SynchronizeInputRegionAsync(); DesktopInteractionNative.DwmFlush();
+            Equal(Visibility.Visible, ((Border)DesktopTestUi.WindowRoot(window).FindName("HoverSurface")).Visibility);
+            True(!window.IsPointerObserverRunning, "the completed unlock observer is stopped before the controlled hover probe");
             await DesktopHit(blank, hwnd);
             await writer.WriteLineAsync("close");
             Equal("closed", await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
@@ -740,32 +765,44 @@ public static partial class MusicUiTests
         {
             DesktopInteractionNative.DwmFlush();
             actual = DesktopInteractionNative.WindowFromPoint(DesktopPoint(point));
-            if (actual == expected) return;
+            if (actual == expected || DesktopInteractionNative.GetAncestor(actual, 2) == expected) return;
             await Task.Delay(16);
         } while (watch.Elapsed < TimeSpan.FromSeconds(8));
-        throw new InvalidOperationException($"Desktop OS hit at {point}: expected HWND 0x{expected:X}, actual 0x{actual:X}");
+        throw new InvalidOperationException($"Desktop OS hit at {point}: expected HWND 0x{expected:X}, actual 0x{actual:X}, root 0x{DesktopInteractionNative.GetAncestor(actual, 2):X}");
     }
 
     private static async Task<Point> DesktopOpaqueLyricPoint(MusicDesktopLyricsWindow window)
     {
         var content = (FrameworkElement)window.Content;
-        var bitmap = await DesktopTestUi.Render(content);
+        var nativeBitmap = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
+        await nativeBitmap.RenderAsync(content);
+        var buffer = await nativeBitmap.GetPixelsAsync();
+        var bytes = new byte[buffer.Length];
+        using (var reader = global::Windows.Storage.Streams.DataReader.FromBuffer(buffer)) reader.ReadBytes(bytes);
+        var bitmap = new DesktopTestUi.RenderFrame(nativeBitmap.PixelWidth, nativeBitmap.PixelHeight,
+            content.XamlRoot!.RasterizationScale, bytes);
         int stride = bitmap.Width * 4;
         var pixels = bitmap.Pixels;
-        for (int y = 48; y < bitmap.Height - 12; y++)
-            for (int x = 22; x < bitmap.Width - 22; x++)
+        int visibleWidth = Math.Min(bitmap.Width, (int)Math.Floor(content.ActualWidth * bitmap.Scale));
+        int visibleHeight = Math.Min(bitmap.Height, (int)Math.Floor(content.ActualHeight * bitmap.Scale));
+        for (int y = (int)Math.Ceiling(48 * bitmap.Scale); y < visibleHeight - (int)Math.Ceiling(12 * bitmap.Scale); y++)
+            for (int x = (int)Math.Ceiling(22 * bitmap.Scale); x < visibleWidth - (int)Math.Ceiling(22 * bitmap.Scale); x++)
             {
                 bool insideInk = true;
                 for (int dy = -1; dy <= 1 && insideInk; dy++)
                     for (int dx = -1; dx <= 1; dx++)
                         if (pixels[(y + dy) * stride + (x + dx) * 4 + 3] < 220) { insideInk = false; break; }
-                if (insideInk) return NativeDesktopCapture.ScreenPoint(content, new((x + .5) / bitmap.Scale, (y + .5) / bitmap.Scale));
+                if (insideInk)
+                {
+                    var point = NativeDesktopCapture.ScreenPoint(content, new((x + .5) / bitmap.Scale, (y + .5) / bitmap.Scale));
+                    return point;
+                }
             }
         throw new InvalidOperationException("No actual rendered lyric glyph was found");
     }
 
     private static DesktopInteractionNative.NativePoint DesktopPoint(Point point) =>
-        new() { X = (int)Math.Round(point.X), Y = (int)Math.Round(point.Y) };
+        new() { X = (int)Math.Floor(point.X), Y = (int)Math.Floor(point.Y) };
 
     private static async Task DesktopHitChild(string pipeName)
     {
@@ -817,6 +854,8 @@ public static partial class MusicUiTests
         }
         [DllImport("user32.dll")]
         internal static extern nint WindowFromPoint(NativePoint point);
+        [DllImport("user32.dll")]
+        internal static extern nint GetAncestor(nint window, uint flags);
         [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
         internal static extern nint GetWindowLongPtr(nint hwnd, int index);
         [DllImport("user32.dll")]

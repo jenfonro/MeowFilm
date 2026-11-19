@@ -2,7 +2,8 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Windows.UI;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
@@ -28,12 +29,12 @@ internal sealed class MusicPresentation
     internal MusicPresentation(MusicCapability module)
     {
         this.module = module;
-        Dispatcher = Dispatcher.CurrentDispatcher;
+        Dispatcher = OwnerDispatcher.Current;
         CreatePlaylistAction = new("创建歌单", () => Page.OpenCreatePlaylistDialog(),
             () => module.CanEdit && page?.IsPlaylistDialogOpen != true);
     }
 
-    internal Dispatcher Dispatcher { get; }
+    internal OwnerDispatcher Dispatcher { get; }
     private T WithArtwork<T>(T view) where T : FrameworkElement
     { ArtworkScope.SetLoader(view, module.ArtworkLoader); return view; }
     internal MusicView Page => page ??= WithArtwork(new MusicView(module));

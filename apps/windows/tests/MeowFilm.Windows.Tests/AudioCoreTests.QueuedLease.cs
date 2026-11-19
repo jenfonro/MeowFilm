@@ -1,4 +1,5 @@
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.AudioCoreFixtures;
 
@@ -8,7 +9,7 @@ public static partial class AudioPlaybackTests
 {
     private static Task QueueRead(NativeAudioPlayback player, Lease lease, CancellationToken token = default)
     {
-        // Called with dispatcher processing disabled. Waiting for the outer task
+        // Called while the owner callback occupies its queue, without yielding. Waiting for the outer task
         // proves OpenReadAsync returned its pending task, not just worker entry.
         return Task.Factory.StartNew(() => Open(player, lease, token: token), CancellationToken.None,
             TaskCreationOptions.DenyChildAttach, TaskScheduler.Default)
@@ -28,7 +29,6 @@ public static partial class AudioPlaybackTests
         Task opening = Task.CompletedTask;
         try
         {
-            using (Dispatcher.CurrentDispatcher.DisableProcessing())
             {
                 opening = QueueRead(player, lease, cancel.Token);
                 Check(!opening.IsCompleted && lease.Stream.ReadCalls == 0, "owned read is queued, not executed");
@@ -40,7 +40,7 @@ public static partial class AudioPlaybackTests
                 Check(lease.Released.Task.Wait(3000), "physical release does not require dispatcher processing");
             }
             await Cancelled(() => opening.WaitAsync(TimeSpan.FromSeconds(3)));
-            await Dispatcher.CurrentDispatcher.InvokeAsync(() => { }, DispatcherPriority.ContextIdle);
+            await OwnerDispatcher.Current.EnqueueAsync(() => { }, DispatcherQueuePriority.Low);
             lease.AssertReleased();
             Check(lease.Stream.ReadCalls == 0 && !player.HasMedia && !player.IsPlaying &&
                 player.OwnerId is null && player.Identity is null && player.LastErrorCode is null && events == 0,
@@ -67,7 +67,6 @@ public static partial class AudioPlaybackTests
         player.Failed += (_, _) => terminal++;
         player.Ended += (_, _) => terminal++;
         Task opening;
-        using (Dispatcher.CurrentDispatcher.DisableProcessing())
         {
             opening = QueueRead(player, rejected);
             rejected.Revoke();
@@ -95,7 +94,6 @@ public static partial class AudioPlaybackTests
         Task opening = Task.CompletedTask, closing = Task.CompletedTask;
         try
         {
-            using (Dispatcher.CurrentDispatcher.DisableProcessing())
             {
                 opening = QueueRead(player, lease, cancel.Token);
                 Check(!opening.IsCompleted && lease.Stream.ReadCalls == 0, "owned read is queued before close");
@@ -109,14 +107,14 @@ public static partial class AudioPlaybackTests
                 Check(!closing.IsCompleted && !opening.IsCompleted && !lease.Released.Task.IsCompleted &&
                     lease.Stream.CloseCalls == 0, "close drains queued ownership through physical release");
             }
-            await Dispatcher.CurrentDispatcher.InvokeAsync(() => { }, DispatcherPriority.ContextIdle);
+            await OwnerDispatcher.Current.EnqueueAsync(() => { }, DispatcherQueuePriority.Low);
             Check(!closing.IsCompleted && !opening.IsCompleted && !lease.Released.Task.IsCompleted,
                 "close remains pending on physical release, not on suspended dispatcher processing");
             release.TrySetResult();
             await closing.WaitAsync(TimeSpan.FromSeconds(3));
             lease.AssertReleased(); // At close completion, before separately awaiting the rejected open.
             await Superseded(opening);
-            await Dispatcher.CurrentDispatcher.InvokeAsync(() => { }, DispatcherPriority.ContextIdle);
+            await OwnerDispatcher.Current.EnqueueAsync(() => { }, DispatcherQueuePriority.Low);
             Check(lease.Stream.ReadCalls == 0 && !player.HasMedia && !player.IsPlaying &&
                 player.OwnerId is null && player.Identity is null && player.LastErrorCode is null && events == 0,
                 "queued read cannot resurrect playback after Stop or Dispose");
@@ -148,7 +146,6 @@ public static partial class AudioPlaybackTests
         Task opening = Task.CompletedTask, closing = Task.CompletedTask;
         try
         {
-            using (Dispatcher.CurrentDispatcher.DisableProcessing())
             {
                 opening = QueueRead(player, lease);
                 closing = dispose ? player.DisposeAsync().AsTask() : player.StopAsync();
@@ -195,7 +192,6 @@ public static partial class AudioPlaybackTests
                 active.DisposeGate = release.Task;
             }
             failed.DisposeGate = Task.FromException(new System.IO.IOException("synthetic-audio-release-canary"));
-            using (Dispatcher.CurrentDispatcher.DisableProcessing())
             {
                 opening = QueueRead(player, queued);
                 closing = dispose ? player.DisposeAsync().AsTask() : player.StopAsync();
@@ -203,7 +199,7 @@ public static partial class AudioPlaybackTests
             }
             await failed.ReleaseEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
             await active.ReleaseEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             Check(!closing.IsCompleted && !opening.IsCompleted && !queued.Released.Task.IsCompleted,
                 "one failed release does not bypass other accepted cleanup receipts");
             release.TrySetResult();

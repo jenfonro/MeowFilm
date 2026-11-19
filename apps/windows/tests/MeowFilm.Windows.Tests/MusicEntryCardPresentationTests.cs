@@ -13,7 +13,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
@@ -396,7 +397,8 @@ public static class MusicEntryCardPresentationTests
             var shade = (Border)f.Entry.FindName("ExpansionShade");
             var rest = await Capture(f.Entry);
             var footer = new Point(f.Entry.ActualWidth / 2, f.Entry.ActualHeight - 3);
-            Check(rest.At(footer) == surface.Color, "the real footer paints the selected image tone");
+            Check(rest.At(footer) == surface.Color,
+                $"the real footer paints the selected image tone: actual={rest.At(footer)}; expected={surface.Color}");
             Check(shade.Background is LinearGradientBrush expansion && expansion.GradientStops[^1].Color == surface.Color,
                 "hover and footer use one color source");
             await f.Expand(true);

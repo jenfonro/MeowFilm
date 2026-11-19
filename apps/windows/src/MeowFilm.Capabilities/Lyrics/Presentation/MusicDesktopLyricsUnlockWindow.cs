@@ -94,6 +94,12 @@ internal static class MusicDesktopLyricsNative
     internal static bool SetLocation(nint handle, int x, int y) =>
         SetWindowPos(handle, 0, x, y, 0, 0, 0x0215); // SWP_NOACTIVATE | NOOWNERZORDER | NOZORDER | NOSIZE
 
+    internal static void BringToTop(nint handle)
+    {
+        if (!SetWindowPos(handle, -1, 0, 0, 0, 0, 0x0213)) // HWND_TOPMOST, NOACTIVATE | NOOWNERZORDER | NOMOVE | NOSIZE
+            throw new Win32Exception();
+    }
+
     internal static void SetResizableStyle(nint handle)
     {
         Marshal.SetLastPInvokeError(0);
@@ -139,7 +145,24 @@ internal static class MusicDesktopLyricsNative
         Marshal.SetLastPInvokeError(0);
         if (SetWindowLongPtr(handle, -20, style) == 0 && Marshal.GetLastPInvokeError() != 0)
             throw new Win32Exception();
+        if (clickThrough)
+        {
+            // WS_EX_TRANSPARENT skips a layered HWND for cross-thread/process
+            // hit testing; NOACTIVATE alone only prevents focus activation.
+            if (SetWindowLongPtr(handle, -20, style | (nint)0x00080000) == 0 && Marshal.GetLastPInvokeError() != 0)
+                throw new Win32Exception();
+            if (!SetLayeredWindowAttributes(handle, 0, 255, 2)) throw new Win32Exception();
+        }
+        else
+        {
+            Marshal.SetLastPInvokeError(0);
+            if (SetWindowLongPtr(handle, -20, style & ~(nint)0x00080000) == 0 && Marshal.GetLastPInvokeError() != 0)
+                throw new Win32Exception();
+        }
     }
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetLayeredWindowAttributes(nint window, uint key, byte alpha, uint flags);
 
     internal delegate nint SubclassProc(nint hwnd, uint message, nint wParam, nint lParam, nuint id, nuint data);
     [DllImport("comctl32.dll", SetLastError = true)]

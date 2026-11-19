@@ -23,7 +23,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
   <Target Name="IncludeWinUIResourcesInPublish" AfterTargets="ComputeResolvedFilesToPublishList"
           DependsOnTargets="GetCopyToOutputDirectoryItems">

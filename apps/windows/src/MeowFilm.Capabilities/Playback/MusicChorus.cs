@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Windows;
 using MeowFilm.Capabilities.PlaybackCache;
 
 namespace MeowFilm.Capabilities;
@@ -30,14 +29,11 @@ public sealed partial class MusicCapability
         start < DurationSeconds && end <= DurationSeconds;
     public string ChorusLabel => HasChorus ? "官方高潮 " + Clock(chorusStart!.Value) : "";
     public double ChorusPositionSeconds => HasChorus ? chorusStart!.Value : double.NaN;
-    public GridLength ChorusBefore => new(HasChorus ? chorusStart!.Value / DurationSeconds : 0, GridUnitType.Star);
-    public GridLength ChorusAfter => new(HasChorus ? 1 - chorusStart!.Value / DurationSeconds : 1, GridUnitType.Star);
 
     private void ChorusBindings()
     {
         Changed(nameof(HasChorus)); Changed(nameof(ChorusLabel));
         Changed(nameof(ChorusPositionSeconds));
-        Changed(nameof(ChorusBefore)); Changed(nameof(ChorusAfter));
     }
     private void ClearChorus()
     {
@@ -47,8 +43,8 @@ public sealed partial class MusicCapability
     private void ChorusAccountChanged()
     {
         Interlocked.Increment(ref chorusAccountEpoch); // Fence before queued UI work.
-        if (!Presentation.Dispatcher.HasShutdownStarted)
-            _ = Presentation.Dispatcher.InvokeAsync(() => { ClearChorus(); if (!stopping) SyncChorus(); });
+        if (!Presentation.Dispatcher.IsClosing)
+            _ = Presentation.Dispatcher.EnqueueAsync(() => { ClearChorus(); if (!stopping) SyncChorus(); });
     }
     private void SyncChorus()
     {

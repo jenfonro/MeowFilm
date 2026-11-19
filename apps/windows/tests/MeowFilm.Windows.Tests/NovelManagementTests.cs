@@ -6,12 +6,10 @@ using Windows.System;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using FontWeights = Microsoft.UI.Text.FontWeights;
 using Color = global::Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -430,7 +428,7 @@ public static class NovelManagementTests
         Button? cancel = null;
         try
         {
-            await DesktopTestUi.DrainAsync();
+            await NovelTestUi.LoadedAsync(body);
             var panel = NovelTests.Find<Border>(dialogHost).Single(item =>
                 AutomationProperties.GetName(item) == title);
             cancel = NovelTests.Find<Button>(dialogHost).Single(button => Equals(button.Content, "取消"));
@@ -464,15 +462,15 @@ public static class NovelManagementTests
         const int scale = 5, border = 4; int width = (qr.Size + border * 2) * scale; var pixels = new byte[width * width]; Array.Fill(pixels, (byte)255);
         for (int y = 0; y < qr.Size; y++) for (int x = 0; x < qr.Size; x++) if (qr.GetModule(x, y))
             for (int dy = 0; dy < scale; dy++) Array.Fill(pixels, (byte)0, ((y + border) * scale + dy) * width + (x + border) * scale, scale);
-        var bitmap = BitmapSource.Create(width, width, 96, 96, PixelFormats.Gray8, null, pixels, width); bitmap.Freeze();
+        var bgra = pixels.SelectMany(value => new byte[] { value, value, value, 255 }).ToArray();
         string path = TestWorkspace.DataPath("novel-management-qr.png");
         try
         {
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using (var file = File.Create(path)) encoder.Save(file);
+            File.WriteAllBytes(path, FixtureImages.Encode(width, width, bgra));
             Check(await NovelSettingsView.ReadRuleQrAsync(path, default) == text);
             File.WriteAllText(path, "not an image");
             try { await NovelSettingsView.ReadRuleQrAsync(path, default); throw new InvalidOperationException("Invalid QR image accepted"); }
-            catch (Exception error) when (error is NotSupportedException or FileFormatException) { }
+            catch (Exception error) when (error is InvalidDataException) { }
         }
         finally { File.Delete(path); }
     }

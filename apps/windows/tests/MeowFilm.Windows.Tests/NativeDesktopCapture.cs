@@ -30,7 +30,8 @@ internal static class NativeDesktopCapture
         return new(origin.X + point.X * root.RasterizationScale, origin.Y + point.Y * root.RasterizationScale);
     }
 
-    internal static async Task SaveAsync(FrameworkElement target, string name) => await SaveAsync(await CaptureAsync(target), name);
+    internal static async Task SaveAsync(FrameworkElement target, string name, nint transparentBackdrop = 0) =>
+        await SaveAsync(await CaptureAsync(target, transparentBackdrop), name);
 
     internal static async Task SaveAsync(Capture image, string name)
     {
@@ -48,7 +49,7 @@ internal static class NativeDesktopCapture
     }
 
     internal sealed record Capture(int Width, int Height, double Scale, byte[] Pixels);
-    internal static async Task<Capture> CaptureAsync(FrameworkElement target)
+    internal static async Task<Capture> CaptureAsync(FrameworkElement target, nint transparentBackdrop = 0)
     {
         if (!TestDesktopContext.Verify(requireTarget: true))
             throw new InvalidOperationException("Desktop capture requires the verified target session.");
@@ -90,7 +91,9 @@ internal static class NativeDesktopCapture
             {
                 var at = new NativePoint { X = x + Math.Clamp(point.Item1, 0, width - 1), Y = y + Math.Clamp(point.Item2, 0, height - 1) };
                 var displayed = GetAncestor(WindowFromPoint(at), 2);
-                if (displayed != hwnd)
+                // Native popups belong to the captured window; transparent regions
+                // deliberately hit their controlled backdrop. Reject other windows.
+                if (!BelongsToWindow(displayed, hwnd) && (transparentBackdrop == 0 || displayed != transparentBackdrop))
                     throw new InvalidOperationException($"Desktop capture target is covered: target=0x{hwnd:X}, displayed=0x{displayed:X}, " +
                         $"point={at.X},{at.Y}, bounds={x},{y},{width},{height}.");
             }
@@ -123,6 +126,13 @@ internal static class NativeDesktopCapture
             if (presenter is not null) presenter.IsAlwaysOnTop = wasTopmost;
         }
     }
+    private static bool BelongsToWindow(nint displayed, nint window)
+    {
+        for (nint current = displayed; current != 0; current = GetWindow(current, 4)) // GW_OWNER
+            if (current == window) return true;
+        return false;
+    }
+    [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
     [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] private struct BitmapInfo
     {

@@ -113,7 +113,7 @@ public static partial class MusicUiTests
             for (int i = 0; i < 3; i++)
                 True(detail.BrowseLyricWheel(-120), "each actual wheel-admission call is accepted");
             await Task.Delay(260); await Drain();
-            int lines = System.Windows.SystemParameters.WheelScrollLines;
+            int lines = MeowFilm.Desktop.DesktopSystemSettings.WheelScrollLines;
             var distance = lines < 0 ? scroll.ViewportHeight : lines * 24d;
             True(Math.Abs(scroll.VerticalOffset - offset - distance * 3) < 2, "successive wheel notches retain their full distance");
             Equal(beforeSeeks, f.Playback.SeekCalls);

@@ -1,15 +1,15 @@
+using System.Numerics;
+using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.Text;
+using Windows.Foundation;
+using Windows.UI;
+using Microsoft.UI.Text;
+using Windows.UI.ViewManagement;
 using System.IO;
-using System.Globalization;
-using SkiaSharp;
-using System.Windows;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
-using System.Windows.Media;
-using System.Runtime.InteropServices.WindowsRuntime;
-using System.Windows.Media.Imaging;
-using System.Windows.Media.TextFormatting;
 using MeowFilm.Desktop;
 using Xaml = Microsoft.UI.Xaml;
 using XamlMedia = Microsoft.UI.Xaml.Media;
@@ -21,17 +21,18 @@ namespace MeowFilm.Capabilities;
 /// <summary>Native paragraph/UTF-16 layout. Only viewport images retain decoded pixels and runtime leases.</summary>
 public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisposable
 {
-    private sealed record Row(int Block, int Offset, double Y, double Height, TextLine? Line = null, string Image = "", double Width = 0, double ImageOffset = 0, double ImageHeight = 0);
+    private sealed record Row(int Block, int Offset, double Y, double Height, CanvasTextLayout? Layout = null, double TextY = 0, string Image = "", double Width = 0, double ImageOffset = 0, double ImageHeight = 0);
     private sealed class ImageLease
     {
         internal CancellationTokenSource Cancellation { get; } = new();
-        internal BitmapSource? Bitmap;
+        internal CanvasBitmap? Bitmap;
         internal string? Reference;
         internal int DecodeWidth;
         internal Task Task = System.Threading.Tasks.Task.CompletedTask;
     }
     private readonly NovelSourceService sources;
-    private readonly TextFormatter formatter = TextFormatter.Create();
+    private readonly CanvasDevice device = CanvasDevice.GetSharedDevice();
+    private readonly List<CanvasTextLayout> layouts = [];
     private readonly List<Row> rows = [];
     private readonly List<double> pages = [];
     private readonly Dictionary<int, ImageLease> images = [];
@@ -46,14 +47,14 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private double offset, totalHeight, textWidth;
     private int page;
     private bool dirty = true, disposed, resourcesPaused;
-    private Brush background = Brushes.White, foreground = Brushes.Black;
-    private BitmapSource? backgroundImage;
+    private Color background = Microsoft.UI.Colors.White, foreground = Microsoft.UI.Colors.Black;
+    private CanvasBitmap? backgroundImage;
     private readonly Microsoft.UI.Xaml.Controls.Image frame = new() { Stretch = XamlMedia.Stretch.Fill, IsHitTestVisible = false };
     private readonly Microsoft.UI.Xaml.Controls.Image previous = new() { Stretch = XamlMedia.Stretch.Fill, IsHitTestVisible = false };
     private readonly XamlMedia.TranslateTransform frameTransform = new(), previousTransform = new();
     private readonly NovelPresentation.VisibilityWatch visibility;
     private readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
-    private readonly long contrastToken;
+    private readonly IDisposable contrastObservation;
     private readonly NovelPageRaster raster = new();
     private XamlAnimation.Storyboard? turnAnimation;
     private Xaml.XamlRoot? xamlRoot;
@@ -84,7 +85,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         visibility = new(this, visible =>
         {
             if (disposed) return;
-            if (!visible) { ClearFrame(); ReleaseAllImages(); backgroundRequest?.Cancel(); backgroundImage = null; }
+            if (!visible) { ClearFrame(); ReleaseAllImages(); backgroundRequest?.Cancel(); backgroundImage?.Dispose(); backgroundImage = null; }
             else { ResumeImages(); InvalidateVisual(); }
         });
         Loaded += (_, _) =>
@@ -95,8 +96,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
             Reflow();
         };
         Unloaded += (_, _) => DetachRoot();
-        ActualThemeChanged += (_, _) => Reflow();
-        contrastToken = RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Reflow());
+        contrastObservation = DesktopTheme.Observe(this, Reflow);
         uiSettings.ColorValuesChanged += HighContrastChanged;
         SizeChanged += (_, _) =>
         {
@@ -232,20 +232,15 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     {
         if (!dirty || ActualWidth < 1 || ActualHeight < 1) return;
         var saved = pendingAnchor ?? CaptureAnchor(); pendingAnchor = null;
-        foreach (var row in rows) row.Line?.Dispose(); rows.Clear(); pages.Clear();
+        foreach (var layout in layouts) layout.Dispose(); layouts.Clear(); rows.Clear(); pages.Clear();
         textWidth = Math.Max(1, Math.Min(appearance.ContentWidth, ActualWidth - appearance.Margin * 2));
         double height = Math.Max(1, ActualHeight - appearance.Margin * 2), y = appearance.Margin, pageStart = 0;
-        var face = new Typeface(new FontFamily(appearance.FontFamily), FontStyles.Normal,
-            appearance.Bold ? FontWeights.SemiBold : FontWeights.Normal, FontStretches.Normal);
-        foreground = Desktop.DesktopTheme.GetIsHighContrast(this) ? SystemColors.WindowTextBrush : ParseBrush(appearance.Foreground);
-        background = Desktop.DesktopTheme.GetIsHighContrast(this) ? SystemColors.WindowBrush : ParseBrush(appearance.Background);
-        var textProperties = new RunStyle(face, appearance.FontSize, foreground, PixelsPerDip);
-        var paragraph = new ParagraphStyle(textProperties, appearance.FontSize * appearance.LineHeight);
+        bool contrast = DesktopTheme.GetIsHighContrast(this);
+        foreground = contrast ? uiSettings.UIElementColor(UIElementType.WindowText) : NovelTextStyle.Color(appearance.Foreground);
+        background = contrast ? uiSettings.UIElementColor(UIElementType.Window) : NovelTextStyle.Color(appearance.Background);
         if (session?.ContentTitle is { Length: > 0 } title)
         {
-            var titleProperties = new RunStyle(new Typeface(SystemFonts.MessageFontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal),
-                appearance.FontSize * 1.15, foreground, PixelsPerDip);
-            Text(title, -1, titleProperties, new ParagraphStyle(titleProperties, appearance.FontSize * appearance.LineHeight * 1.15));
+            Text(title, -1, "Segoe UI", appearance.FontSize * 1.15, false);
             y += appearance.ParagraphSpacing;
         }
         int blockIndex = -1;
@@ -267,20 +262,30 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
                 } while (used < imageHeight - .1);
                 y += appearance.ParagraphSpacing; continue;
             }
-            if (block.Type == "text") { Text(block.Text, blockIndex, textProperties, paragraph); y += appearance.ParagraphSpacing; }
+            if (block.Type == "text") { Text(block.Text, blockIndex, appearance.FontFamily, appearance.FontSize, appearance.Bold); y += appearance.ParagraphSpacing; }
         }
-        void Text(string text, int index, RunStyle properties, ParagraphStyle style)
+        void Text(string text, int index, string family, double size, bool bold)
         {
-            var source = new ParagraphSource(text, properties);
-            int start = 0; TextLineBreak? lineBreak = null;
-            while (start < text.Length)
+            if (text.Length == 0) return;
+            using var format = new CanvasTextFormat
             {
-                var line = formatter.FormatLine(source, start, textWidth, style, lineBreak);
-                lineBreak?.Dispose(); lineBreak = line.GetTextLineBreak();
-                double lineHeight = Math.Max(line.Height, style.LineHeight);
-                Add(new(index, start, y, lineHeight, line)); y += lineHeight; start += Math.Max(1, line.Length);
+                FontFamily = family, FontSize = (float)size,
+                FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
+                WordWrapping = CanvasWordWrapping.Wrap,
+                Direction = CanvasTextDirection.LeftToRightThenTopToBottom,
+                LineSpacingMode = CanvasLineSpacingMode.Uniform,
+                LineSpacing = (float)(size * appearance.LineHeight),
+                LineSpacingBaseline = (float)(size * (appearance.LineHeight - 1) / 2 + size * .8)
+            };
+            var layout = new CanvasTextLayout(device, text, format, (float)textWidth, 0);
+            layouts.Add(layout);
+            int start = 0; double textY = 0;
+            foreach (var line in layout.LineMetrics)
+            {
+                double lineHeight = line.Height;
+                Add(new(index, start, y, lineHeight, layout, textY));
+                y += lineHeight; textY += lineHeight; start += line.CharacterCount;
             }
-            lineBreak?.Dispose();
         }
         if (pages.Count == 0) pages.Add(0);
         totalHeight = Math.Max(ActualHeight, y + appearance.Margin);
@@ -294,7 +299,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         else if (session?.Chapter is { } current)
         {
             int block = Math.Clamp(saved.BlockIndex, 0, Math.Max(0, session.Blocks.Count - 1));
-            int textOffset = block < session.Blocks.Count && session.Blocks[block].Type == "text" ? Math.Min(saved.Utf16Offset, session.Blocks[block].Text.Length) : 0;
+            int textOffset = block < session.Blocks.Count && session.Blocks[block].Type == "text" ? Math.Clamp(saved.Utf16Offset, 0, session.Blocks[block].Text.Length) : 0;
             anchor = saved with { ChapterUrl = current.ChapterUrl, ChapterTitle = current.Name, ChapterIndex = current.Index,
                 BlockIndex = block, Utf16Offset = textOffset };
         }
@@ -328,31 +333,27 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         if (ActualWidth < 1 || ActualHeight < 1) return;
         frame.Source = raster.Render(new(ActualWidth, ActualHeight), PixelsPerDip, DrawPage);
     }
-    private void DrawPage(DrawingContext context)
+    private void DrawPage(CanvasDrawingSession context)
     {
         var bounds = new Rect(0, 0, ActualWidth, ActualHeight);
-        context.DrawRectangle(background, null, bounds);
-        if (backgroundImage is not null && !Desktop.DesktopTheme.GetIsHighContrast(this)) context.DrawImage(backgroundImage, bounds);
-        context.PushClip(new RectangleGeometry(bounds));
+        context.FillRectangle(bounds, background);
+        if (backgroundImage is not null && !DesktopTheme.GetIsHighContrast(this)) context.DrawImage(backgroundImage, bounds);
         double x = (ActualWidth - textWidth) / 2;
         double end = appearance.Mode != "scroll" && page + 1 < pages.Count ? pages[page + 1] + appearance.Margin : offset + ActualHeight - appearance.Margin;
-        context.PushClip(new RectangleGeometry(new Rect(0, appearance.Margin, ActualWidth, Math.Max(0, ActualHeight - appearance.Margin * 2))));
+        using var clip = context.CreateLayer(1, new Rect(0, appearance.Margin, ActualWidth, Math.Max(0, ActualHeight - appearance.Margin * 2)));
         foreach (var row in rows.Where(r => r.Y + r.Height > offset + appearance.Margin && r.Y < end))
         {
-            if (row.Line is { } line) line.Draw(context, new Point(x, row.Y - offset), InvertAxes.None);
+            using var rowClip = context.CreateLayer(1, new Rect(x, row.Y - offset, textWidth, row.Height));
+            if (row.Layout is { } layout)
+                context.DrawTextLayout(layout, new Vector2((float)x, (float)(row.Y - offset - row.TextY)), foreground);
             else if (images.TryGetValue(row.Block, out var image) && image.Bitmap is { } bitmap)
-            {
-                context.PushClip(new RectangleGeometry(new Rect(x, row.Y - offset, textWidth, row.Height)));
                 context.DrawImage(bitmap, new Rect((ActualWidth - row.Width) / 2, row.Y - offset - row.ImageOffset, row.Width, row.ImageHeight));
-                context.Pop();
-            }
             else if (row.Image.Length > 0)
-                context.DrawText(new FormattedText(session?.Blocks[row.Block].Alt ?? "图片", CultureInfo.CurrentCulture,
-                    System.Windows.FlowDirection.LeftToRight,
-                    new Typeface(SystemFonts.MessageFontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal), appearance.FontSize, foreground,
-                    PixelsPerDip), new Point(x, row.Y - offset));
+            {
+                using var format = new CanvasTextFormat { FontFamily = "Segoe UI", FontSize = (float)appearance.FontSize };
+                context.DrawText(session?.Blocks[row.Block].Alt ?? "图片", (float)x, (float)(row.Y - offset), foreground, format);
+            }
         }
-        context.Pop(); context.Pop();
     }
     private void StopTurn()
     {
@@ -388,7 +389,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     }
     private void LoadBackground()
     {
-        backgroundRequest?.Cancel(); backgroundImage = null;
+        backgroundRequest?.Cancel(); backgroundImage?.Dispose(); backgroundImage = null;
         if (appearance.BackgroundImage.Length == 0 || !DesktopVisual.IsVisible(this) || resourcesPaused || disposed) return;
         string path = appearance.BackgroundImage; var owner = backgroundRequest = new();
         var operation = Load(); backgrounds.Add(operation); _ = Observe();
@@ -400,8 +401,8 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
                 await sources.VisualAsync(async ct =>
                 {
                     var bytes = await File.ReadAllBytesAsync(path, ct);
-                    var bitmap = await Task.Run(() => Decode(bytes, 0), ct); ct.ThrowIfCancellationRequested();
-                    if (ReferenceEquals(owner, backgroundRequest)) { backgroundImage = bitmap; InvalidateVisual(); }
+                    var bitmap = await Task.Run(() => NovelImagePixels.Decode(bytes, 0), ct); ct.ThrowIfCancellationRequested();
+                    if (ReferenceEquals(owner, backgroundRequest)) { backgroundImage?.Dispose(); backgroundImage = bitmap.CreateBitmap(device); InvalidateVisual(); }
                 }, owner.Token);
             }
             catch (OperationCanceledException) { }
@@ -435,50 +436,25 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
                     var source = await sources.RequireAsync(book, ct);
                     lease.Reference = await sources.ImageAsync(source, url, book.BookUrl, "content", ct);
                     var bytes = await sources.ReadImageAsync(lease.Reference, ct);
-                    var bitmap = await Task.Run(() => Decode(bytes, decodeWidth), ct);
+                    var bitmap = await Task.Run(() => NovelImagePixels.Decode(bytes, decodeWidth), ct);
                     ct.ThrowIfCancellationRequested();
                     if (generation != contentGeneration || !images.TryGetValue(index, out var current) || !ReferenceEquals(current, lease)) return;
-                    lease.Bitmap = bitmap; dimensions[index] = (bitmap.PixelWidth, bitmap.PixelHeight); Reflow();
+                    lease.Bitmap = bitmap.CreateBitmap(device); dimensions[index] = (bitmap.PixelWidth, bitmap.PixelHeight); Reflow();
                 }
                 catch (OperationCanceledException) { }
                 catch { if (!lease.Cancellation.IsCancellationRequested) ReportError?.Invoke("正文图片加载失败"); }
                 finally
                 {
-                    if (ct.IsCancellationRequested && lease.Reference is { } reference)
+                    if ((ct.IsCancellationRequested || lease.Bitmap is null) && lease.Reference is { } reference)
                     { lease.Reference = null; await sources.ReleaseImageAsync(reference); }
                 }
             }
         }
     }
-    internal static BitmapSource Decode(byte[] bytes, int width)
-    {
-        using var stream = new MemoryStream(bytes);
-        try
-        {
-            var bitmap = new BitmapImage(); bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            if (width > 0) bitmap.DecodePixelWidth = width;
-            bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze(); return bitmap;
-        }
-        catch (Exception error) when (error is NotSupportedException or FileFormatException)
-        {
-            using var data = SKData.CreateCopy(bytes); using var codec = SKCodec.Create(data);
-            if (codec is null) throw new InvalidDataException("IMAGE_DECODE_FAILED");
-            double scale = width <= 0 ? 1 : Math.Min(1, (double)width / codec.Info.Width);
-            var info = new SKImageInfo(Math.Max(1, (int)Math.Round(codec.Info.Width * scale)), Math.Max(1, (int)Math.Round(codec.Info.Height * scale)), SKColorType.Bgra8888, SKAlphaType.Unpremul);
-            var pixels = new byte[info.BytesSize];
-            try
-            {
-                if (codec.GetPixels(info, pixels) != SKCodecResult.Success) throw new InvalidDataException("IMAGE_DECODE_FAILED");
-                var image = BitmapSource.Create(info.Width, info.Height, 96, 96, PixelFormats.Bgra32, null, pixels, info.RowBytes);
-                image.Freeze(); return image;
-            }
-            finally { Array.Clear(pixels); }
-        }
-    }
     private void ReleaseImage(int index)
     {
         if (!images.Remove(index, out var lease)) return;
-        lease.Cancellation.Cancel(); lease.Bitmap = null;
+        lease.Cancellation.Cancel(); lease.Bitmap?.Dispose(); lease.Bitmap = null;
         var task = Release(); releasing.Add(task); _ = Observe();
         async Task Observe() { try { await task; } finally { releasing.Remove(task); } }
         async Task Release()
@@ -495,7 +471,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private void ReleaseAllImages() { foreach (int index in images.Keys.ToArray()) ReleaseImage(index); }
     public async Task DrainImagesAsync()
     {
-        resourcesPaused = true; ClearFrame(); backgroundRequest?.Cancel(); backgroundImage = null; ReleaseAllImages();
+        resourcesPaused = true; ClearFrame(); backgroundRequest?.Cancel(); backgroundImage?.Dispose(); backgroundImage = null; ReleaseAllImages();
         await Task.WhenAll(releasing.Concat(backgrounds).ToArray());
     }
     internal void ResumeImages() { resourcesPaused = false; LoadBackground(); LoadVisibleImages(); InvalidateVisual(); }
@@ -564,88 +540,13 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         else _ = Observe();
         async Task Observe() { try { await TurnAsync(direction); } catch (OperationCanceledException) { } catch { ReportError?.Invoke("章节加载失败"); } }
     }
-    private static Brush ParseBrush(string value) => (Brush)new BrushConverter().ConvertFromInvariantString(value)!;
     public void Dispose()
     {
         if (disposed) return; disposed = true; sources.Changed -= SourcesChanged;
         visibility.Dispose(); DetachRoot(); ClearFrame();
         uiSettings.ColorValuesChanged -= HighContrastChanged;
-        UnregisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, contrastToken);
+        contrastObservation.Dispose();
         contentGeneration++; backgroundRequest?.Cancel(); ReleaseAllImages();
-        foreach (var row in rows) row.Line?.Dispose(); rows.Clear(); formatter.Dispose(); backgroundImage = null;
+        foreach (var layout in layouts) layout.Dispose(); layouts.Clear(); rows.Clear(); backgroundImage?.Dispose(); backgroundImage = null;
     }
-    private sealed class RunStyle : TextRunProperties
-    {
-        private readonly Typeface typeface;
-        private readonly double size;
-        private readonly Brush brush;
-        internal RunStyle(Typeface typeface, double size, Brush brush, double pixelsPerDip)
-        { this.typeface = typeface; this.size = size; this.brush = brush; PixelsPerDip = pixelsPerDip; }
-        public override Typeface Typeface => typeface;
-        public override double FontRenderingEmSize => size;
-        public override double FontHintingEmSize => size;
-        public override TextDecorationCollection? TextDecorations => null;
-        public override Brush ForegroundBrush => brush;
-        public override Brush? BackgroundBrush => null;
-        public override CultureInfo CultureInfo => CultureInfo.CurrentCulture;
-        public override TextEffectCollection? TextEffects => null;
-    }
-    private sealed class ParagraphStyle(TextRunProperties style, double lineHeight) : TextParagraphProperties
-    {
-        public override FlowDirection FlowDirection => FlowDirection.LeftToRight;
-        public override TextAlignment TextAlignment => TextAlignment.Left;
-        public override double LineHeight => lineHeight;
-        public override bool FirstLineInParagraph => false;
-        public override TextRunProperties DefaultTextRunProperties => style;
-        public override TextWrapping TextWrapping => TextWrapping.Wrap;
-        public override TextMarkerProperties? TextMarkerProperties => null;
-        public override double Indent => 0;
-    }
-    private sealed class ParagraphSource(string text, RunStyle style) : TextSource
-    {
-        public override TextRun GetTextRun(int index) => index >= text.Length ? new TextEndOfParagraph(1) :
-            new TextCharacters(text, index, text.Length - index, style);
-        public override TextSpan<CultureSpecificCharacterBufferRange> GetPrecedingText(int index) => new(index,
-            new(CultureInfo.CurrentCulture, new CharacterBufferRange(text, 0, Math.Min(index, text.Length))));
-        public override int GetTextEffectCharacterIndexFromTextSourceCharacterIndex(int index) => index;
-    }
-}
-
-// WPF owns only this offscreen drawing target and TextFormatter's lines above.
-// Neither DrawingVisual nor RenderTargetBitmap is attached to a window or a XAML tree.
-internal sealed class NovelPageRaster
-{
-    private RenderTargetBitmap? target;
-    private Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap? source;
-    private byte[] transfer = [];
-    internal double Scale { get; private set; } = 1;
-
-    internal Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap Render(WinSize size, double scale, Action<DrawingContext> draw)
-    {
-        int width = Math.Max(1, (int)Math.Ceiling(size.Width * scale)), height = Math.Max(1, (int)Math.Ceiling(size.Height * scale));
-        if (target is null || target.PixelWidth != width || target.PixelHeight != height || Math.Abs(Scale - scale) > .001)
-        {
-            Scale = scale;
-            target = new RenderTargetBitmap(width, height, 96 * scale, 96 * scale, PixelFormats.Pbgra32);
-            source = new(width, height); transfer = new byte[checked(width * height * 4)];
-        }
-        var visual = new DrawingVisual();
-        using (var context = visual.RenderOpen()) draw(context);
-        target.Clear(); target.Render(visual); target.CopyPixels(transfer, checked(width * 4), 0);
-        var pixels = source!;
-        using (var buffer = pixels.PixelBuffer.AsStream()) buffer.Write(transfer);
-        pixels.Invalidate();
-        return pixels;
-    }
-
-    internal Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap? Snapshot()
-    {
-        if (source is null) return null;
-        var snapshot = new Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap(source.PixelWidth, source.PixelHeight);
-        using (var buffer = snapshot.PixelBuffer.AsStream()) buffer.Write(transfer);
-        snapshot.Invalidate();
-        return snapshot;
-    }
-
-    internal void Clear() { target = null; source = null; transfer = []; }
 }

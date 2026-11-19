@@ -34,17 +34,26 @@ public static class DesktopVisual
         private readonly List<(DependencyObject Owner, long Token)> ancestors = [];
         private XamlRoot? root;
         private bool? visible;
-        private bool disposed;
+        private bool disposed, loaded;
 
         internal VisibilityObservation(FrameworkElement element, Action<bool> changed)
         {
             this.element = element; this.changed = changed;
-            element.Loaded += Loaded; element.Unloaded += Unloaded;
-            if (element.IsLoaded) Attach();
-            else Publish(false);
+            // Subscribing to Loaded on an already loaded WinUI element resets
+            // IsLoaded without guaranteeing a new notification.
+            loaded = element.IsLoaded;
+            element.Unloaded += Unloaded;
+            if (loaded) Attach();
+            else { element.Loaded += Loaded; Publish(false); }
         }
-        private void Loaded(object sender, RoutedEventArgs args) => Attach();
-        private void Unloaded(object sender, RoutedEventArgs args) { Detach(); Publish(false); }
+        private void Loaded(object sender, RoutedEventArgs args)
+        {
+            element.Loaded -= Loaded; loaded = true; Attach();
+        }
+        private void Unloaded(object sender, RoutedEventArgs args)
+        {
+            loaded = false; Detach(); element.Loaded += Loaded; Publish(false);
+        }
         private void Attach()
         {
             if (disposed) return;
@@ -57,7 +66,7 @@ public static class DesktopVisual
             Refresh();
         }
         private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => Refresh();
-        private void Refresh() { if (!disposed) Publish(element.IsLoaded && IsVisible(element)); }
+        private void Refresh() { if (!disposed) Publish(loaded && IsVisible(element)); }
         private void Publish(bool current)
         {
             if (disposed || visible == current) return;
@@ -119,10 +128,16 @@ public static class DesktopVisual
     }
     public static void UseResource(this FrameworkElement view, DependencyProperty property, string key)
     {
-        // A code-created child acquires its page's resource scope when it is mounted.
-        if (view.IsLoaded) view.SetValue(property, Resource(view, key));
-        else if (FindResource(view, key) is { } value) view.SetValue(property, value);
+        Refresh();
+        // Factory-created controls do not yet have their owner's resource scope.
+        // Loading resolves that scope before their first measure and arrange pass.
+        view.Loading += (_, _) => view.SetValue(property, Resource(view, key));
         view.Loaded += (_, _) => view.SetValue(property, Resource(view, key));
-        view.ActualThemeChanged += (_, _) => view.SetValue(property, Resource(view, key));
+        view.ActualThemeChanged += (_, _) => Refresh();
+        void Refresh()
+        {
+            if (view.IsLoaded) view.SetValue(property, Resource(view, key));
+            else if (FindResource(view, key) is { } value) view.SetValue(property, value);
+        }
     }
 }

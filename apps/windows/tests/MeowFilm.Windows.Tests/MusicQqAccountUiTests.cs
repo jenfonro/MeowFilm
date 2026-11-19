@@ -8,7 +8,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.Text.Json.Nodes;
 using System.IO.Compression;
 using System.Buffers.Binary;
@@ -376,7 +377,7 @@ public static class MusicQqAccountUiTests
     {
         internal string Path { get; } = path;
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
         public string? SelectQrPngPath() => Path;
     }
     private sealed class Output : IMusicPlayback

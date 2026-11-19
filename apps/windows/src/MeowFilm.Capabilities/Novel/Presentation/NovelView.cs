@@ -60,7 +60,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             else if (module.Route == NovelCapability.ReaderRoute)
                 module.RefreshReaderSettings();
         });
-        Loaded += (_, _) => { AttachWindow(); Present(); }; Unloaded += (_, _) => { PauseReading(); DetachWindow(); };
+        Loaded += (_, _) => { AttachWindow(); Present(); }; Unloaded += (_, _) => { discoveryFocus = null; PauseReading(); DetachWindow(); };
     }
     public DesktopHeaderContribution Header => new(module.Route == NovelCapability.HomeRoute ? "小说" : module.Route == NovelCapability.CategoriesRoute ? "分类" : "",
         SearchVisible: module.Route != NovelCapability.ReaderRoute) { SearchTargetId = "novel", SearchContextId = module.Route };
@@ -322,14 +322,17 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         {
             attachedWindow.Deactivated += WindowDeactivated;
             attachedWindow.WindowStateChanged += WindowDeactivated;
+            attachedWindow.Closed += WindowClosed;
         }
     }
     private void WindowDeactivated(object? sender, EventArgs e) { PauseReading(); module.RunUi(_ => SavePositionAsync()); }
+    private void WindowClosed(object sender, WindowEventArgs e) { PauseReading(); DetachWindow(); }
     private void DetachWindow()
     {
         if (attachedWindow is null) return;
         attachedWindow.Deactivated -= WindowDeactivated;
         attachedWindow.WindowStateChanged -= WindowDeactivated;
+        attachedWindow.Closed -= WindowClosed;
         attachedWindow = null;
     }
     private sealed record SourceCandidate(NovelBook Book, string Label) { public override string ToString() => Label; }

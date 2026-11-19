@@ -413,6 +413,32 @@ public static partial class MusicUiTests
             Equal(new UISettings().UIElementColor(UIElementType.WindowText), ((SolidColorBrush)playAll.Foreground).Color);
             DesktopTheme.SetIsHighContrast(view, false);
         });
+        yield return Case("late audio file picker result cannot mutate a playlist after navigation", async () =>
+        {
+            await using var f = await Fixture.Create(persistent: true);
+            await f.Module.CreatePlaylistAsync("文件选择目标");
+            string target = f.Module.Playlists.Single(row => row.Kind == "playlist").Id;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var picked = new TaskCompletionSource<string[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var paths = f.MakeFiles(1);
+            f.Dialogs.AudioPicker = owner =>
+            {
+                True(ReferenceEquals(owner, f.Module.View), "audio picker receives the requesting content page");
+                entered.TrySetResult();
+                return picked.Task;
+            };
+            var importing = f.Module.ImportFilesAsync();
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                await f.Module.NavigateAsync("favorites", default);
+            }
+            finally { picked.TrySetResult(paths); await importing; }
+            Equal(0, f.Calls.Count("music.library.addSongs"));
+            Equal(0, (await new GrantedMediaFiles(f.Store, [".wav"]).ListAsync()).Count);
+            await f.Module.NavigateAsync("playlist/" + target, default);
+            Equal(0, f.Module.Songs.Count);
+        });
         yield return Case("real library CRUD, file grant isolation and cancellation", async () =>
         {
             await using var f = await Fixture.Create(persistent: true);
@@ -1175,10 +1201,11 @@ public static partial class MusicUiTests
     {
         public string[]? Paths; public bool Confirmation = true;
         public string? ScriptPath; public string[]? ScriptPaths;
+        public Func<FrameworkElement, Task<string[]?>>? AudioPicker, ScriptPicker;
         public bool Confirm(string message, string title) => Confirmation;
-        public string[]? SelectAudioFiles() => Paths;
-        public string[]? SelectScriptFiles() => ScriptPaths ?? (ScriptPath is null ? null : [ScriptPath]);
-        public string? SelectScriptFile() => ScriptPath;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => AudioPicker?.Invoke(owner) ?? Task.FromResult<string[]?>(Paths);
+        public Task<string[]?> SelectScriptFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => ScriptPicker?.Invoke(owner) ?? Task.FromResult<string[]?>(ScriptPaths ?? (ScriptPath is null ? null : [ScriptPath]));
+        public Task<string?> SelectScriptFileAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string?>(ScriptPath);
     }
     private class PlaybackProbe : IMusicPlayback
     {

@@ -1,8 +1,6 @@
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -72,13 +70,10 @@ internal static class FFmpegVideoFixtures
     }
     private static byte[] Jpeg(int index)
     {
-        var pixels = new byte[160 * 90 * 3];
-        for (int i = 0; i < pixels.Length; i += 3)
-        { pixels[i] = (byte)(index % 128 + 32); pixels[i + 1] = 50; pixels[i + 2] = 180; }
-        var bitmap = BitmapSource.Create(160, 90, 96, 96, PixelFormats.Rgb24, null, pixels, 160 * 3);
-        var encoder = new JpegBitmapEncoder { QualityLevel = 80 };
-        encoder.Frames.Add(BitmapFrame.Create(bitmap));
-        using var output = new MemoryStream(); encoder.Save(output); return output.ToArray();
+        var pixels = new byte[160 * 90 * 4];
+        for (int i = 0; i < pixels.Length; i += 4)
+        { pixels[i] = 180; pixels[i + 1] = 50; pixels[i + 2] = (byte)(index % 128 + 32); pixels[i + 3] = 255; }
+        return FixtureImages.Encode(160, 90, pixels, "jpeg");
     }
     private static byte[] Ctr(byte[] bytes, string hexKey)
     {

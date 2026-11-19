@@ -49,8 +49,10 @@ public partial class GeneralSettingsView : UserControl
     }
     private void ClosePreferenceChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
     {
-        if (closePreferences is not null) CloseBehaviorSelection.SelectedValue = closePreferences.Behavior.ToString();
+        if (closePreferences is not null) RestoreCloseBehavior();
     }
+    private void RestoreCloseBehavior() => CloseBehaviorSelection.SelectedItem = CloseBehaviorSelection.Items
+        .OfType<ComboBoxItem>().Single(item => Equals(item.Tag, closePreferences!.Behavior.ToString()));
     private void Area_Checked(object sender, RoutedEventArgs e)
     {
         if (AppearancePage is null || sender is not RadioButton { Tag: string area }) return;
@@ -63,12 +65,18 @@ public partial class GeneralSettingsView : UserControl
     }
     private void Area_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (sender is not RadioButton current || e.Key is not (VirtualKey.Home or VirtualKey.End or VirtualKey.Left or VirtualKey.Right)) return;
+        if (sender is RadioButton current && NavigateArea(current, e.Key)) e.Handled = true;
+    }
+    internal bool NavigateArea(RadioButton current, VirtualKey key)
+    {
+        if (key is not (VirtualKey.Home or VirtualKey.End or VirtualKey.Left or VirtualKey.Right)) return false;
         var tabs = Areas.Children.OfType<RadioButton>().Where(tab => tab.Visibility == Visibility.Visible).ToArray();
         int index = Array.IndexOf(tabs, current);
-        int next = e.Key switch { VirtualKey.Home => 0, VirtualKey.End => tabs.Length - 1,
+        if (index < 0) return false;
+        int next = key switch { VirtualKey.Home => 0, VirtualKey.End => tabs.Length - 1,
             VirtualKey.Left => (index + tabs.Length - 1) % tabs.Length, _ => (index + 1) % tabs.Length };
-        tabs[next].IsChecked = true; tabs[next].Focus(FocusState.Programmatic); e.Handled = true;
+        tabs[next].IsChecked = true; tabs[next].Focus(FocusState.Programmatic);
+        return true;
     }
     private async void View_Loaded(object sender, RoutedEventArgs e) =>
         await Task.WhenAll(appearance.LoadAsync(), closePreferences?.LoadAsync() ?? Task.CompletedTask);
@@ -85,10 +93,10 @@ public partial class GeneralSettingsView : UserControl
     private void ClearUserData_Click(object sender, RoutedEventArgs e) => resetUserData?.Invoke();
     private async void CloseBehavior_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (closePreferences is null || CloseBehaviorSelection.SelectedValue is not string choice || !Enum.TryParse<WindowCloseBehavior>(choice, out var behavior) ||
+        if (closePreferences is null || CloseBehaviorSelection.SelectedItem is not ComboBoxItem { Tag: string choice } || !Enum.TryParse<WindowCloseBehavior>(choice, out var behavior) ||
             behavior == closePreferences.Behavior) return;
         await closePreferences.SaveAsync(behavior);
-        CloseBehaviorSelection.SelectedValue = closePreferences.Behavior.ToString();
+        RestoreCloseBehavior();
     }
     private sealed class StatusConverter : IValueConverter
     {

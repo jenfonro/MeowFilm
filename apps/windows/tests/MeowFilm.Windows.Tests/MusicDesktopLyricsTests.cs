@@ -1,4 +1,3 @@
-using SystemParameters = System.Windows.SystemParameters;
 using Color = global::Windows.UI.Color;
 using System.Collections.Specialized;
 using System.Runtime.InteropServices;
@@ -13,7 +12,8 @@ using WindowState = MeowFilm.Desktop.DesktopWindowState;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -185,9 +185,9 @@ public static partial class MusicLyricDisplayTests
 
     private static Window LyricConsumerOwner()
     {
-        var window = DesktopTestUi.CreateWindow(new Grid(), Math.Min(1110, SystemParameters.WorkArea.Width - 48),
-            Math.Min(800, SystemParameters.WorkArea.Height - 48));
-        DesktopTestUi.MoveWindow(window, SystemParameters.WorkArea.Left + 24, SystemParameters.WorkArea.Top + 24);
+        var window = DesktopTestUi.CreateWindow(new Grid(), Math.Min(1110, DesktopTestUi.WorkArea.Width - 48),
+            Math.Min(800, DesktopTestUi.WorkArea.Height - 48));
+        DesktopTestUi.MoveWindow(window, DesktopTestUi.WorkArea.Left + 24, DesktopTestUi.WorkArea.Top + 24);
         window.AppWindow.IsShownInSwitchers = false; return window;
     }
 
@@ -801,9 +801,9 @@ public static partial class MusicUiTests
 
     private static Window DesktopLyricOwner()
     {
-        var window = DesktopTestUi.CreateWindow(new Grid(), Math.Min(1110, SystemParameters.WorkArea.Width - 48),
-            Math.Min(800, SystemParameters.WorkArea.Height - 48));
-        DesktopTestUi.MoveWindow(window, SystemParameters.WorkArea.Left + 24, SystemParameters.WorkArea.Top + 24);
+        var window = DesktopTestUi.CreateWindow(new Grid(), Math.Min(1110, DesktopTestUi.WorkArea.Width - 48),
+            Math.Min(800, DesktopTestUi.WorkArea.Height - 48));
+        DesktopTestUi.MoveWindow(window, DesktopTestUi.WorkArea.Left + 24, DesktopTestUi.WorkArea.Top + 24);
         window.AppWindow.IsShownInSwitchers = false; return window;
     }
 

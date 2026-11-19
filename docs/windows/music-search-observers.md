@@ -31,7 +31,7 @@
 
 - `StopLocked` 同步禁止新分页并标记 loading 变化；每个查询唯一的 `CancellationDrain` 等待已发出页的正常完成/超时和真实清理。
 - 调用方放弃等待不释放物理请求、平台槽位或查询资源。
-- presentation 在发布会触发绑定回调的搜索状态前先登记启动 flight；WPF `SelectionChanged` 或同一搜索重复入口只能加入该 flight，不通过 UI 防抖掩盖重复 owner 请求。
+- presentation 在发布会触发绑定回调的搜索状态前先登记启动 flight；WinUI `SelectionChanged` 或同一搜索重复入口只能加入该 flight，不通过 UI 防抖掩盖重复 owner 请求。
 - `PrepareShutdownAsync` 停止准入并等待现有查询及观察者屏障。
 - `CancelShutdownPreparationAsync` 只在同一 owner 未终结时重新开放准入，不复活旧 query id、旧请求或旧通知。
 - `DisposeAsync` 是终态：取消全部查询，等待排空和观察者结束，再释放 semaphore 与 token。

@@ -1,6 +1,6 @@
 # meowfilm
 
-原生音乐、影视与小说应用：iPhone（UIKit）与 Windows（WPF / .NET）。
+原生音乐、影视与小说应用：iPhone（UIKit）与 Windows（WinUI 3 / .NET）。
 
 ## 构建
 
@@ -17,7 +17,7 @@ Windows 默认生成 Release、win-x64 自包含版本；可选参数 `-Configur
 
 Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\meowfilm`，提供开始菜单、可选桌面快捷方式和系统卸载入口。卸载时可选择保留或删除账号、设置、来源及缓存等用户数据，默认保留；静默卸载保留数据。安装、重复安装及卸载前须退出 meowfilm。详细行为见 [Windows 打包说明](docs/windows/runtime-packaging.md)。
 
-上述工具只用于开发与构建。Windows 部署需要完整的 `build/windows/`，不能只复制 `meowfilm.exe`；`-FrameworkDependent` 版本另外需要匹配的 .NET Desktop Runtime。通用运行器使用原生引擎及 `runtime.http.v1`；iOS 通过内置 NodeMobile／MeowScriptHost framework 接入，构建与验证边界见[iOS 运行底座](docs/ios/runtime-preflight.md)。Windows 启动、HTTP 消费者和平台包装已接入，构建工具链见[Windows 打包说明](docs/windows/runtime-packaging.md)；公共或模拟器通过不等于所有平台可发布。
+上述工具只用于开发与构建。Windows 部署需要完整的 `build/windows/`，不能只复制 `meowfilm.exe`；`-FrameworkDependent` 版本另外需要匹配的 .NET Runtime。通用运行器使用原生引擎及 `runtime.http.v1`；iOS 通过内置 NodeMobile／MeowScriptHost framework 接入，构建与验证边界见[iOS 运行底座](docs/ios/runtime-preflight.md)。Windows 启动、HTTP 消费者和平台包装已接入，构建工具链见[Windows 打包说明](docs/windows/runtime-packaging.md)；公共或模拟器通过不等于所有平台可发布。
 
 影视规则／搜索由 Node film owner 加载共享程序，小说纯规则由 source owner 执行，复用通用脚本宿主的 QuickJS-NG 0.18.0 原生载体，各自保持独立 Runtime／Context。客户端保留原生业务状态、排版与交互，不另带规则 DLL／静态引擎。目标电脑不需要 CMake 或编译器。Windows 书源 Web 交互使用系统已安装的 Microsoft Edge WebView2 Runtime，不自动下载安装。
 

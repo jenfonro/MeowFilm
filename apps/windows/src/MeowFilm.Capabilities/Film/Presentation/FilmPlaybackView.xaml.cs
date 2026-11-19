@@ -132,28 +132,21 @@ public partial class FilmPlaybackView : UserControl
         HeroRowGutter.Height = new(stacked ? 20 : 0);
         Grid.SetColumn(MetadataPanel, stacked ? 0 : 2);
         Grid.SetRow(MetadataPanel, stacked ? 2 : 0);
-        UpdatePictureHeight();
         UpdateMetadataHeight();
         UpdateRailButtons();
     }
 
     private void Player_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        UpdatePictureHeight();
         UpdateMetadataHeight();
-    }
-
-    private void UpdatePictureHeight()
-    {
-        if (playerWindow is null) VideoPicture.Height = PlayerFrame.ActualWidth * 9 / 16;
     }
 
     private void UpdateMetadataHeight()
     {
         if (MetadataPanel is not null)
         {
-            MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerFrame.ActualHeight;
-            MetadataOverlay.MinHeight = ActualWidth < 840 ? 300 : PlayerFrame.ActualHeight;
+            MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerSlot.ActualHeight;
+            MetadataOverlay.MinHeight = ActualWidth < 840 ? 300 : PlayerSlot.ActualHeight;
             bool wrapped = ActualWidth >= 840 && HeroActions.ActualHeight > 44;
             MetadataContent.Margin = new(20, wrapped ? 12 : 22, 20, wrapped ? 12 : 22);
             HeroActions.Margin = new(0, wrapped ? 8 : 14, 0, wrapped ? 8 : 16);
@@ -619,8 +612,7 @@ public partial class FilmPlaybackView : UserControl
     {
         if (boundPage is not { CanPlay: true } page || pictureInPicture && !page.HasOutput) return;
         ClosePlayerMenus(); playerWindow?.Close();
-        HeroGrid.Children.Remove(PlayerFrame);
-        VideoPicture.ClearValue(HeightProperty); PlayerFrame.VerticalAlignment = VerticalAlignment.Stretch;
+        PlayerSlot.Child = null;
         var host = new Grid { Background = new SolidColorBrush(Colors.Black), DataContext = page };
         host.Children.Add(PlayerFrame);
         var dialog = new FilmPlayerWindow(host) { Title = page.Title, MinWidth = 380, MinHeight = 214 };
@@ -633,8 +625,8 @@ public partial class FilmPlaybackView : UserControl
         {
             if (restored) return;
             restored = true; ClosePlayerMenus(); CancelPlayerInput();
-            host.Children.Remove(PlayerFrame); PlayerFrame.VerticalAlignment = VerticalAlignment.Top;
-            HeroGrid.Children.Insert(0, PlayerFrame); page.RetainOwner(null);
+            host.Children.Remove(PlayerFrame);
+            PlayerSlot.Child = PlayerFrame; page.RetainOwner(null);
             if (ReferenceEquals(playerWindow, dialog)) { playerWindow = null; pip = false; }
             UpdatePlayerWindowState(); UpdateLayoutMode(); UpdateMedia(); ShowPlayerControls();
         }

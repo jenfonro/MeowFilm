@@ -998,9 +998,10 @@ public static partial class MusicLyricDisplayTests
         internal bool Accept;
         internal string? LyricFile, ScriptFile;
         public bool Confirm(string message, string title) => Accept;
-        public string[]? SelectAudioFiles() => null;
-        public string? SelectLyricFile() => LyricFile;
-        public string? SelectScriptFile() => ScriptFile;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
+        public Task<string?> SelectLyricFileAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string?>(LyricFile);
+        public Task<string[]?> SelectScriptFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(ScriptFile is null ? null : [ScriptFile]);
+        public Task<string?> SelectScriptFileAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string?>(ScriptFile);
     }
     private sealed class Playback : IMusicPlayback
     {

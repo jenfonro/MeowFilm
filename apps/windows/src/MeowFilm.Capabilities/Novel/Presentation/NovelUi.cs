@@ -225,7 +225,7 @@ internal static class NovelUi
             editing.Tools.Children.Add(close); editing.ContinueAsync = ContinueAsync;
         }
         registration = token.Register(() => owner.DispatcherQueue.TryEnqueue(() => { if (!finished) CloseDialog(); }));
-        surface.Loaded += async (_, _) => await FocusDialog();
+        body.Loaded += async (_, _) => await FocusDialog();
         if (parent is not null)
         {
             nestedLayer = new Grid(); nestedLayer.UseResource(FrameworkElement.StyleProperty, "MeowFilm.DialogHost");
@@ -286,8 +286,10 @@ internal static class NovelUi
         async Task FocusDialog()
         {
             if (!IsOpen()) return;
-            if (FocusManager.FindFirstFocusableElement(body) is UIElement first) first.Focus(FocusState.Programmatic);
-            else cancel.Focus(FocusState.Programmatic);
+            bool focused = body is Control { IsTabStop: true, IsEnabled: true } && body.Focus(FocusState.Programmatic);
+            if (!focused && FocusManager.FindFirstFocusableElement(body) is UIElement first)
+                focused = first.Focus(FocusState.Programmatic);
+            if (!focused) cancel.Focus(FocusState.Programmatic);
             if (autoSubmit) await AcceptAsync();
         }
         void DialogClosed()
@@ -319,6 +321,8 @@ internal sealed class NovelImage : Grid
     internal Stretch Stretch { get => image.Stretch; set => image.Stretch = value; }
     private readonly NovelSourceService sources;
     private readonly NovelBook book;
+    private readonly List<FrameworkElement> layoutOwners = [];
+    private readonly List<(DependencyObject Owner, DependencyProperty Property, long Token)> viewportProperties = [];
     private CancellationTokenSource? request;
     private bool loaded, observingLayout, demanded;
     internal NovelImage(NovelSourceService sources, NovelBook book)
@@ -354,14 +358,45 @@ internal sealed class NovelImage : Grid
         catch (InvalidOperationException) { return false; }
     }
     private void OnLayout(object? sender, object e) => UpdateVisibility();
+    private void ObserveViewportProperty(DependencyObject owner, DependencyProperty property) =>
+        viewportProperties.Add((owner, property, owner.RegisterPropertyChangedCallback(property, (_, _) =>
+        {
+            // Canvas attached positions invalidate their parent arrange, not the
+            // cover. Resolve that actual layout before testing its clipped bounds.
+            layoutOwners.LastOrDefault()?.UpdateLayout(); UpdateVisibility();
+        })));
     private void OnResumed(object? sender, EventArgs e) { Stop(); demanded = false; UpdateVisibility(); }
     private void UpdateVisibility()
     {
         bool observe = loaded && DesktopVisual.IsVisible(this);
         if (observe != observingLayout)
         {
-            if (observe) { LayoutUpdated += OnLayout; sources.Resumed += OnResumed; }
-            else { LayoutUpdated -= OnLayout; sources.Resumed -= OnResumed; }
+            if (observe)
+            {
+                // Positioning or clipping an ancestor need not notify the cover's
+                // LayoutUpdated/EffectiveViewportChanged events in WinUI.
+                for (DependencyObject? owner = this; owner is not null; owner = VisualTreeHelper.GetParent(owner))
+                    if (owner is FrameworkElement element)
+                    {
+                        layoutOwners.Add(element); element.SizeChanged += AncestorSizeChanged;
+                        ObserveViewportProperty(element, UIElement.ClipProperty);
+                        if (VisualTreeHelper.GetParent(element) is Canvas)
+                        {
+                            ObserveViewportProperty(element, Canvas.TopProperty);
+                            ObserveViewportProperty(element, Canvas.LeftProperty);
+                        }
+                    }
+                LayoutUpdated += OnLayout;
+                sources.Resumed += OnResumed;
+            }
+            else
+            {
+                LayoutUpdated -= OnLayout;
+                foreach (var owner in layoutOwners) owner.SizeChanged -= AncestorSizeChanged;
+                foreach (var (owner, property, token) in viewportProperties) owner.UnregisterPropertyChangedCallback(property, token);
+                viewportProperties.Clear();
+                layoutOwners.Clear(); sources.Resumed -= OnResumed;
+            }
             observingLayout = observe;
         }
         bool next = InViewport();
@@ -369,6 +404,7 @@ internal sealed class NovelImage : Grid
         demanded = next;
         if (demanded) Start(); else Stop();
     }
+    private void AncestorSizeChanged(object sender, SizeChangedEventArgs args) => UpdateVisibility();
     private void Start()
     {
         if (request is not null || book.CoverUrl.Length == 0) return;
@@ -386,10 +422,10 @@ internal sealed class NovelImage : Grid
                         var source = await sources.RequireAsync(book, ct);
                         reference = await sources.ImageAsync(source, book.CoverUrl, book.BookUrl, "cover", ct);
                         var bytes = await sources.ReadImageAsync(reference, ct);
-                        var bitmap = await Task.Run(() => NovelReadingSurface.Decode(bytes, 240), ct);
+                        var bitmap = await Task.Run(() => NovelImagePixels.Decode(bytes, 240), ct);
                         ct.ThrowIfCancellationRequested();
                         if (!ReferenceEquals(request, owner) || !InViewport()) return;
-                        Source = NovelPresentation.Bitmap(bitmap);
+                        Source = bitmap.CreateSource();
                         // Keep the lease only while this cover intersects its viewport.
                         await Task.Delay(Timeout.Infinite, ct);
                     }

@@ -72,7 +72,7 @@ internal enum FilmSearchCardEditKind { Insert, Remove, Move }
 internal readonly record struct FilmSearchCardEdit(FilmSearchCardEditKind Kind, int Index, int From = -1);
 internal readonly record struct FilmSearchCardUpdate(FilmSearchCardValue Value, FilmSearchCardFields Fields);
 
-/// <summary>Immutable, non-WPF inputs and keyed edits, prepared away from the Dispatcher.</summary>
+/// <summary>Immutable, UI-independent inputs and keyed edits, prepared away from the Dispatcher.</summary>
 internal sealed class FilmSearchCardProjection
 {
     private FilmSearchCardProjection(JsonElement json, IReadOnlyList<JsonElement> items,

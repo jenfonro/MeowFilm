@@ -1,5 +1,6 @@
 using System.ComponentModel;
-using System.Windows.Input;
+using Key = Windows.System.VirtualKey;
+using ModifierKeys = Windows.System.VirtualKeyModifiers;
 
 namespace MeowFilm.Desktop;
 
@@ -44,7 +45,7 @@ public static class MediaControlDefaults
         }));
 
     private static MediaShortcutBinding Binding(MediaShortcutAction action, Key key) =>
-        new(action, new(key, ModifierKeys.Control), new(key, ModifierKeys.Control | ModifierKeys.Alt));
+        new(action, new(key, ModifierKeys.Control), new(key, ModifierKeys.Control | ModifierKeys.Menu));
 
     public static string Label(MediaShortcutAction action) => action switch
     {
@@ -63,27 +64,28 @@ public static class MediaControlDefaults
 public static class MediaShortcutGestures
 {
     public static bool IsModifierKey(Key key) =>
-        key is Key.LeftCtrl or Key.RightCtrl or Key.LeftShift or Key.RightShift or Key.LeftAlt or Key.RightAlt or Key.LWin or Key.RWin;
+        key is Key.Control or Key.Menu or Key.Shift or Key.LeftControl or Key.RightControl or Key.LeftShift or Key.RightShift or
+            Key.LeftMenu or Key.RightMenu or Key.LeftWindows or Key.RightWindows;
 
     public static bool IsValid(MediaShortcutGesture gesture) =>
         Enum.IsDefined(gesture.Key) &&
-        gesture.Key is not (Key.None or Key.System or Key.ImeProcessed or Key.DeadCharProcessed) &&
+        gesture.Key != Key.None &&
         !IsModifierKey(gesture.Key) &&
-        (gesture.Modifiers & ~(ModifierKeys.Control | ModifierKeys.Alt | ModifierKeys.Shift | ModifierKeys.Windows)) == 0 &&
-        KeyInterop.VirtualKeyFromKey(gesture.Key) != 0;
+        (gesture.Modifiers & ~(ModifierKeys.Control | ModifierKeys.Menu | ModifierKeys.Shift | ModifierKeys.Windows)) == 0 &&
+        (int)(gesture.Key) != 0;
 
     public static string Display(MediaShortcutGesture? gesture)
     {
         if (gesture is null) return "未设置";
         var parts = new List<string>(5);
         if (gesture.Modifiers.HasFlag(ModifierKeys.Control)) parts.Add("Ctrl");
-        if (gesture.Modifiers.HasFlag(ModifierKeys.Alt)) parts.Add("Alt");
+        if (gesture.Modifiers.HasFlag(ModifierKeys.Menu)) parts.Add("Alt");
         if (gesture.Modifiers.HasFlag(ModifierKeys.Shift)) parts.Add("Shift");
         if (gesture.Modifiers.HasFlag(ModifierKeys.Windows)) parts.Add("Win");
         int key = (int)gesture.Key;
-        parts.Add(key >= (int)Key.D0 && key <= (int)Key.D9 ? (key - (int)Key.D0).ToString() : gesture.Key switch
+        parts.Add(key >= (int)Key.Number0 && key <= (int)Key.Number9 ? (key - (int)Key.Number0).ToString() : gesture.Key switch
         {
-            Key.Return => "Enter",
+            Key.Enter => "Enter",
             Key.Back => "Backspace",
             _ => gesture.Key.ToString()
         });
@@ -107,7 +109,7 @@ public static class MediaShortcutGestures
                 if (gesture is null) continue;
                 if (!IsValid(gesture)) return $"{MediaControlDefaults.Label(binding.Action)}：请选择有效按键";
                 if ((gesture.Key == Key.F && gesture.Modifiers == ModifierKeys.Control) ||
-                    (gesture.Key == Key.Left && gesture.Modifiers == ModifierKeys.Alt) ||
+                    (gesture.Key == Key.Left && gesture.Modifiers == ModifierKeys.Menu) ||
                     (gesture.Key is Key.Escape or Key.Space && gesture.Modifiers == ModifierKeys.None))
                     return $"{Display(gesture)} 已用于窗口导航或完整播放器";
                 if (assigned.TryGetValue(gesture, out var action) && action != binding.Action)

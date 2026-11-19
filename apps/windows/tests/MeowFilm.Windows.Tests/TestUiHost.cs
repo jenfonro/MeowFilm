@@ -4,7 +4,7 @@ using Microsoft.UI.Xaml;
 namespace MeowFilm.Windows.Tests;
 
 // WinUI owns one application/UI thread per process. Cases own their windows
-// and resources, rather than starting unrelated WPF dispatchers.
+// and resources, on the same dispatcher queue.
 internal static class TestUiHost
 {
     private static DispatcherQueue? dispatcher;

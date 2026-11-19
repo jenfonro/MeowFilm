@@ -8,7 +8,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.UI.Xaml;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
@@ -1787,7 +1788,7 @@ public static partial class PlaybackRecoveryTests
                 var currentQuality = new Microsoft.UI.Xaml.Controls.TextBlock();
                 currentQuality.SetBinding(Microsoft.UI.Xaml.Controls.TextBlock.TextProperty,
                     new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(MusicCapability.CurrentSourceQuality)), Source = f.Module });
-                await Dispatcher.Yield(DispatcherPriority.DataBind);
+                await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Normal);
                 Check(currentQuality.Text == "音质未知", "unverified media is not presented as confirmed quality");
                 string? identity = f.Output.Identity;
                 int resolves = f.App.Resolutions.Count, opens = f.Output.NetworkOpens, playbackEvents = 0;
@@ -1797,7 +1798,7 @@ public static partial class PlaybackRecoveryTests
                 {
                     f.ValidationRelease.TrySetResult();
                     await Until(() => f.Module.CurrentSourceQuality == "无损", "native cache evidence reaches the authority");
-                    await Dispatcher.Yield(DispatcherPriority.DataBind);
+                    await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Normal);
                     Check(currentQuality.Text == "无损" && f.Module.CurrentQualityLabel == "无损" &&
                         f.Module.SourceChoices.Any(row => row.Provider == "quality-publication" && row.Quality == "无损"),
                         "the existing source header binding and candidate agree with the accepted cache evidence");
@@ -2032,7 +2033,7 @@ public static partial class PlaybackRecoveryTests
             f.Output.Fail(PlaybackError.HttpUnauthorized);
             f.App.ReleaseRefresh.TrySetResult();
             await operation.WaitAsync(TimeSpan.FromSeconds(5));
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             Check(f.Output.Reopens == 1 && f.Output.IsPlaying,
                 "a failed quality search must not consume the accepted stream's pending recovery");
         });
@@ -2181,7 +2182,7 @@ public static partial class PlaybackRecoveryTests
         var origin = new Origin(); var bytes = Wave();
         origin.Route = _ => new Reply(bytes, "audio/wav"); return origin;
     }
-    private static NativeAudioPlayback AudioPlayer() => new(Dispatcher.CurrentDispatcher, audioOutput: NativeAudioOutput.Dummy);
+    private static NativeAudioPlayback AudioPlayer() => new(OwnerDispatcher.Current, audioOutput: NativeAudioOutput.Dummy);
     private static Task Decoded(NativeAudioPlayback player) => Until(() =>
     {
         if (player.LastErrorCode is { } error) throw new InvalidOperationException("native audio failed " + error);
@@ -2251,7 +2252,7 @@ public static partial class PlaybackRecoveryTests
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
     private sealed class MusicFixture : IAsyncDisposable
     {
@@ -2435,7 +2436,7 @@ public static partial class PlaybackRecoveryTests
                 Check(queued.GetProperty("ok").GetBoolean(), "duration queue");
                 await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
                 await f.Module.PlayQueueSurfaceItemAsync(f.Module.QueueSurfaceRows.Single());
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
                 bool allowed = actual == 0 || actual is >= 110 and <= 130;
                 if (!allowed) await Until(() => !f.Output.HasMedia, "mismatched input stopped");
                 Check(f.Output.IsPlaying == allowed, "metadata duration is authoritative and unknown durations are allowed");
@@ -2607,7 +2608,7 @@ public static partial class PlaybackRecoveryTests
             };
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             await f.Module.PlayQueueSurfaceItemAsync(f.Module.QueueSurfaceRows.Single());
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             var state = Field(f.Module, "musicRecovery")!;
             Check(!f.Output.IsPlaying || f.Output.Reopens > 0,
                 "known contradictory duration must not be ignored merely because it arrived during open");

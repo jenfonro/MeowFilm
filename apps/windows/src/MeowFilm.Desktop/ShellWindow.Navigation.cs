@@ -1,4 +1,5 @@
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Desktop;
 
@@ -30,8 +31,8 @@ public sealed partial class ShellWindow
     {
         cancellationToken.ThrowIfCancellationRequested();
         var generation = Interlocked.Read(ref _presentationGeneration);
-        if (Dispatcher.CheckAccess()) await NavigateAsync();
-        else await Dispatcher.InvokeAsync(NavigateAsync, DispatcherPriority.Normal, cancellationToken).Task.Unwrap();
+        if (Dispatcher.HasThreadAccess) await NavigateAsync();
+        else await Dispatcher.EnqueueAsync(NavigateAsync, DispatcherQueuePriority.Normal, cancellationToken);
 
         async Task NavigateAsync()
         {

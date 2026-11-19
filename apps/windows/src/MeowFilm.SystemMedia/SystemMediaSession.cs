@@ -1,5 +1,6 @@
 using System.ComponentModel;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.SystemMedia;
 
@@ -10,7 +11,7 @@ namespace MeowFilm.SystemMedia;
 /// </summary>
 public sealed class SystemMediaSession : IAsyncDisposable
 {
-    private readonly Dispatcher dispatcher;
+    private readonly OwnerDispatcher dispatcher;
     private readonly ISystemPlayback playback;
     private readonly ISystemMediaBackend backend;
     private readonly Dictionary<string, SystemPlaybackOwner> owners;
@@ -30,9 +31,9 @@ public sealed class SystemMediaSession : IAsyncDisposable
     public string? LastErrorCode { get; private set; }
 
     public SystemMediaSession(ISystemPlayback playback, ISystemMediaBackend backend,
-        IEnumerable<SystemPlaybackOwner> owners, Dispatcher? dispatcher = null, bool enabled = true)
+        IEnumerable<SystemPlaybackOwner> owners, OwnerDispatcher? dispatcher = null, bool enabled = true)
     {
-        this.dispatcher = dispatcher ?? Dispatcher.CurrentDispatcher;
+        this.dispatcher = dispatcher ?? OwnerDispatcher.Current;
         this.dispatcher.VerifyAccess();
         this.playback = playback ?? throw new ArgumentNullException(nameof(playback));
         this.backend = backend ?? throw new ArgumentNullException(nameof(backend));
@@ -75,12 +76,18 @@ public sealed class SystemMediaSession : IAsyncDisposable
     private void Changed(object? sender, PropertyChangedEventArgs args)
     {
         if (disposed || stopped) return;
-        if (dispatcher.CheckAccess()) PublishSafely();
-        else if (!dispatcher.HasShutdownStarted)
+        if (dispatcher.HasThreadAccess) PublishSafely();
+        else if (!dispatcher.IsClosing)
         {
-            try { _ = dispatcher.InvokeAsync(PublishSafely); }
-            catch (InvalidOperationException) { }
+            _ = PublishOnOwnerAsync();
         }
+    }
+
+    private async Task PublishOnOwnerAsync()
+    {
+        try { await dispatcher.EnqueueAsync(PublishSafely).ConfigureAwait(false); }
+        catch (OperationCanceledException) { /* Owner shutdown retires this update. */ }
+        catch (InvalidOperationException) when (dispatcher.IsClosing) { }
     }
 
     private void PublishSafely()
@@ -112,7 +119,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
 
     private void Requested(object? sender, SystemPlaybackRequest request)
     {
-        // WinRT events can arrive on a pool thread. Do not touch WPF or the player
+        // WinRT events can arrive on a pool thread. Do not touch owner state or the player
         // there, and bound the number of posted/queued requests before allocation.
         var target = Volatile.Read(ref published);
         if (!target.Enabled) return;
@@ -121,14 +128,14 @@ public sealed class SystemMediaSession : IAsyncDisposable
             Interlocked.Decrement(ref pending);
             return;
         }
-        if (dispatcher.HasShutdownStarted)
+        if (dispatcher.IsClosing)
         {
             Interlocked.Decrement(ref pending);
             return;
         }
         try
         {
-            var operation = dispatcher.InvokeAsync(() =>
+            var operation = dispatcher.EnqueueAsync(() =>
             {
                 if (disposed || stopped)
                 {
@@ -146,7 +153,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
                 running.Add(task);
                 _ = Reap(task);
             });
-            _ = ObserveDispatch(operation.Task);
+            _ = ObserveDispatch(operation);
         }
         catch (InvalidOperationException) { Interlocked.Decrement(ref pending); }
     }

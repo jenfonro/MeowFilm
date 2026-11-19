@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Media;
 
@@ -11,7 +12,7 @@ public sealed record AudioPlaybackRate(NativePlaybackScope Scope, double Request
 public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposable,
     INativePlaybackContinuation, INativePlaybackHandoff
 {
-    private readonly Dispatcher dispatcher;
+    private readonly OwnerDispatcher dispatcher;
     private readonly Func<CancellationToken, Task<IDisposable>>? acquireOutput;
     private readonly NativeAudioOutput audioOutput;
     private readonly SemaphoreSlim commands = new(1);
@@ -20,7 +21,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private readonly object readGate = new();
     private readonly HashSet<Task> readRequests = [];
     private CancellationTokenSource? readQueue = new();
-    private readonly DispatcherTimer progress;
+    private readonly DispatcherQueueTimer progress;
     private Session? session, prepared;
     private CancellationTokenSource? authority, opening, preparing;
     private NativePlaybackContinuation? continuation;
@@ -32,17 +33,16 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private double position, duration, rate = 1;
     private Task? disposal;
 
-    public NativeAudioPlayback(Dispatcher? dispatcher = null, Func<CancellationToken, Task<IDisposable>>? acquireOutput = null,
+    public NativeAudioPlayback(OwnerDispatcher? dispatcher = null, Func<CancellationToken, Task<IDisposable>>? acquireOutput = null,
         NativeAudioOutput audioOutput = NativeAudioOutput.SystemDefault)
     {
-        this.dispatcher = dispatcher ?? Dispatcher.CurrentDispatcher;
-        if (!this.dispatcher.CheckAccess() || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
+        this.dispatcher = dispatcher ?? OwnerDispatcher.Current;
+        if (!this.dispatcher.HasThreadAccess || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
             throw Error(PlaybackError.WrongThread);
         if (!Enum.IsDefined(audioOutput)) throw Error(PlaybackError.InvalidRequest);
         this.acquireOutput = acquireOutput;
         this.audioOutput = audioOutput;
-        progress = new(TimeSpan.FromMilliseconds(100), DispatcherPriority.Background,
-            (_, _) => UpdatePosition(), this.dispatcher);
+        progress = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(100), UpdatePosition);
         progress.Stop();
     }
 
@@ -711,8 +711,8 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     }
     private void Post(Func<Task> operation)
     {
-        if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished) return;
-        _ = dispatcher.InvokeAsync(async () =>
+        if (dispatcher.IsClosing) return;
+        _ = dispatcher.EnqueueAsync(async () =>
         {
             if (disposed) return;
             long version = generation;
@@ -727,17 +727,17 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     }
     private Task DispatchAsync(Func<Task> operation, CancellationToken token = default)
     {
-        if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+        if (dispatcher.IsClosing)
             return Task.FromException(Error(PlaybackError.DispatcherUnavailable));
         if (token.IsCancellationRequested) return Task.FromCanceled(token);
-        return dispatcher.CheckAccess() ? operation() :
-            dispatcher.InvokeAsync(operation, DispatcherPriority.Normal, token).Task.Unwrap();
+        return dispatcher.HasThreadAccess ? operation() :
+            dispatcher.EnqueueAsync(operation, DispatcherQueuePriority.Normal, token);
     }
     private Task<T> DispatchValueAsync<T>(Func<Task<T>> operation) =>
-        dispatcher.CheckAccess() ? operation() : dispatcher.InvokeAsync(operation).Task.Unwrap();
+        dispatcher.HasThreadAccess ? operation() : dispatcher.EnqueueAsync(operation);
     private void RequireDispatcher()
     {
-        if (!dispatcher.CheckAccess()) throw Error(PlaybackError.WrongThread);
+        if (!dispatcher.HasThreadAccess) throw Error(PlaybackError.WrongThread);
     }
     private void ThrowIfDisposed() { if (disposed) throw Error(PlaybackError.Disposed); }
     private static PlaybackException Error(string code) => new(code);

@@ -5,7 +5,7 @@ namespace MeowFilm.Desktop;
 
 internal interface IDesktopTrayIcon : IDisposable { bool TryShow(); }
 
-/// <summary>System notification-area integration on the shell's own HWND; no WPF visual host.</summary>
+/// <summary>System notification-area integration on the shell's own HWND; on the WinUI window.</summary>
 internal sealed class DesktopTrayIcon : IDesktopTrayIcon
 {
     private const uint IconId = 1;

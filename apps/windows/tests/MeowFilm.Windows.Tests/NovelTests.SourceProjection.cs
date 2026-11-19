@@ -9,7 +9,8 @@ using WindowState = MeowFilm.Desktop.DesktopWindowState;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -243,6 +244,8 @@ public static partial class NovelTests
             editor = Find<NovelSourceEditor>(dialogs).Single();
             Field(editor, "bookSourceName").Text = "新源";
             Field(editor, "bookSourceUrl").Text = Source("b").SourceUrl;
+            await Until(() => editor.Draft.Text(new("bookSourceName", "书源名称")) == "新源" &&
+                editor.Draft.Text(new("bookSourceUrl", "书源地址")) == Source("b").SourceUrl);
             string newDefinition = editor.Draft.Definition();
             await Save(editor, null, Source("b").SourceUrl, "新源一", 1, 4, 3, newDefinition);
             var added = sources.Sources.Single(source => source.SourceUrl == Source("b").SourceUrl);
@@ -261,7 +264,8 @@ public static partial class NovelTests
             int writes, string original)
         {
             Field(editor, "bookSourceName").Text = name;
-            await Until(() => Find<Button>(dialogs).Any(button => Equals(button.Content, "保存") && button.IsEnabled));
+            await Until(() => editor.Draft.Text(new("bookSourceName", "书源名称")) == name &&
+                Find<Button>(dialogs).Any(button => Equals(button.Content, "保存") && button.IsEnabled));
             DesktopTestUi.Invoke(Find<Button>(dialogs).Single(button => Equals(button.Content, "保存")));
             await Until(() => sources.Sources.Any(source => source.SourceUrl == url && source.Revision == revision) && notices == writes &&
                 !editor.Draft.HasInput &&
