@@ -118,7 +118,6 @@ public sealed partial class MusicNativeApplication
     {
         var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
         if (input.ValueKind != JsonValueKind.Object ||
-            input.EnumerateObject().Any(p => p.Name is not ("keyword" or "kind" or "platforms" or "refresh")) ||
             !input.TryGetProperty("keyword", out var word) || word.ValueKind != JsonValueKind.String ||
             !input.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String ||
             kind.GetString() is not ("songs" or "playlists") ||
@@ -135,7 +134,7 @@ public sealed partial class MusicNativeApplication
         try
         {
             if (searchPolicyUnconfirmed) return Failed("SEARCH_SETTINGS_UNCONFIRMED");
-            var policy = await library.ExecuteAsync("music.search.settings.get", new { }, token).ConfigureAwait(false);
+            var policy = await library.ExecuteAsync("music.search.settings.get", new { kind = kind.GetString() }, token).ConfigureAwait(false);
             if (!Okay(policy)) return policy;
             var settings = policy.GetProperty("settings")
                 .GetProperty(kind.GetString() == "songs" ? "songs" : "playlists");

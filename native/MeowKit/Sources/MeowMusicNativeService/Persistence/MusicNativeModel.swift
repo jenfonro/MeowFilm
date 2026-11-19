@@ -165,9 +165,8 @@ enum MusicModel {
         let q = prefs["qualitySettings"]
         let order = q["qualityOrder"].strings + qualityOrder.filter { !q["qualityOrder"].strings.contains($0) }
         let spOrder = q["spatialOrder"].strings + spatialOrder.filter { !q["spatialOrder"].strings.contains($0) }
-        var enabled = q.contains("qualityEnabled") ? q["qualityEnabled"].strings : qualityOrder
-        var spatial = q.contains("spatialEnabled") ? q["spatialEnabled"].strings : spatialOrder
-        if !enabled.contains(where: { $0 != "spatial" || !spatial.isEmpty }) { enabled = qualityOrder; spatial = spatialOrder }
+        let enabled = q.contains("qualityEnabled") ? q["qualityEnabled"].strings : qualityOrder
+        let spatial = q.contains("spatialEnabled") ? q["spatialEnabled"].strings : spatialOrder
         return (order.filter(enabled.contains), order, spOrder.filter(spatial.contains), spOrder)
     }
     /// Built-in audio-source admission from validated playback preferences.

@@ -28,6 +28,11 @@ internal static class MusicQualityPolicy
         _ => ""
     };
     internal static string[] Strings(JsonNode? node) => LJ.Array(node).Select(n => LJ.Text(n, 32)).ToArray();
+    private static string[] Ordered(JsonObject policy, string orderField, string enabledField)
+    {
+        var order = Strings(policy[orderField]);
+        return order.Concat(Strings(policy[enabledField]).Except(order)).ToArray();
+    }
     internal static bool HasEnabled(JsonObject policy) => Strings(policy["qualityEnabled"])
         .Any(id => Categories.Contains(id) && (id != "spatial" || Strings(policy["spatialEnabled"]).Any(Spatial.Contains)));
 
@@ -37,14 +42,14 @@ internal static class MusicQualityPolicy
         LJ.Require(LJ.I(policy["schema"]) == 1);
         _ = LJ.I(policy["revision"]);
         LJ.Require(LJ.S(policy["request"]) == "auto" || RequestTypes.Contains(LJ.S(policy["request"])));
-        static void List(JsonNode? n, string[] known, bool complete)
+        static void List(JsonNode? n, string[] known)
         {
             var values = Strings(n);
-            LJ.Require(values.Length <= known.Length && (!complete || values.Length == known.Length) &&
+            LJ.Require(values.Length <= known.Length &&
                 values.Distinct(StringComparer.Ordinal).Count() == values.Length && values.All(known.Contains));
         }
-        List(policy["qualityOrder"], Categories, true); List(policy["qualityEnabled"], Categories, false);
-        List(policy["spatialOrder"], Spatial, true); List(policy["spatialEnabled"], Spatial, false);
+        List(policy["qualityOrder"], Categories); List(policy["qualityEnabled"], Categories);
+        List(policy["spatialOrder"], Spatial); List(policy["spatialEnabled"], Spatial);
         LJ.Require(HasEnabled(policy), "QUALITY_REQUIRED");
     }
     internal static bool Enabled(string level, JsonObject policy)
@@ -53,9 +58,16 @@ internal static class MusicQualityPolicy
         return Strings(policy["qualityEnabled"]).Contains(category) && (category != "spatial" ||
             (level == "spatial" ? Strings(policy["spatialEnabled"]).Length > 0 : Strings(policy["spatialEnabled"]).Contains(level)));
     }
-    internal static int Priority(string level, JsonObject policy) => !Enabled(level, policy) ? int.MaxValue :
-        Array.IndexOf(Strings(policy["qualityOrder"]), Category(level)) * (Spatial.Length + 1) +
-        (Category(level) == "spatial" && level != "spatial" ? Array.IndexOf(Strings(policy["spatialOrder"]), level) : 0);
+    internal static int Priority(string level, JsonObject policy)
+    {
+        if (!Enabled(level, policy)) return int.MaxValue;
+        int category = Array.IndexOf(Strings(policy["qualityOrder"]), Category(level));
+        if (category < 0) category = Categories.Length;
+        int spatial = Category(level) == "spatial" && level != "spatial"
+            ? Array.IndexOf(Strings(policy["spatialOrder"]), level) : 0;
+        if (spatial < 0) spatial = Spatial.Length;
+        return category * (Spatial.Length + 1) + spatial;
+    }
 
     /// <summary>Exact official request levels; spatial and enhanced are platform effects, not LX types.</summary>
     internal static readonly string[] OfficialTypes = [.. RequestTypes, "jyeffect", "dolby", "sky", "vivid"];
@@ -64,7 +76,7 @@ internal static class MusicQualityPolicy
     {
         "master" => ["master"], "hires" => ["flac24bit"], "lossless" => ["flac"], "high" => ["320k", "192k"],
         "standard" => ["128k"], "enhanced" => ["jyeffect"],
-        "spatial" => Strings(policy["spatialOrder"]).Where(level => OfficialTypes.Contains(level) &&
+        "spatial" => Ordered(policy, "spatialOrder", "spatialEnabled").Where(level => OfficialTypes.Contains(level) &&
             Enabled(level, policy)).ToArray(),
         _ => []
     };
@@ -84,7 +96,7 @@ internal static class MusicQualityPolicy
     internal static Tier[] Tiers(JsonObject policy)
     {
         string request = LJ.S(policy["request"]);
-        var order = Strings(policy["qualityOrder"]);
+        var order = Ordered(policy, "qualityOrder", "qualityEnabled");
         int start = request == "auto" ? 0 : Math.Max(0, Array.IndexOf(order, Category(request)));
         return order.Skip(start).Where(category => Strings(policy["qualityEnabled"]).Contains(category))
             .Select(category => new Tier(category, category == Category(request) && request != "auto" &&

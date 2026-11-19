@@ -305,6 +305,8 @@ music.lyrics.parse
 music.online.song
 ```
 
+搜索设置读取可指定 `kind: songs|playlists`，只返回并消费对应分支；一种搜索不因未消费的另一分支损坏而失败。搜索、元数据和音质排序允许部分列表，设置页补全可选项只用于展示；未编辑的保存值与启用意图保持原样。
+
 ## Windows 外观值
 
 `native-appearance` 使用 schema 1、revision CAS：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受当前预设键或严格不透明 `#RRGGBB`（UI 提交统一大写），沿同一外观保存／权威重读路径消费。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。

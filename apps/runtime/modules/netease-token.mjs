@@ -8,9 +8,6 @@ export function createNeteaseTokenModule({ provider = createNeteaseTokenProvider
     methods: {
       'netease.token.get': async (input, context) => {
         try {
-          if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length) {
-            return { ok: false, contract: spec.contract, code: 'INVALID_REQUEST' };
-          }
           const token = await provider.get({ signal: context?.signal });
           return { ok: true, contract: spec.contract, value: { token } };
         } catch (error) {

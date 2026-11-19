@@ -94,7 +94,9 @@ public sealed class MusicLyricApplication(
                     return local;
                 // These are already admitted exact editions of this song, not a
                 // lookup by title. The original metadata traversal is <=10.
-                rows = metadata.GetProperty("platforms").EnumerateArray().Select(item => item.GetString()!)
+                var order = metadata.GetProperty("platforms").EnumerateArray().Select(item => item.GetString()!).ToArray();
+                rows = order.Concat(metadata.GetProperty("enabled").EnumerateArray()
+                        .Select(item => item.GetString()!).Except(order))
                     .Where(enabled.Contains).SelectMany(platform =>
                     rows.Where(row => LJ.S(row["source"]) == platform)
                         .OrderBy(row => LJ.S(row["sourceKey"]), StringComparer.Ordinal).Take(2)).ToArray();

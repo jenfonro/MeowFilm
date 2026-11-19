@@ -43,15 +43,13 @@ class Failure extends Error {
 }
 const requireValue = (condition, code = 'INVALID_REQUEST') => { if (!condition) throw new Failure(code); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const shape = (value, keys) => object(value) && Object.keys(value).length === keys.length &&
-  keys.every(key => Object.hasOwn(value, key));
+const hasFields = (value, keys) => object(value) && keys.every(key => Object.hasOwn(value, key));
 const digest = value => createHash('sha256').update(value).digest('hex');
 const encodedLength = value => Buffer.byteLength(stringifyJSONValue(value, -Infinity));
 const scalars = value => [...value].length;
 const control = /[\u0000-\u001f\u007f]/;
-function fields(value, allowed, required = allowed) {
-  requireValue(object(value) && Object.keys(value).every(key => allowed.includes(key)) &&
-    required.every(key => Object.hasOwn(value, key)));
+function fields(value, required) {
+  requireValue(object(value) && required.every(key => Object.hasOwn(value, key)));
 }
 function integer(value, min = 0) {
   requireValue(Number.isSafeInteger(value) && value >= min);
@@ -121,21 +119,22 @@ function sourceBasename(url) {
 }
 const validCode = value => value === null || typeof value === 'string' && codePattern.test(value);
 function validVersion(value) {
-  return shape(value, ['contentHash', 'bytes', 'version', 'author', 'description', 'homepage']) &&
+  return hasFields(value, ['contentHash', 'bytes', 'version', 'author', 'description', 'homepage']) &&
     typeof value.contentHash === 'string' && hashPattern.test(value.contentHash) &&
     Number.isSafeInteger(value.bytes) && value.bytes > 0 &&
     plainText(value.version, undefined, false) && plainText(value.author) &&
     plainText(value.description) && plainText(value.homepage);
 }
 function validOrigin(value) {
-  if (shape(value, ['kind'])) return value.kind === 'file';
-  if (!shape(value, ['kind', 'url']) || value.kind !== 'network') return false;
+  if (!hasFields(value, ['kind'])) return false;
+  if (value.kind === 'file') return true;
+  if (!hasFields(value, ['url']) || value.kind !== 'network') return false;
   try { return sourceURL(value.url) === value.url; } catch { return false; }
 }
 const validList = (value, max) => Array.isArray(value) &&
   value.every(item => plainText(item, max, false)) && new Set(value).size === value.length;
 function validDeclared(value) {
-  if (!shape(value, ['contentHash', 'capabilities']) || !hashPattern.test(value.contentHash) ||
+  if (!hasFields(value, ['contentHash', 'capabilities']) || !hashPattern.test(value.contentHash) ||
       !object(value.capabilities)) return false;
   try { validateJSONValue(value.capabilities); } catch { return false; }
   return Object.entries(value.capabilities).every(([site, capability]) => sitePattern.test(site) &&
@@ -143,36 +142,22 @@ function validDeclared(value) {
     (capability.qualitys === undefined || validList(capability.qualitys, 64)));
 }
 function validCheck(value) {
-  return shape(value, ['contentHash', 'checkedAt', 'failure', 'sites']) && hashPattern.test(value.contentHash) &&
+  return hasFields(value, ['contentHash', 'checkedAt', 'failure', 'sites']) && hashPattern.test(value.contentHash) &&
     Number.isSafeInteger(value.checkedAt) && value.checkedAt >= 0 && validCode(value.failure) &&
-    object(value.sites) && Object.entries(value.sites).every(([site, result]) => musicPlatforms.includes(site) &&
-      shape(result, ['state', 'quality', 'sample', 'code']) && ['ok', 'failed', 'unsupported'].includes(result.state) &&
+    object(value.sites) && Object.values(value.sites).every(result =>
+      hasFields(result, ['state', 'quality', 'sample', 'code']) && ['ok', 'failed', 'unsupported'].includes(result.state) &&
       (result.quality === null || plainText(result.quality, 64, false)) &&
       (result.sample === null || plainText(result.sample, 128, false)) && validCode(result.code));
 }
 function validCatalog(value) {
-  if (!shape(value, ['schema', 'revision', 'installations']) || value.schema !== 1 ||
-      !Number.isSafeInteger(value.revision) || value.revision < 0 || !Array.isArray(value.installations)) return false;
-  const ids = new Set();
-  for (const item of value.installations) {
-    if (!shape(item, ['id', 'name', 'origin', 'enabled', 'current', 'previous', 'declared', 'check']) ||
-        typeof item.id !== 'string' || !uuidPattern.test(item.id) || ids.has(item.id) ||
-        !plainText(item.name, undefined, false) || item.name.trim().length === 0 || typeof item.enabled !== 'boolean' ||
-        !validOrigin(item.origin) || !validVersion(item.current) ||
-        item.previous !== null && !validVersion(item.previous) ||
-        item.declared !== null && !validDeclared(item.declared) ||
-        item.check !== null && !validCheck(item.check)) return false;
-    ids.add(item.id);
-  }
-  return true;
+  return hasFields(value, ['schema', 'revision', 'installations']) && value.schema === 1 &&
+    Number.isSafeInteger(value.revision) && value.revision >= 0 && Array.isArray(value.installations);
 }
-function validData(value) {
-  if (!shape(value, ['schema', 'sites']) || value.schema !== 1 || !object(value.sites)) return false;
-  const sites = Object.entries(value.sites);
-  return sites.every(([site, values]) => sitePattern.test(site) && Array.isArray(values) &&
-    values.every(entry => shape(entry, ['key', 'value']) &&
-      typeof entry.key === 'string' && entry.key.length > 0) &&
-    new Set(values.map(entry => entry.key)).size === values.length);
+function validInstallation(item) {
+  return hasFields(item, ['id', 'name', 'origin', 'enabled', 'current']) &&
+    typeof item.id === 'string' && uuidPattern.test(item.id) &&
+    plainText(item.name, undefined, false) && item.name.trim().length > 0 && typeof item.enabled === 'boolean' &&
+    validOrigin(item.origin) && validVersion(item.current);
 }
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
@@ -262,8 +247,8 @@ function lxInfo(musicInfo) {
 }
 /**
  * Shared LX music source management and execution. This module is the only
- * writer of `<dataRoot>/music`: installation facts, immutable source files,
- * declared/checked platform facts and each installation's private storage.
+ * writer of music installation facts, declarations/checks and private KV in the
+ * shared database, plus immutable source files in `<dataRoot>/music`.
  * Native hosts supply the data root, file selection and presentation.
  * ScriptHost executes guest code in isolated QuickJS heaps.
  */
@@ -343,15 +328,20 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   function catalog() {requireValue(cached, 'STORAGE_ERROR');return cached;}
   function find(id) {
-    const item = catalog().installations.find(entry => entry.id === id);
-    requireValue(item, 'SOURCE_NOT_FOUND');
+    const matches = catalog().installations.filter(entry => entry?.id === id);
+    requireValue(matches.length > 0, 'SOURCE_NOT_FOUND');
+    requireValue(matches.length === 1, 'CORRUPT_STORAGE');
+    const [item] = matches;
+    requireValue(validInstallation(item), 'CORRUPT_STORAGE');
     return item;
   }
   /** Serialize catalog changes and publish only after the typed transaction commits. */
   function commit(change) {
     const work = catalogWrites.then(async () => {
       await ready;
-      const next = cloneJSONValue(catalog(), -Infinity);
+      // Nested installation snapshots are replaced as units; keep unconsumed declarations intact.
+      const current = catalog();
+      const next = {...current, installations:current.installations.map(item => ({...item}))};
       if (change(next) === false) return;
       next.revision += 1;
       requireValue(validCatalog(next));
@@ -363,7 +353,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   function edit(id, change) {
     return commit(next => {
-      const target = next.installations.find(entry => entry.id === id);
+      const target = next.installations.find(entry => entry?.id === id);
       requireValue(target, 'SOURCE_NOT_FOUND');return change(target);
     });
   }
@@ -459,6 +449,14 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   function declaredOf(record) {
     return { contentHash: record.contentHash, capabilities: snapshot(record.capabilities) };
   }
+  function sameDeclaration(previous, next) {
+    try { return canonical(persistence.readDeclaration(previous) ?? null) === canonical(next); }
+    catch (error) {
+      // An unreadable old declaration is replaced by the live one, not required for its admission.
+      if (error?.code === 'STORAGE_CORRUPT' || error instanceof BridgeError) return false;
+      throw error;
+    }
+  }
   function platformSites(capabilities) {
     const sites = {};
     for (const platform of musicPlatforms) {
@@ -497,7 +495,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       return next;
     } catch (error) {
       if (!closed) {
-        const owner = catalog().installations.find(entry => entry.id === item.id);
+        const owner = catalog().installations.find(entry => entry?.id === item.id);
         const remaining = live(item.id);
         const retained = current?.state === 'ready' && remaining?.state === 'ready' &&
           remaining.generation === current.generation && remaining.contentHash === owner?.current.contentHash;
@@ -517,7 +515,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     const declared = declaredOf(record);
     await edit(item.id, target => {
       if (target.current.contentHash !== record.contentHash ||
-          canonical(target.declared) === canonical(declared)) return false;
+          sameDeclaration(target.declared, declared)) return false;
       target.declared = declared;
     });
     observations.set(item.id, host.observe(item.id));
@@ -529,14 +527,19 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     return passed === 0 ? 'abnormal' : passed === sites.length ? 'normal' : 'partial';
   }
   function view(item, full = false) {
+    requireValue(validInstallation(item), 'CORRUPT_STORAGE');
     const record = observations.get(item.id)?.() ?? live(item.id);
     const ready = item.enabled && record?.state === 'ready' && record.contentHash === item.current.contentHash;
     const failure = failures.get(item.id);
     const failed = record?.state === 'failed' ? errorCode(new ScriptHostError(record.lastFailure ?? 'DISABLED'))
       : failure?.contentHash === item.current.contentHash ? failure.code : null;
-    const capabilities = record?.contentHash === item.current.contentHash && record.state === 'ready'
-      ? record.capabilities : item.declared?.contentHash === item.current.contentHash ? item.declared.capabilities : null;
+    const liveCapabilities = record?.contentHash === item.current.contentHash && record.state === 'ready';
+    const declaration = !liveCapabilities && item.declared?.contentHash === item.current.contentHash
+      ? persistence.readDeclaration(item.declared) : null;
     const check = item.check?.contentHash === item.current.contentHash ? item.check : null;
+    if (declaration) requireValue(validDeclared(declaration), 'CORRUPT_STORAGE');
+    if (check) requireValue(validCheck(check), 'CORRUPT_STORAGE');
+    const capabilities = liveCapabilities ? record.capabilities : declaration?.capabilities ?? null;
     const result = {
       installationId: item.id, name: item.name, version: item.current.version,
       author: item.current.author, description: item.current.description, homepage: item.current.homepage,
@@ -548,7 +551,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       contentHash: item.current.contentHash,
       executionHash: digest(canonical({ id: item.id, contentHash: item.current.contentHash,
         version: item.current.version })),
-      rollbackAvailable: item.previous !== null,
+      rollbackAvailable: item.previous != null,
       // null: never declared for this content. Execution re-checks the live declaration.
       capabilities,
       sites: capabilities === null ? null : platformSites(capabilities),
@@ -672,7 +675,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     } finally {
       if (!closed) await operations.run(id, async () => {
         const now = live(id);
-        const owner = catalog().installations.find(entry => entry.id === id);
+        const owner = catalog().installations.find(entry => entry?.id === id);
         if (releaseTemporary(id, record.generation) && now?.generation === record.generation && !owner?.enabled) {
           observations.delete(id);
           await retire(id);
@@ -703,7 +706,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
         await ready;
-        guard(signal); fields(parameters, allowed, required);
+        guard(signal); fields(parameters, required ?? allowed);
         const captured = snapshot(parameters);
         const scoped = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, scoped);
@@ -742,7 +745,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   async function add(id, prepared, origin) {
     await commit(next => {
-      requireValue(!next.installations.some(item => item.id === id), 'STALE_SOURCE');
+      requireValue(!next.installations.some(item => item?.id === id), 'STALE_SOURCE');
       next.installations.push({ id, name: prepared.name, origin, enabled: false,
         current: prepared.version, previous: null, declared: null, check: null });
     });
@@ -761,7 +764,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       installation(params.installationId); integer(params.sourceRevision, 1);
       return locked(params.installationId, signal, async scoped => {
         guard(scoped);
-        requireValue(!catalog().installations.some(item => item.id === params.installationId), 'STALE_SOURCE');
+        requireValue(!catalog().installations.some(item => item?.id === params.installationId), 'STALE_SOURCE');
         const input = sources.take(params.installationId, params.sourceRevision);
         const bytes = Buffer.from(input.source);
         let prepared, published = false;
@@ -806,7 +809,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       if (admitted.origin.kind === 'file') {
         integer(params.sourceRevision, 1);
         sources.peek(params.installationId, params.sourceRevision);
-      } else requireValue(params.sourceRevision === undefined);
+      }
       interrupt(params.installationId);
       return locked(params.installationId, signal, async scoped => {
         const item = find(params.installationId);
@@ -830,7 +833,10 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       });
     }),
     'music.script.sources.rollback': business(['installationId'], undefined, (params, signal) => {
-      installation(params.installationId); requireValue(find(params.installationId).previous, 'ROLLBACK_UNAVAILABLE');
+      installation(params.installationId);
+      const item = find(params.installationId);
+      requireValue(item.previous, 'ROLLBACK_UNAVAILABLE');
+      requireValue(validVersion(item.previous), 'CORRUPT_STORAGE');
       interrupt(params.installationId);
       return locked(params.installationId, signal, scoped => {
         const item = find(params.installationId);
@@ -847,7 +853,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           guard(scoped);
           await edit(item.id, target => {
             const declared = declaredOf(record);
-            if (target.enabled && canonical(target.declared) === canonical(declared)) return false;
+            if (target.enabled && sameDeclaration(target.declared, declared)) return false;
             target.enabled = true; target.declared = declared;
           });
           observations.set(item.id, host.observe(item.id));
@@ -894,7 +900,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         sources.remove(item.id); temporaryUse.delete(item.id); observations.delete(item.id);
         let cleanupFailure;
         try { await retiring; await retire(item.id); } catch (error) { cleanupFailure = error; }
-        await commit(next => { next.installations = next.installations.filter(entry => entry.id !== item.id); });
+        await commit(next => { next.installations = next.installations.filter(entry => entry?.id !== item.id); });
         failures.delete(item.id); collect();
         requireValue(!cleanupFailure && !live(item.id), 'SCRIPT_CLEANUP');
         cleanup(item.id);
