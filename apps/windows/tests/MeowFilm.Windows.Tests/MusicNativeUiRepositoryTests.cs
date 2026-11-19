@@ -2,9 +2,13 @@ using System.ComponentModel;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -14,6 +18,82 @@ public static class MusicNativeUiRepositoryTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("shell opens and revisits real music settings with SQLite without changing the queue", async () =>
+        {
+            await using var scene = await Scene.Create();
+            var respond = scene.Runtime.OnRequest;
+            scene.Runtime.OnRequest = (call, token) => call.Operation switch
+            {
+                "home" => Task.FromResult(MusicPlatformRuntimeFixture.Json(new
+                    { platform = "wy", sections = Array.Empty<object>(), more = false, continuation = (object?)null })),
+                "channels" => Task.FromResult(MusicPlatformRuntimeFixture.Json(new { items = Array.Empty<object>() })),
+                _ => respond(call, token)
+            };
+            await using var appearance = new AppAppearance(scene.Store);
+            await appearance.LoadAsync();
+            var shell = new ShellWindow([scene.Module], [], () => Task.CompletedTask, () => Task.CompletedTask,
+                appearance: appearance);
+            var root = DesktopTestUi.WindowRoot(shell);
+            try
+            {
+                shell.Show();
+                await Until(() => scene.Module.View.IsLoaded && scene.Module.CanEdit,
+                    "the real music page must be ready before entering settings");
+                var queue = await scene.Ok("music.queue.get");
+                DesktopTestUi.Invoke((Button)root.FindName("SettingsButton"));
+                var header = (DesktopPageHeader)root.FindName("PageHeaderHost");
+                var slot = (ContentControl)header.FindName("LeadingSlot");
+                await Until(() => slot.Content is Panel, "the shell must expose its settings categories");
+                var categories = ((Panel)slot.Content).Children.OfType<RadioButton>().ToArray();
+                var music = categories.Single(tab => Equals(tab.Content, "音乐"));
+                var general = categories.Single(tab => Equals(tab.Content, "通用"));
+                var view = (MusicSettingsView)scene.Module.SettingsView;
+                Check(general.IsChecked == true && !DesktopVisual.IsVisible(view),
+                    "opening general settings must not mount the music settings page");
+                for (int visit = 0; visit < 2; visit++)
+                {
+                    DesktopTestUi.Invoke(music);
+                    await Until(() => view.IsLoaded && DesktopVisual.IsVisible(view) && scene.Module.CanEditQuality &&
+                        scene.Module.CanEditSearchPreferences && scene.Module.CanEditMetadata,
+                        "the music category must mount and activate its real controls");
+                    var anchors = ((Panel)view.FindName("SettingsNavigation")).Children.OfType<RadioButton>().ToArray();
+                    Check(anchors.Select(anchor => anchor.Content).SequenceEqual(new[]
+                        { "账号与平台", "搜索", "音质", "歌词与封面", "音源" }),
+                        "the real music settings sections must be available");
+                    Check(scene.Module.PlatformSettings.Count == 3 && scene.Module.PlatformSettings.All(row => !row.IsLoggedIn),
+                        "the anonymous platform account rows must load without logging in");
+                    foreach (var anchor in anchors)
+                    {
+                        DesktopTestUi.Invoke(anchor);
+                        await MusicTestUi.Drain();
+                        Check(DesktopVisual.IsVisible(view), "changing a music settings section must retain the page");
+                    }
+                    Check(DesktopVisual.IsVisible((FrameworkElement)view.FindName("SourcesPage")),
+                        "source management must mount inside music settings");
+                    DesktopTestUi.Invoke(anchors[0]);
+                    await MusicTestUi.Drain();
+                    Check(DesktopVisual.IsVisible((FrameworkElement)view.FindName("SettingsScroller")),
+                        "returning to the account section must restore the continuous settings page");
+                    Check(scene.Module.Status.Length == 0 && scene.Module.OwnedNotices.Count == 0 && scene.Playback.Opens == 0,
+                        "opening and navigating settings must not report errors or start playback");
+                    DesktopTestUi.Invoke(general);
+                    await Until(() => !DesktopVisual.IsVisible(view), "general settings must retire the music page");
+                }
+                DesktopTestUi.Invoke((Button)root.FindName("BackButton"));
+                await Until(() => DesktopVisual.IsVisible(scene.Module.View) && !DesktopVisual.IsVisible(view),
+                    "Back must restore the original music page");
+                CheckQueueUnchanged(queue, await scene.Ok("music.queue.get"));
+                Check(scene.Runtime.Requests.All(call => call.Operation is "home" or "channels") && scene.Playback.Opens == 0,
+                    "settings navigation must not resolve media or request account data");
+            }
+            finally
+            {
+                shell.Close();
+                await shell.ShutdownCompletion.WaitAsync(TimeSpan.FromSeconds(5));
+                await scene.Module.DeactivateSettingsAsync();
+                await MusicTestUi.Drain();
+            }
+        });
         yield return Case("real SQLite publishes catalog songs and previews on the UI dispatcher", async () =>
         {
             await using var scene = await Scene.Create();
