@@ -659,9 +659,12 @@ public static partial class NovelTests
             Check(module.DiscoverBooks.All(b => b.InstallationId == "b") && ReferenceEquals(sidebar, module.SidebarView));
             var sourcePicker = Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source");
             Check(sourcePicker.Focus(FocusState.Programmatic), "The source selector could not receive keyboard focus.");
+            await Until(() => DesktopTestUi.HasFocus(sourcePicker));
             sourcePicker.SelectedItem = module.Sources.Sources.Single(s => s.InstallationId == "a");
             await Until(() => !module.LoadingDiscovery && module.ExploreSource?.InstallationId == "a");
-            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
+            var replacementSource = Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source");
+            await TestUiHost.LoadedAsync(replacementSource);
+            await Until(() => DesktopTestUi.HasFocus(replacementSource));
             Check(DesktopTestUi.HasFocus(Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source")),
                 "Changing source lost the source selector's keyboard focus.");
             Check(Find<RadioButton>(module.View).Where(r => r.GroupName == "novel.discovery.channels")
@@ -676,7 +679,9 @@ public static partial class NovelTests
             await Until(() => DesktopTestUi.HasFocus(kindPicker));
             kindPicker.IsChecked = true;
             await Until(() => !module.LoadingDiscovery && module.ExploreKind?.Title == "源站新作");
-            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
+            var replacementKind = Find<RadioButton>(module.View).Single(r => Equals(r.Content, "源站新作"));
+            await TestUiHost.LoadedAsync(replacementKind);
+            await Until(() => DesktopTestUi.HasFocus(replacementKind));
             Check(DesktopTestUi.HasFocus(Find<RadioButton>(module.View).Single(r => Equals(r.Content, "源站新作"))),
                 "Changing category lost the category control's keyboard focus.");
             await DesktopTestUi.DrainAsync(); root.UpdateLayout();

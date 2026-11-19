@@ -310,7 +310,8 @@ public static class GeneralCloseSettingsTests
                             "settings areas retain regular text and native focus visuals");
                     }
                     var underline = (Border)DesktopTestUi.Part(tabs[3], "Underline");
-                    Check(((SolidColorBrush)underline.BorderBrush).Color == FilmUiTest.ResourceColor(tabs[3], "MeowFilm.Brush.Accent"),
+                    Check(underline.Visibility == Visibility.Visible &&
+                        ((SolidColorBrush)underline.Background).Color == FilmUiTest.ResourceColor(tabs[3], "MeowFilm.Brush.Accent"),
                         "the selected settings area uses the theme accent underline");
                     await GeneralAppearanceTests.SavePreview(surface, $"general-close-{theme.Name}-{width}", width, 640);
                 }
@@ -331,7 +332,7 @@ public static class GeneralCloseSettingsTests
             var selectedUnderline = (Border)DesktopTestUi.Part(tabs[3], "Underline");
             var selectedLabel = (ContentPresenter)DesktopTestUi.Part(tabs[3], "Label");
             var systemColors = new global::Windows.UI.ViewManagement.UISettings();
-            Check(((SolidColorBrush)selectedUnderline.BorderBrush).Color ==
+            Check(selectedUnderline.Visibility == Visibility.Visible && ((SolidColorBrush)selectedUnderline.Background).Color ==
                 systemColors.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Highlight),
                 "the selected settings underline uses the system high-contrast highlight");
             Check(((SolidColorBrush)selectedLabel.Foreground).Color ==

@@ -397,7 +397,8 @@ public static class MusicEntryCardPresentationTests
             var shade = (Border)f.Entry.FindName("ExpansionShade");
             var rest = await Capture(f.Entry);
             var footer = new Point(f.Entry.ActualWidth / 2, f.Entry.ActualHeight - 3);
-            Check(rest.At(footer) == surface.Color, "the real footer paints the selected image tone");
+            Check(rest.At(footer) == surface.Color,
+                $"the real footer paints the selected image tone: actual={rest.At(footer)}; expected={surface.Color}");
             Check(shade.Background is LinearGradientBrush expansion && expansion.GradientStops[^1].Color == surface.Color,
                 "hover and footer use one color source");
             await f.Expand(true);

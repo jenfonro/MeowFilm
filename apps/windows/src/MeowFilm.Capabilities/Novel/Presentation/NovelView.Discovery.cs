@@ -26,7 +26,9 @@ public sealed partial class NovelView
     private string? CaptureDiscoveryFocus()
     {
         var focused = DesktopVisual.Focused(this);
-        if (discoveryFocus is { } pending && ReferenceEquals(focused, pending.DisplacedFocus)) return pending.Id;
+        // WinUI can move focus onto the content owner again while an intermediate page unloads.
+        if (discoveryFocus is { } pending &&
+            (ReferenceEquals(focused, pending.DisplacedFocus) || ReferenceEquals(focused, body))) return pending.Id;
         for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
         {
             Control? control = node is ComboBox or RadioButton ? (Control)node :
@@ -51,7 +53,8 @@ public sealed partial class NovelView
                 if (!ReferenceEquals(body.Content, replacement) || discoveryFocus is not { } pending) return;
                 discoveryFocus = null;
                 if (!DesktopVisual.IsVisible(replacement) ||
-                    DesktopVisual.Focused(this) is { } focused && !ReferenceEquals(focused, pending.DisplacedFocus)) return;
+                    DesktopVisual.Focused(this) is { } focused && !ReferenceEquals(focused, pending.DisplacedFocus) &&
+                    !ReferenceEquals(focused, body)) return;
                 FindDiscoveryFocus(replacement, pending.Id)?.Focus(FocusState.Programmatic);
             });
         }

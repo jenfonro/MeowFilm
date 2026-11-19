@@ -703,7 +703,7 @@ public static partial class MusicUiTests
             var blank = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(window), new(8, DesktopTestUi.WindowRoot(window).ActualHeight - 8));
             await DesktopHit(glyph, hwnd);
             await DesktopHit(blank, lower);
-            await NativeDesktopCapture.SaveAsync(DesktopTestUi.WindowRoot(window), "desktop-lyrics-transparent");
+            await NativeDesktopCapture.SaveAsync(DesktopTestUi.WindowRoot(window), "desktop-lyrics-transparent", lower);
             var originalSize = DesktopTestUi.WindowSize(window);
             var originalRow = f.Module.Lyrics[0];
             f.Module.Lyrics[0] = originalRow with { Text = "改词后仍按实际笔画命中" };
@@ -725,7 +725,7 @@ public static partial class MusicUiTests
             await window.SynchronizeInputRegionAsync();
             await DesktopHit(glyph, lower);
             await DesktopHit(blank, lower);
-            await NativeDesktopCapture.SaveAsync(DesktopTestUi.WindowRoot(window), "desktop-lyrics-locked");
+            await NativeDesktopCapture.SaveAsync(DesktopTestUi.WindowRoot(window), "desktop-lyrics-locked", lower);
             var unlock = window.UnlockWindow!;
             var unlockHandle = WinRT.Interop.WindowNative.GetWindowHandle(unlock);
             var unlockPoint = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(unlock), new(16, 16));
