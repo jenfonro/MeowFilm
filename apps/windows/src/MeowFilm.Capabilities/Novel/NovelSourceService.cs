@@ -340,7 +340,6 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
                 int count;
                 while ((count = await body.ReadAsync(buffer, deadline.Token)) != 0)
                 {
-                    if (output.Length + count > 16 * 1024 * 1024) throw new BridgeException("LIMIT");
                     output.Write(buffer, 0, count);
                 }
                 try { return new System.Text.UTF8Encoding(false, true).GetString(output.ToArray()).TrimStart('\uFEFF'); }

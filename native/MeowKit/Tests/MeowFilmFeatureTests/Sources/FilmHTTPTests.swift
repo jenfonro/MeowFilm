@@ -92,9 +92,7 @@ final class FilmHTTPTests: XCTestCase {
     }
 
     func testRejectedResponseStopsReadingAtHeaders() async throws {
-        let maximumBytes = 4 * 1_024 * 1_024
         let cases: [(Int, Int?, FilmHomeError)] = [
-            (200, maximumBytes + 1, .responseTooLarge),
             (200, 0, .invalidResponse),
             (503, nil, .upstream(statusCode: 503))
         ]
@@ -114,22 +112,16 @@ final class FilmHTTPTests: XCTestCase {
         }
     }
 
-    func testFourMiBBoundaryAlsoAppliesToStreamsWithoutContentLength() async throws {
-        let maximumBytes = 4 * 1_024 * 1_024
-        for excess in [0, 1] {
-            let chunks = [Data(repeating: 1, count: maximumBytes / 2),
-                          Data(repeating: 2, count: maximumBytes / 2 + excess)]
-            let stub = FilmHTTPStub(bodyChunks: chunks)
+    func testLargeArtworkWithAndWithoutContentLengthReturnsEveryByte() async throws {
+        let chunks = [Data(repeating: 1, count: 2 * 1_024 * 1_024),
+                      Data(repeating: 2, count: 2 * 1_024 * 1_024 + 1)]
+        let expected = chunks.reduce(Data(), +)
+        for length in [nil, Optional(expected.count)] {
+            let stub = FilmHTTPStub(bodyChunks: chunks, length: length)
             defer { stub.close() }
             let http = FilmHTTP(configuration: FilmHTTPStub.configuration())
-            do {
-                let bytes = try await http.readArtwork(stub.url)
-                XCTAssertEqual(excess, 0, "A body above 4 MiB must fail even without Content-Length.")
-                XCTAssertEqual(bytes.count, maximumBytes)
-            } catch {
-                XCTAssertEqual(excess, 1)
-                XCTAssertEqual(error as? FilmHomeError, .responseTooLarge)
-            }
+            let bytes = try await http.readArtwork(stub.url)
+            XCTAssertEqual(bytes, expected)
         }
     }
 

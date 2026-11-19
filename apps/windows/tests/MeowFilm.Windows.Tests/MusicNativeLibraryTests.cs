@@ -35,8 +35,8 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music queue single repeats ended only", () => Modes(3));
         yield return new("Native music queue shuffle previous uses runtime history", Shuffle);
         yield return new("Native music queue remove reorder clear and archive semantics", QueueEdits);
-        yield return new("Native music replace archives five queues and restores occurrences", Archives);
-        yield return new("Native music actual-play history deduplicates and retains seven local days", Played);
+        yield return new("Native music replace retains all archived queues and restores occurrences", Archives);
+        yield return new("Native music actual-play history deduplicates and retains all local days", Played);
         yield return new("Native music queue and history restart preserve selection not session clocks", Restart);
         yield return new("Native music SQLite records reopen without Node", PlainFiles);
         yield return new("Native music before commit failure reads the actual durable outcome without replay", () => UnknownCommit(false));
@@ -61,7 +61,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music word LRC without end boundary keeps timestamps and zero trailing duration", LyricsUnboundedTrailingWords);
         yield return new("Native music QRC XML entity decode never interprets markup", LyricsXml);
         yield return new("Native music translation exact timestamps only no nearest matching", LyricsTranslation);
-        yield return new("Native music lyrics local JSON adapter and bounded bad inputs", LyricsAdapter);
+        yield return new("Native music lyrics local JSON adapter accepts large text and line counts with valid timing", LyricsAdapter);
     }
     private static void Check(bool c, string message = "Assertion failed") { if (!c) throw new InvalidOperationException(message); }
     private static readonly JsonSerializerOptions PersistedJson = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
@@ -293,6 +293,15 @@ public static partial class MusicNativeLibraryTests
         string before = (await Ok(o, "music.queue.get")).GetProperty("currentId").GetString()!;
         var next = await Ok(o, "music.queue.next"); Check(next.GetProperty("currentId").GetString() != before);
         Check((await Ok(o, "music.queue.previous")).GetProperty("targetId").GetString() == before);
+        var visited = new List<string> { before };
+        for (int i = 0; i < 105; i++)
+            visited.Add((await Ok(o, "music.queue.next")).GetProperty("currentId").GetString()!);
+        await Ok(o, "music.queue.replace", new { songs = new[] { Song("replacement") }, index = 0 });
+        string archive = (await Ok(o, "music.history.list", new { kind = "playlists" }))
+            .GetProperty("items")[0].GetProperty("id").GetString()!;
+        await Ok(o, "music.history.restorePlaylist", new { id = archive });
+        for (int i = visited.Count - 2; i >= 0; i--)
+            Check((await Ok(o, "music.queue.previous")).GetProperty("targetId").GetString() == visited[i]);
         await o.DisposeAsync(); var reopened = f.Owner();
         Check((await Ok(reopened, "music.queue.previous")).GetProperty("targetId").ValueKind == JsonValueKind.Null);
     }
@@ -311,7 +320,9 @@ public static partial class MusicNativeLibraryTests
     {
         await using var f = new Fixture(); var o = f.Owner();
         for (int i = 0; i < 7; i++) await Ok(o, "music.queue.replace", new { songs = new[] { Song("a" + i), Song("b" + i) }, index = 1, context = new { sourceTitle = "Set " + i } });
-        var h = await Ok(o, "music.history.list", new { kind = "playlists" }); Check(h.GetProperty("total").GetInt32() == 5);
+        await o.DisposeAsync(); o = f.Owner();
+        var h = await Ok(o, "music.history.list", new { kind = "playlists" }); Check(h.GetProperty("total").GetInt32() == 6);
+        Check(h.GetProperty("items")[5].GetProperty("title").GetString() == "Set 0");
         string id = h.GetProperty("items")[1].GetProperty("id").GetString()!;
         var detail = await Ok(o, "music.history.detail", new { kind = "playlists", id }); string occurrence = detail.GetProperty("currentId").GetString()!;
         await Ok(o, "music.history.restorePlaylist", new { id });
@@ -330,7 +341,9 @@ public static partial class MusicNativeLibraryTests
         await Error(o, "music.history.recordPlayed", new { entryId = id, at = now + 86400000 }, "INVALID_REQUEST");
         for (int i = 0; i < 9; i++)
             for (int j = 0; j < 2; j++) await Ok(o, "music.history.recordPlayed", new { entryId = id, at = now - i * 86400000L - j });
-        var days = await Ok(o, "music.history.get"); Check(days.GetProperty("total").GetInt32() == 7 && days.GetProperty("items")[0].GetProperty("count").GetInt32() == 1);
+        await o.DisposeAsync(); o = f.Owner();
+        var days = await Ok(o, "music.history.get"); Check(days.GetProperty("total").GetInt32() == 9 &&
+            days.GetProperty("items").EnumerateArray().All(day => day.GetProperty("count").GetInt32() == 1));
     }
     private static async Task Restart()
     {
@@ -774,6 +787,14 @@ public static partial class MusicNativeLibraryTests
         var lines = await o.ExecuteAsync("music.lyrics.parse", new { text = "[00:01]Synthetic", translation = "", duration = 4 });
         Check(lines.ValueKind == JsonValueKind.Array && lines[0].GetProperty("words").GetArrayLength() == 0 &&
             !lines[0].TryGetProperty("timing", out _) && f.Store.Writes == 0);
-        await Error(o, "music.lyrics.parse", new { text = new string('x', 65537), translation = "", duration = 0 }, "INVALID_LYRIC_RESPONSE");
+        string text = new('x', 65537);
+        var large = await o.ExecuteAsync("music.lyrics.parse", new { text = "[00:01]" + text, translation = "", duration = 4 });
+        Check(large.ValueKind == JsonValueKind.Array && large.GetArrayLength() == 1 &&
+            large[0].GetProperty("text").GetString() == text && f.Store.Writes == 0);
+        string manyLines = string.Join('\n', Enumerable.Range(0, 10001).Select(i => $"[{i * 10},10]line-{i}"));
+        var parsed = await o.ExecuteAsync("music.lyrics.parse", new { text = manyLines, translation = "", duration = 101 });
+        Check(parsed.ValueKind == JsonValueKind.Array && parsed.GetArrayLength() == 10001 &&
+            parsed[10000].GetProperty("text").GetString() == "line-10000" && f.Store.Writes == 0);
+        await Error(o, "music.lyrics.parse", new { text = "[00:01]line", translation = "", duration = -1 }, "INVALID_LYRIC_RESPONSE");
     }
 }

@@ -6,7 +6,6 @@ import { acquireNativeStorageLock as acquire } from './native-engine.js';
 
 const { path, identity, initialize } = workerData;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
-const MAX_RESULT_BYTES = 16 * 1024 * 1024;
 let db, fileIdentity, commits = 0, maintenanceFailure;
 const enter = (exclusive, timeout = 2500) =>
   acquire(dirname(path) + '/maintenance.lock', exclusive, timeout);
@@ -62,21 +61,17 @@ function value(item) {
   return item;
 }
 
-function query(sql, params = [], maximum = 4096) {
-  if (typeof sql !== 'string' || !Number.isSafeInteger(maximum) || maximum < 1 || maximum > 65536)
+function query(sql, params = [], maximum = Number.MAX_SAFE_INTEGER) {
+  if (typeof sql !== 'string' || !Number.isSafeInteger(maximum) || maximum < 1)
     fail('INVALID_REQUEST');
   const statement = db.prepare(sql);
   statement.setReadBigInts(true);
   const rows = [];
-  let bytes = 0;
   for (const row of statement.iterate(...parameters(params))) {
     if (rows.length >= maximum) fail('STORAGE_RESULT_LIMIT');
     const result = {};
     for (const [key, item] of Object.entries(row)) {
       const field = value(item);
-      bytes += Buffer.byteLength(key) + 32 + (typeof field === 'string'
-        ? Buffer.byteLength(field) : ArrayBuffer.isView(field) ? field.byteLength : 16);
-      if (bytes > MAX_RESULT_BYTES) fail('STORAGE_RESULT_LIMIT');
       result[key] = field;
     }
     rows.push(result);
@@ -94,7 +89,7 @@ function execute(sql, params = [], expected) {
 }
 
 function transaction(statements, readOnly = false) {
-  if (!Array.isArray(statements) || !statements.length || statements.length > 65536)
+  if (!Array.isArray(statements) || !statements.length)
     fail('INVALID_REQUEST');
   db.exec(readOnly ? 'BEGIN DEFERRED' : 'BEGIN IMMEDIATE');
   try {

@@ -1,6 +1,7 @@
 import XCTest
 import UIKit
 import MeowUI
+import MeowStorage
 @testable import MeowFilmFeature
 @testable import MeowMusicFeature
 @testable import MeowNovelFeature
@@ -70,6 +71,146 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         XCTAssertFalse((rootLast.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
         XCTAssertTrue((novelFirst.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
         XCTAssertFalse((novelLast.backgroundView as? SettingsRowBackgroundView)?.drawsSeparator == true)
+        try assertSettingsFirstElement(root, table: rootTable)
+        try assertSettingsFirstElement(novel, table: novelTable)
+    }
+
+    func testSettingsFirstContentMatchesSearchPurificationForTitledUntitledAndNestedPages() async throws {
+        let database = try appStorageTestDatabase()
+        let rules = FilmRuleService(settingsDocument: FilmSettingsDocument(
+            block: .rules, database: database
+        ), request: { _, _ in
+            XCTFail("Measuring native settings must not execute rules")
+            throw FilmRuleServiceError.closed
+        })
+        let owner = FilmRulesDraft(service: rules)
+        try await owner.load()
+        let panModel = PanAccountsModel(service: PanAccountService(document: FilmSettingsDocument(
+            block: .panAccounts, database: database
+        ), request: { _, _, _ in
+            XCTFail("Measuring the account list must not validate accounts")
+            throw FilmRuleServiceError.closed
+        }))
+        addTeardownBlock { @MainActor in
+            panModel.close(); await panModel.closing?.value
+            await rules.close()
+        }
+        let domain = "SettingsTopTheme." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let store = try appStorageTestAppearance(database)
+        let reference = FilmRulePageViewController(owner: owner, group: .search, themeProvider: store)
+        let root = MeowfilmSettingsViewController(themeProvider: store)
+        let novel = NovelTablePage(themeProvider: store)
+        novel.pageTitle = "小说设置"; novel.rows = [.init(title: "书源管理") {}]
+        let film = FilmSettingsListController(themeProvider: store)
+        film.pageTitle = "影视设置"
+        film.sections = [.init(title: "", rows: [.init(title: "播放器设置", id: "spacing.film")])]
+        let titled = FilmSettingsListController(themeProvider: store)
+        titled.pageTitle = "播放控制"
+        titled.sections = [.init(title: "播放选项", rows: [.init(title: "倍速", id: "spacing.player")]),
+                          .init(title: "画面", rows: [.init(title: "比例", id: "spacing.video")])]
+        let pan = PanAccountsViewController(model: panModel, themeProvider: store)
+        let parent = PageViewController(themeProvider: store)
+        parent.pageTitle = "智能播放设置"
+        let nested = SettingsNestedFilmPage(themeProvider: store)
+        nested.sections = [.init(title: "", rows: [.init(title: "偏好设置", id: "spacing.nested")])]
+        parent.loadViewIfNeeded(); parent.addChild(nested)
+        parent.view.addSubview(nested.view); nested.view.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            nested.view.topAnchor.constraint(equalTo: parent.contentTopAnchor),
+            nested.view.leadingAnchor.constraint(equalTo: parent.view.safeAreaLayoutGuide.leadingAnchor),
+            nested.view.trailingAnchor.constraint(equalTo: parent.view.safeAreaLayoutGuide.trailingAnchor),
+            nested.view.bottomAnchor.constraint(equalTo: parent.view.safeAreaLayoutGuide.bottomAnchor),
+        ])
+        nested.didMove(toParent: parent)
+        let pages: [PageViewController] = [reference, root, novel, film, titled, pan, parent]
+        for page in pages { _ = try host(page) }
+        let environments: [(CGFloat, UIContentSizeCategory)] = [CGFloat(320), 390, 430].flatMap { viewport in
+            [UIContentSizeCategory.large, .accessibilityExtraExtraExtraLarge].map { (viewport, $0) }
+        }
+        for (viewport, category) in environments {
+            for dark in [false, true] {
+                for page in pages {
+                    let width = try XCTUnwrap(page.view.constraints.first {
+                        $0.firstAttribute == .width && $0.secondItem == nil
+                    })
+                    width.constant = viewport
+                    page.traitOverrides.preferredContentSizeCategory = category
+                    page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+                    page.applyTheme(); page.view.window?.layoutIfNeeded(); page.view.layoutIfNeeded()
+                }
+                let card = try XCTUnwrap(reference.editors.first)
+                let gap = card.convert(card.bounds, to: reference.view).minY -
+                    reference.pageHeader.convert(reference.pageHeader.bounds, to: reference.view).maxY
+                XCTAssertEqual(SettingsVisualMetrics.contentTopSpacing, 20)
+                XCTAssertEqual(gap, SettingsVisualMetrics.contentTopSpacing, accuracy: 1)
+                XCTAssertEqual(reference.scrollView.contentInset.top, 0, accuracy: 0.5)
+                XCTAssertEqual(reference.scrollView.adjustedContentInset.top, 0, accuracy: 0.5)
+                XCTAssertEqual(reference.scrollView.contentOffset.y, 0, accuracy: 0.5)
+                for page in pages.dropFirst() {
+                    let table = try XCTUnwrap(descendants(page.view).compactMap { $0 as? SettingsTableView }.first)
+                    table.reloadData(); page.view.layoutIfNeeded()
+                    try assertSettingsFirstElement(page, table: table, title: page === titled ? "播放选项" : nil,
+                        referenceGap: gap)
+                }
+                XCTAssertEqual(titled.table.heightForHeader(in: 1, title: "画面"), UITableView.automaticDimension)
+                XCTAssertNil(titled.table.viewForHeader(in: 1, title: "画面", theme: titled.theme))
+                XCTAssertEqual(nested.pageHeader.bounds.height, 0, "The embedded menu does not add another page header")
+                attach(titled, "settings-top-titled-\(Int(viewport))-\(category.rawValue)-\(dark)")
+                attach(pan, "settings-top-pan-\(Int(viewport))-\(category.rawValue)-\(dark)")
+            }
+        }
+        film.sections = [.init(title: "", rows: (0..<60).map {
+            .init(title: "设置 \($0)", id: "spacing.row.\($0)")
+        })]
+        film.render(); film.view.layoutIfNeeded()
+        film.table.setContentOffset(CGPoint(x: 0, y: 240), animated: false)
+        film.table.layoutIfNeeded()
+        let offset = film.table.contentOffset
+        let firstVisible = try XCTUnwrap(film.table.indexPathsForVisibleRows?.first)
+        let visibleTop = film.table.rectForRow(at: firstVisible).minY - offset.y
+        film.render(); film.view.layoutIfNeeded()
+        XCTAssertEqual(film.table.rectForRow(at: firstVisible).minY - film.table.contentOffset.y,
+            visibleTop, accuracy: 1,
+            "Reloading estimated row heights must preserve the visible content anchor")
+        let renderedOffset = film.table.contentOffset
+        let renderedCell = try XCTUnwrap(film.table.cellForRow(at: firstVisible))
+        film.traitOverrides.userInterfaceStyle = .light
+        film.applyTheme(); film.view.layoutIfNeeded()
+        XCTAssertTrue(film.table.cellForRow(at: firstVisible) === renderedCell)
+        XCTAssertEqual((renderedCell.contentConfiguration as? UIListContentConfiguration)?.textProperties.color,
+            UIColor(film.theme.settings.ink))
+        XCTAssertEqual(film.table.contentOffset.y, renderedOffset.y, accuracy: 1,
+            "Theme updates must not change the user's scroll position")
+        XCTAssertEqual(film.table.rectForRow(at: firstVisible).minY - film.table.contentOffset.y,
+            visibleTop, accuracy: 1, "Header policy must preserve the visible content through render and theme changes")
+    }
+
+    func testNonSettingsBorrowerKeepsNativeGroupedFirstHeaderAndInsets() throws {
+        let page = SettingsBorrowedFilmPage(themeProvider: MusicAppearancePreferencesStore())
+        page.pageTitle = "原始目录"
+        page.sections = [.init(title: "", rows: [.init(title: "目录", id: "spacing.directory")])]
+        _ = try host(page)
+        let system = UITableView(frame: .zero, style: .insetGrouped)
+        system.dataSource = page
+        system.rowHeight = UITableView.automaticDimension; system.estimatedRowHeight = 60
+        page.view.insertSubview(system, at: 0); system.alpha = 0
+        system.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            system.topAnchor.constraint(equalTo: page.contentTopAnchor),
+            system.leadingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.leadingAnchor),
+            system.trailingAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.trailingAnchor),
+            system.bottomAnchor.constraint(equalTo: page.view.safeAreaLayoutGuide.bottomAnchor),
+        ])
+        page.view.layoutIfNeeded(); system.layoutIfNeeded()
+        XCTAssertEqual(page.table.contentInsetAdjustmentBehavior, system.contentInsetAdjustmentBehavior)
+        XCTAssertEqual(page.table.contentInset.top, system.contentInset.top, accuracy: 0.5)
+        XCTAssertEqual(page.table.adjustedContentInset.top, system.adjustedContentInset.top, accuracy: 0.5)
+        XCTAssertEqual(page.table.contentOffset.y, system.contentOffset.y, accuracy: 0.5)
+        XCTAssertEqual(page.table.rectForHeader(inSection: 0).height, system.rectForHeader(inSection: 0).height, accuracy: 1)
+        XCTAssertEqual(page.table.rectForRow(at: IndexPath(row: 0, section: 0)).minY,
+            system.rectForRow(at: IndexPath(row: 0, section: 0)).minY, accuracy: 1)
     }
 
     func testUserDataResetRequiresDestructiveConfirmationAndCancelDoesNotRequestIt() throws {
@@ -173,6 +314,7 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
             page.traitOverrides.preferredContentSizeCategory = category
             page.view.layoutIfNeeded()
             let table = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UITableView }.first)
+            try assertSettingsFirstElement(page, table: try XCTUnwrap(table as? SettingsTableView))
             for section in 0..<table.numberOfSections {
                 for row in 0..<table.numberOfRows(inSection: section) {
                     let path = IndexPath(row: row, section: section)
@@ -300,6 +442,40 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         windows.append((window, previous))
         return window
     }
+    private func assertSettingsFirstElement(
+        _ page: PageViewController, table: SettingsTableView, title: String? = nil,
+        referenceGap: CGFloat = SettingsVisualMetrics.contentTopSpacing
+    ) throws {
+        let first: UIView
+        if let title {
+            let labels = descendants(table).compactMap { $0 as? UILabel }.filter {
+                $0.text == title && !$0.isHidden && $0.alpha > 0
+            }
+            XCTAssertEqual(labels.count, 1, "The custom first header must not duplicate UIKit's title")
+            let label = try XCTUnwrap(labels.first)
+            XCTAssertEqual(label.font, UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: table.traitCollection))
+            XCTAssertEqual(label.textColor, UIColor(page.theme.settings.muted))
+            first = label
+        } else {
+            let cell = try XCTUnwrap(table.cellForRow(at: IndexPath(row: 0, section: 0)))
+            first = try XCTUnwrap(cell.backgroundView as? SettingsRowBackgroundView)
+            XCTAssertEqual(table.rectForHeader(inSection: 0).height, SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
+        }
+        let headerBottom = page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY
+        let frame = first.convert(first.bounds, to: page.view)
+        XCTAssertEqual(frame.minY - headerBottom, referenceGap, accuracy: 1,
+            "Measure the first visible card or section title in the page-header coordinate space")
+        XCTAssertEqual(table.contentInset.top, 0, accuracy: 0.5)
+        XCTAssertEqual(table.adjustedContentInset.top, 0, accuracy: 0.5)
+        XCTAssertEqual(table.contentOffset.y, 0, accuracy: 0.5)
+        let metrics = XCTAttachment(string: """
+            page=\(page.pageTitle ?? "") width=\(page.view.bounds.width) category=\(page.traitCollection.preferredContentSizeCategory.rawValue)
+            headerBottom=\(headerBottom) firstFrame=\(frame) firstHeader=\(table.rectForHeader(inSection: 0))
+            offset=\(table.contentOffset) inset=\(table.contentInset) adjustedInset=\(table.adjustedContentInset)
+            """)
+        metrics.name = "settings-native-top-\(page.pageTitle ?? "")-\(Int(page.view.bounds.width))"
+        metrics.lifetime = .keepAlways; add(metrics)
+    }
     private func waitUntil(_ condition: @escaping @MainActor () -> Bool) {
         let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { condition() } }, evaluatedWith: nil)
         wait(for: [ready], timeout: 4)
@@ -312,4 +488,14 @@ final class MeowfilmSettingsNavigationTests: XCTestCase {
         let attachment = XCTAttachment(image: image)
         attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
     }
+}
+
+@MainActor
+private final class SettingsNestedFilmPage: FilmSettingsListController {
+    override var usesPageHeader: Bool { false }
+}
+
+@MainActor
+private final class SettingsBorrowedFilmPage: FilmSettingsListController {
+    override var usesSettingsColors: Bool { false }
 }

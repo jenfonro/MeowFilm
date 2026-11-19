@@ -8,7 +8,6 @@ public static class DatabaseValueTree
 {
     public static readonly string[] Columns = ["node_id", "parent_id", "prop_key", "item_index", "kind",
         "bool_value", "int_value", "real_value", "text_value"];
-    private const int MaximumNodes = 100000;
     private static DocumentStoreException Invalid() => new(DocumentStoreError.Corrupt);
 
     public static IReadOnlyList<object?[]> Rows(JsonNode? value)
@@ -16,7 +15,7 @@ public static class DatabaseValueTree
         var rows = new List<object?[]>();
         void Visit(JsonNode? node, int? parent, string? property, int? index, int depth)
         {
-            if (depth > 64 || rows.Count >= MaximumNodes) throw new DocumentStoreException(DocumentStoreError.Limit);
+            if (depth > 64) throw new DocumentStoreException(DocumentStoreError.Limit);
             int id = rows.Count;
             string kind;
             object? flag = null, integer = null, real = null, text = null;
@@ -50,7 +49,7 @@ public static class DatabaseValueTree
 
     public static JsonNode? Value(IReadOnlyList<IReadOnlyDictionary<string, object?>> rows)
     {
-        if (rows.Count is 0 or > MaximumNodes) throw Invalid();
+        if (rows.Count == 0) throw Invalid();
         var byId = rows.ToDictionary(row => Convert.ToInt32(row["node_id"]));
         var childrenByParent = rows.Where(row => row["parent_id"] is not null)
             .GroupBy(row => Convert.ToInt32(row["parent_id"])).ToDictionary(group => group.Key, group => group.ToArray());

@@ -21,14 +21,20 @@ public interface IMusicDailyStylePreferences
 
 public sealed partial class MusicPlatformCatalog
 {
-    private static readonly JsonSerializerOptions ModelJson = new() { PropertyNameCaseInsensitive = true };
     public async Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken cancellationToken = default)
     {
         var account = await sessions.AcquireAsync("wy", cancellationToken).ConfigureAwait(false)
             ?? throw new MusicPlatformException("AUTH_REQUIRED");
         var data = await client.RequestAsync("wy", "dailyStyle.get", new { }, account, cancellationToken).ConfigureAwait(false);
+        static JsonElement Field(JsonElement value, string key) =>
+            value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) ? field : default;
+        static IEnumerable<JsonElement> Rows(JsonElement value) =>
+            value.ValueKind == JsonValueKind.Array ? value.EnumerateArray() : [];
+        static string Text(JsonElement value, string key) =>
+            Field(value, key) is { ValueKind: JsonValueKind.String } field ? field.GetString()! : "";
         return new(account.Scope, account.Generation, account.UserId,
-            data.GetProperty("categories").Deserialize<MusicDailyStyleCategory[]>(ModelJson)!);
+            Rows(Field(data, "categories")).Select(row => new MusicDailyStyleCategory(Text(row, "id"), Text(row, "name"),
+                Rows(Field(row, "tags")).Select(tag => new MusicDailyStyleTag(Text(tag, "id"), Text(tag, "name"))).ToArray())).ToArray());
     }
     public async Task<MusicDailyStyleSaveResult> SaveDailyStyleAsync(MusicDailyStyleEditor editor,
         MusicDailyStyleSelection selection, CancellationToken cancellationToken = default)

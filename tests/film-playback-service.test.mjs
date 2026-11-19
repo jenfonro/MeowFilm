@@ -828,7 +828,7 @@ test('Douban seed settles to a TMDB target or a successful empty aggregate befor
   assert.equal(unmatched.target.kind, 'group');
   assert.deepEqual(unmatched.target.members, []);
   assert.equal(unmatched.stage, 'unavailable');
-  assert.equal(unmatched.error, 'SOURCE_NOT_FOUND');
+  assert.equal(unmatched.error, null);
   assert.deepEqual(unmatched.sources, []);
   assert.equal(unmatched.search[0].page, 0);
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
@@ -857,8 +857,16 @@ test('public open rejects every supplied empty group while a Douban seed may cre
   await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched' && !f.snapshot(opened.sessionId).browsing.loading);
   assert.deepEqual(f.snapshot(opened.sessionId).target, { ...empty, id: `group:${seed.id}` });
   assert.equal(f.snapshot(opened.sessionId).stage, 'unavailable');
-  assert.equal(f.snapshot(opened.sessionId).error, 'SOURCE_NOT_FOUND');
+  assert.equal(f.snapshot(opened.sessionId).error, null);
   assert.deepEqual(f.calls.filter(row => row[0] !== 'metadata'), []);
+  await f.service.release({ sessionId: opened.sessionId });
+  const reopened = await f.open({ platform: 'ios', target: seed, restoreOnly: true,
+    browsing: { sourceId: null, metadataSourceId: null } });
+  await until(() => f.snapshot(reopened.sessionId).entryResolution === 'unmatched' &&
+    f.snapshot(reopened.sessionId).stage === 'unavailable' && !f.snapshot(reopened.sessionId).browsing.loading);
+  assert.equal(f.snapshot(reopened.sessionId).stage, 'unavailable');
+  assert.equal(f.snapshot(reopened.sessionId).error, null);
+  assert.deepEqual(f.snapshot(reopened.sessionId).sources, []);
 });
 
 test('Douban seed request failure remains an error and browse.refresh retries it before explicit site search', async t => {
@@ -877,6 +885,7 @@ test('Douban seed request failure remains an error and browse.refresh retries it
   const failed = f.snapshot(opened.sessionId);
   assert.equal(failed.error, 'UPSTREAM_HTTP');
   assert.equal(failed.stage, 'error');
+  assert.equal(failed.browsing.error, 'UPSTREAM_HTTP');
   assert.deepEqual(failed.target.members, []);
   await assert.rejects(f.command(opened.sessionId, 'search.more'), { code: 'INVALID_REQUEST' });
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
@@ -884,7 +893,9 @@ test('Douban seed request failure remains an error and browse.refresh retries it
   await f.command(opened.sessionId, 'browse.refresh');
   await until(() => f.snapshot(opened.sessionId).entryResolution === 'unmatched' && !f.snapshot(opened.sessionId).browsing.loading);
   assert.equal(calls, 2);
-  assert.equal(f.snapshot(opened.sessionId).error, 'SOURCE_NOT_FOUND');
+  assert.equal(f.snapshot(opened.sessionId).stage, 'unavailable');
+  assert.equal(f.snapshot(opened.sessionId).error, null);
+  assert.equal(f.snapshot(opened.sessionId).browsing.error, null);
   assert.equal(f.calls.some(row => row[0] === 'search'), false);
   await f.command(opened.sessionId, 'search.more');
   await until(() => f.calls.some(row => row[0] === 'search'));
@@ -1386,7 +1397,7 @@ test('G02-C01 real data restores cached season fields and preview after returnin
   await f.command(sessionId, 'browse', { sourceId: f.snapshot(sessionId).sources[0].id });
   await until(() => f.snapshot(sessionId).browsing.originalEpisodes?.length === 4);
   assert.deepEqual(f.snapshot(sessionId).browsing.originalEpisodes.map(row => row.episode), [1, 2, 3, 99]);
-  await f.command(sessionId, 'browse.metadata', { metadataSourceId: primary.id });
+  await f.command(sessionId, 'browse.metadata', { metadataSourceId: primary.id, keepSource: false });
   await until(() => !f.snapshot(sessionId).browsing.loading && f.snapshot(sessionId).browsing.sourceId === null);
   assert.deepEqual(f.snapshot(sessionId).episodes, initial);
   await f.command(sessionId, 'preview', { enabled: true });
@@ -6174,7 +6185,8 @@ for (const related of [false, true]) {
     await until(() => f.snapshot(sessionId).metadataSources.length === 2 && !f.snapshot(sessionId).browsing.loading);
     const before = f.snapshot(sessionId);
     assert.deepEqual(before.workInfo, { provider: 'tmdb', metadataId: '19', kind: 'tv', title: 'Primary series',
-      summary: related ? 'Douban summary' : '', seasonCount: 4, episodeCount: 93 });
+      summary: related ? 'Douban summary' : '', seasonCount: 4, episodeCount: 93,
+      metadata: f.metadataView(before, { ...primary, overview: related ? 'Douban summary' : '' }) });
     const secondarySource = before.metadataSources.find(row => row.provider === 'douban');
     await f.command(sessionId, 'browse.metadata', { metadataSourceId: secondarySource.id });
     await until(() => !f.snapshot(sessionId).browsing.loading);
@@ -6269,11 +6281,103 @@ for (const secondCount of [7, null]) {
       metadataProvider: 'douban', metadataId: '20' } });
     await until(() => f.snapshot(sessionId).metadataSources[0]?.seasons?.length === 2 && !f.snapshot(sessionId).browsing.loading);
     assert.deepEqual(f.snapshot(sessionId).workInfo, { provider: 'douban', metadataId: '20', kind: 'tv',
-      title: value.title, summary: value.intro, seasonCount: 2, episodeCount: secondCount === null ? null : 10 });
+      title: value.title, summary: value.intro, seasonCount: 2, episodeCount: secondCount === null ? null : 10,
+      metadata: f.metadataView(f.snapshot(sessionId), value) });
     assert.equal(f.snapshot(sessionId).attempt, null);
     assert.equal(f.calls.some(row => ['resolve', 'prepare'].includes(row[0])), false);
   });
 }
+
+test('same preferences and display/automatic-preparation changes do not restart an in-flight formal selection', async t => {
+  const waiting = deferred();
+  const f = fixture({ data: {
+    async resolve(candidate) {
+      f.calls.push(['resolve', candidate.source.key]);
+      await waiting.promise;
+      return { url: 'https://media.invalid/selected', scope: { sourceKey: candidate.source.key } };
+    },
+  } });
+  t.after(() => f.service.close());
+  try {
+    const { sessionId } = await f.open();
+    await until(() => f.snapshot(sessionId).stage === 'idle');
+    await f.command(sessionId, 'play');
+    await until(() => f.calls.some(row => row[0] === 'resolve'));
+    const before = f.snapshot(sessionId);
+    await f.service.setSettings(f.service.settings());
+    await f.service.settingsChanged();
+    assert.equal(f.snapshot(sessionId).sequence, before.sequence);
+    for (const update of [{ metadataViewProvider: 'douban' }, { iosAutoPrepare: false }]) {
+      await f.service.setSettings({ ...f.service.settings(), ...update });
+      const state = f.snapshot(sessionId);
+      assert.deepEqual(state.target, before.target);
+      assert.equal(state.metadataSourceId, before.metadataSourceId);
+      assert.deepEqual(state.constraint, before.constraint);
+      assert.equal(state.stage, before.stage);
+      assert.equal(f.calls.filter(row => row[0] === 'resolve').length, 1);
+      assert.deepEqual(f.released, []);
+    }
+    waiting.resolve();
+    const attempt = await f.pending(sessionId);
+    await f.service.setSettings({ ...f.service.settings(), metadataViewProvider: 'tmdb', iosAutoPrepare: true });
+    assert.equal(f.snapshot(sessionId).attempt.id, attempt.id);
+    assert.equal(f.calls.filter(row => row[0] === 'resolve').length, 1);
+    assert.equal(f.calls.filter(row => row[0] === 'prepare').length, 1);
+    assert.deepEqual(f.released, []);
+  } finally { waiting.resolve(); }
+});
+
+test('a real purification change rechecks active discovery and rejects the late now-forbidden candidate', async t => {
+  const waiting = deferred();
+  const f = fixture({ data: {
+    async resolve(candidate) {
+      f.calls.push(['resolve', candidate.source.key]);
+      if (candidate.source.key === 'a') await waiting.promise;
+      return { url: `https://media.invalid/${candidate.source.key}`, scope: { sourceKey: candidate.source.key } };
+    },
+  } });
+  t.after(() => f.service.close());
+  try {
+    const { sessionId } = await f.open();
+    await until(() => f.snapshot(sessionId).stage === 'idle');
+    await f.command(sessionId, 'play');
+    await until(() => f.calls.some(row => row[0] === 'resolve' && row[1] === 'a'));
+    await f.service.setSettings({ ...f.service.settings(), siteCleanKeywords: ['a'] });
+    const attempt = await f.pending(sessionId);
+    assert.equal(attempt.candidate.source.key, 'b');
+    waiting.resolve();
+    await tick();
+    assert.equal(f.snapshot(sessionId).attempt.id, attempt.id);
+    assert.equal(f.calls.filter(row => row[0] === 'prepare').length, 1);
+    assert.equal(f.resources.size, 1);
+  } finally { waiting.resolve(); }
+});
+
+test('source display renaming rechecks formal selection only when its consumed purification result changes', async t => {
+  const waiting = deferred();
+  const f = fixture({ data: {
+    async resolve(candidate) {
+      f.calls.push(['resolve', candidate.source.key]);
+      if (candidate.source.key === 'a') await waiting.promise;
+      return { url: `https://media.invalid/${candidate.source.key}`, scope: { sourceKey: candidate.source.key } };
+    },
+  } });
+  t.after(() => f.service.close());
+  try {
+    const { sessionId } = await f.open();
+    await until(() => f.snapshot(sessionId).stage === 'idle');
+    await f.command(sessionId, 'play');
+    await until(() => f.calls.some(row => row[0] === 'resolve' && row[1] === 'a'));
+    await f.service.updateSourceDisplay('cat', [{ installationId: 'install-a', sites: [{ key: 'a', name: 'Renamed site' }] }]);
+    assert.equal(f.calls.filter(row => row[0] === 'resolve').length, 1);
+    await f.service.updateSourceDisplay('cat', [{ installationId: 'install-a', sites: [{ key: 'a', name: '短剧 site' }] }]);
+    const attempt = await f.pending(sessionId);
+    assert.equal(attempt.candidate.source.key, 'b');
+    waiting.resolve();
+    await tick();
+    assert.equal(f.snapshot(sessionId).attempt.id, attempt.id);
+  } finally { waiting.resolve(); }
+});
 
 test('real typed library edits and playback writes reopen without accepting unknown internal fields', async t => {
   const root = mkdtempSync(join(tmpdir(), 'film-library-service-'));

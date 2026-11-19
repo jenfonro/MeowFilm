@@ -13,6 +13,14 @@ const expected = [{ kind: 'intro', start: 0, end: 15 }, { kind: 'outro', start: 
 const rejects = (work, code) => assert.rejects(work, error => error.code === code && error.message === code);
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
+test('chapter recognition retains labels after the former collection and title limits', () => {
+  const chapters = Array.from({ length: 257 }, (_, index) => chapter('剧情'.repeat(257), index, index + 1));
+  chapters.push(chapter('片头', 257, 258), chapter('片尾', 258, 259));
+  assert.deepEqual(recognizeChapters(chapters), { segments: [
+    { kind: 'intro', start: 257, end: 258 }, { kind: 'outro', start: 258, end: 259 },
+  ] });
+});
+
 // Real session/receipt owner, with controlled provider, media and unrelated
 // candidate-recognition boundaries. This is not decoder or native-rule evidence.
 function fixture(t, { releaseGate } = {}) {
@@ -102,12 +110,11 @@ test('chapter recognition matches only complete explicit labels and preserves re
   assert.deepEqual(original, copy);
 });
 
-test('chapter inputs are bounded and invalid entries reject the entire snapshot', () => {
+test('chapter inputs retain long titles and invalid entries reject the entire snapshot', () => {
   assert.deepEqual(recognizeChapters([]), { segments: [] });
-  assert.deepEqual(recognizeChapters(Array.from({ length: 256 }, () => chapter('剧情'))), { segments: [] });
-  assert.deepEqual(recognizeChapters([chapter('😀'.repeat(128))]), { segments: [] });
-  for (const input of [null, {}, Array.from({ length: 257 }, () => chapter('片头')),
-    [null], [chapter('x'.repeat(257))], [chapter('😀'.repeat(129))],
+  assert.deepEqual(recognizeChapters(Array.from({ length: 257 }, () => chapter('剧情'))), { segments: [] });
+  assert.deepEqual(recognizeChapters([chapter('x'.repeat(257)), chapter('😀'.repeat(129))]), { segments: [] });
+  for (const input of [null, {}, [null],
     [chapter(1)], [chapter('片头', -1)], [chapter('片头', NaN)],
     [chapter('片头', 0, Infinity)], [chapter('片头', 1, 1)], [chapter('片头', 2, 1)],
     [chapter('片头', '0', 10)], [chapter('片头'), chapter('普通', 0, NaN)]]) {

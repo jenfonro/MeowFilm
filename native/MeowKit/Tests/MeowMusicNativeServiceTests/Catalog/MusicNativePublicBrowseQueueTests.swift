@@ -32,7 +32,7 @@ final class MusicNativePublicBrowseQueueTests: XCTestCase {
         let reader = MusicNativePublicBrowseQueueRead { _ in
             await gate.wait()
             return [.init(songID: "song-1", occurrenceID: "occurrence-1", platform: "wy",
-                          sourceKey: "wy/1", byteCount: NativeMusicFixture.track().data.count)]
+                          sourceKey: "wy/1")]
         }
         let reading = Task { try await reader.page(nil, intent: .init()) }
         await gate.started()

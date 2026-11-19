@@ -40,6 +40,16 @@ public static class MusicNativeAccountTests
         }
         yield return Case("owner.ordinary-validation-failure-keeps-saved-authority-without-credential-write", OrdinaryValidation);
         yield return Case("owner.failed-candidate-does-not-revoke-or-replace-existing-account", CandidateFailure);
+        yield return Case("storage.unrelated-owner-survives-account-write", () => UnrelatedOwner("retained"));
+        yield return Case("storage.unrelated-owner-field-beyond-eight-MiB-survives-account-write",
+            () => UnrelatedOwner(new string('x', 8 * 1024 * 1024 + 1)));
+        yield return Case("credential-cookie-preserves-more-than-sixty-four-pairs", () =>
+        {
+            string cookie = string.Join("; ", Enumerable.Range(0, 65).Select(i => $"part{i}={new string('x', 256)}"));
+            var fields = AccountRules.Cookies(cookie);
+            Check(fields.Count == 65 && fields["part64"] == new string('x', 256));
+            return Task.CompletedTask;
+        });
         yield return Case("owner.no-memory-fallback-on-store-read-error", StorageFailure);
         yield return Case("owner.canonical-profile-rejection-never-saves", ProfileReflection);
         yield return Case("owner.observer-failure-cannot-turn-commit-into-error", ObserverFailure);
@@ -67,7 +77,7 @@ public static class MusicNativeAccountTests
         yield return Case("qr.canonical-state-not-native-display-TTL-controls-handoff", QrExpiry);
         yield return Case("qr.admitted-cancel-handoff-unknown-no-replay", QrUnknown);
     }
-    private static TestCase Case(string name, Func<Task> run) => new("music.native.accounts." + name, run);
+    private static TestCase Case(string name, Func<Task> run) => new("music.native.accounts." + name, () => Task.Run(run));
     private static void Check(bool condition, string message = "native account assertion")
     { if (!condition) throw new InvalidOperationException(message); }
     private static string State(JsonElement response, string platform = "wy") =>
@@ -190,6 +200,15 @@ public static class MusicNativeAccountTests
             return document.ToJsonString();
         }
         finally { owner.DisposeAsync().AsTask().GetAwaiter().GetResult(); store.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+    }
+    private static async Task UnrelatedOwner(string value)
+    {
+        await using var f = new Fixture();
+        await f.Store.WriteAsync(db => db.Execute("INSERT INTO owner_revisions(owner,revision,receipt) VALUES($owner,1,$receipt)",
+            ("$owner", "unrelated-account-fixture"), ("$receipt", value)));
+        Ok(await Import(f.Owner));
+        Check(await f.Store.ReadAsync(db => db.Scalar<string>("SELECT receipt FROM owner_revisions WHERE owner=$owner",
+            ("$owner", "unrelated-account-fixture"))) == value);
     }
     private static async Task AllPlatforms()
     {

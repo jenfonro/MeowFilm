@@ -12,9 +12,9 @@ enum KugouDiscoveryFixture {
     }
     static func json(_ value: String) -> MJ { try! MJ.parse(Data(value.utf8)) }
     static func collection(_ id: Int) -> RuntimeValue {
-        .object(["id": .string("collection_3_123456_\(id)_0"), "name": .string("Synthetic playlist \(id)"),
+        .object(["id": .string("collection_3_123456_\(id)_0"), "title": .string("Synthetic playlist \(id)"), "kind": .string("playlist"),
             "count": .number(196), "creator": .string("Synthetic creator"),
-            "cover": .string("https://imge.kugou.com/synthetic/480/playlist.jpg"), "action": .object(["type": .string("playlist")])])
+            "cover": .string("https://imge.kugou.com/synthetic/480/playlist.jpg"), "action": .object(["type": .string("playlist"), "id": .string("collection_3_123456_\(id)_0")])])
     }
     static func channel(_ id: String, kind: String, name: String? = nil, pageCode: String = "") -> RuntimeValue {
         .object(["id": .string(id), "name": .string(name ?? id), "kind": .string("channel"),
@@ -22,7 +22,6 @@ enum KugouDiscoveryFixture {
     }
     static func section(_ id: String, items: [RuntimeValue], layout: String, channel: RuntimeValue? = nil) -> RuntimeValue {
         var row: RuntimeObject = ["id": .string(id), "title": .string(id), "layout": .string(layout), "items": .array(items)]
-        if layout == "songs" { row["type"] = .string("songs") }
         if let channel { row["action"] = .object(["type": .string("channel"), "channel": channel]) }
         return .object(row)
     }
@@ -31,7 +30,7 @@ enum KugouDiscoveryFixture {
         .object(["sections": .array(sections), "continuation": next, "tags": .array(tags), "selectedTag": .string(selected)])
     }
     static func playlists(_ count: Int, start: Int = 1, next: RuntimeValue = .null) -> RuntimeValue {
-        page([section("playlists", items: (0..<count).map { collection(start + $0) }, layout: "grid")], next: next)
+        page([section("playlists", items: (0..<count).map { collection(start + $0) }, layout: "playlist-grid")], next: next)
     }
     static func songs(_ count: Int, start: Int = 1, rank: Bool = false, next: RuntimeValue = .null,
                       title: String? = nil, duration: Double? = nil) throws -> RuntimeValue {
@@ -40,12 +39,17 @@ enum KugouDiscoveryFixture {
             let track = MusicNativePublicBrowseFixture.track(hash(id), title: title ?? "Synthetic \(rank ? "rank" : "new") song \(id)", platform: "kg")
             var info = try MJ.parse(track.data)
             info["singer"] = .string("Synthetic singer"); info["duration"] = .number(duration ?? (rank ? 216 : 279))
-            return try MusicPlatformFixture.song(.init(platform: "kg", data: info.bytes))
+            let song = try MusicPlatformFixture.song(.init(platform: "kg", data: info.bytes))
+            return .object(["id": .string(hash(id)), "kind": .string("song"), "title": song[music: "title"],
+                "subtitle": song[music: "artist"], "cover": song[music: "cover_url"], "song": song,
+                "action": .object(["type": .string("song"), "id": .string(hash(id))])])
         }
-        return page([section(rank ? "rank" : "new", items: rows, layout: "songs")], next: next)
+        return page([section(rank ? "rank" : "new", items: rows, layout: "song-columns")], next: next)
     }
     static func ranks() -> RuntimeValue {
-        var card = channel("rank-8888", kind: "rankings", name: "Synthetic TOP500", pageCode: "156133")
+        var card: RuntimeValue = .object(["id": .string("rank-8888"), "kind": .string("channel"),
+            "title": .string("Synthetic TOP500"), "action": .object(["type": .string("channel"),
+                "channel": channel("rank-8888", kind: "rankings", name: "Synthetic TOP500", pageCode: "156133")])])
         if case .object(var row) = card {
             row["key"] = .string("rank-8888"); row["updateFrequency"] = .string("每天")
             row["preview"] = .array([.object(["id": .string("preview"), "title": .string("Synthetic preview"),
@@ -60,7 +64,7 @@ enum KugouDiscoveryFixture {
         return .object(["items": .array(primary + zip(ids, names).map { channel("category-" + $0.0, kind: "playlists", name: $0.1) })])
     }
     static func home() throws -> RuntimeValue {
-        let lists = section("playlists", items: (1...20).map(collection), layout: "playlists", channel: channel("playlist", kind: "playlists"))
+        let lists = section("playlists", items: (1...20).map(collection), layout: "playlist-rail", channel: channel("playlist", kind: "playlists"))
         let songs = try self.songs(1)[music: "sections"].musicArray
         return page([lists] + songs + ranks()[music: "sections"].musicArray, next: .object(["page": .number(2)]))
     }

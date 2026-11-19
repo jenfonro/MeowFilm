@@ -20,7 +20,8 @@ extension NativeMusicService: MusicRemoteCollectionServing {
         // serialize with the one existing protected-document transaction.
         return try source.authorization.perform {
             try saveNetworkPlaylist(.init(platform: collection.platform, nativeID: collection.nativeID,
-                title: name, creator: collection.creator, artwork: collection.artwork, count: collection.count), intent: intent)
+                title: name, creator: collection.creator, artwork: collection.artwork, count: collection.count,
+                playCount: collection.playCount), intent: intent)
         }
     }
 

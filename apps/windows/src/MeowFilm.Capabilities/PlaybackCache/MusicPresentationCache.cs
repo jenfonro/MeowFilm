@@ -18,12 +18,13 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     private readonly object gate = new();
     private RawResourceDirectory? files;
     private StorageRevision imageRevision = StorageRevision.Empty, lyricRevision = StorageRevision.Empty;
-    private long imageEpoch, lyricEpoch;
+    private long imageEpoch, lyricEpoch, lyricVersion;
     private int pendingImages, pendingImageBytes;
     private bool imagesReadable = true, lyricsReadable = true, closed;
     private long Now => clock.GetUtcNow().ToUnixTimeMilliseconds();
     public long Epoch { get { lock (gate) return imageEpoch; } }
     internal long LyricEpoch { get { lock (gate) return lyricEpoch; } }
+    internal long LyricVersion { get { lock (gate) return lyricVersion; } }
     public TimeSpan Lifetime => TimeSpan.FromMilliseconds(Ttl);
     internal static string SongKey(JsonObject song) => LJ.S(song["songId"]);
     internal async Task LoadAsync(CancellationToken token)
@@ -35,7 +36,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
                 if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
                 var images = db.Revision(ImageOwner); var lyrics = db.Revision(LyricOwner);
                 if (images != imageRevision) { imageRevision = images; imageEpoch++; }
-                if (lyrics != lyricRevision) { lyricRevision = lyrics; lyricEpoch++; }
+                if (lyrics != lyricRevision) { lyricRevision = lyrics; lyricEpoch++; lyricVersion++; }
             }
             return true;
         }, token).ConfigureAwait(false);
@@ -87,7 +88,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     public async Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (bytes.Length is <= 0 or > ArtworkService.MaximumBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (bytes.Length is <= 0 or > ArtworkService.MaximumCacheEntryBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
         lock (gate)
         {
             if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
@@ -142,7 +143,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
                 PlaybackCacheRecords.Lyrics.Save(db, value, PlaybackCacheRecords.Lyrics.Read(db, [songId]), [songId]);
                 Trim(db); return true;
             }, token, bytes, commit: commit => { lock (gate) { if (closed || lyricEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict); commit(); } }).ConfigureAwait(false);
-            lock (gate) if (lyricEpoch == epoch) lyricsReadable = true;
+            lock (gate) { lyricVersion++; if (lyricEpoch == epoch) lyricsReadable = true; }
         }
         finally { writes.Release(); }
     }
@@ -178,7 +179,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     private async Task ClearAsync(bool lyrics, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        lock (gate) { imageEpoch++; imagesReadable = false; if (lyrics) { lyricEpoch++; lyricsReadable = false; } }
+        lock (gate) { imageEpoch++; imagesReadable = false; if (lyrics) { lyricEpoch++; lyricVersion++; lyricsReadable = false; } }
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -203,6 +204,12 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             if (image.Length > 0) db.Execute("UPDATE windows_images SET updated_at=$now WHERE address=$address", ("$now", Now), ("$address", image));
             return true;
         }, token).ConfigureAwait(false);
+    }
+    internal async Task DrainAsync()
+    {
+        await writes.WaitAsync().ConfigureAwait(false);
+        try { await database.DrainAsync().ConfigureAwait(false); }
+        finally { writes.Release(); }
     }
     public async ValueTask DisposeAsync()
     {

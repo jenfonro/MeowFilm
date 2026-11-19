@@ -3,7 +3,7 @@
 import { createHash, createCipheriv, createDecipheriv, publicEncrypt, constants, randomBytes, randomInt } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { fail } from './errors.mjs';
-import { decodeJSON, encodeProtocolJSON, object, protocolInteger, required, scalar } from './model.mjs';
+import { decodeJSON, encodeProtocolJSON, protocolInteger, required, scalar } from './model.mjs';
 
 export const md5 = value => createHash('md5').update(value).digest('hex');
 export const hex = size => randomBytes(size).toString('hex');
@@ -84,11 +84,11 @@ export function wyRequest(path, params, client, account, clock, weapi = false, t
   return { url: origin + (weapi ? '/weapi/' : '/eapi/') + path.slice(5), method: 'POST', body,
     headers: { ...headers, Referer: 'https://music.163.com/', 'Content-Type': 'application/x-www-form-urlencoded' } };
 }
-export function encryptedWyResponse(bytes, maximumBytes = 4 * 1024 * 1024) {
+export function encryptedWyResponse(bytes) {
   try {
     let plain = decrypt(bytes, 'e82ckenh8dichen8');
     if (plain[0] === 0x1f && plain[1] === 0x8b) {
-      const inflated = gunzipSync(plain, { maxOutputLength: maximumBytes, info: true });
+      const inflated = gunzipSync(plain, { info: true });
       if (inflated.engine.bytesWritten !== plain.length) fail('INVALID_RESPONSE');
       plain = inflated.buffer;
     }
@@ -134,7 +134,7 @@ export function txSuccess(data) {
       20450: 'FORBIDDEN', 20279: 'DEVICE_LIMIT', 20271: 'VERIFICATION_REQUIRED', 20276: 'VERIFICATION_REQUIRED',
       104604: 'RATE_LIMITED', 100001: 'RATE_LIMITED', 20272: 'INVALID_CREDENTIALS', 20274: 'INVALID_CREDENTIALS' })[code] ?? 'UPSTREAM_ERROR');
   }
-  return object(data.req_0.data);
+  return data.req_0.data;
 }
 export function kgRequest(path, params, client, account, clock, router, body, origin = 'https://gateway.kugou.com', salt = kgSalt) {
   const cookies = cookieFields(account?.cookie), time = String(Math.floor(clock() / 1000));

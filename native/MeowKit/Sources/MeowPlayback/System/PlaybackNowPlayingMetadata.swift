@@ -4,13 +4,12 @@ import Foundation
 // existing PlaybackController; no domain identifiers, fetching or persistence.
 // Existing callers retain the resource title until they explicitly override it.
 public struct PlaybackNowPlayingArtwork: Equatable, Sendable {
-    public static let maximumBytes = 2 * 1_024 * 1_024
     public let data: Data
 
     /// An already-loaded, encoded image, never a URL or a request instruction.
     /// The system adapter additionally bounds native thumbnail decoding.
     public init?(data: Data) {
-        guard !data.isEmpty, data.count <= Self.maximumBytes else { return nil }
+        guard !data.isEmpty else { return nil }
         self.data = data
     }
 }

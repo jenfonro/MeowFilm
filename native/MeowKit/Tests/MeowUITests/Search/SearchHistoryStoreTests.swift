@@ -12,14 +12,14 @@ import MeowStorageTestSupport
         addTeardownBlock { try await database.close(); try FileManager.default.removeItem(at: root) }
         return database
     }
-    func testExactKeywordMovesToFrontCapsAtSixtyAndSurvivesReopen() async throws {
+    func testExactKeywordMovesToFrontAndAllKeywordsSurviveReopen() async throws {
         let database = try database(), store = SearchHistoryStore(database: database)
         for index in 0..<65 { await store.record("词\(index)") }
         await store.record("  词20 \n"); await store.record("   ")
-        XCTAssertEqual(store.entries.count, 60)
+        XCTAssertEqual(store.entries.count, 65)
         XCTAssertEqual(store.entries.first?.text, "词20")
         XCTAssertEqual(store.entries.filter { $0.text == "词20" }.count, 1)
-        XCTAssertFalse(store.entries.contains { $0.text == "词0" })
+        XCTAssertTrue(store.entries.contains { $0.text == "词0" })
         let reopened = SearchHistoryStore(database: database)
         await reopened.reload()
         XCTAssertEqual(reopened.entries, store.entries)

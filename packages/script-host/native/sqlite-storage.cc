@@ -84,7 +84,6 @@ Cell ReadCell(napi_env env, napi_value value) {
   bool buffer = false; N(napi_is_buffer(env, value, &buffer));
   if (buffer) {
     void* bytes; size_t length; N(napi_get_buffer_info(env, value, &bytes, &length));
-    Check(length <= MaximumBytes, "STORAGE_BUSY");
     if (!length) return Blob{};
     auto* begin = static_cast<unsigned char*>(bytes); return Blob(begin, begin + length);
   }
@@ -92,7 +91,6 @@ Cell ReadCell(napi_env env, napi_value value) {
   napi_typedarray_type arrayType; size_t length, offset; void* bytes; napi_value arrayBuffer;
   N(napi_get_typedarray_info(env, value, &arrayType, &length, &bytes, &arrayBuffer, &offset));
   Check(arrayType == napi_uint8_array || arrayType == napi_uint8_clamped_array || arrayType == napi_int8_array);
-  Check(length <= MaximumBytes, "STORAGE_BUSY");
   if (!length) return Blob{};
   auto* begin = static_cast<unsigned char*>(bytes); return Blob(begin, begin + length);
 }
@@ -119,7 +117,7 @@ struct Statement {
   std::vector<Cell> params;
   int64_t expected = -1;
   bool rows = false;
-  size_t maximumRows = 4096;
+  size_t maximumRows = size_t(SafeInteger);
 };
 struct Result {
   bool rows = false;
@@ -145,7 +143,7 @@ Statement ReadStatement(napi_env env, napi_value value, bool rows, size_t& bytes
     for (uint32_t i = 0; i < count; ++i) {
       napi_value parameter; N(napi_get_element(env, parameters, i, &parameter));
       Cell cell = ReadCell(env, parameter); bytes += Cost(cell);
-      Check(bytes <= MaximumBytes, "STORAGE_BUSY"); result.params.push_back(std::move(cell));
+      result.params.push_back(std::move(cell));
     }
   }
   Cell expected = ReadCell(env, Property(env, value, "expectChanges"));
@@ -156,7 +154,7 @@ Statement ReadStatement(napi_env env, napi_value value, bool rows, size_t& bytes
   Cell maximum = ReadCell(env, Property(env, value, "maxRows"));
   if (!std::holds_alternative<std::monostate>(maximum)) {
     Check(std::holds_alternative<int64_t>(maximum));
-    int64_t count = std::get<int64_t>(maximum); Check(count > 0 && count <= 65536);
+    int64_t count = std::get<int64_t>(maximum); Check(count > 0);
     result.maximumRows = size_t(count);
   }
   Cell flag = ReadCell(env, Property(env, value, "rows"));
@@ -217,7 +215,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
   }
   void RetainResult(size_t size, size_t& owned) {
     std::lock_guard<std::mutex> lock(mutex);
-    Check(size <= MaximumBytes - pendingBytes, "STORAGE_RESULT_LIMIT");
+    Check(pendingCount <= 1 || (pendingBytes <= MaximumBytes && size <= MaximumBytes - pendingBytes), "STORAGE_RESULT_LIMIT");
     pendingBytes += size; owned += size;
   }
   void ReleaseReply(const Reply& reply) {
@@ -243,10 +241,10 @@ class Storage : public std::enable_shared_from_this<Storage> {
       if (auto* integer = std::get_if<int64_t>(&cell)) bound = sqlite3_bind_int64(raw, position, *integer);
       else if (auto* real = std::get_if<double>(&cell)) bound = sqlite3_bind_double(raw, position, *real);
       else if (auto* text = std::get_if<std::string>(&cell))
-        bound = sqlite3_bind_text(raw, position, text->data(), int(text->size()), SQLITE_TRANSIENT);
+        bound = sqlite3_bind_text64(raw, position, text->data(), sqlite3_uint64(text->size()), SQLITE_TRANSIENT, SQLITE_UTF8);
       else if (auto* blob = std::get_if<Blob>(&cell))
-        bound = sqlite3_bind_blob(raw, position, blob->empty() ? "" : static_cast<const void*>(blob->data()),
-          int(blob->size()), SQLITE_TRANSIENT);
+        bound = sqlite3_bind_blob64(raw, position, blob->empty() ? "" : static_cast<const void*>(blob->data()),
+          sqlite3_uint64(blob->size()), SQLITE_TRANSIENT);
       else bound = sqlite3_bind_null(raw, position);
       if (bound != SQLITE_OK) throw Fault(SQLiteError(bound));
     }
@@ -547,7 +545,7 @@ napi_value RequestValue(napi_env env, napi_callback_info info) {
     else if (request.kind == "transaction" || request.kind == "snapshot") {
       napi_value statements = Property(env, args[1], "statements"); bool array; uint32_t length;
       N(napi_is_array(env, statements, &array)); Check(array);
-      N(napi_get_array_length(env, statements, &length)); Check(length > 0 && length <= 65536);
+      N(napi_get_array_length(env, statements, &length)); Check(length > 0);
       for (uint32_t i = 0; i < length; ++i) {
         napi_value item; N(napi_get_element(env, statements, i, &item));
         request.statements.push_back(ReadStatement(env, item, false, request.bytes));
@@ -561,7 +559,8 @@ napi_value RequestValue(napi_env env, napi_callback_info info) {
     {
       std::lock_guard<std::mutex> lock(storage.mutex);
       Check(!storage.stopping, "STORAGE_CLOSED");
-      Check(storage.pendingCount < 64 && request.bytes <= MaximumBytes - storage.pendingBytes, "STORAGE_BUSY");
+      Check(storage.pendingCount < 64 && (storage.pendingCount == 0 ||
+        (storage.pendingBytes <= MaximumBytes && request.bytes <= MaximumBytes - storage.pendingBytes)), "STORAGE_BUSY");
       if (request.kind == "close") storage.stopping = true;
       ++storage.pendingCount; storage.pendingBytes += request.bytes; storage.pending.push_back(std::move(request));
     }

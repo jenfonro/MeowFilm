@@ -1,6 +1,9 @@
+using System.Runtime.InteropServices.WindowsRuntime;
+using MeowFilm.Desktop;
 using System.Text.Json;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml.Media;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -30,7 +33,7 @@ public static class PanAccountsTests
         yield return Case("URL encoding uses provider text and data images stay local", QrImages);
     }
     private static TestCase Case(string name, Func<Task> run) =>
-        new("pan-accounts: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("pan-accounts: " + name, () => TestUiHost.InvokeAsync(run));
 
     private static async Task Offline()
     {
@@ -274,7 +277,7 @@ public static class PanAccountsTests
                     await model.SaveAsync(new Dictionary<string, string> { ["username"] = "synthetic-new", ["password"] = "synthetic-password" });
                 }
             }
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             bool fenced = !retire.IsCompleted && (shutdown || !successor.IsCompleted) && fixture.Writes.Count == 0;
             release.SetResult(true);
             await Task.WhenAll(mutation, retire, successor);
@@ -506,12 +509,13 @@ public static class PanAccountsTests
     private static Task QrImages()
     {
         var text = PanQrImage.Create("url", "http://arbitrary.fixture.invalid:8000/扫码?token=synthetic#payload");
-        Check(text is { IsFrozen: true, Format: var format } && format == PixelFormats.Gray8, "provider URL is encoded without requesting it");
-        var pixels = new byte[text.PixelWidth * text.PixelHeight];
-        text.CopyPixels(pixels, text.PixelWidth, 0);
+        Check(text.PixelWidth > 0 && text.PixelWidth == text.PixelHeight && text.PixelBuffer.Length == text.PixelWidth * text.PixelHeight * 4, "provider URL is encoded into local BGRA pixels without requesting it");
+        var pixels = text.PixelBuffer.ToArray();
+        Check(Enumerable.Range(0, pixels.Length / 4).All(index => pixels[index * 4] == pixels[index * 4 + 1] &&
+            pixels[index * 4 + 1] == pixels[index * 4 + 2] && pixels[index * 4 + 3] == 255), "QR pixels remain opaque grayscale");
         Check(pixels.Contains((byte)0) && pixels.Contains((byte)255), "real QR pixels are produced");
         var image = PanQrImage.Create("image", PixelDataUri);
-        Check(image is { IsFrozen: true, PixelWidth: 1, PixelHeight: 1 } && image.Format == PixelFormats.Bgra32, "data URI decodes into detached local pixels");
+        Check(image is { PixelWidth: 1, PixelHeight: 1 } && image.PixelBuffer.Length == 4, "data URI decodes into detached local pixels");
         try { PanQrImage.Create("image", "https://image.fixture.invalid/code.png"); throw new Exception("Expected data URI"); }
         catch (BridgeException) { }
         return Task.CompletedTask;

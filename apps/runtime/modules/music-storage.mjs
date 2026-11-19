@@ -59,7 +59,7 @@ export function createMusicStorage(dataRoot) {
       ...['music_script_declared_sites','music_script_declared_actions','music_script_declared_qualities']
         .map(table => ({sql:`SELECT * FROM ${table} ORDER BY installation_id,site_id,position`,rows:true})),
       {sql:'SELECT * FROM music_script_checks',rows:true},
-      {sql:'SELECT * FROM music_script_declared_nodes ORDER BY installation_id,site_id,node_id',rows:true,maxRows:65536},
+      {sql:'SELECT * FROM music_script_declared_nodes ORDER BY installation_id,site_id,node_id',rows:true,maxRows:Number.MAX_SAFE_INTEGER},
     ]);
     return previous = {schema:1,revision:state[0]?.revision ?? 0,installations:installations.map(row => {
       const version = prefix => Object.fromEntries(versionKeys.map((key,index) => [key,row[prefix+'_'+versionColumns[index]]]));
@@ -95,24 +95,15 @@ export function createMusicStorage(dataRoot) {
       const where = 'installation_id=? AND site_id=? AND entry_key=?';
       if (operation === 'get') {
         const nodes = await database.query('SELECT * FROM music_script_kv_nodes WHERE '+where+' ORDER BY node_id',scope,
-          {signal:input.signal,maxRows:65536});
+          {signal:input.signal,maxRows:Number.MAX_SAFE_INTEGER});
         check();return decodeValueNodes(nodes,{rawNumbers:true}) ?? null;
       }
       decodeValueNodes(await database.query('SELECT * FROM music_script_kv_nodes WHERE '+where+' ORDER BY node_id',scope,
-        {signal:input.signal,maxRows:65536}),{rawNumbers:true});
+        {signal:input.signal,maxRows:Number.MAX_SAFE_INTEGER}),{rawNumbers:true});
       const existing = await database.query('SELECT site_id,entry_key,encoded_bytes,position FROM music_script_kv_entries WHERE installation_id=?',[id]);
       const others = existing.filter(row => row.site_id !== input.siteId || row.entry_key !== input.key);
       const siteRows = others.filter(row => row.site_id === input.siteId);
       const bytes = operation === 'set' ? encodedLength(input.value) : 0;
-      if (operation === 'set') {
-        const sites = new Set([...others.map(row => row.site_id),input.siteId]);
-        const entryBytes = row => row.encoded_bytes + encodedLength(row.entry_key) + 18;
-        const candidateBytes = bytes + encodedLength(input.key) + 18;
-        const siteBytes = siteRows.reduce((sum,row) => sum+entryBytes(row),1)+candidateBytes;
-        const totalBytes = others.reduce((sum,row) => sum+entryBytes(row),1)+candidateBytes+sites.size*260+32;
-        if (siteRows.length >= 64 || siteBytes > 65536 || sites.size > 32 || totalBytes > 512*1024)
-          throw Object.assign(new Error('LIMIT'),{code:'LIMIT'});
-      }
       const changes = [{sql:'DELETE FROM music_script_kv_entries WHERE '+where,params:scope}];
       if (operation === 'set') {
         const position = Math.max(-1,...siteRows.map(row => row.position))+1;

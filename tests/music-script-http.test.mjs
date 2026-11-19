@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
+import { createScriptHost, ScriptHostError } from '@meowfilm/script-host';
 import { encodeJSONValue } from '@meowfilm/runtime-bridge';
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createMusicScriptModule, musicScriptContract } from '../apps/runtime/modules/music-script.mjs';
@@ -150,15 +150,14 @@ test('raw HTTP upload preserves basename and UTF-8 contracts before execution', 
   }
 });
 
-test('source larger than the former 512KiB gate and a split UTF-8 character execute as real LX', async t => {
+test('source above 16 MiB and a split UTF-8 character execute as real LX', async t => {
   const { rpc } = setup(t);
   const code = fixture();
   const prefix = '// ' + ' '.repeat(65532) + '猫\n'; // character starts at byte 65535.
   const unpadded = prefix + code;
-  const sourceBytes = limit * 2 + 17;
+  const sourceBytes = 16 * 1024 * 1024 + 17;
   const source = unpadded + ' '.repeat(sourceBytes - Buffer.byteLength(unpadded));
   assert.equal(Buffer.byteLength(source), sourceBytes);
-  denied(await rpc.upload(idOf('large'), 1, Buffer.alloc(SCRIPT_LIMITS.maxSourceBytes + 1, 0x61), { basename: 'too-large.js' }), 'LIMIT');
   const instance = await load(rpc, options(), source);
   assert.equal(instance.contentHash, hash(Buffer.from(source)));
   assert.equal((await value(rpc, instance)).count, 1);
@@ -244,7 +243,7 @@ test('private storage preserves exact untouched values and projects only LX read
   assert.equal(stringifyJSONValue(exact), text);
 });
 
-test('private storage counts exact numeric text against the unchanged value byte budget', async t => {
+test('private storage retains exact numeric text above the former value byte budget', async t => {
   const wrapped = wrappedHost();
   const { rpc, dataRoot } = setup(t, { hostFactory: wrapped.factory });
   const item = await load(rpc, options(), storageFixture);
@@ -257,8 +256,9 @@ test('private storage counts exact numeric text against the unchanged value byte
   const before = await storedNodes(dataRoot, item.installationId, 'key');
   assert.equal(stringifyJSONValue(decodeValueNodes(before, { rawNumbers: true })), stringifyJSONValue(exact));
   exact.padding += 'x';
-  await assert.rejects(wrapped.state.storage.set(input), { code: 'RESOURCE_LIMIT' });
-  assert.deepEqual(await storedNodes(dataRoot, item.installationId, 'key'), before);
+  await wrapped.state.storage.set(input);
+  assert.equal(stringifyJSONValue(await storedValue(dataRoot, item.installationId, 'key')),
+    stringifyJSONValue(exact));
 });
 
 test('private storage get/set/delete is isolated by installation and site', async t => {
@@ -331,10 +331,10 @@ test('real LX input and invokeResult above 512 KiB, 1 MiB and 8 MiB are restored
 
 test('real LX enable and list preserve large valid source declarations over HTTP', async t => {
   const { rpc } = setup(t);
-  const sources = Object.fromEntries(Array.from({ length: 32 }, (_, index) => [`s${index}`, {
-    name: '猫'.repeat(256), type: 'music',
-    actions: Array.from({ length: 32 }, (_, item) => `a${item}`.padEnd(128, 'a')),
-    qualitys: Array.from({ length: 32 }, (_, item) => `q${item}`.padEnd(64, 'q')),
+  const sources = Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`s${index}`, {
+    name: '猫'.repeat(257), type: 'music',
+    actions: Array.from({ length: 33 }, (_, item) => `a${item}`.padEnd(128, 'a')),
+    qualitys: Array.from({ length: 33 }, (_, item) => `q${item}`.padEnd(64, 'q')),
   }]));
   const instance = await load(rpc, options('declarations'), fixture({
     sources, handler: 'async ({info}) => info',
@@ -512,7 +512,7 @@ test('private KV corrupt typed values and write failures are explicit and never 
   });
 });
 
-test('large JSON values retain content while private KV keeps its independent data boundary', async t => {
+test('large JSON values retain content in results and private KV', async t => {
   const { rpc } = setup(t);
   const item = await load(rpc, options(), fixture({ handler: `async ({info}) => 'x'.repeat(info.musicInfo.length)` }));
   assert.equal(Buffer.byteLength(JSON.stringify(await value(rpc, item, 'kw', { length: limit - 2 }))), limit);
@@ -520,7 +520,7 @@ test('large JSON values retain content while private KV keeps its independent da
   const input = await load(rpc, options('input'), fixture({ handler: 'async ({info}) => info.musicInfo.data' }));
   assert.equal(await value(rpc, input, 'kw', { data: 'x'.repeat(limit) }), 'x'.repeat(limit));
   const storage = await load(rpc, options('storage'), fixture({ handler: `async (_,{storage}) => storage.set('big','x'.repeat(${limit}))` }));
-  denied(await rpc('invoke', request(storage)), 'LIMIT');
+  assert.equal(okay(await rpc('invoke', request(storage))), null);
 });
 
 test('private KV supports all twenty concurrent operations of one invocation', async t => {
@@ -680,7 +680,6 @@ test('instances have no fixed count quota, updates advance generations and disab
   const { rpc, host } = setup(t); const items = [];
   for (let index = 0; index < 32; index++) items.push(await load(rpc, options(`i${index}`)));
   assert.equal(host().limits.requestTimeoutMs, 60000); assert.equal(host().limits.cleanupTimeoutMs, 100);
-  assert.equal(host().limits.maxSourceBytes, SCRIPT_LIMITS.maxSourceBytes);
   await load(rpc, options('thirty-third'));
   const updated = await update(rpc, items[0], fixture() + '\n// new');
   assert.ok(updated.generation > items[0].generation);

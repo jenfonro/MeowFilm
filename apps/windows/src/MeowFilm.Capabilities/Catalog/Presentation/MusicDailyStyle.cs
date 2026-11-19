@@ -33,14 +33,14 @@ public sealed partial class MusicCapability
     }
     private static JsonElement DailySelectionSnapshot(JsonElement reply) => JsonSerializer.SerializeToElement(new {
         category = MusicCatalogDto.Text(reply, "category"),
-        tags = reply.TryGetProperty("tags", out var tags) ? tags.Clone() : JsonSerializer.SerializeToElement(Array.Empty<object>())
+        tags = MusicCatalogDto.Rows(MusicCatalogDto.Field(reply, "tags")).ToArray()
     });
     private void PublishDailyStyleSelection(JsonElement reply)
     {
         dailyStyleNeedsRead = false;
         dailyStyleSelectedCategory = MusicCatalogDto.Text(reply, "category");
-        dailyStyleSelected = reply.TryGetProperty("tags", out var tags) && tags.ValueKind == JsonValueKind.Array
-            ? tags.EnumerateArray().Select(tag => new MusicDailyStyleTag(MusicCatalogDto.Text(tag, "id"), MusicCatalogDto.Text(tag, "name"))).ToArray() : [];
+        dailyStyleSelected = MusicCatalogDto.Rows(MusicCatalogDto.Field(reply, "tags"))
+            .Select(tag => new MusicDailyStyleTag(MusicCatalogDto.Text(tag, "id"), MusicCatalogDto.Text(tag, "name"))).ToArray();
         DailyStyleBindings();
     }
     public Task SwitchDailyBranchAsync(string branch)
@@ -85,10 +85,12 @@ public sealed partial class MusicCapability
         bool CanPublishSave() => !stopping && generation == loadGeneration && IsDailyStyle && saveAccount == CatalogAccountKey("wy");
         void RetireSavedAccountSnapshots()
         {
-            foreach (var key in catalogLocations.Where(pair => pair.Value.Pages.Values.Any(page =>
-                page.AccountStamp == saveAccount && page.Target?.Operation == "daily" &&
-                MusicCatalogDto.Text(page.Target.Parameters, "branch") == "style"))
+            bool BelongsToSavedAccount(CatalogPageState page) => page.AccountStamp == saveAccount &&
+                page.Target?.Operation == "daily" && MusicCatalogDto.Text(page.Target.Parameters, "branch") == "style";
+            foreach (var key in catalogLocations.Where(pair => pair.Value.Pages.Values.Any(BelongsToSavedAccount))
                 .Select(pair => pair.Key).ToArray()) catalogLocations.Remove(key);
+            foreach (var page in catalogPages.Where(pair => BelongsToSavedAccount(pair.Value)).ToArray())
+                catalogPages[page.Key] = page.Value with { ExpiresAt = 0 };
         }
         void SettleSavePage()
         {
@@ -143,7 +145,7 @@ public sealed partial class MusicCapability
             }
             dailyStyleNeedsRead = result.Status == MusicDailyStyleWriteStatus.Unknown ||
                 result.Status == MusicDailyStyleWriteStatus.Confirmed && result.Readback is null;
-            if (result.Status != MusicDailyStyleWriteStatus.Confirmed || result.SelectionMatches != true)
+            if (result.Status != MusicDailyStyleWriteStatus.Confirmed || result.SelectionMatches != true || result.Readback is null)
             { status = result.ErrorCode is { } code ? MusicCatalogDto.ErrorText(code) : "风格偏好尚未确认，请重新读取"; Changed(nameof(Status)); }
         }
         catch (Exception error)

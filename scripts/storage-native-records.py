@@ -39,7 +39,7 @@ for name in ("episodeCleanRegexRules", "aggregateRegexRules"):
 for name in ("episodeRules", "movieRules"):
     m.relation(rule, name, "array", "pattern:t replace:t flags:t")
 preferences = record("film_preferences", "version:i")
-prefs = m.relation(preferences, "preferences", "object", "iosAutoPrepare:b")
+prefs = m.relation(preferences, "preferences", "object", "iosAutoPrepare:b metadataViewProvider:t")
 for name in ("ruleOrder", "panOrder", "keywords", "siteCleanKeywords"):
     m.values(prefs, name)
 cat = record("cat_settings", "version:i port:i")
@@ -139,28 +139,32 @@ home = record("home", "platform:t")
 pages = m.relation(home, "pages", "array", "platform:t")
 
 def action(parent, name):
-    row = m.relation(parent, name, "object", "type:t id:n branch:t pageCode:t")
-    m.relation(row, "channel", "object", "id:n pageCode:t")
+    row = m.relation(parent, name, "object", "type:t id:n branch:t pageCode:t provider:t mode:t submode:t ruleId:t tabTagId:t sourceType:t sourceName:t entry:t songId:t")
+    m.relation(row, "channel", "object", "id:n name:t pageCode:t channelKind:t placement:t")
+    m.values(row, "sourceIds")
+    m.values(row, "ids")
     locator(row)
 
 def locator(parent):
     m.relation(parent, "locator", "object", "kind:t id:n playlistId:n dirId:n listId:n version:n totalVersion:n creatorId:n creatorListId:n")
 
 def cards(parent, name):
-    row = m.relation(parent, name, "array", "songId:t id:n key:n name:t subtitle:t creator:t cover:t kind:t pageCode:t available:b errorCode:t requiresAccount:b display:b placement:t canPlay:b rankText:t salesText:t relationship:t count:i presentation:t dayOfMonth:i decoration:t updateFrequency:t")
+    row = m.relation(parent, name, "array", "songId:t id:n key:n name:t title:t label:t subtitle:t contextText:t creator:t cover:t coverLabel:t kind:t pageCode:t channelKind:t available:b errorCode:t requiresAccount:b display:b placement:t canPlay:b rankText:t salesText:t relationship:t count:i playCount:i presentation:t dayOfMonth:i decoration:t updateFrequency:t")
     m.relation(row, "song", "object", "songId:t")
     action(row, "action")
     action(row, "playbackSource")
     locator(row)
+    m.relation(row, "coverRef", "object", "kind:t id:n")
     preview = m.relation(row, "preview", "array", "title:t artist:t cover:t rank:i lastRank:i")
     m.relation(preview, "song", "object", "songId:t")
     return row
 
-cards(pages, "entries")
-cards(pages, "items")
-sections = m.relation(pages, "sections", "array", "id:n title:t type:t layout:t available:b errorCode:t requiresAccount:b display:b")
+sections = m.relation(pages, "sections", "array", "id:n title:t type:t layout:t available:b errorCode:t requiresAccount:b display:b selectedTab:t selectedTag:t")
 action(sections, "action")
 cards(sections, "items")
+tabs = m.relation(sections, "tabs", "array", "id:n name:t")
+cards(tabs, "items")
+m.relation(sections, "tags", "array", "id:n name:t group:t selected:b")
 group("Capabilities/Catalog/HomeStorageRecords.cs", "MeowFilm.Capabilities", "HomeStorageRecords", {"Home": home})
 
 audio = record("audio_index", "file:t size:i sha256:t signature:t confirmedAt:i duration:r", keys=["resource_key"], identity="resourceKey")

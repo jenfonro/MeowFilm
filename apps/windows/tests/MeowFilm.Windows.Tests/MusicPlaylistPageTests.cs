@@ -1,9 +1,12 @@
+using Microsoft.UI.Xaml.Automation;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop;
@@ -66,21 +69,21 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create();
             string id = await f.Collection("内联页面", 3);
             await f.Module.NavigateAsync("playlist/" + id, default);
-            var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
-            True(grid.EnableRowVirtualization && VirtualizingPanel.GetIsVirtualizing(grid) &&
-                VirtualizingPanel.GetVirtualizationMode(grid) == VirtualizationMode.Recycling,
-                "playlist rows remain virtualized");
-            Equal(4, grid.Columns.Count);
-            Equal("歌曲 / 歌手", grid.Columns[0].Header);
-            Equal("专辑", grid.Columns[1].Header);
-            Equal("时长", grid.Columns[2].Header);
-            Equal("操作", grid.Columns[3].Header);
-            True(grid.Columns[0].Width.IsStar && grid.Columns[0].Width.Value == 3 &&
-                grid.Columns[1].Width.IsStar && grid.Columns[1].Width.Value == 2,
+            using var host = new DesktopTestUi.Host(f.Module.View, 1080, 680); await MusicTestUi.Drain();
+            var grid = (ListView)f.Module.View.FindName("SongsGrid");
+            True(grid.ItemsPanelRoot is ItemsStackPanel, "playlist rows use the native recycling panel");
+            var header = DesktopTestUi.Visuals((FrameworkElement)f.Module.View.FindName("SongHeaders")).OfType<Grid>()
+                .Single(panel => panel.ColumnDefinitions.Count == 4);
+            Equal(4, header.ColumnDefinitions.Count);
+            True(header.Children.OfType<TextBlock>().Select(text => text.Text).SequenceEqual(new[] { "歌曲 / 歌手", "专辑", "时长", "操作" }),
+                "all four song table column labels remain visible");
+            True(header.ColumnDefinitions[0].Width.IsStar && header.ColumnDefinitions[0].Width.Value == 3 &&
+                header.ColumnDefinitions[1].Width.IsStar && header.ColumnDefinitions[1].Width.Value == 2,
                 "song and album columns retain the shared three-to-two ratio");
             True(f.Module.IsContentDetailPage && f.Module.ShowsSongTable, "local playlist uses the shared detail surface");
             Equal("3", f.Module.DetailCountText);
-            Equal(50d, grid.RowHeight);
+            var row = (FrameworkElement)grid.ContainerFromIndex(0);
+            Equal(50d, DesktopTestUi.Visuals(row).OfType<Grid>().Single(panel => panel.ColumnDefinitions.Count == 4).Height);
             True(f.Module.CanReorderPlaylist, "same page owns drag reorder");
             True(((MeowFilm.Desktop.IDesktopHeaderSource)f.Module.View).Header.Slot is null,
                 "playlist detail does not publish the home-only create control");
@@ -91,42 +94,23 @@ public static partial class MusicUiTests
             string id = await f.Collection("滚动表格", 80);
             await f.Module.NavigateAsync("playlist/" + id, default);
             var page = (MusicView)f.Module.View;
-            var window = new Window
-            {
-                Content = page, Width = 760, Height = 360, WindowStyle = WindowStyle.None,
-                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
-            };
-            try
-            {
-                window.Show(); window.UpdateLayout(); await Drain();
-                var grid = (DataGrid)page.FindName("SongsGrid");
-                var scroll = Visuals(grid).OfType<ScrollViewer>()
-                    .Single(candidate => ReferenceEquals(candidate.TemplatedParent, grid));
-                True(OverlayScrollChrome.GetEnabled(scroll), "song table mounts the shared scroll behavior");
-                var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
-                True(ReferenceEquals(bar.Style, page.FindResource("Capability.OverlayScrollBar")),
-                    "song table uses the shared overlay scrollbar visual");
-                if (!DesktopTheme.GetIsHighContrast(bar))
-                    True(bar.Opacity == 0, "song scrollbar is hidden at rest");
-                var content = (FrameworkElement)scroll.Template.FindName("PART_ScrollContentPresenter", scroll);
-                True(ReferenceEquals(VisualTreeHelper.GetParent(bar), VisualTreeHelper.GetParent(content)) &&
-                    Grid.GetColumn(bar) == Grid.GetColumn(content) && Grid.GetRow(bar) == Grid.GetRow(content),
-                    "song scrollbar overlays the data viewport");
-                var headers = Visuals(grid).OfType<DataGridColumnHeadersPresenter>().Single();
-                True(headers.IsVisible && headers.ActualHeight > 0, "data grid column headers remain intact");
-                True(scroll.ScrollableHeight > 0 && scroll.CanContentScroll, "virtualized song rows remain scrollable");
-                bar.ApplyTemplate();
-                var track = (Track)bar.Template.FindName("PART_Track", bar);
-                ((RoutedCommand)track.IncreaseRepeatButton.Command).Execute(null, track.IncreaseRepeatButton);
-                await Drain();
-                True(scroll.VerticalOffset > 0 && OverlayScrollChrome.GetActive(scroll) && bar.Opacity > 0,
-                    "real table scrolling reveals the shared chrome");
-            }
-            finally
-            {
-                window.Content = null;
-                window.Close();
-            }
+            using var host = new DesktopTestUi.Host(page, 760, 360); await MusicTestUi.Drain();
+            var grid = (ListView)page.FindName("SongsGrid");
+            var scroll = DesktopTestUi.Visuals(grid).OfType<ScrollViewer>().First();
+            var bar = DesktopTestUi.Visuals(scroll).OfType<ScrollBar>().Single(value => value.Orientation == Orientation.Vertical);
+            var content = DesktopTestUi.Visuals(scroll).OfType<ScrollContentPresenter>().First();
+            True(scroll.VerticalScrollBarVisibility == ScrollBarVisibility.Auto, "native overlay scrollbars follow content overflow");
+            True(ReferenceEquals(VisualTreeHelper.GetParent(bar), VisualTreeHelper.GetParent(content)) &&
+                Grid.GetColumn(bar) == Grid.GetColumn(content) && Grid.GetRow(bar) == Grid.GetRow(content),
+                "the native scrollbar overlays the data viewport");
+            var headers = (FrameworkElement)page.FindName("SongHeaders");
+            True(DesktopVisual.IsVisible(headers) && headers.ActualHeight > 0, "column headers remain intact");
+            True(scroll.ScrollableHeight > 0 && grid.ItemsPanelRoot is ItemsStackPanel, "virtualized rows remain scrollable");
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(scroll)!;
+            ((IScrollProvider)peer.GetPattern(PatternInterface.Scroll)).Scroll(ScrollAmount.NoAmount, ScrollAmount.SmallIncrement);
+            await MusicTestUi.Drain();
+            True(scroll.VerticalOffset > 0 && DesktopVisual.IsVisible(bar), "native scroll provider moves the row surface without input simulation");
+
         });
     }
 

@@ -86,7 +86,8 @@ public static class MusicNativeScriptTests
             ("disable", new { installationId = Installation }), ("rollback", new { installationId = Installation }),
             ("check", new { installationId = Installation }), ("remove", new { installationId = Installation }),
             ("edit", new { installationId = Installation, name = "改名" }),
-            ("download", new { url = "https://host.invalid/source.js" }), ("update", new { installationId = Installation })
+            ("download", new { url = "https://host.invalid/source.js?signature=" + new string('x', 4097) }),
+            ("update", new { installationId = Installation })
         })
         {
             await Ok(f.Owner, "music.sources." + command, parameters);
@@ -470,8 +471,6 @@ public static class MusicNativeScriptTests
         ReadOnlyMemory<byte> Source, string? Basename);
     private sealed class Runtime : IRuntimeSession
     {
-        public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
-            => throw new InvalidOperationException("Image requests are not part of this fixture.");
         public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
             => throw new InvalidOperationException("Image requests are not part of this fixture.");
 

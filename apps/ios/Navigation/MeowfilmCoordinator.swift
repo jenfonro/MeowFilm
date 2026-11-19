@@ -86,7 +86,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }.store(in: &observations)
         if let model = assembly.music { install(model) }
         assembly.restoreFilmPlaybackUI = { [weak self] sessionID in
-            guard let self, let model = assembly.filmPlayback, model.sessionID == sessionID,
+            guard let self, let model = assembly.filmMediaPlayback, model.sessionID == sessionID,
                   UIApplication.shared.applicationState != .background else { return false }
             if let page = self.filmPlayer, page.filmPlaybackModel === model {
                 return page.presentingViewController != nil && page.viewIfLoaded?.window != nil &&
@@ -94,7 +94,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             }
             guard self.root.presentedViewController == nil else { return false }
             await model.open()?.value
-            guard model.sessionID == sessionID, self.assembly.filmPlayback === model else { return false }
+            guard model.sessionID == sessionID, self.assembly.filmMediaPlayback === model else { return false }
             return await withCheckedContinuation { continuation in
                 let accepted = self.presentFilmPlayer(model, restoring: true) { [weak self] in
                     continuation.resume(returning: self?.filmPlayer?.presentingViewController != nil)
@@ -336,7 +336,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private func presentFilmPlayer(_ model: FilmPlaybackModel, restoring: Bool = false,
                                    completion: (() -> Void)? = nil) -> Bool {
         let applicationState = UIApplication.shared.applicationState
-        guard filmPlayer == nil, assembly.filmPlayback === model,
+        guard filmPlayer == nil,
+              restoring ? assembly.filmMediaPlayback === model : assembly.filmPlayback === model,
               root.presentedViewController == nil, !root.isBeingDismissed,
               applicationState == .active || restoring && applicationState != .background else { return false }
         let page = FilmPlayerViewController(model: model, themeProvider: assembly.appearance)
@@ -405,11 +406,11 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 guard let self, let main = self.main else { return }
                 let content: MeowfilmSidebarContent
                 switch main.selectedPage {
-                case .film: content = .film(home: filmHome, settings: self.assembly.filmSettings)
+                case .film: content = .film(settings: self.assembly.filmSettings)
                 case .novel:
-                    guard let novel = self.assembly.novel else { return }
-                    content = .novel(feature: novel, home: { [weak self] in self?.novelHome?.showHome() })
-                default: content = .music(source: MusicHomeSourceSettingsModel(model: model), selectedPage: main.selectedPage)
+                    guard let home = self.novelHome else { return }
+                    content = .novel(discovery: home.discovery, home: { [weak self] in self?.main?.select(.novel) })
+                default: content = .music(selectedPage: main.selectedPage)
                 }
                 self.root.showSidebar(content: content)
             },

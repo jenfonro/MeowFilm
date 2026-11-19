@@ -7,17 +7,19 @@ import MeowRuntime
 /// it does not construct or interpret upstream requests.
 actor MusicNativePlatforms {
     let client: MusicPlatformClient
+    private var playlistArtwork: [String: (revision: UUID?, collection: MusicPublicBrowseCollection)] = [:]
     init(client: MusicPlatformClient) { self.client = client }
     func invalidateCollection(_ collection: MusicPublicBrowseCollection) async {
+        playlistArtwork[collection.id] = nil
         try? await client.clear(platform: collection.platform.rawValue)
     }
     func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicNativeTrackPage {
         let value = try await client.request(platform: platform, operation: "search", parameters: [
             "keyword": .string(query), "kind": .string("songs"), "page": .number(Double(page)), "limit": .number(Double(limit))
         ])
-        return .init(items: try MusicPlatformDTO.tracks(value), total: try MusicPlatformDTO.count(value[music: "total"]),
+        return .init(items: try MusicPlatformDTO.tracks(value), total: MusicPlatformDTO.optionalCount(value[music: "total"]) ?? 0,
             nextPage: value[music: "continuation"][music: "page"] == .null ? nil :
-                try MusicPlatformDTO.count(value[music: "continuation"][music: "page"]))
+                MusicPlatformDTO.optionalCount(value[music: "continuation"][music: "page"]))
     }
     func lyrics(platform: String, info: MJ) async throws -> MusicNativeLyrics {
         let value = try await client.request(platform: platform, operation: "lyrics", parameters: [
@@ -32,30 +34,58 @@ actor MusicNativePlatforms {
         let value = try await client.request(platform: platform.rawValue, operation: "search", parameters: [
             "keyword": .string(query), "kind": .string("playlists"), "page": .number(Double(page)), "limit": .number(Double(limit))
         ])
-        return .init(items: try MusicNativePlatformResult.collections(value[music: "items"], platform: platform), total: try MusicPlatformDTO.count(value[music: "total"]),
+        return .init(items: try MusicNativePlatformResult.collections(value[music: "items"], platform: platform), total: MusicPlatformDTO.optionalCount(value[music: "total"]) ?? 0,
             nextPage: value[music: "continuation"][music: "page"] == .null ? nil :
-                try MusicPlatformDTO.count(value[music: "continuation"][music: "page"]))
+                MusicPlatformDTO.optionalCount(value[music: "continuation"][music: "page"]))
+    }
+    func playlistSummaries(platform: MusicPublicBrowsePlatform, ids: [String]) async throws -> [MusicPublicBrowseCollection] {
+        let revision = try await client.contentRevision(platform: platform.rawValue)
+        var results: [MusicPublicBrowseCollection] = [], missing: [String] = []
+        for id in ids {
+            let key = MusicPublicBrowseCollection(platform: platform, nativeID: id, title: "").id
+            if let saved = playlistArtwork[key], saved.revision == revision { results.append(saved.collection) }
+            else { missing.append(id) }
+        }
+        if !missing.isEmpty {
+            let value = try await client.request(platform: platform.rawValue, operation: "playlists",
+                parameters: ["ids": .array(missing.map(RuntimeValue.string))])
+            results += try MusicNativePlatformResult.collections(value[music: "items"], platform: platform)
+        }
+        guard try await client.contentRevision(platform: platform.rawValue) == revision else { throw MusicServiceError.staleResult }
+        return results
+    }
+    private func rememberArtwork(_ collection: MusicPublicBrowseCollection, revision: UUID?) {
+        guard collection.kind == .playlist, collection.artwork != nil else { return }
+        // Reuse recent detail/preview roots, never member song artwork or a durable collection store.
+        if playlistArtwork.count >= 128, let key = playlistArtwork.keys.first { playlistArtwork[key] = nil }
+        playlistArtwork[collection.id] = (revision, collection)
     }
     func browseDetail(_ collection: MusicPublicBrowseCollection, continuation: MJ) async throws
         -> MusicNativePublicBrowseDetailPage {
+        let revision = try await client.contentRevision(platform: collection.platform.rawValue)
         let value = try await client.request(platform: collection.platform.rawValue, operation: collection.kind.rawValue,
             parameters: ["id": .string(collection.nativeID), "page": .number(continuation["page"].number > 0 ?
                 continuation["page"].number : 1), "limit": .number(30),
                 "continuation": try RuntimeJSON.decode(continuation.bytes)])
         let tracks = try MusicPlatformDTO.tracks(value)
         let sourcePositions = tracks.map(\.sourcePosition)
-        return .init(collection: try MusicNativePlatformResult.collection(value, platform: collection.platform,
-                kind: collection.kind), tracks: tracks, sourcePositions: sourcePositions,
-            total: try MusicPlatformDTO.count(value[music: "total"], default: tracks.count),
+        let root = try MusicNativePlatformResult.collection(value, platform: collection.platform, kind: collection.kind)
+        guard try await client.contentRevision(platform: collection.platform.rawValue) == revision else { throw MusicServiceError.staleResult }
+        rememberArtwork(root, revision: revision)
+        return .init(collection: root, tracks: tracks, sourcePositions: sourcePositions,
+            total: MusicPlatformDTO.optionalCount(value[music: "total"]) ?? tracks.count,
             continuation: value[music: "continuation"] == .null ? nil : try MJ.parse(value[music: "continuation"].musicData()),
-            consumed: try MusicPlatformDTO.count(value[music: "consumed"], default: tracks.count))
+            consumed: MusicPlatformDTO.optionalCount(value[music: "consumed"]) ?? tracks.count)
     }
     func browseComplete(_ collection: MusicPublicBrowseCollection) async throws -> MusicPublicBrowseNativeCollection {
+        let revision = try await client.contentRevision(platform: collection.platform.rawValue)
         let value = try await client.request(platform: collection.platform.rawValue,
             operation: collection.kind == .album ? "album" : "playlist.complete",
             parameters: ["id": .string(collection.nativeID)])
-        return .init(collection: try MusicNativePlatformResult.collection(value, platform: collection.platform, kind: collection.kind),
-                     tracks: try MusicPlatformDTO.tracks(value))
+        let root = try MusicNativePlatformResult.collection(value, platform: collection.platform, kind: collection.kind)
+        guard try await client.contentRevision(platform: collection.platform.rawValue) == revision else { throw MusicServiceError.staleResult }
+        rememberArtwork(root, revision: revision)
+        return .init(collection: root, tracks: try MusicPlatformDTO.tracks(value))
     }
     func browseDiscovery(_ destination: MusicPublicBrowseDestination, source: MusicPublicBrowsePlatform,
                          remote: MJ) async throws -> MusicNativePublicBrowseDiscovery {
@@ -66,7 +96,9 @@ actor MusicNativePlatforms {
                 "continuation": try RuntimeJSON.decode(remote.bytes)]
         case .channels: operation = "channels"; parameters = [:]
         case .channel(let channel, let tag):
-            if channel.kind == .artistActivity {
+            if channel.kind == .chart {
+                operation = "charts"; parameters = ["kind": .string(channel.id)]
+            } else if channel.kind == .artistActivity {
                 operation = "artistActivity"; parameters = ["before": remote["before"] == .null ? .null : .string(remote["before"].string)]
             } else {
                 operation = "channel"; parameters = ["id": .string(channel.id), "name": .string(channel.title),
@@ -75,8 +107,9 @@ actor MusicNativePlatforms {
             }
         case .daily: throw MusicServiceError.unsupported
         }
-        return try MusicNativePlatformResult.discovery(
-            await client.request(platform: source.rawValue, operation: operation, parameters: parameters), platform: source)
+        let result = try await client.request(platform: source.rawValue, operation: operation, parameters: parameters)
+        return try operation == "channels" ? MusicNativePlatformResult.directory(result, platform: source) :
+            MusicNativePlatformResult.discovery(result, platform: source)
     }
     func browseAccountHome(_ destination: MusicPublicBrowseDestination, remote: MJ,
                            account: any MusicNativeHomeProviding, binding: MusicNativeHomeBinding) async throws
@@ -121,12 +154,12 @@ actor MusicNativePlatforms {
         let value = try await client.request(platform: "wy", operation: "searchDiscovery", parameters: [
             "components": .array(components.map { .string($0.rawValue) })
         ])
-        let hot = try value[music: "hot"].musicRequiredArray().enumerated().map { index, row in
-            MusicSearchHotKeyword(keyword: try row[music: "keyword"].musicRequiredText(),
-                rank: try MusicPlatformDTO.count(row[music: "rank"], default: index + 1), score: row[music: "score"].musicNumber)
+        let hot = value[music: "hot"].musicArray.enumerated().map { index, row in
+            MusicSearchHotKeyword(keyword: row[music: "keyword"].musicText,
+                rank: MusicPlatformDTO.optionalCount(row[music: "rank"]) ?? index + 1, score: row[music: "score"].musicNumber)
         }
         return .init(hot: hot, hotCanPlay: value[music: "hotCanPlay"].musicBool,
-            charts: try value[music: "charts"].musicRequiredArray().map {
+            charts: try value[music: "charts"].musicArray.map {
                 .init(collection: try MusicNativePlatformResult.collection($0, platform: .netease))
             }, failures: value[music: "failures"].musicArray.compactMap { row in
                 guard let component = MusicSearchDiscoveryFailure.Component(rawValue: row[music: "stage"].musicText) else { return nil }

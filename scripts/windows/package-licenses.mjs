@@ -9,7 +9,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpRoot } from './working-paths.mjs';
 
 const MANIFEST = 'licenses-manifest.json';
-const MAX_FILE = 1024 * 1024, MAX_TOTAL = 8 * 1024 * 1024;
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const key = path => process.platform === 'win32' ? path.toLowerCase() : path;
@@ -30,6 +29,8 @@ export const licenseFiles = [
   'GCC-Runtime-Library-Exception-3.1.txt',
   'MinGW-w64-runtime-NOTICE.txt', 'winpthreads-LICENSE.txt',
   'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt',
+  'WindowsAppSDK-LICENSE.txt', 'WindowsAppSDK-NOTICE.txt',
+  'Win2D-MIT.txt',
   'NAudio-MIT.txt', 'FFmpeg.AutoGen-MIT.txt', 'dotnet-runtime-MIT.txt', 'FFmpeg-audio-NOTICES.txt',
   'sqlite-LICENSE.md',
 ];
@@ -125,7 +126,7 @@ try {
 function readStable(path, identities) {
   const beforePath = stat(path);
   plain(beforePath, false);
-  need(beforePath.size > 0n && beforePath.size <= BigInt(MAX_FILE), 'SOURCE_SIZE');
+  need(beforePath.size > 0n, 'SOURCE_SIZE');
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const before = fstatSync(fd, { bigint: true });
@@ -213,7 +214,6 @@ export async function packageLicenses({
   windowsReparseAudit([...identities.keys(), ...sourcePaths]);
   checkIdentities(identities);
   const buffers = records.map((file, i) => readStable(sourcePaths[i], identities));
-  need(buffers.reduce((sum, b) => sum + b.length, 0) <= MAX_TOTAL, 'SOURCE_SIZE');
   checkIdentities(identities);
   need(absent(output), 'OUTPUT_EXISTS');
   mkdirSync(output); // non-recursive, exclusive directory creation

@@ -26,7 +26,7 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
         self.database = database; await reload()
     }
     nonisolated private static func load(_ db: SQLiteConnection) throws -> [SearchHistoryEntry] {
-        try db.query("SELECT text FROM ios_search_history ORDER BY used_at DESC,text LIMIT 60").map { .init(text: try $0.text("text")) }
+        try db.query("SELECT text FROM ios_search_history ORDER BY used_at DESC,text").map { .init(text: try $0.text("text")) }
     }
     public func reload() async {
         guard !closed, let database else { return }
@@ -47,13 +47,11 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
                 result = try await database.transaction(ownedBytes: keyword.utf8.count) { db in
                     try db.execute("INSERT INTO ios_search_history(text,used_at) VALUES(?,?) " +
                         "ON CONFLICT(text) DO UPDATE SET used_at=excluded.used_at", [.text(keyword), .optional(Date())])
-                    try db.execute("DELETE FROM ios_search_history WHERE text IN " +
-                        "(SELECT text FROM ios_search_history ORDER BY used_at DESC,text LIMIT -1 OFFSET 60)")
                     return try Self.load(db)
                 }
             } else {
                 let entry = SearchHistoryEntry(text: keyword)
-                result = [entry] + entries.filter { $0.id != entry.id }.prefix(59)
+                result = [entry] + entries.filter { $0.id != entry.id }
             }
             if epoch == ticket, !closed { entries = result; persistenceError = nil }
         } catch { if epoch == ticket, !closed { persistenceError = "搜索历史保存失败" } }

@@ -7,20 +7,21 @@ public static partial class MusicNativePlatformTests
         yield return Case("dynamic home replaces content without native identity or complete-layout proof", async () =>
         {
             int round = 0;
-            await using var f = Peer(_ => Json(new { entries = Enumerable.Range(0, ++round).Select(i => new { id = "current-" + i, available = true }).ToArray() }));
-            Equal(1, (await f.Catalog.HomeAsync(new("wy"))).GetProperty("entries").GetArrayLength());
-            Equal(2, (await f.Catalog.HomeAsync(new("wy", Refresh: true))).GetProperty("entries").GetArrayLength());
+            await using var f = Peer(_ => Json(new { sections = new[] { new { layout = "feature-rail",
+                items = Enumerable.Range(0, ++round).Select(i => new { id = "current-" + i, available = true }).ToArray() } } }));
+            Equal(1, (await f.Catalog.HomeAsync(new("wy"))).GetProperty("sections")[0].GetProperty("items").GetArrayLength());
+            Equal(2, (await f.Catalog.HomeAsync(new("wy", Refresh: true))).GetProperty("sections")[0].GetProperty("items").GetArrayLength());
             Equal(2, f.Requests.Count);
         });
         yield return Case("home preserves declared entry display independently from action availability", async () =>
         {
-            var value = Json(new { platform = "wy", entries = new object[]
+            var value = Json(new { platform = "wy", sections = new[] { new { layout = "feature-rail", items = new object[]
             {
                 new { id = "daily", requiresAccount = true, display = false, available = false,
                     errorCode = "AUTH_REQUIRED", action = new { type = "daily", branch = "default" } },
                 new { id = "fm", requiresAccount = false, display = true, available = false,
                     errorCode = "FORBIDDEN", action = new { type = "fm" } }
-            } });
+            } } } });
             await using var f = Peer(call =>
             {
                 Equal("home", call.Operation); True(call.Parameters.GetProperty("refresh").GetBoolean());

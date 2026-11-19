@@ -3,9 +3,11 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Media;
 using System.Windows.Threading;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
@@ -27,8 +29,8 @@ public static class UserDataResetHostTests
 
     private static async Task Run()
     {
-        // WPF allows only one Application per AppDomain. Keep this real launcher
-        // test isolated from the runner's other independent STA component tests.
+        // A process owns one WinUI Application. The child runs the real launcher
+        // without first creating the component test application.
         if (Environment.GetEnvironmentVariable("MEOWFILM_RESET_LAUNCHER_CHILD") == "1")
         {
             await Launch();
@@ -70,11 +72,11 @@ public static class UserDataResetHostTests
             NativeTestDatabase? cacheStore = null;
             int disposals = 0, pid = Environment.ProcessId;
             Exception? failure = null;
-            var guard = new DispatcherTimer { Interval = TimeSpan.FromSeconds(35) };
+            var guard = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromSeconds(35) };
             guard.Tick += (_, _) =>
             {
                 failure ??= new InvalidOperationException("launcher reset did not settle");
-                System.Windows.Application.Current.Shutdown();
+                Application.Current.Exit();
             };
             guard.Start();
             try
@@ -89,6 +91,7 @@ public static class UserDataResetHostTests
                         var module = new ProbeModule(store, runtime, cacheStore, paths.Documents);
                         modules.Add(module); owners.Add(module);
                     },
+                    launch => new TestApplication(launch),
                     async () =>
                     {
                         if (cacheStore is not null) { await cacheStore.DisposeAsync(); cacheStore = null; }
@@ -98,10 +101,9 @@ public static class UserDataResetHostTests
                     {
                         var shell = (ShellWindow)window;
                         var module = (ProbeModule)owners.Single();
-                        shell.ShowActivated = false;
                         shells.Add(shell);
                         int generation = shells.Count;
-                        shell.Loaded += async (_, _) =>
+                        shell.Root.Loaded += async (_, _) =>
                         {
                             try
                             {
@@ -126,9 +128,9 @@ public static class UserDataResetHostTests
                                     "new native account owner is signed out");
                                 Check(!Directory.Exists(Path.Combine(root, "script-runtime")) &&
                                     !Directory.Exists(Path.Combine(root, "music-playback-cache")), "old runtime and playback files removed");
-                                Click((Button)shell.FindName("SettingsButton"));
-                                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                                var settings = Descendants(shell).OfType<GeneralSettingsView>().Single();
+                                Click((Button)shell.Root.FindName("SettingsButton"));
+                                await DesktopTestUi.DrainAsync();
+                                var settings = Descendants(shell.Root).OfType<GeneralSettingsView>().Single();
                                 var appearance = (IDesktopAppearance)settings.DataContext;
                                 Check(appearance.ThemeColor == AppearanceColors.DefaultColor &&
                                     shell.MediaControls is { IsAvailable: true }, "fresh default settings are usable");
@@ -158,7 +160,7 @@ public static class UserDataResetHostTests
                                 ((StackPanel)settings.FindName("Areas")).Children.OfType<RadioButton>()
                                     .Single(tab => Equals(tab.Tag, "cache")).IsChecked = true;
                                 Click((Button)settings.FindName("ClearUserDataButton"));
-                                var dialog = (UserControl)shell.FindName("ResetDialog");
+                                var dialog = (UserControl)shell.Root.FindName("ResetDialog");
                                 Check(dialog.Visibility == Visibility.Visible);
                                 Click((Button)dialog.FindName("ConfirmChoice"));
                             }
@@ -166,7 +168,7 @@ public static class UserDataResetHostTests
                             {
                                 failure = error;
                                 try { await shell.AbortAsync(); }
-                                catch { System.Windows.Application.Current.Shutdown(); }
+                                catch { Application.Current.Exit(); }
                             }
                         };
                         var attachment = new Attachment();
@@ -258,7 +260,8 @@ public static class UserDataResetHostTests
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
             foreach (var child in Descendants(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
-    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    private static void Click(Button button) =>
+        ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
     private static void Check(bool value, string message = "reset host assertion")
     { if (!value) throw new InvalidOperationException(message); }
 }

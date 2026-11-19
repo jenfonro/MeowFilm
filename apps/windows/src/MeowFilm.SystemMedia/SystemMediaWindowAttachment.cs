@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
-using System.Windows;
+using Microsoft.UI.Xaml;
+using System.Windows.Threading;
 
 [assembly: InternalsVisibleTo("MeowFilm.Windows.Tests")]
 
@@ -17,6 +18,7 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
 
     internal SystemMediaWindowAttachment(Window window, SystemMediaSession session)
     {
+        if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("SYSTEM_MEDIA_THREAD_ACCESS");
         this.window = window;
         this.session = session;
         window.Closed += Closed;
@@ -25,17 +27,22 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
     private static SystemMediaSession CreateSession(Window window, ISystemPlayback playback,
         ISystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled)
     {
-        try { return new SystemMediaSession(playback, backend, owners, window.Dispatcher, enabled); }
+        try
+        {
+            if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("SYSTEM_MEDIA_THREAD_ACCESS");
+            return new SystemMediaSession(playback, backend, owners, Dispatcher.CurrentDispatcher, enabled);
+        }
         catch { backend.Dispose(); throw; }
     }
 
     // Shell can cancel Closing after its event handlers have run.
-    private void Closed(object? sender, EventArgs args) => session.Suspend();
+    private void Closed(object sender, WindowEventArgs args) => session.Suspend();
 
     public void SetEnabled(bool enabled) => session.SetEnabled(enabled);
 
     public ValueTask DisposeAsync()
     {
+        if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("SYSTEM_MEDIA_THREAD_ACCESS");
         window.Closed -= Closed;
         return session.DisposeAsync();
     }

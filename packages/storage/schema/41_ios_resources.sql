@@ -28,10 +28,11 @@ CREATE TABLE ios_music_feedback_outbox (
 CREATE INDEX ios_music_feedback_dispatch ON ios_music_feedback_outbox(scope,state,occurredAt);
 
 CREATE TABLE ios_music_images (
-    resource TEXT PRIMARY KEY NOT NULL, filename TEXT NOT NULL UNIQUE,
+    resource TEXT NOT NULL, filename TEXT PRIMARY KEY NOT NULL,
     updated_at REAL NOT NULL, bytes INTEGER NOT NULL CHECK(bytes>0),
     ready INTEGER NOT NULL CHECK(ready IN (0,1))
 ) STRICT;
+CREATE UNIQUE INDEX ios_music_images_ready ON ios_music_images(resource) WHERE ready=1;
 CREATE INDEX ios_music_images_age ON ios_music_images(updated_at);
 CREATE TABLE ios_music_lyrics (
     song_id TEXT PRIMARY KEY NOT NULL, source_key TEXT NOT NULL, updated_at REAL NOT NULL,

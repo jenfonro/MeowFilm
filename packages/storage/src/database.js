@@ -75,7 +75,7 @@ function createOwner(root, options) {
     if (closing) return Promise.reject(storageError('STORAGE_CLOSED'));
     if (signal?.aborted) return Promise.reject(storageError('CANCELLED'));
     const size = cost(input);
-    if (pending >= MAX_PENDING || size > MAX_BYTES - bytes)
+    if (pending >= MAX_PENDING || pending > 0 && size > MAX_BYTES - bytes)
       return Promise.reject(storageError('STORAGE_BUSY'));
     // Reserve before cloning and retaining producer input in the queue.
     ++pending; bytes += size;
@@ -126,7 +126,7 @@ export function openDatabase(dataRoot, options = {}) {
     ? Promise.reject(storageError('STORAGE_CLOSED')) : owner.request(input, signal, end => { drain = end; });
   return {
     ready: owner.ready,
-    query: (sql, params = [], { signal, maxRows = 4096 } = {}) =>
+    query: (sql, params = [], { signal, maxRows = Number.MAX_SAFE_INTEGER } = {}) =>
       request({ kind: 'query', sql, params, maxRows }, signal),
     execute: (sql, params = [], { signal, expectChanges } = {}) =>
       request({ kind: 'execute', sql, params, expectChanges }, signal),

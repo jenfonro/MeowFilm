@@ -1,7 +1,12 @@
+using SystemParameters = System.Windows.SystemParameters;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
@@ -158,7 +163,7 @@ public static partial class MusicCatalogPersonalTests
     {
         await using var f = await Fixture.Create(store: await SavedHome(HomePage("801")));
         f.Platform.Total = 165;
-        f.Platform.HomeActions = [new { id = "801", name = "歌单 801", kind = "playlist" }];
+        f.Platform.HomeActions = [new { id = "801", title = "歌单 801", kind = "playlist", action = new { type = "playlist", id = "801" } }];
         await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
         await f.Module.HomeRefresh.WaitAsync(HomeGuard);
         var before = await f.Queue();
@@ -201,7 +206,7 @@ public static partial class MusicCatalogPersonalTests
     {
         await using var f = await Fixture.Create(store: await SavedHome(HomePage("801")));
         f.Platform.Total = 165;
-        f.Platform.HomeActions = [new { id = "801", name = "歌单 801", kind = "playlist" }];
+        f.Platform.HomeActions = [new { id = "801", title = "歌单 801", kind = "playlist", action = new { type = "playlist", id = "801" } }];
         await f.Module.NavigateAsync("catalog-home", default).WaitAsync(HomeGuard);
         await f.Module.HomeRefresh.WaitAsync(HomeGuard);
         var card = f.Module.HomeSections.SelectMany(section => section.Items).Single();
@@ -536,7 +541,7 @@ public static partial class MusicCatalogPersonalTests
     private static async Task HomeAfterAccountSettings(bool settings)
     {
         await using var f = await Fixture.Create();
-        f.Platform.HomeActions = [new { id = "801", name = "歌单 801", kind = "playlist" }];
+        f.Platform.HomeActions = [new { id = "801", title = "歌单 801", kind = "playlist", action = new { type = "playlist", id = "801" } }];
         await f.Module.NavigateAsync("catalog-home", default);
         await f.Module.HomeInitialization;
         var card = f.Module.HomeSections.Single().Items.Single();
@@ -618,7 +623,7 @@ public static partial class MusicCatalogPersonalTests
         Equal(0, Calls(f, "music.catalog.daily"));
         using var mount = new HomeNoticeMount(f.Module.View);
         await Drain();
-        Check(Visuals<EntryCard>(f.Module.View).Where(view => view.IsVisible).Select(view => view.DataContext)
+        Check(Visuals<EntryCard>(f.Module.View).Where(view => DesktopVisual.IsVisible(view)).Select(view => view.DataContext)
             .SequenceEqual(f.Module.HomeSections.Single().Items.Cast<object>(), ReferenceEqualityComparer.Instance),
             "actual home entry cards bind only the ordered display projection");
         f.App.Authenticated = true; f.App.AccountGeneration++;
@@ -627,7 +632,7 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.RefreshCatalogAsync().WaitAsync(HomeGuard);
         Equal("每日推荐,风格推荐,心动模式,私人漫游,暂不可用", HomeTitles(f));
         await Drain();
-        Equal(5, Visuals<EntryCard>(f.Module.View).Count(view => view.IsVisible));
+        Equal(5, Visuals<EntryCard>(f.Module.View).Count(view => DesktopVisual.IsVisible(view)));
         AssertNoHomeCommit(f);
     }
 
@@ -648,7 +653,7 @@ public static partial class MusicCatalogPersonalTests
             "snapshot retains producer account declarations without restoring their display authority");
         using var mount = new HomeNoticeMount(f.Module.View);
         await Drain();
-        Check(Visuals<EntryCard>(f.Module.View).Where(view => view.IsVisible)
+        Check(Visuals<EntryCard>(f.Module.View).Where(view => DesktopVisual.IsVisible(view))
             .All(view => view.DataContext is MusicCatalogCard { RequiresAccount: false }),
             "anonymous restored home renders no old private entry");
         home.Release();
@@ -897,40 +902,39 @@ public static partial class MusicCatalogPersonalTests
 
     private static JsonElement HomePage(string id, int? nextPage = null, string platform = "wy") => E(new
     {
-        ok = true, platform, items = new[] { new { id, name = "歌单 " + id, kind = "playlist" } },
+        ok = true, platform, sections = new[] { new { id = "home", layout = "playlist-rail",
+            items = new[] { new { id, title = "歌单 " + id, kind = "playlist", action = new { type = "playlist", id } } } } },
         more = nextPage.HasValue,
         continuation = nextPage is { } page ? new { page, provider = new { cursor = "home-" + page } } : null
     });
     private static JsonElement PrivateHomePage() => E(new
     {
-        ok = true, platform = "wy", more = false, items = new object[]
+        ok = true, platform = "wy", more = false, sections = new[] { new { id = "home", layout = "feature-rail", items = new object[]
         {
-            new { id = "801", name = "歌单 801", kind = "playlist" },
-            new { id = "daily", name = "每日推荐", kind = "daily", requiresAccount = true,
+            new { id = "801", title = "歌单 801", kind = "playlist", action = new { type = "playlist", id = "801" } },
+            new { id = "daily", title = "每日推荐", label = "每日推荐", kind = "daily", requiresAccount = true,
                 action = new { type = "daily", branch = "default" } }
-        }
+        } } }
     });
     private static JsonElement HomeEntryPage(bool grouped, bool authenticated)
     {
         object[] entries =
         [
-            new { id = "daily", name = "每日推荐", presentation = "static", requiresAccount = true,
+            new { kind = "daily", id = "daily", title = "每日推荐", presentation = "static", requiresAccount = true,
                 display = authenticated, available = authenticated, action = new { type = "daily", branch = "default" } },
-            new { id = "style", name = "风格推荐", presentation = "static", requiresAccount = true,
+            new { kind = "daily", id = "style", title = "风格推荐", presentation = "static", requiresAccount = true,
                 display = authenticated, available = authenticated, action = new { type = "daily", branch = "style" } },
-            new { id = "heartbeat", name = "心动模式", presentation = "animated", requiresAccount = true,
+            new { kind = "heartbeat", id = "heartbeat", title = "心动模式", presentation = "animated", requiresAccount = true,
                 display = authenticated, available = authenticated, action = new { type = "heartbeat" } },
-            new { id = "fm", name = "私人漫游", presentation = "animated", requiresAccount = false,
+            new { kind = "fm", id = "fm", title = "私人漫游", presentation = "animated", requiresAccount = false,
                 display = true, available = true, action = new { type = "fm" } },
-            new { id = "unavailable", name = "暂不可用", presentation = "static", requiresAccount = false,
+            new { kind = "daily", id = "unavailable", title = "暂不可用", presentation = "static", requiresAccount = false,
                 display = true, available = false, errorCode = "AUTH_REQUIRED", action = new { type = "daily" } },
-            new { id = "hidden", name = "隐藏歌单", presentation = "preview", requiresAccount = false,
+            new { kind = "playlist", id = "hidden", title = "隐藏歌单", presentation = "preview", requiresAccount = false,
                 display = false, available = true, action = new { type = "playlist", id = "hidden" } }
         ];
-        return grouped
-            ? E(new { ok = true, platform = "wy", more = false, sections = new[]
-                { new { id = "home-entries", title = "", type = "entries", items = entries } } })
-            : E(new { ok = true, platform = "wy", more = false, entries });
+        return E(new { ok = true, platform = "wy", more = false, sections = new[]
+            { new { id = grouped ? "home-entries" : "entries", title = "", layout = "feature-rail", items = entries } } });
     }
     private static JsonElement HomeError(string code) => E(new { ok = false, code });
     private static async Task<Store> SavedHome(params JsonElement[] pages)
@@ -947,8 +951,8 @@ public static partial class MusicCatalogPersonalTests
         await using var restored = new NativeTestDatabase(fixture.Store.CacheBacking);
         var snapshot = await new MusicHomeSnapshotStore(restored).ReadAsync(fixture.App.Library.SongSnapshot);
         Check(snapshot is not null && snapshot.Platform == "wy", "successful display is persisted with its platform");
-        return string.Join(',', snapshot!.Pages.SelectMany(page => page.GetProperty("items").EnumerateArray())
-            .Select(item => S(item, "name")));
+        return string.Join(',', snapshot!.Pages.SelectMany(page => page.GetProperty("sections").EnumerateArray())
+            .SelectMany(section => section.GetProperty("items").EnumerateArray()).Select(item => S(item, "title")));
     }
     private static string HomeTitles(Fixture f) =>
         string.Join(',', f.Module.HomeSections.SelectMany(section => section.Items).Select(card => card.Title));
@@ -975,10 +979,8 @@ public static partial class MusicCatalogPersonalTests
         public List<string> Messages { get; } = [];
         public HomeNoticeMount(FrameworkElement view)
         {
-            window = new() { Content = view, Width = 900, Height = 720, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
-            window.AddHandler(NoticeOutlet.NoticeEvent,
-                new EventHandler<DesktopNoticeEventArgs>((_, notice) => Messages.Add(notice.Message)));
+            window = DesktopTestUi.CreateWindow(view, 900, 720);
+            NoticeOutlet.SetReceiver(DesktopTestUi.WindowRoot(window), notice => Messages.Add(notice.Message));
             window.Show();
         }
         public void Dispose() { window.Content = null; window.Close(); }

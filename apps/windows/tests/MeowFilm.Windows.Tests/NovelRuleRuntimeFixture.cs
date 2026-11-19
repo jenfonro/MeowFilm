@@ -32,7 +32,7 @@ internal sealed class NovelRuleRuntimeFixture : IRuntimeClient, IAsyncDisposable
     {
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("A real eight-module Windows runtime bundle is required.");
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId, AppIdentity.ScriptModules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId);
         string root = TestWorkspace.DataPath("novel-rule-rpc", Guid.NewGuid().ToString("N"));
         database = new NativeDatabase(root);
         await database.Ready.ConfigureAwait(false);

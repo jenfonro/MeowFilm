@@ -12,7 +12,7 @@ public protocol MusicHomeSnapshotStoring: Sendable {
 }
 
 public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @unchecked Sendable {
-    public static let namespace = "music.home.display.v1"
+    public static let namespace = "music.home.display.v2"
     private let database: SQLiteDatabase
     public init(database: SQLiteDatabase) { self.database = database }
     public func read() throws -> Data? {
@@ -47,27 +47,37 @@ enum MusicNativeHomeSnapshot {
     static let maximumBytes = 8 * 1024 * 1024
 
     static func references(_ page: MusicNativePublicBrowseDiscovery, sourceOwner: (String) throws -> String?) throws -> MusicNativePublicBrowseDiscovery {
-        func id(_ track: MusicNativeTrackData) throws -> String {
+        func id(_ track: MusicNativeTrackData) throws -> String? {
             var info = try MJ.parse(track.data); info["source"] = .string(track.platform)
-            let key = try MusicModel.sourceKey(info)
-            guard let id = try sourceOwner(key) else { throw MusicServiceError.notFound }
-            return id
+            guard let key = try? MusicModel.sourceKey(info) else { return nil }
+            return try sourceOwner(key)
         }
         func items(_ rows: [MusicNativePublicBrowseItem]) throws -> [MusicNativePublicBrowseItem] {
             try rows.map { row in
                 var item = row
-                if case .song(let track) = item.content { item.content = .record(try id(track)) }
+                if case .song(let track) = item.content {
+                    item.content = try id(track).map(MusicNativePublicBrowseContent.record) ?? .unavailable
+                }
                 if let ranking = item.ranking {
                     item.ranking = .init(preview: try ranking.preview.map { entry in
                         guard let track = item.previewSongs.first(where: {
                             (try? MusicModel.normalize($0)["sources"].array.first?["musicInfo"]["songmid"].string) == entry.id
                         }) else { return entry }
-                        return .init(id: try id(track), title: "", rank: entry.rank, lastRank: entry.lastRank)
+                        guard let reference = try id(track) else { return entry }
+                        return .init(id: reference, title: entry.title, artist: entry.artist, artwork: entry.artwork,
+                            rank: entry.rank, lastRank: entry.lastRank)
                     }, songArtwork: item.previewSongs.isEmpty && item.previewSongIDs.isEmpty ? ranking.songArtwork : nil,
                        updateFrequency: ranking.updateFrequency)
                 }
-                item.previewSongIDs += try item.previewSongs.map(id)
-                item.previewSongs = []
+                if item.previewSongIDs.isEmpty {
+                    var displayOnly: [MusicNativeTrackData] = []
+                    for track in item.previewSongs {
+                        let reference = try id(track)
+                        item.previewSongIDs.append(reference)
+                        if reference == nil { displayOnly.append(track) }
+                    }
+                    item.previewSongs = displayOnly
+                }
                 return item
             }
         }
@@ -170,7 +180,7 @@ private enum HomeContent: Codable {
             self = .collection(.init(platform: value.platform, nativeID: value.nativeID, kind: value.kind,
                 title: value.title, creator: value.creator,
                 artwork: MusicArtworkURL.normalized(MusicModel.publicURL(.string(value.artwork?.absoluteString ?? "")).string),
-                count: value.count))
+                count: value.count, playCount: value.playCount))
         case .record(let id): self = .record(id)
         case .channel(let channel): self = .channel(channel)
         case .daily: self = .daily
@@ -197,13 +207,20 @@ private struct HomeItem: Codable {
     let artwork: URL?
     let content: HomeContent
     let ranking: MusicPublicBrowseRanking?
-    let previewSongIDs: [String]
+    let previewSongIDs: [String?]
     let recommendationReason: String
     let coverLabel: String
     let requiresAccount: Bool
+    let kind: MusicPublicBrowseItem.Kind?
+    let label: String
+    let contextText: String
+    let playCount: Int?
+    let presentation: String
+    let coverRef: MusicPublicBrowseItem.CoverReference?
+    let displayOnlyPreviews: [MusicNativeTrackData.Display]
     init(_ value: MusicNativePublicBrowseItem) throws {
         id = value.id; content = try HomeContent(value.content)
-        if case .record = value.content { title = ""; subtitle = ""; artwork = nil }
+        if case .record = value.content, value.kind == nil { title = ""; subtitle = ""; artwork = nil }
         else {
             title = value.title; subtitle = value.subtitle
             artwork = MusicNativePublicBrowseSupport.artwork(MusicModel.publicURL(.string(value.artwork?.absoluteString ?? "")))
@@ -211,10 +228,17 @@ private struct HomeItem: Codable {
         ranking = value.ranking; previewSongIDs = value.previewSongIDs
         recommendationReason = value.recommendationReason; coverLabel = value.coverLabel
         requiresAccount = value.requiresAccount
+        contextText = value.contextText; playCount = value.playCount
+        kind = value.kind; label = value.label; presentation = value.presentation; coverRef = value.coverRef
+        displayOnlyPreviews = value.previewSongs.compactMap(\.display)
     }
     var native: MusicNativePublicBrowseItem {
         .init(id: id, title: title, subtitle: subtitle, artwork: artwork, content: content.native,
-              ranking: ranking, recommendationReason: recommendationReason, coverLabel: coverLabel,
-              previewSongIDs: previewSongIDs, requiresAccount: requiresAccount)
+              ranking: ranking, previewSongs: displayOnlyPreviews.map {
+                  .init(platform: "", data: Data("null".utf8), display: $0)
+              }, recommendationReason: recommendationReason, coverLabel: coverLabel,
+              previewSongIDs: previewSongIDs, requiresAccount: requiresAccount,
+              kind: kind, label: label, contextText: contextText, playCount: playCount,
+              presentation: presentation, coverRef: coverRef)
     }
 }

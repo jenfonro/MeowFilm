@@ -386,6 +386,20 @@ final class NativeMusicAccountServiceTests: XCTestCase {
         _ = await f.service.close()
     }
 
+    func testQRImageBeyondFormerByteLimitReachesTheLoginConsumerUnchanged() async throws {
+        let f = try MusicNativeFixture(restored: false); try await f.enable()
+        let image = Data(repeating: 1, count: 1024 * 1024 + 1)
+        await f.platform.replies("qr.create", .object([
+            "imageBase64": .string(image.base64EncodedString()),
+            "expiresAt": .number(f.clock.now().addingTimeInterval(180).timeIntervalSince1970 * 1000)
+        ]))
+        let challenge = try await f.service.beginLogin(platform: .qq)
+        XCTAssertEqual(challenge.image, image)
+        XCTAssertNil(f.store.peek(f.identity))
+        await f.service.cancelLogin(challengeID: challenge.id)
+        _ = await f.service.close()
+    }
+
     @MainActor func testQRCreationAndPollUseNodeResultsAfterNativeClockPassesDisplayExpiry() async throws {
         let f = try MusicNativeFixture(restored: false); try await f.enable()
         let expires = f.clock.now().addingTimeInterval(60)

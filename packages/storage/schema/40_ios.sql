@@ -55,7 +55,8 @@ CREATE TABLE ios_film_rules (
 ) STRICT;
 CREATE TABLE ios_film_preferences (
  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
- iosAutoPrepare INTEGER NOT NULL CHECK(iosAutoPrepare IN(0,1))
+ iosAutoPrepare INTEGER NOT NULL CHECK(iosAutoPrepare IN(0,1)),
+ metadataViewProvider TEXT NOT NULL CHECK(metadataViewProvider IN('tmdb','douban'))
 ) STRICT;
 CREATE TABLE ios_film_preference_items (
  list TEXT NOT NULL CHECK(list IN ('ruleOrder','panOrder','keywords','siteCleanKeywords')),

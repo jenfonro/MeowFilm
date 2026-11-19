@@ -1,291 +1,266 @@
-using System.Diagnostics;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
+using Windows.Foundation;
 
 namespace MeowFilm.Windows.Tests;
 
 public static class MusicCatalogLayoutTests
 {
-    public static IEnumerable<TestCase> Cases()
+    public static IEnumerable<TestCase> Cases() => MusicUiTests.CatalogLayoutCases();
+}
+
+public static partial class MusicUiTests
+{
+    internal static IEnumerable<TestCase> CatalogLayoutCases()
     {
-        yield return Case("section more retains full bounds at narrow and wide layouts across display scales", SectionMoreGeometry);
-        yield return Case("first-load templates match real two-banner and card geometry without artwork", SkeletonGeometry);
-        yield return Case("banner artwork dimensions drive full-image aspect ratio after asynchronous arrival", BannerAspect);
-        yield return Case("two-banner paging retains final resources resize and indicator position", BannerPaging);
-        yield return Case("indicator keeps the active anchor while neighboring dots slide and scale", IndicatorDrawing);
+        yield return Case("section more retains full bounds at narrow and wide native render scales", CatalogMoreGeometry);
+        yield return Case("first-load skeletons match real two-banner and entry geometry without artwork", CatalogSkeletonGeometry);
+        yield return Case("banner frame stays 2.56 to 1 with wide square and portrait artwork", CatalogBannerAspect);
+        yield return Case("two-banner paging retains final resources resize and indicator position", CatalogBannerPaging);
+        yield return Case("native indicator keeps its anchor while neighboring dots slide and scale", CatalogIndicatorDrawing);
+        yield return Case("fixed entry labels captions and resting gradient bind without input", CatalogEntryRoles);
+        yield return Case("artwork demand visibility respects clipping hiding and reentry without input", CatalogArtworkVisibility);
     }
-
-    private static TestCase Case(string name, Func<Task> run) =>
-        new("music-catalog-layout: " + name, () => MusicQualityConsumerTests.Sta(run));
-
-    private static async Task SectionMoreGeometry()
+    private static async Task CatalogMoreGeometry()
     {
-        var view = new MusicCatalogView();
         foreach (double width in new[] { 320d, 826d })
         foreach (double scale in new[] { 1d, 1.5d, 2d })
         {
-            var section = (FrameworkElement)((DataTemplate)view.FindResource("Catalog.SectionsTemplate")).LoadContent();
-            section.DataContext = new MusicCatalogSection("单曲", []);
-            MusicCatalogSurface.SetIsOverview(section, true);
-            section.LayoutTransform = new ScaleTransform(scale, scale);
-            using var scene = new Scene(section, width * scale);
-            await Drain(); scene.Layout(width * scale);
-            var button = Descendants<Button>(section).Single(b => b.Content as string == "查看更多");
-            var header = (DockPanel)VisualTreeHelper.GetParent(button);
-            var bounds = button.TransformToAncestor(header).TransformBounds(new Rect(button.RenderSize));
-            Check(button.IsVisible && button.ActualHeight >= 30, "real more template measures at least 30 DIP");
-            Check(bounds.Top >= -.01 && bounds.Bottom <= header.ActualHeight + .01 &&
-                bounds.Left >= -.01 && bounds.Right <= header.ActualWidth + .01,
-                "the complete button fits inside the real header at every width and scale");
-            var border = Descendants<Border>(button).First();
-            var edge = border.TransformToAncestor(header).TransformBounds(new Rect(border.RenderSize));
-            Check(edge.Top >= -.01 && edge.Bottom <= header.ActualHeight + .01,
-                "rounded template edge is not cut by the header allocation");
-            Check(border.CornerRadius.TopLeft > 0 && border.CornerRadius.BottomLeft > 0,
-                "real template retains both rounded corners");
-            var bitmap = new RenderTargetBitmap((int)Math.Ceiling(width * scale),
-                (int)Math.Ceiling(section.ActualHeight * scale), 96, 96, PixelFormats.Pbgra32);
-            bitmap.Render(section);
-            Check(bitmap.PixelHeight >= Math.Ceiling(bounds.Bottom * scale), "render target includes the complete lower edge");
-            if (Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT") is { } previews)
-            {
-                TestWorkspace.ValidatePath(TestWorkspace.DataRoot, previews);
-                System.IO.Directory.CreateDirectory(previews);
-                var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                using var file = System.IO.File.Create(System.IO.Path.Combine(previews,
-                    $"context-section-more-{width:0}-{scale * 96:0}.png"));
-                encoder.Save(file);
-            }
+            await using var f = await CreateSearchPlaylistPresentationScene(120);
+            await f.Module.OpenSearchTabAsync("overview");
+            var root = new Grid { Width = width, Height = 800 / scale, HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top, RenderTransform = new ScaleTransform { ScaleX = scale, ScaleY = scale } };
+            root.Children.Add(f.Module.View);
+            using var host = new DesktopTestUi.Host(root, (int)Math.Ceiling(width * scale), 800);
+            await TestUiHost.LoadedAsync(root); await Drain(); root.UpdateLayout();
+            var section = Visuals(root).OfType<MusicCatalogSectionView>().First(view =>
+                Visuals(view).OfType<Button>().Any(button => Equals(button.Content, "查看更多")));
+            var button = Visuals(section).OfType<Button>().Single(value => Equals(value.Content, "查看更多"));
+            var heading = (Grid)VisualTreeHelper.GetParent(button);
+            var bounds = DesktopTestUi.Bounds(button, heading);
+            True(DesktopVisual.IsVisible(button) && button.ActualHeight >= 30, "the real more control retains its full minimum height");
+            True(bounds.Top >= -.01 && bounds.Bottom <= heading.ActualHeight + .01 &&
+                bounds.Left >= -.01 && bounds.Right <= heading.ActualWidth + .01,
+                "the complete control fits the real heading at every width and render scale");
+            True(button.CornerRadius.TopLeft > 0 && button.CornerRadius.BottomLeft > 0,
+                "the native control retains both rounded corners");
+            var pixels = await DesktopTestUi.Pixels(section);
+            True(pixels.Any(value => value != 0), "the native heading and its lower edge are rendered");
+            await NativeDesktopCapture.SaveAsync(section, $"catalog-more-{width:0}-{scale * 100:0}");
         }
     }
-
-    private static async Task SkeletonGeometry()
+    private static DataTemplate CatalogCardTemplate(bool entry = false) => MusicTestUi.Template(entry
+        ? "<local:EntryCard/>" : "<local:MusicCatalogCardView Presentation='Banner'/>");
+    private static async Task CatalogSkeletonGeometry()
     {
-        var template = new MusicCatalogView();
-        foreach (var width in new[] { 560d, 826d, 1490d })
-        foreach (var home in new[] { false, true })
+        foreach (int width in new[] { 560, 826, 1490 })
+        foreach (bool home in new[] { false, true })
         {
-            var skeleton = new MusicCatalogSkeleton { IsHome = home };
-            using var scene = new Scene(skeleton, width);
-            await Drain(); scene.Layout(width);
-            Check(!Descendants<ArtworkImage>(skeleton).Any(), "placeholder cannot request artwork");
+            var skeleton = new MusicCatalogSkeleton { IsHome = home, Width = width, VerticalAlignment = VerticalAlignment.Top };
+            using var host = new DesktopTestUi.Host(skeleton, width, 900);
+            await TestUiHost.LoadedAsync(skeleton); await Drain(); skeleton.UpdateLayout();
+            True(!Visuals(skeleton).OfType<ArtworkImage>().Any(), "a placeholder cannot request artwork");
             var shapes = skeleton.Children.Cast<LoadingSkeleton>().ToArray();
-            var squareCovers = shapes.Where(shape => Math.Abs(shape.ActualWidth - shape.ActualHeight) < .5).ToArray();
-            Check(squareCovers.Length > 0 && squareCovers.All(shape => shape.ActualWidth is >= 123.5 and <= 168.5),
-                "ordinary cover placeholders use the same bounded square geometry as their native shelves");
-            var first = shapes[0].TransformToAncestor(skeleton).TransformBounds(new Rect(shapes[0].RenderSize));
+            var squares = shapes.Where(shape => Math.Abs(shape.ActualWidth - shape.ActualHeight) < .5).ToArray();
+            True(squares.Length > 0 && squares.All(shape => shape.ActualWidth is >= 123.5 and <= 168.5),
+                "ordinary covers have the same bounded square geometry as native shelves");
+            var first = DesktopTestUi.Bounds(shapes[0], skeleton);
             if (!home)
             {
-                Check(Math.Abs(first.Width - (width - 20) / 2) < .5, "exactly two equal banners fit with a 20px gap");
-                var second = shapes[1].TranslatePoint(new Point(), skeleton);
-                Check(Math.Abs(second.X - first.Right - 20) < .5, "banner gap matches content");
+                True(Math.Abs(first.Width - (width - 20) / 2) < .5, "two equal banners fit with the real gap");
+                True(Math.Abs(DesktopTestUi.Bounds(shapes[1], skeleton).Left - first.Right - 20) < .5,
+                    "the banner gap matches the content");
             }
-            string key = home ? "Catalog.Entry" : "Catalog.Banner";
-            var card = (FrameworkElement)((DataTemplate)template.FindResource(key)).LoadContent();
+            var card = (FrameworkElement)CatalogCardTemplate(home).LoadContent();
+            card.Width = first.Width;
             card.DataContext = new MusicCatalogCard("1", "测试", "描述", "", "playlist", "wy", ActionId: "1");
-            double pitch = first.Width + (home ? 16 : 20);
-            card.Measure(new(pitch, double.PositiveInfinity));
-            card.Arrange(new(0, 0, pitch, card.DesiredSize.Height)); card.UpdateLayout();
-            Check(Math.Abs(first.Height - card.ActualHeight) < 1, "skeleton uses the real card's height");
+            using var cardHost = new DesktopTestUi.Host(card, (int)Math.Round(first.Width), 900);
+            card.VerticalAlignment = VerticalAlignment.Top;
+            await TestUiHost.LoadedAsync(card); await Drain(); card.UpdateLayout();
+            True(Math.Abs(first.Height - card.ActualHeight) < 1, "the skeleton has the current native card height");
+            True(shapes.All(shape => DesktopTestUi.Bounds(shape, skeleton).Right <= width + .5),
+                "no placeholder extends beyond its content column");
+            skeleton.Visibility = Visibility.Collapsed; await Drain();
+            True(shapes.All(shape => !shape.IsSweeping), "hidden placeholders retire their native sweep");
             if (!home)
             {
-                var section = new MusicCatalogSection("", Enumerable.Range(1, 3).Select(i =>
-                    new MusicCatalogCard(i.ToString(), "横幅" + i, "", "", "playlist", "wy", ActionId: i.ToString()))
-                    .ToArray(), Type: "banner");
-                var shelf = new Shelf { DataContext = section, CardTemplate = (DataTemplate)template.FindResource(key) };
-                using var shelfScene = new Scene(shelf, width);
-                await Until(() => shelf.ScrollHost is not null && Math.Abs(shelf.CardWidth - pitch) < .5);
-                var items = (ListBox)shelf.FindName("ItemsHost");
-                // The card host carries its item; ArtworkImage also owns an internal retry button.
-                Button Banner(int index) => Descendants<Button>((ListBoxItem)items.ItemContainerGenerator.ContainerFromIndex(index))
+                var section = new MusicCatalogSection("", Enumerable.Range(1, 3).Select(index =>
+                    new MusicCatalogCard(index.ToString(), "横幅" + index, "", "", "playlist", "wy", ActionId: index.ToString()))
+                    .ToArray(), Layout: "banner");
+                var shelf = new Shelf { DataContext = section, Width = width, CardTemplate = CatalogCardTemplate(), VerticalAlignment = VerticalAlignment.Top };
+                host.Mount(shelf);
+                double pitch = first.Width + 20;
+                var items = (ListView)shelf.FindName("ItemsHost");
+                await Until(() => shelf.ScrollHost is not null && Math.Abs(shelf.CardWidth - pitch) < .5 && items.ContainerFromIndex(1) is not null);
+                Button Banner(int index) => Visuals((DependencyObject)items.ContainerFromIndex(index)).OfType<Button>()
                     .Single(button => ReferenceEquals(button.Tag, section.Items[index]));
-                var firstBanner = Banner(0);
-                var secondBanner = Banner(1);
-                Check(Math.Abs(firstBanner.ActualWidth - first.Width) < .5 &&
-                    Math.Abs(firstBanner.ActualHeight - first.Height) < 1,
+                var firstBanner = Banner(0); var secondBanner = Banner(1);
+                True(Math.Abs(firstBanner.ActualWidth - first.Width) < .5 && Math.Abs(firstBanner.ActualHeight - first.Height) < 1,
                     "the real virtualized banner matches the shared skeleton width and height");
-                Check(Math.Abs(secondBanner.TranslatePoint(new(), shelf).X -
-                    firstBanner.TranslatePoint(new(firstBanner.ActualWidth, 0), shelf).X - 20) < .5,
-                    "the real virtualized banners use the same 20px gap as the skeleton");
+                True(Math.Abs(DesktopTestUi.Bounds(secondBanner, shelf).Left - DesktopTestUi.Bounds(firstBanner, shelf).Right - 20) < .5,
+                    "the real virtualized banners use the same 20 DIP gap as the skeleton");
             }
-            Check(shapes.All(s => s.TranslatePoint(new(), skeleton).X + s.ActualWidth <= width + .5),
-                "no placeholder extends beyond the content column");
-            skeleton.Visibility = Visibility.Collapsed;
-            Check(shapes.All(s => !s.IsSweeping), "hidden placeholders stop their sweep");
         }
     }
-
-    private static async Task BannerAspect()
+    private static async Task CatalogBannerAspect()
     {
-        var template = new MusicCatalogView();
-        foreach (var (width, height) in new[] { (1029, 399), (800, 200) })
+        foreach (var (width, height) in new[] { (343, 133), (400, 100), (400, 400), (100, 400) })
         {
-            var card = (FrameworkElement)((DataTemplate)template.FindResource("Catalog.Banner")).LoadContent();
+            var card = (FrameworkElement)CatalogCardTemplate().LoadContent();
             card.DataContext = new MusicCatalogCard("banner", "横幅", "", "https://art.example.test/banner", "playlist", "wy", ActionId: "1");
-            var loader = new BannerLoader(); ArtworkScope.SetLoader(card, loader);
-            using var scene = new Scene(card, 826);
+            var loader = new CatalogBannerLoader(); ArtworkScope.SetLoader(card, loader);
+            using var host = new DesktopTestUi.Host(card, 826, 900); card.VerticalAlignment = VerticalAlignment.Top;
             await Until(() => loader.Reads == 1);
             var pixels = new byte[width * height * 4];
             for (int i = 0; i < pixels.Length; i += 4) { pixels[i + 2] = 180; pixels[i + 3] = 255; }
-            var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4); bitmap.Freeze();
-            loader.Result.SetResult(new BannerLease(bitmap));
-            var artwork = Descendants<ArtworkImage>(card).Single();
+            loader.Result.SetResult(new CatalogBannerLease(new ArtworkPixels(width, height, pixels)));
+            var artwork = Visuals(card).OfType<ArtworkImage>().Single();
             await Until(() => artwork.AspectRatio > 0);
-            foreach (double viewport in new[] { 826d, 560d })
+            foreach (int viewport in new[] { 826, 560 })
             {
-                scene.Layout(viewport); await Drain(); scene.Layout(viewport);
-                Check(Math.Abs(artwork.AspectRatio - (double)width / height) < .0001, "decoded dimensions retain the real source ratio");
-                Check(artwork.Stretch == Stretch.Uniform && Math.Abs(artwork.ActualHeight - artwork.ActualWidth * height / width) < 1,
-                    "the full source fits the dynamically measured frame without cropping or stretching");
+                host.Window.Resize(viewport, 900); await Drain(); card.UpdateLayout();
+                True(Math.Abs(artwork.AspectRatio - (double)width / height) < .0001, "decoded dimensions retain the intrinsic ratio");
+                True(artwork.Stretch == Stretch.Uniform && Math.Abs(artwork.ActualHeight - artwork.ActualWidth / 2.56) < 1,
+                    "the complete source fits the fixed frame without cropping or stretching");
             }
-            Check(loader.Reads == 1, "resizing does not reacquire artwork");
+            Equal(1, loader.Reads);
         }
     }
-    private sealed class BannerLoader : IArtworkLoader
+    private sealed class CatalogBannerLoader : IArtworkLoader
     {
         internal int Reads;
         internal readonly TaskCompletionSource<IArtworkLease> Result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
         { Reads++; return Result.Task; }
     }
-    private sealed class BannerLease(BitmapSource image) : IArtworkLease
-    { public BitmapSource Image => image; public void Dispose() { } }
-
-    private static async Task BannerPaging()
+    private static async Task CatalogEntryRoles()
     {
-        var template = new MusicCatalogView();
-        var section = new MusicCatalogSection("", Enumerable.Range(1, 9).Select(i =>
-            new MusicCatalogCard(i.ToString(), "横幅" + i, "", "", "playlist", "wy", ActionId: i.ToString())).ToArray(), Type: "banner");
-        var shelf = new Shelf { DataContext = section, CardTemplate = (DataTemplate)template.FindResource("Catalog.Banner") };
-        using var scene = new Scene(shelf, 826);
+        foreach (bool home in new[] { false, true })
+        {
+            var fixture = MusicNativeCatalogTests.ContentFixture(home ? "home-page" : "browse-page");
+            var sections = MusicCatalogDto.Read(fixture, "wy", home ? "home" : "channel", "");
+            var model = sections.First(section => section.IsEntrySection).Items[0] with { Cover = "", Decoration = "" };
+            var card = new EntryCard { DataContext = model, Width = 152, VerticalAlignment = VerticalAlignment.Top };
+            using var host = new DesktopTestUi.Host(card, 320, 400);
+            await TestUiHost.LoadedAsync(card); await Drain(); card.UpdateLayout();
+            var header = (Grid)card.FindName("TitleHeader");
+            var caption = (TextBlock)card.FindName("Caption");
+            var surface = (Grid)card.FindName("Surface");
+            var shade = (Border)card.FindName("BottomShade");
+            True(header.Visibility == (home ? Visibility.Visible : Visibility.Collapsed),
+                "only home labels occupy the upper title slot");
+            True(caption.Text == (home ? model.ContextText : model.Title), "the lower caption uses the fixed role");
+            if (home) True(Visuals(header).OfType<TextBlock>().Any(text => text.Text == model.Label), "home label is rendered");
+            if (!home) True(((TextBlock)card.FindName("PlayCount")).Text == "0" &&
+                ((Grid)card.FindName("CoverInfo")).Visibility == Visibility.Visible &&
+                ((Border)card.FindName("TitleShade")).Visibility == Visibility.Visible, "zero plays has a protected cover label");
+            True(Visuals(card).OfType<TextBlock>().All(text => text.FontWeight == Microsoft.UI.Text.FontWeights.Normal),
+                "ordinary card typography remains regular");
+            var gradient = (LinearGradientBrush)shade.Background;
+            True(CardMotion.GetProgress(surface) == 0 && shade.Visibility == Visibility.Visible &&
+                !shade.IsHitTestVisible && ((SolidColorBrush)surface.Background).Color == gradient.GradientStops[^1].Color,
+                "the resting gradient is present without hover and shares the footer color");
+            var offsets = gradient.GradientStops.Select(stop => stop.Offset).ToArray();
+            // WinUI stores gradient stop offsets at single precision.
+            True(offsets.SequenceEqual([(double).62f, (double).82f, 1d]), $"resting gradient stop offsets: {string.Join(", ", offsets)}");
+            True(gradient.GradientStops.Select(stop => stop.Color.A).SequenceEqual(new byte[] { 0, 112, 255 }),
+                "the resting alpha stops are not an animated hover effect");
+            if (home)
+            {
+                model.InitializePreview([new("Broken Ankle", "", "", 1, null), new("Maggie", "", "", 2, null), new("HONEYMOON", "", "", 3, null)]);
+                CardMotion.SetPointerActive(surface, true);
+                await Until(() => !CardMotion.HasActiveAnimation(surface)); await Drain(); card.UpdateLayout();
+                var lines = Visuals((Border)card.FindName("PreviewBlock")).OfType<TextBlock>().ToArray();
+                var button = (Button)card.FindName("PlayButton");
+                True(lines.Length == 3 && lines[0].ActualWidth > lines[^1].ActualWidth &&
+                    DesktopTestUi.Bounds(lines[0], surface).Bottom <= DesktopTestUi.Bounds(button, surface).Top &&
+                    DesktopTestUi.Bounds(lines[^1], surface).Right <= DesktopTestUi.Bounds(button, surface).Left,
+                    "preview rows use the unobstructed width above the play button");
+            }
+        }
+        var fm = new MusicCatalogCard("fm", "24h不间断欧美频道 一键播放", "", "", "fm", "wy", CoverLabel: "欧美漫游");
+        var fmCard = new EntryCard { DataContext = fm, Width = 152 };
+        using var fmScene = new DesktopTestUi.Host(fmCard, 320, 400);
+        await TestUiHost.LoadedAsync(fmCard); await Drain(); fmCard.UpdateLayout();
+        True(((TextBlock)fmCard.FindName("FMLabel")).Text == "欧美漫游" &&
+            ((TextBlock)fmCard.FindName("Caption")).Text == fm.Title && !fm.HasLabel,
+            "the FM cover marker is independent of the home category and lower caption");
+    }
+
+    private static async Task CatalogArtworkVisibility()
+    {
+        var viewport = new Canvas { Width = 200, Height = 180, Clip = new RectangleGeometry { Rect = new Rect(0, 0, 200, 180) } };
+        var slot = new Border { Width = 152, Height = 152 };
+        viewport.Children.Add(slot);
+        using var host = new DesktopTestUi.Host(viewport, 320, 400);
+        await TestUiHost.LoadedAsync(slot); await Drain();
+        True(MusicCatalogView.InCatalogViewport(slot), "the loaded visible slot creates demand");
+        Canvas.SetTop(slot, 200); viewport.UpdateLayout(); await Drain();
+        True(!MusicCatalogView.InCatalogViewport(slot), "a realized but clipped slot cannot create demand");
+        Canvas.SetTop(slot, 160); viewport.UpdateLayout(); await Drain();
+        True(MusicCatalogView.InCatalogViewport(slot), "partial visibility creates demand");
+        viewport.Visibility = Visibility.Collapsed; viewport.UpdateLayout(); await Drain();
+        True(!MusicCatalogView.InCatalogViewport(slot), "hidden ancestors stop new demand");
+        viewport.Visibility = Visibility.Visible; Canvas.SetTop(slot, 0); viewport.UpdateLayout(); await Drain();
+        True(MusicCatalogView.InCatalogViewport(slot), "redisplay restores visibility without reconstructing the slot");
+    }
+
+    private sealed class CatalogBannerLease(ArtworkPixels image) : IArtworkLease
+    { public ArtworkPixels Image => image; public void Dispose() { } }
+    private static async Task CatalogBannerPaging()
+    {
+        var section = new MusicCatalogSection("", Enumerable.Range(1, 9).Select(index =>
+            new MusicCatalogCard(index.ToString(), "横幅" + index, "", "", "playlist", "wy", ActionId: index.ToString())).ToArray(), Layout: "banner");
+        var shelf = new Shelf { DataContext = section, CardTemplate = CatalogCardTemplate(), VerticalAlignment = VerticalAlignment.Top };
+        using var host = new DesktopTestUi.Host(shelf, 826, 900);
         await Until(() => shelf.ScrollHost is not null && shelf.MaximumOffset > 0);
-        await Drain(); scene.Layout(826);
         var indicator = (ShelfPageIndicator)shelf.FindName("PageIndicator");
-        var next = (Button)shelf.FindName("Next");
-        var previous = (Button)shelf.FindName("Previous");
-        var rail = shelf.ScrollHost!;
-        Check(Math.Abs(shelf.CardWidth - 423) < .5, "826px viewport holds two banners, not three");
-        Check(indicator.PageCount == 5 && indicator.Visibility == Visibility.Visible, "nine banners have five reachable groups");
-        var cards = section.Items;
+        var next = (Button)shelf.FindName("Next"); var previous = (Button)shelf.FindName("Previous");
+        var rail = shelf.ScrollHost!; var cards = section.Items;
+        True(Math.Abs(shelf.CardWidth - 423) < .5 && indicator.PageCount == 5 && indicator.Visibility == Visibility.Visible,
+            "two banners form one reachable group, including the final odd banner");
         for (int page = 1; page <= 4; page++)
         {
-            next.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Until(() => Math.Abs(indicator.Position - page) < .01 &&
-                Math.Abs(section.HorizontalOffset - rail.HorizontalOffset) < .5,
-                () => $"page={page}, indicator={indicator.Position}, scroll={rail.HorizontalOffset}, saved={section.HorizontalOffset}, max={shelf.MaximumOffset}");
+            Click(next); await Until(() => Math.Abs(indicator.Position - page) < .01 &&
+                Math.Abs(section.HorizontalOffset - rail.HorizontalOffset) < .5);
         }
-        Check(Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 && next.Visibility == Visibility.Collapsed,
-            "last odd banner is reachable without an empty page");
-        Check(ReferenceEquals(cards, section.Items), "view paging never replaces resources");
-        scene.Layout(560);
-        await Until(() => Math.Abs(shelf.CardWidth - 290) < .5 && Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 &&
-            previous.IsEnabled && previous.Visibility == Visibility.Visible,
-            () => $"resized pitch={shelf.CardWidth}, scroll={rail.HorizontalOffset}, max={shelf.MaximumOffset}, previous={previous.IsEnabled}");
-        Check(Math.Abs(indicator.Position - 4) < .01, "resize keeps the end and active group");
-        previous.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        await Until(() => Math.Abs(indicator.Position - 3) < .01 && Math.Abs(section.HorizontalOffset - rail.HorizontalOffset) < .5,
-            () => $"back indicator={indicator.Position}, scroll={rail.HorizontalOffset}, saved={section.HorizontalOffset}");
-        shelf.Visibility = Visibility.Collapsed;
-        double saved = section.HorizontalOffset;
-        await Drain();
-        shelf.Visibility = Visibility.Visible;
-        scene.Layout(560);
+        True(Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 && next.Visibility == Visibility.Collapsed,
+            "the last resource is reachable without an empty page");
+        True(ReferenceEquals(cards, section.Items), "paging retains resource identity");
+        host.Window.Resize(560, 900);
+        await Until(() => Math.Abs(shelf.CardWidth - 290) < .5 && Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 && previous.IsEnabled);
+        True(Math.Abs(indicator.Position - 4) < .01, "resize retains the final group");
+        Click(previous); await Until(() => Math.Abs(indicator.Position - 3) < .01 && Math.Abs(section.HorizontalOffset - rail.HorizontalOffset) < .5);
+        shelf.Visibility = Visibility.Collapsed; double saved = section.HorizontalOffset; await Drain();
+        shelf.Visibility = Visibility.Visible; await Drain();
         await Until(() => Math.Abs(section.HorizontalOffset - saved) < .5 && Math.Abs(indicator.Position - 3) < .01);
         shelf.DataContext = section with { Items = section.Items.Take(2).ToArray(), HorizontalOffset = 0 };
         await Until(() => indicator.Visibility == Visibility.Collapsed);
-        Check(shelf.MaximumOffset == 0, "no overflow means no fake pages");
+        Equal(0d, shelf.MaximumOffset);
     }
-
-    private static Task IndicatorDrawing()
+    private static async Task CatalogIndicatorDrawing()
     {
         var dots = new ShelfPageIndicator { PageCount = 9, Position = 3 };
-        dots.Resources["MeowFilm.Brush.Text"] = Brushes.Black;
-        dots.Measure(new(72, 12)); dots.Arrange(new(0, 0, 72, 12));
-        var first = Pixels(dots);
-        dots.Position = 4;
-        var next = Pixels(dots);
-        Check(first.SequenceEqual(next), "middle active dot stays anchored as page identity advances");
-        Check(Alpha(first, 36, 6) > Alpha(first, 46, 6), "active dot is darker than its neighbor");
-        Check(Alpha(first, 36, 3) > Alpha(first, 46, 3), "active dot is larger than its neighbor");
-        dots.Position = 3.5;
-        var middle = Pixels(dots);
-        Check(!first.SequenceEqual(middle) && Alpha(middle, 31, 6) > 0 && Alpha(middle, 41, 6) > 0,
-            "dots slide between pages rather than swapping only a static highlight");
-        dots.Position = 0;
-        var start = Pixels(dots);
-        Check(Alpha(start, 26, 6) == 0 && Alpha(start, 46, 6) > 0, "first page has no nonexistent preceding dot");
-        dots.Position = 8;
-        var end = Pixels(dots);
-        Check(Alpha(end, 46, 6) == 0 && Alpha(end, 26, 6) > 0, "last page has no nonexistent following dot");
-        Check(AutomationProperties.GetName(dots) == "第 9 / 9 组", "current group is available to accessibility");
-        DesktopTheme.SetIsHighContrast(dots, true);
-        Check(Alpha(Pixels(dots), 36, 6) == 255, "high contrast uses solid indicators");
-        return Task.CompletedTask;
-    }
-
-    private static byte[] Pixels(FrameworkElement control)
-    {
-        control.UpdateLayout();
-        var bitmap = new RenderTargetBitmap(72, 12, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(control);
-        var pixels = new byte[72 * 12 * 4]; bitmap.CopyPixels(pixels, 72 * 4, 0);
-        return pixels;
-    }
-    private static byte Alpha(byte[] pixels, int x, int y) => pixels[(y * 72 + x) * 4 + 3];
-    private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
-    {
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-        {
-            var child = VisualTreeHelper.GetChild(parent, i);
-            if (child is T match) yield return match;
-            foreach (var nested in Descendants<T>(child)) yield return nested;
-        }
-    }
-    private static void Check(bool condition, string message)
-    { if (!condition) throw new InvalidOperationException(message); }
-    private static async Task Drain()
-    { for (int i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
-    private static async Task Until(Func<bool> done, Func<string>? details = null,
-        [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
-    {
-        var clock = Stopwatch.StartNew();
-        while (!done())
-        {
-            if (clock.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException($"Catalog layout did not settle at line {line}: {details?.Invoke()}");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            if (!done()) await Task.Delay(1);
-        }
-        await Drain();
-    }
-    private sealed class Scene : IDisposable
-    {
-        private readonly HwndSource source;
-        private readonly Grid root = new();
-        internal Scene(FrameworkElement content, double width)
-        {
-            root.Resources.MergedDictionaries.Add(new()
-                { Source = new("/MeowFilm.Desktop;component/Theme.xaml", UriKind.Relative) });
-            root.Children.Add(content); content.VerticalAlignment = VerticalAlignment.Top;
-            source = new(new HwndSourceParameters("catalog-layout-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                Width = 1600, Height = 900, PositionX = -32000, PositionY = -32000
-            });
-            source.RootVisual = root; Layout(width);
-        }
-        internal void Layout(double width)
-        {
-            root.Width = width; root.Height = 900;
-            root.Measure(new(width, 900)); root.Arrange(new(0, 0, width, 900)); root.UpdateLayout();
-        }
-        public void Dispose() { source.RootVisual = null; source.Dispose(); }
+        using var host = new DesktopTestUi.Host(dots, 72, 12);
+        await TestUiHost.LoadedAsync(dots); await Drain();
+        async Task<byte[]> Frame() { dots.UpdateLayout(); return await DesktopTestUi.Pixels(dots, 72, 12); }
+        static byte Alpha(byte[] pixels, int x, int y) => pixels[(y * 72 + x) * 4 + 3];
+        var first = await Frame(); dots.Position = 4; var next = await Frame();
+        True(first.SequenceEqual(next), "the active middle dot remains anchored as group identity advances");
+        True(Alpha(first, 36, 6) > Alpha(first, 46, 6) && Alpha(first, 36, 3) > Alpha(first, 46, 3), "active dots are darker and larger");
+        dots.Position = 3.5; var middle = await Frame();
+        True(!first.SequenceEqual(middle) && Alpha(middle, 31, 6) > 0 && Alpha(middle, 41, 6) > 0, "native dots slide between groups");
+        dots.Position = 0; var start = await Frame();
+        True(Alpha(start, 26, 6) == 0 && Alpha(start, 46, 6) > 0, "there is no nonexistent previous dot");
+        dots.Position = 8; var end = await Frame();
+        True(Alpha(end, 46, 6) == 0 && Alpha(end, 26, 6) > 0, "there is no nonexistent following dot");
+        Equal("第 9 / 9 组", AutomationProperties.GetName(dots));
+        DesktopTheme.SetIsHighContrast(dots, true); var contrast = await Frame();
+        Equal((byte)255, Alpha(contrast, 36, 6));
     }
 }

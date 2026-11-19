@@ -1,10 +1,13 @@
+using MeowFilm.Desktop;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Capabilities;
 
@@ -12,7 +15,7 @@ public partial class MusicAccountsView : UserControl
 {
     public static readonly DependencyProperty IsCompactTableProperty = DependencyProperty.RegisterAttached(
         "IsCompactTable", typeof(bool), typeof(MusicAccountsView),
-        new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.Inherits));
+        new PropertyMetadata(false));
     public static bool GetIsCompactTable(DependencyObject target) => (bool)target.GetValue(IsCompactTableProperty);
     public static void SetIsCompactTable(DependencyObject target, bool value) => target.SetValue(IsCompactTableProperty, value);
 
@@ -20,7 +23,10 @@ public partial class MusicAccountsView : UserControl
     private readonly MusicAccountTableRow[] publicCatalogs = [new("kw", "酷我音乐"), new("mg", "咪咕音乐")];
     private ObservableCollection<MusicPlatformSettingsRow>? tableSource;
     private MusicCapability? observed;
-    private Window? window;
+    private bool loginShowing, logoutShowing, surfaceVisible;
+    private Button? logoutAnchor;
+    private DesktopWindow? window;
+    private Microsoft.UI.Windowing.AppWindow? observedWindow;
     private CancellationTokenSource? pollingCancellation;
     private Task? polling;
     private DispatcherTimer? smsCountdown;
@@ -28,8 +34,8 @@ public partial class MusicAccountsView : UserControl
     private MusicCapability? loginOwner;
     private (MusicCapability Owner, MusicPlatformAccount Account)? logoutConfirmation;
     public ReadOnlyObservableCollection<MusicAccountTableRow> AccountTableRows { get; }
-    private bool SurfaceVisible => IsLoaded && IsVisible && window?.WindowState != WindowState.Minimized;
-    private bool Visible => SurfaceVisible && LoginPopup.IsOpen;
+    private bool SurfaceVisible => IsLoaded && DesktopVisual.IsVisible(this) && window?.WindowState != DesktopWindowState.Minimized;
+    private bool Visible => SurfaceVisible && loginShowing;
     private bool QrVisible => Visible && QrPanel.Visibility == Visibility.Visible;
     private MusicCapability? Owner => DataContext as MusicCapability;
 
@@ -39,14 +45,30 @@ public partial class MusicAccountsView : UserControl
         InitializeComponent();
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) => Detach();
-        IsVisibleChanged += (_, _) => VisibilityChanged();
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => VisibilityChanged());
+        LayoutUpdated += (_, _) => { if (surfaceVisible != SurfaceVisible) VisibilityChanged(); };
         DataContextChanged += (_, _) =>
         {
             Detach();
             if (IsLoaded) Attach();
-            else ObserveTableRows();
+            else RebuildTableRows();
         };
         RebuildTableRows();
+    }
+
+    private async void ShowLogin()
+    {
+        if (loginShowing) return;
+        loginShowing = true;
+        try { await DialogPlacement.ShowAsync(this, LoginPopup); }
+        finally { loginShowing = false; }
+    }
+    private async void ShowLogout()
+    {
+        if (logoutShowing) return;
+        logoutShowing = true;
+        try { await DialogPlacement.ShowAsync(this, LogoutPopup); }
+        finally { logoutShowing = false; }
     }
 
     private void ObserveTableRows()
@@ -56,10 +78,10 @@ public partial class MusicAccountsView : UserControl
         if (!ReferenceEquals(tableSource, source))
         {
             if (tableSource is not null)
-                CollectionChangedEventManager.RemoveHandler(tableSource, PlatformSettingsChanged);
+                tableSource.CollectionChanged -= PlatformSettingsChanged;
             tableSource = source;
             if (tableSource is not null)
-                CollectionChangedEventManager.AddHandler(tableSource, PlatformSettingsChanged);
+                tableSource.CollectionChanged += PlatformSettingsChanged;
         }
         RebuildTableRows();
     }
@@ -67,8 +89,8 @@ public partial class MusicAccountsView : UserControl
     private void RebuildTableRows()
     {
         tableRows.Clear();
-        if (tableSource is not null)
-            foreach (var source in tableSource) tableRows.Add(new(source));
+        if ((tableSource ?? Owner?.PlatformSettings) is { } rows)
+            foreach (var source in rows) tableRows.Add(new(source));
         foreach (var row in publicCatalogs) tableRows.Add(row);
     }
 
@@ -79,8 +101,40 @@ public partial class MusicAccountsView : UserControl
         RebuildTableRows();
     }
 
-    private void AccountTableScroll_SizeChanged(object sender, SizeChangedEventArgs e) =>
+    private void AccountTableScroll_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
         SetIsCompactTable(this, e.NewSize.Width < 850);
+        UpdateColumns(AccountTableHeader);
+        UpdateRows(PlatformSettingsList);
+    }
+
+    private void AccountCells_Loaded(object sender, RoutedEventArgs e)
+    {
+        var cells = (Grid)sender;
+        UpdateColumns(cells);
+        if (cells.Parent is Border row) row.BorderThickness = new(0, ReferenceEquals(cells.DataContext, tableRows.FirstOrDefault()) ? 0 : 1, 0, 0);
+    }
+
+    private void UpdateRows(DependencyObject parent)
+    {
+        if (parent is Grid { Name: "AccountCells" } cells) UpdateColumns(cells);
+        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            UpdateRows(VisualTreeHelper.GetChild(parent, index));
+    }
+
+    private void UpdateColumns(Grid cells)
+    {
+        bool compact = GetIsCompactTable(this);
+        for (int index = 0; index < cells.ColumnDefinitions.Count; index++)
+            cells.ColumnDefinitions[index].Width = index switch
+            {
+                0 => new(compact ? 132 : 196),
+                2 => new(1, GridUnitType.Star),
+                10 => new(compact ? 144 : 146),
+                4 or 6 or 8 => new(compact ? 72 : 112),
+                _ => new(compact ? 6 : 8)
+            };
+    }
 
     public void CloseTransientPopups()
     {
@@ -92,7 +146,7 @@ public partial class MusicAccountsView : UserControl
     {
         var owner = loginOwner;
         loginOwner = null;
-        LoginPopup.IsOpen = false;
+        LoginPopup.Hide();
         StopPolling();
         StopSmsCountdown();
         ClearSmsInputs();
@@ -102,8 +156,8 @@ public partial class MusicAccountsView : UserControl
     private void RetireLogoutPopup()
     {
         logoutConfirmation = null;
-        LogoutPopup.PlacementTarget = null;
-        LogoutPopup.IsOpen = false;
+        logoutAnchor = null;
+        LogoutPopup.Hide();
     }
 
     private void Attach()
@@ -112,8 +166,9 @@ public partial class MusicAccountsView : UserControl
         observed = Owner;
         if (observed is not null) observed.PropertyChanged += OwnerChanged;
         ObserveTableRows();
-        window = Window.GetWindow(this);
-        if (window is not null) window.StateChanged += WindowChanged;
+        window = DesktopWindow.GetWindow(this);
+        observedWindow = window?.AppWindow;
+        if (observedWindow is not null) observedWindow.Changed += WindowChanged;
         ClearSmsInputs();
         VisibilityChanged();
     }
@@ -125,10 +180,11 @@ public partial class MusicAccountsView : UserControl
         observed = null;
         if (old is not null) old.PropertyChanged -= OwnerChanged;
         if (tableSource is not null)
-            CollectionChangedEventManager.RemoveHandler(tableSource, PlatformSettingsChanged);
+            tableSource.CollectionChanged -= PlatformSettingsChanged;
         tableSource = null;
         tableRows.Clear();
-        if (window is not null) window.StateChanged -= WindowChanged;
+        if (observedWindow is not null) observedWindow.Changed -= WindowChanged;
+        observedWindow = null;
         window = null;
         CloseTransientPopups();
         if (old is not null && !ReferenceEquals(old, retiringLogin)) _ = Leave(old);
@@ -144,7 +200,7 @@ public partial class MusicAccountsView : UserControl
         catch { }
     }
 
-    private void WindowChanged(object? sender, EventArgs e) => VisibilityChanged();
+    private void WindowChanged(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs e) => VisibilityChanged();
 
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -157,21 +213,21 @@ public partial class MusicAccountsView : UserControl
         if (e.PropertyName is nameof(MusicCapability.HasAccountQr) or nameof(MusicCapability.CanCheckAccountQr) or
             nameof(MusicCapability.AccountBusy))
             RefreshPolling();
-        if (LoginPopup.IsOpen && observed?.SelectedAccount is { HasSession: true } &&
+        if (loginShowing && observed?.SelectedAccount is { HasSession: true } &&
             !observed.AccountBusy && !observed.HasAccountQr)
             RetireLoginPopup();
     }
 
     private async void Login_Click(object sender, RoutedEventArgs e)
     {
-        if (!SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
+        if (loginShowing || logoutShowing || !SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
             sender is not Button { Tag: MusicPlatformSettingsRow row } ||
             !owner.PlatformSettings.Contains(row) || !row.ShowLogin) return;
         LoginSurface.Title = row.Name;
         RetireLoginPopup();
         loginOwner = owner;
         QrMode();
-        LoginPopup.IsOpen = true;
+        ShowLogin();
         await owner.OpenPlatformLoginAsync(row);
         if (ReferenceEquals(loginOwner, owner)) VisibilityChanged();
     }
@@ -185,36 +241,37 @@ public partial class MusicAccountsView : UserControl
 
     private void Logout_Click(object sender, RoutedEventArgs e)
     {
-        if (!SurfaceVisible || Owner is not { } owner ||
+        if (loginShowing || logoutShowing || !SurfaceVisible || Owner is not { } owner ||
             sender is not Button { Tag: MusicPlatformSettingsRow row } button ||
             !owner.PlatformSettings.Contains(row) || !row.CanLogout) return;
         RetireLogoutPopup();
         logoutConfirmation = (owner, row.Account);
-        LogoutPopup.PlacementTarget = button;
-        LogoutPopup.IsOpen = true;
+        logoutAnchor = button;
+        ShowLogout();
     }
 
-    private void LogoutPopup_Opened(object? sender, EventArgs e) => CancelLogoutButton.Focus();
-    private void LogoutPopup_Closed(object? sender, EventArgs e)
+    private void LogoutPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e) => CancelLogoutButton.Focus(FocusState.Programmatic);
+    private void LogoutPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
     {
-        var target = LogoutPopup.PlacementTarget as Button;
+        logoutShowing = false;
+        var target = logoutAnchor;
         logoutConfirmation = null;
-        LogoutPopup.PlacementTarget = null;
-        if (SurfaceVisible && target is { IsVisible: true, IsEnabled: true }) target.Focus();
+        logoutAnchor = null;
+        if (SurfaceVisible && target is { IsEnabled: true } && DesktopVisual.IsVisible(target)) target.Focus(FocusState.Programmatic);
     }
 
-    private void CancelLogout_Click(object sender, RoutedEventArgs e) => LogoutPopup.IsOpen = false;
-    private void LogoutPopup_KeyDown(object sender, KeyEventArgs e)
+    private void CancelLogout_Click(object sender, RoutedEventArgs e) => LogoutPopup.Hide();
+    private void LogoutPopup_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != Key.Escape) return;
+        if (e.Key != VirtualKey.Escape) return;
         e.Handled = true;
-        LogoutPopup.IsOpen = false;
+        LogoutPopup.Hide();
     }
 
     private async void ConfirmLogout_Click(object sender, RoutedEventArgs e)
     {
         var confirmation = logoutConfirmation;
-        LogoutPopup.IsOpen = false;
+        LogoutPopup.Hide();
         if (SurfaceVisible && confirmation is { } captured && ReferenceEquals(Owner, captured.Owner))
             await captured.Owner.LogoutAccountAsync(captured.Account, confirmed: true);
     }
@@ -257,7 +314,7 @@ public partial class MusicAccountsView : UserControl
         SmsPanel.Visibility = Visibility.Visible;
         StopPolling();
         RefreshSmsCountdown();
-        SmsPhoneInput.Focus();
+        SmsPhoneInput.Focus(FocusState.Programmatic);
     }
 
     private void QrMode()
@@ -278,18 +335,20 @@ public partial class MusicAccountsView : UserControl
         if (Owner is { } owner) await owner.SaveAccountQrAsync();
     }
 
-    private void LoginPopup_Opened(object? sender, EventArgs e)
+    private void LoginPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e)
     {
-        if (LoginPopup.IsOpen) loginOwner ??= Owner;
+        if (loginShowing) loginOwner ??= Owner;
     }
 
-    private void LoginPopup_Closed(object? sender, EventArgs e)
+    private void LoginPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
     {
-        if (!LoginPopup.IsOpen) RetireLoginPopup();
+        loginShowing = false;
+        RetireLoginPopup();
     }
 
     private void VisibilityChanged()
     {
+        surfaceVisible = SurfaceVisible;
         if (!SurfaceVisible)
         {
             CloseTransientPopups();
@@ -300,7 +359,7 @@ public partial class MusicAccountsView : UserControl
             StopPolling();
             StopSmsCountdown();
             ClearSmsInputs();
-            if (LoginPopup.IsOpen) RetireLoginPopup();
+            if (loginShowing) RetireLoginPopup();
             return;
         }
         RefreshPolling();
@@ -351,17 +410,17 @@ public partial class MusicAccountsView : UserControl
         {
             if (ReferenceEquals(pollingCancellation, cancellation)) pollingCancellation = null;
             cancellation.Dispose();
-            _ = Dispatcher.BeginInvoke(new Action(() =>
+            _ = DispatcherQueue.TryEnqueue(() =>
             {
                 if (polling?.IsCompleted == true) RefreshPolling();
-            }));
+            });
         }
     }
 
     private void ClearSmsInputs()
     {
-        SmsPhoneInput.Clear();
-        SmsCodeInput.Clear();
+        SmsPhoneInput.Text = "";
+        SmsCodeInput.Password = "";
         seenSmsInputEpoch = Owner?.AccountSmsInputEpoch ?? -1;
     }
 
@@ -387,7 +446,7 @@ public partial class MusicAccountsView : UserControl
             return;
         }
         if (smsCountdown is not null) return;
-        smsCountdown = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        smsCountdown = new DispatcherTimer()
         {
             Interval = TimeSpan.FromSeconds(1)
         };
@@ -395,7 +454,7 @@ public partial class MusicAccountsView : UserControl
         smsCountdown.Start();
     }
 
-    private void SmsTick(object? sender, EventArgs e)
+    private void SmsTick(object? sender, object e)
     {
         if (!Visible || observed is null)
         {
@@ -409,7 +468,7 @@ public partial class MusicAccountsView : UserControl
     private async void SmsSend_Click(object sender, RoutedEventArgs e)
     {
         if (!Visible || Owner is not { CanSendAccountSms: true } owner) return;
-        SmsCodeInput.Clear();
+        SmsCodeInput.Password = "";
         await owner.SendAccountSmsAsync(SmsPhoneInput.Text, "86");
     }
 
@@ -417,7 +476,7 @@ public partial class MusicAccountsView : UserControl
     {
         if (!Visible || Owner is not { CanLoginAccountSms: true } owner) return;
         string captcha = SmsCodeInput.Password;
-        SmsCodeInput.Clear();
+        SmsCodeInput.Password = "";
         await owner.LoginAccountSmsAsync(SmsPhoneInput.Text, "86", captcha);
     }
 }

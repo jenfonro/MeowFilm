@@ -12,7 +12,8 @@ public static class GrantedMediaFilesTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("current-format-roundtrip-restart-and-resolve", Roundtrip);
-        yield return Case("corrupt-current-rows-are-rejected-without-change", NonCurrentDocuments);
+        yield return Case("large-inventory-and-selection-preserve-all-grants", LargeInventory);
+        yield return Case("corrupt-current-rows-is-rejected-without-write", NonCurrentDocuments);
         yield return Case("CAS-conflict-is-not-retried-or-overwritten", CasConflict);
         yield return Case("wrong-write-receipt-is-explicitly-uncertain", WrongReceipt);
         yield return Case("constructor-rejects-invalid-owner-contracts", ConstructorContracts);
@@ -73,6 +74,31 @@ public static class GrantedMediaFilesTests
             Check(store.Writes == writes + 1 && store.Data!.SequenceEqual(original),
                 "Invalid current rows were overwritten or replayed.");
         }
+    }
+
+    private static async Task LargeInventory()
+    {
+        using var file = new Fixture();
+        string[] paths = Enumerable.Range(0, 100_001)
+            .Select(index => Path.Combine(file.Root, "generated-" + index + ".wav")).ToArray();
+        await using var store = new MemoryStore();
+        await store.Inner.WriteAsync(db =>
+        {
+            db.Execute("INSERT INTO windows_file_grants(scope_key,ordinal,shape_mask,null_mask,Schema) VALUES('device',0,3,0,1)");
+            for (int index=0;index<paths.Length;index++)
+                db.Execute("INSERT INTO windows_file_grants_Items(scope_key,Items_key,ordinal,shape_mask,null_mask,Path,Title) VALUES('device',$id,$n,3,0,$path,$title)",
+                    ("$id",Id(paths[index])),("$n",index),("$path",paths[index]),("$title",Path.GetFileNameWithoutExtension(paths[index])));
+            return true;
+        });
+        int initialWrites = store.Writes;
+        var owner = Owner(store);
+        Check((await owner.ListAsync()).Select(item => item.Path).SequenceEqual(paths));
+        var granted = await owner.GrantAsync(Enumerable.Repeat(file.MediaPath, 1001));
+        Check(granted.Count == 1 && store.Writes == initialWrites + 1);
+        var reopened = await Owner(store).ListAsync();
+        Check(reopened.Count == paths.Length + 1 &&
+            reopened.Take(paths.Length).Select(item => item.Path).SequenceEqual(paths) &&
+            reopened[^1] == granted[0]);
     }
 
     private static async Task CasConflict()

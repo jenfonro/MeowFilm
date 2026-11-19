@@ -41,22 +41,18 @@ public static class MusicSearchGroupTests
             ["source"] = "mg", ["id"] = id, ["songmid"] = id, ["songId"] = id,
             ["copyrightId"] = copyright ?? "C" + id
         };
-        return new JsonObject
-        {
-            ["rank"] = rank,
-            ["song"] = MusicSongFixture.Online("mg", id, "Synthetic track " + id,
-                "Synthetic artist", "Synthetic album", 180, native: native)
-        };
+        var song = MusicSongFixture.Online("mg", id, "Synthetic track " + id,
+            "Synthetic artist", "Synthetic album", 180, native: native);
+        song["rank"] = rank;
+        return song;
     }
     private static JsonObject CompactSong(int group, int variant)
     {
         string id = Convert.ToString(group * 32 + variant + 1, 16);
-        return new JsonObject
-        {
-            ["rank"] = group + 1,
-            ["song"] = MusicSongFixture.Online("mg", id, "Track " + id, "a", "", 1,
-                native: new JsonObject { ["copyrightId"] = "c" + id })
-        };
+        var song = MusicSongFixture.Online("mg", id, "Track " + id, "a", "", 1,
+            native: new JsonObject { ["copyrightId"] = "c" + id });
+        song["rank"] = group + 1;
+        return song;
     }
     private static JsonObject ProviderSong(string id, long rank, string copyright)
     {
@@ -76,12 +72,10 @@ public static class MusicSearchGroupTests
             ["qualityKnown"] = true,
             ["contentId"] = "CONTENT" + id[1..]
         };
-        return new JsonObject
-        {
-            ["rank"] = rank,
-            ["song"] = MusicSongFixture.Online("mg", id, "Synthetic track " + id[1..],
-                "Synthetic artist", "Synthetic album", 180, native: native)
-        };
+        var song = MusicSongFixture.Online("mg", id, "Synthetic track " + id[1..],
+            "Synthetic artist", "Synthetic album", 180, native: native);
+        song["rank"] = rank;
+        return song;
     }
     private static JsonObject Group(int page, int limit, long total, int groups, int raw, params JsonObject[] items) => new()
     {
@@ -93,11 +87,9 @@ public static class MusicSearchGroupTests
     };
     private static JsonObject Small() => Group(1, 2, 3, 2, 4,
         Song("S1", 1, "C1"), Song("S2", 1, "C2"), Song("S3", 2, "C3"));
-    private static JsonObject WrappedSong(JsonObject page, int index) =>
-        page["items"]![index]!["song"]!.AsObject();
     private static void SetCopyright(JsonObject page, int index, string? value)
     {
-        var info = MusicSongFixture.Info(WrappedSong(page, index));
+        var info = MusicSongFixture.Info(page["items"]![index]!.AsObject());
         if (value is null) info.Remove("copyrightId"); else info["copyrightId"] = value;
     }
     private static MusicSearchPage Read(JsonObject page, string platform = "mg", MusicSearchKind kind = MusicSearchKind.Songs, int number = 1) =>
@@ -121,7 +113,7 @@ public static class MusicSearchGroupTests
     private static async Task Vector()
     {
         var source = ProviderVector();
-        var records = source["items"]!.AsArray().Select(item => item!["song"]!.AsObject()).ToArray();
+        var records = source["items"]!.AsArray().Select(item => item!.AsObject()).ToArray();
         Check(records.Select(song => MusicSongFixture.Info(song)["songmid"]!.GetValue<string>()).SequenceEqual(["S1", "S2", "S3"]) &&
             records.Select(song => MusicSongFixture.Info(song)["copyrightId"]!.GetValue<string>()).SequenceEqual(["C1", "C2", "C3"]),
             "Provider recording and copyright identities must remain exact");
@@ -208,8 +200,6 @@ public static class MusicSearchGroupTests
     private static Task ItemPages()
     {
         var page = Small(); page.Remove("totalUnit"); page.Remove("groupCount"); page.Remove("rawItemCount");
-        page["items"] = new JsonArray(page["items"]!.AsArray()
-            .Select(item => item!["song"]!.DeepClone()).ToArray());
         Check(Read(page).Items.Length == 3); // A request limit is not a result admission threshold.
         page["limit"] = 3; page["more"] = false; page["continuation"] = null;
         var parsed = Read(page);
@@ -253,13 +243,14 @@ public static class MusicSearchGroupTests
         Check(Read(advancing).More && Read(advancing).Next == 2);
         return Task.CompletedTask;
     }
-    private static async Task Ranks()
+    private static Task Ranks()
     {
         foreach (double value in new[] { 0, 1.5, 3, -1 })
         { var p = Small(); p["items"]![0]!["rank"] = value; Check(Read(p).Items[0].Rank == value); }
-        var missing = Small(); missing["items"]![0]!.AsObject().Remove("rank"); await Reject(missing, "INVALID_RESPONSE");
+        var missing = Small(); missing["items"]![0]!.AsObject().Remove("rank"); Check(Read(missing).Items[0].Rank == 1);
         var crowded = Group(1, 2, 2, 2, 34, Enumerable.Range(0, 33).Select(i => Song("x" + i, 1)).Append(Song("last", 2)).ToArray());
         Check(Read(crowded).Items.Length == 34);
+        return Task.CompletedTask;
     }
     private static Task Identities()
     {
@@ -396,6 +387,7 @@ public static class MusicSearchGroupTests
         public void Dispose() { }
         private static Task<JsonElement> Unused() => throw new InvalidOperationException("non-search call");
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Unused();
+        public Task<JsonElement> PlaylistsAsync(MusicPlaylistsRequest r, CancellationToken t = default) => throw new NotSupportedException();
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Unused();
         public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken token = default) => throw new NotSupportedException();
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Unused();

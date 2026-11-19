@@ -39,13 +39,16 @@ final class MusicNativeSearchMemberTests: XCTestCase {
             await service.close()
         }
     }
-    func testMissingRequiredCanonicalLocatorFailsBeforeAnyPageIsAdopted() async throws {
-        let good = try MusicPlatformFixture.song(MusicNativePublicBrowseFixture.track("17"))
+    func testMissingCanonicalLocatorKeepsDisplayWhileOnlyIdentifiedSongsAreAdopted() async throws {
+        let good = try MusicPlatformFixture.song(MusicNativePublicBrowseFixture.track("17", title: "Song 17"))
         let bad: RuntimeValue = .object(["title": .string("No locator"), "sources": .array([])])
         let peer = NativeMusicResultFixture([.object(["id": .string("41"), "items": .array([good, bad]), "total": .number(2)])])
         let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
-        await assertMusicFailure(.upstreamInvalid) { _ = try await service.publicDetail(self.collection, cursor: nil) }
-        XCTAssertNil(store.snapshot().0); XCTAssertEqual(store.snapshot().2, 0)
+        let page = try await service.publicDetail(collection, cursor: nil)
+        XCTAssertEqual(page.tracks.map(\.title), ["Song 17", "No locator"])
+        XCTAssertFalse(page.tracks[0].songId.isEmpty); XCTAssertTrue(page.tracks[1].songId.isEmpty)
+        let document = try await service.read()
+        XCTAssertEqual(try document.songRows.allSongIDs().count, 1)
         await service.close()
     }
     func testCanonicalAliasMemberIsUsedWithoutRequestIdentityRevalidation() async throws {

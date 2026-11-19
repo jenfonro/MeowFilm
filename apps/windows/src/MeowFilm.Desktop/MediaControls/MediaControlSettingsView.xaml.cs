@@ -1,8 +1,9 @@
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Key = System.Windows.Input.Key;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
 
 namespace MeowFilm.Desktop;
 
@@ -11,17 +12,22 @@ public partial class MediaControlSettingsView : UserControl
     private readonly IDesktopMediaControlSettings settings;
     private readonly Row[] rows = Enum.GetValues<MediaShortcutAction>().Select(action => new Row(action)).ToArray();
     private readonly HashSet<Key> consumedKeys = [];
-    private Window? window;
+    private readonly KeyEventHandler keyDownHandler, keyUpHandler;
+    private DesktopWindow? window;
+    private FrameworkElement? inputRoot;
     private Button? recordingButton;
     private Row? recordingRow;
-    private bool recordingGlobal, subscribed;
+    private bool recordingGlobal, subscribed, refreshing;
 
     public MediaControlSettingsView(IDesktopMediaControlSettings settings)
     {
         this.settings = settings;
+        keyDownHandler = View_KeyDown;
+        keyUpHandler = View_KeyUp;
         InitializeComponent();
         DataContext = settings;
         ShortcutRows.ItemsSource = rows;
+        LayoutUpdated += View_LayoutUpdated;
         Refresh();
     }
 
@@ -30,8 +36,13 @@ public partial class MediaControlSettingsView : UserControl
         if (subscribed) return;
         subscribed = true;
         settings.PropertyChanged += Settings_Changed;
-        InputManager.Current.PreProcessInput += BeforeInput;
-        window = Window.GetWindow(this);
+        inputRoot = XamlRoot.Content as FrameworkElement;
+        if (inputRoot is not null)
+        {
+            inputRoot.AddHandler(UIElement.PreviewKeyDownEvent, keyDownHandler, true);
+            inputRoot.AddHandler(UIElement.PreviewKeyUpEvent, keyUpHandler, true);
+        }
+        window = DesktopWindow.GetWindow(this);
         if (window is not null) window.Deactivated += Window_Deactivated;
         if (!settings.IsAvailable) await settings.LoadAsync();
         Refresh();
@@ -41,7 +52,12 @@ public partial class MediaControlSettingsView : UserControl
         EndRecording();
         if (!subscribed) return;
         settings.PropertyChanged -= Settings_Changed;
-        InputManager.Current.PreProcessInput -= BeforeInput;
+        if (inputRoot is not null)
+        {
+            inputRoot.RemoveHandler(UIElement.PreviewKeyDownEvent, keyDownHandler);
+            inputRoot.RemoveHandler(UIElement.PreviewKeyUpEvent, keyUpHandler);
+        }
+        inputRoot = null;
         if (window is not null) window.Deactivated -= Window_Deactivated;
         window = null;
         consumedKeys.Clear();
@@ -49,7 +65,11 @@ public partial class MediaControlSettingsView : UserControl
     }
     private void Settings_Changed(object? sender, PropertyChangedEventArgs e)
     {
-        if (!Dispatcher.CheckAccess()) { _ = Dispatcher.BeginInvoke(new Action(() => Settings_Changed(sender, e))); return; }
+        if (!DispatcherQueue.HasThreadAccess)
+        {
+            DispatcherQueue.TryEnqueue(() => { if (subscribed) Settings_Changed(sender, e); });
+            return;
+        }
         if (!settings.IsAvailable || !settings.IsRecording) EndRecording();
         if (e.PropertyName == nameof(IDesktopMediaControlSettings.Preferences))
             foreach (var row in rows) row.LocalError = row.DraftGlobalError = "";
@@ -68,9 +88,18 @@ public partial class MediaControlSettingsView : UserControl
             bool ownsInput = ReferenceEquals(recordingButton?.DataContext, row);
             row.LocalEditorEnabled = settings.CanEdit || (ownsInput && !recordingGlobal);
             row.GlobalEditorEnabled = settings.CanEdit || (ownsInput && recordingGlobal);
+            row.CanClear = settings.CanEdit;
             row.Changed();
         }
         RefreshButton.IsEnabled = settings.CanEdit && settings.Preferences.GlobalEnabled && !settings.IsRecording;
+        ReloadButton.Visibility = string.IsNullOrWhiteSpace(settings.Status) ? Visibility.Collapsed : Visibility.Visible;
+        refreshing = true;
+        try
+        {
+            GlobalSwitch.IsOn = settings.Preferences.GlobalEnabled;
+            SystemMediaSwitch.IsOn = settings.Preferences.SystemMediaEnabled;
+        }
+        finally { refreshing = false; }
     }
     private void Record_Click(object sender, RoutedEventArgs e)
     {
@@ -81,7 +110,7 @@ public partial class MediaControlSettingsView : UserControl
         row.LocalError = row.DraftGlobalError = "";
         EditorNotice.Message = "";
         recordingRow = row; recordingGlobal = column == "global"; recordingButton = button;
-        button.Focus();
+        button.Focus(FocusState.Programmatic);
         settings.SetRecording(true);
         Refresh();
     }
@@ -106,61 +135,51 @@ public partial class MediaControlSettingsView : UserControl
         Refresh();
     }
     private void Window_Deactivated(object? sender, EventArgs e) => EndRecording();
-    private void View_VisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
-    { if (!IsVisible) EndRecording(); }
-    private void View_LostFocus(object sender, KeyboardFocusChangedEventArgs e)
-    { if (recordingButton is not null && !ReferenceEquals(e.NewFocus, recordingButton)) EndRecording(); }
-
-    private void BeforeInput(object sender, PreProcessInputEventArgs e)
+    private void View_LayoutUpdated(object? sender, object args)
     {
-        if (e.StagingItem.Input is not KeyEventArgs key || !OwnsInput(key)) return;
-        if (key.RoutedEvent is not { } routed ||
-            (routed != Keyboard.PreviewKeyDownEvent && routed != Keyboard.KeyDownEvent &&
-             routed != Keyboard.PreviewKeyUpEvent && routed != Keyboard.KeyUpEvent)) return;
-        bool down = routed == Keyboard.PreviewKeyDownEvent || routed == Keyboard.KeyDownEvent;
-        if (HandleKey(key, down)) e.Cancel();
+        if (recordingButton is not null && !DesktopVisual.IsVisible(this)) EndRecording();
     }
-    private bool OwnsInput(KeyEventArgs e)
+    private void View_LostFocus(object sender, RoutedEventArgs e)
     {
-        var source = e.OriginalSource as DependencyObject ?? e.Source as DependencyObject;
-        if (source is not null && (IsAncestorOf(source) || ReferenceEquals(source, this))) return true;
-        return PresentationSource.FromVisual(this) is { } presentation && presentation == e.InputSource &&
-            (source is null || consumedKeys.Contains(ActualKey(e)));
+        if (recordingButton is not null && !ReferenceEquals(DesktopVisual.Focused(this), recordingButton)) EndRecording();
     }
-    private void View_KeyDown(object sender, KeyEventArgs e) => HandleKey(e, true);
-    private void View_KeyUp(object sender, KeyEventArgs e) => HandleKey(e, false);
-    private bool HandleKey(KeyEventArgs e, bool down)
+    private void View_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        var key = ActualKey(e);
+        if (ProcessKey(e.OriginalSource, MediaShortcutInput.Key(e), MediaShortcutInput.Modifiers(), true, e.KeyStatus.WasKeyDown)) e.Handled = true;
+    }
+    private void View_KeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (ProcessKey(e.OriginalSource, MediaShortcutInput.Key(e), MediaShortcutInput.Modifiers(), false, false)) e.Handled = true;
+    }
+    internal bool ProcessKey(object? target, Key key, ModifierKeys modifiers, bool down, bool repeat)
+    {
+        if (!consumedKeys.Contains(key) && (target is not DependencyObject source || !DesktopVisual.Contains(this, source))) return false;
         if (!down)
         {
             if (!consumedKeys.Remove(key) && recordingRow is null) return false;
-            e.Handled = true;
             if (recordingRow is null && consumedKeys.Count == 0) EndRecording();
             return true;
         }
-        if (consumedKeys.Contains(key)) { e.Handled = true; return true; }
+        if (consumedKeys.Contains(key)) return true;
         if (recordingRow is not { } row) return false;
         consumedKeys.Add(key);
-        e.Handled = true;
-        if (e.IsRepeat) return true;
+        if (repeat) return true;
         if (key is Key.Escape or Key.Tab)
         {
-            var button = recordingButton;
             CompleteRecording();
-            if (key == Key.Tab) button?.MoveFocus(new(e.KeyboardDevice.Modifiers.HasFlag(ModifierKeys.Shift)
-                ? FocusNavigationDirection.Previous : FocusNavigationDirection.Next));
+            if (key == Key.Tab && XamlRoot is { } xamlRoot)
+                FocusManager.TryMoveFocus(modifiers.HasFlag(ModifierKeys.Shift)
+                    ? FocusNavigationDirection.Previous : FocusNavigationDirection.Next,
+                    new FindNextElementOptions { SearchRoot = xamlRoot.Content });
             return true;
         }
         if (MediaShortcutGestures.IsModifierKey(key)) return true;
-        var gesture = key is Key.Delete or Key.Back ? null : new MediaShortcutGesture(key, MediaShortcutInput.Modifiers(e.KeyboardDevice));
+        var gesture = key is Key.Delete or Key.Back ? null : new MediaShortcutGesture(key, modifiers);
         bool global = recordingGlobal;
         CompleteRecording();
         _ = SaveGesture(row, global, gesture);
         return true;
     }
-    private static Key ActualKey(KeyEventArgs e) =>
-        e.Key == Key.System ? e.SystemKey : e.Key == Key.ImeProcessed ? e.ImeProcessedKey : e.Key;
     private async Task SaveGesture(Row row, bool global, MediaShortcutGesture? gesture)
     {
         row.LocalError = row.DraftGlobalError = "";
@@ -182,27 +201,34 @@ public partial class MediaControlSettingsView : UserControl
         }
         Refresh();
     }
-    private async void GlobalSwitch_Click(object sender, RoutedEventArgs e)
+    private async void GlobalSwitch_Toggled(object sender, RoutedEventArgs e)
     {
+        if (refreshing || !subscribed) return;
+        bool enabled = GlobalSwitch.IsOn;
         EndRecording();
-        await settings.SaveAsync(settings.Preferences with { GlobalEnabled = GlobalSwitch.IsChecked == true });
-        GlobalSwitch.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget();
+        await settings.SaveAsync(settings.Preferences with { GlobalEnabled = enabled });
+        Refresh();
     }
-    private async void SystemMediaSwitch_Click(object sender, RoutedEventArgs e)
+    private async void SystemMediaSwitch_Toggled(object sender, RoutedEventArgs e)
     {
+        if (refreshing || !subscribed) return;
+        bool enabled = SystemMediaSwitch.IsOn;
         EndRecording();
-        await settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = SystemMediaSwitch.IsChecked == true });
-        SystemMediaSwitch.GetBindingExpression(ToggleButton.IsCheckedProperty)?.UpdateTarget();
+        await settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = enabled });
+        Refresh();
     }
     private void Refresh_Click(object sender, RoutedEventArgs e) => settings.RequestRegistrationRefresh();
     private async void Reload_Click(object sender, RoutedEventArgs e)
     { EndRecording(); await settings.LoadAsync(); }
 
-    private sealed class Row(MediaShortcutAction action) : INotifyPropertyChanged
+    [Microsoft.UI.Xaml.Data.Bindable]
+    public sealed class Row(MediaShortcutAction action) : INotifyPropertyChanged
     {
         public MediaShortcutAction Action { get; } = action;
         public string Label => MediaControlDefaults.Label(Action);
         public bool HasGlobal => Action != MediaShortcutAction.ToggleTranslation;
+        public Visibility GlobalVisibility => HasGlobal ? Visibility.Visible : Visibility.Collapsed;
+        public Visibility UnavailableVisibility => HasGlobal ? Visibility.Collapsed : Visibility.Visible;
         public string LocalName => Label + "，应用内快捷键";
         public string GlobalName => Label + "，全局快捷键";
         public string ClearLocalName => "清除" + LocalName;
@@ -214,6 +240,7 @@ public partial class MediaControlSettingsView : UserControl
         public string RegistrationError { get; set; } = "";
         public bool LocalEditorEnabled { get; set; }
         public bool GlobalEditorEnabled { get; set; }
+        public bool CanClear { get; set; }
         public string GlobalError => DraftGlobalError.Length > 0 ? DraftGlobalError : RegistrationError;
         public event PropertyChangedEventHandler? PropertyChanged;
         public void Changed() => PropertyChanged?.Invoke(this, new(""));

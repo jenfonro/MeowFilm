@@ -1,62 +1,50 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using MeowFilm.Desktop;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Microsoft.UI.Xaml.Shapes;
+using Windows.Foundation;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>Directional transport feedback; never changes queue or playback state.</summary>
 public sealed class SkipButton : Button
 {
-    public static readonly DependencyProperty NextProperty = DependencyProperty.Register(nameof(Next), typeof(bool),
-        typeof(SkipButton), new FrameworkPropertyMetadata(true, FrameworkPropertyMetadataOptions.AffectsRender));
-    private static readonly DependencyProperty PhaseProperty = DependencyProperty.Register("Phase", typeof(double),
-        typeof(SkipButton), new FrameworkPropertyMetadata(0d, FrameworkPropertyMetadataOptions.AffectsRender));
-    private static readonly Geometry Arrow = Geometry.Parse("M0,0 L12,8 L0,16 Z");
+    public static readonly DependencyProperty NextProperty = DependencyProperty.Register(nameof(Next), typeof(bool), typeof(SkipButton), new PropertyMetadata(true, (owner, _) => ((SkipButton)owner).Refresh()));
     public bool Next { get => (bool)GetValue(NextProperty); set => SetValue(NextProperty, value); }
+    private readonly Canvas glyph = new() { Width = 16, Height = 16 };
+    private readonly Canvas arrows = new() { Width = 12, Height = 16, Clip = new RectangleGeometry { Rect = new Rect(0, 0, 12, 16) } };
+    private readonly Rectangle edge = new() { Width = 3, Height = 16 };
+    private readonly Microsoft.UI.Xaml.Shapes.Path first = new(), second = new();
+    private readonly TranslateTransform translation = new();
+    private readonly ScaleTransform scale = new() { CenterX = 8, CenterY = 8 };
+    private Storyboard? motion;
     public SkipButton()
     {
-        Template = new ControlTemplate(typeof(Button));
-        Width = Height = 36;
-        Unloaded += (_, _) => ResetMotion();
-        IsEnabledChanged += (_, _) => { if (!IsEnabled) ResetMotion(); InvalidateVisual(); };
+        Width = Height = 36; Padding = new Thickness(0); Background = MusicVisuals.Brush("#00000000"); BorderThickness = new Thickness(0);
+        var moving = new Canvas { RenderTransform = translation };
+        first.Data = MusicVisuals.Geometry("M0,0 L12,8 L0,16 Z"); second.Data = MusicVisuals.Geometry("M0,0 L12,8 L0,16 Z");
+        Canvas.SetLeft(second, -16); moving.Children.Add(first); moving.Children.Add(second); arrows.Children.Add(moving);
+        Canvas.SetLeft(edge, 13); glyph.Children.Add(arrows); glyph.Children.Add(edge);
+        glyph.RenderTransform = scale; Content = glyph;
+        RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => Refresh());
+        RegisterPropertyChangedCallback(IsPressedProperty, (_, _) => Refresh());
+        RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => { if (!IsEnabled) Reset(); });
+        PointerEntered += (_, _) => SetPointerWithin(true); PointerExited += (_, _) => SetPointerWithin(false); Click += (_, _) => Animate();
+        Unloaded += (_, _) => Reset(); Refresh();
     }
-    private void ResetMotion() { BeginAnimation(PhaseProperty, null); SetValue(PhaseProperty, 0d); }
+    internal void SetPointerWithin(bool within) { if (within) Animate(); else Reset(); }
+    internal bool HasActiveAnimation => motion?.GetCurrentState() == ClockState.Active;
+    private void Refresh()
+    {
+        scale.ScaleY = IsPressed ? .9 : 1;
+        scale.ScaleX = Next ? scale.ScaleY : -scale.ScaleY;
+        first.Fill = second.Fill = edge.Fill = Foreground;
+    }
+    private void Reset() { motion?.Stop(); motion = null; translation.X = 0; }
     private void Animate()
     {
-        ResetMotion();
-        if (!IsEnabled || !SystemParameters.ClientAreaAnimation || DesktopTheme.GetIsHighContrast(this)) return;
-        BeginAnimation(PhaseProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(240))
-        { FillBehavior = FillBehavior.Stop, EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
-    }
-    protected override void OnMouseEnter(MouseEventArgs e) { base.OnMouseEnter(e); Animate(); }
-    protected override void OnMouseLeave(MouseEventArgs e) { base.OnMouseLeave(e); ResetMotion(); }
-    protected override void OnClick() { Animate(); base.OnClick(); }
-    protected override void OnPropertyChanged(DependencyPropertyChangedEventArgs e)
-    {
-        base.OnPropertyChanged(e);
-        if (e.Property == IsPressedProperty || e.Property == ForegroundProperty ||
-            e.Property == DesktopTheme.IsHighContrastProperty) InvalidateVisual();
-    }
-    protected override void OnRender(DrawingContext dc)
-    {
-        base.OnRender(dc);
-        dc.DrawRectangle(Brushes.Transparent, null, new Rect(RenderSize));
-        var brush = DesktopTheme.GetIsHighContrast(this) ? SystemColors.WindowTextBrush : Foreground;
-        dc.PushOpacity(IsEnabled ? 1 : .4);
-        double scale = IsPressed ? .9 : 1;
-        dc.PushTransform(new ScaleTransform(scale, scale, ActualWidth / 2, ActualHeight / 2));
-        dc.PushTransform(new TranslateTransform((ActualWidth - 16) / 2, (ActualHeight - 16) / 2));
-        if (!Next) dc.PushTransform(new ScaleTransform(-1, 1, 8, 8));
-        dc.DrawRectangle(brush, null, new Rect(13, 0, 3, 16));
-        dc.PushClip(new RectangleGeometry(new Rect(0, 0, 12, 16)));
-        double x = (double)GetValue(PhaseProperty) * 16;
-        dc.PushTransform(new TranslateTransform(x, 0)); dc.DrawGeometry(brush, null, Arrow); dc.Pop();
-        dc.PushTransform(new TranslateTransform(x - 16, 0)); dc.DrawGeometry(brush, null, Arrow); dc.Pop();
-        dc.Pop();
-        if (!Next) dc.Pop();
-        dc.Pop(); dc.Pop(); dc.Pop();
+        Reset(); if (!IsEnabled || !MusicVisuals.CanAnimate(this)) return;
+        motion = MusicVisuals.AnimateDouble(translation, "X", 0, 16, TimeSpan.FromMilliseconds(240), Reset);
     }
 }

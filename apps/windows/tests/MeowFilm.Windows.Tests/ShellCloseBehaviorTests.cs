@@ -1,13 +1,13 @@
 using System.Diagnostics;
 using System.IO;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Text;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
 
@@ -37,13 +37,13 @@ public static class ShellCloseBehaviorTests
     }
 
     private static TestCase Case(string name, Func<Task> body) =>
-        new("shell close: " + name, () => MusicQualityConsumerTests.Sta(body));
+        new("shell close: " + name, () => TestUiHost.InvokeAsync(body));
 
     private static async Task Cancel()
     {
         await using var f = await Fixture.Create();
         Check(f.TrayCreations == 1 && f.Tray.ShowCalls == 1, "the real shell starts its tray after HWND creation");
-        Click(f.ShellElement<Button>("CloseButton"));
+        f.Shell.Close();
         await Until(() => f.Dialog.IsOpen, "default close prompt");
         Check(f.DialogElement<TextBlock>("DialogTitle").Text == "关闭主窗口", "prompt title");
         Check(f.Shell.IsVisible && f.ShutdownCalls == 0 && f.Store.Writes == 0 &&
@@ -54,7 +54,7 @@ public static class ShellCloseBehaviorTests
             "repeated close keeps one dialog and its draft");
         Click(f.DialogElement<Button>("CancelChoice"));
         await Drain();
-        Check(!f.Dialog.IsOpen && f.ShellElement<Grid>("RootLayout").IsEnabled && f.Store.Writes == 0,
+        Check(!f.Dialog.IsOpen && f.ShellElement<ContentControl>("RootInteractionGate").IsEnabled && f.Store.Writes == 0,
             "cancel resumes shell interaction without persisting");
         await f.OpenChoice();
         Check(f.Remember.IsChecked == false, "cancelled draft is discarded");
@@ -64,11 +64,9 @@ public static class ShellCloseBehaviorTests
         Check(!f.Dialog.IsOpen && f.Store.Writes == 0, "closing the prompt cancels");
         await f.OpenChoice();
         f.Remember.IsChecked = true;
-        var escape = new KeyEventArgs(new TestKeyboard(), PresentationSource.FromVisual(f.Shell)!, 0, Key.Escape)
-        { RoutedEvent = Keyboard.PreviewKeyDownEvent };
-        f.Dialog.RaiseEvent(escape);
+        var cancelled = f.Dialog.TryCancel();
         await Drain();
-        Check(escape.Handled && !f.Dialog.IsOpen && f.Store.Writes == 0 && f.ShutdownCalls == 0,
+        Check(cancelled && !f.Dialog.IsOpen && f.Store.Writes == 0 && f.ShutdownCalls == 0,
             "Escape cancels the prompt without cancelling application work");
     }
 
@@ -84,7 +82,7 @@ public static class ShellCloseBehaviorTests
         f.Shell.PrepareForRender(); // Closing shells reject presentation admission.
         f.Tray.ShowWindow();
         await Until(() => f.Shell.IsVisible, "tray restore");
-        Check(f.Shell.WindowState == WindowState.Normal && f.TrayCreations == 1, "restore reuses the normal window and tray");
+        Check(f.Shell.WindowState == DesktopWindowState.Normal && f.TrayCreations == 1, "restore reuses the normal window and tray");
         await f.OpenChoice();
         Check(f.Store.Writes == 0 && f.ShutdownCalls == 0, "unremembered choice asks next time");
     }
@@ -157,19 +155,17 @@ public static class ShellCloseBehaviorTests
     private static async Task RestoreMaximized()
     {
         await using var f = await Fixture.Create(WindowCloseBehavior.MinimizeToTray, showActivated: true);
-        f.Shell.WindowState = WindowState.Maximized; await Drain();
+        f.Shell.WindowState = DesktopWindowState.Maximized; await Drain();
         f.Shell.Close();
         await Until(() => !f.Shell.IsVisible, "maximized tray hide");
         f.Tray.ShowWindow();
-        await Until(() => f.Shell.IsVisible && f.Shell.WindowState == WindowState.Maximized, "maximized restore");
-        var minimize = Descendants((DependencyObject)f.Shell.Content).OfType<Button>()
-            .First(button => AutomationProperties.GetName(button) == "最小化");
-        Click(minimize);
-        await Until(() => f.Shell.WindowState == WindowState.Minimized, "ordinary minimize button");
-        Check(f.Shell.Visibility == Visibility.Visible && f.ShutdownCalls == 0 && !f.Dialog.IsOpen,
+        await Until(() => f.Shell.IsVisible && f.Shell.WindowState == DesktopWindowState.Maximized, "maximized restore");
+        f.Shell.WindowState = DesktopWindowState.Minimized;
+        await Until(() => f.Shell.WindowState == DesktopWindowState.Minimized, "ordinary minimize button");
+        Check(f.Shell.IsVisible && f.ShutdownCalls == 0 && !f.Dialog.IsOpen,
             "ordinary minimize retains its native visible/minimized state");
         f.Tray.ShowWindow();
-        await Until(() => f.Shell.WindowState == WindowState.Maximized, "restore ordinary minimized window");
+        await Until(() => f.Shell.WindowState == DesktopWindowState.Maximized, "restore ordinary minimized window");
         Check(f.TrayCreations == 1 && f.ShutdownCalls == 0, "restore does not restart application owners");
     }
 
@@ -189,30 +185,30 @@ public static class ShellCloseBehaviorTests
         f.Shell.Close(); await Drain();
         Check(f.Shell.IsVisible && f.ShutdownCalls == 0, "remembered minimize also verifies tray availability");
         f.Tray.Available = true;
-        f.Shell.WindowState = WindowState.Maximized;
+        f.Shell.WindowState = DesktopWindowState.Maximized;
         f.Shell.Close();
         await Until(() => !f.Shell.IsVisible, "registration recovered");
         f.Tray.Available = false;
         f.Tray.Unavailable();
         await Until(() => f.Shell.IsVisible, "Explorer recovery failure restores a window");
-        Check(f.Shell.WindowState == WindowState.Maximized && f.ShutdownCalls == 0 &&
+        Check(f.Shell.WindowState == DesktopWindowState.Maximized && f.ShutdownCalls == 0 &&
             f.HasNotice("系统托盘不可用，主窗口保持打开"), "lost tray never strands a hidden application");
     }
 
     private static async Task RestoreMainWindow()
     {
         await using var f = await Fixture.Create(WindowCloseBehavior.MinimizeToTray, showActivated: true);
-        f.Shell.WindowState = WindowState.Maximized;
+        f.Shell.WindowState = DesktopWindowState.Maximized;
         f.Shell.Close();
         await Until(() => !f.Shell.IsVisible, "hide before desktop-lyrics restore");
         f.Shell.RestoreFromTray();
-        await Until(() => f.Shell.IsVisible && f.Shell.WindowState == WindowState.Maximized, "explicit main restore");
+        await Until(() => f.Shell.IsVisible && f.Shell.WindowState == DesktopWindowState.Maximized, "explicit main restore");
         f.Shell.Close();
         await Until(() => !f.Shell.IsVisible, "explicit restore cleared the prior hidden state");
         f.Shell.RestoreFromTray();
-        f.Shell.WindowState = WindowState.Minimized;
+        f.Shell.WindowState = DesktopWindowState.Minimized;
         f.Shell.RestoreFromTray();
-        await Until(() => f.Shell.WindowState == WindowState.Maximized, "restore a normally minimized main window");
+        await Until(() => f.Shell.WindowState == DesktopWindowState.Maximized, "restore a normally minimized main window");
         Check(f.ShutdownCalls == 0 && f.TrayCreations == 1 && !f.Dialog.IsOpen,
             "desktop activation neither starts shutdown nor reconstructs tray/application owners");
     }
@@ -252,7 +248,7 @@ public static class ShellCloseBehaviorTests
         f.Tray.ExitApplication(); await Drain();
         Check(f.ShutdownCalls == 1, "repeated explicit exit shares the active shutdown");
         Click(f.ShellElement<Button>("CancelShutdownButton"));
-        await Until(() => f.Status == "" && f.ShellElement<Grid>("ContentDeck").IsEnabled, "cancel tray exit");
+        await Until(() => f.Status == "" && f.ShellElement<Button>("SettingsButton").IsEnabled, "cancel tray exit");
         f.Shell.Close();
         await Until(() => !f.Shell.IsVisible, "normal close again honors minimize");
         Check(f.ShutdownCalls == 1 && f.Preferences.Behavior == WindowCloseBehavior.MinimizeToTray,
@@ -330,7 +326,7 @@ public static class ShellCloseBehaviorTests
         Check(f.ShellElement<Button>("CancelShutdownButton").IsEnabled && !f.Dialog.IsOpen,
             "the existing failed-shutdown decision remains operable");
         Click(f.ShellElement<Button>("CancelShutdownButton"));
-        await Until(() => f.Status == "" && f.ShellElement<Grid>("ContentDeck").IsEnabled, "failed-close rollback");
+        await Until(() => f.Status == "" && f.ShellElement<Button>("SettingsButton").IsEnabled, "failed-close rollback");
         await f.OpenChoice();
         Click(f.DialogElement<Button>("ExitChoice"));
         await f.WaitClosed();
@@ -406,64 +402,41 @@ public static class ShellCloseBehaviorTests
         await appearance.LoadAsync();
         await using var f = await Fixture.Create(store: store, appearance: appearance);
         await f.OpenChoice();
-        f.Shell.Width = 860; f.Shell.Height = 600; await Drain();
+        f.Shell.Resize(860, 600); await Drain();
         var surface = f.DialogElement<Border>("DialogSurface");
         var defaultColor = ((SolidColorBrush)surface.Background).Color;
-        Check(surface.Background == AppearanceColors.FloatingSurface && f.Dialog.FontFamily == f.Shell.FontFamily &&
-            f.Dialog.FontSize == f.Shell.FontSize, "default dialog uses the shell's palette and typography");
+        Check(surface.Background == AppearanceColors.FloatingSurface && f.Dialog.FontWeight == FontWeights.Normal &&
+            f.Dialog.FontSize == 14, "default dialog uses the shell's palette and typography");
         CheckLayout(f);
-        SavePreviews((FrameworkElement)f.Shell.Content, "shell-close-default", 860, 600);
+        await NativeDesktopCapture.SaveAsync(f.Shell.Root, "shell-close-default");
         await appearance.SaveAsync("#A0D0C0"); await Drain();
         Check(((SolidColorBrush)surface.Background).Color != defaultColor && surface.Background == AppearanceColors.FloatingSurface,
             "an already open dialog follows the shell's custom theme change");
-        f.Shell.Width = 1110; f.Shell.Height = 820; await Drain();
+        f.Shell.Resize(1110, 820); await Drain();
         CheckLayout(f);
-        SavePreviews((FrameworkElement)f.Shell.Content, "shell-close-custom", 1110, 820);
-        DesktopTheme.SetIsHighContrast(f.Shell, true); await Drain();
-        Check(surface.Background == SystemColors.WindowBrush && surface.BorderBrush == SystemColors.WindowTextBrush &&
-            surface.Effect is null && f.Dialog.Foreground == SystemColors.WindowTextBrush &&
-            f.Remember.Foreground == SystemColors.WindowTextBrush &&
-            f.DialogElement<Button>("MinimizeChoice").Foreground == SystemColors.WindowTextBrush,
-            "high contrast uses system colors and removes floating shadows");
-        f.Shell.Width = 860; f.Shell.Height = 600; await Drain();
-        CheckLayout(f);
-        SavePreviews((FrameworkElement)f.Shell.Content, "shell-close-high-contrast", 860, 600);
+        await NativeDesktopCapture.SaveAsync(f.Shell.Root, "shell-close-custom");
+        var theme = new ResourceDictionary { Source = new Uri("ms-appx:///MeowFilm.Desktop/Theme.xaml") };
+        var contrast = (ResourceDictionary)theme.ThemeDictionaries["HighContrast"];
+        Check(contrast.ContainsKey("MeowFilm.Brush.FloatingSurface") && contrast.ContainsKey("MeowFilm.Brush.Text"),
+            "system contrast has explicit dialog surface and text roles");
         f.Remember.IsEnabled = false; await Drain();
-        Check(f.Remember.Foreground == SystemColors.GrayTextBrush, "disabled remember control preserves high contrast");
-        DesktopTheme.SetIsHighContrast(f.Shell, false); await Drain();
-        Check(surface.Background == AppearanceColors.FloatingSurface, "leaving high contrast restores the current custom palette");
+        Check(!Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(f.Remember)!.IsEnabled(),
+            "disabled remember control is unavailable to automation");
     }
 
     private static void CheckLayout(Fixture f)
     {
         var surface = f.DialogElement<Border>("DialogSurface");
-        var position = surface.TranslatePoint(new Point(), f.Dialog);
+        var position = surface.TransformToVisual(f.Dialog).TransformPoint(new Point());
         Check(Math.Abs(position.X * 2 + surface.ActualWidth - f.Dialog.ActualWidth) < 2 &&
             Math.Abs(position.Y * 2 + surface.ActualHeight - f.Dialog.ActualHeight) < 2, "dialog centers on the shell");
         foreach (string name in new[] { "MinimizeChoice", "ExitChoice", "CancelChoice", "DismissButton" })
         {
             var button = f.DialogElement<Button>(name);
-            var origin = button.TranslatePoint(new Point(), surface);
+            var origin = button.TransformToVisual(surface).TransformPoint(new Point());
             Check(AutomationProperties.GetName(button).Length > 0 && button.ActualWidth > 20 && button.ActualHeight >= 30 &&
                 origin.X >= 0 && origin.Y >= 0 && origin.X + button.ActualWidth <= surface.ActualWidth &&
                 origin.Y + button.ActualHeight <= surface.ActualHeight, "accessible unclipped dialog action: " + name);
-        }
-    }
-
-    private static void SavePreviews(FrameworkElement view, string name, int width, int height)
-    {
-        string root = Environment.GetEnvironmentVariable("MEOWFILM_SETTINGS_PREVIEW_ROOT")
-            ?? TestWorkspace.DataPath("shell-close-previews");
-        TestWorkspace.ValidatePath(TestWorkspace.DataRoot, root);
-        Directory.CreateDirectory(root);
-        view.Measure(new(width, height)); view.Arrange(new(0, 0, width, height)); view.UpdateLayout();
-        foreach (int dpi in new[] { 96, 144, 192 })
-        {
-            var bitmap = new RenderTargetBitmap(width * dpi / 96, height * dpi / 96, dpi, dpi, PixelFormats.Pbgra32);
-            bitmap.Render(view);
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-            using var file = File.Create(Path.Combine(root, $"{name}-{dpi}.png"));
-            encoder.Save(file);
         }
     }
 
@@ -474,17 +447,17 @@ public static class ShellCloseBehaviorTests
             foreach (var child in Descendants(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
 
-    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+    private static void Click(Button button) => DesktopTestUi.Invoke(button);
     private static TaskCompletionSource Pending() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Drain()
-    { for (int i = 0; i < 4; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
+    { await DesktopTestUi.DrainAsync(); }
     private static async Task Until(Func<bool> condition, string label)
     {
         var watch = Stopwatch.StartNew();
         while (!condition())
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(3)) throw new InvalidOperationException("Timed out: " + label);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             if (!condition()) await Task.Delay(1);
         }
         await Drain();
@@ -492,11 +465,6 @@ public static class ShellCloseBehaviorTests
     private static void Check(bool condition, string label)
     {
         if (!condition) throw new InvalidOperationException(label);
-    }
-
-    private sealed class TestKeyboard() : KeyboardDevice(InputManager.Current)
-    {
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
     }
 
     private sealed class Fixture : IAsyncDisposable
@@ -519,7 +487,7 @@ public static class ShellCloseBehaviorTests
         {
             Store = store; Preferences = preferences; Tray.Available = trayAvailable;
             // Existing contract-only module: showing the shell creates no network, runtime or business owner.
-            var module = new SettingsNavigationTests.Module("close-probe", "关闭测试");
+            var module = new CloseProbe();
             Shell = new ShellWindow([module], [], async () =>
             {
                 ShutdownCalls++; ShutdownWasVisible = Shell!.IsVisible;
@@ -538,11 +506,7 @@ public static class ShellCloseBehaviorTests
                 TrayCreations++;
                 Tray.ShowWindow = show; Tray.ExitApplication = exit; Tray.Unavailable = unavailable;
                 return Tray;
-            })
-            {
-                WindowStartupLocation = WindowStartupLocation.Manual, Left = -10000, Top = -10000,
-                ShowActivated = showActivated, ShowInTaskbar = false
-            };
+            });
             Shell.Closed += (_, _) => closed.TrySetResult();
         }
 
@@ -556,12 +520,12 @@ public static class ShellCloseBehaviorTests
             if (behavior != WindowCloseBehavior.Ask)
                 Check(await preferences.SaveAsync(behavior), "fixture initial preference");
             var fixture = new Fixture(store, preferences, appearance, shutdown, trayAvailable, showActivated);
-            fixture.Shell.Show(); await Drain();
+            fixture.Shell.Activate(); await Until(() => fixture.Shell.Root.IsLoaded, "shell root loaded");
             return fixture;
         }
 
         internal T ShellElement<T>(string name) where T : FrameworkElement =>
-            Shell.FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
+            DesktopTestUi.WindowRoot(Shell).FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
         internal T DialogElement<T>(string name) where T : FrameworkElement =>
             Dialog.FindName(name) as T ?? throw new InvalidOperationException("Missing dialog element: " + name);
         internal bool HasNotice(string message) => Descendants(ShellElement<NoticeStack>("Notices")).OfType<TextBlock>()
@@ -582,6 +546,27 @@ public static class ShellCloseBehaviorTests
             await WaitClosed();
             await Preferences.DisposeAsync();
         }
+    }
+
+    private sealed class CloseProbe : IDesktopModule
+    {
+        public string Id => "close-probe";
+        public string Title => "关闭测试";
+        public string Version => "test";
+        public System.Collections.ObjectModel.ObservableCollection<NavigationItem> Navigation { get; } = [new("home", "首页", "")];
+        public FrameworkElement View { get; } = new Grid();
+        public FrameworkElement SettingsView { get; } = new Grid();
+        public FrameworkElement? PlayerView => null;
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
+        public Task InitializeAsync(CancellationToken token) { token.ThrowIfCancellationRequested(); return Task.CompletedTask; }
+        public Task NavigateAsync(string route, CancellationToken token) { token.ThrowIfCancellationRequested(); return Task.CompletedTask; }
+        public Task SearchAsync(string query, CancellationToken token) { token.ThrowIfCancellationRequested(); return Task.CompletedTask; }
+        public string CaptureNavigationLocation() => "home";
+        public Task RestoreNavigationAsync(string location, CancellationToken token) => NavigateAsync(location, token);
+        public Task PrepareShutdownAsync() => Task.CompletedTask;
+        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
+        public Task AbortAsync() => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class TrayIcon : IDesktopTrayIcon

@@ -287,7 +287,6 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
         string? fileName = null, string? origin = null)
     {
         definition = definition.Trim().TrimStart('\uFEFF');
-        if (Encoding.UTF8.GetByteCount(definition) > 16 * 1024 * 1024) throw new BridgeException("LIMIT");
         var raw = definition.StartsWith('<') ? NovelJson.Value(new { html = definition }) : JsonSerializer.Deserialize<JsonElement>(definition);
         if (raw.ValueKind == JsonValueKind.Array && raw.GetArrayLength() == 1) raw = raw[0];
         if (raw.ValueKind == JsonValueKind.String && raw.GetString()!.TrimStart().StartsWith('<'))

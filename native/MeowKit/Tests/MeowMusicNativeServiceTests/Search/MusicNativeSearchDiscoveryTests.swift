@@ -79,12 +79,18 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         let records = try await owner.repositoryTracks(songIDs: Set(tracks.map(\.songId))); XCTAssertEqual(records.count, 3)
         let calls = await peer.calls(); XCTAssertEqual(calls.map(\.operation), ["searchHotPlayback"]); XCTAssertEqual(calls[0].parameters[music: "keywords"].musicArray, words.map(RuntimeValue.string)); await owner.close()
     }
-    func testHotPlaybackAcceptsShortBatchButMissingRequiredLocatorHasZeroAdoption() async throws {
+    func testHotPlaybackAcceptsShortBatchAndRetainsDisplayOnlyRowsWithoutAdoptingThem() async throws {
         let peer = NativeMusicResultFixture([try MusicPlatformFixture.page([MusicNativePublicBrowseFixture.track("11")], platform: "wy")]), owner = try await NativeMusicFixture.service(platform: peer)
         let short = try await owner.searchHotPlayback(keywords: ["第一词", "第二词"]); XCTAssertEqual(short.count, 1); await owner.close()
-        let broken: RuntimeValue = .object(["items": .array([try NativeDiscoveryFixture.song("11"), .object(["sources": .array([.object(["source": .string("wy"), "musicInfo": .object([:])])])])])])
+        let broken: RuntimeValue = .object(["items": .array([try NativeDiscoveryFixture.songValue("11"), .object(["sources": .array([.object(["source": .string("wy"), "musicInfo": .object([:])])])])])])
         let document = NativeMusicTestLibrary(), failed = try await NativeMusicFixture.service(document, platform: NativeMusicResultFixture([broken]))
-        await assertMusicFailure(.upstreamInvalid) { _ = try await failed.searchHotPlayback(keywords: ["first", "second"]) }; XCTAssertEqual(document.snapshot().2, 0); await failed.close()
+        let tracks = try await failed.searchHotPlayback(keywords: ["first", "second"])
+        XCTAssertEqual(tracks.count, 2)
+        XCTAssertFalse(tracks[0].songId.isEmpty); XCTAssertTrue(tracks[1].songId.isEmpty)
+        XCTAssertTrue(tracks[1].sources.isEmpty)
+        let state = try await failed.read()
+        XCTAssertEqual(try state.songRows.allSongIDs().count, 1)
+        await failed.close()
     }
     func testDisabledNetEaseRejectsBeforeIOEvenIfAnotherPlatformIsEnabled() async throws {
         let peer = NativeMusicResultFixture(), document = NativeMusicTestLibrary(), owner = NativeMusicService(database: document, platformClient: try peer.makeClient(), enabledPlatforms: [.qq])
@@ -119,10 +125,13 @@ final class MusicNativeSearchDiscoveryTests: XCTestCase {
         catch { XCTAssertTrue([MusicServiceError.cancelled, .accessUnavailable, .staleAccess].contains(MusicServiceError.sanitized(error))) }
         await peer.waitUntilIdle(); await owner.close()
     }
-    func testRequiredCanonicalKeywordFailurePropagatesWithoutPartialSuccess() async throws {
+    func testMissingCanonicalKeywordRetainsItsRankWithoutRejectingDiscovery() async throws {
         let broken: RuntimeValue = .object(["hot": .array([.object(["rank": .number(1)])]), "charts": .array([])])
         let peer = NativeMusicResultFixture([broken]), owner = try await NativeMusicFixture.service(platform: peer)
-        await assertMusicFailure(.upstreamInvalid) { _ = try await owner.searchDiscovery() }
+        let result = try await owner.searchDiscovery()
+        XCTAssertEqual(result.hot.map(\.keyword), [""])
+        XCTAssertEqual(result.hot.map(\.rank), [1])
+        XCTAssertTrue(result.failures.isEmpty)
         let calls = await peer.calls(); XCTAssertEqual(calls.count, 1); await owner.close()
     }
 }

@@ -403,6 +403,24 @@ test('source RPC auto-detects raw HTML, Cat JS and JSON-string-wrapped HTML', as
   }
 });
 
+test('native Reader loads definitions above 16 MiB with large metadata and executes their rules', async t => {
+  const { rpc } = setup(t);
+  const definition = { ...fixtureSource, bookSourceComment: 'x'.repeat(16 * 1024 * 1024) };
+  const version = '1.0.0-' + 'v'.repeat(129);
+  const sourceRevision = await upload(rpc, definition);
+  const instance = okay(await rpc('load', { installationId: 'fixture', sourceRevision,
+    revision: 1, expectedRevision: 0, protocol: 'legado', version,
+    metadata: { text: '猫'.repeat(32769) } })).instance;
+  assert.equal(instance.version, version);
+  const result = okay(await rpc('invoke', { installationId: instance.installationId,
+    revision: instance.revision, generation: instance.generation, action: 'search',
+    payload: { keyword: 'fixture', page: 1 } }));
+  assert.equal(result.books[0].name, 'Result');
+  assert.equal(result.books[0].bookUrl, 'https://books.invalid/book/1');
+  assert.equal(okay(await rpc('unload', { installationId: instance.installationId,
+    revision: instance.revision, generation: instance.generation })).cleanupComplete, true);
+});
+
 for (const protocol of ['legado', 'qysg']) {
   test(`${protocol} image HTTP results preserve byte bodies and keep JSON validation strict`, async t => {
     let internal;
@@ -1478,11 +1496,11 @@ function mockSourceRuntime(t) {
   return { module, rpc, records, installations, invocations, releases };
 }
 
-test('R5 source HTTP accepts exactly 16 MiB and rejects the next byte', async t => {
+test('R5 source HTTP accepts complete sources above the former 16 MiB boundary', async t => {
   const { rpc } = mockSourceRuntime(t);
   const bytes = Buffer.alloc(16 * 1024 * 1024, 0x61);
   assert.equal(okay(await rpc.upload('large', 1, bytes, { basename: 'source.js' })).sourceBytes, bytes.length);
-  denied(await rpc.upload('large', 2, Buffer.concat([bytes, Buffer.from('a')]), { basename: 'source.js' }), 'LIMIT');
+  assert.equal(okay(await rpc.upload('large', 2, Buffer.concat([bytes, Buffer.from('a')]), { basename: 'source.js' })).sourceBytes, bytes.length + 1);
 });
 
 test('R5 source HTTP retains more than four independent complete candidates', async t => {
@@ -1622,13 +1640,13 @@ for (const [field, value] of [
   });
 }
 
-test('source CAS and metadata limits retain a complete candidate; exact revisions never follow the latest', async t => {
+test('source CAS and invalid metadata retain a complete candidate; large metadata remains complete', async t => {
   const { rpc, installations } = mockSourceRuntime(t);
   await load(rpc, { protocol: 'cat', source: catSource });
   await upload(rpc, catSource, 'source.js', 'fixture', 5);
   const next = { installationId: 'fixture', sourceRevision: 5, revision: 5, expectedRevision: 1, protocol: 'cat' };
   denied(await rpc('load', { ...next, expectedRevision: 4 }), 'STALE_SOURCE');
-  denied(await rpc('load', { ...next, metadata: { text: 'x'.repeat(32768) } }), 'LIMIT');
+  denied(await rpc('load', { ...next, metadata: [] }), 'INVALID_REQUEST');
   assert.equal(installations.length, 1);
   // The deterministic owner supports update through the same installation surface.
   const uploaded = await rpc.upload('another', 1, Buffer.from(catSource), { basename: 'source.js' });
@@ -1638,7 +1656,9 @@ test('source CAS and metadata limits retain a complete candidate; exact revision
   denied(await rpc('load', { installationId: 'another', sourceRevision: 1, revision: 1, expectedRevision: 0 }), 'SOURCE_NOT_FOUND');
   const installed = okay(await rpc('load', { installationId: 'another', sourceRevision: 2, revision: 2, expectedRevision: 0, protocol: 'cat' })).instance;
   assert.equal(installed.revision, 2);
+  next.metadata = { text: 'x'.repeat(32769) };
   assert.equal(okay(await rpc('load', next)).instance.revision, 5);
+  assert.deepEqual(installations.at(-1).metadata, { ...next.metadata, importedProtocol: 'cat' });
 });
 
 test('ordinary source RPC extras never reach installation or invocation owners', async t => {

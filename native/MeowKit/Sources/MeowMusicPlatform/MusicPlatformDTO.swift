@@ -7,21 +7,26 @@ import MeowRuntime
 /// adapter neither interprets upstream envelopes nor proves whole responses.
 public enum MusicPlatformDTO {
     public static func nativeTrack(_ input: RuntimeValue) throws -> MusicNativeTrackData {
-        let song = input[music: "song"] == .null ? input : input[music: "song"]
-        let source = try song[music: "sources"].musicRequiredArray().first
-        guard let source else { throw MusicServiceError.upstreamInvalid }
-        let platform = try source[music: "source"].musicRequiredText()
+        let song = input
+        let source = song[music: "sources"].musicArray.first ?? .null
+        let platform = source[music: "source"].musicText
         let info = source[music: "musicInfo"]
-        guard case .object = info else { throw MusicServiceError.upstreamInvalid }
-        return .init(platform: platform, data: try info.musicData())
+        return .init(platform: platform, data: try info.musicData(),
+            display: .init(title: song[music: "title"].musicText, artist: song[music: "artist"].musicText,
+                album: song[music: "album"].musicText, duration: song[music: "duration"].musicNumber ?? 0,
+                artwork: MusicArtworkURL.normalized(song[music: "cover_url"].musicText)))
     }
     public static func tracks(_ value: RuntimeValue) throws -> [MusicNativeTrackData] {
         let positions = value[music: "sourcePositions"].musicArray
-        return try value[music: "items"].musicRequiredArray().enumerated().map { index, row in
+        return try value[music: "items"].musicArray.enumerated().map { index, row in
             let track = try nativeTrack(row)
-            let position = positions.indices.contains(index) && positions[index] != .null ? try count(positions[index]) : nil
-            return .init(platform: track.platform, data: track.data, sourcePosition: position)
+            let position = positions.indices.contains(index) ? optionalCount(positions[index]) : nil
+            return .init(platform: track.platform, data: track.data, sourcePosition: position, display: track.display)
         }
+    }
+    public static func optionalCount(_ value: RuntimeValue) -> Int? {
+        guard let number = value.musicNumber, number.isFinite, number >= 0 else { return nil }
+        return Int(exactly: number)
     }
     public static func date(_ value: RuntimeValue) -> Date? {
         value.musicNumber.map { Date(timeIntervalSince1970: $0 / 1000) }
@@ -94,14 +99,14 @@ public enum MusicPlatformDTO {
         }
     }
     static func rows(_ value: RuntimeValue) throws -> [RuntimeValue] {
-        try value[music: "items"].musicRequiredArray().map { song in
+        try value[music: "items"].musicArray.map { song in
             let track = try nativeTrack(song)
             return try RuntimeJSON.decode(track.data)
         }
     }
     static func recommendation(_ value: RuntimeValue) throws -> MusicAccountRecommendation {
         .init(rows: try rows(value), nextPage: value[music: "continuation"][music: "page"] == .null ? nil :
-                try count(value[music: "continuation"][music: "page"]),
+                optionalCount(value[music: "continuation"][music: "page"]),
               expiresAt: date(value[music: "expiresAt"]))
     }
 }

@@ -8,7 +8,7 @@
 
 ## 播放器设置
 
-「影视设置 → 播放器设置」提供「默认内核」与「播放控制」入口，由 `FilmPlayerSettingsController` 消费 App 共享的 `FilmPlayerPreferencesStore`。未保存时默认 KSPlayer，可选 AetherEngine；只在此设置页选择内核，播放器内没有切核入口。保存后的首选值在下一次创建媒体候选时读取，包括新播放、切集、换源；不热切当前健康实例，也不重新获取当前播放地址。持久化位置、错误及校正写入见[本地存储](storage.md#播放器偏好)。
+「影视设置 → 播放器设置」提供「播放核心」与「播放控制」入口，由 `FilmPlayerSettingsController` 消费 App 共享的 `FilmPlayerPreferencesStore`。播放核心及播放控制的选择项使用左标题、右当前值的普通行，点击直接打开原生菜单；当前勾选和保存仍由同一 owner 管理，不进入独立选择页。未保存时默认 KSPlayer，可选 AetherEngine；只在此设置页选择内核，播放器内没有切核入口。保存后的首选值在下一次创建媒体候选时读取，包括新播放、切集、换源；不热切当前健康实例，也不重新获取当前播放地址。持久化位置、错误及校正写入见[本地存储](storage.md#播放器偏好)。
 
 「播放控制」共17项；下表为完整产品选项，倍率还须与所选内核能力取交集。
 
@@ -48,9 +48,9 @@ KSPlayer 的临时倍率上限8X；偏好持久化、UIKit触摸、取消／换�
 
 共享载体保留锁定派生源码的正则编译／执行／全局空替换中断能力，普通构建不现场下载或打补丁；中断不冒充正则语法错误。异常、取消或截止后排空真实资源并恢复同一程序。App 资源分发共享原生引擎 MIT 与 Unicode 表许可。
 
-原生编辑分为搜索净化、剧集列表净化、集数匹配、电影匹配四个独立页面。每条规则使用独立卡片，标题左侧“规则 N”、右侧删除，`pattern` 标签及多行胶囊输入在上；匹配组的 `replace`／`flags` 在下方同排，辅助字号时可纵排。净化组仍只有现有 pattern 字段。`flags` 可编辑并保留原值，空值仍由运行器按 `i` 处理。规则列表下方为独立添加按钮，再下方为恢复默认及测试，页头保留唯一保存。添加、修改、删除及恢复只改本组草稿，保存才提交，失败保留编辑。
+原生编辑分为搜索净化、剧集列表净化、集数匹配、电影匹配四个独立页面。每条规则使用独立卡片，左侧“规则 N”与右侧删除文字首行基线对齐，长结果不移动删除；`pattern` 标签及多行下划线输入在上；匹配组的 `replace`／`flags` 在下方同排，辅助字号时可纵排。净化组仍只有现有 pattern 字段。`flags` 可编辑并保留原值，空值仍由运行器按 `i` 处理。添加规则、恢复默认及测试固定在页面底栏，滚动区止于栏顶，末卡可完整显示；页头保留唯一保存。添加、修改、删除及恢复只改本组草稿，保存才提交，失败保留编辑。
 
-测试文本及搜索查询词在当前页输入；测试使用本组草稿和必要关联组的已保存配置，不混用其他页草稿、不保存。各卡片在“规则 N”后留布局间距显示“测试结果：结果”，长结果在标题区换行，不另建输出列表。净化组消费逐条累计预览，匹配组根据同组错误与首命中索引区分未命中、实际输出及命中后的未执行；空字符串保留为有效结果。编辑规则／输入、换代、保存规范化、隐藏或失活使旧结果失效并取消测试，迟到结果不能覆盖当前快照，刷新结果不重建正在输入的字段。本地保存不等待在线测试，真实执行失败仍走统一错误与重试反馈。
+点击测试通过 `ManagementDialog` 收集多行测试文本，仅搜索净化显示查询词；字段采用标题在上、下划线输入在下的结构，不常驻规则页。确认只收集请求与规则快照，浮窗实际关闭并经 `dismissPageModal` 呈现收讫后，由原规则页在 active／visible 状态执行；取消浮窗不执行、不保存。测试使用本组草稿和必要关联组的已保存配置，不混用其他页草稿、不保存。各卡片在“规则 N”后留布局间距显示“测试结果：结果”，长结果在标题区换行，不另建输出列表。净化组消费逐条累计预览，匹配组根据同组错误与首命中索引区分未命中、实际输出及命中后的未执行；空字符串保留为有效结果。编辑规则／输入、换代、保存规范化、隐藏或失活使旧结果失效并取消测试，迟到结果不能覆盖当前快照，刷新结果不重建正在输入的字段。本地保存不等待在线测试，真实执行失败仍走统一错误与重试反馈。
 
 `FilmRuleSettings` 在原生保存边界完成同语义的纯字符串规范化、默认值及新规则文本解析，不编译正则；草稿测试不提前套用保存归一化，匹配规则 JSON 内的 pattern／replace 保持原文。空集数匹配组仍返回清理结果与 previews，同时报告“无匹配规则”，不自动回填规则。
 
@@ -64,7 +64,7 @@ Node 统一处理结果的传输表示：正常文本保持 JSON 字符串，含
 
 ## 猫源与公共宿主
 
-契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:storeFactory:settingsDocument:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（16 MiB 文件读取资源边界，实际字节计数与修改检测），按 SHA-256 排他原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。运行器源码上限仍为 16 MiB；网络输入由 Node 下载。
+契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:storeFactory:settingsDocument:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（分块读至 EOF，并检测修改，不设总字节上限），按 SHA-256 排他原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。网络输入由 Node 下载；执行内存、栈与截止由运行器单独控制。
 
 页头右侧的导入菜单提供本地／网络导入，列表工具行仅保留搜索。导入受页面可见性及忙碌状态约束；本地导入进入编辑页，网络导入浮层保留原列表，取消不提交。现有选择目标的界面保留：选择已有项时保存同一 ID 的来源替换，不另建安装。列表显示名称、启停、运行及更新状态，并提供直接编辑；低频动作收进单一更多菜单。未知 `updateState` 按原文字展示，不作为整批 status 失败。类型和修改时间放在详情，详情保留启用开关、编辑、更新和单实例重启；删除通过选择模式勾选后批量确认。本地更新重新选文件，网络更新重新下载。首次来源保存默认启用；停用保留本地清单但禁止重启／检测；父源删除清除关联本地视频、配置与删除记录。时间取实际更新时间，否则导入时间；失败、无变化、重启不改时间，失败更新不冒充新版本就绪。
 
@@ -177,3 +177,5 @@ xcodebuild test-without-building \
 原手动入口仍可独立使用：`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartPrepareTests/testSaveSyntheticSettingsForNextAppProcess` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=prepare`；`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartRestoreTests/testNextAppProcessRestoresPlainSettingsWithoutNativeWriteback` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=restore`。后者可在完整合成设置 guard 通过后执行原断言及凭据清理，包括重复入口失败后遗留的夹具；不跳过 guard、不仅删除阶段文件，部分写入或 guard 不符时须报告而非冒充清理成功。普通两次 `xcodebuild` 不能称为免重装验证。新入口未设 UUID、旧入口未设对应 phase 均显式跳过，跳过不算通过。真实设置 UI 的保存、保留／替换／清除、失败与截图见 `MeowfilmTMDBHostTests`。
 
 设置不承载首页／搜索业务策略；搜索通过既有 owner 消费其快照。仍不提供任意第三方脚本兼容保证，不以模拟器结果宣称真机后台或实际媒体播放已验证。
+
+原生媒体章节快照与 Aether 包装层完整保留章节和标题，不按 256 项／字符截断；仍筛除无效、非有限或非递增的章节时间。

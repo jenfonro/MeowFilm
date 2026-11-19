@@ -132,7 +132,19 @@ enum MusicModel {
             ("duration", data["duration"]), ("cover_url", publicURL(data["img"])),
             ("sources", .array([.obj([("sourceKey", .string(key)), ("source", data["source"]), ("musicInfo", data)])]))])
         if data["artistNames"].isArray { song["artistNames"] = data["artistNames"] }
+        if let display = value.display {
+            song["title"] = .string(display.title); song["artist"] = .string(display.artist)
+            song["album"] = .string(display.album); song["duration"] = .number(display.duration)
+            song["cover_url"] = publicURL(.string(display.artwork?.absoluteString ?? ""))
+        }
         return song
+    }
+    /// No durable identity or playback authority is created for a display-only row.
+    static func displayTrack(_ value: MusicNativeTrackData) -> MusicRemoteTrack {
+        let display = value.display
+        return .init(ref: .init(kind: .library, id: "", occurrence: UUID().uuidString), songId: "",
+            title: display?.title ?? "", artist: display?.artist ?? "", album: display?.album ?? "",
+            duration: display?.duration ?? 0, artwork: display?.artwork, sourcePosition: value.sourcePosition)
     }
     static func sources(_ song: MJ) throws -> [MusicNativeSource] {
         try musicRequire(song["sources"].isArray, .corruptDocument)

@@ -1,11 +1,17 @@
+using MeowFilm.Desktop;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Search;
@@ -154,8 +160,23 @@ public static partial class MusicUiTests
             Equal(0, f.Http.Requests.Count);
             await f.Open(); await f.Module.SearchAsync("", default);
             True(f.Module.IsDiscovery && f.Module.CanUseDiscovery, "online empty query");
-            var bad = await f.App.ExecuteAsync("music.discovery.read", new { refresh = false, cookie = "not-a-credential" });
-            Equal("INVALID_REQUEST", bad.GetProperty("code").GetString());
+        });
+        yield return Case("native discovery consumes named inputs and ignores unused extra fields", async () =>
+        {
+            await using var f = await DiscoveryScene.Create();
+            var read = await f.Call("music.discovery.read", new { cookie = "not-a-credential", refresh = false,
+                extra = new { nested = new[] { 1, 2 } } });
+            long generation = read.GetProperty("snapshot").GetProperty("generation").GetInt64();
+            True(f.App.IsDiscoveryCurrent(generation), "read issues the current generation");
+            int requests = f.Http.Requests.Count;
+            var rotated = await f.Call("music.discovery.rotate", new { extra = new { generation = -1 }, generation });
+            True(f.App.IsDiscoveryCurrent(rotated.GetProperty("snapshot").GetProperty("generation").GetInt64()),
+                "rotation uses the named generation");
+            Equal(requests, f.Http.Requests.Count);
+            var badRead = await f.App.ExecuteAsync("music.discovery.read", new { refresh = "false", extra = true });
+            Equal("INVALID_REQUEST", badRead.GetProperty("code").GetString());
+            var badRotate = await f.App.ExecuteAsync("music.discovery.rotate", new { generation = 0, extra = true });
+            Equal("INVALID_REQUEST", badRotate.GetProperty("code").GetString());
         });
         yield return Case("native discovery view reactivation during retiring HTTP waits and then restores exactly once", async () =>
         {
@@ -192,10 +213,10 @@ public static partial class MusicUiTests
         {
             await using var f = await DiscoveryScene.Create(); await f.Policy(); await f.Open();
             var view = (FrameworkElement)f.Module.View;
-            var host = new Border { Background = (System.Windows.Media.Brush)view.FindResource("MeowFilm.Brush.Window"), Child = view };
+            var host = new Border { Background = (Brush)DesktopVisual.Resource(view, "MeowFilm.Brush.Window"), Child = view };
             Render(host, 900, 760);
             var discovery = Visuals(view).OfType<MusicDiscoveryView>().Single();
-            True(discovery.IsVisible || discovery.Visibility == Visibility.Visible, "discovery is the selected control");
+            True(DesktopVisual.IsVisible(discovery) || discovery.Visibility == Visibility.Visible, "discovery is the selected control");
             True(!Visuals(view).OfType<MusicCatalogView>().Any(),
                 "discovery owns the content body; inactive catalog is unmounted");
             var button = Visuals(discovery).OfType<Button>().First(b => b.Tag is MusicDiscoveryKeyword word && word.Text == "热搜1");
@@ -210,7 +231,7 @@ public static partial class MusicUiTests
             view.Measure(new Size(900, 380)); view.Arrange(new Rect(0, 0, 900, 380)); view.UpdateLayout(); await Drain();
             var control = Visuals(view).OfType<MusicDiscoveryView>().Single();
             var scroll = Visuals(control).OfType<ScrollViewer>().Single();
-            scroll.ScrollToVerticalOffset(150); await Drain();
+            scroll.ChangeView(null, 150, null, true); await Drain();
             double offset = scroll.VerticalOffset; True(offset > 20, "real scrollable discovery");
             await f.Module.NavigateAsync("favorites", default); await f.Open(); await Drain();
             True(Math.Abs(scroll.VerticalOffset - offset) < 1, "back restores original offset, not cleared-content clamp");

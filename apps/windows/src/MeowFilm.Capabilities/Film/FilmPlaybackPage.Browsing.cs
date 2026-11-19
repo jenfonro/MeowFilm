@@ -6,12 +6,14 @@ public sealed partial class FilmPlaybackPage
 {
     // Successful directory presentation only; no playback stages, attempts or media receipts.
     private sealed record BrowsingSlice(JsonElement Metadata, JsonElement Source, string Kind,
-        FilmMetadataSupplement? Supplement, FilmMetadataCache? Cache, JsonElement Browsing,
+        FilmMetadataCache? Cache, JsonElement Browsing,
         JsonElement CandidateRows, string Summary, FilmEpisodeDirectory? Directory, long Revision);
     private readonly Dictionary<(string? Source, string? Metadata), DirectoryKey> rememberedSelections = [];
     private readonly HashSet<DirectoryKey> unreadDirectories = [];
     private BrowsingSlice? display;
     private DirectoryKey? selection;
+    private string? aggregateProvider;
+    private long metadataChoiceGeneration;
     private bool selectionLocked, explicitRead, preservingRead, browsingLoading = true;
     private string browsingError = "";
     private long browseRevision;
@@ -43,7 +45,7 @@ public sealed partial class FilmPlaybackPage
         if (error.Length > 0 || FilmJson.Bool(value.Browsing, "refreshing")) unreadDirectories.Add(key);
         var slice = new BrowsingSlice(OwnProjection(value.Metadata, previous?.Metadata ?? default),
             OwnProjection(value.SelectedMetadataSource, previous?.Source ?? default), value.ContentKind,
-            value.MetadataSupplement, value.MetadataCache, OwnProjection(value.Browsing, previous?.Browsing ?? default),
+            value.MetadataCache, OwnProjection(value.Browsing, previous?.Browsing ?? default),
             OwnProjection(FilmJson.Member(value.Raw, "candidates"), previous?.CandidateRows ?? default),
             value.WorkInfo?.Summary ?? "", previous?.Directory,
             previous is null || !FilmJson.Equal(previous.Metadata, value.Metadata) ||
@@ -72,12 +74,13 @@ public sealed partial class FilmPlaybackPage
             if (!loading) preservingRead = false;
             return;
         }
-        selection = key; display = slice; EpisodeDirectory = slice.Directory;
+        selection = key; display = slice;
+        EpisodeDirectory = loading || error.Length > 0 ? null : slice.Directory;
         browsingLoading = loading; browsingError = error;
         if (!loading) { explicitRead = false; preservingRead = false; }
     }
 
-    private async Task BrowseAsync(DirectoryKey key)
+    private async Task BrowseAsync(DirectoryKey key, bool metadataSelection = false)
     {
         if (key == selection && !browsingLoading && browsingError.Length == 0 && !unreadDirectories.Contains(key)) return;
         long revision = ++browseRevision;
@@ -102,7 +105,7 @@ public sealed partial class FilmPlaybackPage
             var browsing = FilmJson.Encode(new { sourceId = key.Source, lineId = key.Line.Length > 0
                 ? JsonSerializer.Deserialize<JsonElement>(key.Line) : (JsonElement?)null, lines,
                 season = key.Season, loading = true });
-            display = new(DisplayMetadata, DisplaySource, DisplayKind, Supplement, display?.Cache, browsing,
+            display = new(DisplayMetadata, DisplaySource, DisplayKind, display?.Cache, browsing,
                 default, Overview, null, metadataRevision);
             EpisodeDirectory = null;
             ProjectBrowsing();
@@ -112,7 +115,7 @@ public sealed partial class FilmPlaybackPage
         {
             using var read = new CancellationTokenSource();
             browseRead = read;
-            await ReadBrowsingAsync(key, read.Token);
+            await ReadBrowsingAsync(key, read.Token, metadataSelection);
         }
         catch (Exception error)
         {
@@ -127,7 +130,7 @@ public sealed partial class FilmPlaybackPage
         finally { if (revision == browseRevision) browseRead = null; }
     }
 
-    private async Task ReadBrowsingAsync(DirectoryKey key, CancellationToken token)
+    private async Task ReadBrowsingAsync(DirectoryKey key, CancellationToken token, bool metadataSelection)
     {
         var owner = RequireSession();
         var parameters = new Dictionary<string, object?>
@@ -136,7 +139,9 @@ public sealed partial class FilmPlaybackPage
         };
         if (key.Line.Length > 0) parameters["lineId"] = JsonSerializer.Deserialize<JsonElement>(key.Line);
         if (key.Season is { } season) parameters["season"] = season;
-        await CommandAsync(unreadDirectories.Contains(key) ? "browse.refresh" : "browse", parameters);
+        if (metadataSelection) parameters["keepSource"] = true;
+        await CommandAsync(unreadDirectories.Contains(key) ? "browse.refresh" :
+            metadataSelection ? "browse.metadata" : "browse", parameters);
         await owner.WaitForBrowsingAsync(this, state => Matches(Key(state)), token);
         ProjectBrowsing();
     }
@@ -153,17 +158,26 @@ public sealed partial class FilmPlaybackPage
     {
         if (!Sources.Contains(value)) throw new FilmPlaybackException("INVALID_REQUEST");
         string? source = value.MetadataSourceId is null ? value.Id : null;
-        string? metadata = value.MetadataSourceId ?? MetadataSourceId;
+        if (value.MetadataSourceId is not null)
+        {
+            aggregateProvider = value.Provider;
+            Changed(nameof(SelectedSource));
+        }
+        string? metadata = MetadataSourceId;
         return BrowseAsync(rememberedSelections.GetValueOrDefault((source, metadata)) ??
             new DirectoryKey(source, "", metadata, source is null ? null : Season));
     }
 
-    internal Task BrowseMetadataMappingAsync(FilmSelection value)
+    internal async Task BrowseMetadataMappingAsync(FilmSelection value)
     {
-        if (SourceId is null || !MetadataSources.Contains(value) || value.MetadataSourceId is null)
+        if (!MetadataSources.Contains(value) || value.MetadataSourceId is null || value.Provider is not ("tmdb" or "douban"))
             throw new FilmPlaybackException("INVALID_REQUEST");
-        return BrowseAsync(rememberedSelections.GetValueOrDefault((SourceId, value.MetadataSourceId)) ??
-            new DirectoryKey(SourceId, selection?.Line ?? "", value.MetadataSourceId, null));
+        long generation = ++metadataChoiceGeneration;
+        if (preferences is not null)
+            await preferences.SavePreferencesAsync(FilmPreferences.Defaults with { MetadataViewProvider = value.Provider }, "metadataViewProvider");
+        if (generation != metadataChoiceGeneration || !MetadataSources.Contains(value)) return;
+        await BrowseAsync(rememberedSelections.GetValueOrDefault((SourceId, value.MetadataSourceId)) ??
+            new DirectoryKey(SourceId, selection?.Line ?? "", value.MetadataSourceId, null), metadataSelection: true);
     }
 
     internal Task BrowseLineAsync(FilmSelection value)

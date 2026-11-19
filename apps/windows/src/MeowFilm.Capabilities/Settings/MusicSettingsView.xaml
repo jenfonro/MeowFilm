@@ -1,53 +1,32 @@
 <UserControl x:Class="MeowFilm.Capabilities.MusicSettingsView"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:local="clr-namespace:MeowFilm.Capabilities"
- xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop"
  x:Name="Root"
- UseLayoutRounding="True" SnapsToDevicePixels="True"
+ UseLayoutRounding="True"
  SizeChanged="View_SizeChanged">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Settings/SettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
    <Style x:Key="Settings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}"/>
-   <DataTemplate x:Key="Quality.Name">
-    <TextBlock Foreground="{Binding (TextElement.Foreground),RelativeSource={RelativeSource AncestorType=ContentPresenter}}">
-     <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
-      <Setter Property="Text" Value="{Binding}"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
-      <Style.Triggers>
-       <DataTrigger Binding="{Binding}" Value="auto"><Setter Property="Text" Value="自动"/></DataTrigger>
-       <DataTrigger Binding="{Binding}" Value="128k"><Setter Property="Text" Value="128 kbps"/></DataTrigger>
-       <DataTrigger Binding="{Binding}" Value="192k"><Setter Property="Text" Value="192 kbps"/></DataTrigger>
-       <DataTrigger Binding="{Binding}" Value="320k"><Setter Property="Text" Value="320 kbps"/></DataTrigger>
-       <DataTrigger Binding="{Binding}" Value="flac"><Setter Property="Text" Value="无损"/></DataTrigger>
-       <DataTrigger Binding="{Binding}" Value="flac24bit"><Setter Property="Text" Value="高解析度"/></DataTrigger>
-       <DataTrigger Binding="{Binding}" Value="master"><Setter Property="Text" Value="母带"/></DataTrigger>
-      </Style.Triggers>
-     </Style></TextBlock.Style>
-    </TextBlock>
-   </DataTemplate>
+   <DataTemplate x:Key="Quality.Name"><TextBlock Text="{Binding Converter={StaticResource Settings.QualityName}}" Style="{StaticResource Settings.Text}"/></DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
- <UserControl.Style>
-  <Style TargetType="UserControl">
-   <Setter Property="Background" Value="{DynamicResource Settings.Brush.Ground}"/>
-   <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True"><Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/></Trigger></Style.Triggers>
-  </Style>
- </UserControl.Style>
  <Grid x:Name="MusicContent" Style="{StaticResource MeowFilm.SettingsPage}">
-  <Grid.RowDefinitions><RowDefinition Style="{StaticResource MeowFilm.SettingsNavigationRow}"/><RowDefinition/></Grid.RowDefinitions>
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
   <Border Style="{StaticResource MeowFilm.SettingsNavigationBar}">
    <ScrollViewer VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Hidden">
     <StackPanel x:Name="SettingsNavigation" Orientation="Horizontal" AutomationProperties.Name="设置分类">
-     <RadioButton Content="账号与平台" Tag="AccountsSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" IsChecked="True" Checked="Section_Checked" Click="Section_Checked" PreviewKeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="搜索" Tag="SearchSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" PreviewKeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="音质" Tag="QualitySection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" PreviewKeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="歌词与封面" Tag="MetadataSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" PreviewKeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="音源" Tag="sources" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" PreviewKeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="账号与平台" Tag="AccountsSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" IsChecked="True" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="搜索" Tag="SearchSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="音质" Tag="QualitySection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="歌词与封面" Tag="MetadataSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="音源" Tag="sources" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
     </StackPanel>
    </ScrollViewer>
   </Border>
-  <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ScrollChanged="Settings_ScrollChanged" PreviewMouseWheel="Settings_PreviewMouseWheel" AutomationProperties.Name="全部音乐设置">
+  <ScrollViewer x:Name="SettingsScroller" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" ViewChanged="Settings_ViewChanged" SizeChanged="Settings_ViewportChanged" AutomationProperties.Name="全部音乐设置">
    <StackPanel x:Name="SectionsStack" MaxWidth="1248" Margin="0,0,12,0" HorizontalAlignment="Left">
     <Border x:Name="AccountsSection" Style="{StaticResource Settings.Section}">
      <StackPanel>
@@ -56,10 +35,10 @@
        <TextBlock Text="账号" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
        <Button x:Name="AccountTransferButton" Grid.Column="1" Content="导入导出" Style="{StaticResource Settings.QuietButton}"
                IsEnabled="{Binding CanTransferAccounts}" Click="AccountTransfer_Click" AutomationProperties.Name="导入导出">
-        <Button.ContextMenu><ContextMenu>
-         <MenuItem Header="导入账号" Click="AccountImport_Click" AutomationProperties.Name="导入账号"/>
-         <MenuItem Header="导出账号" Click="AccountExport_Click" AutomationProperties.Name="导出账号"/>
-        </ContextMenu></Button.ContextMenu>
+        <Button.Flyout><MenuFlyout>
+         <MenuFlyoutItem Text="导入账号" Click="AccountImport_Click" AutomationProperties.Name="导入账号"/>
+         <MenuFlyoutItem Text="导出账号" Click="AccountExport_Click" AutomationProperties.Name="导出账号"/>
+        </MenuFlyout></Button.Flyout>
        </Button>
       </Grid>
       <local:MusicAccountsView x:Name="AccountsPanel"/>
@@ -69,7 +48,7 @@
      <StackPanel>
       <TextBlock Text="搜索" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,8"/>
        <Grid x:Name="SearchPanels" local:SettingsLayout.Mode="Pair">
-        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="24"/><ColumnDefinition/></Grid.ColumnDefinitions>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <StackPanel x:Name="SongSearchPanel">
          <Grid Margin="0,0,0,12">
@@ -79,7 +58,7 @@
          </Grid>
          <local:SettingsPriorityList x:Name="SongPriorities" Title="平台优先顺序" Tag="songs" ShowLogos="True" ItemsSource="{Binding SongSearch.Platforms}" CanEdit="{Binding CanEditSearchPreferences}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
         </StackPanel>
-        <StackPanel x:Name="PlaylistSearchPanel" Style="{StaticResource Settings.PairRight}">
+        <StackPanel x:Name="PlaylistSearchPanel" Grid.Column="2">
          <Grid Margin="0,0,0,12">
           <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <TextBlock Text="歌单搜索" FontSize="15" VerticalAlignment="Center"/>
@@ -100,10 +79,10 @@
         <ComboBox Width="190" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding PlaybackQualityOptions}" SelectedItem="{Binding PlaybackQualityRequest,Mode=OneWay}" ItemTemplate="{StaticResource Quality.Name}" SelectionChanged="PlaybackQuality_Changed" IsEnabled="{Binding CanEditQuality}" AutomationProperties.Name="起播目标音质"/>
        </StackPanel>
        <Grid x:Name="QualityPanels" local:SettingsLayout.Mode="Pair">
-        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="24"/><ColumnDefinition/></Grid.ColumnDefinitions>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <local:SettingsPriorityList x:Name="QualityPriorities" Title="音质优先顺序" Tag="quality" ItemsSource="{Binding QualityCategories}" CanEdit="{Binding CanEditQuality}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
-        <local:SettingsPriorityList x:Name="SpatialPriorities" Title="空间音频优先顺序" Tag="spatial" Style="{StaticResource Settings.PairRight}" ItemsSource="{Binding SpatialQualities}" CanEdit="{Binding CanEditQuality}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
+        <local:SettingsPriorityList x:Name="SpatialPriorities" Title="空间音频优先顺序" Tag="spatial" Grid.Column="2" ItemsSource="{Binding SpatialQualities}" CanEdit="{Binding CanEditQuality}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
        </Grid>
        <desktop:NoticeOutlet Message="{Binding QualityStatus}"/>
      </StackPanel>
@@ -118,11 +97,11 @@
       </Grid>
       <Border Style="{StaticResource Settings.ListSurface}">
        <Grid Height="264">
-       <ItemsControl x:Name="ExclusionList" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" ItemsSource="{Binding SourceExclusions}" AutomationProperties.Name="错源记录">
-        <ItemsControl.Style><Style TargetType="ItemsControl"><Style.Triggers><DataTrigger Binding="{Binding HasSourceExclusions}" Value="False"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></ItemsControl.Style>
+       <ItemsControl x:Name="ExclusionList" ItemsSource="{Binding SourceExclusions}" AutomationProperties.Name="错源记录">
+        <ItemsControl.Visibility><Binding Path="HasSourceExclusions" Converter="{StaticResource MeowFilm.BoolToVisibility}"/></ItemsControl.Visibility>
         <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
         <ItemsControl.Template><ControlTemplate TargetType="ItemsControl">
-         <ScrollViewer Style="{StaticResource MeowFilm.SettingsScrollViewer}" CanContentScroll="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsPresenter/></ScrollViewer>
+         <ScrollViewer Style="{StaticResource MeowFilm.SettingsScrollViewer}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><ItemsPresenter/></ScrollViewer>
         </ControlTemplate></ItemsControl.Template>
         <ItemsControl.ItemTemplate><DataTemplate>
          <Border Style="{StaticResource Settings.RowDivider}"><Grid Height="44" Margin="8,0">
@@ -131,13 +110,12 @@
           <TextBlock Grid.Column="1" Text="{Binding ProviderName}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
           <TextBlock Grid.Column="2" Text="{Binding PlatformName}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center"/>
           <Button Grid.Column="3" Content="恢复" Style="{StaticResource Settings.QuietButton}" Click="ExclusionRestore_Click" Tag="{Binding}"
-                  IsEnabled="{Binding DataContext.CanEdit,RelativeSource={RelativeSource AncestorType=ItemsControl}}"
-                  AutomationProperties.Name="{Binding SongText,StringFormat='恢复{0}的音源'}"/>
+                  IsEnabled="{Binding DataContext.CanEdit,ElementName=Root}"
+                  AutomationProperties.Name="{Binding SongText,Converter={StaticResource Settings.RestoreSourceName}}"/>
          </Grid></Border>
         </DataTemplate></ItemsControl.ItemTemplate>
        </ItemsControl>
-       <TextBlock Text="暂无错源记录" HorizontalAlignment="Center" VerticalAlignment="Center">
-        <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding HasSourceExclusions}" Value="False"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+       <TextBlock Text="暂无错源记录" HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource Settings.Subtitle}" Visibility="{Binding HasSourceExclusions,Converter={StaticResource Settings.InverseVisibility}}">
        </TextBlock>
        </Grid>
       </Border>
@@ -147,10 +125,10 @@
      <StackPanel>
       <TextBlock Text="歌词与封面" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,8"/>
       <Grid x:Name="MetadataPanels" local:SettingsLayout.Mode="Pair">
-       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
+       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="24"/><ColumnDefinition/></Grid.ColumnDefinitions>
        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
        <local:SettingsPriorityList x:Name="MetadataPriorities" Title="歌词平台优先顺序" Tag="metadata" ShowLogos="True" ItemsSource="{Binding MetadataPlatforms}" CanEdit="{Binding CanEditMetadata}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
-       <local:SettingsPriorityList x:Name="ArtworkPriorities" Title="封面平台优先顺序" Tag="metadata" Style="{StaticResource Settings.PairRight}" ShowLogos="True" ItemsSource="{Binding MetadataPlatforms}" CanEdit="{Binding CanEditMetadata}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
+       <local:SettingsPriorityList x:Name="ArtworkPriorities" Title="封面平台优先顺序" Tag="metadata" Grid.Column="2" ShowLogos="True" ItemsSource="{Binding MetadataPlatforms}" CanEdit="{Binding CanEditMetadata}" MoveRequested="Priority_Move" ToggleRequested="Priority_Toggle"/>
       </Grid>
      </StackPanel>
     </Border>
@@ -158,14 +136,13 @@
    </StackPanel>
   </ScrollViewer>
   <local:MusicSourcesSettingsView x:Name="SourcesPage" Grid.Row="1" Visibility="Collapsed"/>
-  <Popup x:Name="ExclusionPopup" PlacementTarget="{Binding ElementName=ExclusionAddButton}" desktop:DialogPlacement.Centered="True" StaysOpen="False" AllowsTransparency="True">
-   <Border Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16" Width="360" KeyboardNavigation.TabNavigation="Cycle">
-    <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>
+  <ContentDialog x:Name="ExclusionPopup">
+   <Border Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16" Width="360" TabFocusNavigation="Cycle">
     <StackPanel>
      <TextBlock Text="添加错源" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,12"/>
      <TextBlock Text="歌曲" Style="{StaticResource Settings.Subtitle}" Margin="0,0,0,6"/>
      <ComboBox x:Name="ExclusionSong" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding ExclusionSongs}" AutomationProperties.Name="歌曲">
-      <ComboBox.ItemTemplate><DataTemplate><TextBlock TextTrimming="CharacterEllipsis" Foreground="{Binding (TextElement.Foreground),RelativeSource={RelativeSource AncestorType=ContentPresenter}}"><Run Text="{Binding Name,Mode=OneWay}"/><Run Text="  "/><Run Text="{Binding Detail,Mode=OneWay}"/></TextBlock></DataTemplate></ComboBox.ItemTemplate>
+      <ComboBox.ItemTemplate><DataTemplate><TextBlock TextTrimming="CharacterEllipsis"><Run Text="{Binding Name,Mode=OneWay}"/><Run Text="  "/><Run Text="{Binding Detail,Mode=OneWay}"/></TextBlock></DataTemplate></ComboBox.ItemTemplate>
      </ComboBox>
      <TextBlock Text="音源" Style="{StaticResource Settings.Subtitle}" Margin="0,12,0,6"/>
      <ComboBox x:Name="ExclusionProvider" Style="{StaticResource Settings.ComboBox}" ItemsSource="{Binding ExclusionProviders}" DisplayMemberPath="Name" AutomationProperties.Name="音源"/>
@@ -177,27 +154,26 @@
      </StackPanel>
     </StackPanel>
    </Border>
-  </Popup>
-  <Popup x:Name="SearchAdvancedPopup" desktop:DialogPlacement.Centered="True" StaysOpen="False" AllowsTransparency="True"
+  </ContentDialog>
+  <ContentDialog x:Name="SearchAdvancedPopup" CloseButtonText="关闭"
          Opened="SearchAdvancedPopup_Opened" Closed="SearchAdvancedPopup_Closed">
-   <Grid Width="264" KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="SearchAdvancedPopup_KeyDown">
+   <Grid Width="264" TabFocusNavigation="Cycle" KeyDown="SearchAdvancedPopup_KeyDown">
     <Border x:Name="SearchAdvancedSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16">
-     <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>
      <Grid>
       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
       <TextBlock Text="单次请求页数" VerticalAlignment="Center"/>
       <TextBox x:Name="SearchPagesBox" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" HorizontalContentAlignment="Right"
-               MaxLength="10" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="单次请求页数"/>
+               MaxLength="10" LostFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="单次请求页数"/>
       <TextBlock Grid.Row="1" Text="平台并发数" VerticalAlignment="Center" Margin="0,10,0,0"/>
       <TextBox x:Name="SearchConcurrencyBox" Grid.Row="1" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" HorizontalContentAlignment="Right"
-               MaxLength="10" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="平台并发数"/>
+               MaxLength="10" LostFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="平台并发数"/>
       <TextBlock Grid.Row="2" Text="缓存时长（分钟）" VerticalAlignment="Center" Margin="0,10,0,0"/>
       <TextBox x:Name="SearchCacheBox" Grid.Row="2" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" HorizontalContentAlignment="Right"
-               MaxLength="4" LostKeyboardFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="缓存时长（分钟）"/>
+               MaxLength="4" LostFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="缓存时长（分钟）"/>
      </Grid>
     </Border>
    </Grid>
-  </Popup>
+  </ContentDialog>
  </Grid>
 </UserControl>

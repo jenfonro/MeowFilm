@@ -154,7 +154,6 @@ extension NativeMusicService {
     func adoptQueueTracks(_ tracks: [MusicNativeTrackData], epoch own: UUID,
                           authorization: MusicQueueAuthorization, intent: MusicQueueAuthorization) throws -> [MusicQueueTrackReference] {
         try check(own)
-        try musicRequire(tracks.reduce(0) { $0 + $1.data.count } <= MusicRemoteQueueSource.maximumBytes, .limit)
         var normalized: [MJ] = [], recommendations: [Data?] = []
         var previous: (track: MusicNativeTrackData, song: MJ, recommendation: Data?)?
         for track in tracks {
@@ -174,8 +173,7 @@ extension NativeMusicService {
                 return tracks.indices.map { i in
                     .init(songID: songs[i]["songId"].string, occurrenceID: UUID().uuidString.lowercased(),
                         platform: tracks[i].platform, sourceKey: normalized[i]["sources"].array[0]["sourceKey"].string,
-                        sourcePosition: tracks[i].sourcePosition, recommendation: recommendations[i],
-                        byteCount: tracks[i].data.count)
+                        sourcePosition: tracks[i].sourcePosition, recommendation: recommendations[i])
                 }
             }
         }

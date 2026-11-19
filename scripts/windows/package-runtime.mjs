@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { packageRuntime } from '../package-runtime.mjs';
-import { sourceReferences } from '../module-policy.mjs';
+import { discoverRuntimeSource, relocateRuntimeSource } from '../runtime-source.mjs';
 
 const MANIFEST = 'runtime-manifest.json';
 const TRANSPORT = 'windows-http-v1';
@@ -71,39 +71,6 @@ function inventory(root, relative = '', occupied = new Map()) {
   return { paths, occupied };
 }
 
-// Only platform imports are relocated. Remaining shared dependencies and legal
-// notices stay byte-for-byte from packageRuntime. Do not silently omit a new
-// platform helper, dynamic import or asset: extend this explicit mapping first.
-function relocate(source, imports, dynamicImports = new Map()) {
-  const references = sourceReferences(source);
-  check(references.unresolvedImports.length === 0, 'WINDOWS_IMPORT',
-    'Windows runtime module specifiers must be statically resolvable');
-  const seen = new Set(), dynamicSeen = new Set(), replacements = [];
-  for (const reference of references.imports) {
-    check(reference.kind === 'import', 'WINDOWS_IMPORT', 'Windows runtime may not use CommonJS imports');
-    const dynamic = reference.type === 'ImportExpression';
-    const mapping = dynamic ? dynamicImports : imports;
-    const consumed = dynamic ? dynamicSeen : seen;
-    check(mapping.has(reference.specifier) && !consumed.has(reference.specifier),
-      'WINDOWS_IMPORT', dynamic ? 'Unexpected or duplicate dynamic Windows runtime import'
-        : 'Unexpected or duplicate Windows runtime import');
-    consumed.add(reference.specifier);
-    const raw = source.slice(reference.start, reference.end);
-    replacements.push({
-      start: reference.start,
-      end: reference.end,
-      value: `${raw[0]}${mapping.get(reference.specifier)}${raw.at(-1)}`,
-    });
-  }
-  check(seen.size === imports.size && dynamicSeen.size === dynamicImports.size,
-    'WINDOWS_IMPORT', 'Windows runtime imports must match the explicit source closure');
-  let output = source;
-  for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
-    output = output.slice(0, replacement.start) + replacement.value + output.slice(replacement.end);
-  }
-  return Buffer.from(output);
-}
-
 /**
  * Offline Windows wrapper. The shared packager alone resolves dependencies,
  * retains licenses, validates the lock and creates a NEW output directory.
@@ -116,13 +83,12 @@ export async function packageWindowsRuntime({
 } = {}) {
   // Rejections here retain the shared packager's failed manifest, if it created
   // one. An existing output is never opened, adopted, altered or removed.
-  const manifest = await packageRuntime({ root, product, output, profile: 'common-native' });
+  const manifest = await packageRuntime({ root, product, output, profile: 'common-native', platform: 'windows' });
   root = realpathSync(root);
   output = resolve(output);
   const identity = lstatSync(output);
   const originalManifest = jsonBytes(manifest);
   let fd;
-  const sourceInputs = [];
   const assertOutput = () => {
     const current = lstatSync(output);
     check(current.isDirectory() && !current.isSymbolicLink() &&
@@ -166,7 +132,6 @@ export async function packageWindowsRuntime({
       readFileSync(fd).equals(originalManifest),
     'MANIFEST_CHANGED', 'Shared runtime manifest changed before Windows packaging');
     manifest.entry = `${WINDOWS_OUTPUT}/entries/${product}.mjs`;
-    manifest.modules = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform'];
     manifest.platform = 'win32';
     manifest.transport = TRANSPORT;
     manifest.status = 'building';
@@ -177,14 +142,7 @@ export async function packageWindowsRuntime({
     check((manifest.trustedNative ?? []).every(native => native.platform === 'win32' && native.arch === 'x64'),
       'NATIVE_TARGET_MISMATCH', 'Windows runtime requires the win-x64 native build');
     const occupied = audit();
-    const allowedSources = new Set([
-      'bootstrap.mjs', 'native-settings.mjs', 'entries/aggregate.mjs',
-    ]);
-    const sourceDirectory = checkedPath(root, WINDOWS_SOURCE);
-    const sourceTree = inventory(sourceDirectory);
-    check(sourceTree.paths.every(path => allowedSources.has(path)) &&
-      [...sourceTree.occupied.values()].every(item => !item.directory || item.path === 'entries'),
-    'WINDOWS_CLOSURE', 'Unexpected Windows runtime source; refusing to silently omit it');
+    const sourceTree = discoverRuntimeSource(root, 'windows').platform;
     function appendFile(path, bytes) {
       safeRelative(path);
       assertOutput();
@@ -214,37 +172,16 @@ export async function packageWindowsRuntime({
       manifest.files.push({ path, bytes: bytes.length, sha256: digest(bytes) });
       delete manifest.incompleteFile;
     }
-    const bootstrapImports = new Map([
-      ['node:net', 'node:net'],
-      ['node:path', 'node:path'],
-      ['@meowfilm/runtime-bridge', '@meowfilm/runtime-bridge'],
-      ['./native-settings.mjs', './native-settings.mjs'],
-    ]);
-    const settingsImports = new Map([
-      ['../../runtime/native-settings.mjs', '../native-settings.mjs'],
-    ]);
-    const entryImports = new Map([
-      ['@meowfilm/storage', '@meowfilm/storage'],
-      ['@meowfilm/script-host/storage', '@meowfilm/script-host/storage'],
-      ['../bootstrap.mjs', '../bootstrap.mjs'],
-      ['../../../runtime/entry.mjs', '../../entry.mjs'],
-    ]);
-    for (const [relative, imports, dynamicImports = new Map()] of [
-      ['bootstrap.mjs', bootstrapImports], ['native-settings.mjs', settingsImports],
-      ['entries/aggregate.mjs', entryImports],
-    ]) {
-      const source = `${WINDOWS_SOURCE}/${relative}`, path = `${WINDOWS_OUTPUT}/${relative}`;
+    for (const relative of sourceTree.files) {
+      const source = `${WINDOWS_SOURCE}/${relative}`;
       const input = readStable(root, source);
+      check(manifest.inputs.some(record => record.path === source && record.sha256 === digest(input)),
+        'SOURCE_CHANGED', 'Platform input differs from the resolved dependency graph');
       const text = new TextDecoder('utf-8', { fatal: true }).decode(input);
-      const bytes = relocate(text, imports, dynamicImports);
-      sourceInputs.push({ path: source, sha256: digest(input) });
+      const { path, bytes, imports } = relocateRuntimeSource(text, source, 'windows');
       appendFile(path, bytes);
-      manifest.relocations.push({
-        source, path, imports: [...imports].map(([from, to]) => ({ from, to })),
-        ...(dynamicImports.size ? { dynamicImports: [...dynamicImports].map(([from, to]) => ({ from, to })) } : {}),
-      });
+      manifest.relocations.push({ source, path, imports });
     }
-    manifest.inputs.push(...sourceInputs);
     for (const input of manifest.inputs) {
       check(digest(readStable(root, input.path)) === input.sha256,
         'SOURCE_CHANGED', 'Runtime build input changed during packaging');

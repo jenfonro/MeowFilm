@@ -1,4 +1,7 @@
-using System.Windows.Controls;
+using Color = global::Windows.UI.Color;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -61,12 +64,12 @@ public static partial class MusicUiTests
                 text = "[00:01]<00:01.000>甲<00:02.000>乙<00:03.000>\n[00:05]第二句" });
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
             var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            using var source = LyricInputSource(detail);
+            using var source = new DesktopTestUi.Host(detail, 1110, 800);
             try
             {
                 f.Playback.Tick(1.25);
                 Render(detail, 1110, 800); await Drain();
-                GeneralAppearanceTests.SavePreview(detail, "player-lyric-timing-rail", 1110, 800);
+                await GeneralAppearanceTests.SavePreview(detail, "player-lyric-timing-rail", 1110, 800);
                 var list = (MusicLyricList)detail.FindName("LyricList");
                 var delay = (Button)detail.FindName("DelayLyricButton");
                 var advance = (Button)detail.FindName("AdvanceLyricButton");
@@ -92,7 +95,7 @@ public static partial class MusicUiTests
             finally
             {
                 f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-                source.RootVisual = null;
+                source.Window.Content = null;
             }
         });
 
@@ -199,8 +202,8 @@ public static partial class MusicUiTests
 
     private static async Task AssertLyricTimingIconAsync(Button button, bool expectCircle = true)
     {
-        True(button.Content is System.Windows.FrameworkElement &&
-            Visuals(button).OfType<System.Windows.Shapes.Path>().Any(path => path.Data is not null),
+        True(button.Content is FrameworkElement &&
+            Visuals(button).OfType<Microsoft.UI.Xaml.Shapes.Path>().Any(path => path.Data is not null),
             "lyric timing uses directional vector artwork instead of a plain text button");
         if (expectCircle)
             True(Visuals(button).OfType<Border>().Any(border =>
@@ -210,24 +213,24 @@ public static partial class MusicUiTests
             True(Visuals(button).OfType<Border>().All(border => border.BorderThickness == default),
                 "the desktop timing control has no circular outline");
         Equal("5", Visuals(button).OfType<TextBlock>().Single().Text);
-        True(System.Windows.Automation.AutomationProperties.GetName(button).Contains("0.5") &&
-            button.ToolTip?.ToString()?.Contains("0.5") == true,
+        True(Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button).Contains("0.5") &&
+            ToolTipService.GetToolTip(button)?.ToString()?.Contains("0.5") == true,
             "the icon retains the exact half-second accessible name and tooltip");
         bool highContrast = DesktopTheme.GetIsHighContrast(button);
-        var admission = System.Windows.Data.BindingOperations.GetBindingExpression(button, System.Windows.UIElement.IsEnabledProperty)!;
+        var admission = button.GetBindingExpression(Control.IsEnabledProperty)!;
         try
         {
             DesktopTheme.SetIsHighContrast(button, true); await Drain();
-            Equal(System.Windows.SystemColors.WindowTextColor,
-                ((System.Windows.Media.SolidColorBrush)button.Foreground).Color);
-            True(Visuals(button).OfType<System.Windows.Shapes.Path>().All(path => Equals(path.Stroke, button.Foreground)),
+            Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText),
+                ((SolidColorBrush)button.Foreground).Color);
+            True(Visuals(button).OfType<Microsoft.UI.Xaml.Shapes.Path>().All(path => Equals(path.Stroke, button.Foreground)),
                 "the vector follows system high-contrast ink");
-            button.SetCurrentValue(System.Windows.UIElement.IsEnabledProperty, false); await Drain();
-            Equal(System.Windows.SystemColors.GrayTextColor,
-                ((System.Windows.Media.SolidColorBrush)button.Foreground).Color);
+            button.SetValue(Control.IsEnabledProperty, false); await Drain();
+            Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.GrayText),
+                ((SolidColorBrush)button.Foreground).Color);
             if (expectCircle)
-                Equal(System.Windows.SystemColors.GrayTextColor,
-                    ((System.Windows.Media.SolidColorBrush)button.BorderBrush).Color);
+                Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.GrayText),
+                    ((SolidColorBrush)button.BorderBrush).Color);
             else
                 True(Visuals(button).OfType<Border>().All(border => border.BorderThickness == default),
                     "high contrast and disabled state do not introduce a desktop timing outline");
@@ -235,7 +238,7 @@ public static partial class MusicUiTests
         finally
         {
             DesktopTheme.SetIsHighContrast(button, highContrast);
-            admission.UpdateTarget(); await Drain();
+            button.SetBinding(Control.IsEnabledProperty, admission.ParentBinding); await Drain();
         }
     }
 }

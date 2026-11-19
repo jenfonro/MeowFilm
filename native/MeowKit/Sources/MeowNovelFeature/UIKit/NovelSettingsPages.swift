@@ -53,6 +53,12 @@ open class NovelTablePage: PageViewController, UITableViewDataSource, UITableVie
         }
     }
     public func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { rows.count }
+    public func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        table.heightForHeader(in: section)
+    }
+    public func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        table.viewForHeader(in: section, title: nil, theme: theme)
+    }
     public func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let row = rows[indexPath.row]
         let isLast = indexPath.row == rows.count - 1
@@ -68,7 +74,7 @@ open class NovelTablePage: PageViewController, UITableViewDataSource, UITableVie
         let input = ManagementDialog.input(placeholder: title)
         input.text = value; input.keyboardType = keyboard; input.autocapitalizationType = .none
         input.accessibilityLabel = title; input.accessibilityIdentifier = "novel.settings.input"
-        dialog.body.addArrangedSubview(input)
+        dialog.addInput(input, title: title)
         dialog.submit = { try save(input.text ?? ""); return true }
         present(dialog, animated: true)
     }

@@ -3,7 +3,6 @@ import { BridgeError } from '@meowfilm/runtime-bridge';
 import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const blocks = new Set(['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences']);
-export const nativeSettingsFrameBytes = 8 * 1024 * 1024;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const codes = new Set(['INVALID_REQUEST', 'PERMISSION_DENIED', 'CLOSED', 'CANCELLED', 'TIMEOUT',
   'STORAGE_ERROR', 'CORRUPT_STORAGE', 'STORAGE_CONFLICT', 'COMMIT_UNKNOWN']);
@@ -34,8 +33,6 @@ export function createNativeSettings(stream, stop) {
       return Promise.reject(new BridgeError('INVALID_REQUEST'));
     const id = ++sequence;
     const line = stringifyJSONValue({ kind, id, block, ...extra }, -2) + '\n';
-    if (Buffer.byteLength(line) - 1 > nativeSettingsFrameBytes)
-      return Promise.reject(new BridgeError('INVALID_REQUEST'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => fail('TIMEOUT'), 5000);
       pending.set(id, { block, resolve, reject, timer });
@@ -59,7 +56,6 @@ export function createNativeSettings(stream, stop) {
         const end = newline < 0 ? bytes.length : newline;
         const part = bytes.subarray(offset, end);
         length += part.length;
-        if (length > nativeSettingsFrameBytes) { fail('INVALID_RESPONSE'); return; }
         chunks.push(part);
         offset = end + 1;
         if (newline < 0) return;

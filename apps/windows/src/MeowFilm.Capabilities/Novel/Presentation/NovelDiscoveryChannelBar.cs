@@ -1,8 +1,10 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -15,7 +17,7 @@ internal sealed class NovelDiscoveryChannelBar : Grid
     private readonly Canvas overlay = new() { Visibility = Visibility.Collapsed };
     private readonly Border expansion = new() { Padding = new(12, 0, 12, 0) };
     private readonly WrapPanel expandedChoices = new();
-    private Window? owner;
+    private DesktopWindow? owner;
     private ScrollViewer? pageScroll;
     private bool arranging;
 
@@ -26,29 +28,30 @@ internal sealed class NovelDiscoveryChannelBar : Grid
         AutomationProperties.SetName(this, "发现频道");
         AutomationProperties.SetAutomationId(this, "novel.discovery.channels");
         ColumnDefinitions.Add(new()); ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        var row = new StackPanel { Orientation = Orientation.Horizontal, ClipToBounds = true };
+        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        row.SizeChanged += (_, _) => row.Clip = new RectangleGeometry { Rect = new(0, 0, row.ActualWidth, row.ActualHeight) };
         Children.Add(row);
         foreach (var tab in this.tabs)
         {
             row.Children.Add(tab);
             tab.Checked += (_, _) => ArrangeChannels();
             tab.Click += (_, _) => Close();
-            tab.PreviewKeyDown += ChannelKeyDown;
+            tab.KeyDown += ChannelKeyDown;
         }
         more = NovelUi.Button("展开频道", Toggle);
-        more.SetResourceReference(StyleProperty, "Novel.Discovery.Action");
+        more.UseResource(StyleProperty, "Novel.Discovery.Action");
         more.Margin = new(8, 0, 8, 0); more.Padding = new(0); more.Width = 30;
         more.VerticalAlignment = VerticalAlignment.Center; more.Visibility = Visibility.Collapsed;
         AutomationProperties.SetAutomationId(more, "novel.discovery.channels.expand");
-        var icon = new System.Windows.Shapes.Path
+        var icon = new Microsoft.UI.Xaml.Shapes.Path
         {
-            Data = Geometry.Parse("M1,1 L6,6 11,1"), Width = 11, Height = 6, Stretch = Stretch.Fill,
+            Data = NovelPresentation.Geometry("M1,1 L6,6 11,1"), Width = 11, Height = 6, Stretch = Stretch.Fill,
             StrokeThickness = 1.4, StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round,
             StrokeLineJoin = PenLineJoin.Round, RenderTransformOrigin = new(.5, .5), RenderTransform = chevron
         };
-        icon.SetBinding(System.Windows.Shapes.Shape.StrokeProperty, new System.Windows.Data.Binding("Foreground") { Source = more });
+        icon.SetBinding(Microsoft.UI.Xaml.Shapes.Shape.StrokeProperty, new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath("Foreground"), Source = more });
         more.Content = icon; Grid.SetColumn(more, 1); Children.Add(more);
-        expansion.SetResourceReference(StyleProperty, "MeowFilm.FloatingSurface");
+        expansion.UseResource(StyleProperty, "MeowFilm.FloatingSurface");
         AutomationProperties.SetName(expansion, "全部频道");
         AutomationProperties.SetAutomationId(expansion, "novel.discovery.channels.expanded");
         var scroll = new ScrollViewer
@@ -57,19 +60,19 @@ internal sealed class NovelDiscoveryChannelBar : Grid
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
         scroll.Resources.MergedDictionaries.Add(new()
-            { Source = new Uri("/MeowFilm.Desktop;component/SettingsScrollChrome.xaml", UriKind.Relative) });
-        scroll.SetResourceReference(StyleProperty, "MeowFilm.SettingsScrollViewer");
+            { Source = new Uri("ms-appx:///MeowFilm.Desktop/SettingsScrollChrome.xaml") });
+        scroll.UseResource(StyleProperty, "MeowFilm.SettingsScrollViewer");
         expansion.Child = scroll; overlay.Children.Add(expansion); Canvas.SetTop(expansion, 48);
         Grid.SetColumnSpan(overlay, 2); Children.Add(overlay);
         Loaded += (_, _) => ArrangeChannels();
         SizeChanged += (_, _) => { Close(); ArrangeChannels(); };
         Unloaded += (_, _) => Close();
-        IsVisibleChanged += (_, _) => { if (!IsVisible) Close(); };
-        PreviewKeyDown += (_, e) =>
+        _ = new NovelPresentation.VisibilityWatch(this, visible => { if (!visible) Close(); });
+        KeyDown += (_, e) =>
         {
-            if (e.Key == Key.Escape && overlay.Visibility == Visibility.Visible)
-            { Close(); more.Focus(); e.Handled = true; }
-            else if (ReferenceEquals(e.OriginalSource, more) && e.Key == Key.Down)
+            if (e.Key == VirtualKey.Escape && overlay.Visibility == Visibility.Visible)
+            { Close(); more.Focus(FocusState.Programmatic); e.Handled = true; }
+            else if (ReferenceEquals(e.OriginalSource, more) && e.Key == VirtualKey.Down)
             { if (overlay.Visibility != Visibility.Visible) Toggle(); e.Handled = true; }
         };
     }
@@ -119,35 +122,36 @@ internal sealed class NovelDiscoveryChannelBar : Grid
     private void Toggle()
     {
         if (overlay.Visibility == Visibility.Visible) { Close(); return; }
-        if (!IsVisible || more.Visibility != Visibility.Visible) return;
+        if (!DesktopVisual.IsVisible(this) || more.Visibility != Visibility.Visible) return;
         expandedChoices.Children.Clear();
         foreach (var tab in tabs)
         {
             var choice = new RadioButton
             {
-                Content = tab.Content, ToolTip = tab.Content, IsChecked = tab.IsChecked,
+                Content = tab.Content, IsChecked = tab.IsChecked,
                 GroupName = "novel.discovery.expanded-channels", MaxWidth = Math.Max(0, ActualWidth - 24)
             };
-            choice.SetResourceReference(StyleProperty, "Novel.Discovery.Tab");
+            ToolTipService.SetToolTip(choice, tab.Content);
+            choice.UseResource(StyleProperty, "Novel.Discovery.Tab");
             AutomationProperties.SetName(choice, AutomationProperties.GetName(tab));
             AutomationProperties.SetAutomationId(choice, AutomationProperties.GetAutomationId(tab) + ".expanded");
             choice.Checked += (_, _) => { if (overlay.Visibility == Visibility.Visible) Select(tab); };
             choice.Click += (_, _) => { if (overlay.Visibility == Visibility.Visible) Select(tab); };
-            choice.PreviewKeyDown += (_, e) => Navigate(tab, e);
+            choice.KeyDown += (_, e) => Navigate(tab, e);
             expandedChoices.Children.Add(choice);
         }
         expansion.Width = ActualWidth; overlay.Visibility = Visibility.Visible;
         chevron.Angle = 180; AutomationProperties.SetName(more, "收起频道");
-        owner = Window.GetWindow(this);
+        owner = DesktopWindow.GetWindow(this);
         if (owner is not null)
         {
-            owner.PreviewMouseDown += OutsidePressed; owner.Deactivated += OwnerChanged;
-            owner.LocationChanged += OwnerChanged; owner.SizeChanged += OwnerResized;
+            owner.Root.AddHandler(PointerPressedEvent, new PointerEventHandler(OutsidePressed), true); owner.Deactivated += OwnerChanged;
+            owner.Root.SizeChanged += OwnerResized;
         }
         for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null;
             parent = VisualTreeHelper.GetParent(parent))
-            if (parent is ScrollViewer scroll) { pageScroll = scroll; scroll.ScrollChanged += PageScrolled; break; }
-        expandedChoices.Children.OfType<RadioButton>().FirstOrDefault(choice => choice.IsChecked == true)?.Focus();
+            if (parent is ScrollViewer scroll) { pageScroll = scroll; scroll.ViewChanged += PageScrolled; break; }
+        expandedChoices.Children.OfType<RadioButton>().FirstOrDefault(choice => choice.IsChecked == true)?.Focus(FocusState.Programmatic);
     }
 
     internal void Close()
@@ -156,31 +160,30 @@ internal sealed class NovelDiscoveryChannelBar : Grid
         AutomationProperties.SetName(more, "展开频道");
         if (owner is not null)
         {
-            owner.PreviewMouseDown -= OutsidePressed; owner.Deactivated -= OwnerChanged;
-            owner.LocationChanged -= OwnerChanged; owner.SizeChanged -= OwnerResized; owner = null;
+            owner.Root.RemoveHandler(PointerPressedEvent, new PointerEventHandler(OutsidePressed)); owner.Deactivated -= OwnerChanged;
+            owner.Root.SizeChanged -= OwnerResized; owner = null;
         }
-        if (pageScroll is not null) { pageScroll.ScrollChanged -= PageScrolled; pageScroll = null; }
+        if (pageScroll is not null) { pageScroll.ViewChanged -= PageScrolled; pageScroll = null; }
     }
 
     private void Select(RadioButton tab)
     {
-        Close(); tab.Visibility = Visibility.Visible; tab.Focus(); tab.IsChecked = true; ArrangeChannels();
+        Close(); tab.Visibility = Visibility.Visible; tab.Focus(FocusState.Programmatic); tab.IsChecked = true; ArrangeChannels();
     }
-    private void ChannelKeyDown(object sender, KeyEventArgs e) => Navigate((RadioButton)sender, e);
-    private void Navigate(RadioButton tab, KeyEventArgs e)
+    private void ChannelKeyDown(object sender, KeyRoutedEventArgs e) => Navigate((RadioButton)sender, e);
+    private void Navigate(RadioButton tab, KeyRoutedEventArgs e)
     {
-        if (tabs.Length == 0 || e.Key is not (Key.Home or Key.End or Key.Left or Key.Right)) return;
+        if (tabs.Length == 0 || e.Key is not (VirtualKey.Home or VirtualKey.End or VirtualKey.Left or VirtualKey.Right)) return;
         int index = Array.IndexOf(tabs, tab);
-        int next = e.Key switch { Key.Home => 0, Key.End => tabs.Length - 1,
-            Key.Left => (index + tabs.Length - 1) % tabs.Length, _ => (index + 1) % tabs.Length };
+        int next = e.Key switch { VirtualKey.Home => 0, VirtualKey.End => tabs.Length - 1,
+            VirtualKey.Left => (index + tabs.Length - 1) % tabs.Length, _ => (index + 1) % tabs.Length };
         Select(tabs[next]); e.Handled = true;
     }
-    private void OutsidePressed(object sender, MouseButtonEventArgs e)
+    private void OutsidePressed(object sender, PointerRoutedEventArgs e)
     {
-        if (e.OriginalSource is not DependencyObject target || !IsAncestorOf(target)) Close();
+        if (e.OriginalSource is not DependencyObject target || !DesktopVisual.Contains(this, target)) Close();
     }
     private void OwnerChanged(object? sender, EventArgs e) => Close();
     private void OwnerResized(object sender, SizeChangedEventArgs e) => Close();
-    private void PageScrolled(object sender, ScrollChangedEventArgs e)
-    { if (ReferenceEquals(e.OriginalSource, pageScroll) && (e.VerticalChange != 0 || e.HorizontalChange != 0)) Close(); }
+    private void PageScrolled(object? sender, ScrollViewerViewChangedEventArgs e) => Close();
 }

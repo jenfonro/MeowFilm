@@ -12,6 +12,7 @@ public static partial class MusicNativeCatalogTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in ContentCases()) yield return test;
         foreach (var test in NextCases()) yield return test;
         yield return new("Native catalog public boundary borrows platform and library", Boundary);
         yield return new("Native catalog base typed routes preserve UI DTO and continuation", BaseRoutes);
@@ -56,7 +57,7 @@ public static partial class MusicNativeCatalogTests
         yield return new("Native catalog close drains ignored read cancellation and borrows dependencies", CloseRead);
         yield return new("Native catalog close drains admitted CAS without pretending cancellation rollback", CloseCommit);
         yield return new("Native catalog bounded close fails until actual drain rather than disposing dependencies", CloseTimeout);
-        yield return new("Native catalog field and storage capacity checks never admit partial persistence", Budgets);
+        yield return new("Native catalog large fields and stages preserve complete input and storage results", Budgets);
     }
 
     private static void Check(bool value, string message = "Assertion failed")
@@ -126,7 +127,7 @@ public static partial class MusicNativeCatalogTests
             globalCollectionId = (string?)null, source = 1, listVersion = 7 };
 
     private sealed record Call(string Method, object? Request, CancellationToken Token);
-    private sealed class Platform : IMusicPlatformCatalog, IMusicArtistCatalog
+    private sealed class Platform : IMusicPlatformCatalog, IMusicArtistCatalog, IMusicDailyStylePreferences
     {
         private readonly object gate = new();
         private readonly List<Call> calls = [];
@@ -152,6 +153,7 @@ public static partial class MusicNativeCatalogTests
         }
         public Task<JsonElement> SearchAsync(MusicSearchRequest r, CancellationToken t = default) => Run("search", r, t);
         public Task<JsonElement> SongAsync(MusicSongRequest r, CancellationToken t = default) => Run("song", r, t);
+        public Task<JsonElement> PlaylistsAsync(MusicPlaylistsRequest r, CancellationToken t = default) => Run("playlists", r, t);
         public Task<JsonElement> PlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Run("playlist", r, t);
         public Task<JsonElement> CompletePlaylistAsync(MusicPlaylistRequest r, CancellationToken t = default) => Run("playlist.complete", r, t);
         public Task<JsonElement> HomeAsync(MusicHomeRequest r, CancellationToken t = default) => Run("home", r, t);
@@ -165,6 +167,11 @@ public static partial class MusicNativeCatalogTests
         public Task<JsonElement> QueueRecommendationsAsync(MusicQueueRecommendationsRequest r, CancellationToken t = default) => Run("queueRecommendations", r, t);
         public Task<JsonElement> AlbumAsync(MusicAlbumRequest r, CancellationToken t = default) => Run("album", r, t);
         public Task<JsonElement> ArtistAsync(MusicArtistRequest r, CancellationToken t = default) => Run("artist", r, t);
+        public Task<MusicDailyStyleEditor> OpenDailyStyleEditorAsync(CancellationToken t = default) =>
+            Task.FromResult(new MusicDailyStyleEditor("fixture:42", 1, "42", []));
+        public async Task<MusicDailyStyleSaveResult> SaveDailyStyleAsync(MusicDailyStyleEditor editor,
+            MusicDailyStyleSelection selection, CancellationToken t = default) =>
+            new(MusicDailyStyleWriteStatus.Confirmed, await Run("dailyStyle.save", selection, t), true, null);
         public JsonElement Describe() => E(new { platform = "explicit-fixture", enabled = true });
         public void Invalidate(string? platform = null) { lock (gate) Invalidations.Add(platform); }
         public void Dispose() => Disposed = true;
@@ -283,8 +290,9 @@ public static partial class MusicNativeCatalogTests
         var canonical = O(E(new
         {
             platform = "wy",
-            sections = new[] { new { id = "songs", title = "Current songs", type = "songs",
-                items = new[] { new { id = "visible-song", song = MusicSongFixture.Online(
+            sections = new[] { new { id = "songs", title = "Current songs", layout = "song-list",
+                items = new[] { new { id = "visible-song", kind = "song", title = "Actual title",
+                    subtitle = "Actual artist", cover = "https://images.example.test/actual.png", song = MusicSongFixture.Online(
                     "wy", "actual-song", "Actual title", "Actual artist", duration: 180,
                     cover: "https://images.example.test/actual.png") } } } },
             more = false
@@ -327,7 +335,8 @@ public static partial class MusicNativeCatalogTests
                 JsonElement.DeepEquals(queue.GetProperty("entries"), before.GetProperty("entries")));
         }
         Check(f.Platform.Calls.Length == variants.Length, "Canonical consumption cannot request supplemental confirmation");
-        var visible = MusicSongFixture.Online("wy", "direct-song", "Direct card");
+        var visible = new JsonObject { ["kind"] = "song", ["title"] = "Direct card",
+            ["song"] = MusicSongFixture.Online("wy", "direct-song", "Direct card") };
         visible["available"] = false; visible["requiresAccount"] = true; visible["display"] = true;
         visible["errorCode"] = "AUTH_REQUIRED"; visible["key"] = "direct-key";
         visible["playbackSource"] = new JsonObject { ["type"] = "playlist", ["id"] = "origin" };
@@ -335,13 +344,13 @@ public static partial class MusicNativeCatalogTests
         var preview = new JsonArray();
         for (int i = 0; i < 3; i++) preview.Add(new JsonObject { ["title"] = "Preview " + i });
         preview.Add(new JsonObject { ["song"] = new JsonObject { ["sources"] = false } });
-        var chart = new JsonObject { ["id"] = "chart", ["name"] = "Chart", ["kind"] = "playlist", ["preview"] = preview };
-        var page = new JsonObject { ["items"] = new JsonArray(visible, hidden, chart,
-            new JsonObject { ["song"] = new JsonObject { ["sources"] = false } }) };
+        var chart = new JsonObject { ["id"] = "chart", ["title"] = "Chart", ["kind"] = "playlist", ["preview"] = preview };
+        var page = new JsonObject { ["sections"] = new JsonArray(new JsonObject { ["layout"] = "playlist-rail",
+            ["items"] = new JsonArray(visible, hidden, chart, new JsonObject { ["song"] = new JsonObject { ["sources"] = false } }) }) };
         f.Platform.Handler = _ => Task.FromResult(J(page));
         var adopted = Ok(await f.Run("home", new { platform = "wy" }));
         var cards = MusicCatalogDto.Read(adopted, "wy", "home", "").Single().Items;
-        Check(cards.Count == 2);
+        Check(cards.Count == 4 && !cards[1].Display && cards[3].Song is null);
         var direct = cards.Single(card => card.Song is not null);
         Check(!direct.Available && direct.RequiresAccount && direct.Display && direct.ErrorCode == "AUTH_REQUIRED" &&
             direct.StableKey == "direct-key" && direct.PlaybackSource!.Value.GetProperty("id").GetString() == "origin");
@@ -350,15 +359,14 @@ public static partial class MusicNativeCatalogTests
             new JsonObject { ["items"] = new JsonArray(new JsonObject { ["song"] = new JsonObject { ["sources"] = false } }) } })
         {
             f.Platform.Handler = _ => Task.FromResult(J(malformed));
-            Error(await f.Run("playlist", new { platform = "wy", id = "42" }), "INVALID_RESPONSE");
+            var partial = Ok(await f.Run("playlist", new { platform = "wy", id = "42" }));
+            Check(MusicCatalogDto.Read(partial, "wy", "playlist", "").Count == 1);
         }
         foreach (var malformed in new[] { new JsonObject(), new JsonObject { ["items"] = false },
             new JsonObject { ["items"] = new JsonArray(new JsonObject { ["count"] = "bad" }) } })
         {
-            bool failed = false;
-            try { _ = MusicCatalogDto.Read(J(malformed), "wy", "home", ""); }
-            catch (MusicOperationException error) when (error.Code == "INVALID_RESPONSE") { failed = true; }
-            Check(failed, "Missing or wholly unusable content cannot become a successful empty page");
+            Check(MusicCatalogDto.Read(J(malformed), "wy", "home", "").Count == 0,
+                "missing display fields do not become a content admission gate");
         }
         Check(MusicCatalogDto.Read(E(new { items = Array.Empty<object>() }), "wy", "playlist", "").Single().Items.Count == 0);
 
@@ -911,8 +919,13 @@ public static partial class MusicNativeCatalogTests
         var huge = O(Song("wy", 0)); huge["title"] = new string('x', 32 * 1024 * 1024);
         var large = J(huge);
         f.Platform.Pages = p => Page(p, 1, _ => large);
-        Error(await f.Run("playlist.prepare", new { platform = "wy", id = "42" }), "LIMIT");
-        Check(f.Store.Writes == writes);
+        var stage = await f.Prepare();
+        Check(N(stage, "count") == 1 && f.Store.Writes == writes + 1 && N(await f.Queue(), "total") == 0);
+        Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 0 }));
+        var queue = await f.Queue();
+        Check(N(queue, "total") == 1 && S(queue.GetProperty("current").GetProperty("song"), "title") == S(large, "title"));
+        Error(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "play", expectedVersion = 1 }),
+            "CATALOG_TOKEN_EXPIRED");
         f.Platform.Pages = p => Page(p, 1); await f.Prepare(); await f.Prepare();
     }
 }

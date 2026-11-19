@@ -147,15 +147,16 @@ public static class StorageTests
             }
             finally { release.TrySetResult(); await database.DisposeAsync(); }
         });
-        yield return Case("pre-cancelled-and-oversized-admission-do-not-execute", async () =>
+        yield return Case("pre-cancelled-admission-does-not-execute-and-a-large-solitary-write-is-accepted", async () =>
         {
             await using var database = new NativeDatabase(Root());
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
             int executions = 0;
             try { await database.WriteAsync(_ => ++executions, cancelled.Token); throw new InvalidOperationException("Cancelled admission"); }
             catch (OperationCanceledException) { }
-            await Error(DocumentStoreError.Limit, () => database.WriteAsync(_ => ++executions, retainedBytes: 32 * 1024 * 1024));
             Check(executions == 0);
+            await database.WriteAsync(_ => ++executions, retainedBytes: 32 * 1024 * 1024);
+            Check(executions == 1);
         });
         yield return Case("queue-and-retained-input-budgets-are-bounded", async () =>
         {

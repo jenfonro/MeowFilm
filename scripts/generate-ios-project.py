@@ -31,16 +31,11 @@ def source_paths(root, directories):
         folder = base / directory
         if folder.is_symlink() or folder.resolve() != folder.absolute():
             raise ValueError("Linked source directory: " + directory)
-        if not folder.is_dir():
-            raise ValueError("Missing source directory: " + directory)
-        count = len(result)
         for path in sorted(folder.rglob("*")):
             if path.is_symlink() or path.resolve() != path.absolute() or not path.resolve().is_relative_to(base.resolve()):
                 raise ValueError("Linked or escaped source: " + str(path))
             if path.is_file() and path.suffix == ".swift":
                 result.append(path.relative_to(base).as_posix())
-        if len(result) == count:
-            raise ValueError("Empty source directory: " + directory)
     if not result:
         raise ValueError("Empty source group: " + ", ".join(directories))
     return sorted(result)

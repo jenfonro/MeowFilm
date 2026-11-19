@@ -11,7 +11,7 @@ namespace MeowFilm.Platform.Runtime;
 /// <summary>Owns one child, its Job, private lifetime pipe and HTTP client.</summary>
 public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSource
 {
-    private const int HandshakeBytes = 64 * 1024;
+    private const int PipeBufferBytes = 64 * 1024;
     private readonly Process process;
     private readonly int processId;
     private readonly NamedPipeServerStream pipe;
@@ -92,7 +92,7 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         try
         {
             server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, HandshakeBytes, HandshakeBytes);
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, PipeBufferBytes, PipeBufferBytes);
             var start = new ProcessStartInfo(node)
             {
                 UseShellExecute = false, CreateNoWindow = true,
@@ -123,7 +123,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
                 throw new BridgeException("INVALID_MESSAGE");
             var config = BridgeCodec.EncodeJSONValue(settingsStore is null ? new { sessionId, dataRoot } :
                 (object)new { sessionId, dataRoot, nativeSettings = true });
-            if (config.Length + 1 > HandshakeBytes) throw new BridgeException("INVALID_MESSAGE");
             await server.WriteAsync(config, deadline.Token).ConfigureAwait(false);
             await server.WriteAsync("\n"u8.ToArray(), deadline.Token).ConfigureAwait(false);
             await server.FlushAsync(deadline.Token).ConfigureAwait(false);
@@ -131,11 +130,11 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             var ready = await settingsPipe.ReadyAsync(deadline.Token).ConfigureAwait(false);
             client = new RuntimeHttpClient(ready);
             runtime = new NodeRuntime(child, server, client, output, error, exited, job,
-                RuntimeHttpProtocol.ValidateEndpoint(ready), ownerRevoked, settingsPipe);
+                ready, ownerRevoked, settingsPipe);
             var description = await client.DescribeAsync(deadline.Token).ConfigureAwait(false);
             if (!description.GetProperty("ok").GetBoolean())
                 throw new BridgeException(description.GetProperty("code").GetString()!);
-            _ = ValidateDescription(description.GetProperty("value"), bundle.Product, expectedModules);
+            RuntimeHttpProtocol.ValidateDescription(description.GetProperty("value"), bundle.Product, expectedModules);
             deadline.Token.ThrowIfCancellationRequested();
             if (!runtime.IsConnected) throw new BridgeException("CLOSED");
             return runtime;
@@ -169,9 +168,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         }
     }
 
-    public static HashSet<string> ValidateDescription(JsonElement description, string product,
-        IReadOnlyList<RuntimeModule> modules) => RuntimeHttpProtocol.ValidateDescription(description, product, modules);
-
     public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
     {
         if (!IsConnected) return Task.FromException<JsonElement>(new BridgeException("CLOSED"));
@@ -196,12 +192,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
     {
         if (!IsConnected) return Task.FromException<JsonElement>(new BridgeException("CLOSED"));
         return client.UploadSourceAsync(module, installationId, sourceRevision, source, basename, cancellationToken);
-    }
-
-    public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default)
-    {
-        if (!IsConnected) return Task.FromException<byte[]>(new BridgeException("CLOSED"));
-        return client.ReadImageAsync(reference, maximumBytes, cancellationToken);
     }
 
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)

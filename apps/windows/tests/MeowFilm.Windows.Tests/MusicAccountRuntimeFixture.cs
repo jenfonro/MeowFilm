@@ -73,7 +73,7 @@ internal sealed class MusicAccountRuntimeFixture : IAsyncDisposable
     internal static string Code(JsonElement value) => value.GetProperty("code").GetString()!;
     internal static void Check(bool value, string reason = "Canonical account invariant") { if (!value) throw new InvalidOperationException(reason); }
     // Local image bytes only; no QQ transport, callback or credential recipe.
-    internal static byte[] QrPng(int width = 16, int inflated = 0)
+    internal static byte[] QrPng(int width = 16, int inflated = 0, int height = 16, bool noise = false, int chunkBytes = 0)
     {
         using var output = new MemoryStream(); output.Write(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
         void Chunk(string kind, byte[] data)
@@ -85,13 +85,22 @@ internal sealed class MusicAccountRuntimeFixture : IAsyncDisposable
             BinaryPrimitives.WriteUInt32BigEndian(length, ~crc); output.Write(length);
         }
         byte[] header = new byte[13]; BinaryPrimitives.WriteInt32BigEndian(header, width);
-        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(4), 16); header[8] = 8; Chunk("IHDR", header);
-        byte[] pixels = new byte[inflated > 0 ? inflated : 16 * (width + 1)];
-        for (int y = 0; y < 16 && inflated == 0; y++)
-            for (int x = 0; x < width; x++) pixels[y * (width + 1) + x + 1] = (byte)((x + y) % 2 == 0 ? 0 : 255);
+        BinaryPrimitives.WriteInt32BigEndian(header.AsSpan(4), height); header[8] = 8; Chunk("IHDR", header);
+        byte[] pixels = new byte[inflated > 0 ? inflated : height * (width + 1)];
+        if (noise) new Random(42).NextBytes(pixels);
+        for (int y = 0; y < height && inflated == 0; y++)
+        {
+            pixels[y * (width + 1)] = 0;
+            if (!noise)
+                for (int x = 0; x < width; x++) pixels[y * (width + 1) + x + 1] = (byte)((x + y) % 2 == 0 ? 0 : 255);
+        }
         using var compressed = new MemoryStream();
         using (var zlib = new ZLibStream(compressed, CompressionLevel.SmallestSize, leaveOpen: true)) zlib.Write(pixels);
-        Chunk("IDAT", compressed.ToArray()); Chunk("IEND", []); return output.ToArray();
+        byte[] data = compressed.ToArray();
+        if (chunkBytes == 0) chunkBytes = data.Length;
+        for (int start = 0; start < data.Length; start += chunkBytes)
+            Chunk("IDAT", data.AsSpan(start, Math.Min(chunkBytes, data.Length - start)).ToArray());
+        Chunk("IEND", []); return output.ToArray();
     }
     public async ValueTask DisposeAsync()
     {

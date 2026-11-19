@@ -231,7 +231,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
                 try await port.checkLibrarySync(session)
                 try check(own); try authorization.check()
                 try musicRequire(!session.accountID.isEmpty, .invalidResponse)
-                _ = try musicText(session.scope, maximum: 1024)
+                _ = try musicText(session.scope)
                 let previous = wrapper["library"]["accounts"][selection.platform.rawValue]
                 try musicRequire(session.platform == selection.platform &&
                     (previous == .null || previous.string == session.accountID), .targetChanged)

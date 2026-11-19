@@ -252,10 +252,13 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertNil(appearance.displayedArtwork)
         XCTAssertFalse(state.captureArtwork(revision: state.artworkRevision) { nil })
         XCTAssertFalse(state.captureArtwork(revision: state.artworkRevision) { Data() })
-        XCTAssertFalse(state.captureArtwork(revision: state.artworkRevision) {
-            Data(repeating: 0, count: PlaybackNowPlayingArtwork.maximumBytes + 1)
-        })
         XCTAssertNil(appearance.displayedArtwork)
+        let data = Data(repeating: 0, count: 2 * 1_024 * 1_024 + 1)
+        XCTAssertTrue(state.captureArtwork(revision: state.artworkRevision) { data })
+        XCTAssertEqual(appearance.displayedArtwork?.data, data)
+        let metadata = MusicSystemMetadataCoordinator.metadata(track: next, lines: [], position: 0,
+            preferences: appearance.preferences, favorite: false, artwork: appearance.displayedArtwork)
+        XCTAssertEqual(metadata.artwork?.data, data)
     }
 
     @MainActor func testRepeatedSameURLImageChangesCannotLoseReplacementRevision() async throws {

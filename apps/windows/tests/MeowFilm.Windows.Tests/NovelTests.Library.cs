@@ -1,8 +1,8 @@
 using System.IO;
 using System.Text;
 using System.Text.Json;
-using System.Windows.Automation;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -206,10 +206,10 @@ public static partial class NovelTests
         var display = initial.ForReading();
         Check(display.Mode == "none" && display.Conversion == "none" && display.Theme == 0 && display.Background == new NovelAppearance().Background);
         var editor = new NovelAppearanceEditor(initial);
-        var host = GeneralAppearanceTests.Window(editor); NovelUi.Theme(host); host.Show();
+        var host = GeneralAppearanceTests.Window(editor); NovelUi.Theme(host.Root); host.Show();
         try
         {
-            host.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render);
+            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             ComboBox Select(string label) => Find<ComboBox>(editor).Single(value => AutomationProperties.GetName(value) == label);
             TextBox Input(string label) => Find<TextBox>(editor).Single(value => AutomationProperties.GetName(value) == label);
             Check(Select("阅读模式").SelectedIndex == 2 && Select("简繁转换").SelectedIndex == 0 && Select("主题").SelectedIndex == 0);

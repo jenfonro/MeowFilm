@@ -1,7 +1,8 @@
 using System.Collections.ObjectModel;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
 
 namespace MeowFilm.Desktop;
 
@@ -23,18 +24,26 @@ public sealed partial class ShellWindow
     private readonly List<(ModuleSession Session, Destination Destination)> _future = [];
     private ModuleSession? _settingsReturn;
     private ModuleSession? _sidebarOwner;
-    private ListCollectionView _mainNavigation = null!, _collectionNavigation = null!;
+    private readonly CollectionViewSource _collectionNavigation = new() { IsSourceGrouped = true };
+    private sealed class NavigationGroup(string name, IEnumerable<ShellNavigationEntry> entries) : List<ShellNavigationEntry>(entries)
+    {
+        public string Name => name;
+        public DesktopNavigationGroupAction? Action => this.FirstOrDefault()?.GroupAction;
+        public bool HasAction => Action is not null;
+    }
+    private void RefreshNavigation()
+    {
+        NavigationList.ItemsSource = _sidebar.Where(item => IsCurrentNavigation(item, false)).ToArray();
+        _collectionNavigation.Source = _sidebar.Where(item => IsCurrentNavigation(item, true))
+            .GroupBy(item => item.Group!).Select(group => new NavigationGroup(group.Key, group)).ToArray();
+        CollectionNavigationList.ItemsSource = _collectionNavigation.View;
+    }
 
     private void InitializeUnifiedNavigation()
     {
         foreach (var session in _sessions) BindNavigation(session);
         _sidebarOwner = _sessions[0];
         ModuleNavigationList.ItemsSource = _sessions;
-        _mainNavigation = new ListCollectionView(_sidebar) { Filter = x => IsCurrentNavigation(x, grouped: false) };
-        _collectionNavigation = new ListCollectionView(_sidebar) { Filter = x => IsCurrentNavigation(x, grouped: true) };
-        _collectionNavigation.GroupDescriptions.Add(new PropertyGroupDescription(nameof(ShellNavigationEntry.Group)));
-        NavigationList.ItemsSource = _mainNavigation;
-        CollectionNavigationList.ItemsSource = _collectionNavigation;
         RebuildSidebar();
     }
 
@@ -49,19 +58,29 @@ public sealed partial class ShellWindow
         try
         {
             _sidebarOwner = current;
-            _mainNavigation.Refresh();
-            _collectionNavigation.Refresh();
+            RefreshNavigation();
         }
         finally { _suppressSelection = false; }
     }
 
     private void OnModuleSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSelection || _isClosing || !ReferenceEquals(e.Source, ModuleNavigationList) ||
+        if (_suppressSelection || _isClosing || !ReferenceEquals(e.OriginalSource, ModuleNavigationList) ||
             ModuleNavigationList.SelectedItem is not ModuleSession session) return;
         RunUiAction(() => session.Module.Navigation.FirstOrDefault() is { } home
             ? NavigateFromUiAsync(session, home.Route)
             : ActivateAsync(session));
+    }
+
+    private void OnNavigationContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    {
+        args.ItemContainer.ClearValue(AutomationProperties.NameProperty);
+        if (args.InRecycleQueue) return;
+        args.ItemContainer.SetBinding(AutomationProperties.NameProperty, new Binding
+        {
+            Source = args.Item,
+            Path = new PropertyPath(args.Item is ModuleSession ? "Module.Title" : "Title")
+        });
     }
 
     private void RebuildSidebar()
@@ -73,6 +92,7 @@ public sealed partial class ShellWindow
             foreach (var session in _sessions)
                 foreach (var item in session.Module.Navigation.Where(x => x.ShowInSidebar))
                     _sidebar.Add(new(session, item));
+            RefreshNavigation();
         }
         finally { _suppressSelection = false; }
         RestoreNavigationSelection();

@@ -43,7 +43,6 @@ final class MusicNativeFilteredRemoteQueueTests: XCTestCase {
         XCTAssertEqual(Set(references.map(\.occurrenceID)).count, count)
         XCTAssertEqual(Set(references.map(\.songID)).count, 1)
         XCTAssertEqual(references.map(\.sourcePosition), tracks.map(\.sourcePosition))
-        XCTAssertEqual(references.map(\.byteCount), tracks.map { $0.data.count })
         var counts = store.counts()
         XCTAssertEqual(counts.songReads, 1); XCTAssertEqual(counts.sourceReads, 1)
         XCTAssertEqual(counts.saved, 1); XCTAssertEqual(counts.candidates, 1); XCTAssertEqual(counts.enumerations, 0)

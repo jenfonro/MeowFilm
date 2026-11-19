@@ -90,15 +90,28 @@ test('private settings CAS failure keeps the prior snapshot and close drains pen
   await closed;
 });
 
-test('private settings reject unknown exchanges and oversize frames without waiting for timeout', async t => {
-  for (const oversized of [false, true]) {
-    const f = pipe(t), read = f.settings.reload('douban');
-    const closed = assert.rejects(read, { code: 'CLOSED' });
-    f.settings.accept(oversized ? Buffer.alloc(8 * 1024 * 1024 + 1, 32) :
-      f.respond({ id: 99 }, null));
-    await closed;
-    assert.deepEqual(f.stopped, ['INVALID_RESPONSE']);
-  }
+test('private settings reject unknown exchanges without waiting for timeout', async t => {
+  const f = pipe(t), read = f.settings.reload('douban');
+  const closed = assert.rejects(read, { code: 'CLOSED' });
+  f.settings.accept(f.respond({ id: 99 }, null));
+  await closed;
+  assert.deepEqual(f.stopped, ['INVALID_RESPONSE']);
+});
+
+test('Windows settings preserve fragmented documents above the former 8 MiB frame quota', async t => {
+  const f = pipe(t), read = f.settings.reload('pan.accounts');
+  const document = { value: 'x'.repeat(8 * 1024 * 1024 + 1) };
+  const bytes = f.respond(f.requests[0], document);
+  f.settings.accept(bytes.subarray(0, 8 * 1024 * 1024));
+  f.settings.accept(bytes.subarray(8 * 1024 * 1024));
+  assert.deepEqual(await read, document);
+  const store = f.settings.document('pan.accounts');
+  const write = store.write(document);
+  assert.deepEqual(f.requests[1].document, document);
+  f.settings.accept(f.respond(f.requests[1], document));
+  assert.deepEqual(await write, document);
+  store.close();
+  assert.deepEqual(f.stopped, []);
 });
 
 const tmdb = language => ({ version: 1, settings: { apiBase: 'https://api.themoviedb.org/3',

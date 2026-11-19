@@ -7,7 +7,19 @@ const qualityRanks = { '4k_hdr': 6, '4k_fps': 5, '4k': 4, '1080p': 2, '720p': 1 
 
 export function defaultPreferences() {
   return { ruleOrder: [...ruleOrder], panOrder: [...panOrder], keywords: [],
-    siteCleanKeywords: [...siteCleanKeywords], iosAutoPrepare: true };
+    siteCleanKeywords: [...siteCleanKeywords], iosAutoPrepare: true, metadataViewProvider: 'tmdb' };
+}
+
+export function readPreferences(value = {}) {
+  const result = defaultPreferences();
+  for (const field of ['ruleOrder', 'panOrder', 'keywords', 'siteCleanKeywords']) {
+    if (value?.[field] === undefined) continue;
+    result[field] = Array.isArray(value[field])
+      ? value[field].filter(item => typeof item === 'string').map(item => item.trim()).filter(Boolean) : [];
+  }
+  if (typeof value?.iosAutoPrepare === 'boolean') result.iosAutoPrepare = value.iosAutoPrepare;
+  if (value?.metadataViewProvider === 'douban') result.metadataViewProvider = 'douban';
+  return result;
 }
 
 function invalidPreferences() {
@@ -22,17 +34,15 @@ export function normalizePreferences(value = {}) {
     if (!Array.isArray(value[field]) || value[field].some(item => typeof item !== 'string')) invalidPreferences();
     const items = value[field].map(item => item.trim());
     if (items.some(item => !item) || new Set(items.map(item => item.toLowerCase())).size !== items.length) invalidPreferences();
-    if (field === 'ruleOrder' && (items.length !== ruleOrder.length || items.some(item => !ruleOrder.includes(item)))) {
-      invalidPreferences();
-    }
-    if (field === 'panOrder') {
-      if (items.some(item => !panOrder.includes(item))) invalidPreferences();
-      result[field] = [...items, ...panOrder.filter(item => !items.includes(item))];
-    } else result[field] = items;
+    result[field] = items;
   }
   if (Object.hasOwn(value, 'iosAutoPrepare')) {
     if (typeof value.iosAutoPrepare !== 'boolean') invalidPreferences();
     result.iosAutoPrepare = value.iosAutoPrepare;
+  }
+  if (Object.hasOwn(value, 'metadataViewProvider')) {
+    if (!['tmdb', 'douban'].includes(value.metadataViewProvider)) invalidPreferences();
+    result.metadataViewProvider = value.metadataViewProvider;
   }
   return result;
 }
@@ -74,7 +84,8 @@ export function compareCandidates(a, b, { preferences = defaultPreferences(), co
   const compare = dimension => {
     if (dimension === 'quality') return (qualityRanks[qualityKey(b.quality)] ?? 0) - (qualityRanks[qualityKey(a.quality)] ?? 0);
     if (dimension === 'pan') return panRank(a, preferences) - panRank(b, preferences);
-    return keywordRank(a, preferences.keywords) - keywordRank(b, preferences.keywords);
+    if (dimension === 'keyword') return keywordRank(a, preferences.keywords) - keywordRank(b, preferences.keywords);
+    return 0;
   };
   if (constraint.action === 'pan' || constraint.action === 'quality') {
     const dimension = constraint.action === 'pan' ? 'quality' : 'pan';

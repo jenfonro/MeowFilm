@@ -2,7 +2,7 @@
 
 meowfilm 的 iPhone 与 Windows 原生客户端：
 - iOS：UIKit 负责应用、窗口、导航、呈现与手势，Swift Package 提供原生业务、账号安全、播放和持久化能力。公共 Node 运行器随 App 启动恢复启用猫源，持有影视规则与会话，并执行两端共同音乐平台请求配方。
-- Windows：WPF / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视与音乐平台请求使用共同实现，音乐脚本仅在启用、调用或显式检测时执行。音乐账号安全保存、永久歌曲仓库、引用队列、共享图片和原生播放由本端 owner 管理。
+- Windows：WinUI 3 / .NET 原生桌面应用；公共 Node 运行器随 App 启动，影视与音乐平台请求使用共同实现，音乐脚本仅在启用、调用或显式检测时执行。音乐账号安全保存、永久歌曲仓库、引用队列、共享图片和原生播放由本端 owner 管理。
 
 ## 命令
 
@@ -149,6 +149,8 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 
 - 按风险覆盖实际受影响的契约与消费者：编译、静态检查、单元、组件或集成测试；必要时覆盖失败、取消、恢复和资源释放路径。
 - 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
+- 构建与打包只检查实际输入、依赖边界和交付完整性，不增加逐文件／导入／target 名称批准表、固定数量或完整源码／方法清单快照；合法公开依赖和实际引用的 helper 不需要额外登记。启动只核对实际身份、权限、执行内容与生命周期，不预检未调用业务方法，不重复审计同一输入，不将普通描述扩展或无依赖的排列变化作为拒绝条件。
+- 新增构建或启动拒绝条件须说明当前保护的实际消费边界，并以行为测试覆盖；不增加关键字扫描式禁令、例外白名单或另一套批准框架。真实 native 来源／ABI／哈希／签名、执行污染、权限与资源排空约束继续保留。
 - 通用运行器原生引擎仅按 `scripts/script-host-native.json` 的精确来源、版本、ABI／架构、补丁、根锁、构建输入及文件／许可哈希放行；用 `node scripts/quickjs/build-native.mjs` 构建，再由 `scripts/package-runtime.mjs --product aggregate --profile common-native --output <absolute-directory>` 复制受信产物。无 WASM／asm.js 回退；其他 native/WASM 仍拒绝，打包不安装／修锁。平台包装尚未迁移时，不将通用运行器通过表述为平台 App 通过。
 - 影视纯计算与第三方脚本共用锁定的 QuickJS-NG 0.18.0 源码、Unicode 表及平台载体，但 Runtime/Context、线程和生命周期独立；影视通过 `NativeJsonProgram` 使用 JSON 字符串边界，客户端不再链接第二份引擎。
 - iOS 脚本引擎使用 App 内置 `MeowScriptHost.framework`，复用通用原生核心与固定依赖，构建目标明确区分 device／simulator。原生载体随 App 签名；构建回执、内置身份和 JS／SDK 清单不能用签名前 Mach-O 全文件 hash 代替安装后签名边界，也不能据此放宽桌面 `.node` 校验。

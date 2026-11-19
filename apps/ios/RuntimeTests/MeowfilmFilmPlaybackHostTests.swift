@@ -1,9 +1,12 @@
 import XCTest
 import UIKit
 import Combine
+import AVFoundation
+import AVKit
 import MeowContracts
 import MeowPlayback
 import MeowRuntime
+import MeowUI
 @testable import MeowFilmFeature
 @testable import Meowfilm
 
@@ -11,6 +14,83 @@ import MeowRuntime
 /// Only upstream source/metadata, a synthetic music tone and the small movie are fixtures.
 @MainActor
 final class MeowfilmFilmPlaybackHostTests: XCTestCase {
+    func testReadingAnotherDetailKeepsTheActualPictureInPictureOwnerAndRestoresItsPlayer() async throws {
+        let resources = try await hostResources()
+        let app = try XCTUnwrap(UIApplication.shared.delegate as? MeowfilmAppDelegate)
+        let assembly = try XCTUnwrap(app.readyAssembly())
+        let client = try await resources.scriptSession.connection()
+        let movie = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "ordinary", withExtension: "mp4"))
+        let fixture = FilmPlaybackHostFixture(assembly: assembly, client: client, movie: movie)
+        addTeardownBlock { try await fixture.close() }
+        try await fixture.install(autoPrepare: true)
+        let playing = try await fixture.makeModel()
+        await playing.open()?.value
+        try await waitForPreparation(playing, expectPrepared: true)
+        try await fixture.mountSurface(playing)
+        await playing.send("play")?.value
+        try await waitForHost { playing.mediaState.attemptID != nil && playing.mediaState.position > 0.1 }
+        playing.pauseOrResume()
+        try await waitForHost { playing.mediaState.paused }
+        do {
+            try await waitForHost { playing.mediaState.pictureInPictureAvailable }
+        } catch {
+            fixture.describeSurface()
+            print("PIP_HOST_STATE position=\(playing.mediaState.position) paused=\(playing.mediaState.paused) " +
+                "available=\(playing.mediaState.pictureInPictureAvailable) active=\(playing.mediaState.pictureInPicture)")
+            throw error
+        }
+        playing.startPictureInPicture()
+        try await waitForHost { playing.hasSystemOwner && playing.mediaState.pictureInPicture }
+        let native = try XCTUnwrap(assembly.playback.currentAttempt)
+        let playingSession = try XCTUnwrap(playing.sessionID)
+        let browsing = try assembly.makeFilmPlayback(request: { try await fixture.makeRequest() })
+        addTeardownBlock { await browsing.close() }
+        try await assembly.activateFilm(browsing)
+        await browsing.open(restoreOnly: true)?.value
+        XCTAssertTrue(assembly.filmPlayback === browsing)
+        XCTAssertTrue(assembly.filmMediaPlayback === playing)
+        XCTAssertEqual(assembly.playback.currentAttempt, native)
+        XCTAssertTrue(playing.hasSystemOwner)
+        XCTAssertFalse(playing.isReleased)
+        XCTAssertEqual(assembly.filmSettings?.playback?.playbackSnapshot?()?.sessionID, playingSession)
+        XCTAssertFalse(browsing.navigateFromSystem(forward: true))
+        XCTAssertNil(browsing.mediaState.attemptID)
+        try fixture.removePresentation()
+        let restored = await assembly.restoreFilmPlaybackUI?(playingSession)
+        XCTAssertEqual(restored, true, "PiP restores the media model, not the unrelated detail model")
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let root = try XCTUnwrap(scene.windows.first { $0.isKeyWindow }?.rootViewController)
+        let player = try XCTUnwrap(root.presentedViewController as? FilmPlayerViewController)
+        addTeardownBlock {
+            await MainActor.run { PageViewController.invalidatePages(in: player) }
+            await withCheckedContinuation { continuation in
+                Task { @MainActor in root.dismiss(animated: false) { continuation.resume() } }
+            }
+            await MainActor.run { player.onDismiss?() }
+        }
+        XCTAssertTrue(player.filmPlaybackModel === playing)
+        XCTAssertTrue(assembly.filmPlayback === browsing)
+        XCTAssertEqual(assembly.playback.currentAttempt, native)
+        XCTAssertTrue(playing.navigateFromSystem(forward: true))
+        try await waitForHost {
+            playing.snapshot?.current?.candidate.position.episode == 2 &&
+                playing.mediaState.attemptID == playing.snapshot?.current?.attemptID
+        }
+        XCTAssertNotEqual(assembly.playback.currentAttempt, native)
+        XCTAssertNil(browsing.mediaState.attemptID)
+        var views = [player.view!], close: UIButton?
+        while let view = views.popLast() {
+            if view.accessibilityIdentifier == "film.player.close" { close = view as? UIButton; break }
+            views.append(contentsOf: view.subviews)
+        }
+        try XCTUnwrap(close).sendActions(for: .touchUpInside)
+        try await waitForHost { root.presentedViewController == nil }
+        await playing.close()
+        XCTAssertTrue(playing.isReleased)
+        XCTAssertNil(assembly.filmMediaPlayback)
+    }
+
     func testAutomaticFirstEpisodePreparationDoesNotTakeMusicAndFormalPlaybackUsesTheRealOwner() async throws {
         try await exercisePlayback(autoPrepare: true)
     }
@@ -137,7 +217,10 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         XCTAssertEqual(prepared["reports"], .array([]))
         XCTAssertEqual(operations(prepared), autoPrepare ? ["search", "detail", "play"] : [])
 
+        var selectedTarget: FilmPlaybackTarget?
         if !autoPrepare {
+            let initialTarget = model.snapshot?.target
+            let initialCandidates = model.snapshot?.candidates
             // Reading/rendering the menu does not run discovery. Explicit more
             // searches only; selecting one result is what admits its detail.
             XCTAssertTrue(try XCTUnwrap(model.snapshot).sources.isEmpty)
@@ -146,6 +229,7 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
             let searched = try await fixture.sourceState()
             XCTAssertEqual(operations(searched), ["search"])
             let source = try XCTUnwrap(model.snapshot?.sources.first)
+            let sourceKey = try XCTUnwrap(source.source.key)
             await model.send("browse", parameters: ["sourceId": .string(source.id)])?.value
             try await waitForHost {
                 guard let browsing = model.snapshot?.browsing else { return false }
@@ -171,12 +255,18 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
             for file in selected.browsing.files {
                 let candidateID = try XCTUnwrap(file.candidateID)
                 XCTAssertFalse(candidateID.isEmpty)
-                let candidate = try XCTUnwrap(selected.candidates.first { $0.id == candidateID })
-                XCTAssertEqual(candidate.source.key, source.source.key)
-                XCTAssertEqual(candidate.lineID, line.id)
-                XCTAssertEqual(candidate.lineLabel, "备用原始线路")
-                XCTAssertEqual(candidate.position, file.position)
+                XCTAssertEqual(file.businessID, candidateID)
+                XCTAssertEqual(file.playbackTarget.kind, .source)
+                XCTAssertEqual(file.playbackTarget.position, file.position)
+                let reference = try XCTUnwrap(file.playbackTarget.value["source"]?.filmObject)
+                XCTAssertEqual(reference["key"], .string(sourceKey))
+                XCTAssertEqual(reference["lineId"], line.id.value)
+                XCTAssertEqual(reference["candidateId"], .string(candidateID))
             }
+            XCTAssertEqual(selected.target, initialTarget, "Reading a directory cannot select a formal target")
+            XCTAssertEqual(selected.candidates, initialCandidates, "Browser candidates do not replace execution candidates")
+            XCTAssertNil(selected.attempt); XCTAssertNil(selected.current)
+            selectedTarget = try XCTUnwrap(selected.browsing.files.first).playbackTarget
             let selectedLine = try await fixture.sourceState()
             XCTAssertEqual(operations(selectedLine), ["search", "detail"],
                            "a complete detail line is not fetched/listed again")
@@ -185,7 +275,12 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         let selectedPlayID = autoPrepare ? "one" : "other"
         let selectedLine = autoPrepare ? "原始线路" : "备用原始线路"
         try await fixture.mountSurface(model)
-        await model.send("play")?.value
+        if let selectedTarget {
+            model.selectTarget(selectedTarget, metadataSourceID: model.presentation?.metadataSourceID)
+            await model.waitForPendingWork()
+        } else {
+            await model.send("play")?.value
+        }
         try await waitForHost {
             model.mediaState.attemptID != nil && model.mediaState.position > 0.1 &&
                 model.snapshot?.current?.attemptID == model.mediaState.attemptID
@@ -503,10 +598,14 @@ final class MeowfilmFilmPlaybackHostTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.attempt?.prepareOnly, expectPrepared ? true : nil)
     }
 
-    private func waitForHost(_ predicate: @escaping @MainActor () -> Bool) async throws {
-        let ready = expectation(for: NSPredicate { _, _ in MainActor.assumeIsolated { predicate() } }, evaluatedWith: nil)
-        await fulfillment(of: [ready], timeout: 20)
-        guard predicate() else { throw FilmPlaybackError(code: "HOST_TEST_TIMEOUT") }
+    private func waitForHost(file: StaticString = #filePath, line: UInt = #line,
+                             _ predicate: @escaping @MainActor () -> Bool) async throws {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            MainActor.assumeIsolated { predicate() }
+        }, object: nil)
+        let result = await XCTWaiter.fulfillment(of: [ready], timeout: 20)
+        XCTAssertEqual(result, .completed, file: file, line: line)
+        guard result == .completed, predicate() else { throw FilmPlaybackError(code: "HOST_TEST_TIMEOUT") }
     }
 }
 
@@ -666,6 +765,27 @@ final class FilmPlaybackHostFixture {
         let state = try value.filmRequiredObject()
         if let error = state["waitError"]?.filmText { throw FilmPlaybackError(code: error) }
         return state
+    }
+
+    func describeSurface() {
+        print("PIP_HOST_SUPPORT supported=\(AVPictureInPictureController.isPictureInPictureSupported()) " +
+            "audioCategory=\(AVAudioSession.sharedInstance().category.rawValue) " +
+            "audioMode=\(AVAudioSession.sharedInstance().mode.rawValue)")
+        guard let window else { print("PIP_HOST_SURFACE missing"); return }
+        print("PIP_HOST_WINDOW bounds=\(window.bounds) key=\(window.isKeyWindow) " +
+            "application=\(UIApplication.shared.applicationState.rawValue) " +
+            "scene=\(window.windowScene?.activationState.rawValue ?? -1)")
+        func describe(_ view: UIView) {
+            if let layer = view.layer as? AVSampleBufferDisplayLayer {
+                print("PIP_HOST_LAYER bounds=\(layer.bounds) ready=\(layer.isReadyForDisplay) " +
+                    "status=\(layer.status.rawValue) hidden=\(layer.isHidden) " +
+                    "error=\((layer.error as NSError?)?.domain ?? "nil"):\((layer.error as NSError?)?.code ?? 0) " +
+                    "timebaseRate=\(layer.controlTimebase.map(CMTimebaseGetRate) ?? -1) " +
+                    "timebaseTime=\(layer.controlTimebase.map { CMTimebaseGetTime($0).seconds } ?? -1)")
+            }
+            view.subviews.forEach(describe)
+        }
+        if let view = window.rootViewController?.view { describe(view) }
     }
 
     func history() async throws -> [RuntimeValue] {

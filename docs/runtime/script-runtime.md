@@ -63,7 +63,7 @@ Promise reaction、原生 await、异步迭代和清理回调保留登记任务�
 
 异步生成器排队请求独立保存执行 owner，切换请求时同步切换取消与截止控制，不以权限身份替代执行控制；既有取消收尾时限不变。跨环境数组复制定义自身数据元素，不触发继承 setter；业务 JSON 和内部 typed bytes 契约不变。
 
-源码上限 16 MiB、QuickJS 栈边界以及 Reader 解析预算是独立输入/引擎/解析契约。运行器已删除 `maxMemoryBytes`、引擎内存额度、派生宿主 body/算法/state 配额、耗尽标记及内存超限自动重启；没有 Infinity、极大值或 nullable 开关伪装保留。普通网络体、ABI bytes、JSON 和变量不套 Reader 解析额度。可报告分配失败、取消、超时和资源释放仍需处理，不保证系统 OOM 仅影响单实例。
+源码不设人为字节上限；QuickJS 栈边界和 Reader 解析预算保持独立的执行契约。运行器已删除 `maxMemoryBytes`、引擎内存额度、派生宿主 body/算法/state 配额、耗尽标记及内存超限自动重启；没有 Infinity、极大值或 nullable 开关伪装保留。普通网络体、ABI bytes、JSON 和变量不套 Reader 解析额度。可报告分配失败、取消、超时和资源释放仍需处理，不保证系统 OOM 仅影响单实例。
 
 保留真实内存观测：原生 QuickJS 使用实际引擎统计，Cat 使用 Node/V8 的含义，RSS 是进程级值；重叠统计不可相加。不将旧配额减 heap 伪装为 `os.freemem()`，也不把取消额度当作性能优化证据。
 
@@ -91,7 +91,7 @@ lx.on(lx.EVENT_NAMES.request, async (payload, context) => {
 
 `context.storage.get/set/delete` 绑定调用 ID、site、installation、generation 及 read/write 权限，跨 await 保持同一身份。请求结束、取消或退休后旧引用失效。全局 `meow` 只提供 config；startup/background 不获得隐式存储授权，即使另一请求活跃也不能借用。Node AsyncLocalStorage 不能推断 guest Promise 的特权。
 
-私有 KV 由音乐模块在 `<dataRoot>/music` 中持久保存，不再通过客户端 grant 或反向存储 RPC；运行器在处理器有效请求内提供读写权限，旧 context 在请求结束、取消或退休后失效。已有 KV 文档大小和键数边界是持久化数据契约，不是脚本内存配额。详见 [音乐脚本契约](music-script-runtime.md)。
+私有 KV 由音乐模块在 `<dataRoot>/music` 中持久保存，不再通过客户端 grant 或反向存储 RPC；运行器在处理器有效请求内提供读写权限，旧 context 在请求结束、取消或退休后失效。KV 不设文档大小和键数配额，仍逐值校验 JSON 并原子保存。详见 [音乐脚本契约](music-script-runtime.md)。
 
 ## 网络与 Cat 持久资源
 
@@ -103,7 +103,7 @@ LX 网络适配器形状保持 `network({url,options,signal,scope,validateURL})`
 decoder 与收集器实际关闭；HEAD／无正文状态不对缺失正文解压。实际解码后移除失效的
 编码／长度头，未知编码与损坏压缩体分别返回 `UNSUPPORTED_OPTION`、`NETWORK_ERROR`。
 
-管理入口的网络源码通过专用 `createSourceDownload` 下载，沿用各模块的 URL、状态、重定向和期限规则；传输与解压后的源码均受 16 MiB 输入边界约束，取消等待连接与解压流真实关闭。普通 guest 网络适配器不恢复响应字节配额，也不套用源码大小限制。
+管理入口的网络源码通过专用 `createSourceDownload` 下载，沿用各模块的 URL、状态、重定向和期限规则；传输与解压后的源码均不设人为字节上限，取消等待连接与解压流真实关闭。普通 guest 网络适配器不恢复响应字节配额，不截断完整业务内容。
 
 Cat 的 HTTP(S)、DNS、net/TLS 不按公网、私网或链路本地地址过滤；已登记 listener 别名映射本实例实际端点，HTTP 自调用的内部 scope 只用于取消与归属，不是访问凭据，未登记回环目标直接访问。listener 和 aggregate 全接口监听，无 access token、管理 Cookie 或 Host／Origin 来源门禁；调用输入的显式头不按 origin 删除。socketPath/fd 与私有卷规则继续属于文件/IPC 边界。完整服务、页面、provider 拦截和目录规则见 [CatNode 契约](cat-script-runtime.md)。
 
@@ -112,6 +112,8 @@ Cat 真实 Buffer/流/密钥对象按 Node 语义工作，资源按请求或实�
 ## 构建、发布与验证边界
 
 公共构建输入见 `scripts/script-host-native.json`，桌面构建入口为 `scripts/quickjs/build-native.mjs`；公共打包 `scripts/package-runtime.mjs` 仅支持 `common-native`，manifest 的 entry 为 `app/entry.mjs`、status 为 complete 时表示打包完成。闭包含公共装配、实际导入的 workspace 包、规则 SDK、Cat 依赖和精确受信原生载体。Windows wrapper 在公共产物上增加私密启动包装；iOS wrapper 增加受信启动及签名 framework 装配，目标明确区分 device／simulator。旧 profile 不提供兼容后端。平台构建和完整性边界分别见[Windows 打包说明](../windows/runtime-packaging.md)及[iOS 发布说明](../ios/release.md)。
+
+平台包装从实际入口收集静态可解析的 helper 依赖，按源路径映射到产物路径；公开 workspace 导入按 exports 和根锁解析，Node 内建模块由 Node 自身识别，不维护逐文件导入批准表或固定文件数量。未引用的普通说明／数据文件不阻断构建，也不会自动成为载荷；实际引用缺失、私有／跨端越界、符号链接和非受信 native 输入仍拒绝。交付清单继续记录全部文件 bytes/hash，并标出实际法律／说明材料的 `documentation` 角色；Windows 启动只复核执行与解析输入，完整许可交付检查留在打包侧。
 
 构建成功、原生可加载、合成行为测试、清理/取消验证、真实第三方联网动作和同机性能测量是不同证据。main 整合前的定档 `b2ec723` 已在 Linux arm64／Node 24.21.0 上完成原生／SDK 增量构建；受影响的 33 个测试文件、740 个不同用例结合定向复验均通过，包含真实独立 payload 的三协议启动。首轮仅三个新增 Cat 夹具遗漏实例标准流基线，修正为完整对象身份及实际关闭检查后，三例复验通过；产品输入未变，其余通过结果复用。这些是定档证据，不代替本次管理功能与 HTTP 接线整合后的定向验证。
 

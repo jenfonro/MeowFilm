@@ -2,18 +2,24 @@ using System.IO;
 using System.Globalization;
 using SkiaSharp;
 using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Input;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
+using System.Runtime.InteropServices.WindowsRuntime;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.TextFormatting;
-using System.Windows.Threading;
+using MeowFilm.Desktop;
+using Xaml = Microsoft.UI.Xaml;
+using XamlMedia = Microsoft.UI.Xaml.Media;
+using XamlAnimation = Microsoft.UI.Xaml.Media.Animation;
+using WinSize = Windows.Foundation.Size;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>Native paragraph/UTF-16 layout. Only viewport images retain decoded pixels and runtime leases.</summary>
-public sealed class NovelReadingSurface : FrameworkElement, IDisposable
+public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisposable
 {
     private sealed record Row(int Block, int Offset, double Y, double Height, TextLine? Line = null, string Image = "", double Width = 0, double ImageOffset = 0, double ImageHeight = 0);
     private sealed class ImageLease
@@ -41,8 +47,20 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
     private int page;
     private bool dirty = true, disposed, resourcesPaused;
     private Brush background = Brushes.White, foreground = Brushes.Black;
-    private BitmapSource? backgroundImage, previousFrame;
-    private int direction = 1;
+    private BitmapSource? backgroundImage;
+    private readonly Microsoft.UI.Xaml.Controls.Image frame = new() { Stretch = XamlMedia.Stretch.Fill, IsHitTestVisible = false };
+    private readonly Microsoft.UI.Xaml.Controls.Image previous = new() { Stretch = XamlMedia.Stretch.Fill, IsHitTestVisible = false };
+    private readonly XamlMedia.TranslateTransform frameTransform = new(), previousTransform = new();
+    private readonly NovelPresentation.VisibilityWatch visibility;
+    private readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
+    private readonly long contrastToken;
+    private readonly NovelPageRaster raster = new();
+    private XamlAnimation.Storyboard? turnAnimation;
+    private Xaml.XamlRoot? xamlRoot;
+    private bool renderQueued;
+    private int pendingTurn;
+    private uint? pressedPointer;
+    private double PixelsPerDip => XamlRoot?.RasterizationScale ?? 1;
     private Point? pressed;
     private bool dragged;
     private NovelAnchor? pendingAnchor;
@@ -57,31 +75,46 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
     public Action<string>? ReportError { get; set; }
     public NovelReadingSurface(NovelSourceService sources)
     {
-        this.sources = sources; Focusable = true; ClipToBounds = true;
+        this.sources = sources; IsTabStop = true;
+        Background = new XamlMedia.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        previous.RenderTransform = previousTransform; frame.RenderTransform = frameTransform;
+        Children.Add(previous); Children.Add(frame);
         sources.Changed += SourcesChanged;
         AutomationProperties.SetName(this, "小说正文");
-        IsVisibleChanged += (_, _) =>
+        visibility = new(this, visible =>
         {
             if (disposed) return;
-            if (!IsVisible) { ReleaseAllImages(); backgroundRequest?.Cancel(); backgroundImage = null; }
+            if (!visible) { ClearFrame(); ReleaseAllImages(); backgroundRequest?.Cancel(); backgroundImage = null; }
             else { ResumeImages(); InvalidateVisual(); }
-        };
-        SizeChanged += (_, _) => Reflow();
-        PreviewTouchDown += (_, e) => { dragged = false; pressed = e.GetTouchPoint(this).Position; UserInteracted?.Invoke(this, EventArgs.Empty); };
-        PreviewTouchMove += (_, e) =>
+        });
+        Loaded += (_, _) =>
         {
-            if (appearance.Mode != "scroll" || pressed is not { } start) return;
-            var point = e.GetTouchPoint(this).Position; ScrollDrag(start.Y - point.Y); pressed = point; dragged = true; e.Handled = true;
+            DetachRoot();
+            xamlRoot = XamlRoot;
+            if (xamlRoot is not null) xamlRoot.Changed += RootChanged;
+            Reflow();
         };
-        PreviewTouchUp += (_, e) =>
+        Unloaded += (_, _) => DetachRoot();
+        ActualThemeChanged += (_, _) => Reflow();
+        contrastToken = RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Reflow());
+        uiSettings.ColorValuesChanged += HighContrastChanged;
+        SizeChanged += (_, _) =>
         {
-            var point = e.GetTouchPoint(this).Position;
-            if (dragged) { pressed = null; e.Handled = true; return; }
-            if (pressed is { } start && Math.Abs(point.X - start.X) > 45) { Turn(point.X < start.X ? 1 : -1); e.Handled = true; }
-            else HandleClick(point);
-            pressed = null;
+            Clip = new XamlMedia.RectangleGeometry { Rect = new(0, 0, ActualWidth, ActualHeight) };
+            Reflow();
         };
+        PointerPressed += Pressed; PointerReleased += Released; PointerMoved += Moved;
+        PointerWheelChanged += WheelChanged;
+        PointerCaptureLost += (_, _) => { pressed = null; pressedPointer = null; dragged = false; };
+        KeyDown += KeyPressed;
     }
+    private void HighContrastChanged(Windows.UI.ViewManagement.UISettings sender, object args) =>
+        DispatcherQueue.TryEnqueue(() => { if (!disposed) Reflow(); });
+    private void RootChanged(Xaml.XamlRoot sender, Xaml.XamlRootChangedEventArgs args)
+    { if (Math.Abs(PixelsPerDip - raster.Scale) > .001) Reflow(); }
+    protected override AutomationPeer OnCreateAutomationPeer() => new FrameworkElementAutomationPeer(this);
+    private void DetachRoot()
+    { if (xamlRoot is not null) xamlRoot.Changed -= RootChanged; xamlRoot = null; }
     private void SourcesChanged(object? sender, EventArgs e)
     {
         if (session is null || sources.Sources.Any(s => s.Enabled &&
@@ -107,7 +140,7 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
             if (!contentChanged) pendingAnchor = CaptureAnchor();
             appearance = settings; dirty = true; LoadBackground();
         }
-        if (dirty) { InvalidateMeasure(); InvalidateVisual(); }
+        if (dirty) { StopTurn(); InvalidateMeasure(); InvalidateVisual(); }
     }
     private IReadOnlyList<NovelBlock>? displayedBlocks;
     public NovelAnchor CaptureAnchor() => pendingAnchor ?? anchor;
@@ -185,14 +218,16 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
     }
     private void Reflow()
     {
-        pendingAnchor ??= CaptureAnchor(); dirty = true; InvalidateMeasure(); InvalidateVisual();
+        if (disposed) return;
+        StopTurn(); pendingAnchor ??= CaptureAnchor(); dirty = true; InvalidateMeasure(); InvalidateVisual();
     }
-    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    protected override WinSize MeasureOverride(WinSize availableSize)
     {
-        base.OnDpiChanged(oldDpi, newDpi); Reflow();
+        var size = new WinSize(double.IsInfinity(availableSize.Width) ? 700 : availableSize.Width,
+            double.IsInfinity(availableSize.Height) ? 600 : availableSize.Height);
+        base.MeasureOverride(size); return size;
     }
-    protected override Size MeasureOverride(Size availableSize) => new(double.IsInfinity(availableSize.Width) ? 700 : availableSize.Width,
-        double.IsInfinity(availableSize.Height) ? 600 : availableSize.Height);
+    internal void UpdateReadingLayout() { UpdateLayout(); EnsureLayout(); }
     private void EnsureLayout()
     {
         if (!dirty || ActualWidth < 1 || ActualHeight < 1) return;
@@ -204,12 +239,12 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
             appearance.Bold ? FontWeights.SemiBold : FontWeights.Normal, FontStretches.Normal);
         foreground = Desktop.DesktopTheme.GetIsHighContrast(this) ? SystemColors.WindowTextBrush : ParseBrush(appearance.Foreground);
         background = Desktop.DesktopTheme.GetIsHighContrast(this) ? SystemColors.WindowBrush : ParseBrush(appearance.Background);
-        var textProperties = new RunStyle(face, appearance.FontSize, foreground, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+        var textProperties = new RunStyle(face, appearance.FontSize, foreground, PixelsPerDip);
         var paragraph = new ParagraphStyle(textProperties, appearance.FontSize * appearance.LineHeight);
         if (session?.ContentTitle is { Length: > 0 } title)
         {
-            var titleProperties = new RunStyle(new Typeface(face.FontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal),
-                appearance.FontSize * 1.15, foreground, VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            var titleProperties = new RunStyle(new Typeface(SystemFonts.MessageFontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal),
+                appearance.FontSize * 1.15, foreground, PixelsPerDip);
             Text(title, -1, titleProperties, new ParagraphStyle(titleProperties, appearance.FontSize * appearance.LineHeight * 1.15));
             y += appearance.ParagraphSpacing;
         }
@@ -275,21 +310,30 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
             rows.Add(row);
         }
     }
-    protected override void OnRender(DrawingContext context)
+    private void InvalidateVisual()
     {
-        EnsureLayout();
-        context.DrawRectangle(background, null, new Rect(RenderSize));
-        if (backgroundImage is not null && !Desktop.DesktopTheme.GetIsHighContrast(this)) context.DrawImage(backgroundImage, new Rect(RenderSize));
-        double progress = (double)GetValue(TurnProgressProperty);
-        double shift = previousFrame is null || progress >= 1 ? 0 : direction * ActualWidth * (1 - progress);
-        context.PushClip(new RectangleGeometry(new Rect(RenderSize)));
-        if (previousFrame is not null && progress < 1)
+        if (renderQueued || disposed) return;
+        renderQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
-            double previousShift = appearance.Mode == "cover" ? 0 : -direction * ActualWidth * progress;
-            context.DrawImage(previousFrame, new Rect(previousShift, 0, ActualWidth, ActualHeight));
-        }
-        context.PushTransform(new TranslateTransform(shift, 0));
-        if (shift != 0) context.DrawRectangle(background, null, new Rect(RenderSize));
+            renderQueued = false;
+            if (disposed || resourcesPaused || !IsLoaded || !DesktopVisual.IsVisible(this)) return;
+            RenderFrame();
+            if (pendingTurn != 0) StartTurn();
+        });
+    }
+    private void RenderFrame()
+    {
+        if (disposed || resourcesPaused) return;
+        EnsureLayout();
+        if (ActualWidth < 1 || ActualHeight < 1) return;
+        frame.Source = raster.Render(new(ActualWidth, ActualHeight), PixelsPerDip, DrawPage);
+    }
+    private void DrawPage(DrawingContext context)
+    {
+        var bounds = new Rect(0, 0, ActualWidth, ActualHeight);
+        context.DrawRectangle(background, null, bounds);
+        if (backgroundImage is not null && !Desktop.DesktopTheme.GetIsHighContrast(this)) context.DrawImage(backgroundImage, bounds);
+        context.PushClip(new RectangleGeometry(bounds));
         double x = (ActualWidth - textWidth) / 2;
         double end = appearance.Mode != "scroll" && page + 1 < pages.Count ? pages[page + 1] + appearance.Margin : offset + ActualHeight - appearance.Margin;
         context.PushClip(new RectangleGeometry(new Rect(0, appearance.Margin, ActualWidth, Math.Max(0, ActualHeight - appearance.Margin * 2))));
@@ -304,28 +348,48 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
             }
             else if (row.Image.Length > 0)
                 context.DrawText(new FormattedText(session?.Blocks[row.Block].Alt ?? "图片", CultureInfo.CurrentCulture,
-                    FlowDirection.LeftToRight, new Typeface(appearance.FontFamily), appearance.FontSize, foreground,
-                    VisualTreeHelper.GetDpi(this).PixelsPerDip), new Point(x, row.Y - offset));
+                    System.Windows.FlowDirection.LeftToRight,
+                    new Typeface(SystemFonts.MessageFontFamily, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal), appearance.FontSize, foreground,
+                    PixelsPerDip), new Point(x, row.Y - offset));
         }
-        context.Pop();
         context.Pop(); context.Pop();
     }
-    private static readonly DependencyProperty TurnProgressProperty = DependencyProperty.Register("TurnProgress", typeof(double),
-        typeof(NovelReadingSurface), new FrameworkPropertyMetadata(1d, FrameworkPropertyMetadataOptions.AffectsRender));
+    private void StopTurn()
+    {
+        turnAnimation?.Stop(); turnAnimation = null; pendingTurn = 0;
+        previous.Source = null; frameTransform.X = previousTransform.X = 0;
+    }
+    private void ClearFrame()
+    {
+        StopTurn(); frame.Source = null; raster.Clear();
+    }
     private void AnimateTurn(int delta)
     {
-        if (appearance.Mode is "none" or "scroll" || !SystemParameters.ClientAreaAnimation || ActualWidth < 1) return;
-        var frame = new RenderTargetBitmap(Math.Max(1, (int)ActualWidth), Math.Max(1, (int)ActualHeight), 96, 96, PixelFormats.Pbgra32);
-        previousFrame = null; BeginAnimation(TurnProgressProperty, null); SetValue(TurnProgressProperty, 1d);
-        frame.Render(this); frame.Freeze(); previousFrame = frame; direction = delta;
-        var animation = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)) { FillBehavior = FillBehavior.Stop };
-        animation.Completed += (_, _) => { previousFrame = null; SetValue(TurnProgressProperty, 1d); };
-        BeginAnimation(TurnProgressProperty, animation);
+        StopTurn();
+        if (disposed || resourcesPaused || !IsLoaded || !DesktopVisual.IsVisible(this) ||
+            appearance.Mode is "none" or "scroll" || !new Windows.UI.ViewManagement.UISettings().AnimationsEnabled || ActualWidth < 1) return;
+        RenderFrame();
+        previous.Source = raster.Snapshot(); pendingTurn = delta;
+    }
+    private void StartTurn()
+    {
+        int direction = pendingTurn; pendingTurn = 0;
+        var animation = new XamlAnimation.Storyboard(); turnAnimation = animation;
+        Add(frameTransform, direction * ActualWidth, 0);
+        if (appearance.Mode != "cover") Add(previousTransform, 0, -direction * ActualWidth);
+        animation.Completed += (_, _) => { if (ReferenceEquals(turnAnimation, animation)) StopTurn(); };
+        animation.Begin();
+        void Add(XamlMedia.TranslateTransform transform, double from, double to)
+        {
+            var change = new XamlAnimation.DoubleAnimation { From = from, To = to, Duration = new Xaml.Duration(TimeSpan.FromMilliseconds(180)) };
+            XamlAnimation.Storyboard.SetTarget(change, transform); XamlAnimation.Storyboard.SetTargetProperty(change, "X");
+            animation.Children.Add(change);
+        }
     }
     private void LoadBackground()
     {
         backgroundRequest?.Cancel(); backgroundImage = null;
-        if (appearance.BackgroundImage.Length == 0 || !IsVisible || resourcesPaused || disposed) return;
+        if (appearance.BackgroundImage.Length == 0 || !DesktopVisual.IsVisible(this) || resourcesPaused || disposed) return;
         string path = appearance.BackgroundImage; var owner = backgroundRequest = new();
         var operation = Load(); backgrounds.Add(operation); _ = Observe();
         async Task Observe() { try { await operation; } finally { backgrounds.Remove(operation); } }
@@ -347,11 +411,11 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
     }
     private void LoadVisibleImages()
     {
-        if (session is null || !IsVisible || disposed || resourcesPaused || dirty) return;
+        if (session is null || !DesktopVisual.IsVisible(this) || disposed || resourcesPaused || dirty) return;
         if (!sources.Sources.Any(s => s.Enabled && s.InstallationId == session.Book.InstallationId &&
             s.Revision == session.Book.Revision)) return;
         var visible = rows.Where(r => r.Image.Length > 0 && r.Y + r.Height >= offset && r.Y < offset + ActualHeight).Select(r => r.Block).ToHashSet();
-        int decodeWidth = (int)Math.Ceiling(textWidth * VisualTreeHelper.GetDpi(this).DpiScaleX);
+        int decodeWidth = (int)Math.Ceiling(textWidth * PixelsPerDip);
         foreach (int index in images.Keys.Where(i => !visible.Contains(i) || images[i].DecodeWidth < decodeWidth).ToArray()) ReleaseImage(index);
         foreach (int index in visible.Where(i => !images.ContainsKey(i)))
         {
@@ -431,29 +495,38 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
     private void ReleaseAllImages() { foreach (int index in images.Keys.ToArray()) ReleaseImage(index); }
     public async Task DrainImagesAsync()
     {
-        resourcesPaused = true; backgroundRequest?.Cancel(); backgroundImage = null; ReleaseAllImages();
+        resourcesPaused = true; ClearFrame(); backgroundRequest?.Cancel(); backgroundImage = null; ReleaseAllImages();
         await Task.WhenAll(releasing.Concat(backgrounds).ToArray());
     }
-    internal void ResumeImages() { resourcesPaused = false; LoadBackground(); LoadVisibleImages(); }
-    protected override void OnMouseDown(MouseButtonEventArgs e)
+    internal void ResumeImages() { resourcesPaused = false; LoadBackground(); LoadVisibleImages(); InvalidateVisual(); }
+    private void Pressed(object sender, PointerRoutedEventArgs e)
     {
-        base.OnMouseDown(e); if (e.ChangedButton != MouseButton.Left) return;
-        Focus(); CaptureMouse(); dragged = false; pressed = e.GetPosition(this); UserInteracted?.Invoke(this, EventArgs.Empty);
+        var point = e.GetCurrentPoint(this);
+        if (!point.Properties.IsLeftButtonPressed && e.Pointer.PointerDeviceType == Microsoft.UI.Input.PointerDeviceType.Mouse) return;
+        if (pressedPointer is not null) return;
+        Focus(Xaml.FocusState.Pointer);
+        if (!CapturePointer(e.Pointer)) return;
+        pressedPointer = e.Pointer.PointerId;
+        dragged = false; pressed = new(point.Position.X, point.Position.Y); UserInteracted?.Invoke(this, EventArgs.Empty);
+        e.Handled = true;
     }
-    protected override void OnMouseUp(MouseButtonEventArgs e)
+    private void Released(object sender, PointerRoutedEventArgs e)
     {
-        base.OnMouseUp(e); if (e.ChangedButton != MouseButton.Left || pressed is null) return;
-        ReleaseMouseCapture(); Point end = e.GetPosition(this);
-        if (dragged) { pressed = null; e.Handled = true; return; }
-        if (Math.Abs(end.X - pressed.Value.X) > 45) Turn(end.X < pressed.Value.X ? 1 : -1);
-        else HandleClick(end);
-        pressed = null; e.Handled = true;
+        if (pressedPointer != e.Pointer.PointerId || pressed is not { } start) return;
+        var position = e.GetCurrentPoint(this).Position; var end = new Point(position.X, position.Y);
+        bool moved = dragged; pressed = null; pressedPointer = null; ReleasePointerCapture(e.Pointer);
+        if (!moved)
+        {
+            if (Math.Abs(end.X - start.X) > 45) Turn(end.X < start.X ? 1 : -1);
+            else HandleClick(end);
+        }
+        e.Handled = true;
     }
-    protected override void OnMouseMove(MouseEventArgs e)
+    private void Moved(object sender, PointerRoutedEventArgs e)
     {
-        base.OnMouseMove(e);
-        if (appearance.Mode != "scroll" || pressed is not { } start || e.LeftButton != MouseButtonState.Pressed) return;
-        var point = e.GetPosition(this); if (Math.Abs(point.Y - start.Y) < 3 && !dragged) return;
+        if (appearance.Mode != "scroll" || pressedPointer != e.Pointer.PointerId || pressed is not { } start) return;
+        var position = e.GetCurrentPoint(this).Position; var point = new Point(position.X, position.Y);
+        if (Math.Abs(point.Y - start.Y) < 3 && !dragged) return;
         ScrollDrag(start.Y - point.Y); pressed = point; dragged = true; e.Handled = true;
     }
     private void ScrollDrag(double distance)
@@ -467,23 +540,23 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
         else if (point.X > ActualWidth * 2 / 3) Turn(1);
         else ControlsRequested?.Invoke(this, EventArgs.Empty);
     }
-    protected override void OnMouseWheel(MouseWheelEventArgs e)
+    private void WheelChanged(object sender, PointerRoutedEventArgs e)
     {
+        int delta = e.GetCurrentPoint(this).Properties.MouseWheelDelta;
         UserInteracted?.Invoke(this, EventArgs.Empty);
         if (appearance.Mode == "scroll")
         {
-            double before = offset; offset = Math.Clamp(offset - e.Delta, 0, Math.Max(0, totalHeight - ActualHeight));
-            if (Math.Abs(offset - before) < .1) Turn(e.Delta < 0 ? 1 : -1); else PublishPosition();
+            double before = offset; offset = Math.Clamp(offset - delta, 0, Math.Max(0, totalHeight - ActualHeight));
+            if (Math.Abs(offset - before) < .1) Turn(delta < 0 ? 1 : -1); else PublishPosition();
         }
-        else Turn(e.Delta < 0 ? 1 : -1);
+        else Turn(delta < 0 ? 1 : -1);
         e.Handled = true;
     }
-    protected override void OnKeyDown(KeyEventArgs e)
+    private void KeyPressed(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key is Key.Right or Key.PageDown or Key.Space or Key.Down) { UserInteracted?.Invoke(this, EventArgs.Empty); Turn(1); e.Handled = true; }
-        if (e.Key is Key.Left or Key.PageUp or Key.Up) { UserInteracted?.Invoke(this, EventArgs.Empty); Turn(-1); e.Handled = true; }
-        if (e.Key == Key.Escape) ControlsRequested?.Invoke(this, EventArgs.Empty);
-        base.OnKeyDown(e);
+        if (e.Key is VirtualKey.Right or VirtualKey.PageDown or VirtualKey.Space or VirtualKey.Down) { UserInteracted?.Invoke(this, EventArgs.Empty); Turn(1); e.Handled = true; }
+        if (e.Key is VirtualKey.Left or VirtualKey.PageUp or VirtualKey.Up) { UserInteracted?.Invoke(this, EventArgs.Empty); Turn(-1); e.Handled = true; }
+        if (e.Key == VirtualKey.Escape) { ControlsRequested?.Invoke(this, EventArgs.Empty); e.Handled = true; }
     }
     private void Turn(int direction)
     {
@@ -495,6 +568,9 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
     public void Dispose()
     {
         if (disposed) return; disposed = true; sources.Changed -= SourcesChanged;
+        visibility.Dispose(); DetachRoot(); ClearFrame();
+        uiSettings.ColorValuesChanged -= HighContrastChanged;
+        UnregisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, contrastToken);
         contentGeneration++; backgroundRequest?.Cancel(); ReleaseAllImages();
         foreach (var row in rows) row.Line?.Dispose(); rows.Clear(); formatter.Dispose(); backgroundImage = null;
     }
@@ -533,4 +609,43 @@ public sealed class NovelReadingSurface : FrameworkElement, IDisposable
             new(CultureInfo.CurrentCulture, new CharacterBufferRange(text, 0, Math.Min(index, text.Length))));
         public override int GetTextEffectCharacterIndexFromTextSourceCharacterIndex(int index) => index;
     }
+}
+
+// WPF owns only this offscreen drawing target and TextFormatter's lines above.
+// Neither DrawingVisual nor RenderTargetBitmap is attached to a window or a XAML tree.
+internal sealed class NovelPageRaster
+{
+    private RenderTargetBitmap? target;
+    private Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap? source;
+    private byte[] transfer = [];
+    internal double Scale { get; private set; } = 1;
+
+    internal Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap Render(WinSize size, double scale, Action<DrawingContext> draw)
+    {
+        int width = Math.Max(1, (int)Math.Ceiling(size.Width * scale)), height = Math.Max(1, (int)Math.Ceiling(size.Height * scale));
+        if (target is null || target.PixelWidth != width || target.PixelHeight != height || Math.Abs(Scale - scale) > .001)
+        {
+            Scale = scale;
+            target = new RenderTargetBitmap(width, height, 96 * scale, 96 * scale, PixelFormats.Pbgra32);
+            source = new(width, height); transfer = new byte[checked(width * height * 4)];
+        }
+        var visual = new DrawingVisual();
+        using (var context = visual.RenderOpen()) draw(context);
+        target.Clear(); target.Render(visual); target.CopyPixels(transfer, checked(width * 4), 0);
+        var pixels = source!;
+        using (var buffer = pixels.PixelBuffer.AsStream()) buffer.Write(transfer);
+        pixels.Invalidate();
+        return pixels;
+    }
+
+    internal Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap? Snapshot()
+    {
+        if (source is null) return null;
+        var snapshot = new Microsoft.UI.Xaml.Media.Imaging.WriteableBitmap(source.PixelWidth, source.PixelHeight);
+        using (var buffer = snapshot.PixelBuffer.AsStream()) buffer.Write(transfer);
+        snapshot.Invalidate();
+        return snapshot;
+    }
+
+    internal void Clear() { target = null; source = null; transfer = []; }
 }

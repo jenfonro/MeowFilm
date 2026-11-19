@@ -28,7 +28,7 @@ function expectedIdentity(expected, actual) {
 }
 async function authenticateTx(c, userId) {
   try {
-    const auth = await c.tx('music.UserInfo.userInfoServer', 'GetLoginUserInfo', {}, false, { maximumBytes: 65536 });
+    const auth = await c.tx('music.UserInfo.userInfoServer', 'GetLoginUserInfo', {}, false);
     if (auth.code != null) {
       const code = required(auth.code);
       if (!Number.isInteger(Number(code))) fail('INVALID_RESPONSE');
@@ -85,7 +85,7 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
   try {
     if (c.platform === 'wy') {
       if (!cookieFields(cookie).MUSIC_U) fail('INVALID_CREDENTIALS');
-      const response = await c.wy('/api/w/nuser/account/get', {}, true, { response: true, maximumBytes: 65536 });
+      const response = await c.wy('/api/w/nuser/account/get', {}, true, { response: true });
       const raw = response.value.profile;
       if (raw === null) fail('AUTH_EXPIRED');
       const userId = required(raw?.userId);
@@ -101,7 +101,7 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
       const encrypted = first(fields.encrypt_uin, fields.encryptUin);
       if (encrypted) {
         const data = await c.tx('music.UnifiedHomepage.UnifiedHomepageSrv', 'GetHomepageHeader',
-          { uin: encrypted, IsQueryTabDetail: 1 }, false, { maximumBytes: 65536 });
+          { uin: encrypted, IsQueryTabDetail: 1 }, false);
         const raw = object(data.Info?.BaseInfo);
         if (authenticate && raw.EncryptedUin != null) expectedIdentity(encrypted, scalar(raw.EncryptedUin));
         result = profile('tx', userId, raw.Name, raw.Avatar, cookie);
@@ -110,8 +110,7 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
         const data = await c.read({ url: 'https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg?' + form({
           g_tk: hash33(key, 5381), format: 'json', inCharset: 'utf-8', outCharset: 'utf-8', notice: 0,
           cid: 205360838, needNewCode: 0, loginUin: userId, hostUin: 0, userid: userId, reqfrom: 1 }),
-        headers: { Cookie: cookieHeader({ uin: userId, qqmusic_uin: userId, qm_keyst: key, qqmusic_key: key }) },
-        maximumBytes: 65536 });
+        headers: { Cookie: cookieHeader({ uin: userId, qqmusic_uin: userId, qm_keyst: key, qqmusic_key: key }) } });
         if (required(data.code) !== '0') fail('UPSTREAM_ERROR');
         const raw = object(data.data?.creator);
         if (authenticate) expectedIdentity(first(raw.uin, raw.musicid), userId);
@@ -128,7 +127,7 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
           BigInt('0x' + md5(fields.KUGOU_API_GUID)).toString() !== fields.KUGOU_API_MID) fail('DEVICE_CONTEXT_REQUIRED');
       const p = kgRaw({ clienttime: time, token: required(fields.token, 'INVALID_CREDENTIALS') });
       const data = await c.kg('/v3/get_my_info', { plat: 1 }, 'usercenter.kugou.com',
-        { visit_time: time, usertype: 1, p, userid: protocolInteger(userId) }, undefined, undefined, { maximumBytes: 65536 });
+        { visit_time: time, usertype: 1, p, userid: protocolInteger(userId) });
       const raw = object(data.data);
       if (authenticate && requireIdentity && raw.userid == null) fail('VERIFICATION_REQUIRED');
       if (authenticate && raw.userid != null) expectedIdentity(raw.userid, userId);
@@ -145,13 +144,12 @@ async function rights(c) {
   const now = c.clock();
   try {
     if (c.platform === 'wy') {
-      const result = await c.wy('/api/music-vip-membership/client/vip/info', { userId: c.account.userId }, true, { maximumBytes: 65536 });
+      const result = await c.wy('/api/music-vip-membership/client/vip/info', { userId: c.account.userId }, true);
       return wyRights(object(result.data), now);
     }
-    if (c.platform === 'tx') return txRights(await c.tx('VipLogin.VipLoginInter', 'vip_login_base', {}, false, { maximumBytes: 65536 }), now);
+    if (c.platform === 'tx') return txRights(await c.tx('VipLogin.VipLoginInter', 'vip_login_base', {}, false), now);
     if (c.platform === 'kg') {
-      const result = await c.kg('/v1/get_union_vip', { busi_type: 'concept' }, null, undefined, 'https://kugouvip.kugou.com',
-        undefined, { maximumBytes: 65536 });
+      const result = await c.kg('/v1/get_union_vip', { busi_type: 'concept' }, null, undefined, 'https://kugouvip.kugou.com');
       return kgRights(object(result.data), now);
     }
     fail('UNSUPPORTED');
@@ -195,7 +193,7 @@ function qqURL(address, host, path) {
   return url.searchParams;
 }
 function qqGet(host, path, data, cookie) {
-  return { url: `https://${host}${path}?${form(data)}`, json: false, maximumBytes: 65536,
+  return { url: `https://${host}${path}?${form(data)}`, json: false,
     headers: { Referer: 'https://xui.ptlogin2.qq.com/', ...(cookie ? { Cookie: cookie } : {}) } };
 }
 function callback(bytes) {
@@ -252,7 +250,7 @@ export function createAccountOperations() {
         scope: 'get_user_info,get_app_friends', state: 'state', switch: '', from_ptlogin: 1,
         src: 1, update_auth: 1, openapi: '1010_1030', g_tk: hash33(required(cookies.p_skey), 5381),
         auth_time: Math.floor(c.clock() / 1000) * 1000, ui: randomUUID() }),
-      allowRedirect: true, json: false, maximumBytes: 65536 });
+      allowRedirect: true, json: false });
     const location = qqURL(authorized.headers.get('location'), 'y.qq.com', '/portal/wx_redirect.html');
     if (location.get('state') !== 'state') fail('REDIRECT_DENIED');
     const code = required(location.get('code'));
@@ -272,7 +270,7 @@ export function createAccountOperations() {
       const encrypted = required(fields.encrypt_uin, 'INVALID_CREDENTIALS');
       try {
         const raw = await c.tx('music.UnifiedHomepage.UnifiedHomepageSrv', 'GetHomepageHeader',
-          { uin: encrypted, IsQueryTabDetail: 1 }, false, { maximumBytes: 65536 });
+          { uin: encrypted, IsQueryTabDetail: 1 }, false);
         expectedIdentity(encrypted, required(raw.Info?.BaseInfo?.EncryptedUin));
       } catch (error) {
         if (error.code === 'AUTH_REQUIRED' || error.status === 401) fail('AUTH_EXPIRED');
@@ -290,7 +288,7 @@ export function createAccountOperations() {
       const fields = cookieFields(c.account.cookie);
       if (c.platform === 'wy') {
         required(fields.MUSIC_U, 'INVALID_CREDENTIALS');
-        const response = await c.wy('/api/login/token/refresh', {}, false, { response: true, maximumBytes: 65536 });
+        const response = await c.wy('/api/login/token/refresh', {}, false, { response: true });
         c.account = { ...original, cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, fields, c.clock, 'interfacepc.music.163.com')) };
       } else if (c.platform === 'tx') {
         expectedIdentity(original.userId, credentialID('tx', original.cookie));
@@ -300,7 +298,7 @@ export function createAccountOperations() {
           'login_type', 'musickey_create_time', 'key_expires_in'])
           if (fields[key] != null) params[key] = ['musicid', 'login_type', 'musickey_create_time', 'key_expires_in'].includes(key) ?
             protocolInteger(fields[key]) : fields[key];
-        const data = await c.tx('music.login.LoginServer', 'Login', params, true, { maximumBytes: 65536 });
+        const data = await c.tx('music.login.LoginServer', 'Login', params, true);
         c.account = { ...original, cookie: qqCredential(data, fields) };
       } else if (c.platform === 'kg') {
         const time = c.clock(), seed = hex(8), key = md5(seed);
@@ -376,7 +374,7 @@ export function createAccountOperations() {
         let result;
         if (c.platform === 'wy') {
           const response = await c.wy('/api/login/qrcode/client/login', { key: current.key, type: 3 }, false,
-            { raw: true, response: true, maximumBytes: 65536 });
+            { raw: true, response: true });
           const status = { 800: 'expired', 801: 'waiting', 802: 'confirming', 803: 'authenticated' }[scalar(response.value.code)];
           if (!status) { wySuccess(response.value); fail('INVALID_RESPONSE'); }
           result = { status, ...(status === 'authenticated' ? {
@@ -434,12 +432,12 @@ export function createAccountOperations() {
         if (c.platform === 'wy') {
           smsResponse(await c.wy('/api/sms/captcha/sent', {
             cellphone: phone, ctcode: countryCode, secrete: 'music_middleuser_pclogin',
-          }, true, { raw: true, maximumBytes: 65536, dispatched: markDispatch }), true);
+          }, true, { raw: true, dispatched: markDispatch }), true);
         } else {
           await c.registerKg();
           await c.kg('/v7/send_mobile_code', {}, 'login.user.kugou.com',
             { businessid: 5, mobile: phone, plat: 3 }, undefined, undefined,
-            { maximumBytes: 65536, dispatched: markDispatch });
+            { dispatched: markDispatch });
         }
         return { platform: c.platform, confirmed: true, retryAfterSeconds: 60 };
       } catch (error) {
@@ -463,7 +461,7 @@ export function createAccountOperations() {
       if (c.platform === 'wy') {
         const response = await c.wy('/api/w/login/cellphone', { type: '1', https: 'true', phone,
           countrycode: countryCode, captcha, remember: 'true', secureCaptcha: '' }, true,
-        { raw: true, response: true, maximumBytes: 65536 });
+        { raw: true, response: true });
         const raw = smsResponse(response.value);
         c.account = { cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, {}, c.clock, 'music.163.com')),
           userId: required(raw.profile?.userId) };
@@ -476,7 +474,7 @@ export function createAccountOperations() {
           key: md5('1005' + kgSalt + '20489' + time),
           pk: kgRaw({ clienttime_ms: time, key: seed }).toUpperCase(),
           params: aes(JSON.stringify({ mobile: phone, code: captcha }), secret, 'cbc', secret.slice(16)).toString('hex'),
-        }, 'https://loginserviceretry.kugou.com', undefined, { maximumBytes: 65536,
+        }, 'https://loginserviceretry.kugou.com', undefined, {
           headers: { 'support-calm': '1', 'User-Agent': 'Android16-1070-11440-130-0-LOGIN-wifi' } });
         const raw = object(response.data);
         if (Array.isArray(raw.info_list)) fail('ACCOUNT_SELECTION_REQUIRED');

@@ -5,7 +5,7 @@ import {
 import { createHash } from 'node:crypto';
 import { join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { sourceReferences } from '../module-policy.mjs';
+import { discoverRuntimeSource, relocateRuntimeSource } from '../runtime-source.mjs';
 import { packageRuntime } from '../package-runtime.mjs';
 import { iosTarget } from '../quickjs/ios-target.mjs';
 
@@ -71,26 +71,6 @@ function inventory(root, relative = '', occupied = new Map()) {
   return { paths, occupied };
 }
 
-// Only the explicit platform imports are relocated. Shared modules and
-// dependencies stay byte-for-byte from packageRuntime.
-function relocate(source, imports, references) {
-  const seen = new Set();
-  const replacements = [];
-  for (const { specifier, start, end } of references) {
-    check(imports.has(specifier) && !seen.has(specifier), 'IOS_IMPORT', 'Unexpected or duplicate iOS runtime import');
-    seen.add(specifier);
-    const raw = source.slice(start, end);
-    replacements.push({ start, end, value: `${raw[0]}${imports.get(specifier)}${raw.at(-1)}` });
-  }
-  check(seen.size === imports.size,
-    'IOS_IMPORT', 'iOS runtime imports must match the explicit static closure');
-  let output = source;
-  for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
-    output = output.slice(0, replacement.start) + replacement.value + output.slice(replacement.end);
-  }
-  return Buffer.from(output);
-}
-
 /**
  * Offline iOS wrapper. The shared packager alone resolves dependencies,
  * retains licenses, validates the lock and creates a NEW output directory.
@@ -101,13 +81,12 @@ export async function packageIOSRuntime({
   root = fileURLToPath(new URL('../../', import.meta.url)), product, output, sdk, arch,
 } = {}) {
   const target = iosTarget(sdk, arch);
-  const manifest = await packageRuntime({ root, product, output, profile: 'common-native', target });
+  const manifest = await packageRuntime({ root, product, output, profile: 'common-native', target, platform: 'ios' });
   root = realpathSync(root);
   output = resolve(output);
   const identity = lstatSync(output);
   const originalManifest = jsonBytes(manifest);
   let fd;
-  const sourceInputs = [];
   const assertOutput = () => {
     const current = lstatSync(output);
     check(current.isDirectory() && !current.isSymbolicLink() &&
@@ -154,7 +133,6 @@ export async function packageIOSRuntime({
       && manifest.trustedNative[0].package === '@meowfilm/script-host',
     'INVALID_NATIVE_RECEIPT', 'The iOS runtime requires the reviewed embedded framework');
     manifest.entry = `${IOS_OUTPUT}/entries/${product}.mjs`;
-    manifest.modules = ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform'];
     manifest.platform = 'ios';
     manifest.transport = TRANSPORT;
     manifest.target = target;
@@ -164,13 +142,8 @@ export async function packageIOSRuntime({
     manifest.relocations = [];
     save();
     const occupied = audit();
-    const allowedSources = new Set(['bootstrap.mjs', 'entries/aggregate.mjs']);
-    const sourceTree = inventory(checkedPath(root, IOS_SOURCE));
-    check(sourceTree.paths.length === allowedSources.size &&
-      sourceTree.paths.every(path => allowedSources.has(path)) &&
-      [...sourceTree.occupied.values()].every(item => !item.directory || item.path === 'entries'),
-    'IOS_CLOSURE', 'Unexpected or missing iOS runtime source; refusing to silently omit it');
-    function appendFile(path, bytes) {
+    const sourceTree = discoverRuntimeSource(root, 'ios').platform;
+    function appendFile(path, bytes, documentation = false) {
       safeRelative(path);
       assertOutput();
       let parent = '';
@@ -196,54 +169,25 @@ export async function packageIOSRuntime({
         fsyncSync(targetFD);
       } finally { closeSync(targetFD); }
       occupied.set(key(path), { path, directory: false });
-      manifest.files.push({ path, bytes: bytes.length, sha256: digest(bytes) });
+      manifest.files.push({ path, bytes: bytes.length, sha256: digest(bytes),
+        ...(documentation ? { role: 'documentation' } : {}) });
       delete manifest.incompleteFile;
     }
-    // These are platform capabilities imported by the bootstrap, not workspace package subpaths.
-    const platformImports = new Set([
-      'node:path', 'node:net', 'node:fs', 'node:crypto', 'node:buffer', 'node:util',
-      '@meowfilm/runtime-bridge', '@meowfilm/storage', '@meowfilm/script-host/storage',
-    ]);
-    // These are path rewrites for the thin iOS launchers, not package-subpath permissions.
-    const sharedImports = new Map([
-      ['../../../packages/script-host/src/native-engine.js', '../../node_modules/@meowfilm/script-host/src/native-engine.js'],
-      ['../../runtime/bootstrap.mjs', '../bootstrap.mjs'],
-      ['../../runtime/native-settings.mjs', '../native-settings.mjs'],
-      ['../../../runtime/modules/music-script.mjs', '../../modules/music-script.mjs'],
-      ['../../../runtime/modules/cat-script.mjs', '../../modules/cat-script.mjs'],
-      ['../../../runtime/modules/source-runtime.mjs', '../../modules/source-runtime.mjs'],
-      ['../../../runtime/modules/pan-runtime.mjs', '../../modules/pan-runtime.mjs'],
-      ['../../../runtime/modules/metadata-data.mjs', '../../modules/metadata-data.mjs'],
-      ['../../../runtime/modules/netease-token.mjs', '../../modules/netease-token.mjs'],
-      ['../../../runtime/entry.mjs', '../../entry.mjs'],
-      ['../bootstrap.mjs', '../bootstrap.mjs'],
-    ]);
-    for (const relative of ['bootstrap.mjs', 'entries/aggregate.mjs']) {
-      const source = `${IOS_SOURCE}/${relative}`, path = `${IOS_OUTPUT}/${relative}`;
+    for (const relative of sourceTree.files) {
+      const source = `${IOS_SOURCE}/${relative}`;
       const input = readStable(root, source);
+      check(manifest.inputs.some(record => record.path === source && record.sha256 === digest(input)),
+        'SOURCE_CHANGED', 'Platform input differs from the resolved dependency graph');
       const text = new TextDecoder('utf-8', { fatal: true }).decode(input);
-      const references = sourceReferences(text);
-      check(references.unresolvedImports.length === 0, 'IOS_IMPORT',
-        'iOS runtime module specifiers must be statically resolvable');
-      const imports = new Map();
-      for (const { specifier, kind, type } of references.imports) {
-        check(kind === 'import' && type === 'ImportDeclaration',
-          'IOS_IMPORT', 'iOS runtime imports must be static declarations');
-        check(!imports.has(specifier) && (sharedImports.has(specifier) || platformImports.has(specifier)),
-          'IOS_IMPORT', 'Unexpected or duplicate iOS runtime import');
-        imports.set(specifier, sharedImports.get(specifier) ?? specifier);
-      }
-      const bytes = relocate(text, imports, references.imports);
-      sourceInputs.push({ path: source, sha256: digest(input) });
+      const { path, bytes, imports } = relocateRuntimeSource(text, source, 'ios');
       appendFile(path, bytes);
-      manifest.relocations.push({ source, path, imports: [...imports].map(([from, to]) => ({ from, to })) });
+      manifest.relocations.push({ source, path, imports });
     }
     for (const name of ['npm-node-compat-ISC.txt']) {
       const source = `LICENSES/${name}`, bytes = readStable(root, source);
-      sourceInputs.push({ path: source, sha256: digest(bytes) });
-      appendFile(`licenses/${name}`, bytes);
+      manifest.inputs.push({ path: source, sha256: digest(bytes) });
+      appendFile(`licenses/${name}`, bytes, true);
     }
-    manifest.inputs.push(...sourceInputs);
     for (const input of manifest.inputs) {
       check(digest(readStable(root, input.path)) === input.sha256,
         'SOURCE_CHANGED', 'Runtime build input changed during packaging');

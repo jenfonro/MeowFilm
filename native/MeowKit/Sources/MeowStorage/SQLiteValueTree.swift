@@ -19,9 +19,9 @@ public enum SQLiteValueTree {
     private static let number = try! NSRegularExpression(pattern: #"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"#)
 
     public static func rows(_ value: SQLiteTreeValue) throws -> [[SQLiteValue]] {
-        var rows: [[SQLiteValue]] = [], bytes = 0
+        var rows: [[SQLiteValue]] = []
         func visit(_ value: SQLiteTreeValue, parent: Int?, name: String?, index: Int?, depth: Int) throws {
-            guard depth <= 64, rows.count < 65_536 else { throw SQLiteStorageError.queueFull }
+            guard depth <= 64 else { throw SQLiteStorageError.queueFull }
             let id = rows.count
             var kind: String, boolean: SQLiteValue = .null, integer: SQLiteValue = .null
             var real: SQLiteValue = .null, text: SQLiteValue = .null
@@ -44,8 +44,6 @@ public enum SQLiteValueTree {
             }
             let row: [SQLiteValue] = [.integer(id), .optional(parent), .optional(name), .optional(index), .text(kind),
                                      boolean, integer, real, text]
-            bytes += row.reduce(0) { $0 + $1.byteCount }
-            guard bytes <= 16 * 1024 * 1024 else { throw SQLiteStorageError.queueFull }
             rows.append(row)
             switch value {
             case .array(let values):
@@ -64,7 +62,7 @@ public enum SQLiteValueTree {
     }
 
     public static func value(_ rows: [SQLiteRow]) throws -> SQLiteTreeValue {
-        guard !rows.isEmpty, rows.count <= 65_536 else { throw SQLiteStorageError.invalidValue }
+        guard !rows.isEmpty else { throw SQLiteStorageError.invalidValue }
         var indexed: [Int: SQLiteRow] = [:], children: [Int: [Int]] = [:]
         var root: Int?
         for row in rows {

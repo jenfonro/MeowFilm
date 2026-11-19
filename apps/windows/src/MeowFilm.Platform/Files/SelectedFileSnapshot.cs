@@ -35,7 +35,7 @@ internal static class SelectedFileSnapshot
     private const uint NoFollow = 0x00200000, BackupSemantics = 0x02000000;
 
     internal static async Task<SelectedFileSnapshotData> ReadAsync(string selectedPath, string extension,
-        int maximumBytes, CancellationToken cancellation, string[]? forbiddenCompanionSuffixes = null)
+        CancellationToken cancellation, string[]? forbiddenCompanionSuffixes = null)
     {
         cancellation.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
@@ -45,12 +45,13 @@ internal static class SelectedFileSnapshot
             {
                 cancellation.ThrowIfCancellationRequested();
                 string path = ValidatePath(selectedPath, extension);
-                using var opened = OpenSnapshot(path, maximumBytes, cancellation, forbiddenCompanionSuffixes ?? []);
+                using var opened = OpenSnapshot(path, cancellation, forbiddenCompanionSuffixes ?? []);
                 return opened.Read(cancellation);
             }, cancellation).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw new OperationCanceledException(cancellation); }
         catch (SelectedFileSnapshotException) { throw; }
+        catch (OverflowException) { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.TooLarge); }
         catch { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.ReadFailed); }
     }
 
@@ -109,10 +110,10 @@ internal static class SelectedFileSnapshot
         return volume;
     }
 
-    private static OpenedSnapshot OpenSnapshot(string validatedPath, int maximumBytes, CancellationToken cancellation,
+    private static OpenedSnapshot OpenSnapshot(string validatedPath, CancellationToken cancellation,
         string[] companionSuffixes)
     {
-        var opened = new OpenedSnapshot(Path.GetFileName(validatedPath), maximumBytes, companionSuffixes);
+        var opened = new OpenedSnapshot(Path.GetFileName(validatedPath), companionSuffixes);
         try
         {
             cancellation.ThrowIfCancellationRequested();
@@ -142,14 +143,13 @@ internal static class SelectedFileSnapshot
             opened.CheckCompanions(cancellation);
             opened.Initial = Information(opened.File);
             ValidateFile(opened.File, opened.Initial);
-            if (Length(opened.Initial.Info) > (ulong)maximumBytes) Fail(SelectedFileSnapshotError.TooLarge);
             cancellation.ThrowIfCancellationRequested();
             return opened;
         }
         catch { opened.Dispose(); throw; }
     }
 
-    private sealed class OpenedSnapshot(string basename, int maximumBytes, string[] companionSuffixes) : IDisposable
+    private sealed class OpenedSnapshot(string basename, string[] companionSuffixes) : IDisposable
     {
         internal readonly List<SafeFileHandle> Directories = [];
         internal readonly List<FileIdentity> DirectoryIdentities = [];
@@ -178,7 +178,7 @@ internal static class SelectedFileSnapshot
                 cancellation.ThrowIfCancellationRequested();
                 // Disable FileStream read-ahead: the EOF probe must request only one extra byte.
                 using var stream = new FileStream(File!, FileAccess.Read, bufferSize: 1, isAsync: false);
-                bytes = ReadFixed(stream, checked((int)Length(Initial.Info)), maximumBytes, cancellation);
+                bytes = ReadFixed(stream, checked((int)Length(Initial.Info)), cancellation);
                 cancellation.ThrowIfCancellationRequested();
                 var after = Information(File!);
                 ValidateFile(File!, after);
@@ -239,10 +239,10 @@ internal static class SelectedFileSnapshot
     }
 
     // Fixed allocation and bounded chunks, plus an EOF probe; never return a prefix on change.
-    private static byte[] ReadFixed(Stream stream, int length, int maximumBytes, CancellationToken cancellation)
+    private static byte[] ReadFixed(Stream stream, int length, CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
-        if (length < 0 || length > maximumBytes) Fail(SelectedFileSnapshotError.TooLarge);
+        if (length < 0) Fail(SelectedFileSnapshotError.TooLarge);
         var bytes = new byte[length];
         try
         {

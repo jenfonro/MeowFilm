@@ -31,8 +31,8 @@ const forbiddenHeaders = new Set([
   'proxy-authorization', 'proxy-connection', 'te',
 ]);
 
-function text(value, maximum = 4096, code = 'INVALID_ARGUMENT') {
-  sourceRequire(typeof value === 'string' && value.length <= maximum &&
+function text(value, maximum, code = 'INVALID_ARGUMENT') {
+  sourceRequire(typeof value === 'string' && (maximum === undefined || value.length <= maximum) &&
     !/[\u0000-\u001f\u007f]/.test(value), code);
   return value;
 }
@@ -49,7 +49,7 @@ function route(value) {
 }
 
 function httpUrl(value, code = 'INVALID_ARGUMENT') {
-  sourceRequire(typeof value === 'string' && value.length <= 16384, code);
+  sourceRequire(typeof value === 'string', code);
   try {
     const url = new URL(value);
     sourceRequire(['http:', 'https:'].includes(url.protocol), code);
@@ -63,14 +63,12 @@ function httpUrl(value, code = 'INVALID_ARGUMENT') {
 function headers(value = {}, code = 'INVALID_ARGUMENT') {
   sourceObject(value, code);
   const result = {};
-  sourceRequire(Object.keys(value).length <= 128, code);
   for (const [key, item] of Object.entries(value)) {
-    sourceRequire(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$/.test(key), code);
+    sourceRequire(/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(key), code);
     const values = Array.isArray(item) ? item : [item];
-    sourceRequire(values.length > 0 && values.length <= 32, code);
+    sourceRequire(values.length > 0, code);
     result[key.toLowerCase()] = values.map(entry => {
-      sourceRequire(typeof entry === 'string' && entry.length <= 16384 &&
-        !/[\r\n]/.test(entry), code);
+      sourceRequire(typeof entry === 'string' && !/[\r\n]/.test(entry), code);
       return entry;
     });
   }
@@ -136,7 +134,7 @@ function validateHttpResult(value) {
   return {
     version: hostApiVersion,
     status: value.status,
-    statusText: typeof value.statusText === 'string' ? value.statusText.slice(0, 256) : '',
+    statusText: typeof value.statusText === 'string' ? value.statusText : '',
     headers: headers(value.headers, 'INVALID_RESPONSE'),
     url: httpUrl(value.url, 'INVALID_RESPONSE'),
     body: bytes(value.body, 'INVALID_RESPONSE'),
@@ -174,10 +172,10 @@ function validateInput(name, input) {
       sourceRequire(input.version === hostApiVersion && typeof input.url === 'string');
       {
         const values = Array.isArray(input.values) ? input.values : [input.values];
-        sourceRequire(values.length > 0 && values.length <= 64);
+        sourceRequire(values.length > 0);
         return {
           version: hostApiVersion, profile: profile(input.profile), url: httpUrl(input.url),
-          values: values.map(value => text(value, 16384)),
+          values: values.map(value => text(value)),
         };
       }
     case 'storage.get':
@@ -186,14 +184,14 @@ function validateInput(name, input) {
       sourceRequire(input.version === hostApiVersion);
       return {
         version: hostApiVersion, profile: profile(input.profile),
-        key: text(input.key, 256),
+        key: text(input.key),
       };
     case 'storage.set':
       fields(input, ['version', 'profile', 'key', 'value']);
       sourceRequire(input.version === hostApiVersion);
       return {
         version: hostApiVersion, profile: profile(input.profile),
-        key: text(input.key, 256), value: jsonClone(input.value),
+        key: text(input.key), value: jsonClone(input.value),
       };
     case 'encoding.encode':
       fields(input, ['version', 'encoding', 'text']);

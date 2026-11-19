@@ -454,7 +454,7 @@ private actor NetworkPlaylistUIKitService: MusicServing, MusicAccountBrowsing, M
             queueSongs[track.songId] = track
             return .init(songID: track.songId, occurrenceID: UUID().uuidString, platform: row.platform,
                 sourceKey: track.sources.first?.sourceKey ?? track.songId,
-                sourcePosition: row.sourcePosition, byteCount: row.data.count)
+                sourcePosition: row.sourcePosition)
         }
     }
     private func projectQueueTracks(_ rows: [MusicQueueTrackReference]) throws -> [MusicNativeTrackData] {

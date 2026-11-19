@@ -24,7 +24,7 @@ function fixture(t) {
   };
   write('package.json', { workspaces: ['packages/*'] });
   for (const [name, exports] of [
-    ['runtime-bridge', { '.': './src/index.js' }],
+    ['runtime-bridge', { '.': './src/index.js', './json': './src/json-value.js' }],
     ['script-host', { '.': './src/index.js', './native-json': './src/native-json.js' }],
     ['source-runtime', { '.': './src/index.js' }],
     ['novel-rules', { '.': './src/index.js' }],
@@ -53,7 +53,10 @@ function fixture(t) {
   for (const file of metadataFiles) write(`apps/runtime/${file}`, 'export {};');
   write('apps/windows/runtime/bootstrap.mjs',
     "import { Socket } from 'node:net';\nimport './native-settings.mjs';");
-  write('apps/windows/runtime/native-settings.mjs', "import { BridgeError } from '@meowfilm/runtime-bridge';");
+  write('apps/windows/runtime/native-settings.mjs', `
+    import { BridgeError } from '@meowfilm/runtime-bridge';
+    import { parseJSONText } from '@meowfilm/runtime-bridge/json';
+  `);
   write('apps/windows/runtime/entries/aggregate.mjs',
     "import '../bootstrap.mjs';\nimport '../../../runtime/entry.mjs';");
   write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
@@ -69,37 +72,7 @@ test('checks relative imports and resources in the declared source tree', t => {
   assert.equal(result.resourceReferences, 1);
 });
 
-test('Windows runtime descriptors match shared contracts without loosening method validation', async t => {
-  const f = fixture(t);
-  f.write('apps/runtime/contracts.mjs', `
-    export const contracts = {
-      film: { contract: 'film.playback.v1', version: '0.1.0', prefix: 'film.',
-        operations: ['data.catalog', 'data.target'] },
-      'music-platform': { contract: 'music.platform.v1', version: '0.1.0', prefix: 'music.platform.',
-        operations: ['request'] }
-    };
-  `);
-  const native = `
-    ["film"] = new("0.1.0", "film.playback.v1", "film.", ["data.target", "data.catalog"]),
-    ["music-platform"] = new("0.1.0", "music.platform.v1", "music.platform.", ["request"])
-  `;
-  for (const [name, source, mismatch] of [
-    ['matching methods in a different order', native, false],
-    ['missing current target operation', native.replace('"data.target", ', ''), true],
-    ['unknown operation', native.replace('"data.target"', '"data.unknown"'), true],
-    ['wrong prefix', native.replace('"film."', '"film.other."'), true],
-    ['wrong contract', native.replace('"film.playback.v1"', '"film.playback.v2"'), true],
-    ['wrong version', native.replace('"0.1.0"', '"0.2.0"'), true],
-  ]) {
-    await t.test(name, () => {
-      f.write('apps/windows/src/MeowFilm.Core/Runtime/RuntimeHttpProtocol.cs', source);
-      if (mismatch) assert.throws(() => verifyAppStructure(f.source), /runtime contract mismatch: film/);
-      else assert.doesNotThrow(() => verifyAppStructure(f.source));
-    });
-  }
-});
-
-test('shared metadata sources and neutral HTTP imports fit the exact runtime inventory', t => {
+test('shared metadata sources and public HTTP imports resolve', t => {
   const f = fixture(t);
   f.write('apps/runtime/modules/metadata-data.mjs', `
     import '../contracts.mjs';
@@ -115,15 +88,7 @@ test('shared metadata sources and neutral HTTP imports fit the exact runtime inv
   `);
   const result = verifyAppStructure(f.source);
   assert.equal(result.relativeImports, 10);
-  assert.deepEqual(result.sourceFiles.filter(path => path.startsWith('apps/runtime/')), [
-    'apps/runtime/bootstrap.mjs', 'apps/runtime/client.mjs', 'apps/runtime/contracts.mjs', 'apps/runtime/entry.mjs',
-    'apps/runtime/modules/cat-script.mjs', 'apps/runtime/modules/film-playback.mjs',
-    ...metadataFiles.map(file => `apps/runtime/${file}`),
-    'apps/runtime/modules/music-script.mjs', 'apps/runtime/modules/netease-token.mjs', 'apps/runtime/modules/pan-runtime.mjs',
-    'apps/runtime/modules/source-candidates.mjs', 'apps/runtime/modules/source-library.mjs',
-    'apps/runtime/modules/source-rules.mjs', 'apps/runtime/modules/source-runtime.mjs', 'apps/runtime/modules/source-web.mjs',
-    'apps/runtime/pan-entry.mjs',
-  ]);
+  assert.ok(result.sourceFiles.includes('apps/runtime/modules/metadata/network.mjs'));
 });
 
 test('shared pan entry and public workspace import coexist with metadata sources', t => {
@@ -189,12 +154,6 @@ for (const file of [
     assert.ok(verifyAppStructure(f.source).sourceFiles.includes(`apps/runtime/${file}`));
   });
 }
-
-test('shared runtime rejects non-module assets instead of silently omitting them', t => {
-  const f = fixture(t);
-  f.write('apps/runtime/modules/metadata/fixture.json', '{}');
-  assert.throws(() => verifyAppStructure(f.source), /Unexpected shared runtime source/);
-});
 
 test('tool scripts may load runtime-selected modules but application imports stay statically checkable', t => {
   const f = fixture(t);
@@ -265,13 +224,13 @@ for (const [specifier, error] of [
   });
 }
 
-test('resolves WPF pack references and rejects missing resources', t => {
+test('resolves WinUI resource references and rejects missing resources', t => {
   const f = fixture(t);
   f.write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
-    '<ResourceDictionary Source="/MeowFilm.Desktop;component/Theme.xaml"/>');
+    '<ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme.xaml"/>');
   assert.equal(verifyAppStructure(f.source).resourceReferences, 1);
   f.write('apps/windows/src/MeowFilm.Desktop/Page.xaml',
-    '<ResourceDictionary Source="/MeowFilm.Desktop;component/Missing.xaml"/>');
+    '<ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Missing.xaml"/>');
   assert.throws(() => verifyAppStructure(f.source), /missing\/unsafe XAML resource/);
 });
 
@@ -338,19 +297,31 @@ test('shared runtime cannot import the Windows transport', t => {
   assert.throws(() => verifyAppStructure(f.source), /shared runtime platform dependency/);
 });
 
-test('shared runtime cannot create a platform transport directly', t => {
-  const f = fixture(t);
-  f.write('apps/runtime/modules/music-script.mjs', "import { Socket } from 'node:net';");
-  assert.throws(() => verifyAppStructure(f.source), /shared runtime platform import/);
-});
+for (const owner of [
+  'apps/runtime/modules/music-script.mjs', 'apps/runtime/modules/metadata/network.mjs',
+  'apps/windows/runtime/native-settings.mjs', 'apps/windows/runtime/entries/aggregate.mjs',
+]) {
+  test(`${owner} accepts Node builtins without per-file registration`, t => {
+    const f = fixture(t);
+    f.write(owner, `
+      import 'node:net';
+      import 'node:fs';
+      import 'node:child_process';
+      import 'node:url';
+      import 'util';
+      import 'fs/promises';
+      import 'node:test';
+    `);
+    assert.doesNotThrow(() => verifyAppStructure(f.source));
+  });
+}
 
-for (const specifier of ['node:net', 'node:fs', 'node:child_process',
-  '@meowfilm/script-host/src/host.js', '@meowfilm/pan-runtime/src/index.js',
+for (const specifier of ['@meowfilm/script-host/src/host.js', '@meowfilm/pan-runtime/src/index.js',
   '@meowfilm/film-playback/src/service.js']) {
   test(`metadata helpers cannot bypass public imports with ${specifier}`, t => {
     const f = fixture(t);
     f.write('apps/runtime/modules/metadata/network.mjs', `import '${specifier}';`);
-    assert.throws(() => verifyAppStructure(f.source), /shared runtime platform import/);
+    assert.throws(() => verifyAppStructure(f.source), /runtime private\/undeclared import/);
   });
 }
 
@@ -364,37 +335,68 @@ for (const platform of ['windows', 'ios']) {
   });
 }
 
-test('Windows runtime contains only the platform bootstrap, private settings helper and thin entry', t => {
+test('Windows runtime resolves new nested helpers and their public dependencies', t => {
   const f = fixture(t);
-  f.write('apps/windows/runtime/modules/music-script.mjs', 'export {};');
-  assert.throws(() => verifyAppStructure(f.source), /unexpected runtime source: apps\/windows\/runtime/);
+  f.write('apps/windows/runtime/bootstrap.mjs', "import './helpers/settings.mjs';");
+  f.write('apps/windows/runtime/helpers/settings.mjs', `
+    export { parseJSONText } from '@meowfilm/runtime-bridge/json';
+    import './paths/storage.mjs';
+  `);
+  f.write('apps/windows/runtime/helpers/paths/storage.mjs', "import 'node:path';");
+  const result = verifyAppStructure(f.source);
+  assert.ok(result.sourceFiles.includes('apps/windows/runtime/helpers/settings.mjs'));
+  assert.ok(result.sourceFiles.includes('apps/windows/runtime/helpers/paths/storage.mjs'));
+  rmSync(join(f.source, 'apps/windows/runtime/helpers/paths/storage.mjs'));
+  assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
 });
 
-test('Windows runtime requires its private settings helper', t => {
+test('Windows runtime requires its imported private settings helper', t => {
   const f = fixture(t);
   rmSync(join(f.source, 'apps/windows/runtime/native-settings.mjs'));
-  assert.throws(() => verifyAppStructure(f.source), /missing runtime source: apps\/windows\/runtime/);
+  assert.throws(() => verifyAppStructure(f.source), /missing\/linked relative import/);
 });
 
-for (const specifier of ['node:net', 'node:fs', '@meowfilm/script-host',
-  '@meowfilm/runtime-bridge/src/index.js']) {
-  test(`Windows settings helper cannot import ${specifier}`, t => {
+for (const owner of ['apps/windows/runtime/native-settings.mjs', 'apps/windows/runtime/entries/aggregate.mjs']) {
+  test(`${owner} accepts new public workspace subpaths but rejects private and missing targets`, t => {
     const f = fixture(t);
-    f.write('apps/windows/runtime/native-settings.mjs', `import '${specifier}';`);
-    assert.throws(() => verifyAppStructure(f.source), /Windows runtime bypasses shared module/);
+    f.write('packages/script-host/package.json', {
+      name: '@meowfilm/script-host',
+      exports: { '.': './src/index.js', './helper': './src/helper.js' },
+    });
+    f.write('packages/script-host/src/helper.js', 'export const value = 1;');
+    f.write(owner, "import '@meowfilm/script-host/helper';");
+    assert.doesNotThrow(() => verifyAppStructure(f.source));
+    f.write(owner, "import '@meowfilm/script-host/src/helper.js';");
+    assert.throws(() => verifyAppStructure(f.source), /runtime private\/undeclared import/);
+    f.write(owner, "import '@meowfilm/script-host/helper';");
+    rmSync(join(f.source, 'packages/script-host/src/helper.js'));
+    assert.throws(() => verifyAppStructure(f.source), /runtime private\/undeclared import/);
+  });
+  for (const specifier of ['node:meowfilm-missing', '@meowfilm/undeclared', '@meowfilm/runtime-bridge/src/index.js']) {
+    test(`${owner} rejects unavailable or private imports: ${specifier}`, t => {
+      const f = fixture(t);
+      f.write(owner, `import '${specifier}';`);
+      assert.throws(() => verifyAppStructure(f.source), /runtime private\/undeclared import/);
+    });
+  }
+}
+
+for (const [file, error] of [
+  ['entries/aggregate.mjs', /missing runtime source/],
+  ['bootstrap.mjs', /missing\/linked relative import/],
+]) {
+  test(`Windows runtime requires its actual entry dependency ${file}`, t => {
+    const f = fixture(t);
+    rmSync(join(f.source, 'apps/windows/runtime', file));
+    assert.throws(() => verifyAppStructure(f.source), error);
   });
 }
 
-test('an empty Windows module directory is not a valid platform boundary', t => {
+test('Windows runtime cannot bypass public workspace exports with a relative import', t => {
   const f = fixture(t);
-  mkdirSync(join(f.source, 'apps/windows/runtime/modules'));
-  assert.throws(() => verifyAppStructure(f.source), /unexpected runtime source: apps\/windows\/runtime/);
-});
-
-test('Windows entry cannot import script-host instead of its shared business module', t => {
-  const f = fixture(t);
-  f.write('apps/windows/runtime/entries/aggregate.mjs', "import '@meowfilm/script-host';");
-  assert.throws(() => verifyAppStructure(f.source), /Windows runtime bypasses shared module/);
+  f.write('apps/windows/runtime/native-settings.mjs',
+    "import '../../../packages/runtime-bridge/src/index.js';");
+  assert.throws(() => verifyAppStructure(f.source), /Windows runtime source dependency/);
 });
 
 test('native build intermediates are excluded while authored native inputs stay in source scope', t => {

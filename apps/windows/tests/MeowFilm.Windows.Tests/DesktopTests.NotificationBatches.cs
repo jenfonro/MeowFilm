@@ -1,6 +1,9 @@
 using System.Collections.ObjectModel;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.UI;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
 using System.Windows.Threading;
 using MeowFilm.Desktop;
 
@@ -59,13 +62,13 @@ public static partial class DesktopTests
                 { new("hidden-new", "hidden new", "") });
             current.NotifyAll(); hidden.NotifyAll();
             await DrainAsync();
-            True(LogicalTreeHelper.GetParent(oldView) is null, "the replaced main view is detached");
+            True(ParentOf(oldView) is null, "the replaced main view is detached");
             Same(view, Host(view).Content, "current main view is refreshed");
             Same(player, f.Element<ContentControl>("PlayerHost").Content, "current player replacement is retained");
             True(f.Navigation.Items.OfType<ShellNavigationEntry>().Any(item => item.Route == "new"),
                 "navigation invalidation survives the combined batch");
             Equal(0, hidden.InitializeCount, "invalidating an unvisited owner does not initialize it");
-            True(LogicalTreeHelper.GetParent(hiddenView) is null, "an unvisited owner's replacement stays unmounted");
+            True(ParentOf(hiddenView) is null, "an unvisited owner's replacement stays unmounted");
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             Same(settings, Host(settings).Content, "latest settings view is mounted on demand");
             Click(f.Back); await DrainAsync();
@@ -131,7 +134,7 @@ public static partial class DesktopTests
         public DesktopHeaderContribution Contribution { get; set; } = contribution;
         public int Reads { get; private set; }
         public Action? OnRead { get; set; }
-        public DesktopHeaderContribution Header
+        public new DesktopHeaderContribution Header
         {
             get { Reads++; var current = Contribution; OnRead?.Invoke(); return current; }
         }

@@ -20,7 +20,16 @@ struct MusicNativePublicBrowseCursor {
 }
 
 extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
-    MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing {
+    MusicPublicBrowseQueueLoading, MusicPublicBrowseRefreshing, MusicPublicPlaylistSummaryReading {
+    public func publicPlaylistSummaries(platform: MusicPublicBrowsePlatform, ids: [String]) async throws -> [MusicPublicBrowseCollection] {
+        try check(); try requirePlatform(platform.rawValue)
+        let own = epoch, revision = homeSourceRevision, port = publicPlatforms
+        let result = try await work(label: "publicBrowse") {
+            try await port.playlistSummaries(platform: platform, ids: ids)
+        }
+        try check(own); try musicRequire(homeSourceRevision == revision, .staleResult)
+        return result
+    }
     public func refreshPublicCollection(_ collection: MusicPublicBrowseCollection) async {
         guard !closed, available else { return }
         publicCollectionRefreshes += 1
@@ -88,7 +97,6 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         let port = publicPlatforms, own = epoch, revision = publicCollectionRevision
         let result = try await work(label: "publicBrowseQueue") { try await port.browseComplete(request.collection) }
         try check(own); try musicRequire(revision == publicCollectionRevision, .staleResult)
-        try musicRequire(result.tracks.reduce(0, { $0 + $1.data.count }) <= MusicRemoteQueueSource.maximumBytes, .limit)
         let authorization = MusicQueueAuthorization()
         let references = try adoptQueueTracks(result.tracks, epoch: own, authorization: authorization, intent: authorization)
         try check(own)
@@ -163,19 +171,21 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             case .unavailable: content = .unavailable
             case .action(let action): content = .action(action)
             case .song(let value):
-                guard let song = songs[publicSongMetadataKey(value)] else { throw MusicServiceError.notFound }
-                let track = try repositoryTrack(song); content = .track(track)
-                title = track.title
-                subtitle = [track.artist, layout == .vipSongs ? "" : track.album].filter { !$0.isEmpty }.joined(separator: " · ")
-                artwork = track.artwork
+                if let song = songs[publicSongMetadataKey(value)] { content = .track(try repositoryTrack(song)) }
+                else { content = .unavailable }
             case .record(let id):
                 let track = try repositoryTrack(repositorySong(id, read())); content = .track(track)
-                title = track.title; subtitle = track.artist; artwork = track.artwork
+                if item.kind == nil { title = track.title; subtitle = track.artist; artwork = track.artwork }
             }
-            let preview = try item.previewSongs.map { value -> MusicRemoteTrack in
-                guard let song = songs[publicSongMetadataKey(value)] else { throw MusicServiceError.notFound }
+            let displayPreviews = try item.previewSongs.map { value -> MusicRemoteTrack in
+                guard let song = songs[publicSongMetadataKey(value)] else { return MusicModel.displayTrack(value) }
                 return try repositoryTrack(song)
-            } + item.previewSongIDs.map { try repositoryTrack(repositorySong($0, read())) }
+            }
+            var displayOnly = displayPreviews.makeIterator()
+            let preview = item.previewSongIDs.isEmpty ? displayPreviews : try item.previewSongIDs.compactMap { id in
+                if let id { return try repositoryTrack(repositorySong(id, read())) }
+                return displayOnly.next()
+            }
             let ranking = item.ranking.map { ranking in
                 MusicPublicBrowseRanking(preview: ranking.preview.map { entry in
                     guard let track = preview.first(where: {
@@ -188,7 +198,9 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             }
             return .init(id: item.id, title: title, subtitle: subtitle, artwork: artwork, content: content,
                 ranking: ranking, previewSongs: preview, recommendationReason: item.recommendationReason,
-                coverLabel: item.coverLabel, requiresAccount: item.requiresAccount)
+                coverLabel: item.coverLabel, requiresAccount: item.requiresAccount,
+                kind: item.kind, label: item.label, presentation: item.presentation, coverRef: item.coverRef,
+                contextText: item.contextText, playCount: item.playCount)
         }
     }
 }

@@ -2,7 +2,6 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
-using System.Windows.Controls;
 using System.Windows.Threading;
 
 namespace MeowFilm.Media;
@@ -23,6 +22,9 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     private readonly object ownership = new();
     private readonly HashSet<Session> sessions = [];
     private Session? pending, current;
+    private Session? surfaceOwner;
+    private FilmKernelNative.Surface? presentedSurface;
+    private bool updatingSurface;
     private long generation;
     private long admittedGeneration;
     private bool disposing, polling;
@@ -40,19 +42,20 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         this(dispatcher, new FilmKernelApi(), acquireOutput) { }
 
     internal FilmPlayback(Dispatcher? dispatcher, FilmKernelApi kernel,
-        Func<CancellationToken, Task<IDisposable>>? acquireOutput = null)
+        Func<CancellationToken, Task<IDisposable>>? acquireOutput = null, FilmVideoSurface? surface = null)
     {
         this.kernel = kernel;
         this.acquireOutput = acquireOutput;
         this.dispatcher = dispatcher ?? Dispatcher.CurrentDispatcher;
         if (!this.dispatcher.CheckAccess() || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
             throw new PlaybackException(PlaybackError.WrongThread);
-        surface = new FilmVideoSurface();
+        this.surface = surface ?? new FilmVideoSurface();
+        this.surface.TargetChanged += SurfaceChanged;
         timer = new DispatcherTimer(TimeSpan.FromMilliseconds(100), DispatcherPriority.Background,
             Poll, this.dispatcher);
         timer.Stop();
     }
-    public ContentControl VideoView => surface;
+    public FilmVideoSurface VideoView => surface;
     public NativePlaybackScope? Scope => scope;
     public string? Identity => scope?.Identity;
     public bool HasOutput => hasOutput;
@@ -134,7 +137,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                 {
                     if (preceding is not null) await RetireAsync(preceding);
                     RequirePending(candidate);
-                    var target = surface.PictureHandle;
+                    var target = surface.DisplayWindow;
                     await Task.Run(() =>
                     {
                         candidate.Create();
@@ -207,6 +210,8 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         try
         {
             RequirePending(session); token.ThrowIfCancellationRequested();
+            await surface.WaitForTargetAsync(session.Token);
+            RequirePending(session); token.ThrowIfCancellationRequested();
             if (intent.PreserveFrom is { } preserve && donor?.Scope != preserve)
                 throw new PlaybackException(PlaybackError.Superseded);
             if (!canCommit()) return false;
@@ -237,11 +242,11 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             FilmKernelNative.Check(kernel.Volume(session.Handle, volume / 100d));
             if (donor is not null)
             {
-                FilmKernelNative.Check(kernel.Attach(donor.Handle, IntPtr.Zero));
+                DetachSurface(donor);
                 detached = true;
             }
             bool startPaused = intent.PreserveFrom is not null ? donorPaused : intent.Paused;
-            FilmKernelNative.Check(kernel.Attach(session.Handle, surface.PictureHandle));
+            AttachSurface(session);
             FilmKernelNative.Check(kernel.Start(session.Handle, startPaused ? 1 : 0));
             var snapshot = kernel.Read(session.Handle);
             if (snapshot.Error != 0 || snapshot.State is not (2 or 3 or 4) ||
@@ -287,7 +292,12 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                 {
                     try
                     {
-                        if (detached) FilmKernelNative.Check(kernel.Attach(donor.Handle, surface.PictureHandle));
+                        if (detached)
+                        {
+                            AttachSurface(donor);
+                            var target = surface.Describe();
+                            FilmKernelNative.Check(kernel.UpdateSurface(donor.Handle, ref target));
+                        }
                         FilmKernelNative.Check(kernel.Pause(donor.Handle, donorPaused ? 1 : 0));
                     }
                     catch (Exception error) { Report(error); }
@@ -480,9 +490,72 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     private async Task RetireAsync(Session session)
     {
         session.Cancel();
-        try { await session.ReleaseAsync(); }
+        try
+        {
+            await Dispatch(() =>
+            {
+                if (ReferenceEquals(surfaceOwner, session))
+                {
+                    surface.BindSwapchain(0);
+                    surfaceOwner = null;
+                    presentedSurface = null;
+                }
+                return Task.CompletedTask;
+            });
+            await session.ReleaseAsync();
+        }
         catch { releaseFaulted = true; throw new PlaybackException(PlaybackError.ReleaseFailed); }
         lock (ownership) sessions.Remove(session);
+    }
+
+    private void AttachSurface(Session session)
+    {
+        var target = surface.Describe();
+        FilmKernelNative.Check(kernel.Attach(session.Handle, target, out var swapchain));
+        if (swapchain == IntPtr.Zero) throw new PlaybackException("FILM_RENDER_FAILED");
+        surface.BindSwapchain(swapchain);
+        surfaceOwner = session;
+        presentedSurface = target;
+    }
+
+    private void DetachSurface(Session session)
+    {
+        if (ReferenceEquals(surfaceOwner, session))
+        {
+            surface.BindSwapchain(0);
+            surfaceOwner = null;
+            presentedSurface = null;
+        }
+        FilmKernelNative.Check(kernel.Attach(session.Handle, null, out _));
+    }
+
+    private async void SurfaceChanged(object? sender, EventArgs args)
+    {
+        if (updatingSurface || disposing) return;
+        updatingSurface = true;
+        await commands.WaitAsync();
+        try
+        {
+            while (!disposing && surfaceOwner is { } owner)
+            {
+                var target = surface.Describe();
+                if (presentedSurface is { } previous && previous.Equals(target)) break;
+                try
+                {
+                    await Task.Run(() => FilmKernelNative.Check(kernel.UpdateSurface(owner.Handle, ref target)));
+                    presentedSurface = target;
+                }
+                catch (Exception error)
+                {
+                    if (ReferenceEquals(current, owner)) { current = null; ClearOutput(); }
+                    try { await RetireAsync(owner); }
+                    catch (Exception releaseError) { error = releaseError; }
+                    Report(error);
+                    break;
+                }
+            }
+        }
+        finally { commands.Release(); updatingSurface = false; }
     }
     private async Task RetireCancelledAsync(Session session)
     {
@@ -519,6 +592,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         Session[] owned;
         lock (ownership) { disposing = true; owned = sessions.ToArray(); }
         timer.Stop(); timer.Tick -= Poll;
+        surface.TargetChanged -= SurfaceChanged;
         pending = null; current = null; ClearOutput();
         foreach (var session in owned) session.Cancel();
         await commands.WaitAsync();

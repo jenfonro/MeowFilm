@@ -1,23 +1,20 @@
-using System.Windows;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 
 namespace MeowFilm.Capabilities;
 
 internal sealed class SettingsReorderShift
 {
-    private sealed class Shift(Transform original)
+    private sealed class Shift(Transform? original)
     {
-        internal Transform Original { get; } = original;
+        internal Transform? Original { get; } = original;
         internal TranslateTransform Translation { get; } = new();
+        internal Storyboard? Animation { get; set; }
         internal double Target { get; set; }
-        internal int Generation { get; set; }
     }
-
     private readonly Dictionary<FrameworkElement, Shift> shifts = [];
-
-    internal void Apply(FrameworkElement element, int index, int sourceIndex, int destinationIndex,
-        double rowHeight, bool animate)
+    internal void Apply(FrameworkElement element, int index, int sourceIndex, int destinationIndex, double rowHeight, bool animate)
     {
         double target = destinationIndex < 0 || index == sourceIndex ? 0 :
             index > sourceIndex && index <= destinationIndex ? -rowHeight :
@@ -25,38 +22,24 @@ internal sealed class SettingsReorderShift
         if (!shifts.TryGetValue(element, out var shift))
         {
             if (target == 0) return;
-            shift = new(element.RenderTransform);
-            shifts.Add(element, shift);
-            element.SetCurrentValue(UIElement.RenderTransformProperty,
-                new TransformGroup { Children = { shift.Original, shift.Translation } });
+            shift = new(element.RenderTransform); shifts.Add(element, shift);
+            var group = new TransformGroup();
+            if (shift.Original is not null) group.Children.Add(shift.Original);
+            group.Children.Add(shift.Translation); element.RenderTransform = group;
         }
-        if (shift.Target == target && (animate || !shift.Translation.HasAnimatedProperties)) return;
+        if (shift.Target == target) return;
         double from = shift.Translation.Y;
-        shift.Translation.BeginAnimation(TranslateTransform.YProperty, null);
-        shift.Translation.Y = target;
-        shift.Target = target;
-        int generation = ++shift.Generation;
+        shift.Animation?.Stop(); shift.Translation.Y = target; shift.Target = target;
         if (!animate || Math.Abs(target - from) < .5) return;
-        var animation = new DoubleAnimation(from, target, TimeSpan.FromMilliseconds(150))
-        {
-            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        animation.Completed += (_, _) =>
-        {
-            if (shift.Generation == generation) shift.Translation.BeginAnimation(TranslateTransform.YProperty, null);
-        };
-        shift.Translation.BeginAnimation(TranslateTransform.YProperty, animation, HandoffBehavior.SnapshotAndReplace);
+        var animation = new DoubleAnimation { From = from, To = target, Duration = new(TimeSpan.FromMilliseconds(150)),
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }, EnableDependentAnimation = true };
+        Storyboard.SetTarget(animation, shift.Translation); Storyboard.SetTargetProperty(animation, "Y");
+        shift.Animation = new Storyboard(); shift.Animation.Children.Add(animation); shift.Animation.Begin();
     }
-
     internal void Clear()
     {
         foreach (var (element, shift) in shifts)
-        {
-            shift.Generation++;
-            shift.Translation.BeginAnimation(TranslateTransform.YProperty, null);
-            element.SetCurrentValue(UIElement.RenderTransformProperty, shift.Original);
-        }
+        { shift.Animation?.Stop(); element.RenderTransform = shift.Original; }
         shifts.Clear();
     }
 }

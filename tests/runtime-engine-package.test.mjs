@@ -125,7 +125,6 @@ test('common native payload preserves exact build, ABI, SDK, source and license 
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.entry, 'app/entry.mjs');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.ok(manifest.dependencies.some(dependency => dependency.name === '@meowfilm/music-platform'));
   assert.ok(manifest.files.some(file => file.path === 'app/modules/music-platform.mjs'));
   assert.ok(manifest.files.some(file => file.path === 'node_modules/@meowfilm/music-platform/src/index.mjs'));

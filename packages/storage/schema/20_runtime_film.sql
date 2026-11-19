@@ -2,6 +2,7 @@
 CREATE TABLE film_preferences_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ios_auto_prepare INTEGER NOT NULL CHECK (ios_auto_prepare IN (0, 1)),
+    metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban')),
     row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
 ) STRICT;
 

@@ -16,7 +16,6 @@ test('packaged iOS JavaScript resolves only its offline closure on the build hos
     import { registerHooks } from 'node:module';
     import { fileURLToPath } from 'node:url';
     import { isAbsolute, relative, sep, join } from 'node:path';
-    import { readFileSync } from 'node:fs';
     const payload = process.cwd();
     const unusedProvider = new URL('./app/modules/metadata/douban.mjs', import.meta.url).href;
     let commonOnly = true;

@@ -120,9 +120,9 @@ test('QQ damaged auxiliary lyric tracks retain the main and healthy sibling with
   const invalid = fixture(() => rpc({ lyric: '', trans: 'not-hex', roma: 'not-hex' }));
   seedClients(invalid); t.after(() => invalid.close());
   await assert.rejects(invalid.request('tx', 'lyrics', { id: 'mid' }), { code: 'INVALID_RESPONSE' });
-  const limited = fixture(() => rpc({ lyric: '[00:01]main', trans: 'x'.repeat(512 * 1024) }));
+  const limited = fixture(() => rpc({ lyric: '[00:01]main', trans: '[00:01]' + 'x'.repeat(512 * 1024) }));
   seedClients(limited); t.after(() => limited.close());
-  await assert.rejects(limited.request('tx', 'lyrics', { id: 'mid' }), { code: 'LIMIT' });
+  assert.equal((await limited.request('tx', 'lyrics', { id: 'mid' })).translation, '[00:01]' + 'x'.repeat(512 * 1024));
 });
 
 test('KRC and Kuwo accept equivalent Base64 whitespace and omitted padding but reject ignored junk', async t => {

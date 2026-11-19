@@ -178,8 +178,12 @@ final class FilmSourceManagementPlatformTests: XCTestCase {
         } as? UITextField)
         await eventually { dialog.view.window != nil && !dialog.isBeingPresented }
         XCTAssertEqual(input.text, String(target.order))
-        XCTAssertEqual(input.backgroundColor, UIColor(detail.theme.settings.input))
-        XCTAssertEqual(input.layer.borderColor, UIColor(detail.theme.settings.inputBorder).cgColor)
+        let inputSection = try XCTUnwrap(input.superview as? SettingsInputSection)
+        XCTAssertEqual(inputSection.titleLabel.text, "排序")
+        XCTAssertLessThanOrEqual(inputSection.titleLabel.frame.maxY, input.frame.minY)
+        XCTAssertEqual((input as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual(input.backgroundColor, .clear)
+        XCTAssertEqual(input.layer.borderWidth, 0)
         input.text = "not-an-integer"
         try XCTUnwrap(descendants(dialog.view).compactMap { $0 as? UIButton }.first {
             $0.accessibilityIdentifier == "management.dialog.confirm"

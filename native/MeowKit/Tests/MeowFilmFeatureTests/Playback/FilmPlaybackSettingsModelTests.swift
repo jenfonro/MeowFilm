@@ -4,6 +4,28 @@ import MeowRuntime
 
 @MainActor
 final class FilmPlaybackSettingsModelTests: XCTestCase {
+    func testIndependentMetadataPreferenceSurvivesAnOlderSettingsDraftAndReopen() async throws {
+        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preference RPC"); throw FilmPlaybackError.closed })
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
+        let settings = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
+        try await settings.loadPreferences()
+        XCTAssertEqual(settings.preferences?.metadataViewProvider, .tmdb)
+        let initial = try await store.document.read(); XCTAssertNil(initial)
+        settings.edit { $0.keywords = ["已编辑"] }
+        try await settings.setMetadataViewProvider(.douban)
+        try await settings.savePreferences()
+        XCTAssertEqual(settings.preferences?.metadataViewProvider, .douban)
+        XCTAssertEqual(settings.preferences?.keywords, ["已编辑"])
+        let reopened = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
+        try await reopened.loadPreferences()
+        XCTAssertEqual(reopened.preferences?.metadataViewProvider, .douban)
+        for value in [RuntimeValue.null, .number(1), .string("unknown")] {
+            var fields = FilmPlaybackPreferences.defaults.value.filmObject!
+            fields["metadataViewProvider"] = value
+            XCTAssertThrowsError(try FilmPlaybackPreferences(.object(fields)))
+        }
+    }
+
     func testPreferenceEditsPreserveOtherValidatedOrdersUntilTheirOrderIsEdited() async throws {
         var fields = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
         fields["ruleOrder"] = .array([.string("keyword"), .string("quality"), .string("pan")])

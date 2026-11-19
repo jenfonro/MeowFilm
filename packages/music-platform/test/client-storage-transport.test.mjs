@@ -146,7 +146,7 @@ test('actual account-derived HTTP headers reject CRLF and NUL before fetch and w
   }
 });
 
-test('default Node HTTP preserves URL, headers and cookies, bounds decoded bytes and never follows redirects', async t => {
+test('default Node HTTP preserves URL, headers and cookies, retains large decoded bodies and never follows redirects', async t => {
   const paths = [], cookies = ['first=one; Expires=Wed, 01 Jan 2031 00:00:00 GMT', 'second=two; Path=/'];
   const payload = Buffer.from('{"value":"exact"}'), oversized = gzipSync(Buffer.alloc(4 * 1024 * 1024 + 1, 120));
   const peer = await nativeHTTP(t, (request, reply) => {
@@ -174,7 +174,7 @@ test('default Node HTTP preserves URL, headers and cookies, bounds decoded bytes
   assert.equal(peer.requests[0].url, url);
   const local = await transport({ url: peer.origin + '/exact?variant=480&variant=960&token=a%2Fb', headers: { 'X-Actual': 'yes' } });
   assert.deepEqual(local.value, result.value); assert.deepEqual(local.cookies, cookies);
-  await assert.rejects(transport({ url: 'https://synthetic.invalid/limit', json: false }), { code: 'LIMIT' });
+  assert.deepEqual((await transport({ url: 'https://synthetic.invalid/limit', json: false })).value, Buffer.alloc(4 * 1024 * 1024 + 1, 120));
   const redirect = await transport({ url: 'https://synthetic.invalid/redirect', json: false, allowRedirect: true });
   assert.equal(redirect.status, 302);
   assert.equal(redirect.headers.get('location'), 'https://unchanged.invalid/path?variant=480&token=a%2Fb');

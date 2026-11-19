@@ -7,7 +7,7 @@ import { encodeValueNodes } from '@meowfilm/storage/values';
 import { nodeInserts } from '@meowfilm/storage/statements';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
+import { createScriptHost, ScriptHostError } from '@meowfilm/script-host';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
 import { createSourceLibrary } from '../apps/runtime/modules/source-library.mjs';
 import { createSourceWebBroker } from '../apps/runtime/modules/source-web.mjs';
@@ -296,6 +296,21 @@ test('the runtime-owned default writes and reopens typed definitions without nat
   assert.equal(value(await search(reopened.rpc, saved)).marker, 'default-edited');
 });
 
+test('native snapshots and runtime saves preserve definitions above the former 16 MiB boundary', async t => {
+  const padding = 'x'.repeat(16 * 1024 * 1024 + 1);
+  const item = source('large', { definition: definition('large', padding) });
+  const native = fixture(t);
+  value(await native.rpc('library.apply', snapshot([item])));
+  assert.equal(JSON.parse(native.host.loads[0].source).marker, padding);
+  assert.equal(value(await search(native.rpc, item)).marker, padding);
+  const runtime = fixture(t, { configurationOwner: 'runtime' });
+  const imported = value(await runtime.rpc('library.import', { text: definition('large') }));
+  assert.deepEqual(imported.failures, []);
+  value(await runtime.rpc('library.save', { installationId: imported.sources[0].installationId,
+    expectedRevision: 1, definition: item.definition }));
+  assert.equal(JSON.parse(runtime.disk.json('library.json').sources[0].definition).marker, padding);
+});
+
 test('snapshot identity and consumed configuration failures remain atomic before session changes', async t => {
   const { rpc, host, disk } = fixture(t), a = source(), b = source('other');
   value(await rpc('library.apply', snapshot([a, b])));
@@ -311,7 +326,6 @@ test('snapshot identity and consumed configuration failures remain atomic before
     [snapshot([changed, changed], 2), 'SOURCE_INTEGRITY'],
     [snapshot([changed, { ...b, sourceUrl: a.sourceUrl }], 2), 'SOURCE_INTEGRITY'],
     [snapshot([changed, { ...b, protocol: 'cat' }], 2), 'UNSUPPORTED_PROTOCOL'],
-    [snapshot([changed, { ...b, definition: ' '.repeat(SCRIPT_LIMITS.maxSourceBytes + 1) }], 2), 'LIMIT'],
     [snapshot([changed], 0), 'INVALID_REQUEST'],
     [snapshot([changed], Number.MAX_SAFE_INTEGER + 1), 'INVALID_REQUEST'],
     [snapshot([changed], '2'), 'INVALID_REQUEST'],

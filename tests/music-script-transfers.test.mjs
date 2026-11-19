@@ -58,7 +58,7 @@ function setup(t, options = {}) {
       rmSync(dataRoot, { recursive: true, force: true });
     });
   }
-  const module = createMusicScriptModule({ dataRoot, hostFactory: () => host });
+  const module = createMusicScriptModule({ dataRoot, hostFactory: input => { state.storage = input.storage; return host; } });
   cleanupsByRoot.get(dataRoot).push(module);
   const rpc = moduleHttp(t, module);
   return { state, module, rpc, dataRoot };
@@ -68,6 +68,37 @@ async function load(rpc, params = input(), source = '/* complete source */') {
   success(await rpc('sources.add', params));
   return success(await rpc('sources.enable', { installationId: params.installationId })).item;
 }
+
+test('music private storage persists large values and collections through cold reopen', async t => {
+  const capabilities = Object.fromEntries(Array.from({ length: 33 }, (_, index) =>
+    [`site${index}`, { actions: ['musicUrl'], qualitys: [] }]));
+  const version = 'v'.repeat(129);
+  const first = setup(t, { capabilities }), item = await load(first.rpc, input(),
+    `/*\n * @version ${version}\n */`);
+  const context = (generation, siteId, key, value) => ({
+    installationId: item.installationId, generation, siteId, key, value,
+    signal: new AbortController().signal, isCurrent: () => true,
+  });
+  const large = '猫'.repeat(16385);
+  const longKey = '键'.repeat(257);
+  await first.state.storage.set(context(item.generation, 'site0', longKey, large));
+  for (let index = 0; index < 65; index++)
+    await first.state.storage.set(context(item.generation, 'site0', `key${index}`, large));
+  for (let index = 1; index < 33; index++)
+    await first.state.storage.set(context(item.generation, `site${index}`, 'key', index));
+  const path = join(first.dataRoot, 'music', 'data', `${item.installationId}.json`);
+  assert.ok(readFileSync(path).length > 512 * 1024);
+  success(await first.module.close());
+  const reopened = setup(t, { capabilities, dataRoot: first.dataRoot });
+  const restored = success(await reopened.rpc('sources.enable', { installationId: item.installationId })).item;
+  assert.equal(restored.version, version);
+  assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', 'key64')), large);
+  assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', longKey)), large);
+  assert.equal(await reopened.state.storage.get(context(restored.generation, 'site32', 'key')), 32);
+  await reopened.state.storage.delete(context(restored.generation, 'site0', 'key0'));
+  assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', 'key0')), null);
+  assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', 'key64')), large);
+});
 
 test('B1 arbitrary values named blob and receipt remain ordinary business JSON', async t => {
   const { rpc } = setup(t); const instance = await load(rpc);
@@ -292,19 +323,20 @@ test('complete candidates select exact revisions, reject changed content or base
   failure(await rpc('sources.update', input('one', 9)), 'SOURCE_NOT_FOUND');
 });
 
-test('music retains six complete candidates and enforces only the 16 MiB source input boundary', async t => {
+test('music retains six complete candidates and source bytes above the former 16 MiB boundary', async t => {
   const { rpc, state } = setup(t);
   const exact = Buffer.alloc(16 * 1024 * 1024, 0x61);
   const receipt = success(await rpc.upload(idOf('large'), 1, exact, { basename: 'x.js' }));
   assert.equal(receipt.sourceBytes, exact.length);
   assert.equal(receipt.contentHash, hash(exact));
-  failure(await rpc.upload(idOf('large'), 2, Buffer.concat([exact, Buffer.from('a')]), { basename: 'x.js' }), 'LIMIT');
+  assert.equal(success(await rpc.upload(idOf('large'), 2, Buffer.concat([exact, Buffer.from('a')]), { basename: 'x.js' })).sourceBytes, exact.length + 1);
   for (let i = 0; i < 6; i++) success(await rpc.upload(idOf(`i${i}`), 1, Buffer.from(`complete-${i}`), { basename: 'x.js' }));
   for (let i = 0; i < 6; i++) {
     assert.equal(success(await rpc('sources.add', input(`i${i}`))).item.installationId, idOf(`i${i}`));
     success(await rpc('sources.enable', { installationId: idOf(`i${i}`) }));
   }
-  assert.equal(success(await rpc('sources.add', input('large'))).item.contentHash, receipt.contentHash);
+  failure(await rpc('sources.add', input('large')), 'SOURCE_NOT_FOUND');
+  assert.equal(success(await rpc('sources.add', input('large', 2))).item.contentHash, hash(Buffer.concat([exact, Buffer.from('a')])));
   success(await rpc('sources.enable', { installationId: idOf('large') }));
   assert.equal(state.installs, 7);
 });
@@ -364,8 +396,8 @@ test('main UTF-8 scalar positions survive complete request and response serializ
 
 test('main large source metadata list stays complete and disable fences a previously prepared call', async t => {
   const { rpc, state } = setup(t);
-  const header = `/**\n * @name ${'猫'.repeat(255)}\n * @description ${'漢'.repeat(1024)}\n` +
-    ` * @author ${'作'.repeat(1024)}\n * @homepage ${'页'.repeat(1024)}\n */\n`;
+  const header = `/**\n * @name ${'猫'.repeat(256)}\n * @description ${'漢'.repeat(8193)}\n` +
+    ` * @author ${'作'.repeat(1025)}\n * @homepage ${'页'.repeat(1025)}\n * @version ${'v'.repeat(129)}\n */\n`;
   for (let index = 0; index < 8; index++) {
     const id = randomUUID();
     success(await rpc.upload(id, 1, Buffer.from(`${header}// ${index}`), { basename: 'metadata.js' }));
@@ -375,7 +407,11 @@ test('main large source metadata list stays complete and disable fences a previo
   const listed = await rpc('sources.list');
   assert.ok(encodeJSONValue(listed).length > 65536);
   assert.equal(success(listed).items.length, 9);
-  assert.equal(success(listed).items[0].description, '漢'.repeat(1024));
+  assert.equal(success(listed).items[0].name, '猫'.repeat(256));
+  assert.equal(success(listed).items[0].description, '漢'.repeat(8193));
+  assert.equal(success(listed).items[0].author, '作'.repeat(1025));
+  assert.equal(success(listed).items[0].homepage, '页'.repeat(1025));
+  assert.equal(success(listed).items[0].version, 'v'.repeat(129));
   assert.deepEqual(success(listed).items.at(-1), item);
   const prepared = request(item, { text: 'x'.repeat(65536) });
   success(await rpc('sources.disable', { installationId: item.installationId }));

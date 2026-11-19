@@ -1,8 +1,13 @@
+using MeowFilm.Desktop;
 using System.Globalization;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using MeowFilm.Media;
 using MeowFilm.Capabilities;
 
@@ -145,40 +150,43 @@ public static partial class MusicUiTests
             Equal(null, f.Module.AcceptedPlaybackRate);
             True(f.Module.Status.Length > 0, "unsupported rate not silent");
         });
-        yield return Case("native music rate actual WPF popup exposes tenths and reset without explanatory text", async () =>
+        yield return Case("native music rate actual flyout exposes tenths and reset without explanatory text", async () =>
         {
             var output = new RateProbe();
             await using var f = await Fixture.Create(output: output);
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var player = (MusicPlayerView)f.Module.PlayerView;
-            var window = new Window { Content = player, Width = 1110, Height = 100,
-                Left = -32000, Top = -32000, ShowActivated = false, ShowInTaskbar = false,
-                WindowStyle = WindowStyle.None };
+            var window = DesktopTestUi.CreateWindow(player, 1110, 100);
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
-                var popup = (Popup)player.FindName("RatePopup");
-                True(player.IsLoaded && popup.IsLoaded, "rate panel belongs to the actually loaded offscreen player");
+                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                var popup = (Flyout)player.FindName("RatePopup");
+                True(player.IsLoaded && ReferenceEquals(((FrameworkElement)popup.Content).DataContext, f.Module),
+                    "rate panel belongs to the real player owner");
                 var button = (Button)player.FindName("MoreButton");
-                Equal("更多", AutomationProperties.GetName(button));
-                button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                var rate = (MenuItem)button.ContextMenu.Items[0];
-                True(button.ContextMenu.IsOpen, "more menu is actually open before choosing rate");
-                True(ReferenceEquals(button.ContextMenu.Style, player.FindResource("MeowFilm.ContextMenu")),
+                Equal("更多播放选项", AutomationProperties.GetName(button));
+                DesktopTestUi.Invoke(button);
+                await Drain();
+                var menu = (MenuFlyout)player.FindName("MoreMenu");
+                var rate = (MenuFlyoutItem)menu.Items[0];
+                True(menu.IsOpen, "more menu is actually open before choosing rate");
+                True(ReferenceEquals(menu.MenuFlyoutPresenterStyle, DesktopVisual.Resource(player, "MeowFilm.ContextMenu")),
                     "more uses the shared menu surface");
-                True(rate.Header.ToString()!.StartsWith("播放倍速"), "rate is a more-menu action");
+                True(rate.Text.StartsWith("播放倍速"), "rate is a more-menu action");
                 var slider = (Slider)player.FindName("RateSlider");
-                Equal(0.5, slider.Minimum); Equal(3d, slider.Maximum); Equal(0.1, slider.TickFrequency);
-                True(slider.IsSnapToTickEnabled, "keyboard/mouse tenths");
+                Equal(0.5, slider.Minimum); Equal(3d, slider.Maximum); Equal(0.1, slider.StepFrequency);
                 await f.Module.ChangePlaybackRateAsync(1.3); await Drain();
-                True(button.ToolTip is null, "the footer has no explanatory hover hint");
+                True(ToolTipService.GetToolTip(button) is null, "the footer has no explanatory hover hint");
                 Equal(1.3, slider.Value);
                 True(!f.Module.EffectivePlaybackRateVerified, "requested != measured");
-                rate.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-                True(!button.ContextMenu.IsOpen && popup.IsOpen, "rate action hands off from menu to its panel");
-                True(ReferenceEquals(((Border)popup.Child).Background, player.FindResource("MeowFilm.Brush.FloatingSurface")),
+                MusicTestUi.Invoke(rate);
+                await Until(() => !menu.IsOpen && popup.IsOpen);
+                True(ReferenceEquals(popup.XamlRoot, player.XamlRoot),
+                    "rate action hands off to the same-root panel");
+                var presenter = Visuals(((FrameworkElement)popup.Content).Parent).OfType<FlyoutPresenter>().Single();
+                True(ReferenceEquals(presenter.Background, DesktopVisual.Resource(player, "MeowFilm.Brush.FloatingSurface")),
                     "rate panel uses the same floating palette");
-                popup.IsOpen = false;
+                popup.Hide();
             }
             finally { player.Deactivate(); window.Content = null; window.Close(); await Drain(); }
         });

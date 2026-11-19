@@ -60,7 +60,7 @@ test('audio consumes quality arrays before dependencies and retains the existing
   });
 });
 
-test('KG lyric duration conversion reports request failures before HTTP and keeps absent, fractional and response-error semantics', async t => {
+test('KG lyric duration conversion retains request checks while absent candidates produce no lyric', async t => {
   const invalid = fixture(() => assert.fail('unusable request duration must not dispatch lyric search'));
     await invalid.owner.ready;
     const storageCounts = [invalid.reads.length, invalid.writes.length];
@@ -82,8 +82,8 @@ test('KG lyric duration conversion reports request failures before HTTP and keep
   assert.deepEqual(durations, ['0', '0', '240250']); assert.equal(f.requests.length, 3);
   const damaged = fixture(() => response({ status: 200, error_code: 0, candidates: 'not-a-list' }));
   t.after(() => damaged.close());
-  await assert.rejects(damaged.request('kg', 'lyrics', { id: kgHash, musicInfo: { duration: '240.25' } }),
-    { code: 'INVALID_RESPONSE' });
+  assert.deepEqual(await damaged.request('kg', 'lyrics', { id: kgHash, musicInfo: { duration: '240.25' } }),
+    { text: '', translation: '', romanization: '' });
   assert.equal(damaged.requests.length, 1);
 });
 
@@ -414,8 +414,8 @@ test('lyrics retain real decryption and decompression failures and preserve an i
   await assert.rejects(damaged.request('tx', 'lyrics', { id: 'mid' }), { code: 'INVALID_RESPONSE' }); await damaged.close();
   const bomb = fixture(request => response(new URL(request.url).pathname === '/v1/search' ?
     { status: 200, candidates: [{ id: 1, accesskey: 'synthetic' }] } :
-    { status: 200, error_code: 0, content: krc('x'.repeat(512 * 1024 + 1)) }));
-  await assert.rejects(bomb.request('kg', 'lyrics', { id: kgHash }), { code: 'LIMIT' }); await bomb.close();
+    { status: 200, error_code: 0, content: krc('[1000,300]' + 'x'.repeat(512 * 1024 + 1)) }));
+  assert.equal((await bomb.request('kg', 'lyrics', { id: kgHash })).text, '[1000,300]' + 'x'.repeat(512 * 1024 + 1)); await bomb.close();
 });
 
 test('chorus consumes actual timing only; absent and unrelated fields do not block', async t => {

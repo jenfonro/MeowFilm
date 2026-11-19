@@ -1,6 +1,12 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
+using MeowFilm.Desktop;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
+using Windows.UI.Text;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
@@ -20,6 +26,7 @@ public static partial class MusicUiTests
             await f.Module.ActivateSettingsAsync();
             await SearchUntil(() => f.Module.LibrarySync.CanEdit);
             var view = f.Module.SettingsView;
+            using var mount = new ReplicaMount(view); await Drain();
             view.Measure(new Size(1000, 1000));
             view.Arrange(new Rect(0, 0, 1000, 1000)); view.UpdateLayout();
             var accounts = Visuals(view).OfType<MusicAccountsView>().Single();

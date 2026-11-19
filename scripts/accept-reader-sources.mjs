@@ -191,7 +191,7 @@ async function inventory(input) {
     let value;
     try { value = JSON.parse(text); } catch { throw new Error('SOURCE_ENCODING'); }
     const entries = Array.isArray(value) ? value : [value];
-    if (!entries.length || entries.length > 4096) throw new Error('SOURCE_LIMIT');
+    if (!entries.length) throw new Error('SOURCE_LIMIT');
     for (const [index, entry] of entries.entries()) {
       if (entry === null || typeof entry !== 'object' && typeof entry !== 'string') {
         throw new Error('UNSUPPORTED_PROTOCOL');

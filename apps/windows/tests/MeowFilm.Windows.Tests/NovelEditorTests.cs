@@ -2,13 +2,18 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using FontWeights = Microsoft.UI.Text.FontWeights;
+using Color = global::Windows.UI.Color;
+using PixelFormats = System.Windows.Media.PixelFormats;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -23,7 +28,7 @@ public static class NovelEditorTests
         yield return new("novel editor input: initial load reverted input and successful save reset", Input);
         yield return new("novel editor confirmation: cancel close dismiss and protocol use only yes or no",
             () => NovelTests.Sta(() => Confirmation(["cancel", "close", "dismiss", "protocol"])));
-        yield return new("novel editor Escape: save confirmation preserves only yes or no", () => NovelTests.Sta(() => Confirmation(["escape"])));
+        yield return new("novel editor close request: save confirmation preserves only yes or no", () => NovelTests.Sta(() => Confirmation(["host-close"])));
         yield return new("novel editor save: failure retains input and cancelled accepted write drains before continuing", () => NovelTests.Sta(SaveFailure));
         yield return new("novel editor viewport: fixed footer optimized internal horizontal and vertical scrolling", () => NovelTests.Sta(Viewport));
         yield return new("novel settings navigation: shared areas direct new source and ordered protocol actions", () => NovelTests.Sta(Settings));
@@ -59,10 +64,10 @@ public static class NovelEditorTests
             switch (request)
             {
                 case "cancel": Click(scene.Surface, "取消"); break;
-                case "close": NovelTests.Find<Button>(scene.Surface).Single(button => AutomationProperties.GetAutomationId(button) == "novel.dialog.close").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); break;
+                case "close": NovelTestUi.Invoke(NovelTests.Find<Button>(scene.Surface).Single(button => AutomationProperties.GetAutomationId(button) == "novel.dialog.close")); break;
                 case "dismiss": scene.Host.RequestClose(); break;
-                case "escape":
-                    scene.Host.HandleEscape(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(scene.Window), 0, Key.Escape));
+                case "host-close":
+                    scene.Host.RequestClose();
                     break;
                 case "protocol": change = scene.Editing.ContinueAsync(() => { scene.Editor.ChangeProtocol("qysg"); switched = true; }); break;
             }
@@ -134,73 +139,52 @@ public static class NovelEditorTests
     }
     private static async Task Viewport()
     {
-        await using var scene = new Scene(); scene.Window.Width = 500; scene.Window.Height = 640;
-        DesktopTheme.SetIsHighContrast(scene.Window, false);
+        await using var scene = new Scene(); scene.Window.Resize(500, 640);
         await scene.Ready();
-        var tabs = NovelTests.Find<TabControl>(scene.Editor).Single();
-        var header = (ScrollViewer)tabs.Template.FindName("HeaderScroll", tabs);
-        Check(header.Style == tabs.FindResource("MeowFilm.SettingsScrollViewer") && header.ScrollableWidth > 0,
-            "Overflowing tabs did not retain the existing horizontal scroll style.");
-        var horizontal = (ScrollBar)header.Template.FindName("PART_HorizontalScrollBar", header);
-        Check(horizontal.Orientation == Orientation.Horizontal && horizontal.Style == header.FindResource("MeowFilm.SettingsScrollBar"),
-            "The tab bar used a default or vertical-only scrollbar.");
-        header.ScrollToRightEnd(); await scene.Layout();
-        Check(header.HorizontalOffset > 0, "The final tabs cannot be reached by horizontal scrolling.");
-        Check(!NovelTests.Find<ScrollViewer>(scene.Surface).Any(scroll => ReferenceEquals(scroll.Content, scene.Editor)),
-            "The editor still has a scrolling outer wrapper.");
+        var tabs = NovelTests.Find<TabView>(scene.Editor).Single();
+        Check(!tabs.IsAddTabButtonVisible && !tabs.CanReorderTabs && tabs.TabItems.Count >= 6,
+            "The source field groups must remain fixed native tabs.");
+        Check(tabs.TabItems.OfType<TabViewItem>().All(tab => tab.FontWeight == Microsoft.UI.Text.FontWeights.Normal &&
+            tab.FontStyle == global::Windows.UI.Text.FontStyle.Normal), "Source field group labels must retain normal system typography.");
+        tabs.SelectedIndex = tabs.TabItems.Count - 1; await scene.Layout();
+        Check(((TabViewItem)tabs.SelectedItem).IsSelected && ((TabViewItem)tabs.SelectedItem).IsLoaded,
+            "The final field group must be reachable in a narrow window.");
+        tabs.SelectedIndex = 0; await scene.Layout();
+        Check(!NovelTests.Find<ScrollViewer>(scene.Surface).Any(scroll =>
+            scroll.Content is DependencyObject content && DesktopVisual.Contains(content, scene.Editor)),
+            "The editor must not acquire a scrolling outer wrapper.");
         var footer = NovelTests.Find<Border>(scene.Surface).Single(border => AutomationProperties.GetAutomationId(border) == "novel.dialog.footer");
-        double before = footer.TransformToAncestor(scene.Surface).Transform(new Point()).Y;
-        Check(footer.BorderThickness.Top == 1 && footer.BorderBrush == scene.Surface.FindResource("MeowFilm.Brush.Border"),
-            "The fixed action area lost its themed top separator.");
-        var basic = (ScrollViewer)((TabItem)tabs.Items[0]).Content;
-        var vertical = (ScrollBar)basic.Template.FindName("PART_VerticalScrollBar", basic);
-        var track = (Track)vertical.Template.FindName("PART_Track", vertical);
-        Check(OverlayScrollChrome.GetEnabled(basic) && vertical.Orientation == Orientation.Vertical &&
-            track.Orientation == Orientation.Vertical && vertical.Opacity == 0,
-            "The selected form lost its optimized vertical scrollbar or idle visibility.");
-        Check(basic.ScrollableHeight > 0,
-            $"The selected form cannot scroll: editor={scene.Editor.ActualHeight}, tabs={tabs.ActualHeight}, " +
-            $"form={basic.ActualHeight}, extent={basic.ExtentHeight}, viewport={basic.ViewportHeight}, " +
-            $"surface={scene.Surface.ActualHeight}, host={scene.Host.ActualHeight}.");
+        double before = NovelTestUi.Bounds(footer, scene.Surface).Y;
+        Check(footer.BorderThickness.Top == 1 && ReferenceEquals(footer.BorderBrush, NovelTestUi.Resource(scene.Surface, "MeowFilm.Brush.Border")),
+            "The fixed action area lost its themed separator.");
+        var basic = (ScrollViewer)((TabViewItem)tabs.TabItems[0]).Content;
+        Check(basic.ScrollableHeight > 0 && basic.VerticalScrollBarVisibility == ScrollBarVisibility.Auto,
+            "All fields must contribute to the form's scroll extent.");
         var comment = NovelTests.Find<TextBox>(scene.Editor).Single(input => AutomationProperties.GetAutomationId(input) == "novel.source.field.bookSourceComment");
         comment.Text = string.Join('\n', Enumerable.Repeat("长内容", 50)); await scene.Layout();
-        var inner = (ScrollViewer)comment.Template.FindName("PART_ContentHost", comment);
-        Check(inner.Style == comment.FindResource("MeowFilm.SettingsScrollViewer"), "The multiline input retained a default scrollbar.");
-        comment.ScrollToEnd(); await scene.Layout();
-        Check(comment.VerticalOffset > 0, "Long field input is not reachable.");
-        basic.ScrollToEnd(); await scene.Layout();
-        Check(basic.VerticalOffset > 0 && Math.Abs(vertical.Value - basic.VerticalOffset) < 1 &&
-            Math.Abs(vertical.Maximum - basic.ScrollableHeight) < 1 &&
-            Math.Abs(vertical.ViewportSize - basic.ViewportHeight) < 1 &&
-            !OverlayScrollChrome.GetActive(basic) && vertical.Opacity == 0,
-            "The form scrollbar lost its viewport bindings or programmatic scrolling activated idle chrome.");
+        var inner = NovelTests.Find<ScrollViewer>(comment).Single();
+        inner.ChangeView(null, inner.ScrollableHeight, null, true); await scene.Layout();
+        Check(inner.VerticalOffset > 0, "Long field input must remain reachable.");
+        basic.ChangeView(null, basic.ScrollableHeight, null, true); await scene.Layout();
+        Check(basic.VerticalOffset > 0, "The form must scroll to its final fields.");
         var last = NovelTests.Find<TextBox>(scene.Editor).Single(input => AutomationProperties.GetAutomationId(input) == "novel.source.field.jsLib");
-        Check(last.TransformToAncestor(basic).TransformBounds(new Rect(last.RenderSize)).Bottom <= basic.ActualHeight + 1,
-            "Removing outer scroll made the last field unreachable.");
-        Check(Math.Abs(before - footer.TransformToAncestor(scene.Surface).Transform(new Point()).Y) < 1 &&
+        Check(NovelTestUi.Bounds(last, basic).Bottom <= basic.ActualHeight + 1,
+            "The final source field must remain reachable without moving the footer.");
+        Check(Math.Abs(before - NovelTestUi.Bounds(footer, scene.Surface).Y) < 1 &&
             scene.Surface.ActualHeight <= scene.Host.ActualHeight - 31,
-            "Internal scrolling moved the fixed footer or overflowed the host.");
-        DesktopTheme.SetIsHighContrast(scene.Window, true); await scene.Layout();
-        Check(scene.Host.Background == SystemColors.WindowBrush && footer.BorderBrush == SystemColors.WindowTextBrush &&
-            vertical.Opacity == 1 && !vertical.HasAnimatedProperties &&
-            NovelTests.Find<Border>(track.Thumb).Any(border => border.Background is SolidColorBrush brush &&
-                brush.Color == SystemColors.WindowTextColor),
-            "The shared scrim, footer or form scrollbar lost high-contrast semantics.");
-        DesktopTheme.SetIsHighContrast(scene.Window, false); await scene.Layout();
-        GeneralAppearanceTests.SavePreview(scene.Surface, "reader-page-source-editor",
-            (int)Math.Ceiling(scene.Surface.ActualWidth), (int)Math.Ceiling(scene.Surface.ActualHeight));
+            "Internal scrolling moved the footer or overflowed the host.");
+        NovelTestUi.CheckContrastResources(scene.Surface);
+        await NovelTestUi.Preview(scene.Surface, "reader-page-source-editor", (int)Math.Ceiling(scene.Surface.ActualWidth), (int)Math.Ceiling(scene.Surface.ActualHeight));
         scene.Host.Close(); await scene.Dialog;
         var list = new ManagementList { Height = 280 }; scene.Owner.Children.Add(list);
-        var rows = Enumerable.Range(0, 100).Select(index => new ManagementRow(index.ToString(), "书源 " + index, "阅读源", true, () => { }, _ => { }, new ContextMenu())).ToArray();
+        var rows = Enumerable.Range(0, 100).Select(index => new ManagementRow(index.ToString(), "书源 " + index, "阅读源", true, () => { }, _ => { }, new MenuFlyout())).ToArray();
         list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "无书源"); await scene.Layout();
-        var native = NovelTests.Find<ListBox>(list).Single();
-        Check(native.Style == list.FindResource("MeowFilm.ManagementList") &&
-            native.ItemContainerStyle == list.FindResource("MeowFilm.ManagementListItem") &&
-            ((Grid)native.Parent).Clip is RectangleGeometry { RadiusX: 14, RadiusY: 14 },
-            "Management lists lost their themed rounded content boundary.");
-        Check((bool)native.GetValue(VirtualizingPanel.IsVirtualizingProperty) &&
-            NovelTests.Find<ManagementRowView>(list).Count() < rows.Length,
-            "Optimized list scroll disabled virtualization.");
+        var native = NovelTests.Find<ListView>(list).Single();
+        Check(ReferenceEquals(native.Style, NovelTestUi.Resource(list, "MeowFilm.ManagementList")) &&
+            ReferenceEquals(native.ItemContainerStyle, NovelTestUi.Resource(list, "MeowFilm.ManagementListItem")),
+            "The native management list lost its theme.");
+        Check(NovelTests.Find<ManagementRowView>(list).Count() < rows.Length,
+            "The native management list must retain viewport virtualization.");
     }
     private static async Task Settings()
     {
@@ -210,21 +194,21 @@ public static class NovelEditorTests
         var settings = (NovelSettingsView)module.SettingsView;
         var root = new Grid(); root.Children.Add(settings);
         var dialogs = new PlayerDialogHost(); root.Children.Add(dialogs);
-        var window = GeneralAppearanceTests.Window(root); NovelUi.Theme(window); dialogs.Attach(window); window.Show();
+        var window = NovelTestUi.Window(root); NovelUi.Theme(window.Root); dialogs.Attach(window); window.Activate();
         try
         {
-            await Dispatcher.Yield(DispatcherPriority.Render);
+            await DesktopTestUi.DrainAsync();
             var areas = NovelTests.Find<RadioButton>(settings).Where(area => area.GroupName == "novel-settings-area").ToArray();
             Check(areas.Select(area => area.Content as string).SequenceEqual(["书源管理", "替换净化"]) &&
-                areas.All(area => area.Style == area.FindResource("MeowFilm.SettingsArea")),
+                areas.All(area => ReferenceEquals(area.Style, NovelTestUi.Resource(area, "MeowFilm.SettingsArea"))),
                 "Settings areas do not reuse the shared navigation.");
             Check(!NovelTests.Find<Button>(settings).Any(button => Equals(button.Content, "取消操作")), "The ambiguous settings cancel operation remains.");
             var add = NovelTests.Find<Button>(settings).Single(button => AutomationProperties.GetName(button) == "添加书源");
-            Check(Equals(add.Content, "\uE710") && add.ContextMenu!.Items.OfType<MenuItem>().Single(item => Equals(item.Header, "新建书源")).Items.Count == 0,
+            Check(Equals(add.Content, "\uE710") && add.ContextFlyout is MenuFlyout menu && menu.Items.OfType<MenuFlyoutItem>().Count(item => item.Text == "新建书源") == 1 && !menu.Items.OfType<MenuFlyoutSubItem>().Any(item => item.Text == "新建书源"),
                 "New sources still require a protocol submenu.");
             var edit = settings.EditSourceAsync(null, "legado", default);
             await Until(() => dialogs.IsOpen);
-            await Dispatcher.Yield(DispatcherPriority.Render);
+            await DesktopTestUi.DrainAsync();
             var type = NovelTests.Find<ComboBox>(dialogs).Single(input => AutomationProperties.GetAutomationId(input) == "novel.source.protocol");
             var tools = (StackPanel)type.Parent;
             Check(tools.Children.Cast<FrameworkElement>().Select(AutomationProperties.GetName)
@@ -254,10 +238,10 @@ public static class NovelEditorTests
             var settings = (NovelSettingsView)module.SettingsView;
             var root = new Grid(); root.Children.Add(settings);
             var host = new PlayerDialogHost(); root.Children.Add(host);
-            var window = GeneralAppearanceTests.Window(root); NovelUi.Theme(window); host.Attach(window); window.Show();
+            var window = NovelTestUi.Window(root); NovelUi.Theme(window.Root); host.Attach(window); window.Activate();
             try
             {
-                await Dispatcher.Yield(DispatcherPriority.Render);
+                await DesktopTestUi.DrainAsync();
                 var edit = settings.EditSourceAsync(original, "legado", default);
                 await Until(() => host.IsOpen && NovelTests.Find<NovelSourceEditor>(host).Any(editor => editor.IsLoaded));
                 var editor = NovelTests.Find<NovelSourceEditor>(host).Single();
@@ -276,8 +260,8 @@ public static class NovelEditorTests
                     "The protocol guard lost the original source or converted its fields.");
                 Field("bookSourceName").Text = "独立新协议";
                 Field("bookSourceUrl").Text = "https://new-source.invalid/";
-                var tabs = NovelTests.Find<TabControl>(editor).Single(); tabs.SelectedIndex = 1;
-                await Dispatcher.Yield(DispatcherPriority.Render);
+                var tabs = NovelTests.Find<TabView>(editor).Single(); tabs.SelectedIndex = 1;
+                await DesktopTestUi.DrainAsync();
                 Field("html").Text = "<html><body>新定义</body></html>";
                 Click(host, "保存");
                 await Until(() => service.Sources.Count == 2 && !editor.Draft.HasInput);
@@ -301,19 +285,19 @@ public static class NovelEditorTests
         }
     }
     private static void Click(DependencyObject root, string label) =>
-        NovelTests.Find<Button>(root).Single(button => Equals(button.Content, label)).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        NovelTestUi.Invoke(NovelTests.Find<Button>(root).Single(button => Equals(button.Content, label)));
     private static async Task Until(Func<bool> condition)
     {
         var deadline = Stopwatch.StartNew();
         while (!condition())
         {
             if (deadline.Elapsed > TimeSpan.FromSeconds(10)) throw new TimeoutException("Novel editor state did not complete.");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
         }
     }
     private sealed class Scene : IAsyncDisposable
     {
-        internal readonly StackPanel Owner = new() { Focusable = true };
+        internal readonly StackPanel Owner = new() { IsTabStop = true };
         internal readonly PlayerDialogHost Host = new();
         internal readonly NovelSourceEditor Editor = new("legado", Definition);
         internal readonly CancellationTokenSource Cancellation = new();
@@ -328,15 +312,20 @@ public static class NovelEditorTests
         internal Scene()
         {
             var root = new Grid(); root.Children.Add(Owner); root.Children.Add(Host);
-            Window = GeneralAppearanceTests.Window(root); NovelUi.Theme(Window); Host.Attach(Window); Window.Show();
+            Window = NovelTestUi.Window(root); NovelUi.Theme(DesktopTestUi.WindowRoot(Window)); Host.Attach(Window); Window.Activate();
             Editing = new(new StackPanel { Orientation = Orientation.Horizontal }, () => Editor.Draft.HasInput);
-            Dialog = NovelUi.DialogAsync(Owner, "编辑书源", Editor, "保存", Save, Cancellation.Token, applicationOverlay: true, editing: Editing);
+            Dialog = OpenAsync();
+        }
+        private async Task<bool> OpenAsync()
+        {
+            await TestUiHost.LoadedAsync(Owner);
+            return await NovelUi.DialogAsync(Owner, "编辑书源", Editor, "保存", Save, Cancellation.Token, applicationOverlay: true, editing: Editing);
         }
         internal Border Surface => NovelTests.Find<Border>(Host).Single(border => AutomationProperties.GetName(border) == "编辑书源");
         internal Border? Question => NovelTests.Find<Border>(Host).SingleOrDefault(border => AutomationProperties.GetName(border) == "保存更改");
         internal TextBox Name => NovelTests.Find<TextBox>(Editor).Single(input => AutomationProperties.GetAutomationId(input) == "novel.source.field.bookSourceName");
         internal async Task Ready() { await Until(() => Host.IsOpen && Editor.IsLoaded); await Layout(); }
-        internal async Task Layout() { Window.UpdateLayout(); await Dispatcher.Yield(DispatcherPriority.Render); }
+        internal async Task Layout() { DesktopTestUi.WindowRoot(Window).UpdateLayout(); await DesktopTestUi.DrainAsync(); }
         private async Task<bool> Save(CancellationToken token)
         {
             SaveStarted.TrySetResult();

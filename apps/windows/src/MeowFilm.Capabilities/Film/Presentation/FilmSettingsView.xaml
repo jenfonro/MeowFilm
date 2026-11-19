@@ -1,232 +1,284 @@
-<UserControl x:Class="MeowFilm.Capabilities.FilmSettingsView"
- xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
- xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:local="clr-namespace:MeowFilm.Capabilities"
- xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- x:Name="Root"
- UseLayoutRounding="True" SnapsToDevicePixels="True" ClipToBounds="True"
- Loaded="View_Loaded" Unloaded="View_Unloaded" IsVisibleChanged="View_IsVisibleChanged" SizeChanged="View_SizeChanged">
+<UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:desktop="using:MeowFilm.Desktop" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmSettingsView" x:Name="Root" UseLayoutRounding="True" Loaded="View_Loaded" Unloaded="View_Unloaded" SizeChanged="View_SizeChanged" Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="/MeowFilm.Capabilities;component/Film/Presentation/FilmSettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
+   <ResourceDictionary.MergedDictionaries>
+    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/FilmSettingsTheme.xaml" />
+   </ResourceDictionary.MergedDictionaries>
+   <local:FilmVisibilityConverter x:Key="Film.Visible" />
+   <local:FilmEmptyConverter x:Key="Film.Empty" />
   </ResourceDictionary>
  </UserControl.Resources>
- <UserControl.Style><Style TargetType="UserControl">
-  <Setter Property="Background" Value="{DynamicResource Settings.Brush.Ground}"/>
-  <Setter Property="Foreground" Value="{DynamicResource MeowFilm.Brush.Text}"/>
-  <Style.Triggers><Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-   <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-   <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-  </Trigger></Style.Triggers>
- </Style></UserControl.Style>
- <Grid x:Name="ContentFrame" Style="{DynamicResource MeowFilm.SettingsPage}" local:SettingsLayout.Mode="Sections">
-  <Grid.RowDefinitions><RowDefinition Style="{DynamicResource MeowFilm.SettingsNavigationRow}"/><RowDefinition/></Grid.RowDefinitions>
-  <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource MeowFilm.Brush.Border}">
+ <UserControl.Background><ThemeResource ResourceKey="Film.SettingsGround" /></UserControl.Background>
+ <Grid x:Name="ContentFrame" Style="{ThemeResource MeowFilm.SettingsPage}" local:SettingsLayout.Mode="Sections">
+  <Grid.RowDefinitions>
+   <RowDefinition Height="Auto" />
+   <RowDefinition />
+  </Grid.RowDefinitions>
+  <Border BorderThickness="0,0,0,1" BorderBrush="{ThemeResource MeowFilm.Brush.Border}">
    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
     <StackPanel x:Name="SettingsNavigation" Orientation="Horizontal" AutomationProperties.Name="影视设置分类">
-     <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="魔法匹配"/>
-     <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="猫源管理"/>
-     <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="视频源管理"/>
-     <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="数据源设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
-     <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown" AutomationProperties.Name="网盘账号"/>
+     <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="魔法匹配" KeyDown="Section_KeyDown" />
+     <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="猫源管理" KeyDown="Section_KeyDown" />
+     <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="视频源管理" KeyDown="Section_KeyDown" />
+     <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="数据源设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource Film.Visible}}" KeyDown="Section_KeyDown" />
+     <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="网盘账号" KeyDown="Section_KeyDown" />
      <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
-      <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" PreviewKeyDown="Section_KeyDown"/>
+      <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" KeyDown="Section_KeyDown" />
      </StackPanel>
     </StackPanel>
    </ScrollViewer>
   </Border>
   <Grid x:Name="MetadataPage" Grid.Row="1" Visibility="Collapsed">
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
-   <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-    <StackPanel.Style><Style TargetType="StackPanel">
-     <Setter Property="Visibility" Value="Collapsed"/>
-     <Style.Triggers>
-      <DataTrigger Binding="{Binding MetadataBusy}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-      <DataTrigger Binding="{Binding MetadataFailed}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-     </Style.Triggers>
-    </Style></StackPanel.Style>
-    <TextBlock Text="正在处理数据源设置…" VerticalAlignment="Center" Visibility="{Binding MetadataBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
-    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding MetadataFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding MetadataIdle}" AutomationProperties.Name="重新读取数据源设置"/>
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto" />
+    <RowDefinition />
+   </Grid.RowDefinitions>
+   <StackPanel Orientation="Horizontal">
+    <TextBlock Text="正在处理数据源设置…" VerticalAlignment="Center" Visibility="{Binding MetadataBusy,Converter={StaticResource Film.Visible}}" AutomationProperties.LiveSetting="Polite" />
+    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding MetadataFailed,Converter={StaticResource Film.Visible}}" IsEnabled="{Binding MetadataIdle}" AutomationProperties.Name="重新读取数据源设置" />
    </StackPanel>
    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="数据源配置">
-    <StackPanel IsEnabled="{Binding CanEditMetadata}" Visibility="{Binding MetadataLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}" Margin="0,0,12,0">
-     <Border Style="{StaticResource Settings.Section}"><StackPanel>
-      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-       <TextBlock Text="豆瓣配置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
-       <Button Content="保存" Tag="douban" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" Margin="12,0,0,0" AutomationProperties.Name="保存豆瓣设置"/>
-      </StackPanel>
-      <TextBlock Text="豆瓣数据代理" Margin="0,0,0,8"/>
-      <ComboBox x:Name="DoubanDataProxy" ItemsSource="{Binding DoubanDataRoutes}" DisplayMemberPath="Label" SelectedValuePath="Id" SelectionChanged="DoubanRoute_Changed" Style="{StaticResource Settings.ComboBox}" AutomationProperties.Name="豆瓣数据代理"/>
-      <StackPanel x:Name="DoubanDataAddressField" Visibility="Collapsed">
-       <TextBlock Text="豆瓣代理地址" Margin="0,12,0,8"/>
-       <TextBox x:Name="DoubanDataAddress" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣代理地址"/>
-      </StackPanel>
-      <TextBlock Text="豆瓣图片代理" Margin="0,12,0,8"/>
-      <ComboBox x:Name="DoubanImageProxy" ItemsSource="{Binding DoubanImageRoutes}" DisplayMemberPath="Label" SelectedValuePath="Id" SelectionChanged="DoubanRoute_Changed" Style="{StaticResource Settings.ComboBox}" AutomationProperties.Name="豆瓣图片代理"/>
-      <StackPanel x:Name="DoubanImageAddressField" Visibility="Collapsed">
-       <TextBlock Text="豆瓣图片代理地址" Margin="0,12,0,8"/>
-       <TextBox x:Name="DoubanImageAddress" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣图片代理地址"/>
-      </StackPanel>
-      <TextBlock Text="豆瓣搜索 Cookie" Margin="0,12,0,8"/>
-      <TextBox x:Name="DoubanCookie" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣搜索 Cookie"/>
-     </StackPanel></Border>
-     <Border Style="{StaticResource Settings.Section}"><StackPanel>
-      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-       <TextBlock Text="TMDB 设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
-       <Button x:Name="MetadataSave" Content="保存" Tag="tmdb" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" Margin="12,0,0,0" AutomationProperties.Name="保存 TMDB 设置"/>
-      </StackPanel>
-      <TextBlock Text="TMDB API TOKEN" Margin="0,0,0,8"/>
-      <TextBox x:Name="MetadataApiToken" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB API TOKEN"/>
-      <TextBlock Text="TMDB 数据代理地址" Margin="0,12,0,8"/>
-      <TextBox x:Name="MetadataApiBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 数据代理地址"/>
-      <TextBlock Text="TMDB 图片代理地址" Margin="0,12,0,8"/>
-      <TextBox x:Name="MetadataImageBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 图片代理地址"/>
-      <Grid Margin="0,12,0,0" local:SettingsLayout.Mode="Pair">
-       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Style="{StaticResource Settings.PairGap}"/><ColumnDefinition Style="{StaticResource Settings.PairColumn}"/></Grid.ColumnDefinitions>
-       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-       <StackPanel><TextBlock Text="语言" Margin="0,0,0,8"/><TextBox x:Name="MetadataLanguage" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 语言"/></StackPanel>
-       <StackPanel Style="{StaticResource Settings.PairRight}"><TextBlock Text="地区" Margin="0,0,0,8"/><TextBox x:Name="MetadataRegion" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 地区"/></StackPanel>
-      </Grid>
-      <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
-       <TextBlock Text="包含成人内容" VerticalAlignment="Center" Margin="0,0,12,0"/>
-       <CheckBox x:Name="MetadataIncludeAdult" Style="{StaticResource Settings.Switch}" AutomationProperties.Name="包含成人内容"/>
-      </StackPanel>
-     </StackPanel></Border>
-    </StackPanel>
+    <ContentControl IsEnabled="{Binding CanEditMetadata}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
+     <StackPanel Visibility="{Binding MetadataLoaded,Converter={StaticResource Film.Visible}}" Margin="0,0,12,0">
+      <Border Style="{StaticResource Settings.Section}">
+       <StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+         <TextBlock Text="豆瓣配置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+         <Button Content="保存" Tag="douban" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" Margin="12,0,0,0" AutomationProperties.Name="保存豆瓣设置" />
+        </StackPanel>
+        <TextBlock Text="豆瓣数据代理" Margin="0,0,0,8" />
+        <ComboBox x:Name="DoubanDataProxy" ItemsSource="{Binding DoubanDataRoutes}" DisplayMemberPath="Label" SelectedValuePath="Id" SelectionChanged="DoubanRoute_Changed" Style="{StaticResource Settings.ComboBox}" AutomationProperties.Name="豆瓣数据代理" />
+        <StackPanel x:Name="DoubanDataAddressField" Visibility="Collapsed">
+         <TextBlock Text="豆瓣代理地址" Margin="0,12,0,8" />
+         <TextBox x:Name="DoubanDataAddress" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣代理地址" />
+        </StackPanel>
+        <TextBlock Text="豆瓣图片代理" Margin="0,12,0,8" />
+        <ComboBox x:Name="DoubanImageProxy" ItemsSource="{Binding DoubanImageRoutes}" DisplayMemberPath="Label" SelectedValuePath="Id" SelectionChanged="DoubanRoute_Changed" Style="{StaticResource Settings.ComboBox}" AutomationProperties.Name="豆瓣图片代理" />
+        <StackPanel x:Name="DoubanImageAddressField" Visibility="Collapsed">
+         <TextBlock Text="豆瓣图片代理地址" Margin="0,12,0,8" />
+         <TextBox x:Name="DoubanImageAddress" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣图片代理地址" />
+        </StackPanel>
+        <TextBlock Text="豆瓣搜索 Cookie" Margin="0,12,0,8" />
+        <TextBox x:Name="DoubanCookie" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="豆瓣搜索 Cookie" />
+       </StackPanel>
+      </Border>
+      <Border Style="{StaticResource Settings.Section}">
+       <StackPanel>
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+         <TextBlock Text="TMDB 设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+         <Button x:Name="MetadataSave" Content="保存" Tag="tmdb" Click="MetadataSave_Click" Style="{StaticResource Settings.PrimaryButton}" Margin="12,0,0,0" AutomationProperties.Name="保存 TMDB 设置" />
+        </StackPanel>
+        <TextBlock Text="TMDB API TOKEN" Margin="0,0,0,8" />
+        <TextBox x:Name="MetadataApiToken" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB API TOKEN" />
+        <TextBlock Text="TMDB 数据代理地址" Margin="0,12,0,8" />
+        <TextBox x:Name="MetadataApiBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 数据代理地址" />
+        <TextBlock Text="TMDB 图片代理地址" Margin="0,12,0,8" />
+        <TextBox x:Name="MetadataImageBase" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 图片代理地址" />
+        <Grid Margin="0,12,0,0" local:SettingsLayout.Mode="Pair">
+         <Grid.ColumnDefinitions>
+          <ColumnDefinition />
+          <ColumnDefinition />
+          <ColumnDefinition />
+         </Grid.ColumnDefinitions>
+         <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="Auto" />
+         </Grid.RowDefinitions>
+         <StackPanel>
+          <TextBlock Text="语言" Margin="0,0,0,8" />
+          <TextBox x:Name="MetadataLanguage" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 语言" />
+         </StackPanel>
+         <StackPanel>
+          <TextBlock Text="地区" Margin="0,0,0,8" />
+          <TextBox x:Name="MetadataRegion" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="TMDB 地区" />
+         </StackPanel>
+        </Grid>
+        <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+         <TextBlock Text="包含成人内容" VerticalAlignment="Center" Margin="0,0,12,0" />
+         <CheckBox x:Name="MetadataIncludeAdult" Style="{StaticResource Settings.Switch}" AutomationProperties.Name="包含成人内容" />
+        </StackPanel>
+       </StackPanel>
+      </Border>
+     </StackPanel>
+    </ContentControl>
    </ScrollViewer>
   </Grid>
-  <Grid x:Name="BusinessPage" Grid.Row="1" Visibility="Collapsed"/>
-  <local:PanAccountsView x:Name="PanPage" Grid.Row="1" Visibility="Collapsed"/>
+  <Grid x:Name="BusinessPage" Grid.Row="1" Visibility="Collapsed" />
+  <local:PanAccountsView x:Name="PanPage" Grid.Row="1" Visibility="Collapsed" />
   <Grid x:Name="RulesPage" Grid.Row="1">
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
-   <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-    <StackPanel.Style><Style TargetType="StackPanel">
-     <Setter Property="Visibility" Value="Collapsed"/>
-     <Style.Triggers>
-      <DataTrigger Binding="{Binding RulesBusy}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-      <DataTrigger Binding="{Binding RulesFailed}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-     </Style.Triggers>
-    </Style></StackPanel.Style>
-    <TextBlock Text="正在处理规则…" VerticalAlignment="Center" Visibility="{Binding RulesBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.LiveSetting="Polite"/>
-    <Button Content="重试" Click="RulesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding RulesFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding RulesIdle}" AutomationProperties.Name="重新读取魔法规则"/>
-    <Button Content="取消" Click="RulesCancel_Click" Margin="8,0,0,0" Style="{StaticResource Settings.QuietButton}" Visibility="{Binding RulesBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="取消规则操作"/>
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto" />
+    <RowDefinition />
+   </Grid.RowDefinitions>
+   <StackPanel Orientation="Horizontal">
+    <TextBlock Text="正在处理规则…" VerticalAlignment="Center" Visibility="{Binding RulesBusy,Converter={StaticResource Film.Visible}}" AutomationProperties.LiveSetting="Polite" />
+    <Button Content="重试" Click="RulesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding RulesFailed,Converter={StaticResource Film.Visible}}" IsEnabled="{Binding RulesIdle}" AutomationProperties.Name="重新读取魔法规则" />
+    <Button Content="取消" Click="RulesCancel_Click" Margin="8,0,0,0" Style="{StaticResource Settings.QuietButton}" Visibility="{Binding RulesBusy,Converter={StaticResource Film.Visible}}" AutomationProperties.Name="取消规则操作" />
    </StackPanel>
-   <ScrollViewer x:Name="RulesScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
-                 Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="魔法匹配设置">
+   <ScrollViewer x:Name="RulesScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="魔法匹配设置">
     <StackPanel>
-    <StackPanel x:Name="RuleSections" Margin="0,0,12,0" IsEnabled="{Binding CanEditRules}" Visibility="{Binding RulesLoaded,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-     <Border Style="{StaticResource Settings.Section}">
-      <StackPanel>
-       <DockPanel Margin="0,0,0,8">
-        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Episode" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复列表净化默认规则"/>
-        <TextBlock Text="列表净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
-       </DockPanel>
-       <local:FilmSettingsRuleEditor x:Name="EpisodeCleanEditor" Title="剧集列表净化规则" Tag="episodeClean"/>
-       <local:FilmSettingsRuleEditor x:Name="EpisodeEditor" Title="集数匹配规则" Tag="episode" HasReplacement="True"/>
-       <TextBlock Text="文件名" Margin="0,0,0,8"/>
-       <DockPanel>
-        <Button DockPanel.Dock="Right" Content="测试" Tag="Episode" Style="{StaticResource Settings.Button}" Margin="12,0,0,0" Click="TestRules_Click" AutomationProperties.Name="测试列表净化与集数匹配"/>
-        <TextBox x:Name="EpisodeInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="列表净化测试文件名"/>
-       </DockPanel>
-       <StackPanel x:Name="EpisodeResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="列表净化测试结果"/>
+     <ContentControl IsEnabled="{Binding CanEditRules}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
+      <StackPanel x:Name="RuleSections" Margin="0,0,12,0" Visibility="{Binding RulesLoaded,Converter={StaticResource Film.Visible}}">
+       <Border Style="{StaticResource Settings.Section}">
+        <StackPanel>
+         <Grid Margin="0,0,0,8">
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="恢复默认规则" Tag="Episode" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复列表净化默认规则" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBlock Text="列表净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+          </Grid>
+         </Grid>
+         <local:FilmSettingsRuleEditor x:Name="EpisodeCleanEditor" Title="剧集列表净化规则" Tag="episodeClean" />
+         <local:FilmSettingsRuleEditor x:Name="EpisodeEditor" Title="集数匹配规则" Tag="episode" HasReplacement="True" />
+         <TextBlock Text="文件名" Margin="0,0,0,8" />
+         <Grid>
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="测试" Tag="Episode" Style="{StaticResource Settings.Button}" Margin="12,0,0,0" Click="TestRules_Click" AutomationProperties.Name="测试列表净化与集数匹配" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBox x:Name="EpisodeInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="列表净化测试文件名" />
+          </Grid>
+         </Grid>
+         <StackPanel x:Name="EpisodeResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="列表净化测试结果" />
+        </StackPanel>
+       </Border>
+       <Border Style="{StaticResource Settings.Section}">
+        <StackPanel>
+         <Grid Margin="0,0,0,8">
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="恢复默认规则" Tag="Movie" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复电影匹配默认规则" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBlock Text="电影匹配设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+          </Grid>
+         </Grid>
+         <local:FilmSettingsRuleEditor x:Name="MovieEditor" Title="电影匹配规则" Tag="movie" HasReplacement="True" />
+         <TextBlock Text="文件名" Margin="0,0,0,8" />
+         <Grid>
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="测试" Tag="Movie" Style="{StaticResource Settings.Button}" Margin="12,0,0,0" Click="TestRules_Click" AutomationProperties.Name="测试电影匹配" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBox x:Name="MovieInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="电影匹配测试文件名" />
+          </Grid>
+         </Grid>
+         <StackPanel x:Name="MovieResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="电影匹配测试结果" />
+        </StackPanel>
+       </Border>
+       <Border Style="{StaticResource Settings.Section}">
+        <StackPanel>
+         <Grid Margin="0,0,0,8">
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="恢复默认规则" Tag="Search" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复搜索列表净化默认规则" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBlock Text="搜索列表净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" />
+          </Grid>
+         </Grid>
+         <local:FilmSettingsRuleEditor x:Name="SearchEditor" Title="搜索列表净化规则" Tag="search" />
+         <TextBlock Text="搜索词（可空）" Margin="0,0,0,8" />
+         <TextBox x:Name="SearchQuery" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="搜索列表净化测试搜索词" />
+         <TextBlock Text="结果标题" Margin="0,12,0,8" />
+         <Grid>
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="*" />
+           <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <Button Content="测试" Tag="Search" Style="{StaticResource Settings.Button}" Margin="12,0,0,0" Click="TestRules_Click" AutomationProperties.Name="测试搜索列表净化" Grid.Column="1" />
+          <Grid Grid.Column="0">
+           <TextBox x:Name="SearchInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="搜索列表净化测试结果标题" />
+          </Grid>
+         </Grid>
+         <StackPanel x:Name="SearchResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="搜索列表净化测试结果" />
+        </StackPanel>
+       </Border>
       </StackPanel>
-     </Border>
-     <Border Style="{StaticResource Settings.Section}">
-      <StackPanel>
-       <DockPanel Margin="0,0,0,8">
-        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Movie" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复电影匹配默认规则"/>
-        <TextBlock Text="电影匹配设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
-       </DockPanel>
-       <local:FilmSettingsRuleEditor x:Name="MovieEditor" Title="电影匹配规则" Tag="movie" HasReplacement="True"/>
-       <TextBlock Text="文件名" Margin="0,0,0,8"/>
-       <DockPanel>
-        <Button DockPanel.Dock="Right" Content="测试" Tag="Movie" Style="{StaticResource Settings.Button}" Margin="12,0,0,0" Click="TestRules_Click" AutomationProperties.Name="测试电影匹配"/>
-        <TextBox x:Name="MovieInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="电影匹配测试文件名"/>
-       </DockPanel>
-       <StackPanel x:Name="MovieResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="电影匹配测试结果"/>
-      </StackPanel>
-     </Border>
-     <Border Style="{StaticResource Settings.Section}">
-      <StackPanel>
-       <DockPanel Margin="0,0,0,8">
-        <Button DockPanel.Dock="Right" Content="恢复默认规则" Tag="Search" Click="RestoreRules_Click" Style="{StaticResource Settings.DangerButton}" AutomationProperties.Name="恢复搜索列表净化默认规则"/>
-        <TextBlock Text="搜索列表净化设置" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
-       </DockPanel>
-       <local:FilmSettingsRuleEditor x:Name="SearchEditor" Title="搜索列表净化规则" Tag="search"/>
-       <TextBlock Text="搜索词（可空）" Margin="0,0,0,8"/>
-       <TextBox x:Name="SearchQuery" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="搜索列表净化测试搜索词"/>
-       <TextBlock Text="结果标题" Margin="0,12,0,8"/>
-       <DockPanel>
-        <Button DockPanel.Dock="Right" Content="测试" Tag="Search" Style="{StaticResource Settings.Button}" Margin="12,0,0,0" Click="TestRules_Click" AutomationProperties.Name="测试搜索列表净化"/>
-        <TextBox x:Name="SearchInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="搜索列表净化测试结果标题"/>
-       </DockPanel>
-       <StackPanel x:Name="SearchResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="搜索列表净化测试结果"/>
-      </StackPanel>
-     </Border>
-    </StackPanel>
-     <ContentControl x:Name="SiteCleanHost"/>
+     </ContentControl>
+     <ContentControl x:Name="SiteCleanHost" />
     </StackPanel>
    </ScrollViewer>
   </Grid>
   <Grid x:Name="CatsPage" Grid.Row="1" Visibility="Collapsed">
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
-   <StackPanel Style="{DynamicResource MeowFilm.ManagementTitleRow}">
-    <TextBlock Text="猫源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0"/>
-    <Button Content="添加本地文件" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanEditSources}" Click="ImportLocal_Click" AutomationProperties.Name="添加本地文件"/>
-    <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanEditSources}" Click="ImportNetwork_Click" AutomationProperties.Name="添加网络猫源"/>
-    <Button Content="删除所选" Style="{DynamicResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{Binding CanDeleteCats}" Click="DeleteSelectedCats_Click" AutomationProperties.Name="删除选中猫源"/>
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto" />
+    <RowDefinition Height="Auto" />
+    <RowDefinition />
+   </Grid.RowDefinitions>
+   <StackPanel Style="{ThemeResource MeowFilm.ManagementTitleRow}">
+    <TextBlock Text="猫源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0" />
+    <Button Content="添加本地文件" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanEditSources}" Click="ImportLocal_Click" AutomationProperties.Name="添加本地文件" />
+    <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanEditSources}" Click="ImportNetwork_Click" AutomationProperties.Name="添加网络猫源" />
+    <Button Content="删除所选" Style="{ThemeResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{Binding CanDeleteCats}" Click="DeleteSelectedCats_Click" AutomationProperties.Name="删除选中猫源" />
    </StackPanel>
-   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{Binding HasSourceWork,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-    <TextBlock Text="{Binding SourceWork}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
-    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{Binding SourcesBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="取消猫源操作"/>
-    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding SourcesFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding SourcesIdle}" AutomationProperties.Name="重试猫源读取"/>
+   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{Binding HasSourceWork,Converter={StaticResource Film.Visible}}">
+    <TextBlock Text="{Binding SourceWork}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
+    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{Binding SourcesBusy,Converter={StaticResource Film.Visible}}" AutomationProperties.Name="取消猫源操作" />
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding SourcesFailed,Converter={StaticResource Film.Visible}}" IsEnabled="{Binding SourcesIdle}" AutomationProperties.Name="重试猫源读取" />
    </StackPanel>
-   <desktop:ManagementList x:Name="CatsList" Grid.Row="2" IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="猫源列表"/>
+   <ContentControl IsEnabled="{Binding CanEditSources}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" Grid.Row="2">
+    <desktop:ManagementList x:Name="CatsList" AutomationProperties.Name="猫源列表" />
+   </ContentControl>
   </Grid>
   <Grid x:Name="VideosPage" Grid.Row="1" Visibility="Collapsed">
-   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition/></Grid.RowDefinitions>
-   <StackPanel Style="{DynamicResource MeowFilm.ManagementTitleRow}">
-    <TextBlock Text="视频源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0"/>
-    <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanDetectVideos}" Click="DetectSelectedVideos_Click" AutomationProperties.Name="检测选中视频源"/>
-    <Button Content="删除所选" Style="{DynamicResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{Binding CanDeleteVideos}" Click="DeleteSelectedVideos_Click" AutomationProperties.Name="删除选中视频源"/>
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto" />
+    <RowDefinition Height="Auto" />
+    <RowDefinition />
+   </Grid.RowDefinitions>
+   <StackPanel Style="{ThemeResource MeowFilm.ManagementTitleRow}">
+    <TextBlock Text="视频源管理" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center" Margin="0,0,12,0" />
+    <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{Binding CanDetectVideos}" Click="DetectSelectedVideos_Click" AutomationProperties.Name="检测选中视频源" />
+    <Button Content="删除所选" Style="{ThemeResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{Binding CanDeleteVideos}" Click="DeleteSelectedVideos_Click" AutomationProperties.Name="删除选中视频源" />
    </StackPanel>
-   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{Binding HasSourceWork,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-    <TextBlock Text="{Binding SourceWork}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
-    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{Binding SourcesBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}" AutomationProperties.Name="取消视频源操作"/>
-    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding SourcesFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding SourcesIdle}" AutomationProperties.Name="重试视频源读取"/>
+   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{Binding HasSourceWork,Converter={StaticResource Film.Visible}}">
+    <TextBlock Text="{Binding SourceWork}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
+    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{Binding SourcesBusy,Converter={StaticResource Film.Visible}}" AutomationProperties.Name="取消视频源操作" />
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding SourcesFailed,Converter={StaticResource Film.Visible}}" IsEnabled="{Binding SourcesIdle}" AutomationProperties.Name="重试视频源读取" />
    </StackPanel>
-   <desktop:ManagementList x:Name="VideosList" Grid.Row="2" IsEnabled="{Binding CanEditSources}" AutomationProperties.Name="视频源列表"/>
+   <ContentControl IsEnabled="{Binding CanEditSources}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" Grid.Row="2">
+    <desktop:ManagementList x:Name="VideosList" AutomationProperties.Name="视频源列表" />
+   </ContentControl>
   </Grid>
-  <desktop:NoticeOutlet x:Name="Notices"/>
-  <Popup x:Name="ActionPopup" PlacementTarget="{Binding ElementName=Root}" desktop:DialogPlacement.Centered="True"
-         StaysOpen="False" AllowsTransparency="True" Opened="ActionPopup_Opened" Closed="ActionPopup_Closed">
+  <desktop:NoticeOutlet x:Name="Notices" />
+  <Popup x:Name="ActionPopup" IsLightDismissEnabled="True" Opened="ActionPopup_Opened" Closed="ActionPopup_Closed">
    <Border x:Name="PopupSurface" Width="360" Padding="20" Style="{StaticResource Settings.PopupSurface}">
-    <Border.Effect><DropShadowEffect BlurRadius="16" ShadowDepth="4" Opacity=".13"/></Border.Effect>
     <ScrollViewer x:Name="PopupScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-     <StackPanel KeyboardNavigation.TabNavigation="Cycle" PreviewKeyDown="ActionPopup_KeyDown">
-      <TextBlock x:Name="PopupTitle" Style="{StaticResource Settings.PopupTitle}" TextWrapping="Wrap"/>
-      <TextBlock x:Name="PopupMessage" TextWrapping="Wrap" Margin="0,12,0,0"/>
+     <StackPanel KeyDown="ActionPopup_KeyDown">
+      <TextBlock x:Name="PopupTitle" Style="{StaticResource Settings.PopupTitle}" TextWrapping="Wrap" />
+      <TextBlock x:Name="PopupMessage" TextWrapping="Wrap" Margin="0,12,0,0" />
       <StackPanel x:Name="PopupFields" Margin="0,16,0,0" Visibility="Collapsed">
-       <TextBlock Text="名称" Margin="0,0,0,8"/>
-       <TextBox x:Name="CatNameBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="猫源名称"/>
+       <TextBlock Text="名称" Margin="0,0,0,8" />
+       <TextBox x:Name="CatNameBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="猫源名称" />
        <StackPanel x:Name="CatTypeField" Margin="0,14,0,0" Visibility="Collapsed">
-        <TextBlock Text="类型" Margin="0,0,0,8"/>
+        <TextBlock Text="类型" Margin="0,0,0,8" />
         <ComboBox x:Name="CatTypeBox" Style="{StaticResource Settings.ComboBox}" SelectionChanged="CatType_Changed" SelectedValuePath="Tag" AutomationProperties.Name="猫源类型">
-         <ComboBoxItem Content="本地源" Tag="local"/><ComboBoxItem Content="网络源" Tag="network"/>
+         <ComboBoxItem Content="本地源" Tag="local" />
+         <ComboBoxItem Content="网络源" Tag="network" />
         </ComboBox>
        </StackPanel>
        <StackPanel x:Name="CatUrlField" Margin="0,14,0,0">
-        <TextBlock Text="地址" Margin="0,0,0,8"/>
-        <TextBox x:Name="CatUrlBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="猫源网络 URL"/>
+        <TextBlock Text="地址" Margin="0,0,0,8" />
+        <TextBox x:Name="CatUrlBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="猫源网络 URL" />
        </StackPanel>
        <StackPanel x:Name="CatFileField" Margin="0,14,0,0" Visibility="Collapsed">
-        <TextBlock Text="文件" Margin="0,0,0,8"/>
-        <Button x:Name="CatFileButton" Content="选择文件" Click="CatFile_Click" Style="{StaticResource Settings.Button}" HorizontalAlignment="Left" AutomationProperties.Name="选择猫源文件"/>
+        <TextBlock Text="文件" Margin="0,0,0,8" />
+        <Button x:Name="CatFileButton" Content="选择文件" Click="CatFile_Click" Style="{StaticResource Settings.Button}" HorizontalAlignment="Left" AutomationProperties.Name="选择猫源文件" />
        </StackPanel>
       </StackPanel>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
-       <Button x:Name="PopupCancel" Content="取消" Style="{StaticResource Settings.QuietButton}" Click="PopupCancel_Click" MinWidth="64"/>
-       <Button x:Name="PopupAccept" Content="确定" Style="{StaticResource Settings.PrimaryButton}" Click="PopupAccept_Click" MinWidth="64" Margin="8,0,0,0"/>
+       <Button x:Name="PopupCancel" Content="取消" Style="{StaticResource Settings.QuietButton}" Click="PopupCancel_Click" MinWidth="64" />
+       <Button x:Name="PopupAccept" Content="确定" Style="{StaticResource Settings.PrimaryButton}" Click="PopupAccept_Click" MinWidth="64" Margin="8,0,0,0" />
       </StackPanel>
      </StackPanel>
     </ScrollViewer>

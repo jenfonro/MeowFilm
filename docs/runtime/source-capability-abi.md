@@ -24,7 +24,7 @@ Portable guest 常态执行栈仍为 256 KiB。可信 core 仅在同步、纯字
 | --- | --- |
 | `http.request` | 异步 HTTP(S)，输入 method、URL、headers、body、timeout、redirects、cookie profile；输出 status、headers、final URL 和原始 body |
 | `cookie.get/set/clear` | 按 profile 隔离的 Cookie |
-| `storage.get/set/delete` | 按 profile 隔离的 JSON 键值存储 |
+| `storage.get/set/delete` | 按 profile 隔离的 JSON 键值存储；键不设字符串长度配额，字符格式仍校验 |
 | `encoding.encode/decode` | 非 UTF-8 字符编码，在 source core/native 所属线程同步计算 |
 | `crypto.digest/hmac/aes/random` | 固定算法集合的摘要、HMAC、AES-CBC／ECB及随机字节，在 source core/native 所属线程同步计算 |
 | `web.interact` | 登录、验证码、动态页面等可选平台交互 |
@@ -52,7 +52,7 @@ Promise／原生 await／异步迭代与清理回调保留登记任务身份；A
 
 ## 网络与隔离
 
-ABI 不维护域名白名单或按 origin／本机／私网分类的访问门禁。`http.request` 校验 HTTP(S) 语法、typed bytes 和重定向次数；Node owner 为每个请求建立一个覆盖完整重定向链的截止信号。调用输入中的 Authorization、Cookie、Host、Origin 跨 origin 重定向继续保留；自动 Cookie jar 则每跳按实际目标和 profile 选择，不沿用上一目标的 jar Cookie，也不读取其它账号。source 调用与初始化的默认等待上限均为 60 秒，清理为 3 秒；单次 HTTP 截止受所属调用/启动信号约束，不延长整个动作生命周期。
+ABI 不维护域名白名单或按 origin／本机／私网分类的访问门禁。`http.request` 校验 HTTP(S) 语法、typed bytes 和重定向次数；URL、header 名称/值及其集合、Cookie 集合不设人为字节/数量配额，保留字段语法和禁止的协议 header；Node owner 为每个请求建立一个覆盖完整重定向链的截止信号。调用输入中的 Authorization、Cookie、Host、Origin 跨 origin 重定向继续保留；自动 Cookie jar 则每跳按实际目标和 profile 选择，不沿用上一目标的 jar Cookie，也不读取其它账号。source 调用与初始化的默认等待上限均为 60 秒，清理为 3 秒；单次 HTTP 截止受所属调用/启动信号约束，不延长整个动作生命周期。
 
 guest 只得到能力调用结果，不得到 Node socket、`fetch` 实现、Cookie jar、存储对象或宿主 callable。文件、进程、模块加载和任意 JVM 类不属于 ABI。
 

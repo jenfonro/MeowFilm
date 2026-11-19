@@ -1,11 +1,11 @@
 <UserControl x:Class="MeowFilm.Capabilities.MusicHomeSourceSettingsView"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- UseLayoutRounding="True" SnapsToDevicePixels="True">
+ xmlns:desktop="using:MeowFilm.Desktop"
+ UseLayoutRounding="True">
  <UserControl.Resources>
   <ResourceDictionary><ResourceDictionary.MergedDictionaries>
-   <ResourceDictionary Source="/MeowFilm.Capabilities;component/Settings/SettingsTheme.xaml"/>
+   <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Settings/SettingsTheme.xaml"/>
   </ResourceDictionary.MergedDictionaries></ResourceDictionary>
  </UserControl.Resources>
  <Border x:Name="HomeSourceSection" Style="{StaticResource Settings.Section}">

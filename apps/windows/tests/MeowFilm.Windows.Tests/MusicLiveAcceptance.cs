@@ -1,17 +1,23 @@
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
+using System.Net.Http;
 using System.Reflection;
-using System.Security.Principal;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using MeowFilm.Desktop;
+using Microsoft.UI.Xaml.Controls;
+
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
@@ -27,19 +33,8 @@ internal static class MusicLiveAcceptance
         try
         {
             Require(OperatingSystem.IsWindows(), "UNSUPPORTED");
-            if (catalogOnly)
-            {
-                Require(Program.CheckDesktopContext(requireTarget: true), "PERMISSION_DENIED");
-                report.Record("desktop.identity", "PASS", count: 1);
-            }
-            else
-            {
-                using var process = Process.GetCurrentProcess();
-                using var identity = WindowsIdentity.GetCurrent();
-                report.WriteIdentity(process.Id, identity.Name, process.SessionId, Environment.UserInteractive);
-                Require(identity.Name.Split('\\')[^1] == "79917" &&
-                    process.SessionId == 1 && Environment.UserInteractive, "PERMISSION_DENIED");
-            }
+            Require(TestDesktopContext.Verify(requireTarget: true), "PERMISSION_DENIED");
+            report.Record("desktop.identity", "PASS", count: 1);
             TestWorkspace.Initialize();
             string root = TestWorkspace.DataPath("live-music-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
@@ -56,24 +51,8 @@ internal static class MusicLiveAcceptance
 
     private static async Task OnDesktopAsync(Func<Task> action, Report report)
     {
-        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
-            dispatcher.BeginInvoke(new Action(async () =>
-            {
-                try { await action(); }
-                catch (Exception error) { report.Record("live.native", "FAIL", ErrorCode(error)); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            }));
-            try { Dispatcher.Run(); }
-            catch (Exception error) { report.Record("desktop.dispatcher", "FAIL", ErrorCode(error)); }
-            finally { stopped.TrySetResult(); }
-        }) { IsBackground = true, Name = "music-live-acceptance" };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        await stopped.Task;
+        try { await TestUiHost.InvokeAsync(action); }
+        catch (Exception error) { report.Record("live.native", "FAIL", ErrorCode(error)); }
     }
 
     private static async Task RunOwnedAsync(string root, Report report, bool kugouHomeOnly, bool catalogOnly)
@@ -87,7 +66,7 @@ internal static class MusicLiveAcceptance
         NativeAudioPlayback? player = null;
         MusicNativeApplication? application = null;
         MusicCapability? module = null;
-        Window? window = null;
+        DesktopWindow? window = null;
         bool importAttempted = false, logoutAttempted = false;
         try
         {
@@ -96,7 +75,7 @@ internal static class MusicLiveAcceptance
                 ?? throw new LiveFailure("NOT_COVERED");
             var bundle = RuntimeBundle.Verify(Path.Combine(
                 TestWorkspace.ValidatePath(TestWorkspace.ResultsRoot, bundleRoot), AppIdentity.RuntimeId),
-                AppIdentity.RuntimeId, AppIdentity.ScriptModules);
+                AppIdentity.RuntimeId);
             Directory.CreateDirectory(Path.Combine(data, "native"));
             Directory.CreateDirectory(Path.Combine(data, "cache"));
             store = new(Path.Combine(data, "native"));
@@ -118,13 +97,20 @@ internal static class MusicLiveAcceptance
             layout.Children.Add(module.View);
             Grid.SetRow(module.PlayerView, 1);
             layout.Children.Add(module.PlayerView);
-            window = new Window { Title = "MeowFilm music live acceptance", Width = 1100, Height = 800,
-                Content = layout, ShowActivated = false };
+            window = new DesktopWindow { Title = "MeowFilm music live acceptance", Content = layout };
+            window.AttachRoot(); window.Resize(1100, 800);
+            var area = Microsoft.UI.Windowing.DisplayArea.GetFromWindowId(window.AppWindow.Id,
+                Microsoft.UI.Windowing.DisplayAreaFallback.Primary).WorkArea;
+            window.AppWindow.Move(new(area.X + (area.Width - window.AppWindow.Size.Width) / 2,
+                area.Y + (area.Height - window.AppWindow.Size.Height) / 2));
+            if (window.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+                presenter.IsAlwaysOnTop = catalogOnly;
             var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            window.ContentRendered += (_, _) => rendered.TrySetResult();
-            window.Show();
+            layout.Loaded += (_, _) => rendered.TrySetResult();
+            window.Activate();
             await rendered.Task.WaitAsync(TimeSpan.FromSeconds(15));
-            Require(window.IsVisible && PresentationSource.FromVisual(module.View) is not null &&
+            await RenderAsync(window);
+            Require(window.IsVisible && module.View.XamlRoot is not null &&
                 module.View.ActualWidth > 0 && module.View.ActualHeight > 0, "NOT_COVERED");
             report.Record("desktop.window.programmatic-no-input", "PASS", count: 1);
             if (catalogOnly)
@@ -243,13 +229,24 @@ internal static class MusicLiveAcceptance
     }
 
     private static async Task CatalogAsync(MusicNativeApplication application, MusicCapability module, NativeAudioPlayback player,
-        ObservedRuntime runtime, Report report, Window window)
+        ObservedRuntime runtime, Report report, DesktopWindow window)
     {
         Require((await AccountStatesAsync(application)).Values.All(state => state == "none"), "STORAGE_CONFLICT");
         foreach (string platform in new[] { "wy", "kg" })
         {
-            await report.StepAsync("guest." + platform + ".home.ui", () => HomeAsync(module, runtime, report, window, platform, refresh: true));
+            bool home = await report.StepAsync("guest." + platform + ".home.ui",
+                () => HomeAsync(module, runtime, report, window, platform, refresh: true));
+            if (home)
+                await report.StepAsync("guest." + platform + ".home.artwork", () => WaitForVisibleArtworkAsync(window));
             if (platform != "wy") continue;
+            await report.StepAsync("guest.wy.home.visual", async () =>
+            {
+                await MusicTestUi.Drain();
+                await module.CatalogEntryInitialization;
+                await RenderAsync(window);
+                await CaptureCatalogAsync(module, window, report, "wy-home");
+                return 1;
+            });
             int directoryReads = runtime.Successes("wy", "channels"), channelReads = runtime.Successes("wy", "channel");
             int errors = report.Failures;
             MusicCatalogCard? channel = null;
@@ -274,12 +271,117 @@ internal static class MusicLiveAcceptance
                         report.Failures > errors ? report.LastError : "UNCLASSIFIED_CODE");
                     return Cards(module).Count();
                 });
+                await report.StepAsync("guest.wy.channel.artwork", () => WaitForVisibleArtworkAsync(window));
+                string firstRoute = module.CaptureNavigationLocation();
+                var alternatives = module.VisibleChannelTabs.Concat(module.MoreChannelTabs)
+                    .Where(card => card.CanOpen && !card.RequiresAccount && card.Kind == "channel" &&
+                        card.Song is null && card.Locator is null && card.ActionId != selected.ActionId)
+                    .Take(2).ToArray();
+                for (int index = 0; index < 2; index++)
+                {
+                    int position = index;
+                    bool opened = await report.StepAsync("guest.wy.channel.switch-" + (index + 1), async () =>
+                    {
+                        Require(position < alternatives.Length, "NOT_COVERED");
+                        var target = alternatives[position];
+                        await module.OpenCatalogCardAsync(target);
+                        await RenderAsync(window);
+                        Require(module.CaptureNavigationLocation() == "catalog-channel/wy/" +
+                            Uri.EscapeDataString(target.ActionId) && Cards(module).Any() &&
+                            module.Status.Length == 0, "NOT_COVERED");
+                        Require(!player.HasMedia && !player.IsPlaying, "PERMISSION_DENIED");
+                        return Cards(module).Count();
+                    });
+                    if (opened)
+                        await report.StepAsync("guest.wy.channel.switch-" + (index + 1) + ".artwork",
+                            () => WaitForVisibleArtworkAsync(window));
+                }
+                await report.StepAsync("guest.wy.channel.restore", async () =>
+                {
+                    await module.RestoreNavigationAsync(firstRoute, CancellationToken.None);
+                    await RenderAsync(window);
+                    Require(module.CaptureNavigationLocation() == firstRoute && Cards(module).Any() &&
+                        module.Status.Length == 0, "NOT_COVERED");
+                    return Cards(module).Count();
+                });
+                await report.StepAsync("guest.wy.channel.restore.artwork", () => WaitForVisibleArtworkAsync(window));
+                foreach (var (target, title) in new[] { ("playlist-square", ""), ("electronic", "电音"), ("euro", "欧美"), ("chinese", "华语") })
+                    await report.StepAsync("guest.wy." + target + ".ui", async () =>
+                    {
+                        var selected = module.ChannelTabs.FirstOrDefault(card => target == "playlist-square"
+                            ? card.ChannelKind == "playlists" : card.Title.StartsWith(title, StringComparison.Ordinal));
+                        Require(selected is not null, "NOT_COVERED");
+                        await module.OpenCatalogCardAsync(selected);
+                        await RenderAsync(window);
+                        await MusicTestUi.Drain();
+                        await module.CatalogEntryInitialization;
+                        await RenderAsync(window);
+                        Require(module.Status.Length == 0 && Cards(module).Any(),
+                            report.Failures > errors ? report.LastError : "NOT_COVERED");
+                        await CaptureCatalogAsync(module, window, report, "wy-" + target);
+                        if (target != "playlist-square")
+                        {
+                            var slots = Descendants(module.View).OfType<EntryCard>().Where(MusicCatalogView.InCatalogViewport).ToArray();
+                            Require(slots.Any(slot => slot.DataContext is MusicCatalogCard { Kind: "fm", HasCoverLabel: true }), "NOT_COVERED");
+                            var playlists = slots.Where(slot => slot.DataContext is MusicCatalogCard { Kind: "playlist" }).ToArray();
+                            Require(playlists.Length > 0 && playlists.All(slot => slot.DataContext is MusicCatalogCard
+                                { HasPlayCount: true, Title.Length: > 0, HasLabel: false }), "NOT_COVERED");
+                            if (target == "euro")
+                            {
+                                var slot = playlists.FirstOrDefault(slot => slot.DataContext is MusicCatalogCard model &&
+                                    model.PreviewSongs.Count == 3 && model.Title.Contains("红心")) ?? playlists.First();
+                                var model = (MusicCatalogCard)slot.DataContext;
+                                var surface = (Grid)slot.FindName("Surface");
+                                CardMotion.SetPointerActive(surface, true);
+                                try
+                                {
+                                    using var motionDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                                    while (CardMotion.HasActiveAnimation(surface)) await Task.Delay(10, motionDeadline.Token);
+                                    await RenderAsync(window);
+                                    var block = (Border)slot.FindName("PreviewBlock");
+                                    Require(model.PreviewSongs.Count == 3 && DesktopVisual.IsVisible(block) && block.Opacity == 1 &&
+                                        Descendants(block).OfType<TextBlock>().Select(text => text.Text).SequenceEqual(model.PreviewTitles), "NOT_COVERED");
+                                    await NativeDesktopCapture.SaveAsync(slot, "music-content-wy-euro-preview");
+                                }
+                                finally { CardMotion.SetPointerActive(surface, false); }
+                            }
+                        }
+                        return Cards(module).Count();
+                    });
             }
             else report.Record("guest.wy.channel.ui", "NOT_COVERED", "NOT_COVERED");
         }
         Require(!player.HasMedia && !player.IsPlaying &&
             runtime.AuthenticatedPublications("wy") == 0 && runtime.AuthenticatedPublications("kg") == 0, "PERMISSION_DENIED");
         report.Record("guest.catalog.no-account-or-media", "PASS", count: 1);
+    }
+
+    private static async Task<int> WaitForVisibleArtworkAsync(DesktopWindow window)
+    {
+        await RenderAsync(window);
+        var images = Descendants(window.Root).OfType<ArtworkImage>().Where(image =>
+            image.Address.Length > 0 && MusicCatalogView.InCatalogViewport(image)).ToArray();
+        Require(images.Length > 0, "NOT_COVERED");
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var held = new List<IDisposable>();
+        try
+        {
+            foreach (var image in images)
+                held.Add(await image.PrepareForPresentationAsync(deadline.Token));
+            Require(images.All(image => image.Source is not null), "NOT_COVERED");
+            return images.Length;
+        }
+        finally { foreach (var lease in held) lease.Dispose(); }
+    }
+
+    private static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            yield return child;
+            foreach (var descendant in Descendants(child)) yield return descendant;
+        }
     }
 
     private static async Task CheckSafetyAsync(MusicNativeApplication application)
@@ -331,7 +433,7 @@ internal static class MusicLiveAcceptance
     }
 
     private static async Task ExerciseWyAsync(string phase, MusicNativeApplication application, MusicCapability module, NativeAudioPlayback player,
-        ObservedRuntime runtime, Report report, Window window)
+        ObservedRuntime runtime, Report report, DesktopWindow window)
     {
         if (!await report.StepAsync(phase + ".wy.home", () => HomeAsync(module, runtime, report, window, "wy", refresh: true)))
         {
@@ -420,7 +522,7 @@ internal static class MusicLiveAcceptance
         module.CatalogSections.SelectMany(section => section.Action is { } action
             ? section.Items.Append(action) : section.Items).Where(card => card.Platform == module.CatalogSourcePlatform && card.Display);
 
-    private static async Task<int> HomeAsync(MusicCapability module, ObservedRuntime runtime, Report report, Window window,
+    private static async Task<int> HomeAsync(MusicCapability module, ObservedRuntime runtime, Report report, DesktopWindow window,
         string platform, bool refresh)
     {
         int errors = report.Failures;
@@ -487,10 +589,72 @@ internal static class MusicLiveAcceptance
         }
     }
 
-    private static async Task RenderAsync(Window window)
+    private static async Task RenderAsync(DesktopWindow window)
     {
-        await window.Dispatcher.InvokeAsync(window.UpdateLayout, DispatcherPriority.Render);
-        Require(window.IsVisible && window.ActualWidth > 0 && window.ActualHeight > 0, "NOT_COVERED");
+        DesktopTestUi.WindowRoot(window).UpdateLayout(); await MusicTestUi.Drain();
+        Require(window.IsVisible && DesktopTestUi.WindowRoot(window).ActualWidth > 0 && DesktopTestUi.WindowRoot(window).ActualHeight > 0, "NOT_COVERED");
+    }
+
+    private static async Task CaptureCatalogAsync(MusicCapability module, DesktopWindow window, Report report, string name)
+    {
+        var images = Descendants(module.View).OfType<ArtworkImage>()
+            .Where(image => image.Address.Length > 0 && MusicCatalogView.InCatalogViewport(image)).ToArray();
+        var finished = new HashSet<ArtworkImage>();
+        var changed = new SemaphoreSlim(0);
+        void Completed(object? sender, ArtworkLoadEventArgs _) { if (sender is ArtworkImage image) finished.Add(image); changed.Release(); }
+        foreach (var image in images) image.LoadCompleted += Completed;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            while (images.Any(image => image.Source is null && !finished.Contains(image)))
+                try { await changed.WaitAsync(timeout.Token); }
+                catch (OperationCanceledException) { break; }
+            report.Record("guest." + name + ".visible-image-urls", "PASS", count: images.Length);
+            report.Record("guest." + name + ".decoded-images", "PASS", count: images.Count(image => image.Source is not null));
+            int unresolved = images.Count(image => image.Source is null);
+            report.Record("guest." + name + ".unresolved-images", unresolved == 0 ? "PASS" : "NOT_COVERED",
+                unresolved == 0 ? null : "NOT_COVERED", count: unresolved);
+            foreach (var image in images.Where(image => image.Source is null))
+            {
+                string code = AutomationProperties.GetHelpText(image) switch
+                {
+                    "图片格式不支持或已损坏" => "ARTWORK_FORMAT",
+                    "图片超出资源限制" => "ARTWORK_LIMIT",
+                    "图片地址不可用" => "ARTWORK_ADDRESS",
+                    "图片重定向不可用" => "ARTWORK_REDIRECT",
+                    "图片访问被拒绝" => "ARTWORK_DENIED",
+                    "图片服务已关闭" => "ARTWORK_CLOSED",
+                    "图片网络加载失败" => "ARTWORK_NETWORK",
+                    "图片加载超时" => "ARTWORK_TIMEOUT",
+                    "图片加载失败" => "ARTWORK_UNKNOWN",
+                    _ => "ARTWORK_PENDING"
+                };
+                string kind = image.DataContext is MusicCatalogCard card && card.Kind is ("playlist" or "album" or "song" or "fm")
+                    ? card.Kind : "other";
+                string layer = image.Name is ("Cover" or "DecorationLayer" or "BannerImage") ? image.Name : "artwork";
+                string key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(image.Address)))[..12];
+                Console.WriteLine($"LIVE_IMAGE_FAILURE page={name}; kind={kind}; layer={layer}; key={key}; code={code}");
+                if (code == "ARTWORK_NETWORK" && Uri.TryCreate(image.Address, UriKind.Absolute, out var uri) &&
+                    uri.Scheme is ("http" or "https") && uri.UserInfo.Length == 0)
+                {
+                    try
+                    {
+                        using var handler = new SocketsHttpHandler { UseCookies = false, UseProxy = false, AllowAutoRedirect = false };
+                        using var probe = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10) };
+                        using var message = new HttpRequestMessage(HttpMethod.Head, uri);
+                        using var response = await probe.SendAsync(message, HttpCompletionOption.ResponseHeadersRead);
+                        Console.WriteLine($"LIVE_IMAGE_HEAD key={key}; status={(int)response.StatusCode}");
+                    }
+                    catch { Console.WriteLine($"LIVE_IMAGE_HEAD key={key}; status=unavailable"); }
+                }
+            }
+            await NativeDesktopCapture.SaveAsync(module.View, "music-content-" + name);
+        }
+        finally
+        {
+            foreach (var image in images) image.LoadCompleted -= Completed;
+            changed.Dispose();
+        }
     }
 
     private static JsonElement Reply(JsonElement reply)
@@ -643,6 +807,7 @@ internal static class MusicLiveAcceptance
         internal async Task<bool> StepAsync(string stage, Func<Task<int>> action)
         {
             Stage = stage;
+            Write($"LIVE {stage} BEGIN");
             try { Record(stage, "PASS", count: await action()); return true; }
             catch (Exception error)
             {

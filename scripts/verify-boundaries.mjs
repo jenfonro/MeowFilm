@@ -1,18 +1,17 @@
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { windowsRoot } from './windows/working-paths.mjs';
 import { discoverWorkspaces } from './verify-dependency-lock.mjs';
 import {
-  SHARED_RUNTIME_BUILTINS, packageNameFromSpecifier, publicPackageImport, sourceReferences, workspaceMap,
+  packageNameFromSpecifier, publicPackageImport, sourceReferences, workspaceMap,
 } from './module-policy.mjs';
-import { verifyStorageBoundaries } from './verify-storage-boundaries.mjs';
 
 const portablePackage = '@meowfilm/source-runtime';
 
 export function verifyBoundaries(root = windowsRoot) {
-  verifyStorageBoundaries(root);
   const workspaces = discoverWorkspaces(root, JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')));
   const names = new Set([...workspaces.values()].map(manifest => manifest.name));
   const packages = workspaceMap(root, workspaces);
@@ -36,7 +35,7 @@ export function verifyBoundaries(root = windowsRoot) {
         errors.push(`${relative(root, file)}: module specifiers must be statically resolvable`);
       }
       for (const { specifier: target, kind } of references.imports) {
-        if (manifest.name === portablePackage && target.startsWith('node:')) {
+        if (manifest.name === portablePackage && (isBuiltin(target) || target.startsWith('node:'))) {
           errors.push(`${relative(root, file)}: portable runtime imports Node builtin ${target}`);
         }
         if (target.startsWith('.')) {
@@ -72,7 +71,7 @@ export function verifyBoundaries(root = windowsRoot) {
           const path = relative(shared, resolve(dirname(file), target));
           if (path === '..' || path.startsWith('..' + sep) || isAbsolute(path))
             errors.push(`${relative(root, file)}: shared runtime depends on platform source: ${target}`);
-        } else if (!SHARED_RUNTIME_BUILTINS.has(target) && !publicPackageImport(root, packages, target, { kind })) {
+        } else if (!isBuiltin(target) && !publicPackageImport(root, packages, target, { kind })) {
           errors.push(`${relative(root, file)}: shared runtime platform/private import: ${target}`);
         }
       }

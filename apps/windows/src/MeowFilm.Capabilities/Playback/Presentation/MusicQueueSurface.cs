@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
-using System.Windows;
+using Microsoft.UI.Xaml;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;

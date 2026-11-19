@@ -94,6 +94,7 @@ public final class ManagementDialog: UIViewController {
     private func applyTheme(_ theme: PageTheme, to content: UIView) {
         if let preview = content as? ManagementImportView { preview.applyTheme(theme); return }
         if let form = content as? ManagementFormView { form.applyTheme(theme); return }
+        if let field = content as? SettingsInputSection { field.applyTheme(theme); return }
         if let label = content as? UILabel {
             if !label.adjustsFontForContentSizeCategory {
                 label.font = UIFontMetrics(forTextStyle: .subheadline).scaledFont(for: label.font, compatibleWith: traitCollection)
@@ -117,6 +118,10 @@ public final class ManagementDialog: UIViewController {
         input.textColor = ManagementAppearance.ink; input.tintColor = ManagementAppearance.accent
         input.attributedPlaceholder = NSAttributedString(string: placeholder, attributes: [.foregroundColor: ManagementAppearance.muted])
         input.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true; return input
+    }
+    public func addInput(_ input: UITextField, title: String) {
+        (input as? SettingsTextField)?.inputAppearance = .underline
+        body.addArrangedSubview(SettingsInputSection(title: title, input: input))
     }
     public override func viewWillDisappear(_ animated: Bool) { super.viewWillDisappear(animated); task?.cancel() }
     private func commit() {

@@ -4,8 +4,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
-using System.Windows;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Graphics;
 using MeowFilm.Media;
 
 namespace MeowFilm.Windows.Tests;
@@ -19,15 +19,15 @@ internal static class NativeMediaFixtures
     {
         var window = new Window
         {
-            Title = "Meowfilm scoped film validation", Width = 640, Height = 400,
-            Content = player.VideoView, ShowActivated = false
+            Title = "Meowfilm scoped film validation", Content = player.VideoView
         };
+        window.AppWindow.Resize(new SizeInt32(640, 400));
         var owner = new FilmWindow(player, window);
         try
         {
-            window.Show(); window.UpdateLayout();
-            await Dispatcher.Yield(DispatcherPriority.Loaded);
-            if (!window.IsVisible || !player.VideoView.IsLoaded ||
+            window.Activate();
+            await TestUiHost.LoadedAsync(player.VideoView);
+            if (!window.AppWindow.IsVisible || !player.VideoView.IsLoaded ||
                 player.VideoView.ActualWidth <= 1 || player.VideoView.ActualHeight <= 1)
                 throw new InvalidOperationException("Film fixture window did not load at a renderable size");
             return owner;
@@ -42,24 +42,7 @@ internal static class NativeMediaFixtures
             finally { window.Content = null; window.Close(); }
         }
     }
-    internal static async Task Sta(Func<Task> body)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await body(); done.TrySetResult(); }
-                catch (Exception error) { done.TrySetException(error); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        try { await done.Task.WaitAsync(TimeSpan.FromSeconds(40)); }
-        finally { if (!thread.Join(3000)) throw new InvalidOperationException("Media fixture STA did not exit"); }
-    }
+    internal static Task Sta(Func<Task> body) => TestUiHost.InvokeAsync(body);
     internal sealed record Reply(byte[] Data, string Mime = "application/vnd.apple.mpegurl")
     {
         internal int Status { get; init; } = 200;

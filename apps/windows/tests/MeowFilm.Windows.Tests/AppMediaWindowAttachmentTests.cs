@@ -1,10 +1,13 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Interop;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Key = System.Windows.Input.Key;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
+using KeyInterop = System.Windows.Input.KeyInterop;
 using MeowFilm.App;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
@@ -91,7 +94,7 @@ public static class AppMediaWindowAttachmentTests
             window.Close();
             Console.WriteLine($"NATIVE shortcut after Close {ShortcutNative.WindowEvidence(keys.Handle)} cancelled={window.Cancelled} " +
                 $"available={settings.IsAvailable} closingStatus={closing?.Status} pausedBeforeDomain={pausedBeforeDomain}");
-            Check(window.Cancelled == 1 && !keys.Source.IsDisposed, "real Closing was cancelled after event handlers");
+            Check(window.Cancelled == 1 && window.IsVisible, "real Closing was cancelled after event handlers");
             Check(pausedBeforeDomain && !settings.IsAvailable, "shared settings pause inputs before domain preparation");
             keys.Post(old); system.Backend.Request(SystemPlaybackCommand.Pause); await Pump();
             Check(keys.Actions.Count == 0 && system.Player.Calls.Count == 0, "preparation invalidates pending commands on both channels");
@@ -315,8 +318,6 @@ public static class AppMediaWindowAttachmentTests
             shutdown.CancelShutdownPreparationAsync, TimeProvider.System, appearance, closePreferences,
             (_, _, _, _) => tray, mediaControls: settings)
         {
-            WindowStartupLocation = WindowStartupLocation.Manual, Left = -32000, Top = -32000,
-            ShowActivated = false, ShowInTaskbar = false
         };
         shell.Closed += (_, _) => closed.TrySetResult();
         var native = new ShortcutNative();
@@ -338,22 +339,26 @@ public static class AppMediaWindowAttachmentTests
             owner = new AppMediaWindowAttachment(shell, settings);
             system = new SystemFixture(shell);
             owner.OwnSystemMedia(system.Attachment, system.Attachment.SetEnabled);
-            owner.OwnShortcuts(new MediaShortcutWindowAttachment(shell, settings, action =>
+            var shortcutAttachment = new MediaShortcutWindowAttachment(shell, settings, action =>
             {
                 actions.Add(action); return Task.CompletedTask;
-            }, native));
+            }, native);
+            owner.OwnShortcuts(shortcutAttachment);
             shell.Show(); await Pump();
-            var handle = new WindowInteropHelper(shell).Handle;
-            var dialog = (CloseWindowDialog)shell.FindName("CloseDialog");
+            var handle = shell.Handle;
+            var dialog = (CloseWindowDialog)DesktopTestUi.WindowRoot(shell).FindName("CloseDialog");
             Check(ReferenceEquals(shell.MediaControls, settings) && native.Latest.Success && system.Backend.Enabled,
                 "the real shell and both attachments share the restored media settings");
             void Post(ShortcutNative.Call registration)
             {
                 var gesture = ShortcutFixture.GlobalGesture;
                 nint packed = (nint)((KeyInterop.VirtualKeyFromKey(gesture.Key) << 16) | (int)gesture.Modifiers);
-                bool posted = PostMessageW(handle, MediaShortcutNative.HotKeyMessage, registration.Id, packed);
-                int error = posted ? 0 : Marshal.GetLastWin32Error();
-                Check(posted, $"queued shell hotkey; {ShortcutNative.WindowEvidence(handle)} id=0x{registration.Id:X} error={error}");
+                Check(DesktopTestUi.WindowRoot(shell).DispatcherQueue.TryEnqueue(() =>
+                {
+                    object?[] arguments = [handle, MediaShortcutNative.HotKeyMessage, registration.Id, packed, false];
+                    typeof(MediaShortcutWindowAttachment).GetMethod("Message", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                        .Invoke(shortcutAttachment, arguments);
+                }), "queued registration parser action");
             }
             async Task AcceptAll(string stage)
             {
@@ -374,7 +379,7 @@ public static class AppMediaWindowAttachmentTests
                 domainPreparations == 0 && !shell.ShutdownCompletion.IsCompleted,
                 "close inquiry does not start preparation or retire either media channel");
             await AcceptAll("close inquiry");
-            ((Button)dialog.FindName("MinimizeChoice")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke((Button)dialog.FindName("MinimizeChoice"));
             await Pump();
             Check(!shell.IsVisible && !dialog.IsOpen && settings.IsAvailable && system.Backend.Enabled &&
                 native.Latest == active && domainPreparations == 0 && closePreferences.Behavior == WindowCloseBehavior.Ask,
@@ -390,7 +395,7 @@ public static class AppMediaWindowAttachmentTests
             int acceptedSystem = system.Player.Calls.Count, acceptedShortcuts = actions.Count;
             Post(active);
             foreach (var command in commands) system.Backend.Request(command, 30);
-            ((Button)dialog.FindName("ExitChoice")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke((Button)dialog.FindName("ExitChoice"));
             Check(!settings.IsAvailable && !system.Backend.Enabled && native.Unregistered.Contains(active.Id) &&
                 !saving.IsCompleted && domainPreparations == 0 && closePreferences.CanEdit,
                 "media admission stops synchronously before awaiting appearance and preparing later participants");
@@ -408,13 +413,13 @@ public static class AppMediaWindowAttachmentTests
                 "the actual save settles before domain preparation while media admission remains closed");
             prepare.TrySetException(new InvalidOperationException("synthetic-preparation-failure"));
             await shell.ShutdownCompletion.WaitAsync(timeout); await Pump();
-            var cancel = (Button)shell.FindName("CancelShutdownButton");
+            var cancel = (Button)DesktopTestUi.WindowRoot(shell).FindName("CancelShutdownButton");
             Check(shell.IsVisible && cancel.IsEnabled && restoredAfterShared,
                 "failed preparation remains cancellable and rollback reopens media only after later shared owners");
-            cancel.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); await Pump();
+            DesktopTestUi.Invoke(cancel); await Pump();
             Check(settings.IsAvailable && system.Backend.Enabled && native.Latest.Success &&
                 appearance.CanEdit && closePreferences.CanEdit && closePreferences.Behavior == WindowCloseBehavior.Ask &&
-                ((Grid)shell.FindName("ContentDeck")).IsEnabled,
+                ((ContentControl)DesktopTestUi.WindowRoot(shell).FindName("RootInteractionGate")).IsEnabled,
                 "actual shell cancellation restores both channels from unchanged authoritative preferences");
             await AcceptAll("cancelled preparation");
         }
@@ -432,9 +437,7 @@ public static class AppMediaWindowAttachmentTests
             "shell cleanup releases its single system attachment, tray and all real hotkey registration identities");
     }
 
-    [DllImport("user32.dll", ExactSpelling = true, SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostMessageW(nint hwnd, int message, nint wParam, nint lParam);
+
 
     private static async Task Fails(Task task, string code)
     {

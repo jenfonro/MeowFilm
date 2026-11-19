@@ -18,6 +18,12 @@ final class MusicArtworkURLTests: XCTestCase {
         XCTAssertEqual(MusicArtworkURL.normalized("http://cdn.invalid:443/x.jpg")?.absoluteString,
                        "https://cdn.invalid:443/x.jpg")
     }
+    func testLongArtworkURLKeepsItsFullPathAndQuery() throws {
+        let source = "http://cdn.invalid/" + String(repeating: "a", count: 8193) + ".jpg?size=480&extra=a%2Fb"
+        let image = try XCTUnwrap(MusicArtworkURL.normalized(source))
+        XCTAssertEqual(image.absoluteString, source.replacingOccurrences(of: "http:", with: "https:"))
+        XCTAssertTrue(MusicArtworkHTTP.permits(image))
+    }
     func testArtworkStillRejectsCredentialsUnsafeURLFormsAndNonHTTPResources() {
         for text in ["https://user:secret@p1.music.126.net/a.jpg", "https://p1.music.126.net:444/a.jpg",
                      "https:///a.jpg", "http://cdn.invalid:444/a.jpg",

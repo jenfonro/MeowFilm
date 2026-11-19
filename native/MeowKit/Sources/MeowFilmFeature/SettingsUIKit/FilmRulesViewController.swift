@@ -4,11 +4,37 @@ import Combine
 import MeowUI
 
 @MainActor
-final class FilmRuleTestView {
-    let input = filmTextField("测试文本", id: "film.rule.test.input")
-    let query = filmTextField("查询词", id: "film.rule.test.query")
+final class FilmRuleTestView: NSObject, UITextViewDelegate {
+    let input = SettingsTextView()
+    let query = SettingsTextField()
+    let inputSection: SettingsInputSection
+    let querySection: SettingsInputSection
+    var change: (() -> Void)?
 
-    init(group: FilmRuleGroup) { query.isHidden = group != .search }
+    init(group: FilmRuleGroup) {
+        inputSection = SettingsInputSection(title: "测试文本", input: input)
+        querySection = SettingsInputSection(title: "查询词", input: query)
+        super.init()
+        input.accessibilityLabel = "测试文本"; input.accessibilityIdentifier = "film.rule.test.input"
+        query.accessibilityLabel = "查询词"; query.accessibilityIdentifier = "film.rule.test.query"
+        input.inputAppearance = .underline; query.inputAppearance = .underline
+        input.font = .preferredFont(forTextStyle: .body)
+        query.font = .preferredFont(forTextStyle: .body)
+        input.adjustsFontForContentSizeCategory = true; query.adjustsFontForContentSizeCategory = true
+        input.autocorrectionType = .no; query.autocorrectionType = .no
+        input.autocapitalizationType = .none; query.autocapitalizationType = .none
+        input.smartQuotesType = .no; query.smartQuotesType = .no
+        input.smartDashesType = .no; query.smartDashesType = .no
+        input.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+        query.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        query.isHidden = group != .search; querySection.isHidden = query.isHidden
+        input.delegate = self
+        query.addAction(UIAction { [weak self] _ in self?.change?() }, for: .editingChanged)
+    }
+    func textViewDidChange(_ textView: UITextView) { change?() }
+    func applyTheme(_ theme: PageTheme) {
+        inputSection.applyTheme(theme); querySection.applyTheme(theme)
+    }
 }
 
 @MainActor
@@ -23,6 +49,7 @@ final class FilmRulePageViewController: FilmSettingsListController {
     private let content = UIStackView()
     private let cards = UIStackView()
     private let actions = UIStackView()
+    private let actionLine = UIView()
     private let loading = UILabel()
     private var actionHeights: [NSLayoutConstraint] = []
     private(set) var editors: [FilmRuleEditorView] = []
@@ -33,6 +60,7 @@ final class FilmRulePageViewController: FilmSettingsListController {
     private var editGeneration = UUID()
     private var testGeneration = UUID()
     private var testTask: Task<Void, Never>?
+    private var pendingTest: (generation: UUID, request: FilmRuleRequest, rules: [FilmMatchRule])?
     private lazy var saveButton = PageHeaderTextButton(title: "保存") { [weak self] in self?.save() }
     private lazy var addButton = PageHeaderTextButton(title: "＋ 添加规则") { [weak self] in
         guard let self, !owner.busy, !writing else { return }
@@ -63,6 +91,11 @@ final class FilmRulePageViewController: FilmSettingsListController {
         scrollView.alwaysBounceVertical = true
         scrollView.contentInsetAdjustmentBehavior = .never
         view.addSubview(scrollView); scrollView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(actions); actions.translatesAutoresizingMaskIntoConstraints = false
+        actions.accessibilityIdentifier = "film.rules.actions"
+        actions.isLayoutMarginsRelativeArrangement = true
+        actions.layoutMargins = .init(top: 8, left: SettingsVisualMetrics.cardHorizontalInset,
+                                      bottom: 8, right: SettingsVisualMetrics.cardHorizontalInset)
         content.axis = .vertical; content.spacing = SettingsVisualMetrics.sectionSpacing
         cards.axis = .vertical; cards.spacing = SettingsVisualMetrics.sectionSpacing
         scrollView.addSubview(content); content.translatesAutoresizingMaskIntoConstraints = false
@@ -70,9 +103,12 @@ final class FilmRulePageViewController: FilmSettingsListController {
             scrollView.topAnchor.constraint(equalTo: contentTopAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: actions.topAnchor),
+            actions.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+            actions.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+            actions.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
             content.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor,
-                constant: SettingsVisualMetrics.sectionSpacing),
+                constant: SettingsVisualMetrics.contentTopSpacing),
             content.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor,
                 constant: -SettingsVisualMetrics.sectionSpacing),
             content.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor,
@@ -86,29 +122,21 @@ final class FilmRulePageViewController: FilmSettingsListController {
         loading.text = "加载中"; loading.font = .preferredFont(forTextStyle: .body)
         loading.adjustsFontForContentSizeCategory = true
         content.addArrangedSubview(loading)
-        content.addArrangedSubview(addButton)
-        addButton.layer.cornerRadius = SettingsVisualMetrics.cardCornerRadius
-        addButton.layer.borderWidth = 1
-        let testInputs = UIStackView(); testInputs.axis = .vertical; testInputs.spacing = 12
-        for field in [testFields.input, testFields.query] where !field.isHidden {
-            let label = UILabel(); label.text = field.placeholder
-            label.font = .preferredFont(forTextStyle: .subheadline)
-            label.adjustsFontForContentSizeCategory = true; label.numberOfLines = 0
-            let column = UIStackView(arrangedSubviews: [label, field])
-            column.axis = .vertical; column.spacing = 8
-            testInputs.addArrangedSubview(column)
-            field.smartQuotesType = .no; field.smartDashesType = .no
-            field.addAction(UIAction { [weak self] _ in self?.cancelTest() }, for: .editingChanged)
-        }
-        content.addArrangedSubview(testInputs)
+        testFields.change = { [weak self] in self?.cancelTest() }
         actions.axis = .horizontal; actions.spacing = 12; actions.distribution = .fillEqually
-        for button in [restoreButton, testButton] {
+        for button in [addButton, restoreButton, testButton] {
             button.titleLabel?.numberOfLines = 0
             button.titleLabel?.lineBreakMode = .byCharWrapping
             button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            actions.addArrangedSubview(button)
         }
-        actions.addArrangedSubview(restoreButton); actions.addArrangedSubview(testButton)
-        content.addArrangedSubview(actions)
+        actions.addSubview(actionLine); actionLine.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            actionLine.topAnchor.constraint(equalTo: actions.topAnchor),
+            actionLine.leadingAnchor.constraint(equalTo: actions.leadingAnchor),
+            actionLine.trailingAnchor.constraint(equalTo: actions.trailingAnchor),
+            actionLine.heightAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight),
+        ])
         actionHeights = [addButton, restoreButton, testButton].map {
             let height = $0.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
             height.isActive = true
@@ -134,19 +162,16 @@ final class FilmRulePageViewController: FilmSettingsListController {
             catch { failure(error, retry: { [weak self] in self?.pageDidBecomeActive() }) }
         }
     }
-    override func pageDidBecomeVisible() { render() }
+    override func pageDidBecomeVisible() { render(); startPendingTest() }
+    override func pageDidFinishAppearing() { super.pageDidFinishAppearing(); startPendingTest() }
     override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
         for editor in editors { editor.applyTheme(theme) }
-        for field in [testFields.input, testFields.query] {
-            theme.settings.apply(to: field)
-            for case let label as UILabel in (field.superview as? UIStackView)?.arrangedSubviews ?? [] {
-                label.textColor = UIColor(theme.settings.muted)
-            }
-        }
+        testFields.applyTheme(theme)
         loading.textColor = UIColor(theme.settings.muted)
-        addButton.layer.borderColor = UIColor(theme.settings.border).cgColor
+        actions.backgroundColor = UIColor(theme.settings.surface)
+        actionLine.backgroundColor = UIColor(theme.settings.separator)
         updateControls()
     }
     override func render() {
@@ -195,16 +220,16 @@ final class FilmRulePageViewController: FilmSettingsListController {
     }
     private func updateActionLayout() {
         let largeType = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
+        actions.axis = largeType ? .vertical : .horizontal
+        actions.distribution = largeType ? .fillEqually : .fillProportionally
         for (button, height) in zip([addButton, restoreButton, testButton], actionHeights) {
             button.titleLabel?.font = .preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
             button.titleLabel?.adjustsFontForContentSizeCategory = true
-            let lines: CGFloat = largeType && button !== addButton ? 2 : 1
-            height.constant = max(44, (button.titleLabel?.font.lineHeight ?? 20) * lines + 16)
+            height.constant = max(44, (button.titleLabel?.font.lineHeight ?? 20) + 16)
         }
     }
     private func scrollFocusedField() {
         let fields: [UIView] = editors.flatMap { [$0.pattern as UIView] + [$0.replacement, $0.flags].compactMap { $0 } }
-            + [testFields.input, testFields.query]
         guard let field = fields.first(where: \.isFirstResponder) else { return }
         view.layoutIfNeeded()
         scrollView.scrollRectToVisible(field.convert(field.bounds, to: scrollView).insetBy(dx: 0, dy: -12), animated: false)
@@ -232,12 +257,34 @@ final class FilmRulePageViewController: FilmSettingsListController {
               query: group == .search ? testFields.query.text : nil)
     }
     func runTest() {
-        guard isPageActive, owner.draft != nil, !owner.busy, !writing else { return }
+        guard canPresentPageAlert, owner.draft != nil, !owner.busy, !writing else { return }
         cancelTest()
-        let generation = UUID()
-        testGeneration = generation
-        let request = testRequest
-        let rules = owner.rules(group)
+        let dialog = ManagementDialog(title: "测试", action: "测试", themeProvider: themeProvider)
+        dialog.body.addArrangedSubview(testFields.inputSection)
+        if group == .search { dialog.body.addArrangedSubview(testFields.querySection) }
+        var submitted: (generation: UUID, request: FilmRuleRequest, rules: [FilmMatchRule])?
+        dialog.submit = { [weak self] in
+            guard let self, isPageActive, owner.draft != nil, !owner.busy, !writing else { return false }
+            submitted = (testGeneration, testRequest, owner.rules(group))
+            return true
+        }
+        dialog.accepted = { [weak self, weak dialog] in
+            guard let self, let dialog, let value = submitted else { return }
+            submitted = nil
+            dismissPageModal(dialog) { [weak self] in
+                guard let self, isPageActive, testGeneration == value.generation else { return }
+                pendingTest = value
+                startPendingTest()
+            }
+        }
+        present(dialog, animated: true)
+    }
+    private func startPendingTest() {
+        guard let value = pendingTest, isPageActive, isPageVisible, canPresentPageAlert else { return }
+        pendingTest = nil
+        guard owner.draft != nil, !owner.busy, !writing, testGeneration == value.generation,
+              testRequest == value.request, owner.rules(group) == value.rules else { cancelTest(); return }
+        let generation = value.generation, request = value.request, rules = value.rules
         testing = true
         for editor in editors { editor.showResult(.init(text: "测试中"), theme: theme) }
         updateControls()
@@ -263,6 +310,7 @@ final class FilmRulePageViewController: FilmSettingsListController {
     }
     func cancelTest() {
         testGeneration = UUID()
+        pendingTest = nil
         testTask?.cancel(); testTask = nil
         testing = false; result = nil
         for editor in editors { editor.showResult(nil, theme: theme) }

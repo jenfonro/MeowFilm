@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
-using System.Windows;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
 
 namespace MeowFilm.Desktop;
 
@@ -13,34 +14,39 @@ internal class DesktopTrayIconNative
         var borrowed = SendMessage(owner, 0x7f, 2, 0); // WM_GETICON / ICON_SMALL2
         if (borrowed == 0) borrowed = SendMessage(owner, 0x7f, 0, 0);
         if (borrowed == 0) borrowed = SendMessage(owner, 0x7f, 1, 0);
-        // WM_GETICON does not return a class icon. WPF has already installed its
-        // default executable icon before SourceInitialized; use only the window's sources.
+        // WM_GETICON does not return a class icon; consult the existing window class.
         if (borrowed == 0) borrowed = GetClassLongPtr(owner, -34); // GCLP_HICONSM
         if (borrowed == 0) borrowed = GetClassLongPtr(owner, -14); // GCLP_HICON
-        return borrowed == 0 ? 0 : CopyIcon(borrowed);
+        if (borrowed != 0) return CopyIcon(borrowed);
+        // An unpackaged WinUI window need not install the executable icon as a class icon.
+        // ExtractIconEx returns an owned icon; the same retirement path destroys it.
+        if (Environment.ProcessPath is not { } executable) return 0;
+        return ExtractIconEx(executable, 0, out var large, out var small, 1) > 0 ? Pick(large, small) : 0;
+        static nint Pick(nint large, nint small)
+        {
+            if (small == 0) return large;
+            if (large != 0) DestroyIcon(large);
+            return small;
+        }
     }
 
     internal virtual void DestroyOwnedIcon(nint icon) => DestroyIcon(icon);
 
-    internal bool ShowMenuHost(nint hwnd, Point position)
-    {
-        if (!SetWindowPos(hwnd, 0, (int)position.X, (int)position.Y, 1, 1, 0x14)) return false;
-        ShowWindow(hwnd, 4); // SW_SHOWNOACTIVATE; SetForegroundWindow performs the activation.
-        if (ActivateMenuHost(hwnd)) return true;
-        ShowWindow(hwnd, 0);
-        return false;
-    }
-
     internal virtual bool ActivateMenuHost(nint hwnd) => SetForegroundWindow(hwnd) || GetForegroundWindow() == hwnd;
     internal virtual bool IsMenuHostForeground(nint hwnd) => GetForegroundWindow() == hwnd;
-
-    internal bool CloseMenuHost(nint hwnd)
+    internal virtual nint CreateMenuHost(Point point)
     {
-        bool returnFocus = IsMenuHostForeground(hwnd);
-        PostMessage(hwnd, 0, 0, 0); // WM_NULL settles the shell's context-menu tracking.
-        ShowWindow(hwnd, 0);
-        return returnFocus; // An outside click must retain its destination's foreground focus.
+        // A zero-size tool window permits the system menu to take foreground while
+        // the application is hidden. It has no XAML/content surface or callback owner.
+        nint host = CreateWindowEx(0x80, "STATIC", "", 0x80000000, (int)point.X, (int)point.Y, 0, 0, 0, 0, 0, 0);
+        if (host != 0) ShowWindow(host, 4);
+        return host;
     }
+    internal virtual void DestroyMenuHost(nint hwnd) => DestroyWindow(hwnd);
+    internal virtual uint TrackMenu(nint menu, Point point, nint owner) =>
+        TrackPopupMenuEx(menu, 0x100 | 0x2, (int)point.X, (int)point.Y, owner, 0);
+    internal virtual bool ResolveMenuPosition(nint hwnd, uint id, out Point position) =>
+        TryGetMenuPosition(hwnd, id, out position);
 
     internal static bool TryGetMenuPosition(nint hwnd, uint id, out Point position)
     {
@@ -55,6 +61,9 @@ internal class DesktopTrayIconNative
         position = new Point(cursor.X, cursor.Y);
         return found;
     }
+
+    [DllImport("shell32.dll", EntryPoint = "ExtractIconExW", CharSet = CharSet.Unicode)]
+    private static extern uint ExtractIconEx(string file, int index, out nint large, out nint small, uint count);
 
     [DllImport("shell32.dll", EntryPoint = "Shell_NotifyIconW", CharSet = CharSet.Unicode, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -81,22 +90,19 @@ internal class DesktopTrayIconNative
 
     [DllImport("user32.dll", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetWindowPos(nint hwnd, nint insertAfter, int x, int y, int width, int height, uint flags);
-
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool ShowWindow(nint hwnd, int command);
-
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint hwnd);
 
     [DllImport("user32.dll", ExactSpelling = true)]
     private static extern nint GetForegroundWindow();
 
-    [DllImport("user32.dll", EntryPoint = "PostMessageW", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool PostMessage(nint hwnd, int message, nint wParam, nint lParam);
+    [DllImport("user32.dll", ExactSpelling = true)]
+    private static extern uint TrackPopupMenuEx(nint menu, uint flags, int x, int y, nint owner, nint parameters);
+
+    [DllImport("user32.dll", EntryPoint = "CreateWindowExW", CharSet = CharSet.Unicode)]
+    private static extern nint CreateWindowEx(uint extendedStyle, string className, string name, uint style,
+        int x, int y, int width, int height, nint parent, nint menu, nint instance, nint parameter);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ShowWindow(nint hwnd, int command);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyWindow(nint hwnd);
 
     [DllImport("user32.dll", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

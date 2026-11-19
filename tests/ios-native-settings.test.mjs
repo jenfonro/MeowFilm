@@ -5,7 +5,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { once } from 'node:events';
 import { join } from 'node:path';
-import { createNativeSettings, nativeSettingsFrameBytes } from '../apps/runtime/native-settings.mjs';
+import { createNativeSettings } from '../apps/runtime/native-settings.mjs';
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { parseIOSConfiguration } from '../apps/ios/runtime/bootstrap.mjs';
 import { createTMDBDataModule } from '../apps/runtime/modules/metadata-data.mjs';
@@ -134,7 +134,6 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
       { ...result(1, null), revision: 1.5 },
       { kind: 'settings.result', id: 1, ok: false, code: 'private-error-message' },
       Buffer.from([0xff, 10]),
-      Buffer.alloc(nativeSettingsFrameBytes + 1, 32),
     ]) await t.test(Buffer.isBuffer(reply) ? `bytes-${reply.length}` : JSON.stringify(reply), async sub => {
       const f = pipe(sub), first = assert.rejects(f.settings.reload('tmdb'), { code: 'CLOSED' }),
         second = assert.rejects(f.settings.reload('douban'), { code: 'CLOSED' });
@@ -145,7 +144,7 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
     });
   });
 
-test('private frames accept multiple replies per chunk but bound outgoing writes and release pending work on close', async t => {
+test('private frames accept multiple replies, large documents and release pending work on close', async t => {
   const f = pipe(t), a = f.settings.reload('tmdb'), b = f.settings.reload('douban');
   f.settings.accept(Buffer.concat([line(result(1, null)), line(result(2, { version: 1 }))]));
   assert.equal(await a, null);

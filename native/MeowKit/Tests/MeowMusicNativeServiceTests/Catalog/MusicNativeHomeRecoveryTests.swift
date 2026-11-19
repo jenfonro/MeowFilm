@@ -20,11 +20,11 @@ private final class RecoveryHomeStore: MusicHomeSnapshotStoring, @unchecked Send
 
 private func recoveryHome(_ blocks: [(String, [Int])], next: String? = nil) -> Data {
     var data = MJ.obj([("sections", .array(blocks.map { id, items in
-        .obj([("id", .string(id)), ("title", .string(id)), ("type", .string("playlists")),
+        .obj([("id", .string(id)), ("title", .string(id)), ("layout", .string("playlist-rail")),
             ("items", .array(items.map { number in
-                .obj([("key", .string("\(id):playlist:\(number)")), ("id", .string(String(number))), ("name", .string("歌单 \(number)")),
+                .obj([("key", .string("\(id):playlist:\(number)")), ("id", .string(String(number))), ("title", .string("歌单 \(number)")), ("kind", .string("playlist")),
                       ("cover", .string("https://p1.music.126.net/\(number).jpg")),
-                      ("action", .obj([("type", .string("playlist"))]))])
+                      ("action", .obj([("type", .string("playlist")), ("id", .string(String(number)))]))])
             }))])
     }))])
     if let next { data["continuation"] = .obj([("cursor", .string(next))]) }

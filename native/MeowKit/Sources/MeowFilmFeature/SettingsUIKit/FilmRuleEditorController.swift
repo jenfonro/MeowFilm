@@ -39,7 +39,7 @@ final class FilmRuleEditorView: UIStackView {
         resultLabel.lineBreakMode = .byCharWrapping
         resultLabel.accessibilityIdentifier = id + ".result"
         resultLabel.isHidden = true
-        titleRow.axis = .horizontal; titleRow.alignment = .top; titleRow.spacing = 12
+        titleRow.axis = .horizontal; titleRow.alignment = .firstBaseline; titleRow.spacing = 12
         titleRow.addArrangedSubview(title); titleRow.addArrangedSubview(resultLabel)
         let remove = PageHeaderTextButton(title: "删除") { }
         deleteButton = remove
@@ -50,23 +50,35 @@ final class FilmRuleEditorView: UIStackView {
         deleteHeight = remove.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
         deleteHeight?.isActive = true
         remove.addAction(UIAction { [weak self] _ in self?.delete?() }, for: .touchUpInside)
-        let heading = UIStackView(arrangedSubviews: [titleRow, remove])
-        heading.axis = .horizontal
-        heading.spacing = 12; heading.alignment = .top
-        heading.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        let heading = UIView()
+        heading.addSubview(titleRow); titleRow.translatesAutoresizingMaskIntoConstraints = false
+        heading.addSubview(remove); remove.translatesAutoresizingMaskIntoConstraints = false
+        // Pin the delete hit region; only the title's first line follows its baseline.
+        let contentBottom = heading.bottomAnchor.constraint(equalTo: titleRow.bottomAnchor)
+        contentBottom.priority = .defaultLow
+        NSLayoutConstraint.activate([
+            remove.topAnchor.constraint(equalTo: heading.topAnchor),
+            remove.trailingAnchor.constraint(equalTo: heading.trailingAnchor),
+            titleRow.leadingAnchor.constraint(equalTo: heading.leadingAnchor),
+            titleRow.trailingAnchor.constraint(equalTo: remove.leadingAnchor, constant: -12),
+            title.firstBaselineAnchor.constraint(equalTo: remove.firstBaselineAnchor),
+            heading.bottomAnchor.constraint(greaterThanOrEqualTo: titleRow.bottomAnchor),
+            heading.bottomAnchor.constraint(greaterThanOrEqualTo: remove.bottomAnchor),
+            contentBottom,
+        ])
         addArrangedSubview(heading)
 
         pattern = form.text("pattern", value: rule.pattern, rows: 4,
-            id: id + ".pattern", theme: theme, in: self) { [weak self] _ in
+            id: id + ".pattern", theme: theme, appearance: .underline, in: self) { [weak self] _ in
                 self?.changed()
             } as! UITextView
         if !group.isClean {
             let replaceColumn = UIStackView(); replaceColumn.axis = .vertical
             let flagsColumn = UIStackView(); flagsColumn.axis = .vertical
             replacement = form.text("replace", value: rule.replace, id: id + ".replace",
-                theme: theme, in: replaceColumn) { [weak self] _ in self?.changed() } as! UITextField
+                theme: theme, appearance: .underline, in: replaceColumn) { [weak self] _ in self?.changed() } as! UITextField
             flags = form.text("flags", value: rule.flags, id: id + ".flags",
-                theme: theme, in: flagsColumn) { [weak self] _ in self?.changed() } as! UITextField
+                theme: theme, appearance: .underline, in: flagsColumn) { [weak self] _ in self?.changed() } as! UITextField
             matchingFields.axis = .horizontal; matchingFields.alignment = .fill; matchingFields.spacing = 12
             matchingFields.addArrangedSubview(replaceColumn); matchingFields.addArrangedSubview(flagsColumn)
             flagsWidth = flagsColumn.widthAnchor.constraint(equalToConstant: 76)
@@ -82,6 +94,7 @@ final class FilmRuleEditorView: UIStackView {
     private func updateFieldLayout() {
         let vertical = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
         titleRow.axis = vertical ? .vertical : .horizontal
+        titleRow.alignment = vertical ? .fill : .firstBaseline
         matchingFields.axis = vertical ? .vertical : .horizontal
         flagsWidth?.isActive = !vertical
         for label in [title, resultLabel, deleteButton.titleLabel].compactMap({ $0 }) {

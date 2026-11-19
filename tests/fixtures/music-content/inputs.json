@@ -1,0 +1,304 @@
+{
+  "browse": {
+    "platform": "wy",
+    "id": "synthetic:channel",
+    "title": "电音",
+    "sections": [
+      {
+        "id": "banner",
+        "title": "",
+        "type": "banner",
+        "layout": "rail",
+        "items": [
+          {
+            "id": "synthetic-song",
+            "name": "活动横幅",
+            "cover": "https://images.invalid/banner.jpg",
+            "song": {
+              "title": "合成歌曲",
+              "artist": "合成艺人",
+              "album": "合成专辑",
+              "duration": 180,
+              "cover_url": "https://images.invalid/song.jpg",
+              "sources": [
+                {
+                  "sourceKey": "[\"wy\",\"synthetic-song\",\"\"]",
+                  "source": "wy",
+                  "musicInfo": {
+                    "source": "wy",
+                    "songmid": "synthetic-song",
+                    "name": "合成歌曲",
+                    "singer": "合成艺人",
+                    "albumName": "合成专辑",
+                    "duration": 180,
+                    "img": "https://images.invalid/song.jpg"
+                  }
+                }
+              ]
+            },
+            "action": {
+              "type": "song",
+              "id": "synthetic-song"
+            }
+          },
+          {
+            "id": "no-banner-image",
+            "name": "无横幅图",
+            "cover": "",
+            "song": {
+              "title": "合成歌曲",
+              "artist": "合成艺人",
+              "album": "合成专辑",
+              "duration": 180,
+              "cover_url": "https://images.invalid/song.jpg",
+              "sources": [
+                {
+                  "sourceKey": "[\"wy\",\"synthetic-song\",\"\"]",
+                  "source": "wy",
+                  "musicInfo": {
+                    "source": "wy",
+                    "songmid": "synthetic-song",
+                    "name": "合成歌曲",
+                    "singer": "合成艺人",
+                    "albumName": "合成专辑",
+                    "duration": 180,
+                    "img": "https://images.invalid/song.jpg"
+                  }
+                }
+              ]
+            },
+            "action": {
+              "type": "song",
+              "id": "synthetic-song"
+            }
+          }
+        ]
+      },
+      {
+        "id": "entries",
+        "title": "频道推荐",
+        "type": "entries",
+        "layout": "rail",
+        "items": [
+          {
+            "id": "synthetic-list",
+            "name": "电音歌单",
+            "subtitle": "歌单内容说明",
+            "kind": "playlist",
+            "cover": "",
+            "action": {
+              "type": "playlist",
+              "id": "synthetic-list"
+            },
+            "presentation": "preview",
+            "count": null,
+            "playCount": 0
+          }
+        ],
+        "tabs": [
+          {
+            "id": "recommend",
+            "name": "推荐",
+            "items": [
+              {
+                "id": "synthetic-list",
+                "name": "电音歌单",
+                "subtitle": "歌单内容说明",
+                "kind": "playlist",
+                "cover": "",
+                "action": {
+                  "type": "playlist",
+                  "id": "synthetic-list"
+                },
+                "presentation": "preview",
+                "count": null
+              }
+            ]
+          },
+          {
+            "id": "other",
+            "name": "其他",
+            "items": [
+              {
+                "id": "synthetic-other",
+                "name": "电音歌单",
+                "subtitle": "歌单内容说明",
+                "kind": "playlist",
+                "cover": "",
+                "action": {
+                  "type": "playlist",
+                  "id": "synthetic-other"
+                },
+                "presentation": "preview",
+                "count": null
+              }
+            ]
+          }
+        ],
+        "selectedTab": "recommend"
+      },
+      {
+        "id": "songs",
+        "title": "歌曲",
+        "type": "songs",
+        "layout": "list",
+        "items": [
+          {
+            "title": "合成歌曲",
+            "artist": "合成艺人",
+            "album": "合成专辑",
+            "duration": 180,
+            "cover_url": "https://images.invalid/song.jpg",
+            "sources": [
+              {
+                "sourceKey": "[\"wy\",\"synthetic-song\",\"\"]",
+                "source": "wy",
+                "musicInfo": {
+                  "source": "wy",
+                  "songmid": "synthetic-song",
+                  "name": "合成歌曲",
+                  "singer": "合成艺人",
+                  "albumName": "合成专辑",
+                  "duration": 180,
+                  "img": "https://images.invalid/song.jpg"
+                }
+              }
+            ]
+          },
+          {
+            "title": "仅展示歌曲",
+            "artist": "",
+            "album": "",
+            "duration": null,
+            "cover_url": "",
+            "sources": []
+          }
+        ]
+      },
+      {
+        "id": "partial",
+        "title": "局部资料",
+        "type": "playlists",
+        "layout": "grid",
+        "items": [
+          {
+            "name": "缺少定位的歌单",
+            "kind": "playlist",
+            "cover": "",
+            "count": "unknown"
+          },
+          {
+            "name": "未知动作内容",
+            "kind": "future-kind",
+            "cover": "https://images.invalid/unknown.jpg"
+          }
+        ]
+      },
+      {
+        "id": "rank",
+        "title": "榜单",
+        "type": "rankings",
+        "layout": "TOP_3",
+        "items": [
+          {
+            "id": "albums",
+            "name": "专辑榜",
+            "kind": "chart",
+            "action": {
+              "type": "chart",
+              "id": "albums"
+            },
+            "canPlay": false
+          }
+        ],
+        "action": {
+          "type": "channel",
+          "channel": {
+            "id": "rankings",
+            "name": "排行榜",
+            "kind": "rankings"
+          }
+        }
+      },
+      {
+        "id": "empty",
+        "title": "暂无成员",
+        "type": "songs",
+        "layout": "list",
+        "items": []
+      }
+    ],
+    "tags": [
+      {
+        "id": "all",
+        "name": "全部",
+        "group": "style",
+        "selected": true
+      }
+    ],
+    "selectedTag": "all",
+    "more": false,
+    "continuation": null
+  },
+  "home": {
+    "id": "synthetic:home",
+    "entries": [
+      {
+        "id": "synthetic-list",
+        "name": "私人雷达",
+        "subtitle": "今天的歌单内容",
+        "kind": "playlist",
+        "cover": "",
+        "action": {
+          "type": "playlist",
+          "id": "synthetic-list"
+        },
+        "presentation": "preview",
+        "count": null,
+        "contextText": "今日动态歌单",
+        "playCount": 3031000
+      }
+    ],
+    "sections": [],
+    "more": false,
+    "continuation": null
+  },
+  "channels": {
+    "platform": "wy",
+    "items": [
+      {
+        "id": "electronic",
+        "name": "电音",
+        "kind": "channel",
+        "channelKind": "cube",
+        "pageCode": "SYNTHETIC_ELECTRONIC",
+        "placement": "more"
+      },
+      {
+        "id": "new",
+        "name": "新歌",
+        "kind": "channel",
+        "channelKind": "new-songs",
+        "placement": "primary"
+      }
+    ]
+  },
+  "list": {
+    "platform": "mg",
+    "items": [
+      {
+        "rank": 1,
+        "song": {
+          "title": "合成歌曲",
+          "artist": "合成艺人",
+          "album": "合成专辑",
+          "duration": 180,
+          "cover_url": "https://images.invalid/song.jpg",
+          "sources": []
+        }
+      }
+    ],
+    "more": false,
+    "continuation": null
+  }
+}

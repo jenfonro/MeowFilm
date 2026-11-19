@@ -344,7 +344,7 @@ public sealed partial class MusicCapability
         if (CatalogSections.FirstOrDefault(section => section.Id == id && section.Title == title) is { } existing &&
             existing.Items.SequenceEqual(cards, ReferenceEqualityComparer.Instance))
             return existing;
-        return new(title, cards, Id: id);
+        return new(title, cards, Id: id, Layout: kind == "songs" ? "song-list" : "playlist-rail");
     }
 
     private bool ApplySearchSections(MusicCatalogSection[] sections)
@@ -352,7 +352,7 @@ public sealed partial class MusicCapability
         bool changed = false;
         bool sameLayout = CatalogSections.Count == sections.Length &&
             sections.Select((section, index) => CatalogSections[index].Title == section.Title &&
-                CatalogSections[index].Id == section.Id && CatalogSections[index].Type == section.Type).All(same => same);
+                CatalogSections[index].Id == section.Id && CatalogSections[index].Layout == section.Layout).All(same => same);
         if (!sameLayout)
         {
             CatalogSections.Clear();

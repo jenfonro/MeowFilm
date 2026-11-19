@@ -184,7 +184,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
             songs[track.songId] = track
             return .init(songID: track.songId, occurrenceID: UUID().uuidString, platform: row.platform,
                 sourceKey: track.sources.first?.sourceKey ?? track.songId,
-                sourcePosition: row.sourcePosition, byteCount: row.data.count)
+                sourcePosition: row.sourcePosition)
         }
     }
     private func projectQueueTracks(_ rows: [MusicQueueTrackReference]) throws -> [MusicNativeTrackData] {
@@ -481,12 +481,12 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
     func testBoundedPaginationReusesLoadedPreviousAndNextPagesUntilExplicitRefresh() async throws {
         let service = MusicPublicBrowseFeatureService(), model = model(service)
         await model.refresh()
-        XCTAssertEqual(model.pageNumber, 1); XCTAssertEqual(model.sections[0].items[0].id, "wy:playlist:1")
+        XCTAssertEqual(model.pageNumber, 1); XCTAssertEqual(model.sections[0].items[0].id, "first:0:wy:playlist:1")
         await model.next()
         XCTAssertEqual(model.pageNumber, 2); XCTAssertEqual(model.sections.count, 1)
-        XCTAssertEqual(model.sections[0].items[0].id, "wy:playlist:2"); XCTAssertNil(model.nextCursor)
+        XCTAssertEqual(model.sections[0].items[0].id, "next:0:wy:playlist:2"); XCTAssertNil(model.nextCursor)
         await model.previous()
-        XCTAssertEqual(model.pageNumber, 1); XCTAssertEqual(model.sections[0].items[0].id, "wy:playlist:1")
+        XCTAssertEqual(model.pageNumber, 1); XCTAssertEqual(model.sections[0].items[0].id, "first:0:wy:playlist:1")
         await model.next()
         var cursors = await service.cursors; XCTAssertEqual(cursors, [nil, "next"])
         await model.refresh()
@@ -707,7 +707,7 @@ private actor MusicPublicBrowseFeatureService: MusicPublicBrowsing, MusicPublicB
             let service = MusicPublicBrowseFeatureService(), model = model(service, request: .playlists(platform, query: "Synthetic"))
             await model.refresh(); await service.fail(.rateLimited); await model.next()
             XCTAssertEqual(model.pageNumber, 1); XCTAssertEqual(model.error, .rateLimited)
-            XCTAssertEqual(model.sections[0].items[0].id, platform.rawValue + ":playlist:1")
+            XCTAssertEqual(model.sections[0].items[0].id, "first:0:" + platform.rawValue + ":playlist:1")
             await service.fail(nil); await model.retry()
             XCTAssertNil(model.error); XCTAssertEqual(model.pageNumber, 2)
             let cursors = await service.cursors, platforms = await service.platforms

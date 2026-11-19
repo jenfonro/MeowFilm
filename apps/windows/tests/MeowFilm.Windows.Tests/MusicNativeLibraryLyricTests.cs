@@ -1,6 +1,8 @@
+using System.IO;
 using System.Text;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -9,8 +11,9 @@ public static partial class MusicNativeLibraryTests
 {
     private static IEnumerable<TestCase> LyricPersistenceCases()
     {
-        yield return new("Native music lyric display independent cache preserves plain and true words across restart", LyricDisplayRestart);
+        yield return new("Native music lyric display independent cache preserves plain and true words across restart", () => Task.Run(LyricDisplayRestart));
         yield return new("Native music local lyrics current schema preserves plain and true words across restart", LocalLyricsRestart);
+        yield return new("Native music local lyrics beyond sixty four songs and two MiB reopen without truncation", LargeLocalLyrics);
         yield return new("Native music current local lyric documents reject damaged schema fields without writes", LyricSnapshotSchemas);
         yield return new("Native music lyric snapshots ignore unused timing fields without rewriting source data", LyricSnapshotFields);
     }
@@ -49,21 +52,47 @@ public static partial class MusicNativeLibraryTests
 
     private static async Task LyricDisplayRestart()
     {
-        await using var f = new Fixture(); var owner = f.Owner();
-        var (song, sourceKey) = await SeedLyricSong(owner);
+        await using var f = new Fixture();
+        JsonObject song;
+        string sourceKey;
         var lines = CurrentLyricRows();
         lines[0]!["translation"] = "译文";
         lines[0]!["romanization"] = "A B";
-        await Ok(owner, "music.lyrics.display.save", new { song, sourceKey, lines });
-        byte[] bytes = f.Store.Bytes!.ToArray(); int writes = f.Store.Writes;
-        await owner.DisposeAsync();
+        byte[] bytes;
+        int writes;
+        await using (var owner = new MusicLibraryOwner(f.Store, database: f.Store.Storage))
+        {
+            var seeded = await SeedLyricSong(owner); song = seeded.Song; sourceKey = seeded.SourceKey;
+            await Ok(owner, "music.lyrics.display.save", new { song, sourceKey, lines });
+            await owner.PresentationCache.DrainAsync();
+            bytes = f.Store.Bytes!.ToArray(); writes = f.Store.Writes;
+        }
+        Check(await f.Store.Storage.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_lyrics")) == 1);
 
-        var reopened = f.Owner();
+        await using var reopened = new MusicLibraryOwner(f.Store, database: f.Store.Storage);
         var restored = await Ok(reopened, "music.lyrics.display.get", new { song, sourceKey });
         Check(restored.GetProperty("state").GetString() == "restored" && restored.GetProperty("sourceKey").GetString() == sourceKey);
         Check(JsonNode.DeepEquals(JsonNode.Parse(restored.GetProperty("lines").GetRawText()), lines));
         await Ok(reopened, "music.lyrics.display.save", new { song, sourceKey, lines });
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
+    }
+
+    private static async Task LargeLocalLyrics()
+    {
+        await using var f = new Fixture(); var owner = f.Owner();
+        JsonObject song = null!;
+        string text = new('x', 2 * 1024 * 1024 + 1);
+        for (int i = 0; i < 65; i++)
+        {
+            await Ok(owner, "music.queue.replace", new { songs = new[] { Online((1000 + i).ToString()) }, index = 0 });
+            song = Parsed((await Ok(owner, "music.queue.get")).GetProperty("current").GetProperty("song"));
+            await Ok(owner, "music.lyrics.local.save", new { song, text = "[00:01]" + (i == 64 ? text : "line") });
+        }
+        Check(f.Store.State("native-local-lyrics")["items"]!.AsArray().Count == 65);
+        await owner.DisposeAsync();
+        var restored = await Ok(f.Owner(), "music.lyrics.local.get", new { song });
+        Check(restored.GetProperty("state").GetString() == "local" &&
+            restored.GetProperty("lines")[0].GetProperty("text").GetString() == text);
     }
 
     private static async Task LocalLyricsRestart()

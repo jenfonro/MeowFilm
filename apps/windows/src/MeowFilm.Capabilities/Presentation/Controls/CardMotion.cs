@@ -1,60 +1,103 @@
-using System.Windows;
-using System.Windows.Media.Animation;
+using System.Runtime.CompilerServices;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media.Animation;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-// Presentation only. One replaceable animation clock, no timer, network or playback.
-public static class CardMotion
+// One local hover/focus progress value; it does not change content or playback state.
+public sealed class CardMotion : DependencyObject
 {
-    public static readonly DependencyProperty EnabledProperty = DependencyProperty.RegisterAttached("Enabled",
-        typeof(bool), typeof(CardMotion), new PropertyMetadata(false, Changed));
-    public static readonly DependencyProperty ProgressProperty = DependencyProperty.RegisterAttached("Progress",
-        typeof(double), typeof(CardMotion), new PropertyMetadata(0d));
-    public static bool GetEnabled(DependencyObject value) => (bool)value.GetValue(EnabledProperty);
-    public static void SetEnabled(DependencyObject value, bool enabled) => value.SetValue(EnabledProperty, enabled);
-    public static double GetProgress(DependencyObject value) => (double)value.GetValue(ProgressProperty);
-    public static void SetProgress(DependencyObject value, double progress) => value.SetValue(ProgressProperty, progress);
-    private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs args)
+    public static readonly DependencyProperty EnabledProperty = DependencyProperty.RegisterAttached("Enabled", typeof(bool), typeof(CardMotion),
+        new PropertyMetadata(false, EnabledChanged));
+    public static readonly DependencyProperty ProgressProperty = DependencyProperty.RegisterAttached("Progress", typeof(double), typeof(CardMotion), new PropertyMetadata(0d));
+    public static bool GetEnabled(DependencyObject owner) => (bool)owner.GetValue(EnabledProperty);
+    public static void SetEnabled(DependencyObject owner, bool value) => owner.SetValue(EnabledProperty, value);
+    public static double GetProgress(DependencyObject owner) => (double)owner.GetValue(ProgressProperty);
+    public static void SetProgress(DependencyObject owner, double value) => owner.SetValue(ProgressProperty, value);
+    private sealed class Motion
     {
-        if (value is not FrameworkElement element) return;
-        if ((bool)args.NewValue)
+        internal bool Pointer, Focus;
+        internal Storyboard? Storyboard;
+        internal IDisposable? Visibility;
+    }
+    private static readonly ConditionalWeakTable<FrameworkElement, Motion> Motions = new();
+    private static void EnabledChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
+    {
+        if (owner is not FrameworkElement element) return;
+        if (Motions.TryGetValue(element, out var existing))
         {
-            element.MouseEnter += Mouse; element.MouseLeave += Mouse;
-            element.IsKeyboardFocusWithinChanged += State; element.IsEnabledChanged += State;
-            element.IsVisibleChanged += State;
-            element.Loaded += Loaded; element.Unloaded += Unloaded; element.DataContextChanged += Context;
-            Update(element);
+            Refresh(element, existing);
+            return;
         }
-        else
+        if (args.NewValue is not true) return;
+        var state = Motions.GetValue(element, _ => new());
+        element.PointerEntered += (_, _) => SetPointerActive(element, true);
+        element.PointerExited += (_, _) => SetPointerActive(element, false);
+        element.GotFocus += (_, _) => { state.Focus = true; Refresh(element, state); };
+        element.LostFocus += (_, _) =>
         {
-            element.MouseEnter -= Mouse; element.MouseLeave -= Mouse;
-            element.IsKeyboardFocusWithinChanged -= State; element.IsEnabledChanged -= State;
-            element.IsVisibleChanged -= State;
-            element.Loaded -= Loaded; element.Unloaded -= Unloaded; element.DataContextChanged -= Context;
-            Reset(element);
+            element.DispatcherQueue.TryEnqueue(() =>
+            {
+                state.Focus = element.XamlRoot is { } root &&
+                    Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(root) is DependencyObject focused &&
+                    MusicVisuals.IsWithin(focused, element);
+                Refresh(element, state);
+            });
+        };
+        void Loaded()
+        {
+            state.Visibility ??= DesktopVisual.ObserveVisibility(element, visible =>
+            {
+                if (visible) Refresh(element, state);
+                else { state.Focus = state.Pointer = false; Reset(element, state); }
+            });
+            Refresh(element, state);
+        }
+        element.Loaded += (_, _) => Loaded();
+        element.DataContextChanged += (_, _) => { Reset(element, state); Refresh(element, state); };
+        if (element is Microsoft.UI.Xaml.Controls.Control control)
+            control.RegisterPropertyChangedCallback(Microsoft.UI.Xaml.Controls.Control.IsEnabledProperty, (_, _) => Refresh(element, state));
+        element.Unloaded += (_, _) =>
+        {
+            state.Visibility?.Dispose(); state.Visibility = null;
+            state.Focus = state.Pointer = false; Reset(element, state);
+        };
+        if (element.IsLoaded) Loaded();
+    }
+    internal static bool IsPointerActive(FrameworkElement element) =>
+        Motions.TryGetValue(element, out var motion) && motion.Pointer;
+    internal static bool HasActiveAnimation(FrameworkElement element) =>
+        Motions.TryGetValue(element, out var motion) && motion.Storyboard?.GetCurrentState() == ClockState.Active;
+    internal static void SetPointerActive(FrameworkElement element, bool active)
+    {
+        if (!Motions.TryGetValue(element, out var motion)) return;
+        motion.Pointer = active; Refresh(element, motion);
+    }
+    private static void Refresh(FrameworkElement element, Motion motion)
+    {
+        if (!GetEnabled(element) || !element.IsLoaded || !DesktopVisual.IsVisible(element) ||
+            element is Microsoft.UI.Xaml.Controls.Control { IsEnabled: false })
+        {
+            Reset(element, motion);
+            return;
+        }
+        double from = GetProgress(element), to = motion.Pointer || motion.Focus ? 1 : 0;
+        motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
+        if (MusicVisuals.CanAnimate(element) && Math.Abs(from - to) > .001)
+        {
+            Storyboard? animation = null;
+            animation = MusicVisuals.AnimateDouble(element, "(MeowFilm.Capabilities.CardMotion.Progress)", from, to,
+                TimeSpan.FromMilliseconds(to > 0 ? 220 : 160), () =>
+                {
+                    if (!ReferenceEquals(motion.Storyboard, animation)) return;
+                    motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
+                });
+            motion.Storyboard = animation;
         }
     }
-    private static void Mouse(object sender, System.Windows.Input.MouseEventArgs _) => Update((FrameworkElement)sender);
-    private static void State(object sender, DependencyPropertyChangedEventArgs _) => Update((FrameworkElement)sender);
-    private static void Loaded(object sender, RoutedEventArgs _) => Update((FrameworkElement)sender);
-    private static void Unloaded(object sender, RoutedEventArgs _) => Reset((FrameworkElement)sender);
-    private static void Context(object sender, DependencyPropertyChangedEventArgs _) { Reset((FrameworkElement)sender); Update((FrameworkElement)sender); }
-    internal static void Reset(FrameworkElement element)
-    { element.BeginAnimation(ProgressProperty, null); SetProgress(element, 0); }
-    private static void Update(FrameworkElement element)
+    private static void Reset(FrameworkElement element, Motion motion)
     {
-        if (!element.IsLoaded || !element.IsVisible) { Reset(element); return; }
-        Transition(element, element.IsEnabled && (element.IsMouseOver || element.IsKeyboardFocusWithin),
-            SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast);
-    }
-    internal static void Transition(FrameworkElement element, bool active, bool animate)
-    {
-        double from = GetProgress(element), to = active ? 1 : 0;
-        element.BeginAnimation(ProgressProperty, null);
-        SetProgress(element, to);
-        if (!animate || Math.Abs(from - to) < .001) return;
-        element.BeginAnimation(ProgressProperty, new DoubleAnimation(from, to, TimeSpan.FromMilliseconds(active ? 220 : 160))
-        { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }, FillBehavior = FillBehavior.Stop },
-            HandoffBehavior.SnapshotAndReplace);
+        motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, 0);
     }
 }

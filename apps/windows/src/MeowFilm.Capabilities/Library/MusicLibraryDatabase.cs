@@ -94,7 +94,6 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         foreach (var value in songs.Values.Concat(areas.Values))
         {
             bytes = checked(bytes + System.Text.Encoding.UTF8.GetByteCount(value.ToJsonString(LJ.Json)));
-            if (bytes > 16 * 1024 * 1024) throw new DocumentStoreException(DocumentStoreError.Limit);
         }
         return database.WriteAsync(db =>
         {

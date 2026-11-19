@@ -1,9 +1,11 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Foundation;
+using Windows.UI;
 
 namespace MeowFilm.Desktop.Artwork;
 
@@ -11,11 +13,31 @@ namespace MeowFilm.Desktop.Artwork;
 public static class ArtworkScope
 {
     public static readonly DependencyProperty LoaderProperty = DependencyProperty.RegisterAttached("Loader",
-        typeof(IArtworkLoader), typeof(ArtworkScope), new FrameworkPropertyMetadata(null,
-            FrameworkPropertyMetadataOptions.Inherits, Changed));
-    public static IArtworkLoader? GetLoader(DependencyObject view) => (IArtworkLoader?)view.GetValue(LoaderProperty);
-    public static void SetLoader(DependencyObject view, IArtworkLoader? value) => view.SetValue(LoaderProperty, value);
-    private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs _) { if (value is ArtworkImage image) image.Restart(); }
+        typeof(IArtworkLoader), typeof(ArtworkScope), new PropertyMetadata(null, Changed));
+    public static IArtworkLoader? GetLoader(DependencyObject view)
+    {
+        for (DependencyObject? current = view; current is not null; current = VisualTreeHelper.GetParent(current))
+            if (current.ReadLocalValue(LoaderProperty) != DependencyProperty.UnsetValue) return current.GetValue(LoaderProperty) as IArtworkLoader;
+        return null;
+    }
+    public static void SetLoader(DependencyObject view, IArtworkLoader? value)
+    {
+        bool explicitNull = value is null && view.ReadLocalValue(LoaderProperty) == DependencyProperty.UnsetValue;
+        view.SetValue(LoaderProperty, value);
+        // A local null changes owner lookup even when the dependency property's
+        // default is already null, so that transition has no Changed callback.
+        if (explicitNull) Notify(view);
+    }
+    private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs _) => Notify(value);
+    private static void Notify(DependencyObject view)
+    {
+        if (view is ArtworkImage image) image.ScopeChanged();
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(view); i++)
+        {
+            var child = VisualTreeHelper.GetChild(view, i);
+            if (child.ReadLocalValue(LoaderProperty) == DependencyProperty.UnsetValue) Notify(child);
+        }
+    }
 }
 
 public sealed class ArtworkLoadEventArgs(string address, bool succeeded) : EventArgs
@@ -35,43 +57,42 @@ public sealed class ArtworkImage : Grid
         typeof(ArtworkImage), new PropertyMetadata(Stretch.UniformToFill, (value, args) => ((ArtworkImage)value).image.Stretch = (Stretch)args.NewValue));
     public static readonly DependencyProperty ShowRetryProperty = DependencyProperty.Register(nameof(ShowRetry), typeof(bool),
         typeof(ArtworkImage), new PropertyMetadata(true, (value, _) => ((ArtworkImage)value).UpdateRetryVisibility()));
-    private static readonly DependencyPropertyKey SourcePropertyKey = DependencyProperty.RegisterReadOnly(nameof(Source),
+    public static readonly DependencyProperty SourceProperty = DependencyProperty.Register(nameof(Source),
         typeof(BitmapSource), typeof(ArtworkImage), new PropertyMetadata(null,
             (value, args) => ((ArtworkImage)value).image.Source = (BitmapSource?)args.NewValue));
-    public static readonly DependencyProperty SourceProperty = SourcePropertyKey.DependencyProperty;
     /// <summary>Borrowed decoded pixels; cleared with the artwork lease, without another acquisition.</summary>
     public BitmapSource? Source => (BitmapSource?)GetValue(SourceProperty);
-    private static readonly DependencyPropertyKey AspectRatioPropertyKey = DependencyProperty.RegisterReadOnly(nameof(AspectRatio),
+    public static readonly DependencyProperty AspectRatioProperty = DependencyProperty.Register(nameof(AspectRatio),
         typeof(double), typeof(ArtworkImage), new PropertyMetadata(0d));
-    public static readonly DependencyProperty AspectRatioProperty = AspectRatioPropertyKey.DependencyProperty;
     public double AspectRatio => (double)GetValue(AspectRatioProperty);
-    private static readonly DependencyPropertyKey RawPaletteBrushPropertyKey = DependencyProperty.RegisterReadOnly(nameof(RawPaletteBrush),
-        typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(Brushes.DimGray));
-    public static readonly DependencyProperty RawPaletteBrushProperty = RawPaletteBrushPropertyKey.DependencyProperty;
+    public static readonly DependencyProperty RawPaletteBrushProperty = DependencyProperty.Register(nameof(RawPaletteBrush),
+        typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(null));
     public Brush RawPaletteBrush => (Brush)GetValue(RawPaletteBrushProperty);
-    private static readonly DependencyPropertyKey PaletteBrushPropertyKey = DependencyProperty.RegisterReadOnly(nameof(PaletteBrush),
-        typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(Brushes.DimGray));
-    public static readonly DependencyProperty PaletteBrushProperty = PaletteBrushPropertyKey.DependencyProperty;
+    public static readonly DependencyProperty PaletteBrushProperty = DependencyProperty.Register(nameof(PaletteBrush),
+        typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(null));
     public Brush PaletteBrush => (Brush)GetValue(PaletteBrushProperty);
-    private static readonly DependencyPropertyKey TopPaletteBrushPropertyKey = DependencyProperty.RegisterReadOnly(nameof(TopPaletteBrush),
-        typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(Brushes.DimGray));
-    public static readonly DependencyProperty TopPaletteBrushProperty = TopPaletteBrushPropertyKey.DependencyProperty;
+    public static readonly DependencyProperty TopPaletteBrushProperty = DependencyProperty.Register(nameof(TopPaletteBrush),
+        typeof(Brush), typeof(ArtworkImage), new PropertyMetadata(null));
     public Brush TopPaletteBrush => (Brush)GetValue(TopPaletteBrushProperty);
-    private static readonly DependencyPropertyKey HasTopPalettePropertyKey = DependencyProperty.RegisterReadOnly(nameof(HasTopPalette),
+    public static readonly DependencyProperty HasTopPaletteProperty = DependencyProperty.Register(nameof(HasTopPalette),
         typeof(bool), typeof(ArtworkImage), new PropertyMetadata(false));
-    public static readonly DependencyProperty HasTopPaletteProperty = HasTopPalettePropertyKey.DependencyProperty;
     public bool HasTopPalette => (bool)GetValue(HasTopPaletteProperty);
     private readonly Image image = new() { Stretch = Stretch.UniformToFill };
     private readonly Button retry = new() { Content = "重试",
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-        Visibility = Visibility.Collapsed, Padding = new Thickness(4) };
+        Visibility = Visibility.Collapsed, Padding = new Thickness(4), FontWeight = Microsoft.UI.Text.FontWeights.Normal };
     private IArtworkLease? lease;
+    private IArtworkLoader? loader;
+    private readonly Brush fallback = new SolidColorBrush(Color.FromArgb(255, 105, 105, 105));
+    private readonly RectangleGeometry boundsClip = new();
+    private readonly List<(FrameworkElement Element, long Token)> visibilitySubscriptions = [];
     private string displayedIdentity = "";
     private CancellationTokenSource? request;
     private Task? requestTask;
     private PresentationLease? presentation;
     private long epoch;
     private bool loaded, attempted, canRetry, observingLayout;
+    private XamlRoot? root;
 
     public string Address { get => (string)GetValue(AddressProperty); set => SetValue(AddressProperty, value); }
     /// <summary>Only a consumer with a stable display identity retains successful pixels during a resource change.</summary>
@@ -80,30 +101,45 @@ public sealed class ArtworkImage : Grid
     public bool ShowRetry { get => (bool)GetValue(ShowRetryProperty); set => SetValue(ShowRetryProperty, value); }
     public ArtworkImage()
     {
-        retry.SetResourceReference(Control.FontSizeProperty, "MeowFilm.Font.Size.Caption");
-        ClipToBounds = true; Background = Brushes.Transparent; Children.Add(image); Children.Add(retry);
-        System.Windows.Automation.AutomationProperties.SetName(retry, "重试图片");
-        retry.Click += (_, args) => { args.Handled = true; Restart(); };
+        if (Application.Current?.Resources.TryGetValue("MeowFilm.Font.Size.Caption", out var fontSize) == true && fontSize is double size)
+            retry.FontSize = size;
+        Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
+        Clip = boundsClip;
+        SetValue(RawPaletteBrushProperty, fallback); SetValue(PaletteBrushProperty, fallback); SetValue(TopPaletteBrushProperty, fallback);
+        Children.Add(image); Children.Add(retry);
+        AutomationProperties.SetName(retry, "重试图片");
+        retry.Click += (_, _) => Restart();
         Loaded += (_, _) =>
         {
-            loaded = true;
+            loaded = true; root = XamlRoot;
+            if (root is not null) root.Changed += RootChanged;
+            ObserveVisibility();
             UpdateVisibility();
         };
         Unloaded += (_, _) =>
         {
             loaded = false;
+            if (root is not null) root.Changed -= RootChanged; root = null;
             if (observingLayout) { LayoutUpdated -= OnLayout; observingLayout = false; }
+            ClearVisibilitySubscriptions();
             var prior = presentation; presentation = null; prior?.Dispose();
             Retire();
         };
-        IsVisibleChanged += (_, _) => UpdateVisibility();
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateVisibility());
+        EffectiveViewportChanged += (_, _) => UpdateVisibility();
+        SizeChanged += (_, _) =>
+        {
+            boundsClip.Rect = new Rect(0, 0, ActualWidth, ActualHeight);
+            UpdateVisibility();
+        };
     }
     protected override AutomationPeer OnCreateAutomationPeer() => new FrameworkElementAutomationPeer(this);
 
     /// <summary>Prepare an imminent surface on the UI thread; its owner releases the lease when that presentation retires.</summary>
     public async Task<IDisposable> PrepareForPresentationAsync(CancellationToken cancellationToken = default)
     {
-        Dispatcher.VerifyAccess(); cancellationToken.ThrowIfCancellationRequested();
+        if (!DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("Artwork preparation requires its UI thread.");
+        cancellationToken.ThrowIfCancellationRequested();
         var prior = presentation;
         var current = new PresentationLease(this); presentation = current; prior?.Dispose();
         try
@@ -142,7 +178,15 @@ public sealed class ArtworkImage : Grid
         }
     }
     private bool HasDemand() => presentation is not null || InViewport();
-    private void OnLayout(object? sender, EventArgs args) => UpdateVisibility();
+    private void OnLayout(object? sender, object args) => UpdateVisibility();
+    internal void ScopeChanged()
+    {
+        var current = ArtworkScope.GetLoader(this);
+        if (ReferenceEquals(loader, current)) return;
+        loader = current;
+        Retire();
+        UpdateVisibility();
+    }
     internal void Restart()
     {
         Retire(lease is not null && DisplayIdentity.Length > 0 && displayedIdentity == DisplayIdentity && Address.Length > 0);
@@ -156,73 +200,58 @@ public sealed class ArtworkImage : Grid
         if (!retainImage)
         {
             lease = null; displayedIdentity = "";
-            SetValue(SourcePropertyKey, null); SetValue(AspectRatioPropertyKey, 0d); SetValue(RawPaletteBrushPropertyKey, Brushes.DimGray);
-            SetValue(PaletteBrushPropertyKey, Brushes.DimGray);
-            SetValue(TopPaletteBrushPropertyKey, Brushes.DimGray);
-            SetValue(HasTopPalettePropertyKey, false);
+            SetValue(SourceProperty, null); SetValue(AspectRatioProperty, 0d); SetValue(RawPaletteBrushProperty, fallback);
+            SetValue(PaletteBrushProperty, fallback);
+            SetValue(TopPaletteBrushProperty, fallback);
+            SetValue(HasTopPaletteProperty, false);
         }
-        ClearValue(ToolTipProperty); ClearValue(AutomationProperties.HelpTextProperty);
+        ClearValue(ToolTipService.ToolTipProperty); ClearValue(AutomationProperties.HelpTextProperty);
         UpdateRetryVisibility();
         priorLease?.Dispose();
         // Cancellation may synchronously resume preparation; publish retirement before invoking it.
         priorRequest?.Cancel();
     }
-    // Small raster sample of the already acquired cover: no second fetch or full-image copy.
-    public static (Brush Raw, Brush Palette) SamplePalette(BitmapSource source)
+    // Colors were sampled once by the cache's immutable raster, not once per control.
+    public static (Brush Raw, Brush Palette) SamplePalette(ArtworkPixels source)
     {
-        var palettes = SamplePalettes(source);
-        return (palettes.Raw, palettes.Palette);
+        var palettes = source.Palettes;
+        return (new SolidColorBrush(palettes.Raw), new SolidColorBrush(palettes.Palette));
     }
-    internal static Brush SampleTopPalette(BitmapSource source) => SamplePalettes(source).Top;
-    private static (Brush Raw, Brush Palette, Brush Top, bool HasTopPalette) SamplePalettes(BitmapSource source)
+    internal static Brush SampleTopPalette(ArtworkPixels source) => new SolidColorBrush(source.Palettes.Top);
+
+    private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => UpdateVisibility();
+    private void ObserveVisibility()
     {
-        var small = new TransformedBitmap(source, new ScaleTransform(8d / source.PixelWidth, 8d / source.PixelHeight));
-        var rgba = new FormatConvertedBitmap(small, PixelFormats.Bgra32, null, 0);
-        int stride = rgba.PixelWidth * 4;
-        var bytes = new byte[stride * rgba.PixelHeight]; rgba.CopyPixels(bytes, stride, 0);
-        static (double Red, double Green, double Blue, long Weight, int Count) Average(
-            byte[] pixels, int pixelWidth, int firstRow, int rowCount)
-        {
-            long r = 0, g = 0, b = 0, weight = 0;
-            int first = firstRow * pixelWidth * 4;
-            int last = Math.Min(pixels.Length, (firstRow + rowCount) * pixelWidth * 4);
-            for (int i = first; i < last; i += 4)
-            {
-                int alpha = pixels[i + 3];
-                b += pixels[i] * alpha; g += pixels[i + 1] * alpha;
-                r += pixels[i + 2] * alpha; weight += alpha;
-            }
-            var count = Math.Max(0, (last - first) / 4);
-            return weight == 0 ? (0, 0, 0, 0, count) :
-                ((double)r / weight, (double)g / weight, (double)b / weight, weight, count);
-        }
-        static Brush Brush(double red, double green, double blue, double factor = 1, byte alpha = byte.MaxValue)
-        {
-            var brush = new SolidColorBrush(Color.FromArgb(alpha, (byte)(red * factor),
-                (byte)(green * factor), (byte)(blue * factor)));
-            brush.Freeze(); return brush;
-        }
-        var all = Average(bytes, rgba.PixelWidth, 0, rgba.PixelHeight);
-        if (all.Weight == 0) return (Brushes.DimGray, Brushes.DimGray, Brushes.DimGray, false);
-        double scale = Math.Min(1, 105 / Math.Max(1, .2126 * all.Red + .7152 * all.Green + .0722 * all.Blue));
-        var top = Average(bytes, rgba.PixelWidth, 0, Math.Max(1, (int)Math.Ceiling(rgba.PixelHeight * .375)));
-        var topAlpha = top.Count == 0 ? (byte)0 : (byte)Math.Clamp(
-            (int)Math.Round((double)top.Weight / top.Count, MidpointRounding.AwayFromZero), 0, 255);
-        return (Brush(all.Red, all.Green, all.Blue), Brush(all.Red, all.Green, all.Blue, scale),
-            top.Weight == 0 ? Brushes.DimGray : Brush(top.Red, top.Green, top.Blue, alpha: topAlpha),
-            top.Weight > 0);
+        ClearVisibilitySubscriptions();
+        for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+            if (parent is FrameworkElement element)
+                visibilitySubscriptions.Add((element,
+                    element.RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateVisibility())));
+    }
+    private void ClearVisibilitySubscriptions()
+    {
+        foreach (var (element, token) in visibilitySubscriptions) element.UnregisterPropertyChangedCallback(VisibilityProperty, token);
+        visibilitySubscriptions.Clear();
+    }
+    private bool IsVisibleInTree()
+    {
+        for (DependencyObject? current = this; current is not null; current = VisualTreeHelper.GetParent(current))
+            if (current is UIElement { Visibility: not Visibility.Visible }) return false;
+        return XamlRoot?.IsHostVisible != false;
     }
 
     private bool InViewport()
     {
-        if (!loaded || !IsVisible || ActualWidth <= 0 || ActualHeight <= 0) return false;
+        if (!loaded || !IsVisibleInTree() || ActualWidth <= 0 || ActualHeight <= 0) return false;
         try
         {
             for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null; parent = VisualTreeHelper.GetParent(parent))
-                if (parent is FrameworkElement element && (element.ClipToBounds || element is ScrollContentPresenter))
+                if (parent is FrameworkElement element && (element.Clip is not null || element is ScrollContentPresenter or ScrollViewer))
                 {
-                    Rect bounds = TransformToAncestor(element).TransformBounds(new Rect(0, 0, ActualWidth, ActualHeight));
-                    if (!bounds.IntersectsWith(new Rect(0, 0, element.ActualWidth, element.ActualHeight))) return false;
+                    Rect bounds = TransformToVisual(element).TransformBounds(new Rect(0, 0, ActualWidth, ActualHeight));
+                    var clip = element.Clip?.Rect ?? new Rect(0, 0, element.ActualWidth, element.ActualHeight);
+                    bounds.Intersect(clip);
+                    if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0) return false;
                 }
             return true;
         }
@@ -230,7 +259,10 @@ public sealed class ArtworkImage : Grid
     }
     private void UpdateVisibility()
     {
-        bool observe = loaded && IsVisible;
+        var currentLoader = ArtworkScope.GetLoader(this);
+        if (!ReferenceEquals(loader, currentLoader)) { loader = currentLoader; Retire(); }
+        bool visible = IsVisibleInTree();
+        bool observe = loaded && visible;
         if (observe != observingLayout)
         {
             if (observe) LayoutUpdated += OnLayout;
@@ -243,12 +275,12 @@ public sealed class ArtworkImage : Grid
             // Actual Unloaded/recycling and explicit presentation retirement release those resources.
             if (loaded)
             {
-                if (request is not null || IsVisible && (attempted || lease is not null)) Retire();
+                if (request is not null || visible && (attempted || lease is not null)) Retire();
             }
             else if (attempted || request is not null || lease is not null) Retire();
             return;
         }
-        if (attempted || string.IsNullOrWhiteSpace(Address) || ArtworkScope.GetLoader(this) is not { } loader) return;
+        if (attempted || string.IsNullOrWhiteSpace(Address) || loader is not { } currentLoaderOwner) return;
         attempted = true; var stamp = epoch; string address = Address;
         var current = new CancellationTokenSource(); request = current;
         var work = ReadAsync();
@@ -259,17 +291,18 @@ public sealed class ArtworkImage : Grid
             IArtworkLease? acquired = null;
             try
             {
-                acquired = await loader.AcquireAsync(address, current.Token);
+                acquired = await currentLoaderOwner.AcquireAsync(address, current.Token);
                 if (stamp != epoch || current.IsCancellationRequested || !HasDemand()) return;
+                var source = acquired.Image.GetSource(DispatcherQueue);
+                var palettes = acquired.Image.Palettes;
                 var prior = lease;
                 lease = acquired; acquired = null; displayedIdentity = DisplayIdentity;
-                SetValue(SourcePropertyKey, lease.Image); prior?.Dispose();
-                SetValue(AspectRatioPropertyKey, (double)lease.Image.PixelWidth / lease.Image.PixelHeight);
-                var palettes = SamplePalettes(lease.Image);
-                SetValue(RawPaletteBrushPropertyKey, palettes.Raw);
-                SetValue(PaletteBrushPropertyKey, palettes.Palette);
-                SetValue(TopPaletteBrushPropertyKey, palettes.Top);
-                SetValue(HasTopPalettePropertyKey, palettes.HasTopPalette);
+                SetValue(SourceProperty, source); prior?.Dispose();
+                SetValue(AspectRatioProperty, (double)lease.Image.PixelWidth / lease.Image.PixelHeight);
+                SetValue(RawPaletteBrushProperty, new SolidColorBrush(palettes.Raw));
+                SetValue(PaletteBrushProperty, new SolidColorBrush(palettes.Palette));
+                SetValue(TopPaletteBrushProperty, new SolidColorBrush(palettes.Top));
+                SetValue(HasTopPaletteProperty, palettes.HasTopPalette);
                 LoadCompleted?.Invoke(this, new(address, true));
             }
             catch (OperationCanceledException) { }
@@ -290,7 +323,7 @@ public sealed class ArtworkImage : Grid
                         "ARTWORK_TIMEOUT" => (true, "图片加载超时"),
                         _ => (true, "图片加载失败")
                     };
-                    ToolTip = message; AutomationProperties.SetHelpText(this, message);
+                    ToolTipService.SetToolTip(this, message); AutomationProperties.SetHelpText(this, message);
                     UpdateRetryVisibility();
                     LoadCompleted?.Invoke(this, new(address, false));
                 }

@@ -911,12 +911,11 @@ public static partial class MusicNativeSyncTests
         await vm.SetAsync(row, "playlists", true, confirmed: true); Check(f.Server.Reads == requests);
         await vm.ActivateAsync(); Check(vm.Platforms.Single(p => p.Platform == "tx").Favorites);
     }
-    private static Task View()
+    private static Task View() => TestUiHost.InvokeAsync(() =>
     {
-        var result = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() => { try { var view = new MusicAccountsView(); view.Measure(new System.Windows.Size(900, 700)); Check(view.DesiredSize.Width > 0); result.SetResult(); } catch (Exception e) { result.SetException(e); } });
-        thread.SetApartmentState(ApartmentState.STA); thread.Start(); return result.Task;
-    }
+        var view = new MusicAccountsView(); view.Measure(new global::Windows.Foundation.Size(900, 700));
+        Check(view.DesiredSize.Width > 0); return Task.CompletedTask;
+    });
     private static async Task KgCloudMissing()
     {
         await using var f = new Fixture("kg"); await Reorder(f); var result = Ok(await f.Run());

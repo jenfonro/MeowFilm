@@ -42,7 +42,7 @@ public static class RuntimeTests
         yield return new("native-runtime: App real Node/ACL/PID handshake preserves aggregate identity", async () =>
         {
             var modules = Modules;
-            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
+            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity);
             await using var store = new NativeDatabase(NewData());
             var scriptData = ScriptData();
             int pid;
@@ -70,8 +70,16 @@ public static class RuntimeTests
                 BridgeTests.Equal("film.playback.v1", target.GetProperty("contract").GetString());
                 BridgeTests.Equal("douban:movie:100", target.GetProperty("value").GetProperty("id").GetString());
                 BridgeTests.Equal(true, runtime.IsConnected);
+                foreach (var method in new[] { "source.runtime.rules.unknown", "film.script.status", "film.sources.list",
+                    "film.session.media.release.extra", "netease.token.close", "music.script.netease.token.get" })
+                {
+                    var missing = await runtime.CallAsync(method);
+                    BridgeTests.Equal(false, missing.GetProperty("ok").GetBoolean());
+                    BridgeTests.Equal(RuntimeHttpProtocol.Name, missing.GetProperty("contract").GetString());
+                    BridgeTests.Equal("METHOD_NOT_FOUND", missing.GetProperty("code").GetString());
+                }
                 foreach (var method in new[] { "music.library.list", "music.queue.get", "music.accounts.list",
-                    "music.catalog.search", "film.script.status", "film.sources.list", "reader.rules.reset",
+                    "music.catalog.search", "reader.rules.reset",
                     "reader.sources.list", "reader.content.chapter", "missing.operation" })
                     await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync(method, new { }));
             }
@@ -80,7 +88,7 @@ public static class RuntimeTests
         yield return new("native-runtime: nine-module App keeps platform Film and token routes independent without starting the SDK", async () =>
         {
             var modules = Modules;
-            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
+            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity);
             await using var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData());
             var token = await runtime.CallAsync("netease.token.get", new { unexpected = true });
             BridgeTests.Equal(false, token.GetProperty("ok").GetBoolean());
@@ -103,7 +111,7 @@ public static class RuntimeTests
         {
             var root = NewData();
             var modules = Modules;
-            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
+            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity);
             string collectionId, songId;
             await using (var store = new MusicRecordTestStore(Path.Combine(root, "music-library")))
             await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData()))
@@ -140,7 +148,7 @@ public static class RuntimeTests
         yield return new("native-runtime: child crash closes pending generation and reclaims process", async () =>
         {
             var modules = Modules;
-            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, modules);
+            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity);
             await using var database = new NativeTestDatabase(NewData());
             await database.Ready;
             await using var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, database.ProductRoot!);
@@ -198,7 +206,7 @@ public static class RuntimeTests
         foreach (var protocol in new[] { "cat", "qysg" })
             yield return new("native-runtime: source " + protocol + " complete upload load invoke and unload use current public contract", async () =>
             {
-                var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, Modules);
+                var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity);
                 var pid = 0;
                 await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, Modules, ScriptData()))
                 {
@@ -254,9 +262,9 @@ public static class RuntimeTests
             });
         foreach (var (mode, code) in new[]
         {
-            ("wrong-protocol", "INVALID_RESPONSE"), ("wrong-endpoint", "INVALID_RESPONSE"),
-            ("extra-ready-field", "INVALID_RESPONSE"), ("extra-ready-bytes", "INVALID_RESPONSE"),
-            ("invalid-json", "INVALID_RESPONSE"), ("large-ready", "INVALID_RESPONSE"),
+            ("wrong-protocol", "INVALID_RESPONSE"), ("wrong-endpoint", "INVALID_REQUEST"),
+            ("extra-ready-bytes", "INVALID_RESPONSE"),
+            ("invalid-json", "INVALID_MESSAGE"), ("large-ready", "INVALID_RESPONSE"),
             ("exit", "CLOSED"), ("timeout", "TIMEOUT")
         })
             yield return new("native-runtime: startup " + mode + " reclaims the real child", async () =>
@@ -266,6 +274,21 @@ public static class RuntimeTests
                 var pid = await ReadFixturePidAsync(fixture.Root);
                 AssertExited(pid);
             });
+        yield return new("native-runtime: ordinary ready extensions preserve the verified live session", async () =>
+        {
+            var fixture = CreateFixture("extra-ready-field");
+            int pid;
+            await using (var runtime = await NodeRuntime.StartAsync(Node, fixture.Bundle, Modules, ScriptData()))
+            {
+                pid = runtime.ProcessId;
+                BridgeTests.Equal(true, runtime.IsConnected);
+                var connection = await runtime.CaptureConnectionAsync();
+                BridgeTests.Equal("http", connection.BusinessOrigin.Scheme);
+                BridgeTests.Equal("127.0.0.1", connection.BusinessOrigin.Host);
+                BridgeTests.Equal(false, connection.Revoked.IsCancellationRequested);
+            }
+            AssertExited(pid);
+        });
         yield return new("native-runtime: startup cancellation after process launch waits for actual exit", async () =>
         {
             var fixture = CreateFixture("timeout");
@@ -324,48 +347,127 @@ public static class RuntimeTests
             await BridgeTests.Expect("INVALID_RESPONSE", () => runtime.DisposeAsync().AsTask());
             AssertExited(runtime.ProcessId);
         });
-        yield return new("native-runtime: verified bundle rejects changed and unlisted payloads", () =>
-        {
-            var changed = CreateFixture("normal");
-            File.AppendAllText(Path.Combine(changed.Root, "entry.mjs"), "\n// changed");
-            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(changed.Root, Identity, Modules));
-            var extra = CreateFixture("normal");
-            File.WriteAllText(Path.Combine(extra.Root, "extra.node"), "unlisted");
-            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(extra.Root, Identity, Modules));
-            return Task.CompletedTask;
-        });
-        foreach (var assembly in new[] { "missing provider modules", "missing token module", "missing music-platform module", "reordered modules" })
-            yield return new("native-runtime: verified App bundle rejects " + assembly + " manifest", () =>
+        foreach (var mutation in new[] { "changed", "missing", "additional" })
+            yield return new("native-runtime: " + mutation + " documentation preserves live startup", async () =>
             {
                 var fixture = CreateFixture("normal");
-                var path = Path.Combine(fixture.Root, "runtime-manifest.json");
-                var manifest = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
-                var modules = manifest["modules"]!.AsArray();
-                if (assembly == "missing provider modules")
+                foreach (string relative in FixtureDocumentation)
                 {
-                    modules.RemoveAt(6); modules.RemoveAt(5); modules.RemoveAt(3);
+                    var path = RuntimeBundle.SafePath(fixture.Root, relative);
+                    if (mutation == "changed") File.AppendAllText(path, "\nchanged documentation");
+                    if (mutation == "missing") File.Delete(path);
                 }
-                else if (assembly == "missing token module") modules.RemoveAt(7);
-                else if (assembly == "missing music-platform module") modules.RemoveAt(8);
-                else
+                if (mutation == "additional")
                 {
-                    var first = modules[0]!.DeepClone();
-                    modules[0] = modules[1]!.DeepClone(); modules[1] = first;
+                    File.WriteAllText(Path.Combine(fixture.Root, "ordinary.md"), "additional documentation");
+                    File.WriteAllText(Path.Combine(fixture.Root, "ordinary.TXT"), "additional documentation");
                 }
-                File.WriteAllText(path, manifest.ToJsonString());
-                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity, Modules));
+                var bundle = RuntimeBundle.Verify(fixture.Root, Identity);
+                int pid;
+                await using (var runtime = await NodeRuntime.StartAsync(Node, bundle, Modules, ScriptData()))
+                {
+                    pid = runtime.ProcessId;
+                    BridgeTests.Equal(true, runtime.IsConnected);
+                    BridgeTests.Equal(true, ReferenceEquals(runtime, (await runtime.CaptureConnectionAsync()).Client));
+                }
+                AssertExited(pid);
+            });
+        yield return new("native-runtime: verified bundle rejects changed entry and unlisted executable or parser inputs", () =>
+        {
+            var changed = CreateFixture("normal");
+            var entryPath = Path.Combine(changed.Root, "entry.mjs");
+            var bytes = File.ReadAllBytes(entryPath); bytes[0] ^= 1; File.WriteAllBytes(entryPath, bytes);
+            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(changed.Root, Identity));
+            foreach (string relative in new[] { "extra.js", "extra.mjs", "extra.cjs", "package.json",
+                "extra.node", "extra.dll", "extra", "LICENSE.js" })
+            {
+                var extra = CreateFixture("normal");
+                File.WriteAllText(Path.Combine(extra.Root, relative), "unlisted");
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(extra.Root, Identity));
+            }
+            return Task.CompletedTask;
+        });
+        foreach (string relative in new[] { "node.exe", "node_modules/@meowfilm/script-host/package.json",
+            "node_modules/@meowfilm/script-host/build/Release/source-sdk.js",
+            "node_modules/@meowfilm/script-host/build/Release/script_host_native.node",
+            "node_modules/@meowfilm/script-host/build/Release/script-host-native.json" })
+            yield return new("native-runtime: bundle rejects same-length corruption of actual execution input " + relative, () =>
+            {
+                var fixture = CreateFixture("normal");
+                var source = relative == "node.exe" ? Node : RuntimeBundle.SafePath(Path.Combine(Bundles, Identity), relative);
+                var bytes = File.ReadAllBytes(source);
+                RegisterFixtureFile(fixture.Root, relative, bytes);
+                _ = RuntimeBundle.Verify(fixture.Root, Identity);
+                bytes[0] ^= 1;
+                File.WriteAllBytes(RuntimeBundle.SafePath(fixture.Root, relative), bytes);
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity));
                 return Task.CompletedTask;
             });
+        foreach (string extension in new[] { ".js", ".mjs", ".cjs", ".JSON", ".node", ".dll", ".exe", ".wasm", ".so.1" })
+            yield return new("native-runtime: documentation role cannot bypass execution integrity or presence " + extension, () =>
+            {
+                var fixture = CreateFixture("normal");
+                string relative = "licenses/LICENSE" + extension;
+                var bytes = Encoding.UTF8.GetBytes("execution input fixture");
+                RegisterFixtureFile(fixture.Root, relative, bytes, "documentation");
+                _ = RuntimeBundle.Verify(fixture.Root, Identity);
+                var path = RuntimeBundle.SafePath(fixture.Root, relative);
+                bytes[0] ^= 1; File.WriteAllBytes(path, bytes);
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity));
+                File.Delete(path);
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity));
+                return Task.CompletedTask;
+            });
+        yield return new("native-runtime: text data without documentation role retains integrity and presence", () =>
+        {
+            var fixture = CreateFixture("normal");
+            const string relative = "runtime-data.txt";
+            RegisterFixtureFile(fixture.Root, relative, "runtime input"u8.ToArray());
+            _ = RuntimeBundle.Verify(fixture.Root, Identity);
+            var path = RuntimeBundle.SafePath(fixture.Root, relative);
+            File.WriteAllText(path, "changed input");
+            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity));
+            File.Delete(path);
+            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity));
+            return Task.CompletedTask;
+        });
+        foreach (string suffix in new[] { "", ".js" })
+            yield return new("native-runtime: bundle rejects actual extensionless resolution shadowing with parser" + suffix, async () =>
+            {
+                var fixture = CreateFixture("normal");
+                string registered = suffix.Length == 0 ? "parser.js" : "parser/index.js";
+                RegisterFixtureFile(fixture.Root, registered, Encoding.UTF8.GetBytes("module.exports = 'registered';"));
+                _ = RuntimeBundle.Verify(fixture.Root, Identity);
+                string[] arguments = ["--input-type=commonjs", "--eval", "process.stdout.write(require.resolve('./parser'))"];
+                BridgeTests.Equal(RuntimeBundle.SafePath(fixture.Root, registered),
+                    await RunFixtureToolAsync(Node, fixture.Root, arguments));
+                var extra = Path.Combine(fixture.Root, "parser" + suffix);
+                File.WriteAllText(extra, "module.exports = 'unlisted';");
+                BridgeTests.Equal(extra, await RunFixtureToolAsync(Node, fixture.Root, arguments));
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity));
+            });
+        yield return new("native-runtime: ordinary documentation cannot hide a directory reparse point", async () =>
+        {
+            var fixture = CreateFixture("normal");
+            var target = NewData();
+            File.WriteAllText(Path.Combine(target, "ordinary.txt"), "documentation");
+            var link = Path.Combine(fixture.Root, "documentation");
+            await RunFixtureToolAsync("cmd.exe", fixture.Root, "/c", "mklink", "/J", link, target);
+            try
+            {
+                BridgeTests.Equal(true, (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0);
+                BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(fixture.Root, Identity));
+            }
+            finally { Directory.Delete(link); }
+        });
         yield return new("native-runtime: wrong identity, module, version and remote data roots fail closed", async () =>
         {
             var description = BridgeCodec.Value(new { protocol = "runtime.http.v1", product = Identity,
                 modules = new[] { new { id = "music", version = "0.2.0", methods = new[] { "music.script.sources.list" } } } });
-            BridgeTests.Throws("INVALID_RESPONSE", () => NodeRuntime.ValidateDescription(description, Identity, Modules));
-            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(Path.Combine(Bundles, Identity), "music", Modules));
-            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity,
-                [new("reader", "0.4.0")]));
+            BridgeTests.Throws("INVALID_RESPONSE", () => RuntimeHttpProtocol.ValidateDescription(description, Identity, Modules));
+            BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.Verify(Path.Combine(Bundles, Identity), "music"));
             BridgeTests.Throws("INVALID_MESSAGE", () => RuntimeBundle.SafePath(NewData(), "../escape"));
-            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity, Modules);
+            var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity);
             await BridgeTests.Expect("INVALID_MESSAGE", () => NodeRuntime.StartAsync(Node, bundle, Modules, "//server/share"));
         });
         yield return new("native-runtime: closing job reclaims owned Node descendants", async () =>
@@ -451,7 +553,10 @@ public static class RuntimeTests
               }
               if (mode === 'timeout') return;
               if (mode === 'invalid-json') { stream.write('{\n'); return; }
-              if (mode === 'large-ready') { stream.write(' '.repeat(65537) + '\n'); return; }
+              if (mode === 'large-ready') {
+                stream.write(JSON.stringify({protocol:'runtime.http.v1', baseUrl:'http://127.0.0.1:1',
+                  padding:' '.repeat(8 * 1024 * 1024)}) + '\n'); return;
+              }
               server = http.createServer(async (request, response) => {
                 request.resume();
                 if (request.headers.authorization !== undefined || request.headers['x-meow-session'] !== undefined) {
@@ -492,10 +597,50 @@ public static class RuntimeTests
         {
             schemaVersion = 1, status = "complete", product = Identity, transport = "windows-http-v1",
             assemblyProfile = "common-native", platform = "win32", entry = "entry.mjs",
-            modules = Modules.Select(module => module.Id).ToArray(),
             files = new[] { new { path = "entry.mjs", sha256 = Convert.ToHexStringLower(SHA256.HashData(bytes)), bytes = bytes.Length } }
         }));
-        return (root, RuntimeBundle.Verify(root, Identity, Modules));
+        foreach (string relative in FixtureDocumentation)
+            RegisterFixtureFile(root, relative, Encoding.UTF8.GetBytes("documentation fixture"), "documentation");
+        return (root, RuntimeBundle.Verify(root, Identity));
+    }
+    private static string[] FixtureDocumentation =>
+        ["licenses/LICENSE", "licenses/LICENSE.extra", "licenses/LICENSE.APACHE", "licenses/LICENSE.BSD",
+            "README.md", "NOTICE.mdown", "node-LICENSE.txt"];
+
+    private static void RegisterFixtureFile(string root, string relative, byte[] bytes, string? role = null)
+    {
+        var path = RuntimeBundle.SafePath(root, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, bytes);
+        var manifestPath = Path.Combine(root, "runtime-manifest.json");
+        var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!;
+        var record = new JsonObject { ["path"] = relative, ["bytes"] = bytes.Length,
+            ["sha256"] = Convert.ToHexStringLower(SHA256.HashData(bytes)) };
+        if (role is not null) record["role"] = role;
+        manifest["files"]!.AsArray().Add(record);
+        File.WriteAllText(manifestPath, manifest.ToJsonString());
+    }
+
+    private static async Task<string> RunFixtureToolAsync(string executable, string directory, params string[] arguments)
+    {
+        var start = new ProcessStartInfo(executable) { WorkingDirectory = directory, UseShellExecute = false,
+            CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (string argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new InvalidOperationException("Fixture tool did not start");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var error = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            BridgeTests.Equal(0, process.ExitCode);
+            return (await output).Trim();
+        }
+        finally
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            await Task.WhenAll(output, error);
+        }
     }
     private static async Task<int> ReadFixturePidAsync(string root)
     {

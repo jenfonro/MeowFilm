@@ -381,15 +381,19 @@ final class FilmPlaybackModelTests: XCTestCase {
         XCTAssertEqual(releases.count, 1)
     }
 
-    func testMetadataBrowseKeepsOnlyExplicitSourceAndRunsBeforeFollowingPlay() async throws {
+    func testMetadataBrowseAlwaysKeepsSourceAndRunsBeforeFollowingPlay() async throws {
         let gate = FilmPlaybackGate()
+        let sources: [RuntimeValue] = ["tmdb", "douban"].map { provider in .object([
+            "id": .string("confirmed-\(provider)"), "provider": .string(provider),
+            "metadataId": .number(19), "kind": .string("tv"), "title": .string("星河")]) }
         let server = FilmPlaybackWireServer(handler: { operation, input in
+            if operation == "session.release" { return .object(["released": .bool(true)]) }
             if operation == "session.command" {
                 if input.filmObject?["action"] == .string("browse.metadata") { await gate.wait() }
-                return FilmPlaybackFixture.snapshot(input.filmObject?["action"] == .string("play") ? 3 : 2)
+                return FilmPlaybackFixture.snapshot(input.filmObject?["action"] == .string("play") ? 3 : 2,
+                    metadataSources: sources, metadataSourceID: "confirmed-douban")
             }
-            if operation == "session.release" { return .object(["released": .bool(true)]) }
-            return FilmPlaybackFixture.snapshot()
+            return FilmPlaybackFixture.snapshot(metadataSources: sources, metadataSourceID: "confirmed-tmdb")
         })
         let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
         await model.open()?.value
@@ -398,14 +402,10 @@ final class FilmPlaybackModelTests: XCTestCase {
         model.send("play")
         await gate.release()
         await model.waitForPendingWork()
-        var calls = await server.calls().filter { $0.0 == "session.command" }
+        let calls = await server.calls().filter { $0.0 == "session.command" }
         XCTAssertEqual(actions(calls), ["browse.metadata", "play"])
         XCTAssertEqual(calls[0].1.filmObject?["metadataSourceId"], .string("confirmed-douban"))
-        XCTAssertNil(calls[0].1.filmObject?["keepSource"])
-        model.browseMetadata("confirmed-tmdb", keepSource: true)
-        await model.waitForPendingWork()
-        calls = await server.calls().filter { $0.0 == "session.command" }
-        XCTAssertEqual(calls.last?.1.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(calls[0].1.filmObject?["keepSource"], .bool(true))
         XCTAssertTrue(media.prepared.isEmpty)
         await model.close()
     }
@@ -589,7 +589,7 @@ final class FilmPlaybackModelTests: XCTestCase {
                 "metadataId": .number(19), "kind": .string(kind.rawValue), "title": .string("可靠作品")])
             let workInfo: RuntimeValue = .object(["provider": .string("tmdb"), "metadataId": .number(19),
                 "kind": .string(kind.rawValue), "title": .string("可靠作品"), "summary": .string(""),
-                "seasonCount": .null, "episodeCount": .null])
+                "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
             func candidate(_ id: String) -> RuntimeValue {
                 .object(["businessId": .string(id), "playbackTarget": .object(target(id).value),
                     "id": .string(id), "source": FilmPlaybackFixture.source, "lineId": .number(0),

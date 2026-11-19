@@ -13,6 +13,7 @@ public static class MusicRecommendationLibraryTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("Recommendation owner empty checkpoint restored by one transaction", () => Restore(0));
+        yield return new("Recommendation checkpoint beyond eight MiB restores complete queue context", LargeCheckpoint);
         yield return new("Recommendation owner singleton retains occurrence context and selection", () => Restore(1));
         yield return new("Recommendation owner full paged queue restore preserves all occurrences", () => Restore(120));
         yield return new("Recommendation checkpoint restores references without reverting newer repository metadata", RestoreCurrentMetadata);
@@ -58,6 +59,19 @@ public static class MusicRecommendationLibraryTests
         if (seed is not null) return await Command(owner, "enter", new { nonce = Nonce(), expectedVersion = N(q, "version"), songs = new[] { Song("900") }, seedEntryId = seed });
         return await Command(owner, "enter", new { nonce = Nonce(), expectedVersion = N(q, "version"), songs = new[] { Song("900") } });
     }
+    private static async Task LargeCheckpoint()
+    {
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        string title = new('x', 8 * 1024 * 1024 + 1);
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Song("42") }, index = 0,
+            context = new { sourceTitle = title } });
+        var entered = await Enter(owner);
+        await Command(owner, "restore", new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"),
+            checkpoint = S(entered, "checkpoint") });
+        var queue = await Queue(owner);
+        Check(queue.GetProperty("current").GetProperty("context").GetProperty("sourceTitle").GetString() == title);
+    }
+
     private static async Task Restore(int count)
     {
         var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);

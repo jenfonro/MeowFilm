@@ -6,7 +6,6 @@ import MeowStorage
 /// Prepares an immutable input in the runtime's existing source store. This
 /// neither installs a script nor creates another source/configuration owner.
 struct CatLocalSourceInput: Sendable {
-    static let maximumBytes = 16 * 1024 * 1024
     let runtimeRoot: URL
 
     func prepare(_ source: String) throws -> String {
@@ -14,7 +13,6 @@ struct CatLocalSourceInput: Sendable {
         var bytes = Data(source.utf8)
         defer { bytes.resetBytes(in: 0..<bytes.count) }
         guard !CatSourceSettings.trim(source).isEmpty else { throw FilmSourceError(code: "INVALID_SOURCE") }
-        guard bytes.count <= Self.maximumBytes else { throw FilmSourceError(code: "RESOURCE_LIMIT") }
         guard runtimeRoot.isFileURL, runtimeRoot.path.hasPrefix("/"),
               !runtimeRoot.path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }) else {
             throw FilmSourceError(code: "STORAGE_ERROR")

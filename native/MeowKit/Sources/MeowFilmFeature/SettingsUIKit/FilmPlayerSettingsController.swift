@@ -34,7 +34,7 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
         switch area {
         case .settings:
             sections = [.init(title: "", rows: [
-                choiceRow("默认内核", id: "engine", keyPath: \.engine, options: { _ in PlaybackVideoEngine.allCases },
+                choiceRow("播放核心", id: "engine", keyPath: \.engine, options: { _ in PlaybackVideoEngine.allCases },
                           title: { $0.title }),
                 .init(title: "播放控制", id: "film.player.controls", disclosure: true, action: { [weak self] in
                     guard let self else { return }
@@ -87,7 +87,8 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
             failure(NSError(domain: "FilmPlayerPreferences", code: 1,
                             userInfo: [NSLocalizedDescriptionKey: error]), retry: { [weak self] in
                 self?.displayedError = nil
-                Task { await self?.owner.reload(); self?.update() }
+                Task { await self?.owner.reload() }
+                self?.update()
             })
         } else { displayedError = nil }
     }
@@ -100,12 +101,21 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
                                              keyPath: WritableKeyPath<FilmPlayerPreferences, Value>,
                                              options: @escaping (FilmPlayerPreferences) -> [Value],
                                              title label: @escaping (Value) -> String) -> FilmSettingsRow {
-        .init(title: title, detail: label(owner.preferences[keyPath: keyPath]), id: "film.player." + id,
-              enabled: owner.persistenceError == nil, disclosure: true, action: { [weak self] in
-            guard let self else { return }
-            navigationController?.pushViewController(FilmPlayerChoiceController(owner: owner, title: title,
-                id: id, keyPath: keyPath, options: options, label: label, themeProvider: themeProvider), animated: true)
+        let value = label(owner.preferences[keyPath: keyPath])
+        let button = FilmPlayerSettingsMenuButton(title: title, value: value,
+                                                 enabled: owner.persistenceError == nil)
+        button.accessibilityIdentifier = "film.player." + id + ".menu"
+        button.showsMenuAsPrimaryAction = true
+        button.menu = UIMenu(options: .singleSelection, children: options(owner.preferences).enumerated().map { index, value in
+            UIAction(title: label(value), identifier: .init("film.player.\(id).option.\(index)"),
+                     attributes: owner.persistenceError == nil ? [] : .disabled,
+                     state: owner.preferences[keyPath: keyPath] == value ? .on : .off) { [weak self] _ in
+                guard let self else { return }
+                Task { await self.owner.set(keyPath, value); self.update() }
+            }
         })
+        return .init(title: title, detail: value, id: "film.player." + id,
+                     enabled: button.isEnabled, content: button)
     }
 
     private func switchRow(_ title: String, id: String,
@@ -118,52 +128,47 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
 }
 
 @MainActor
-private final class FilmPlayerChoiceController<Value: Equatable>: FilmSettingsListController {
-    private let owner: FilmPlayerPreferencesStore
-    private let id: String
-    private let keyPath: WritableKeyPath<FilmPlayerPreferences, Value>
-    private let options: (FilmPlayerPreferences) -> [Value]
-    private let label: (Value) -> String
-
-    init(owner: FilmPlayerPreferencesStore, title: String, id: String,
-         keyPath: WritableKeyPath<FilmPlayerPreferences, Value>,
-         options: @escaping (FilmPlayerPreferences) -> [Value],
-         label: @escaping (Value) -> String, themeProvider: any PageThemeProviding) {
-        self.owner = owner; self.id = id; self.keyPath = keyPath
-        self.options = options; self.label = label
-        super.init(themeProvider: themeProvider)
-        pageTitle = title
+private final class FilmPlayerSettingsMenuButton: UIButton {
+    init(title: String, value: String, enabled: Bool) {
+        super.init(frame: .zero)
+        isEnabled = enabled
+        accessibilityLabel = title; accessibilityValue = value
+        let heading = UILabel(), current = UILabel()
+        heading.text = title; current.text = value
+        heading.font = .preferredFont(forTextStyle: .body)
+        current.font = .preferredFont(forTextStyle: .subheadline)
+        heading.textColor = UIColor {
+            let colors = SettingsTheme(dark: $0.userInterfaceStyle == .dark)
+            return UIColor(enabled ? colors.ink : colors.muted)
+        }
+        current.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).muted) }
+        for label in [heading, current] {
+            label.adjustsFontForContentSizeCategory = true
+            label.numberOfLines = 0
+        }
+        current.textAlignment = .right
+        current.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        current.setContentCompressionResistancePriority(.init(751), for: .horizontal)
+        let content = UIStackView(arrangedSubviews: [heading, current])
+        content.alignment = .center; content.spacing = 12
+        content.isUserInteractionEnabled = false; content.accessibilityElementsHidden = true
+        content.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: topAnchor),
+            content.bottomAnchor.constraint(equalTo: bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: trailingAnchor),
+            current.widthAnchor.constraint(lessThanOrEqualTo: content.widthAnchor, multiplier: 0.6),
+        ])
     }
 
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        table.accessibilityIdentifier = "film.player." + id + ".options"
-        observe(owner) { [weak self] in self?.update() }
-        update()
-    }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func pageDidFinishAppearing() {
-        Task { await owner.reload() }
-        update()
-        super.pageDidFinishAppearing()
-    }
-
-    private func update() {
-        sections = [.init(title: "", rows: options(owner.preferences).enumerated().map { index, value in
-            .init(title: label(value), id: "film.player.\(id).option.\(index)",
-                  enabled: owner.persistenceError == nil, selected: owner.preferences[keyPath: keyPath] == value,
-                  action: { [weak self] in
-                guard let self else { return }
-                Task {
-                    if await self.owner.set(self.keyPath, value) { self.navigationController?.popViewController(animated: true) }
-                    else {
-                        self.failure(NSError(domain: "FilmPlayerPreferences", code: 1,
-                            userInfo: [NSLocalizedDescriptionKey: self.owner.persistenceError ?? "播放器偏好保存失败"]))
-                    }
-                }
-            })
-        })]
-        render()
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -SettingsVisualMetrics.rowHorizontalPadding,
+                       dy: -SettingsVisualMetrics.rowVerticalPadding).contains(point)
     }
 }
 #endif

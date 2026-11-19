@@ -34,8 +34,14 @@ try {
     $Exit = Invoke-WindowsLoggedTool -Executable $WindowsDotnet -WorkingDirectory $WindowsAppRoot `
         -Arguments @('build', $Project, '--configuration', 'Release', '--no-restore', '--nologo', '-nodeReuse:false') -Log (Join-Path $Run 'build.log')
     if ($Exit -ne 0) { $Result.status = 'failed'; $Result['exitCode'] = $Exit; exit $Exit }
-    $TestAssembly = Join-Path $Project 'bin\Release\net10.0-windows10.0.19041.0\MeowFilm.Windows.Tests.dll'
-    $Exit = Invoke-WindowsLoggedTool -Executable $WindowsDotnet -Arguments (@($TestAssembly) + $Arguments) -Log (Join-Path $Run 'native.log')
+    $TargetLog = Join-Path $Run 'target-path.log'
+    $Exit = Invoke-WindowsLoggedTool -Executable $WindowsDotnet -WorkingDirectory $WindowsAppRoot `
+        -Arguments @('msbuild', (Join-Path $Project 'MeowFilm.Windows.Tests.csproj'), '-nologo', '-p:Configuration=Release', '-getProperty:TargetPath') -Log $TargetLog
+    if ($Exit -ne 0) { $Result.status = 'failed'; $Result['exitCode'] = $Exit; exit $Exit }
+    # The app host carries the activation manifest required by self-contained WinUI.
+    $TestExecutable = Assert-WindowsPath -Owner $Project -Path ([IO.Path]::ChangeExtension((Get-Content -LiteralPath $TargetLog -Raw).Trim(), '.exe'))
+    if (-not (Test-Path -LiteralPath $TestExecutable -PathType Leaf)) { throw 'Native test executable is missing.' }
+    $Exit = Invoke-WindowsLoggedTool -Executable $TestExecutable -Arguments $Arguments -Log (Join-Path $Run 'native.log')
     $Result['exitCode'] = $Exit
     if ($Exit -ne 0) { $Result.status = 'failed'; exit $Exit }
     $Summary = @(Select-String -LiteralPath (Join-Path $Run 'native.log') -Pattern '^TOTAL (\d+); PASSED (\d+); FAILED (\d+); SKIPPED (\d+)$')

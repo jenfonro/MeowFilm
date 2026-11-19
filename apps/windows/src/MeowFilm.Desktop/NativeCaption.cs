@@ -1,102 +1,50 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Interop;
-using System.Runtime.InteropServices;
+using Microsoft.UI.Input;
+using Microsoft.UI.Windowing;
+using Microsoft.UI.Xaml;
+using Windows.Graphics;
 
 namespace MeowFilm.Desktop;
 
-/// <summary>Only the custom maximize hit target is adapted; WindowChrome owns the rest of non-client behavior.</summary>
+/// <summary>Native caption buttons/Snap and drag regions of the one application window.</summary>
 internal sealed class NativeCaption : IDisposable
 {
-    private const int WmNcHitTest = 0x0084;
-    private const int WmNcLeftButtonDown = 0x00A1;
-    private const int WmNcLeftButtonUp = 0x00A2;
-    private const int WmNcLeftButtonDoubleClick = 0x00A3;
-    private const int WmLeftButtonUp = 0x0202;
-    private const int WmCancelMode = 0x001F;
-    private const int HtMaxButton = 9;
-    private readonly Window _window;
-    private readonly Button _maximize;
-    private readonly Action _toggle;
-    private readonly HwndSource? _source;
-    private bool _pressed;
-    private bool? _borderSuppressed;
-
-    internal NativeCaption(Window window, Button maximize, Action toggle)
+    private readonly DesktopWindow window;
+    private readonly FrameworkElement titleBar;
+    private readonly FrameworkElement[] controls;
+    private readonly InputNonClientPointerSource input;
+    internal NativeCaption(DesktopWindow window, FrameworkElement titleBar, params FrameworkElement[] controls)
     {
-        _window = window;
-        _maximize = maximize;
-        _toggle = toggle;
-        _source = HwndSource.FromHwnd(new WindowInteropHelper(window).Handle);
-        _source?.AddHook(Hook);
-        if (_source is not null && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
-        {
-            uint round = 2; // DWMWCP_ROUND. Maximized/snapped shape remains a Windows decision.
-            _ = DwmSetWindowAttribute(_source.Handle, 33, ref round, sizeof(uint));
-        }
+        this.window = window; this.titleBar = titleBar; this.controls = controls;
+        window.ExtendsContentIntoTitleBar = true;
+        window.SetTitleBar(titleBar);
+        input = InputNonClientPointerSource.GetForWindowId(window.AppWindow.Id);
+        titleBar.SizeChanged += Changed;
+        titleBar.Loaded += Loaded;
+        foreach (var control in controls) control.LayoutUpdated += Layout;
+        window.AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+        Update();
     }
-
-    internal void SetImmersiveBorder(bool suppress)
+    private void Loaded(object sender, RoutedEventArgs args) => Update();
+    private void Changed(object sender, SizeChangedEventArgs args) => Update();
+    private void Layout(object? sender, object args) => Update();
+    private RectInt32[] regions = [];
+    private void Update()
     {
-        if (_borderSuppressed == suppress || _source is null || !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
-        // DWMWA_BORDER_COLOR affects painting only. Keep WindowChrome resize,
-        // snap, shadow and native caption hit testing intact.
-        uint color = suppress ? 0xfffffffeu : 0xffffffffu;
-        if (DwmSetWindowAttribute(_source.Handle, 34, ref color, sizeof(uint)) >= 0) _borderSuppressed = suppress;
-    }
-
-    [DllImport("dwmapi.dll", ExactSpelling = true)]
-    private static extern int DwmSetWindowAttribute(nint hwnd, int attribute, ref uint value, int size);
-
-    private nint Hook(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
-    {
-        try
+        if (titleBar.XamlRoot is null) return;
+        double scale = titleBar.XamlRoot.RasterizationScale;
+        var next = controls.Where(control => control.IsLoaded && DesktopVisual.IsVisible(control)).Select(control =>
         {
-            if (message == WmNcHitTest && _maximize.IsVisible && _maximize.IsEnabled &&
-                _window.ResizeMode is ResizeMode.CanResize or ResizeMode.CanResizeWithGrip)
-            {
-                // WM_NCHITTEST uses signed screen coordinates, including negative multi-monitor coordinates.
-                var packed = lParam.ToInt64();
-                var screen = new Point(unchecked((short)(packed & 0xffff)), unchecked((short)((packed >> 16) & 0xffff)));
-                var point = _maximize.PointFromScreen(screen);
-                if (new Rect(0, 0, _maximize.ActualWidth, _maximize.ActualHeight).Contains(point))
-                {
-                    handled = true;
-                    return HtMaxButton;
-                }
-            }
-            else if (message == WmNcLeftButtonDown && wParam == HtMaxButton)
-            {
-                _pressed = true;
-                handled = true;
-            }
-            else if (message == WmNcLeftButtonUp)
-            {
-                var invoke = _pressed && wParam == HtMaxButton;
-                _pressed = false;
-                if (invoke)
-                {
-                    handled = true;
-                    _toggle();
-                }
-            }
-            else if (message == WmNcLeftButtonDoubleClick && wParam == HtMaxButton)
-            {
-                handled = true;
-            }
-            else if (message is WmCancelMode or WmLeftButtonUp) _pressed = false;
-        }
-        catch (InvalidOperationException)
-        {
-            // During HWND teardown, defer to normal system processing rather than throwing through WndProc.
-            _pressed = false;
-        }
-        return 0;
+            var bounds = control.TransformToVisual(window.Root).TransformBounds(new Windows.Foundation.Rect(0, 0, control.ActualWidth, control.ActualHeight));
+            return new RectInt32((int)(bounds.X * scale), (int)(bounds.Y * scale), (int)Math.Ceiling(bounds.Width * scale), (int)Math.Ceiling(bounds.Height * scale));
+        }).ToArray();
+        if (regions.SequenceEqual(next)) return;
+        regions = next;
+        input.SetRegionRects(NonClientRegionKind.Passthrough, next);
     }
-
     public void Dispose()
     {
-        try { _source?.RemoveHook(Hook); }
-        catch (InvalidOperationException) { /* The HWND source may already be disposed. */ }
+        titleBar.SizeChanged -= Changed; titleBar.Loaded -= Loaded;
+        foreach (var control in controls) control.LayoutUpdated -= Layout;
+        input.ClearRegionRects(NonClientRegionKind.Passthrough);
     }
 }

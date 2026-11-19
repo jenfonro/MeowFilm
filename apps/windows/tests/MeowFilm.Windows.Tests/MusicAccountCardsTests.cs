@@ -1,10 +1,16 @@
+using FontWeights = Microsoft.UI.Text.FontWeights;
 using System.Reflection;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Documents;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
+using Windows.UI.Text;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Desktop;
@@ -21,7 +27,7 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> PlatformAccountCardCases()
     {
-        yield return Case("login mode buttons preserve paired colors across selection disabled hover and high contrast", async () =>
+        yield return Case("login modes preserve selection availability and regular text through native states", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Module.ActivateSettingsAsync();
@@ -30,74 +36,39 @@ public static partial class MusicUiTests
             try
             {
                 window.Show(); await Drain();
-                // SearchScene uses an in-process transport: QR begin fails without contacting an upstream.
-                // Keep the real login/mode handlers and exercise their usable post-failure surface.
-                AccountCardButton(view, "网易云音乐登录").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                FilmUiTest.Click(AccountCardButton(view, "网易云音乐登录"));
                 await SearchUntil(() => !f.Module.AccountBusy); await Drain();
-                var popup = (Popup)view.FindName("LoginPopup");
-                True(popup.Child is AccountLoginSurface surface &&
-                    ReferenceEquals(surface.Style, view.FindResource("Account.LoginSurface")),
-                    "music consumes the shared neutral login surface");
+                var dialog = (ContentDialog)view.FindName("LoginPopup");
+                True(dialog.Content is AccountLoginSurface surface && ReferenceEquals(surface.Style,
+                    DesktopVisual.Resource(view, "Account.LoginSurface")), "the native dialog consumes the shared login surface");
                 var qr = (Button)view.FindName("QrModeButton");
                 var sms = (Button)view.FindName("SmsModeButton");
-                True(popup.IsOpen && f.Module.ShowAccountSms && sms.IsEnabled,
-                    "the real login entry admits the existing QR and SMS modes");
-                var hoverKey = (DependencyPropertyKey)typeof(UIElement).GetField("IsMouseOverPropertyKey",
-                    BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
-                // Inject only dependency-property states; no mouse movement or capture.
-                qr.SetValue(hoverKey, false); sms.SetValue(hoverKey, false);
+                True(MusicTestUi.IsDialogOpen(dialog) && f.Module.ShowAccountSms && sms.IsEnabled, "login admits both actual modes");
                 foreach (var selected in new[] { qr, sms, qr })
                 {
-                    selected.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
-                    Equal(selected == qr ? Visibility.Visible : Visibility.Collapsed,
-                        ((FrameworkElement)view.FindName("QrPanel")).Visibility);
-                    Equal(selected == sms ? Visibility.Visible : Visibility.Collapsed,
-                        ((FrameworkElement)view.FindName("SmsPanel")).Visibility);
-                    foreach (bool contrast in new[] { false, true, false })
+                    FilmUiTest.Click(selected); await Drain();
+                    Equal(selected == qr ? Visibility.Visible : Visibility.Collapsed, ((FrameworkElement)view.FindName("QrPanel")).Visibility);
+                    Equal(selected == sms ? Visibility.Visible : Visibility.Collapsed, ((FrameworkElement)view.FindName("SmsPanel")).Visibility);
+                    foreach (var button in new[] { qr, sms })
                     {
-                        DesktopTheme.SetIsHighContrast(view, contrast); await Drain();
-                        foreach (var button in new[] { qr, sms })
+                        foreach (string state in new[] { "Normal", "PointerOver", "Pressed", "Normal" })
                         {
-                            var normal = contrast ? SystemColors.WindowBrush :
-                                button == selected ? (Brush)view.FindResource("MeowFilm.Brush.Surface") : Brushes.Transparent;
-                            var foreground = contrast ? SystemColors.WindowTextBrush :
-                                (Brush)view.FindResource("MeowFilm.Brush.Text");
-                            AssertPair(button, normal, foreground);
-                            button.SetValue(hoverKey, true); view.UpdateLayout();
-                            AssertPair(button, contrast ? SystemColors.HighlightBrush :
-                                (Brush)view.FindResource("MeowFilm.Brush.Hover"),
-                                contrast ? SystemColors.HighlightTextBrush : foreground);
-                            button.SetValue(hoverKey, false);
-                            SetCardActionPressed(button, true); view.UpdateLayout();
-                            AssertPair(button, contrast ? SystemColors.WindowBrush :
-                                (Brush)view.FindResource("MeowFilm.Brush.Pressed"), foreground);
-                            SetCardActionPressed(button, false);
-                            // Parent disable preserves the SMS button's business IsEnabled binding.
-                            var parent = (UIElement)VisualTreeHelper.GetParent(button);
-                            parent.IsEnabled = false; view.UpdateLayout();
-                            AssertPair(button, contrast ? SystemColors.WindowBrush : Brushes.Transparent,
-                                contrast ? SystemColors.GrayTextBrush : (Brush)view.FindResource("MeowFilm.Brush.Disabled"));
-                            parent.ClearValue(UIElement.IsEnabledProperty); view.UpdateLayout();
-                            True(button.IsEnabled, "restoring the parent restores mode admission");
-                            AssertPair(button, normal, foreground);
+                            True(VisualStateManager.GoToState(button, state, false), "native mode visual state exists");
+                            var label = Visuals(button).OfType<TextBlock>().Single();
+                            Equal(button.Content.ToString(), label.Text);
+                            True(label.Foreground is SolidColorBrush { Color.A: > 0 } && label.FontWeight == FontWeights.Normal,
+                                "mode state keeps readable regular text");
                         }
+                        var parent = (AccountLoginSurface)dialog.Content;
+                        parent.IsEnabled = false; await Drain();
+                        True(!button.IsEnabled, "disabled parent denies mode changes without removing its owner binding");
+                        parent.ClearValue(Control.IsEnabledProperty); await Drain();
+                        True(button.IsEnabled, "restoring the parent restores mode admission");
                     }
                 }
-                True(popup.IsOpen && f.Module.SelectedAccountPlatform == "wy",
-                    "visual states do not retire login or change the selected account");
-                AccountCardButton(popup.Child, "关闭登录").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                await Drain();
-                True(!popup.IsOpen, "the original close action still retires login");
-
-                void AssertPair(Button button, Brush background, Brush foreground)
-                {
-                    button.UpdateLayout();
-                    AssertCardActionBrush(button.Background, background);
-                    AssertCardActionBrush(button.Foreground, foreground);
-                    var text = Visuals(button).OfType<TextBlock>().Single();
-                    Equal(button.Content.ToString(), text.Text);
-                    AssertCardActionBrush(text.Foreground, foreground);
-                }
+                True(MusicTestUi.IsDialogOpen(dialog) && f.Module.SelectedAccountPlatform == "wy", "visual states never change account identity");
+                FilmUiTest.Click(AccountCardButton((DependencyObject)dialog.Content, "关闭登录")); await Drain();
+                True(!MusicTestUi.IsDialogOpen(dialog), "close retires the actual dialog");
             }
             finally { window.Close(); await Drain(); }
         });
@@ -105,7 +76,8 @@ public static partial class MusicUiTests
         {
             await using var f = await SearchScene.Create();
             var view = new MusicAccountsView { DataContext = f.Module };
-            Render(view, 840, 360);
+            using var mount = new ReplicaMount(view); await Drain();
+            await RenderSettings(view, 840, 360);
             foreach (var row in f.Module.PlatformSettings)
             {
                 Equal("none", row.Account.State);
@@ -119,7 +91,7 @@ public static partial class MusicUiTests
             var unboundAvatar = Visuals(view).OfType<ArtworkImage>()
                 .Single(image => AutomationProperties.GetName(image) == first.Name + "头像");
             unboundLogo.DataContext = null; unboundAvatar.DataContext = null;
-            Render(view, 840, 360);
+            await RenderSettings(view, 840, 360);
             Equal(Visibility.Visible, unboundLogo.Visibility);
             True(unboundLogo.Source is not null, "an unbound platform mark uses the local default, not account identity");
             Equal(Visibility.Collapsed, unboundAvatar.Visibility);
@@ -133,7 +105,7 @@ public static partial class MusicUiTests
             {
                 await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 Equal(accountReads + 1, f.Store.AccountReads);
-                Render(view, 840, 360);
+                await RenderSettings(view, 840, 360);
                 foreach (var row in f.Module.PlatformSettings)
                 {
                     Equal("none", row.Account.State);
@@ -143,7 +115,7 @@ public static partial class MusicUiTests
                 hold.Release();
                 await Task.WhenAll(reread, activation).WaitAsync(TimeSpan.FromSeconds(5));
                 Equal(accountReads + 1, f.Store.AccountReads);
-                Render(view, 840, 360);
+                await RenderSettings(view, 840, 360);
                 foreach (var row in f.Module.PlatformSettings)
                 {
                     Equal("none", row.Account.State);
@@ -178,7 +150,8 @@ public static partial class MusicUiTests
                 f.Module.Accounts[accountIndex] = new("wy", row.Name, item.State, "Saved native name", "1", 1);
                 f.Module.RefreshPlatformSetting("wy");
                 var view = new MusicAccountsView { DataContext = f.Module };
-                Render(view, 840, 360);
+            using var mount = new ReplicaMount(view); await Drain();
+                await RenderSettings(view, 840, 360);
                 True(row.IsLoggedIn && !row.ShowLogin, "login identity does not depend on an avatar URL");
                 Equal("", row.Avatar);
                 AssertAccountTableImages(view, row, avatarVisible: true);
@@ -186,11 +159,11 @@ public static partial class MusicUiTests
                 try
                 {
                     await source.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                    Render(view, 840, 360);
+                    await RenderSettings(view, 840, 360);
                     AssertAccountTableImages(view, row, avatarVisible: true);
                     source.Release.TrySetResult();
                     await read.WaitAsync(TimeSpan.FromSeconds(5));
-                    Render(view, 840, 360);
+                    await RenderSettings(view, 840, 360);
                     Equal("Cached native name", row.DisplayName);
                     Equal(item.Avatar, row.Avatar);
                     AssertAccountTableImages(view, row, avatarVisible: true);
@@ -198,7 +171,7 @@ public static partial class MusicUiTests
                     {
                         f.Module.Accounts[accountIndex] = new("wy", row.Name, state, Generation: 2);
                         f.Module.RefreshPlatformSetting("wy");
-                        Render(view, 840, 360);
+                        await RenderSettings(view, 840, 360);
                         Equal("", row.Avatar);
                         AssertAccountTableImages(view, row, avatarVisible: false);
                     }
@@ -213,7 +186,8 @@ public static partial class MusicUiTests
             await using var f = await SearchScene.Create();
             await f.Module.ActivateSettingsAsync();
             var view = new MusicAccountsView { DataContext = f.Module };
-            Render(view, 1104, 600);
+            using var mount = new ReplicaMount(view); await Drain();
+            await RenderSettings(view, 1104, 600);
             var titles = Visuals(view).OfType<TextBlock>()
                 .Where(text => text.Text == "未登录" && IsAccountContentVisible(text)).ToArray();
             Equal(3, titles.Length);
@@ -231,80 +205,41 @@ public static partial class MusicUiTests
                 .Where(image => AutomationProperties.GetName(image).EndsWith("标志", StringComparison.Ordinal) &&
                     IsAccountContentVisible(image)).ToArray();
             Equal(5, logos.Length);
-            True(logos.All(image => image.Source is not null && image.Source.Width > 0 && image.Source.Height > 0),
+            True(logos.All(image => image.Source is not null && image.Source is Microsoft.UI.Xaml.Media.Imaging.BitmapSource { PixelWidth: > 0, PixelHeight: > 0 }),
                 "official marks are available as local image resources");
             True(logos.All(image => image.Width == 26 && image.Height == 26), "platform marks use their own 26 DIP column");
             Equal(2, Visuals(view).OfType<TextBlock>().Count(text => text.Text == "无需登录" && IsAccountContentVisible(text)));
             Equal(0, f.Http.Requests.Count); Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("platform account table actions retain quiet text styling and accessible states across themes", async () =>
+        yield return Case("platform account actions retain quiet text geometry and native enabled states", async () =>
         {
-            await using var f = await DetailsScene.Create();
-            await f.Module.ActivateSettingsAsync();
+            await using var f = await DetailsScene.Create(); await f.Module.ActivateSettingsAsync();
             var view = new MusicAccountsView { DataContext = f.Module };
-            Render(view, 840, 360);
-            var refresh = AccountCardButton(view, "网易云音乐刷新资料");
-            var logout = AccountCardButton(view, "网易云音乐退出账号");
-            var buttons = new[] { refresh, logout };
-            foreach (bool dark in new[] { false, true })
+            using var mount = new ReplicaMount(view); await Drain();
+            var buttons = new[] { AccountCardButton(view, "网易云音乐刷新资料"), AccountCardButton(view, "网易云音乐退出账号") };
+            foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark, ElementTheme.Light })
             {
-                if (dark)
-                    foreach (var resource in new (string Key, Brush Brush)[]
-                    {
-                        ("Surface", Brushes.DarkSlateGray), ("Text", Brushes.WhiteSmoke), ("Muted", Brushes.LightGray),
-                        ("Border", Brushes.SlateGray), ("Hover", Brushes.SlateGray),
-                        ("Pressed", Brushes.Black), ("Error", Brushes.IndianRed),
-                        ("Focus", Brushes.DodgerBlue), ("Disabled", Brushes.Gray)
-                    })
-                        view.Resources["MeowFilm.Brush." + resource.Key] = resource.Brush;
-                if (dark) view.Resources["Settings.Brush.Active"] = Brushes.SlateGray;
-                foreach (bool highContrast in new[] { false, true })
+                view.RequestedTheme = theme; await Drain();
+                foreach (var button in buttons)
                 {
-                    DesktopTheme.SetIsHighContrast(view, highContrast);
-                    Render(view, 840, 360);
-                    if (highContrast)
+                    True(button.IsEnabled && button.UseSystemFocusVisuals, "actions retain admission and native focus visuals");
+                    Equal(13d, button.FontSize); Equal(32d, button.ActualHeight); Equal(new Thickness(0), button.BorderThickness);
+                    foreach (string state in new[] { "Normal", "PointerOver", "Pressed", "Normal" })
                     {
-                        foreach (var text in Visuals(view).OfType<TextBlock>().Where(text =>
-                            IsAccountContentVisible(text) && text.DataContext is MusicPlatformSettingsRow))
-                            AssertCardActionBrush(text.Foreground, SystemColors.WindowTextBrush);
+                        True(VisualStateManager.GoToState(button, state, false), "native action visual state exists");
+                        var label = Visuals(button).OfType<TextBlock>().Single();
+                        True(label.Foreground is SolidColorBrush { Color.A: > 0 } && label.FontWeight == FontWeights.Normal,
+                            "the real action label remains visible and regular in each state");
                     }
-                    foreach (var button in buttons)
-                    {
-                        True(button.IsEnabled && button.FocusVisualStyle is not null, "table actions retain admission and keyboard focus visuals");
-                        Equal(13d, button.FontSize); Equal(32d, button.ActualHeight);
-                        var surface = Visuals(button).OfType<Border>().Single();
-                        Equal(new Thickness(0), surface.BorderThickness);
-                        Equal(10d, surface.CornerRadius.TopLeft);
-                        AssertCardActionBrush(button.Background, highContrast ? SystemColors.WindowBrush : Brushes.Transparent);
-                        AssertCardActionBrush(button.Foreground, highContrast ? SystemColors.WindowTextBrush : (Brush)button.FindResource("MeowFilm.Brush.Text"));
-                        AssertCardActionBrush(button.BorderBrush, highContrast ? SystemColors.WindowTextBrush :
-                            (Brush)button.FindResource("MeowFilm.Brush.Border"));
-                        SimulateFocus(button, UIElement.IsMouseOverProperty, true);
-                        Render(view, 840, 360);
-                        AssertCardActionBrush(button.Background, highContrast ? SystemColors.HighlightBrush : (Brush)button.FindResource("MeowFilm.Brush.Hover"));
-                        AssertCardActionBrush(button.Foreground, highContrast ? SystemColors.HighlightTextBrush : (Brush)button.FindResource("MeowFilm.Brush.Text"));
-                        SimulateFocus(button, UIElement.IsMouseOverProperty, false);
-                        SetCardActionPressed(button, true);
-                        Render(view, 840, 360);
-                        AssertCardActionBrush(button.Background, highContrast ? SystemColors.WindowBrush : (Brush)button.FindResource("MeowFilm.Brush.Pressed"));
-                        SetCardActionPressed(button, false);
-                        SimulateFocus(button, UIElement.IsKeyboardFocusedProperty, true);
-                        Render(view, 840, 360);
-                        AssertCardActionBrush(button.BorderBrush, highContrast ? SystemColors.WindowTextBrush : (Brush)button.FindResource("MeowFilm.Brush.Focus"));
-                        SimulateFocus(button, UIElement.IsKeyboardFocusedProperty, false);
-                    }
-                    view.IsEnabled = false;
-                    Render(view, 840, 360);
-                    foreach (var button in buttons)
-                    {
-                        True(!button.IsEnabled, "disabled parent preserves the action binding while denying interaction");
-                        AssertCardActionBrush(button.Foreground, highContrast ? SystemColors.GrayTextBrush : (Brush)button.FindResource("MeowFilm.Brush.Disabled"));
-                    }
-                    view.IsEnabled = true;
+                    True(button.Focus(FocusState.Programmatic), "quiet actions accept native focus");
                 }
+                view.IsEnabled = false; await Drain();
+                True(buttons.All(button => !button.IsEnabled), "parent disability preserves the action bindings and denies interaction");
+                view.IsEnabled = true; await Drain();
+                True(buttons.All(button => button.IsEnabled), "restoring the view restores current action admission");
             }
             Equal(0, f.Peer.Requests);
-            True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
+            True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "visual state performs no script IO");
         });
         yield return Case("platform account card refresh action updates native profile avatar and membership once", async () =>
         {
@@ -322,11 +257,11 @@ public static partial class MusicUiTests
                 var refresh = AccountCardButton(view, "网易云音乐刷新资料");
                 Equal("刷新", (string)refresh.Content);
                 Equal("退出登录", (string)AccountCardButton(view, "网易云音乐退出账号").Content);
-                refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                FilmUiTest.Click(refresh);
                 await f.Peer.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 True(!row.CanRefresh && !refresh.IsEnabled && row.RefreshText == "刷新中", "refresh is bounded by its current request");
                 Equal("刷新中", (string)refresh.Content);
-                refresh.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                FilmUiTest.Click(refresh);
                 Equal(1, f.Peer.Requests);
                 f.Peer.Release.TrySetResult();
                 await SearchUntil(() => row.CanRefresh && row.DisplayName == f.Peer.DisplayName);
@@ -355,20 +290,19 @@ public static partial class MusicUiTests
             {
                 window.Show(); await Drain();
                 var logout = AccountCardButton(view, "网易云音乐退出账号");
-                var popup = (Popup)view.FindName("LogoutPopup");
-                logout.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
-                True(popup.IsOpen && ReferenceEquals(popup.PlacementTarget, logout), "confirmation belongs to the clicked button");
-                var placement = popup.CustomPopupPlacementCallback!(new Size(216, 120), new Size(64, 32), new Point()).Single();
-                True(placement.Point.Y >= 32, "confirmation is positioned below the button");
-                True(((Button)view.FindName("CancelLogoutButton")).IsKeyboardFocusWithin, "cancel receives initial keyboard focus");
-                AccountCardButton(popup.Child, "取消退出账号").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                var popup = (ContentDialog)view.FindName("LogoutPopup");
+                FilmUiTest.Click(logout); await Drain();
+                True(MusicTestUi.IsDialogOpen(popup) && ReferenceEquals(FilmUiTest.Field<Button?>(view, "logoutAnchor"), logout), "confirmation belongs to the clicked button");
+                True(ReferenceEquals(popup.XamlRoot, view.XamlRoot), "logout is part of the same native root");
+                True(ReferenceEquals(DesktopVisual.Focused(view), view.FindName("CancelLogoutButton")), "cancel receives initial native focus");
+                FilmUiTest.Click(AccountCardButton((DependencyObject)popup.Content, "取消退出账号"));
                 await Drain(); await SearchUntil(() => !f.Module.AccountBusy);
-                True(!popup.IsOpen && row.IsLoggedIn, "cancel does not change the account");
+                True(!MusicTestUi.IsDialogOpen(popup) && row.IsLoggedIn, "cancel does not change the account");
                 Equal(0, f.Peer.Requests);
-                logout.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
-                AccountCardButton(popup.Child, "确定退出账号").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                FilmUiTest.Click(logout); await Drain();
+                FilmUiTest.Click(AccountCardButton((DependencyObject)popup.Content, "确定退出账号"));
                 await SearchUntil(() => !row.IsLoggedIn && !f.Module.AccountBusy);
-                True(!popup.IsOpen && row.DisplayName == "未登录", "logout restores the native account state without changing platform identity");
+                True(!MusicTestUi.IsDialogOpen(popup) && row.DisplayName == "未登录", "logout restores the native account state without changing platform identity");
                 Equal("tx", f.Module.SelectedAccountPlatform);
                 Equal(0, f.Peer.Requests);
                 True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
@@ -385,21 +319,21 @@ public static partial class MusicUiTests
             {
                 window.Show(); await Drain();
                 var logout = AccountCardButton(view, "网易云音乐退出账号");
-                var popup = (Popup)view.FindName("LogoutPopup");
-                logout.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
-                var confirm = AccountCardButton(popup.Child, "确定退出账号");
+                var popup = (ContentDialog)view.FindName("LogoutPopup");
+                FilmUiTest.Click(logout); await Drain();
+                var confirm = AccountCardButton((DependencyObject)popup.Content, "确定退出账号");
                 view.Visibility = Visibility.Collapsed; await Drain();
-                True(!popup.IsOpen, "hidden view retires confirmation");
-                confirm.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                True(!MusicTestUi.IsDialogOpen(popup), "hidden view retires confirmation");
+                FilmUiTest.Click(confirm);
                 True(f.Module.PlatformSettings[0].IsLoggedIn, "retired confirmation cannot submit logout");
                 view.Visibility = Visibility.Visible; await Drain();
-                logout.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
+                FilmUiTest.Click(logout); await Drain();
                 var old = f.Module.Accounts.Single(account => account.Platform == "wy");
                 int index = f.Module.Accounts.IndexOf(old);
                 f.Module.Accounts[index] = old with { Generation = old.Generation + 1 };
                 f.Module.SelectedAccount = f.Module.Accounts[index]; await Drain();
-                True(!popup.IsOpen, "replacement generation retires confirmation");
-                confirm.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                True(!MusicTestUi.IsDialogOpen(popup), "replacement generation retires confirmation");
+                FilmUiTest.Click(confirm);
                 await f.Module.LogoutAccountAsync(old, confirmed: true);
                 True(f.Module.PlatformSettings[0].IsLoggedIn, "old generation cannot log out its replacement");
                 Equal(0, f.Peer.Requests);
@@ -437,13 +371,13 @@ public static partial class MusicUiTests
                     Equal(0, Visuals(element).OfType<ArtworkImage>().Count());
                     foreach (var button in Visuals(element).OfType<Button>())
                     {
-                        True(!button.IsEnabled && button.Tag is null && !button.IsVisible, "public catalog has no login or account action");
-                        button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                        True(!button.IsEnabled && button.Tag is null && !DesktopVisual.IsVisible(button), "public catalog has no login or account action");
+                        FilmUiTest.Click(button);
                     }
                     foreach (var toggle in Visuals(element).OfType<CheckBox>())
                     {
-                        True(!toggle.IsEnabled && toggle.Tag is null && !toggle.IsVisible, "public catalog has no sync or feedback consent");
-                        toggle.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                        True(!toggle.IsEnabled && toggle.Tag is null && !DesktopVisual.IsVisible(toggle), "public catalog has no sync or feedback consent");
+                        FilmUiTest.Click(toggle);
                     }
                 }
                 await Drain();
@@ -460,20 +394,21 @@ public static partial class MusicUiTests
             await using var next = await SearchScene.Create();
             int firstReads = first.Store.AccountReads, nextReads = next.Store.AccountReads;
             var view = new MusicAccountsView { DataContext = first.Module };
-            Render(view, 1104, 600);
+            using var mount = new ReplicaMount(view); await Drain();
+            await RenderSettings(view, 1104, 600);
             first.Module.PlatformSettings.Move(2, 0);
-            Render(view, 1104, 600);
+            await RenderSettings(view, 1104, 600);
             Equal("kg", ((MusicAccountTableRow)AccountTableItems(view).Items[0]).Platform);
             var old = first.Module.PlatformSettings.Single(row => row.Platform == "wy");
             int index = first.Module.PlatformSettings.IndexOf(old);
             var replacement = new MusicPlatformSettingsRow(first.Module, old.Platform, old.Name, first.App);
             first.Module.PlatformSettings[index] = replacement;
             await old.DisposeAsync();
-            Render(view, 1104, 600);
+            await RenderSettings(view, 1104, 600);
             True(view.AccountTableRows.Cast<MusicAccountTableRow>().Any(row => ReferenceEquals(row.Source, replacement)) &&
                 !view.AccountTableRows.Cast<MusicAccountTableRow>().Any(row => ReferenceEquals(row.Source, old)),
-                "collection changes before load replace the projection rather than copying account state");
-            var window = AccountCardWindow(view);
+                "collection changes replace the loaded projection rather than copying account state");
+            var window = mount.Window;
             try
             {
                 window.Show(); await Drain();
@@ -512,9 +447,10 @@ public static partial class MusicUiTests
             await using var f = await DetailsScene.Create();
             await f.Module.ActivateSettingsAsync();
             var view = new MusicAccountsView { DataContext = f.Module };
+            using var mount = new ReplicaMount(view); await Drain();
             foreach (int width in new[] { 1104, 850, 849, 640, 500, 360 })
             {
-                Render(view, width, 600);
+                await RenderSettings(view, width, 600);
                 var horizontal = (ScrollViewer)view.FindName("AccountTableScroll");
                 var header = (Grid)view.FindName("AccountTableHeader");
                 var items = AccountTableItems(view);
@@ -561,7 +497,7 @@ public static partial class MusicUiTests
                     {
                         AssertAccountDimension(32d, toggle.ActualWidth); AssertAccountDimension(18d, toggle.ActualHeight);
                         var cell = (Grid)VisualTreeHelper.GetParent(toggle);
-                        True(Math.Abs(toggle.TranslatePoint(new Point(16, 9), cell).X - cell.ActualWidth / 2) < .5,
+                        True(Math.Abs(toggle.TransformToVisual(cell).TransformPoint(new Point(16, 9)).X - cell.ActualWidth / 2) < .5,
                             "each preference switch is centered in its independent column");
                     }
                     foreach (var button in Visuals(element).OfType<Button>().Where(button => button.Visibility == Visibility.Visible))
@@ -572,7 +508,7 @@ public static partial class MusicUiTests
                 }
                 var login = AccountCardButton(view, "酷狗音乐登录");
                 AssertAccountDimension(32d, login.ActualHeight);
-                AssertCardActionBrush(login.Background, (Brush)view.FindResource("MeowFilm.Brush.Accent"));
+                AssertCardActionBrush(login.Background, (Brush)DesktopVisual.Resource(view, "MeowFilm.Brush.Accent"));
             }
             Equal(0, f.Peer.Requests);
             True(f.Runtime.Calls.All(call => call.Method.StartsWith("music.platform.", StringComparison.Ordinal)), "no script IO");
@@ -581,7 +517,8 @@ public static partial class MusicUiTests
         {
             await using var f = await SearchScene.Create();
             var view = new MusicAccountsView { DataContext = f.Module };
-            Render(view, 500, 600);
+            using var mount = new ReplicaMount(view); await Drain();
+            await RenderSettings(view, 500, 600);
             var horizontal = (ScrollViewer)view.FindName("AccountTableScroll");
             var header = (Grid)view.FindName("AccountTableHeader");
             True(horizontal.VerticalScrollBarVisibility == ScrollBarVisibility.Disabled &&
@@ -590,9 +527,9 @@ public static partial class MusicUiTests
             var rows = AccountTableItems(view).Items.Cast<MusicAccountTableRow>().ToArray();
             Equal(5, rows.Length);
             var firstElement = AccountTableRowElement(view, rows[0]);
-            horizontal.ScrollToRightEnd(); await Drain();
-            Render(view, 500, 600);
-            True(Math.Abs(header.TranslatePoint(new Point(), view).X - firstElement.TranslatePoint(new Point(), view).X) < .5,
+            horizontal.ChangeView(horizontal.ScrollableWidth, null, null, true); await Drain();
+            await RenderSettings(view, 500, 600);
+            True(Math.Abs(header.TransformToVisual(view).TransformPoint(new Point()).X - firstElement.TransformToVisual(view).TransformPoint(new Point()).X) < .5,
                 "horizontal scrolling keeps header and row aligned");
             Equal(new Thickness(0), firstElement.BorderThickness);
             Equal(new Thickness(0, 1, 0, 0), AccountTableRowElement(view, rows[^1]).BorderThickness);
@@ -611,18 +548,18 @@ public static partial class MusicUiTests
             {
                 window.Show(); await Drain();
                 var logout = AccountCardButton(view, "网易云音乐退出账号");
-                var popup = (Popup)view.FindName("LogoutPopup");
-                logout.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
-                True(popup.IsOpen, "current logout confirmation is open");
-                var confirm = AccountCardButton(popup.Child, "确定退出账号");
-                scroll.ScrollToVerticalOffset(160); await Drain();
+                var popup = (ContentDialog)view.FindName("LogoutPopup");
+                FilmUiTest.Click(logout); await Drain();
+                True(MusicTestUi.IsDialogOpen(popup), "current logout confirmation is open");
+                var confirm = AccountCardButton((DependencyObject)popup.Content, "确定退出账号");
+                scroll.ChangeView(null, 160, null, true); await Drain();
                 double offset = scroll.VerticalOffset;
                 True(offset > 0, "settings host was scrolled before navigation retirement");
                 view.CloseTransientPopups(); await Drain();
-                True(!popup.IsOpen && popup.PlacementTarget is null && !((Popup)view.FindName("LoginPopup")).IsOpen,
+                True(!MusicTestUi.IsDialogOpen(popup) && FilmUiTest.Field<Button?>(view, "logoutAnchor") is null && !MusicTestUi.IsDialogOpen((ContentDialog)view.FindName("LoginPopup")),
                     "retirement closes all account transient surfaces");
                 Equal(offset, scroll.VerticalOffset);
-                confirm.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); await Drain();
+                FilmUiTest.Click(confirm); await Drain();
                 True(f.Module.PlatformSettings.Single(row => row.Platform == "wy").IsLoggedIn,
                     "a retired confirmation has no logout admission");
                 Equal(0, f.Peer.Requests);
@@ -659,17 +596,13 @@ public static partial class MusicUiTests
         });
     }
 
-    private static Window AccountCardWindow(FrameworkElement view) => new()
-    {
-        Width = 840, Height = 360, Content = view, ShowInTaskbar = false,
-        WindowStyle = WindowStyle.None, ResizeMode = ResizeMode.NoResize
-    };
+    private static Window AccountCardWindow(FrameworkElement view) => FilmUiTest.Window(view, 840, 600);
     private static Button AccountCardButton(DependencyObject view, string name) => Visuals(view).OfType<Button>()
         .Single(button => AutomationProperties.GetName(button) == name);
     private static ItemsControl AccountTableItems(MusicAccountsView view) => (ItemsControl)view.FindName("PlatformSettingsList");
     private static Border AccountTableRowElement(MusicAccountsView view, MusicAccountTableRow row)
     {
-        var container = AccountTableItems(view).ItemContainerGenerator.ContainerFromItem(row);
+        var container = AccountTableItems(view).ContainerFromItem(row);
         True(container is not null, "table row is generated");
         return Visuals(container!).OfType<Border>().Single(border => border.Name == "AccountTableRow");
     }
@@ -704,12 +637,6 @@ public static partial class MusicUiTests
     }
     private static void AssertCardActionBrush(Brush actual, Brush expected) =>
         Equal(((SolidColorBrush)expected).Color, ((SolidColorBrush)actual).Color);
-    private static void SetCardActionPressed(Button button, bool value)
-    {
-        var field = typeof(ButtonBase).GetField("IsPressedPropertyKey", BindingFlags.Static | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("Pressed-state test seam unavailable");
-        button.SetValue((DependencyPropertyKey)field.GetValue(null)!, value);
-    }
     private sealed class HeldCardDetailsSource(MusicAccountDetails snapshot) : IMusicAccountDetailsSource
     {
         internal int Reads;

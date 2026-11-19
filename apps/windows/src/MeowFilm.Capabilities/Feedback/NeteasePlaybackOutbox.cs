@@ -60,8 +60,6 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
             FeedbackProtocolRules.Require(value.ConsentRevision == revision || settings.PreservesWyConsent, "SESSION_CHANGED");
             value = value with { ConsentRevision = revision };
             FeedbackProtocolRules.Require(!entries.ContainsKey(value.PlaybackId), "INSTANCE_MISMATCH");
-            FeedbackProtocolRules.Require(NeteasePlaybackOutboxDocument.Encode([value]).Length <=
-                NeteasePlaybackOutboxDocument.MaximumEventBytes, "LIMIT");
             entries.Add(value.PlaybackId, value); live[value.PlaybackId] = token;
             Trim();
             FeedbackProtocolRules.Require(entries.ContainsKey(value.PlaybackId), "LIMIT");
@@ -81,8 +79,6 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
                 before.Account.Matches(account) && (before.Start is not null || before.StartConfirmed), "START_UNCONFIRMED");
             FeedbackProtocolRules.Require(before.End is null, "INSTANCE_ENDED");
             var after = before with { End = end };
-            FeedbackProtocolRules.Require(NeteasePlaybackOutboxDocument.Encode([after]).Length <=
-                NeteasePlaybackOutboxDocument.MaximumEventBytes, "LIMIT");
             entries[playbackId] = after;
             Trim();
             await SaveAsync().ConfigureAwait(false);
@@ -379,14 +375,6 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         foreach (var value in entries.Values.ToArray())
             if (value.Count > 0 && value.Oldest < oldest && value.Start?.Inflight != true && value.End?.Inflight != true)
             { entries.Remove(value.PlaybackId); live.Remove(value.PlaybackId); changed = true; }
-        while (entries.Values.Sum(e => e.Count) > NeteasePlaybackOutboxDocument.MaximumEvents ||
-            NeteasePlaybackOutboxDocument.Encode(entries.Values).Length > NeteasePlaybackOutboxDocument.MaximumBytes)
-        {
-            var first = entries.Values.Where(e => e.Count > 0 && e.Start?.Inflight != true && e.End?.Inflight != true)
-                .MinBy(e => e.Oldest);
-            FeedbackProtocolRules.Require(first is not null, "LIMIT");
-            entries.Remove(first.PlaybackId); live.Remove(first.PlaybackId); changed = true;
-        }
         return changed;
     }
 

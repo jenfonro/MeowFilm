@@ -6,7 +6,7 @@ import { duplicateBootstrapDescriptor } from '../../../packages/script-host/src/
 import { createNativeStorageDriver } from '@meowfilm/script-host/storage';
 import { configureStorage } from '@meowfilm/storage';
 import { createAppRuntime } from '../../runtime/bootstrap.mjs';
-import { createNativeSettings, nativeSettingsFrameBytes } from '../../runtime/native-settings.mjs';
+import { createNativeSettings } from '../../runtime/native-settings.mjs';
 
 const startupStages = new Set([
   'arguments', 'native-binding', 'bootstrap-channel', 'configuration', 'assembly',
@@ -34,7 +34,7 @@ export function parseIOSLaunchArguments(argv) {
 export function parseIOSConfiguration(bytes) {
   const value = decodeJSONValue(bytes);
   if (value === null || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).length !== (value.nativeSettings === true ? 3 : 2) || !Object.hasOwn(value, 'sessionId') ||
+      !Object.hasOwn(value, 'sessionId') ||
       !Object.hasOwn(value, 'dataRoot') ||
       typeof value.dataRoot !== 'string' || !isAbsolute(value.dataRoot) ||
       /[\u0000-\u001f\u007f]/.test(value.dataRoot)) throw new BridgeError('INVALID_REQUEST');
@@ -145,7 +145,6 @@ function readConfiguration(channel, configured) {
     const failed = () => finish(new BridgeError('CLOSED'));
     const data = bytes => {
       chunks.push(bytes); length += bytes.length;
-      if (length > nativeSettingsFrameBytes) { finish(new BridgeError('INVALID_REQUEST')); return; }
       const newline = bytes.indexOf(10);
       if (newline === -1) return;
       try {

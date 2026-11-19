@@ -17,7 +17,7 @@ class FilmSettingsFormController: FilmSettingsListController {
         if let header = formHeader {
             view.addSubview(header); header.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([
-                header.topAnchor.constraint(equalTo: contentTopAnchor, constant: 12),
+                header.topAnchor.constraint(equalTo: contentTopAnchor, constant: SettingsVisualMetrics.contentTopSpacing),
                 header.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
                 header.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
             ])
@@ -28,7 +28,7 @@ class FilmSettingsFormController: FilmSettingsListController {
         panel.layer.borderWidth = 0.5
         panel.addSubview(form); form.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            panel.topAnchor.constraint(equalTo: top, constant: 12),
+            panel.topAnchor.constraint(equalTo: top, constant: formHeader == nil ? SettingsVisualMetrics.contentTopSpacing : 12),
             panel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
             panel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24),
             panel.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),

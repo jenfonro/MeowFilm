@@ -1,5 +1,6 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -8,11 +9,11 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicCatalogSkeleton : Panel
 {
     public static readonly DependencyProperty IsHomeProperty = DependencyProperty.Register(nameof(IsHome),
-        typeof(bool), typeof(MusicCatalogSkeleton), new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.AffectsMeasure));
+        typeof(bool), typeof(MusicCatalogSkeleton), new PropertyMetadata(false, (owner, _) => ((UIElement)owner).InvalidateMeasure()));
     public bool IsHome { get => (bool)GetValue(IsHomeProperty); set => SetValue(IsHomeProperty, value); }
     private readonly List<Rect> bounds = [];
 
-    public MusicCatalogSkeleton() { IsHitTestVisible = false; ClipToBounds = true; }
+    public MusicCatalogSkeleton() { IsHitTestVisible = false; }
 
     protected override Size MeasureOverride(Size available)
     {
@@ -25,7 +26,7 @@ public sealed class MusicCatalogSkeleton : Panel
         {
             var (_, pitch) = Shelf.MeasureCards(width, 260, 20, banner: true);
             var cardWidth = Math.Max(0, pitch - 20);
-            const double height = 160; // Unknown until artwork publishes its intrinsic ratio.
+            double height = cardWidth / 2.56;
             for (int i = 0; i < 2; i++) bounds.Add(new(i * pitch, y, cardWidth, height));
             y += height + 56;
         }
@@ -34,7 +35,7 @@ public sealed class MusicCatalogSkeleton : Panel
         y = Cards(width, y, 124, footer: false);
         while (Children.Count > bounds.Count) Children.RemoveAt(Children.Count - 1);
         while (Children.Count < bounds.Count) Children.Add(new LoadingSkeleton { CornerRadius = new(8) });
-        for (int i = 0; i < bounds.Count; i++) Children[i].Measure(bounds[i].Size);
+        for (int i = 0; i < bounds.Count; i++) Children[i].Measure(new(bounds[i].Width, bounds[i].Height));
         return new(width, y);
     }
 

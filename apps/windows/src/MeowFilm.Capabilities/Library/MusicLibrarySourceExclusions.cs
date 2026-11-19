@@ -28,8 +28,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Fields(item, "songId provider platform providerName title artist at", "songId provider platform providerName title artist at");
         LJ.Require(LJ.Id(LJ.S(item["songId"]), 512) && IsProvider(LJ.S(item["provider"])) &&
             NativeMusicSong.Platforms.Contains(LJ.S(item["platform"])), "CORRUPT_STORAGE");
-        _ = LJ.Text(item["providerName"], 255); _ = LJ.Text(item["title"], 512); _ = LJ.S(item["artist"]);
-        LJ.Require(LJ.S(item["artist"]).Length <= 512, "CORRUPT_STORAGE");
+        _ = LJ.Text(item["providerName"], null); _ = LJ.Text(item["title"], null); _ = LJ.S(item["artist"]);
         _ = LJ.I(item["at"]);
     }
     private static string ExclusionKey(JsonNode? item) =>

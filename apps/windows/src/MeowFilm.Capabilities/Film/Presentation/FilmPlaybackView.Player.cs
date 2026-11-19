@@ -1,11 +1,10 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.System;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,15 +12,13 @@ public partial class FilmPlaybackView
 {
     private readonly DispatcherTimer controlsTimer = new() { Interval = TimeSpan.FromMilliseconds(2200) };
     private readonly DispatcherTimer pictureClickTimer = new() { Interval = TimeSpan.FromMilliseconds(220) };
-    private ContextMenu? playerMenu;
-    private Window? keyboardWindow;
+    private MenuFlyout? playerMenu;
     private FilmPlaybackPage? clickPage;
     private string? clickIdentity;
     private bool playerInputInitialized, keyboardControls, wasPlaying, wasBusy, wasBuffering;
     private int audibleVolume = 80;
-    private Rect? overlayViewport;
-    private readonly ScaleTransform controlsScale = new();
-    private (double Width, string Pan, string Quality, int Pans, int Qualities, bool Actions, bool Volume, string Time, bool Contrast)? controlLayout;
+    private bool? playingGlyph;
+    private (double Width, string Pan, string Quality, int Pans, int Qualities, bool Actions, bool Volume, string Time)? controlLayout;
 
     private void InitializePlayerInput()
     {
@@ -41,196 +38,126 @@ public partial class FilmPlaybackView
         };
     }
 
-    private void DetachOverlay()
+    private void DetachControls()
     {
         if (mediaSurface is { } surface)
         {
-            ClosePlayerMenus();
-            surface.Content = null;
-            mediaSurface = null;
+            ClosePlayerMenus(); surface.Content = null; mediaSurface = null;
         }
         if (!VideoPicture.Children.Contains(PlayerOverlay)) VideoPicture.Children.Add(PlayerOverlay);
     }
-
-    private void Overlay_Loaded(object sender, RoutedEventArgs e)
-    {
-        InitializePlayerInput();
-        ShowPlayerControls();
-        UpdateOverlayClip();
-    }
+    private void Overlay_Loaded(object sender, RoutedEventArgs e) { InitializePlayerInput(); ShowPlayerControls(); }
     private void Overlay_Unloaded(object sender, RoutedEventArgs e) => CancelPlayerInput();
-    private void Overlay_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateOverlayClip();
-    private void AttachKeyboard()
-    {
-        var window = Window.GetWindow(this);
-        if (ReferenceEquals(window, keyboardWindow)) return;
-        DetachKeyboard(); keyboardWindow = window;
-        if (window is not null)
-        {
-            window.PreviewKeyDown += Player_KeyDown;
-            window.PreviewMouseDown += Menu_MouseDown;
-        }
-    }
-    private void DetachKeyboard()
-    {
-        if (keyboardWindow is { } window)
-        {
-            window.PreviewKeyDown -= Player_KeyDown;
-            window.PreviewMouseDown -= Menu_MouseDown;
-        }
-        keyboardWindow = null;
-    }
-
+    private void Overlay_SizeChanged(object sender, SizeChangedEventArgs e) =>
+        SettingsPanel.MaxHeight = Math.Max(0, PlayerOverlay.ActualHeight - SettingsPanel.Margin.Top - SettingsPanel.Margin.Bottom);
     private bool CanHidePlayerControls() => boundPage is { IsPlaying: true, PlayerBusy: false, PlayerBuffering: false } &&
-        !HasPlayerMenu && seekingPage is null && !(keyboardControls && ControlBar.IsKeyboardFocusWithin);
-    private bool HasPlayerMenu => playerMenu?.IsOpen == true || SettingsPanel.Visibility == Visibility.Visible;
+        !HasPlayerMenu && seekingPage is null && !(keyboardControls &&
+            MeowFilm.Desktop.DesktopVisual.ContainsFocus(ControlBar));
+    private bool HasPlayerMenu => playerMenu is not null || SettingsPanel.Visibility == Visibility.Visible;
     private void ShowPlayerControls()
     {
         if (PlayerChrome is null) return;
-        InitializePlayerInput();
-        controlsTimer.Stop();
-        SetPlayerControls(true);
+        InitializePlayerInput(); controlsTimer.Stop(); SetPlayerControls(true);
         if (CanHidePlayerControls()) controlsTimer.Start();
     }
     private void SetPlayerControls(bool visible)
     {
-        bool wasVisible = PlayerChrome.Visibility == Visibility.Visible;
-        PlayerChrome.BeginAnimation(OpacityProperty, null);
         PlayerChrome.IsHitTestVisible = visible;
-        PlayerChrome.Visibility = visible ? Visibility.Visible : Visibility.Hidden;
+        // Keep the measured control tree; opacity is composed with the picture, never in another window.
         PlayerChrome.Opacity = visible ? 1 : 0;
-        if (visible && !wasVisible && SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
-            PlayerChrome.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)));
     }
-    private void Player_MouseEnter(object sender, MouseEventArgs e) => ShowPlayerControls();
-    private void Player_MouseMove(object sender, MouseEventArgs e)
+    private void Player_MouseEnter(object sender, PointerRoutedEventArgs e) => ShowPlayerControls();
+    private void Player_MouseMove(object sender, PointerRoutedEventArgs e) { keyboardControls = false; ShowPlayerControls(); }
+    private void Player_MouseLeave(object sender, PointerRoutedEventArgs e)
     {
-        keyboardControls = false;
-        ShowPlayerControls();
+        controlsTimer.Stop(); if (CanHidePlayerControls()) SetPlayerControls(false);
     }
-    private void Player_MouseLeave(object sender, MouseEventArgs e)
-    {
-        controlsTimer.Stop();
-        if (CanHidePlayerControls()) SetPlayerControls(false);
-    }
-    private void Controls_MouseDown(object sender, MouseButtonEventArgs e)
-    {
-        // Do not mark handled: the slider/button must still receive its native WPF input.
-        keyboardControls = false;
-        if (e.ChangedButton == MouseButton.Left && e.OriginalSource is DependencyObject target &&
-            (ReferenceEquals(target, SeekSlider) || SeekSlider.IsAncestorOf(target)))
-            Seek_Begin(SeekSlider, e);
-        ShowPlayerControls();
-    }
-    private async void Controls_MouseUp(object sender, MouseButtonEventArgs e)
-    {
-        if (e.ChangedButton == MouseButton.Left && e.OriginalSource is DependencyObject target &&
-            (ReferenceEquals(target, SeekSlider) || SeekSlider.IsAncestorOf(target)))
-            await CommitSeekAsync();
-    }
+    private void Controls_MouseDown(object sender, PointerRoutedEventArgs e) => ShowPlayerControls();
     private static bool IsPlayerControl(DependencyObject? target)
     {
-        for (var item = target; item is not null; item = item is Visual ? VisualTreeHelper.GetParent(item) : LogicalTreeHelper.GetParent(item))
-            if (item is ButtonBase or Slider or Selector or TextBoxBase or PasswordBox or MenuItem) return true;
+        for (var item = target; item is not null; item = VisualTreeHelper.GetParent(item))
+            if (item is ButtonBase or Slider or Selector or TextBox or PasswordBox or MenuFlyoutItemBase) return true;
         return false;
     }
-    private void Picture_MouseDown(object sender, MouseButtonEventArgs e)
+    private void Picture_Tapped(object sender, TappedRoutedEventArgs e)
     {
-        if (IsPlayerControl(e.OriginalSource as DependencyObject) || SettingsPanel.IsMouseOver || ControlBar.IsMouseOver) return;
-        bool menuWasOpen = HasPlayerMenu;
-        ClosePlayerMenus();
-        if (menuWasOpen) { e.Handled = true; return; }
-        if (boundPage?.ShortVideo == true) return; // The picture's swipe surface owns this gesture.
+        if (IsPlayerControl(e.OriginalSource as DependencyObject) || boundPage?.ShortVideo == true) return;
         e.Handled = true;
-        PlayerOverlay.Focus();
-        if (e.ClickCount >= 2)
-        {
-            pictureClickTimer.Stop(); clickPage = null; clickIdentity = null;
-            ToggleFullscreen();
-        }
-        else SchedulePictureClick();
+        if (HasPlayerMenu) { ClosePlayerMenus(); return; }
+        SchedulePictureClick();
+    }
+    private void Picture_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (IsPlayerControl(e.OriginalSource as DependencyObject)) return;
+        e.Handled = true; pictureClickTimer.Stop(); clickPage = null; clickIdentity = null;
+        ToggleFullscreen();
     }
     private void SchedulePictureClick()
     {
-        InitializePlayerInput();
-        pictureClickTimer.Stop();
+        InitializePlayerInput(); pictureClickTimer.Stop();
         clickPage = boundPage; clickIdentity = boundPage?.MediaIdentity;
         pictureClickTimer.Start(); ShowPlayerControls();
     }
-    private async void Player_KeyDown(object sender, KeyEventArgs e)
+    private async void Player_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Handled || Keyboard.Modifiers != ModifierKeys.None ||
-            boundPage is not { } page || !PlayerOverlay.IsVisible) return;
-        if (e.Key == Key.Escape && playerWindow is { } window)
+        if (!e.Handled)
+            e.Handled = await HandlePlayerKeyAsync(e.Key, e.KeyStatus.WasKeyDown,
+                MeowFilm.Desktop.DesktopVisual.Modifiers, e.OriginalSource as DependencyObject);
+    }
+    internal async Task<bool> HandlePlayerKeyAsync(VirtualKey key, bool repeat,
+        VirtualKeyModifiers modifiers, DependencyObject? source)
+    {
+        if (modifiers != VirtualKeyModifiers.None || boundPage is not { } page) return false;
+        if (key == VirtualKey.Escape && playerWindow is { } window)
         {
-            window.Close(); e.Handled = true; return;
+            window.Close(); return true;
         }
-        keyboardControls = true;
-        ShowPlayerControls();
-        if (IsPlayerControl(e.OriginalSource as DependencyObject)) return;
-        switch (e.Key)
+        keyboardControls = true; ShowPlayerControls();
+        if (IsPlayerControl(source)) return false;
+        switch (key)
         {
-            case Key.Space:
-                if (e.IsRepeat) return;
-                e.Handled = true; await ExecuteAsync(page, page.PauseOrResumeAsync); break;
-            case Key.Left when page.CanSeek:
-            case Key.Right when page.CanSeek:
-                e.Handled = true;
-                await ExecuteAsync(page, () => page.SeekAsync(Math.Clamp(page.Position + (e.Key == Key.Left ? -5 : 5), 0, page.Duration)), "跳转失败");
-                break;
+            case VirtualKey.Space:
+                if (repeat) return false;
+                await ExecuteAsync(page, page.PauseOrResumeAsync); return true;
+            case VirtualKey.Left when page.CanSeek:
+            case VirtualKey.Right when page.CanSeek:
+                await ExecuteAsync(page, () => page.SeekAsync(Math.Clamp(page.Position + (key == VirtualKey.Left ? -5 : 5), 0, page.Duration)), "跳转失败");
+                return true;
+            default: return false;
         }
     }
     private void CancelPlayerInput()
     {
-        controlsTimer.Stop(); pictureClickTimer.Stop();
-        clickPage = null; clickIdentity = null;
-        ClosePlayerMenus();
-        CancelSeek();
-        swipeStart = null;
-        if (ShortVideoGesture.IsMouseCaptured) ShortVideoGesture.ReleaseMouseCapture();
-        ((RotateTransform)BufferSpinner.RenderTransform).BeginAnimation(RotateTransform.AngleProperty, null);
-        BufferSpinner.Visibility = Visibility.Collapsed;
-        wasBuffering = false;
+        controlsTimer.Stop(); pictureClickTimer.Stop(); clickPage = null; clickIdentity = null;
+        ClosePlayerMenus(); CancelSeek(); swipeStart = null; ShortVideoGesture.ReleasePointerCaptures();
+        BufferSpinner.IsActive = false; BufferSpinner.Visibility = Visibility.Collapsed; wasBuffering = false;
     }
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
-        bool opening = SettingsPanel.Visibility != Visibility.Visible;
-        ClosePlayerMenus();
+        bool opening = SettingsPanel.Visibility != Visibility.Visible; ClosePlayerMenus();
         SettingsPanel.Visibility = opening ? Visibility.Visible : Visibility.Collapsed;
-        AutomationProperties.SetItemStatus(SettingsButton, opening ? "已展开" : "已收起");
-        ShowPlayerControls();
+        AutomationProperties.SetItemStatus(SettingsButton, opening ? "已展开" : "已收起"); ShowPlayerControls();
     }
     private void ClosePlayerMenus()
     {
-        if (playerMenu is { } menu) { playerMenu = null; menu.IsOpen = false; }
+        if (playerMenu is { } menu) { playerMenu = null; menu.Hide(); }
         SettingsPanel.Visibility = Visibility.Collapsed;
         AutomationProperties.SetItemStatus(SettingsButton, "已收起");
     }
-    private void Menu_MouseDown(object sender, MouseButtonEventArgs e)
+    private void Volume_Enter(object sender, PointerRoutedEventArgs e)
     {
-        if (e.OriginalSource is not DependencyObject source ||
-            ReferenceEquals(source, SettingsButton) || SettingsButton.IsAncestorOf(source) ||
-            ReferenceEquals(source, SettingsPanel) || SettingsPanel.IsAncestorOf(source)) return;
-        if (HasPlayerMenu) ClosePlayerMenus();
+        VolumeSlider.Visibility = Visibility.Visible; UpdateControlLayout();
     }
-    private void Volume_Enter(object sender, MouseEventArgs e)
+    private void Volume_Leave(object sender, PointerRoutedEventArgs e)
     {
-        VolumeSlider.Visibility = Visibility.Visible;
-        UpdateControlLayout();
-    }
-    private void Volume_Leave(object sender, MouseEventArgs e)
-    {
-        if (VolumeSlider.IsKeyboardFocusWithin) return;
-        VolumeSlider.Visibility = Visibility.Collapsed;
+        if (!MeowFilm.Desktop.DesktopVisual.ContainsFocus(VolumeSlider))
+            VolumeSlider.Visibility = Visibility.Collapsed;
         UpdateControlLayout();
     }
     private void Mute_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
         if (boundPage is not { HasOutput: true } page) return;
-        if (page.Volume > 0) { audibleVolume = page.Volume; page.Volume = 0; }
-        else page.Volume = audibleVolume;
+        if (page.Volume > 0) { audibleVolume = page.Volume; page.Volume = 0; } else page.Volume = audibleVolume;
         ShowPlayerControls();
     }
     private void UpdatePlayerWindowState()
@@ -238,38 +165,42 @@ public partial class FilmPlaybackView
         bool full = playerWindow is not null && !pip;
         string fullscreenName = full ? "退出全屏" : "全屏";
         string pipName = playerWindow is not null && pip ? "退出画中画" : "画中画";
-        FullscreenButton.ToolTip = fullscreenName; AutomationProperties.SetName(FullscreenButton, fullscreenName);
-        PipButton.ToolTip = pipName; AutomationProperties.SetName(PipButton, pipName);
+        ToolTipService.SetToolTip(FullscreenButton, fullscreenName); AutomationProperties.SetName(FullscreenButton, fullscreenName);
+        ToolTipService.SetToolTip(PipButton, pipName); AutomationProperties.SetName(PipButton, pipName);
         AutomationProperties.SetItemStatus(PipButton, pip ? "已开启" : "已关闭");
-        ((System.Windows.Shapes.Path)FullscreenButton.Content).Data = Geometry.Parse(full
-            ? "M4,8 H8 V4 H10 V10 H4 Z M14,4 H16 V8 H20 V10 H14 Z M4,14 H10 V20 H8 V16 H4 Z M14,14 H20 V16 H16 V20 H14 Z"
-            : "M4,4 H10 V6 H6 V10 H4 Z M14,4 H20 V10 H18 V6 H14 Z M4,14 H6 V18 H10 V20 H4 Z M18,14 H20 V20 H14 V18 H18 Z");
     }
     private void UpdatePlayerState()
     {
         if (boundPage is not { } page) return;
         if (wasPlaying != page.IsPlaying || wasBusy != page.PlayerBusy || wasBuffering != page.PlayerBuffering || !page.IsPlaying)
         {
-            wasPlaying = page.IsPlaying; wasBusy = page.PlayerBusy;
-            ShowPlayerControls();
+            wasPlaying = page.IsPlaying; wasBusy = page.PlayerBusy; ShowPlayerControls();
         }
-        if (wasBuffering != page.PlayerBuffering)
-        {
-            wasBuffering = page.PlayerBuffering;
-            BufferSpinner.Visibility = wasBuffering ? Visibility.Visible : Visibility.Collapsed;
-            ((RotateTransform)BufferSpinner.RenderTransform).BeginAnimation(RotateTransform.AngleProperty,
-                wasBuffering && SystemParameters.ClientAreaAnimation
-                    ? new DoubleAnimation(0, 360, TimeSpan.FromMilliseconds(900)) { RepeatBehavior = RepeatBehavior.Forever }
-                    : null);
-        }
+        wasBuffering = page.PlayerBuffering;
+        BufferSpinner.Visibility = wasBuffering ? Visibility.Visible : Visibility.Collapsed;
+        BufferSpinner.IsActive = wasBuffering;
         if (page.Volume > 0) audibleVolume = page.Volume;
         string muteLabel = page.Volume == 0 ? "取消静音" : "静音";
-        AutomationProperties.SetName(MuteButton, muteLabel); MuteButton.ToolTip = muteLabel;
-        VolumeIcon.Data = Geometry.Parse(page.Volume == 0
-            ? "M3,10 V14 H7 L12,19 V5 L7,10 Z M15,8 L17.5,10.5 L20,8 L21,9 L18.5,11.5 L21,14 L20,15 L17.5,12.5 L15,15 L14,14 L16.5,11.5 L14,9 Z"
-            : "M3,10 V14 H7 L12,19 V5 L7,10 Z M14,8 A4.5,4.5 0 0 1 14,16 L14,14 A2.5,2.5 0 0 0 14,10 Z");
-        if (seekingPage is null) PlayerTime.Text = page.ProgressLabel;
-        UpdateControlLayout(); UpdateOverlayClip();
+        AutomationProperties.SetName(MuteButton, muteLabel); ToolTipService.SetToolTip(MuteButton, muteLabel);
+        if (playingGlyph != page.IsPlaying)
+        {
+            playingGlyph = page.IsPlaying;
+            PlayIcon.Data = FilmVisuals.Geometry(page.IsPlaying ? "M6,5 H10 V19 H6 Z M14,5 H18 V19 H14 Z" : "M8,5 V19 L19,12 Z");
+        }
+        if (seekingPage is null)
+        {
+            PlayerTime.Text = page.ProgressLabel;
+            SeekSlider.Maximum = Math.Max(0, page.Duration); SeekSlider.Value = page.Position;
+        }
+        RetryMediaRecoveryButton.Visibility = page.NoOutput && page.CanRetryMedia ? Visibility.Visible : Visibility.Collapsed;
+        OverviewToggle.Content = page.OverviewExpanded ? "收起简介" : "简介";
+        AutomationProperties.SetName(OverviewToggle, page.OverviewExpanded ? "收起简介" : "展开简介");
+        AutomationProperties.SetItemStatus(OverviewToggle, page.OverviewExpanded ? "已展开" : "已收起");
+        OverviewToggle.Visibility = page.Overview.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        FavoriteLabel.Text = page.IsFavorite ? "已收藏" : "收藏";
+        FavoriteIcon.Text = page.IsFavorite ? "\uEB52" : "\uEB51";
+        AutomationProperties.SetName(FavoriteButton, (page.IsFavorite ? "取消收藏 " : "收藏 ") + page.Title);
+        UpdateControlLayout();
     }
     private void ControlBar_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateControlLayout();
     private void UpdateControlLayout()
@@ -277,64 +208,21 @@ public partial class FilmPlaybackView
         if (boundPage is not { } page || ControlsRow.ActualWidth <= 0) return;
         var key = (ControlsRow.ActualWidth, page.PlayerPanLabel, page.PlayerQualityLabel,
             page.PlayerPanOptions.Count, page.PlayerQualityOptions.Count, page.ShowPlayerSwitchActions,
-            VolumeSlider.Visibility == Visibility.Visible, PlayerTime.Text, SystemParameters.HighContrast);
+            VolumeSlider.Visibility == Visibility.Visible, PlayerTime.Text);
         if (controlLayout == key) return;
         controlLayout = key;
-        controlsScale.ScaleX = controlsScale.ScaleY = 1;
-        PanButton.GetBindingExpression(ContentControl.ContentProperty)?.UpdateTarget();
-        QualityButton.GetBindingExpression(ContentControl.ContentProperty)?.UpdateTarget();
-        PanButton.Visibility = key.Item4 > 0 ? Visibility.Visible : Visibility.Collapsed;
-        QualityButton.Visibility = key.Item5 > 0 ? Visibility.Visible : Visibility.Collapsed;
-        SwitchButton.Visibility = BlockButton.Visibility = key.Item6 ? Visibility.Visible : Visibility.Collapsed;
+        PanButton.Visibility = page.PlayerPanOptions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        QualityButton.Visibility = page.PlayerQualityOptions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        SwitchButton.Visibility = BlockButton.Visibility = page.ShowPlayerSwitchActions ? Visibility.Visible : Visibility.Collapsed;
         PipButton.Visibility = Visibility.Visible;
-        var size = new Size(double.PositiveInfinity, double.PositiveInfinity);
-        LeftPill.Child.InvalidateMeasure();
-        LeftPill.InvalidateMeasure();
-        LeftPill.Measure(size);
-        double required = LeftPill.DesiredSize.Width + RightPill.Padding.Left + RightPill.Padding.Right +
-            RightPill.BorderThickness.Left + RightPill.BorderThickness.Right + 12;
-        // Child visibility does not immediately invalidate every ancestor's cached
-        // DesiredSize. Measure each button once, then subtract its full width and gap.
-        foreach (FrameworkElement button in ((Panel)RightPill.Child).Children)
-        {
-            button.Measure(size);
-            required += button.DesiredSize.Width;
-        }
+        LeftPill.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        RightPill.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
+        double required = LeftPill.DesiredSize.Width + RightPill.DesiredSize.Width + 12;
         foreach (var button in new[] { PanButton, QualityButton, SwitchButton, BlockButton, PipButton })
         {
-            if (required <= ControlsRow.ActualWidth + .5) break;
-            required -= button.DesiredSize.Width;
-            button.Visibility = Visibility.Collapsed;
+            if (required <= ControlsRow.ActualWidth) break;
+            required -= button.DesiredSize.Width; button.Visibility = Visibility.Collapsed;
         }
-        // A minimum-size PiP can be narrower than the two essential capsules.
-        // Keep their gap and contents instead of drawing one over the other.
-        controlsScale.ScaleX = controlsScale.ScaleY =
-            Math.Clamp((ControlsRow.ActualWidth - 12) / (required - 12), 0, 1);
-    }
-    private void Page_ScrollChanged(object sender, ScrollChangedEventArgs e) => UpdateOverlayClip();
-    private void UpdateOverlayClip()
-    {
-        if (!PlayerOverlay.IsLoaded) return;
-        SettingsPanel.MaxHeight = Math.Max(0, PlayerOverlay.ActualHeight -
-            SettingsPanel.Margin.Top - SettingsPanel.Margin.Bottom);
-        var visible = new Rect(0, 0, PlayerOverlay.ActualWidth, PlayerOverlay.ActualHeight);
-        // A native foreground window is not a child of the ScrollViewer: explicitly carry its viewport clip.
-        if (playerWindow is null)
-        {
-            // Loaded notifications can still be queued while the surface is being
-            // reparented. PointToScreen requires a live presentation source.
-            var source = PresentationSource.FromVisual(VideoPicture);
-            if (source?.CompositionTarget is not { } target || PresentationSource.FromVisual(PageScroll) is null) return;
-            var viewport = PageScroll.PointToScreen(new Point(0, 0));
-            var origin = VideoPicture.PointToScreen(new Point(0, 0));
-            var transform = target.TransformFromDevice;
-            var offset = transform.Transform(viewport) - transform.Transform(origin);
-            visible.Intersect(new Rect(offset.X, offset.Y, PageScroll.ActualWidth, PageScroll.ActualHeight));
-        }
-        if (overlayViewport == visible) return;
-        overlayViewport = visible;
-        var clip = visible.IsEmpty ? Geometry.Empty : new RectangleGeometry(visible);
-        clip.Freeze();
-        PlayerOverlay.Clip = clip;
+        Grid.SetRow(RightPill, required > ControlsRow.ActualWidth ? 1 : 0);
     }
 }

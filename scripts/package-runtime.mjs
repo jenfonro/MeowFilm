@@ -6,10 +6,11 @@ import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, matchesGlob, parse, posix, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
+import { isBuiltin } from 'node:module';
 import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols, IOS_CAT_WEB_VALUES } from './quickjs/ios-target.mjs';
-import { packageNameFromSpecifier, sourceReferences, publicPackageImport, SHARED_RUNTIME_BUILTINS,
+import { packageNameFromSpecifier, sourceReferences, publicPackageImport,
   workspaceMap } from './module-policy.mjs';
-import { discoverRuntimeSource } from './runtime-source.mjs';
+import { discoverRuntimeSource, runtimeOutputPath } from './runtime-source.mjs';
 import { discoverWorkspaces } from './verify-dependency-lock.mjs';
 import { iosTargetPolicy, lockedNodeHeaders, nativeSourceInputs } from './quickjs/native-inputs.mjs';
 import { sqliteBuildInputs } from './quickjs/sqlite-inputs.mjs';
@@ -43,6 +44,7 @@ const OMIT_DIRECTORIES = new Set([
 ]);
 const NATIVE_FILE = /(?:\.(?:node|dll|dylib|so(?:\.\d+)*|exe|a|o|wasm|framework|xcframework)|^binding\.gyp)$/i;
 const LEGAL_FILE = /^(?:\.?licen[cs]e[sd]?|notice|copying|copyright|authors|third[-_]?party|sources)(?:[._-]|$)/i;
+const DOCUMENTATION_FILE = /^(?:readme|changelog|history)(?:[._-]|$)/i;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -603,23 +605,37 @@ function buildGraph(root, product, target, runtimeSource) {
   const workspaces = discoverWorkspaces(root, manifest);
   const packages = workspaceMap(root, workspaces);
   const appRoots = new Set(), publicFiles = new Map();
+  const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
   function recordPublicImport(exported) {
     if (!publicFiles.has(exported.name)) publicFiles.set(exported.name, new Set());
     publicFiles.get(exported.name).add(exported.target.slice(2));
   }
-  for (const file of runtimeSource.files) {
-    const location = `${SHARED_SOURCE}/${file}`;
-    const references = sourceReferences(readFileSync(sourcePath(root, location), 'utf8'));
-    check(references.unresolvedImports.length === 0, 'SHARED_IMPORT',
+  const sourceFiles = runtimeSource.files.map(file => `${SHARED_SOURCE}/${file}`);
+  const platform = runtimeSource.platform?.source.split('/')[1];
+  const platformFiles = runtimeSource.platform?.files.map(file => `${runtimeSource.platform.source}/${file}`) ?? [];
+  const runtimeFiles = new Set([...sourceFiles, ...platformFiles]);
+  for (const location of runtimeFiles) {
+    const code = platformFiles.includes(location) ? 'PLATFORM_IMPORT' : 'SHARED_IMPORT';
+    const bytes = readFileSync(sourcePath(root, location));
+    addInput(inputs, { path: location, sha256: sha256(bytes) });
+    const references = sourceReferences(bytes.toString('utf8'));
+    check(references.unresolvedImports.length === 0, code,
       `${location}: module specifiers must be statically resolvable`);
     for (const { specifier, kind } of references.imports) {
       if (specifier.startsWith('.')) {
-        const target = posix.normalize(posix.join(posix.dirname(file), specifier));
-        check(target !== '..' && !target.startsWith('../') && !target.startsWith('/'),
-          'SHARED_IMPORT', `${location}: relative import escapes the shared runtime closure: ${specifier}`);
-        check(runtimeSource.files.includes(target), 'MISSING_SOURCE',
-          `${location}: missing shared runtime import: ${specifier}`);
-      } else if (!SHARED_RUNTIME_BUILTINS.has(specifier)) {
+        const target = posix.normalize(posix.join(posix.dirname(location), specifier));
+        const nativeHelper = code === 'PLATFORM_IMPORT' && platform === 'ios'
+          && target === 'packages/script-host/src/native-engine.js';
+        check(code === 'SHARED_IMPORT' ? target.startsWith(`${SHARED_SOURCE}/`)
+          : runtimeOutputPath(target, platform), code,
+        `${location}: relative import escapes the runtime closure: ${specifier}`);
+        check(runtimeFiles.has(target) || nativeHelper, 'MISSING_SOURCE',
+          `${location}: missing runtime import: ${specifier}`);
+        if (nativeHelper) {
+          sourcePath(root, target);
+          appRoots.add('@meowfilm/script-host');
+        }
+      } else if (!isBuiltin(specifier)) {
         const name = packageNameFromSpecifier(specifier);
         const workspace = name && packages.get(name);
         if (workspace) fileDeclarations(root, workspace.manifest, workspace.location, true);
@@ -628,7 +644,7 @@ function buildGraph(root, product, target, runtimeSource) {
           const link = lock.packages[`node_modules/${name}`];
           if (link?.link) sourcePath(root, `${link.resolved}/package.json`);
         }
-        check(exported, 'SHARED_IMPORT',
+        check(exported, code,
           `${location}: import is not a public workspace package: ${specifier}`);
         check(publicPackageImport(root, packages, specifier, { kind }), 'MISSING_PUBLIC_FILE',
           `${location}: public workspace target is missing: ${specifier}`);
@@ -641,7 +657,6 @@ function buildGraph(root, product, target, runtimeSource) {
     .filter(([, value]) => value.link === true)
     .map(([location, value]) => [value.resolved, location]));
   const nodes = new Map(), edges = [], omitted = [];
-  const inputs = [{ path: 'package.json', sha256: rootJSON.hash }, { path: 'package-lock.json', sha256: lockJSON.hash }];
   function outputPath(location) {
     for (const [source, dest] of workspacePaths) {
       if (location === source || location.startsWith(`${source}/node_modules/`)) return dest + location.slice(source.length);
@@ -731,8 +746,6 @@ function buildGraph(root, product, target, runtimeSource) {
     checkManifest(pkg, locked, location);
     check(!pkg.gypfile || (location === 'packages/script-host' && pkg.gypfile === true),
       'NATIVE_PAYLOAD', `${location}: native build metadata is not allowed`);
-    check(pkg.name !== 'jsdom' || pkg.version === '24.1.3',
-      'PRODUCT_CLOSURE', 'The token SDK requires the reviewed Node 18 compatible jsdom');
     if (pkg.name.startsWith('@meowfilm/')) {
       check(workspace, 'PRODUCT_CLOSURE', `${location}: workspace is not declared by the root manifest`);
     }
@@ -757,9 +770,6 @@ function buildGraph(root, product, target, runtimeSource) {
       ['peer', dependencyMap(pkg, 'peerDependencies', location)],
     ]) {
       for (const name of Object.keys(entries).sort()) {
-        check(name !== 'jsdom' || (pkg.name === '@meowfilm/netease-token' &&
-          kind === 'dependency' && entries[name] === '24.1.3'),
-        'PRODUCT_CLOSURE', 'Only the token owner may depend on the reviewed jsdom');
         const optionalEdge = kind === 'optionalDependency' || (kind === 'peer' && pkg.peerDependenciesMeta?.[name]?.optional === true);
         let found;
         for (const candidate of candidates(location, name)) {
@@ -850,9 +860,11 @@ function includedFile(rel, node) {
  * Synchronous file operations keep each local validation/copy step contiguous.
  */
 export async function packageRuntime({ root = fileURLToPath(new URL('../', import.meta.url)), product, output,
-  profile = 'common-native', target } = {}) {
+  profile = 'common-native', target, platform } = {}) {
   check(Object.hasOwn(PRODUCTS, product), 'INVALID_PRODUCT', 'Only the App wire identity aggregate is supported');
   check(profile === 'common-native', 'INVALID_PROFILE', 'Only common-native is supported');
+  check(platform === undefined || ['ios', 'windows'].includes(platform),
+    'INVALID_PLATFORM', 'Unknown runtime platform');
   check(typeof root === 'string' && isAbsolute(root) && !/^(?:\\\\|\/\/)/.test(root),
     'INVALID_ROOT', 'Root must be a local absolute directory');
   root = realpathSync(root);
@@ -901,7 +913,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
     reserve(rel, false);
     return join(output, rel);
   }
-  function copy(location, rel, expectedHash, nativeArtifact) {
+  function copy(location, rel, expectedHash, nativeArtifact, documentation = false) {
     const file = sourcePath(root, location);
     check(!NATIVE_FILE.test(posix.basename(location))
       || (location === NATIVE_ARTIFACT && nativeArtifact?.path === location),
@@ -930,7 +942,8 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       'SOURCE_CHANGED', `Source changed during packaging: ${location}`);
       check(!nativeArtifact || (bytes === nativeArtifact.bytes && digest === nativeArtifact.sha256),
         'NATIVE_HASH_MISMATCH', `Native artifact differs from its build receipt: ${location}`);
-      files.push({ path: rel, bytes, sha256: digest });
+      files.push({ path: rel, bytes, sha256: digest,
+        ...(documentation ? { role: 'documentation' } : {}) });
       addInput(manifest.inputs, { path: location, sha256: digest });
       delete manifest.incompleteFile;
     } finally {
@@ -956,8 +969,10 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
           || (item.name.startsWith('.') && !LEGAL_FILE.test(item.name))) continue;
         copyPackage(node, child);
       } else if (includedFile(child, node)) {
+        const documentation = !node.required.has(child) && !/\.(?:[cm]?js|json)$/i.test(child)
+          && (LEGAL_FILE.test(posix.basename(child)) || DOCUMENTATION_FILE.test(posix.basename(child)));
         copy(posix.join(node.location, child), posix.join(node.path, child),
-          child === 'package.json' ? node.manifestHash : undefined);
+          child === 'package.json' ? node.manifestHash : undefined, undefined, documentation);
       }
     }
   }
@@ -971,7 +986,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
   try {
     manifestFD = openSync(join(output, MANIFEST), 'wx', 0o644);
     saveManifest();
-    runtimeSource = discoverRuntimeSource(root);
+    runtimeSource = discoverRuntimeSource(root, platform);
     const graph = buildGraph(root, product, target, runtimeSource);
     manifest.inputs = graph.inputs;
     manifest.omittedOptionalDependencies = graph.omitted;
@@ -1003,7 +1018,7 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
       };
     });
     copySharedRuntime();
-    for (const name of MUSIC_LICENSES) copy(`LICENSES/${name}`, `licenses/${name}`);
+    for (const name of MUSIC_LICENSES) copy(`LICENSES/${name}`, `licenses/${name}`, undefined, undefined, true);
     for (const node of graph.nodes) {
       copyPackage(node);
       if (node.nativeBuild) {
@@ -1014,11 +1029,12 @@ export async function packageRuntime({ root = fileURLToPath(new URL('../', impor
         copy(receipt.sdk.path, `${node.path}/build/Release/source-sdk.js`, receipt.sdk.sha256);
         if (ios) {
           copy(receipt.catWebValues.path, `${node.path}/build/Release/cat-web-values.cjs`, receipt.catWebValues.sha256);
-          copy(receipt.catWebValues.license.path, 'licenses/undici-LICENSE.txt', receipt.catWebValues.license.sha256);
+          copy(receipt.catWebValues.license.path, 'licenses/undici-LICENSE.txt',
+            receipt.catWebValues.license.sha256, undefined, true);
         }
         for (const source of Object.values(policy.sources)) {
           for (const license of [source.license, ...(source.unicodeLicense ? [source.unicodeLicense] : [])]) {
-            copy(license.path, `licenses/${posix.basename(license.path)}`, license.sha256);
+            copy(license.path, `licenses/${posix.basename(license.path)}`, license.sha256, undefined, true);
           }
         }
       }

@@ -1,12 +1,17 @@
+using MeowFilm.Desktop;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -52,12 +57,11 @@ public static partial class MusicUiTests
             var window = SearchPlaylistWindow(f.Module.View, 1042, 800);
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
-                var row = Visuals(f.Module.View).OfType<FrameworkElement>().First(e => e.IsVisible &&
-                    ReferenceEquals(e.DataContext, cards[1]) && e.ContextMenu is not null);
-                RaiseSongMenu(row);
-                var play = (MenuItem)row.ContextMenu.Items[0];
-                play.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                var row = Visuals(f.Module.View).OfType<MusicCatalogCardView>().First(e => DesktopVisual.IsVisible(e) &&
+                    ReferenceEquals(e.DataContext, cards[1]));
+                var menu = row.ShowMenu(row, cards[1])!;
+                MusicTestUi.Invoke(menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "播放"));
                 await SearchUntil(() => !f.Module.Busy && f.Module.HasCurrent);
                 var queue = await f.Call("music.queue.get", new { limit = 100 });
                 var entries = queue.GetProperty("entries").EnumerateArray().ToArray();
@@ -79,23 +83,27 @@ public static partial class MusicUiTests
             var window = SearchPlaylistWindow(f.Module.View, 900, 700);
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
-                var grid = (DataGrid)f.Module.View.FindName("SearchSongsGrid");
-                var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
+                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                var page = (MusicView)f.Module.View;
+                var grid = (ListView)page.FindName("SearchSongsGrid");
+                var row = (ListViewItem)grid.ContainerFromIndex(0);
                 var more = Visuals(row).OfType<Button>().Single(b => AutomationProperties.GetName(b) == "更多");
-                SimulateFocus(row, UIElement.IsKeyboardFocusWithinProperty, true); row.UpdateLayout();
+                more.Focus(FocusState.Keyboard); await Drain(); row.UpdateLayout();
                 Click(more);
+                var menu = (MenuFlyout)typeof(MusicView).GetField("songMenu",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(page)!;
                 try
                 {
-                    await AssertOpenedSongMenuStyles(grid.ContextMenu, more);
-                    True(grid.ContextMenu.Items.OfType<MenuItem>().Single(i => i.Header as string == "添加到歌单").Items.Count > 0,
+                    await AssertOpenedSongMenuStyles(menu, more);
+                    True(menu.Items.OfType<MenuFlyoutSubItem>().Single(i => i.Text == "添加到歌单").Items.Count > 0,
                         "actual destination playlist children are covered");
                 }
-                finally { grid.ContextMenu.IsOpen = false; }
-                f.Module.SelectedSong = f.Module.Songs[0]; RaiseSongMenu(grid); grid.ContextMenu.IsOpen = true;
-                try { await AssertOpenedSongMenuStyles(grid.ContextMenu, grid); }
-                finally { grid.ContextMenu.IsOpen = false; }
-                True(!grid.ContextMenu.Items.OfType<MenuItem>().Any(i => i.Header as string == "移除"),
+                finally { menu.Hide(); }
+                var body = Visuals(row).OfType<Grid>().First(panel => panel.DataContext is SongRow);
+                menu = page.OpenSongMenu(body)!;
+                try { await AssertOpenedSongMenuStyles(menu, body); }
+                finally { menu.Hide(); }
+                True(!menu.Items.OfType<MenuFlyoutItem>().Any(i => i.Text == "移除"),
                     "search results have no collection membership to remove");
             }
             finally { window.Content = null; window.Close(); }
@@ -115,10 +123,10 @@ public static partial class MusicUiTests
                 var window = SearchPlaylistWindow(f.Module.View, 1042, 420);
                 try
                 {
-                    window.Show(); window.UpdateLayout(); await Drain();
-                    var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
+                    window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                    var grid = (ListView)f.Module.View.FindName("SongsGrid");
                     var scroll = Visuals(grid).OfType<ScrollViewer>().First();
-                    scroll.ScrollToVerticalOffset(10); await Drain();
+                    scroll.ChangeView(null, 10, null, true); await Drain();
                     double offset = scroll.VerticalOffset;
                     True(offset > 0, "local location has a non-top scroll anchor");
                     string local = f.Module.CaptureNavigationLocation();
@@ -134,14 +142,14 @@ public static partial class MusicUiTests
                     int reads = f.Http.SearchRequests;
                     for (int round = 0; round < 2; round++)
                     {
-                        await f.Module.RestoreNavigationAsync(local, default); window.UpdateLayout(); await Drain();
+                        await f.Module.RestoreNavigationAsync(local, default); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                         True(f.Module.IsSongList && !f.Module.IsSearchPage, "local history restores local library search");
                         Equal("101–200 / 210", f.Module.PageText);
                         Equal(selected, f.Module.SelectedSong?.SelectionKey);
                         True(Math.Abs(offset - scroll.VerticalOffset) < 1, "local history restores saved scroll");
                         Equal(local, f.Module.CaptureNavigationLocation());
                         Equal(reads, f.Http.SearchRequests);
-                        await f.Module.RestoreNavigationAsync(online, default); window.UpdateLayout(); await Drain();
+                        await f.Module.RestoreNavigationAsync(online, default); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                         True(f.Module.IsSearchSongs, "online history restores the retained selected tab");
                         True(ReferenceEquals(source, f.Module.Songs) && ReferenceEquals(song, f.Module.Songs[0]),
                             "online source and row survive local search restoration");
@@ -152,11 +160,11 @@ public static partial class MusicUiTests
                 finally { window.Content = null; window.Close(); }
             }
         });
-        yield return Case("restored search locations reject empty oversized and control queries", async () =>
+        yield return Case("restored search locations reject empty and control queries", async () =>
         {
             await using var f = await SearchScene.Create();
             foreach (string prefix in new[] { "search-local/", "catalog-search/" })
-            foreach (string query in new[] { "", new string('x', 201), "a\nb" })
+            foreach (string query in new[] { "", "a\nb" })
             {
                 bool rejected = false;
                 try { await f.Module.RestoreNavigationAsync(prefix + Uri.EscapeDataString(query), default); }
@@ -174,21 +182,21 @@ public static partial class MusicUiTests
             {
                 window.Show(); await f.Search("骨架");
                 await SearchUntil(() => f.Http.SearchRequests == 2 && f.Module.CatalogSections.Count == 2);
-                window.UpdateLayout(); await Drain();
+                DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 var catalog = (MusicCatalogView)f.Module.View.FindName("CatalogView");
                 var overview = (ScrollViewer)catalog.FindName("SearchOverviewScroll");
-                var visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => s.IsVisible).ToArray();
+                var visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => DesktopVisual.IsVisible(s)).ToArray();
                 True(visible.Length > 0, "empty overview has section skeletons");
                 True(visible.All(skeleton => Visuals(overview).Contains(skeleton)), "overview has no global skeleton overlay");
-                await f.Module.OpenSearchTabAsync("playlists"); window.UpdateLayout(); await Drain();
-                True(Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => s.IsVisible), "playlist page has card skeletons");
-                await f.Module.OpenSearchTabAsync("songs"); window.UpdateLayout(); await Drain();
-                visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => s.IsVisible).ToArray();
+                await f.Module.OpenSearchTabAsync("playlists"); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                True(Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => DesktopVisual.IsVisible(s)), "playlist page has card skeletons");
+                await f.Module.OpenSearchTabAsync("songs"); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => DesktopVisual.IsVisible(s)).ToArray();
                 True(visible.Length > 0 && visible.All(s => s.Height == 34), "song page only shows row skeletons");
                 f.Http.Release.TrySetResult();
                 await SearchUntil(() => !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
-                window.UpdateLayout(); await Drain();
-                True(!Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => s.IsVisible), "settled results remove all skeletons");
+                DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                True(!Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => DesktopVisual.IsVisible(s)), "settled results remove all skeletons");
             }
             finally { f.Http.Release.TrySetResult(); window.Content = null; window.Close(); }
         });
@@ -533,18 +541,17 @@ public static partial class MusicUiTests
                 new { id = forwarder.SearchIds["songs"] })).Clone();
             await module.OpenSearchTabAsync("songs");
             var view = (MusicView)module.View;
-            var window = new Window { Content = view, Width = 1042, Height = 700,
-                Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false };
+            var window = DesktopTestUi.CreateWindow(view, 1042, 700);
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
-                var grid = (DataGrid)view.FindName("SearchSongsGrid");
+                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                var grid = (ListView)view.FindName("SearchSongsGrid");
                 var scroll = Visuals(grid).OfType<ScrollViewer>()
-                    .Single(viewScroll => viewScroll.IsVisible && viewScroll.ScrollableHeight > 0);
+                    .Single(viewScroll => DesktopVisual.IsVisible(viewScroll) && viewScroll.ScrollableHeight > 0);
                 double target = Math.Min(scroll.ScrollableHeight, scroll.ViewportHeight * 1.5);
-                scroll.ScrollToVerticalOffset(target); await Drain(); window.UpdateLayout();
+                scroll.ChangeView(null, target, null, true); await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
                 module.SelectedSong = module.Songs[15];
-                await Drain(); window.UpdateLayout();
+                await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
                 double offset = scroll.VerticalOffset;
                 True(offset > 0, "the song table starts at a real non-top offset");
                 string selected = module.Songs[15].SelectionKey;
@@ -562,7 +569,7 @@ public static partial class MusicUiTests
                 Equal(selected, module.SelectedSong.SelectionKey);
                 True(module.Songs.Any(song => ReferenceEquals(song, module.SelectedSong)),
                     "the selected row is projected into the current collection");
-                window.UpdateLayout(); await Drain();
+                DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 True(Math.Abs(scroll.VerticalOffset - offset) < 1,
                     "the reset restores the actual song-table offset");
                 True(atReset.HasValue && Math.Abs(atReset.Value - offset) < 1,
@@ -730,7 +737,7 @@ public static partial class MusicUiTests
                 new { keyword = "已确认", kind = "songs", platforms = new[] { "wy" } })).GetProperty("ok").GetBoolean(),
                 "start succeeds after the authoritative read");
         });
-        yield return Case("native search transient failure is retried by the next round and real WPF search controls", async () =>
+        yield return Case("native search transient failure is retried by the next round and real native search controls", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], [], automaticPlaylists: false);
@@ -748,9 +755,9 @@ public static partial class MusicUiTests
             True(buttons.Contains("综合") && buttons.Contains("单曲") && buttons.Contains("歌单") &&
                 buttons.Count(text => text == "查看更多") == 2, "real result tabs and section actions");
             True(!buttons.Contains("更多结果") && !buttons.Contains("取消搜索"), "retired utility controls");
-            True(!Visuals(f.Module.View).OfType<DataGrid>().Any(), "overview does not mount the song table");
+            True(!Visuals(f.Module.View).OfType<ListView>().Any(), "overview does not mount the song table");
             var catalog = Visuals(f.Module.View).OfType<MusicCatalogView>().Single();
-            var moreStyle = (Style)catalog.FindResource("Catalog.SectionMore");
+            var moreStyle = (Style)DesktopVisual.Resource(catalog, "Catalog.SectionMore");
             var moreButtons = Visuals(catalog).OfType<Button>()
                 .Where(button => button.Content as string == "查看更多").ToArray();
             True(moreButtons.All(button => ReferenceEquals(button.Style, moreStyle) &&
@@ -764,13 +771,13 @@ public static partial class MusicUiTests
                 "settled section spinners are hidden");
             await f.Module.OpenSearchTabAsync("songs"); await Drain();
             f.Module.View.UpdateLayout();
-            var grid = Visuals(f.Module.View).OfType<DataGrid>().Single();
+            var grid = Visuals(f.Module.View).OfType<ListView>().Single();
             True(ReferenceEquals(grid, f.Module.View.FindName("SearchSongsGrid")) &&
                 !Visuals(f.Module.View).OfType<MusicCatalogView>().Any(),
                 "song tab restores the retained search song table");
             await f.Module.OpenSearchTabAsync("playlists"); await Drain();
             f.Module.View.UpdateLayout();
-            True(!Visuals(f.Module.View).OfType<DataGrid>().Any() &&
+            True(!Visuals(f.Module.View).OfType<ListView>().Any() &&
                 ReferenceEquals(catalog, Visuals(f.Module.View).OfType<MusicCatalogView>().Single()),
                 "playlist tab uses the card surface");
         });

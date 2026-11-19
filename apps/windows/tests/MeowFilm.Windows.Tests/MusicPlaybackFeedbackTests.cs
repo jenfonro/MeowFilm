@@ -32,6 +32,19 @@ public static partial class MusicPlaybackFeedbackTests
             f.Controller.Started("wrong-entry", 0, 200); await f.Drain(); Check(f.Protocol.Starts.IsEmpty);
             f.Controller.Started("entry-1", 0, 200); await f.Drain(); Check(f.Protocol.Starts.Count == 1);
         });
+        yield return Case("opaque-entry-identity-has-no-length-quota", async () =>
+        {
+            await using var f = new Fixture(); await f.Enable("wy");
+            f.Controller.Select(Selection() with { EntryId = "" });
+            f.Controller.Started("", 0, 200); await f.Drain(); Check(f.Protocol.Starts.IsEmpty);
+            string entry = new('e', 201);
+            f.Controller.Select(Selection() with { EntryId = entry });
+            f.Controller.Started("wrong-entry", 0, 200); await f.Drain(); Check(f.Protocol.Starts.IsEmpty);
+            f.Controller.Started(entry, 0, 200); await f.Drain();
+            Check(f.Protocol.Starts.Single().EntryId == entry);
+            f.Controller.Started(entry, 0, 200); await f.Drain(); Check(f.Protocol.Starts.Count == 1);
+            f.Controller.Finish(); await f.Drain(); Check(f.Protocol.Finished.Count == 1);
+        });
         yield return Case("real-start-default-off-does-not-acquire-accounts", async () =>
         {
             await using var f = new Fixture(); f.Play();
@@ -228,6 +241,7 @@ public static partial class MusicPlaybackFeedbackTests
             {
                 var root = JsonNode.Parse(value)!.AsObject();
                 root["extra"] = JsonNode.Parse("{\"large\":900719925474099312345,\"decimal\":0.12345678901234567890123456789}");
+                root["extra"]!["text"] = new string('x', 2048);
                 var store = new MemoryStore { Data = JsonSerializer.SerializeToUtf8Bytes(root) };
                 await using var settings = new MusicFeedbackSettingsOwner(store);
                 var before = await settings.ReadAsync();
@@ -236,7 +250,8 @@ public static partial class MusicPlaybackFeedbackTests
                 Check(saved.Enabled.SequenceEqual(["wy"]) && saved.Revision == before.Revision + 1);
                 string bytes = Encoding.UTF8.GetString(store.Data!);
                 Check(bytes.Contains("900719925474099312345", StringComparison.Ordinal) &&
-                    bytes.Contains("0.12345678901234567890123456789", StringComparison.Ordinal));
+                    bytes.Contains("0.12345678901234567890123456789", StringComparison.Ordinal) &&
+                    JsonNode.Parse(bytes)!["extra"]!["text"]!.GetValue<string>() == new string('x', 2048));
                 await using var cold = new MusicFeedbackSettingsOwner(store);
                 Check((await cold.ReadAsync()).Enabled.SequenceEqual(["wy"]));
             }

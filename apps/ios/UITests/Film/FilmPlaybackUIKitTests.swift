@@ -108,7 +108,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(media.inputs.isEmpty, "Selecting a source is browsing, not media transport")
     }
 
-    func testMetadataMenusOnlyExposeConfirmedProvidersAndChangingProviderUpdatesDirectoryVisibility() async throws {
+    func testSourceAndMetadataMenusHaveIndependentSelectionsAndKeepTheSiteDirectory() async throws {
         let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
         await model.open()?.value
@@ -151,14 +151,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(metadataAlert.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         try await runnerAction { $0.alerts.buttons["确定"].tap() }
         try await waitFor { page.presentedViewController == nil && page.canPresentPageAlert }
-        await server.reply(to: "browse.metadata", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
-            browsing: FilmUIKitPlaybackFixture.browsing(),
-            metadataSources: associated))
         invoke(try menuAction("豆瓣 · 星海航线", source.menu))
         await model.waitForPendingWork()
         await settle()
         XCTAssertFalse(try hasDirectory(page))
-        await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
+        XCTAssertEqual(model.presentation?.metadataSourceID, "confirmed-tmdb")
+        XCTAssertEqual(model.aggregateSourceProvider, .douban)
+        await server.reply(to: "browse", with: FilmUIKitPlaybackFixture.snapshot(
             browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-a", files: files, original: files),
             metadataSources: associated))
         invoke(try menuAction("测试站 · 星海航线", source.menu))
@@ -166,13 +165,16 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertTrue(try hasDirectory(page))
         XCTAssertEqual(try button("film.detail.line", page.view).title(for: .normal), "未知原标签")
         let season = try button("film.detail.season", page.view)
-        let mapping = try XCTUnwrap(season.menu?.children.compactMap { $0 as? UIMenu }.first { $0.title == "分季资料" })
-        invoke(try menuAction("TMDB · 星海航线", mapping))
+        let mapping = try XCTUnwrap(season.menu?.children.compactMap { $0 as? UIMenu }.first { $0.title == "资料视图" })
+        await server.reply(to: "browse.metadata", with: FilmUIKitPlaybackFixture.snapshot(provider: .douban,
+            browsing: FilmUIKitPlaybackFixture.browsing(sourceID: "result-a", files: files, original: files),
+            metadataSources: associated))
+        invoke(try menuAction("豆瓣 · 星海航线", mapping))
         await model.waitForPendingWork()
         let commands = await server.calls().filter { $0.operation == "session.command" }
-        XCTAssertEqual(commands.map(\.action), ["browse.metadata", "browse", "browse.metadata"])
-        XCTAssertNil(commands[0].input.filmObject?["keepSource"])
-        XCTAssertEqual(commands[2].input.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(commands.map(\.action), ["browse", "browse.metadata"])
+        XCTAssertEqual(commands[1].input.filmObject?["keepSource"], .bool(true))
+        XCTAssertEqual(model.presentation?.browsing.sourceID, "result-a")
         XCTAssertTrue(media.inputs.isEmpty)
     }
 
@@ -199,7 +201,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         await settle()
         XCTAssertTrue(try XCTUnwrap(view("film.detail.episode-cards", page.view)).isHidden)
         XCTAssertTrue(model.presentation?.browsing.files.isEmpty == true)
-        XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
+        XCTAssertEqual((view("film.detail.episodes-state", page.view) as? UILabel)?.text, "加载失败")
         let error = try await presentedAlert(page, title: "错误", style: .alert)
         XCTAssertEqual(error.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         XCTAssertEqual(error.actions.map(\.title), ["确定", "重试"])
@@ -362,7 +364,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["metadata"] = .object(["name": .string("旧资料标题"), "overview": .string("保留的旧简介")])
         fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
-            "title": .string("旧资料标题"), "summary": .string("保留的旧简介"), "seasonCount": .null, "episodeCount": .null])
+            "title": .string("旧资料标题"), "summary": .string("保留的旧简介"), "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
         fields["metadataCache"] = .object([
             "status": .string("stale"), "error": .object(["code": .string("UPSTREAM_HTTP")]),
             "components": .object(["detail": .object(["status": .string("failed")])])
@@ -398,7 +400,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["metadata"] = .object(["name": .string("星海航线")])
         fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
-            "title": .string("星海航线"), "summary": .string("卡片旧简介"), "seasonCount": .null, "episodeCount": .null])
+            "title": .string("星海航线"), "summary": .string("卡片旧简介"), "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
         fields["metadataCache"] = .object(["status": .string("stale"), "components": .object([
             "detail": .object(["status": .string("failed")])
         ])])
@@ -419,7 +421,9 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         ] {
             fields["sequence"] = .number(Double(try XCTUnwrap(model.snapshot).sequence) + 1)
             fields["metadataCache"] = .object(["status": .string("stale"), "components": .object(["detail": component])])
-            fields["workInfo"] = .null
+            fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19),
+                "kind": .string("tv"), "title": .string("星海航线"), "summary": .string(""),
+                "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
             try await server.publish(.object(fields))
             await settle()
             try await waitFor {
@@ -661,7 +665,7 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(alert.message, FilmPlaybackError(code: "UPSTREAM_HTTP").localizedDescription)
         XCTAssertEqual(alert.actions.map(\.title), ["确定", "重试"])
         XCTAssertTrue(search.isHidden)
-        XCTAssertNil((view("film.detail.episodes-state", page.view) as? UILabel)?.text)
+        XCTAssertEqual((view("film.detail.episodes-state", page.view) as? UILabel)?.text, "加载失败")
         fields["entryResolution"] = .string("unmatched"); fields["stage"] = .string("idle"); fields["error"] = .null
         await server.reply(to: "browse.refresh", with: .object(fields))
         try await runnerAction { $0.alerts.buttons["重试"].tap() }
@@ -856,13 +860,16 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         var fields = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
         fields["workInfo"] = .object(["provider": .string("tmdb"), "metadataId": .number(19), "kind": .string("tv"),
             "title": .string("星海航线"), "summary": .string("第一行简介。第二行简介。第三行简介。"),
-            "seasonCount": .null, "episodeCount": .null])
+            "seasonCount": .null, "episodeCount": .null, "metadata": .object([:])])
         fields["metadata"] = .object(["name": .string("星海航线"), "overview": .string("第一行简介。第二行简介。第三行简介。"),
             "poster_path": .string(poster.absoluteString), "seasons": .array([.object([
                 "businessId": .string("fixture-season-1"), "playbackTarget": FilmUIKitPlaybackFixture.target(),
                 "id": .number(1), "season_number": .number(1), "name": .string("第一季"),
                 "poster_path": .string(seasonPoster.absoluteString),
             ])])])
+        var work = try fields.filmValue("workInfo").filmRequiredObject()
+        work["metadata"] = .object(["poster_path": .string(poster.absoluteString)])
+        fields["workInfo"] = .object(work)
         var episodes = FilmUIKitPlaybackFixture.episodes(numbers: [1, 2])
         var first = try episodes[0].filmRequiredObject()
         first["name"] = .string("启航"); first["overview"] = .string("真实分集简介")
@@ -1498,54 +1505,50 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         }
     }
 
-    func testChangingMetadataClearsOldImagesAndUsesTheNewLocalFavoriteIdentity() async throws {
-        let server = FilmUIKitPlaybackServer(), media = FilmUIKitPlaybackMedia()
+    func testBrowsingMetadataKeepsTheSameWorkElementsAndFavoriteIdentity() async throws {
+        var initial = try FilmUIKitPlaybackFixture.snapshot().filmRequiredObject()
+        var work = try initial.filmValue("workInfo").filmRequiredObject()
+        work["metadata"] = .object(["poster_path": .string("https://artwork.example.invalid/poster.png"),
+            "images": .object(["logos": .array([.object(["file_path": .string("https://artwork.example.invalid/logo.png")])])])])
+        initial["workInfo"] = .object(work)
+        let server = FilmUIKitPlaybackServer(.object(initial)), media = FilmUIKitPlaybackMedia()
         let model = makeModel(server, media)
         await model.open()?.value
         await server.awaitObservation()
         let original = FilmItem(sourceID: "tmdb", id: "19", title: "星海航线", kind: .tv,
             posterURL: URL(string: "https://artwork.example.invalid/poster.png"), businessID: "tmdb:tv:19",
             playbackTarget: .init(id: "tmdb:tv:19", kind: .tv, title: "星海航线", metadataProvider: .tmdb, metadataID: "19"))
-        let logo = URL(string: "https://artwork.example.invalid/logo.png")!
         let library = try appStorageTestFilmLibrary()
         XCTAssertTrue(try appStorageTestWait { try await library.toggle(original) })
         let data = try XCTUnwrap(UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
             UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
         }.pngData())
         let images = ArtworkImages(maximumBytes: 1_024 * 1_024) { _ in data }
-        let page = FilmDetailViewController(detail: .init(item: original, logoURL: logo, summary: "原资料"),
-            library: library, images: images, themeProvider: FilmPlaybackUIKitTheme(), model: model)
+        let page = FilmDetailViewController(detail: .init(item: original), library: library, images: images,
+            themeProvider: FilmPlaybackUIKitTheme(), model: model)
         let window = try mount(page)
         defer { unmount(page, window) }
         try await visible(page)
-        try await waitFor {
-            ["film.detail.hero", "film.detail.logo"].allSatisfy {
-                (self.view($0, page.view) as? ArtworkView)?.image != nil
-            }
-        }
-        let episodeImages = descendants(page.view).compactMap { $0 as? FilmEpisodeButton }
-            .flatMap { descendants($0).compactMap { $0 as? ArtworkView } }
-        try await waitFor { episodeImages.count == 2 && episodeImages.allSatisfy { $0.image != nil } }
+        let hero = try XCTUnwrap(view("film.detail.hero", page.view) as? ArtworkView)
+        let logo = try XCTUnwrap(view("film.detail.logo", page.view) as? ArtworkView)
+        try await waitFor { hero.image != nil && logo.image != nil }
+        let title = try XCTUnwrap(view("film.detail.title", page.view))
+        let before = page.detail
         let favorite = try button("film.detail.favorite", page.view)
-        XCTAssertEqual(favorite.configuration?.title, "已收藏")
         var changed = try FilmUIKitPlaybackFixture.snapshot(10, provider: .douban).filmRequiredObject()
-        changed["metadata"] = .null
-        var target = try XCTUnwrap(changed["target"]?.filmObject)
-        target["metadataId"] = .number(0)
-        changed["target"] = .object(target)
-        try await server.publish(.object(changed))
-        await settle()
-        XCTAssertTrue(descendants(page.view).compactMap { $0 as? ArtworkView }.filter {
-            !sequence(first: $0 as UIView, next: { $0.superview }).contains(where: \.isHidden)
-        }.allSatisfy { $0.image == nil })
-        XCTAssertEqual(favorite.configuration?.title, "收藏")
-        XCTAssertEqual(try XCTUnwrap(view("film.detail.title", page.view) as? UILabel).text, "星海航线")
+        changed["metadata"] = .object(["title": .string("浏览资料"), "poster_path": .null])
+        changed["workInfo"] = .object(work)
+        try await server.publish(.object(changed)); await settle()
+        XCTAssertEqual(page.detail, before)
+        XCTAssertTrue(view("film.detail.title", page.view) === title)
+        XCTAssertTrue(view("film.detail.hero", page.view) === hero)
+        XCTAssertTrue(view("film.detail.logo", page.view) === logo)
+        XCTAssertNotNil(hero.image); XCTAssertNotNil(logo.image)
+        XCTAssertEqual(favorite.configuration?.title, "已收藏")
+        XCTAssertEqual(page.detail.item.identity, original.identity)
         favorite.sendActions(for: .touchUpInside)
-        appStorageTestEventually { library.contains(page.detail.item) }
-        XCTAssertEqual(page.detail.item.sourceID, "douban")
-        XCTAssertEqual(page.detail.item.id, "0")
-        XCTAssertTrue(library.contains(page.detail.item))
-        XCTAssertTrue(library.contains(original), "Switching metadata must not rewrite the existing favorite")
+        XCTAssertFalse(library.contains(original))
+        XCTAssertTrue(library.favorites.isEmpty)
     }
 
     func testAutoPrepareUIEditsADraftAndOnlySuccessfulSavePublishesPreferences() async throws {
@@ -1672,6 +1675,12 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         window.frame = CGRect(x: 0, y: 0, width: 320, height: 480)
         window.layoutIfNeeded(); page.view.layoutIfNeeded()
         let name = try XCTUnwrap(view("film.manual.name", page.view) as? UITextField)
+        let panel = try XCTUnwrap(page.form.superview)
+        XCTAssertEqual(panel.convert(panel.bounds, to: page.view).minY -
+            page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY,
+            SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
+        XCTAssertEqual((name as? SettingsTextField)?.inputAppearance, .plain)
+        XCTAssertEqual(name.backgroundColor, .clear); XCTAssertEqual(name.layer.borderWidth, 0)
         XCTAssertTrue(name.becomeFirstResponder())
         name.text = "草稿名称"; name.sendActions(for: .editingChanged)
         page.applyTheme()
@@ -1802,7 +1811,26 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             input.tap()
         }
         let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
+        let keywordSection = try XCTUnwrap(keywords.superview as? SettingsInputSection)
+        XCTAssertEqual(keywordSection.titleLabel.text, "关键字匹配规则")
+        XCTAssertLessThanOrEqual(keywordSection.titleLabel.frame.maxY, keywords.frame.minY)
+        XCTAssertEqual((keywords as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual(keywords.backgroundColor, .clear); XCTAssertEqual(keywords.layer.borderWidth, 0)
         try await waitFor { keywords.isFirstResponder }
+        await layoutKeywordConsumer(page, window)
+        let scroll = try XCTUnwrap(sequence(first: keywordSection as UIView, next: { $0.superview })
+            .compactMap { $0 as? UIScrollView }.first)
+        let inputTarget = keywords.convert(keywords.bounds, to: scroll).insetBy(dx: 0, dy: -2)
+        XCTAssertTrue(scroll.bounds.inset(by: scroll.adjustedContentInset).insetBy(dx: -1, dy: -1).contains(inputTarget),
+            "Focusing the native field must reveal its full hit region when the keyboard resizes the list")
+        attachWindow(window, name: "film-preferences-keywords-focused-above-keyboard")
+        let hitPoint = keywords.convert(CGPoint(x: keywords.bounds.midX, y: keywords.bounds.maxY + 2), to: page.view)
+        let hit = page.view.hitTest(hitPoint, with: nil)
+        XCTAssertTrue(hit === keywords || hit?.isDescendant(of: keywords) == true,
+            "The SwiftUI keyword row must preserve the compact field's lower hit region: " +
+                "input=\(keywords.frame), section=\(keywordSection.frame), target=\(inputTarget), " +
+                "viewport=\(scroll.bounds), keyboard=\(page.view.keyboardLayoutGuide.layoutFrame), " +
+                "point=\(hitPoint), hit=\(String(describing: hit))")
         keywords.text = " H.265,，DDP, "
         keywords.sendActions(for: .editingChanged)
         await settle()
@@ -1841,8 +1869,18 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await visible(page)
         try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
         await settle()
-        _ = try await visibleCell("film.preferences.keywords.row", page)
+        XCTAssertNil(page.table.superview)
+        try await waitFor { self.view("film.preferences.keywords", page.view)?.window === window }
         let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? UITextField)
+        let keywordSection = try XCTUnwrap(keywords.superview as? SettingsInputSection)
+        XCTAssertEqual(keywordSection.titleLabel.text, "关键字匹配规则")
+        XCTAssertLessThanOrEqual(keywordSection.titleLabel.frame.maxY, keywords.frame.minY)
+        XCTAssertEqual((keywords as? SettingsTextField)?.inputAppearance, .underline)
+        XCTAssertEqual(keywords.backgroundColor, .clear); XCTAssertEqual(keywords.layer.borderWidth, 0)
+        let hitPoint = keywords.convert(CGPoint(x: keywords.bounds.midX, y: keywords.bounds.maxY + 2), to: page.view)
+        let hit = page.view.hitTest(hitPoint, with: nil)
+        XCTAssertTrue(hit === keywords || hit?.isDescendant(of: keywords) == true,
+            "The shared keyword row must preserve the compact field's lower hit region")
         XCTAssertTrue(keywords.becomeFirstResponder())
         keywords.text = " 广告,，预告, "
         keywords.sendActions(for: .editingChanged)
@@ -1862,7 +1900,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         try await waitFor("The saved notice was acknowledged through its UI action") {
             page.presentedViewController == nil && page.canPresentPageAlert
         }
-        try select("film.preferences.restore.siteClean", page)
+        try await runnerAction { app in
+            let restore = app.buttons["film.preferences.restore.siteClean"]
+            XCTAssertTrue(restore.isHittable)
+            restore.tap()
+        }
         await settle()
         XCTAssertEqual(owner.draft?.siteCleanKeywords, FilmPlaybackPreferences.defaults.siteCleanKeywords)
         XCTAssertEqual(owner.draft?.ruleOrder, draft.ruleOrder)
@@ -1874,6 +1916,230 @@ final class FilmPlaybackUIKitTests: XCTestCase {
         XCTAssertEqual(restoredChanges, savedChanges)
         let calls = await store.calls()
         XCTAssertTrue(calls.isEmpty, "Site-clean draft restoration must not call the runtime or persist")
+    }
+
+    func testKeywordConsumersKeepCompleteRowsAndEditingStateAt320PointsAcrossAccessibilitySizeAndThemes() async throws {
+        for area in [FilmPlaybackPreferencesController.Area.preferences, .siteClean] {
+            let consumer = area == .preferences ? "preferences" : "site-clean"
+            let store = try await FilmUIKitPlaybackSettingsStore(self)
+            let owner = FilmPlaybackSettingsModel(transport: store.transport, settingsDocument: store.document)
+            let page = FilmPlaybackPreferencesController(owner: owner, area: area,
+                                                         themeProvider: FilmPlaybackUIKitTheme())
+            page.traitOverrides.preferredContentSizeCategory = .large
+            page.traitOverrides.userInterfaceStyle = .light
+            let container = UIViewController()
+            let window = try mount(container)
+            defer { unmount(container, window) }
+            container.addChild(page); container.view.addSubview(page.view)
+            page.view.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                page.view.topAnchor.constraint(equalTo: container.view.topAnchor),
+                page.view.leadingAnchor.constraint(equalTo: container.view.leadingAnchor),
+                page.view.bottomAnchor.constraint(equalTo: container.view.bottomAnchor),
+                page.view.widthAnchor.constraint(equalToConstant: 320),
+            ])
+            page.didMove(toParent: container)
+            await layoutKeywordConsumer(page, window)
+            try await visible(page)
+            try await waitFor { owner.draft != nil && !owner.busy && !owner.preferencesBusy }
+            await settle()
+            XCTAssertNil(page.table.superview)
+            let list = try XCTUnwrap(descendants(page.view).compactMap { $0 as? UICollectionView }.first)
+            await layoutKeywordConsumer(page, window, scroll: list)
+            if area == .preferences {
+                try await runnerAction { app in
+                    XCTAssertTrue(app.staticTexts["film.preferences.dimension.quality"].waitForExistence(timeout: 4),
+                        "The loaded preference rows must be published before scrolling to the keyword input")
+                    app.swipeUp()
+                }
+            }
+            let keywords = try XCTUnwrap(view("film.preferences.keywords", page.view) as? SettingsTextField)
+            let section = try XCTUnwrap(keywords.superview as? SettingsInputSection)
+            let title = section.titleLabel
+            let scroll = try XCTUnwrap(sequence(first: section as UIView, next: { $0.superview })
+                .compactMap { $0 as? UIScrollView }.first)
+            let initialRow = try XCTUnwrap(sequence(first: section as UIView, next: { $0.superview }).first {
+                $0 is UITableViewCell || $0 is UICollectionViewCell
+            })
+            let initialPath = try XCTUnwrap(list.indexPath(for: try XCTUnwrap(initialRow as? UICollectionViewCell)))
+            list.scrollToItem(at: initialPath, at: .centeredVertically, animated: false)
+            await layoutKeywordConsumer(page, window, scroll: list)
+            try await runnerAction { app in
+                XCTAssertTrue(app.textFields["film.preferences.keywords"].isHittable)
+            }
+            var phase = "begin editing"
+            var editingEndPhases: [String] = []
+            keywords.addAction(UIAction { _ in
+                editingEndPhases.append(phase)
+            }, for: .editingDidEnd)
+            func layoutDescription() -> String {
+                let row = sequence(first: section as UIView, next: { $0.superview }).first {
+                    $0 is UITableViewCell || $0 is UICollectionViewCell
+                }
+                return "\(consumer), \(phase), category=\(keywords.traitCollection.preferredContentSizeCategory.rawValue), " +
+                    "title=\(title.frame), input=\(keywords.frame), section=\(section.frame), " +
+                    "row=\(String(describing: row.map(ObjectIdentifier.init))), original=\(ObjectIdentifier(initialRow)), " +
+                    "viewport=\(scroll.bounds), content=\(scroll.contentSize), focused=\(keywords.isFirstResponder), " +
+                    "window=\(keywords.convert(keywords.bounds, to: window)), keyboard=\(page.view.keyboardLayoutGuide.layoutFrame), " +
+                    "editingEnded=\(editingEndPhases)"
+            }
+            let normalTitleSize = title.font.pointSize
+            let normalInputSize = try XCTUnwrap(keywords.font).pointSize
+            XCTAssertTrue(keywords.becomeFirstResponder())
+            let text = " 自订,，保留, "
+            keywords.text = text; keywords.sendActions(for: .editingChanged)
+            await settle()
+            XCTAssertTrue(keywords.isFirstResponder)
+            let selectionStart = try XCTUnwrap(keywords.position(from: keywords.beginningOfDocument, offset: 1))
+            let selectionEnd = try XCTUnwrap(keywords.position(from: selectionStart, offset: 2))
+            keywords.selectedTextRange = keywords.textRange(from: selectionStart, to: selectionEnd)
+            let draft = try XCTUnwrap(owner.draft)
+            XCTAssertEqual(area == .preferences ? draft.keywords : draft.siteCleanKeywords, ["自订", "保留"])
+            attachWindow(window, name: "film-\(consumer)-keywords-320-regular-focused")
+            for style in [UIUserInterfaceStyle.light, .dark] {
+                phase = "accessibilityExtraExtraExtraLarge, \(style), trait layout"
+                await layoutKeywordConsumer(page, window, scroll: scroll) {
+                    page.traitOverrides.preferredContentSizeCategory = .accessibilityExtraExtraExtraLarge
+                    page.traitOverrides.userInterfaceStyle = style
+                }
+                let row = try XCTUnwrap(sequence(first: section as UIView, next: { $0.superview }).first {
+                    $0 is UITableViewCell || $0 is UICollectionViewCell
+                }, layoutDescription())
+                XCTAssertTrue(row is UICollectionViewCell, layoutDescription())
+                XCTAssertTrue(row === initialRow, layoutDescription())
+                phase = "accessibilityExtraExtraExtraLarge, \(style), scroll"
+                let cell = try XCTUnwrap(row as? UICollectionViewCell, layoutDescription())
+                let path = try XCTUnwrap(list.indexPath(for: cell), layoutDescription())
+                list.scrollToItem(at: path, at: .centeredVertically, animated: false)
+                await layoutKeywordConsumer(page, window, scroll: scroll)
+                let context = layoutDescription()
+                XCTAssertEqual(page.view.bounds.width, 320, accuracy: 0.5, context)
+                XCTAssertTrue(view("film.preferences.keywords", page.view) === keywords, context)
+                XCTAssertTrue(keywords.superview === section, context)
+                XCTAssertTrue(section.input === keywords, context)
+                XCTAssertTrue(keywords.isFirstResponder, context)
+                XCTAssertTrue(editingEndPhases.isEmpty, context)
+                XCTAssertEqual(keywords.text, text, context)
+                let selection = try XCTUnwrap(keywords.selectedTextRange, context)
+                XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.start), 1, context)
+                XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.end), 3, context)
+                XCTAssertEqual(owner.draft, draft, context)
+                XCTAssertEqual(owner.preferences, .defaults, context)
+                XCTAssertEqual(title.text, "关键字匹配规则", context)
+                XCTAssertEqual(title.numberOfLines, 0, context)
+                XCTAssertTrue(title.adjustsFontForContentSizeCategory, context)
+                XCTAssertTrue(keywords.adjustsFontForContentSizeCategory, context)
+                for content in [title as UIView, keywords] {
+                    XCTAssertEqual(content.traitCollection.preferredContentSizeCategory,
+                        .accessibilityExtraExtraExtraLarge, context)
+                    XCTAssertEqual(content.traitCollection.userInterfaceStyle, style, context)
+                    XCTAssertFalse(content.hasAmbiguousLayout, context)
+                    XCTAssertFalse(content.isHidden, context)
+                    XCTAssertGreaterThan(content.alpha, 0, context)
+                    XCTAssertGreaterThan(content.bounds.width, 0, context)
+                }
+                let font = try XCTUnwrap(keywords.font)
+                XCTAssertGreaterThan(title.font.pointSize, normalTitleSize, context)
+                XCTAssertGreaterThan(font.pointSize, normalInputSize, context)
+                XCTAssertEqual(title.font.pointSize,
+                    UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: title.traitCollection).pointSize,
+                    accuracy: 0.5, context)
+                XCTAssertEqual(font.pointSize,
+                    UIFont.preferredFont(forTextStyle: .body, compatibleWith: keywords.traitCollection).pointSize,
+                    accuracy: 0.5, context)
+                let fittedTitle = title.sizeThatFits(.init(width: title.bounds.width, height: .greatestFiniteMagnitude))
+                XCTAssertGreaterThan(fittedTitle.height, title.font.lineHeight, context)
+                XCTAssertLessThanOrEqual(fittedTitle.height, title.bounds.height + 0.5, context)
+                XCTAssertLessThanOrEqual(title.frame.maxY, keywords.frame.minY, context)
+                XCTAssertGreaterThanOrEqual(keywords.bounds.height + 0.5, keywords.intrinsicContentSize.height, context)
+                XCTAssertGreaterThanOrEqual(keywords.editingRect(forBounds: keywords.bounds).height + 0.5,
+                    font.lineHeight, context)
+                let fittedSection = section.systemLayoutSizeFitting(
+                    CGSize(width: section.bounds.width, height: UIView.layoutFittingCompressedSize.height),
+                    withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
+                XCTAssertLessThanOrEqual(fittedSection.height, section.bounds.height + 0.5, context)
+                let containment: [(UIView, UIView)] = [(title, section), (keywords, section), (section, row), (row, scroll)]
+                for (content, container) in containment {
+                    let frame = content.convert(content.bounds, to: container)
+                    let bounds = container === scroll ? scroll.bounds.inset(by: scroll.adjustedContentInset) : container.bounds
+                    XCTAssertGreaterThanOrEqual(frame.minX, bounds.minX - 0.5, context)
+                    XCTAssertLessThanOrEqual(frame.maxX, bounds.maxX + 0.5, context)
+                    XCTAssertGreaterThanOrEqual(frame.minY, bounds.minY - 0.5, context)
+                    XCTAssertLessThanOrEqual(frame.maxY, bounds.maxY + 0.5, context)
+                }
+                for ancestor in sequence(first: keywords as UIView, next: { $0.superview }) {
+                    XCTAssertFalse(ancestor.isHidden, context)
+                    XCTAssertGreaterThan(ancestor.alpha, 0, context)
+                }
+                XCTAssertTrue(keywords.window === window, context)
+                XCTAssertTrue(keywords.isEnabled, context)
+                XCTAssertEqual(keywords.inputAppearance, .underline, context)
+                XCTAssertEqual(keywords.backgroundColor, .clear, context)
+                XCTAssertEqual(keywords.layer.borderWidth, 0, context)
+                XCTAssertEqual(keywords.layer.cornerRadius, 0, context)
+                XCTAssertEqual(title.textColor, UIColor(page.theme.settings.muted), context)
+                XCTAssertEqual(keywords.textColor, UIColor(page.theme.settings.ink), context)
+                let lines = (keywords.layer.sublayers ?? []).filter {
+                    !$0.isHidden && $0.backgroundColor == UIColor(page.theme.settings.separator).cgColor &&
+                        $0.bounds.height == SettingsVisualMetrics.separatorHeight
+                }
+                XCTAssertEqual(lines.count, 1, context)
+                let line = try XCTUnwrap(lines.first, context)
+                XCTAssertGreaterThan(line.opacity, 0, context)
+                XCTAssertGreaterThan(try XCTUnwrap(line.backgroundColor).alpha, 0, context)
+                XCTAssertEqual(line.frame.minX, keywords.bounds.minX, accuracy: 0.5, context)
+                XCTAssertEqual(line.frame.maxY, keywords.bounds.maxY, accuracy: 0.5, context)
+                XCTAssertEqual(line.bounds.width, keywords.bounds.width, accuracy: 0.5, context)
+                try await runnerAction { app in
+                    XCTAssertTrue(app.textFields["film.preferences.keywords"].isHittable, context)
+                }
+                attachWindow(window, name: "film-\(consumer)-keywords-320-accessibility-\(style == .dark ? "dark" : "light")")
+            }
+            phase = "restore large"
+            await layoutKeywordConsumer(page, window, scroll: scroll) {
+                page.traitOverrides.preferredContentSizeCategory = .large
+            }
+            XCTAssertTrue(view("film.preferences.keywords", page.view) === keywords, consumer)
+            XCTAssertTrue(keywords.isFirstResponder, consumer)
+            XCTAssertTrue(editingEndPhases.isEmpty, layoutDescription())
+            XCTAssertEqual(keywords.text, text, consumer)
+            let selection = try XCTUnwrap(keywords.selectedTextRange, consumer)
+            XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.start), 1, consumer)
+            XCTAssertEqual(keywords.offset(from: keywords.beginningOfDocument, to: selection.end), 3, consumer)
+            XCTAssertEqual(owner.draft, draft, consumer)
+            XCTAssertEqual(owner.preferences, .defaults, consumer)
+            XCTAssertEqual(title.font.pointSize, normalTitleSize, accuracy: 0.5, consumer)
+            XCTAssertEqual(try XCTUnwrap(keywords.font).pointSize, normalInputSize, accuracy: 0.5, consumer)
+            XCTAssertFalse(title.hasAmbiguousLayout, consumer)
+            XCTAssertFalse(keywords.hasAmbiguousLayout, consumer)
+            let fittedSection = section.systemLayoutSizeFitting(
+                CGSize(width: section.bounds.width, height: UIView.layoutFittingCompressedSize.height),
+                withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
+            XCTAssertEqual(fittedSection.height, section.bounds.height, accuracy: 0.5, consumer)
+            attachWindow(window, name: "film-\(consumer)-keywords-320-regular-restored-dark")
+            phase = "user scroll, stable layout"
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x,
+                y: max(-scroll.adjustedContentInset.top, scroll.contentOffset.y - 12)), animated: false)
+            let userOffset = scroll.contentOffset
+            page.view.setNeedsLayout()
+            await layoutKeywordConsumer(page, window, scroll: scroll)
+            XCTAssertEqual(scroll.contentOffset.y, userOffset.y, accuracy: 0.5, layoutDescription())
+            XCTAssertTrue(keywords.isFirstResponder, layoutDescription())
+            XCTAssertEqual(keywords.text, text, consumer)
+            XCTAssertEqual(owner.draft, draft, consumer)
+            phase = "unmount"
+        }
+    }
+
+    private func layoutKeywordConsumer(_ page: UIViewController, _ window: UIWindow,
+                                       scroll: UIScrollView? = nil, update: () -> Void = {}) async {
+        let committed = expectation(description: "Keyword layout transaction completed")
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { committed.fulfill() }
+        update()
+        window.layoutIfNeeded(); page.view.layoutIfNeeded(); scroll?.layoutIfNeeded()
+        CATransaction.commit()
+        await fulfillment(of: [committed], timeout: 4)
     }
 
     func testBlocksRequireConfirmationAndUseExactOrBulkReceiptsWithoutChangingHistory() async throws {
@@ -2095,6 +2361,13 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                     page.view.window?.windowScene?.interfaceOrientation.isLandscape == true &&
                     page.view.bounds.width > page.view.bounds.height)
         }
+        if page is FilmPlayerViewController, let window = page.view.window, let scene = window.windowScene {
+            window.frame = scene.coordinateSpace.bounds
+            window.layoutIfNeeded(); page.view.layoutIfNeeded()
+            try await waitFor("The landscape fixture uses the actual scene bounds rather than a preceding compact window") {
+                window.bounds.size == scene.coordinateSpace.bounds.size && page.view.bounds.size == window.bounds.size
+            }
+        }
     }
     private func waitForActualPage(_ page: PageViewController) async throws {
         try await waitFor("The page is visible in the real active key window") {
@@ -2184,36 +2457,48 @@ final class FilmPlaybackUIKitTests: XCTestCase {
                 .coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.4)).tap()
         }
     }
-    private func tapVideo(in page: FilmPlayerViewController) async throws {
+    private func tapVideo(in page: FilmPlayerViewController, file: StaticString = #filePath, line: UInt = #line) async throws {
         let video = try XCTUnwrap(view("film.player.video", page.view))
         let window = try XCTUnwrap(video.window)
         let identifier = try XCTUnwrap(Bundle.main.bundleIdentifier)
         let app = XCUIApplication(bundleIdentifier: identifier)
         var offset = CGVector.zero
-        try await waitFor("The real XCUI video geometry has an uncovered, gesture-safe tap point") {
-            page.view.layoutIfNeeded()
-            let element = app.otherElements["film.player.video"]
-            let frame = element.frame
-            guard element.exists, frame.width > 0, frame.height > 0,
-                  abs(frame.width / frame.height - video.bounds.width / video.bounds.height) < 0.01 else { return false }
-            let inset = max(20, max(video.safeAreaInsets.left, video.safeAreaInsets.right))
-            for x in [CGFloat(0.2), 0.5, 0.8] {
-                for y in [CGFloat(0.4), 0.3, 0.5, 0.6, 0.7, 0.2, 0.8] {
-                    let point = CGPoint(x: video.bounds.width * x, y: video.bounds.height * y)
-                    guard point.x > inset, point.x < video.bounds.width - inset,
-                          point.y > 20, point.y < video.bounds.height - 20,
-                          let hit = window.hitTest(video.convert(point, to: window), with: nil),
-                          hit === video || hit.isDescendant(of: video) else { continue }
-                    var ancestor: UIView? = hit
-                    while let current = ancestor, current !== video, !(current is UIControl) {
-                        ancestor = current.superview
+        do {
+            try await waitFor("The real XCUI video geometry has an uncovered, gesture-safe tap point", file: file, line: line) {
+                page.view.layoutIfNeeded()
+                let element = app.otherElements["film.player.video"]
+                let frame = element.frame
+                guard element.exists, frame.width > 0, frame.height > 0,
+                      abs(frame.width / frame.height - video.bounds.width / video.bounds.height) < 0.01 else { return false }
+                let inset = max(20, max(video.safeAreaInsets.left, video.safeAreaInsets.right))
+                for x in [CGFloat(0.2), 0.5, 0.8] {
+                    for y in [CGFloat(0.4), 0.3, 0.5, 0.6, 0.7, 0.2, 0.8] {
+                        let point = CGPoint(x: video.bounds.width * x, y: video.bounds.height * y)
+                        guard point.x > inset, point.x < video.bounds.width - inset,
+                              point.y > 20, point.y < video.bounds.height - 20,
+                              let hit = window.hitTest(video.convert(point, to: window), with: nil),
+                              hit === video || hit.isDescendant(of: video) else { continue }
+                        var ancestor: UIView? = hit
+                        while let current = ancestor, current !== video, !(current is UIControl) {
+                            ancestor = current.superview
+                        }
+                        guard ancestor === video else { continue }
+                        offset = CGVector(dx: x, dy: y)
+                        return true
                     }
-                    guard ancestor === video else { continue }
-                    offset = CGVector(dx: x, dy: y)
-                    return true
                 }
+                return false
             }
-            return false
+        } catch {
+            let element = app.otherElements["film.player.video"]
+            let center = window.hitTest(video.convert(CGPoint(x: video.bounds.midX, y: video.bounds.midY), to: window), with: nil)
+            attachWindow(window, name: "film-video-safe-tap-failure")
+            XCTFail("Video bounds=\(video.bounds), frame=\(video.frame), safeArea=\(video.safeAreaInsets), " +
+                "XCUI exists=\(element.exists), frame=\(element.frame), centerHit=\(String(describing: center)), " +
+                "window=\(window.bounds), sceneBounds=\(String(describing: window.windowScene?.coordinateSpace.bounds)), " +
+                "screenBounds=\(window.screen.bounds), scene=\(String(describing: window.windowScene?.interfaceOrientation))",
+                file: file, line: line)
+            throw error
         }
         try await runnerAction { app in
             app.otherElements["film.player.video"].coordinate(withNormalizedOffset: offset).tap()
@@ -2257,8 +2542,11 @@ final class FilmPlaybackUIKitTests: XCTestCase {
             let to = app.cells.containing(.staticText, identifier: destination).firstMatch
             XCTAssertTrue(from.waitForExistence(timeout: 3)); XCTAssertTrue(to.waitForExistence(timeout: 3))
             XCTAssertTrue(from.isHittable); XCTAssertTrue(to.isHittable)
-            from.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5))
-                .press(forDuration: 0.5, thenDragTo: to.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)))
+            let handle = from.buttons.firstMatch
+            XCTAssertTrue(handle.waitForExistence(timeout: 3), from.debugDescription)
+            XCTAssertTrue(handle.isHittable, handle.debugDescription)
+            handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+                .press(forDuration: 0.5, thenDragTo: to.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)))
         }
     }
 }

@@ -33,6 +33,25 @@ constexpr size_t max_subtitle_rects = 256;
 constexpr int max_text_events = 4096;
 constexpr size_t max_text_bytes = 1024 * 1024;
 
+bool display_window(HWND window)
+{
+    return window && IsWindow(window) && GetAncestor(window, GA_ROOT) == window;
+}
+
+bool valid_surface(const mfk_surface &surface)
+{
+    return surface.size == sizeof(surface) && surface.abi == MFK_ABI &&
+        (display_window(static_cast<HWND>(surface.display_window)) ||
+         (!surface.display_window && surface.visible == 0)) &&
+        surface.width >= 0 && surface.height >= 0 &&
+        surface.width <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+        surface.height <= D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION &&
+        std::isfinite(surface.scale_x) && surface.scale_x > 0 &&
+        std::isfinite(surface.scale_y) && surface.scale_y > 0 &&
+        std::isfinite(1.0f / surface.scale_x) && std::isfinite(1.0f / surface.scale_y) &&
+        (surface.visible == 0 || surface.visible == 1);
+}
+
 bool font_attachment(const char *name, const char *mime)
 {
     if (mime && (!_stricmp(mime, "application/x-truetype-font") ||
@@ -355,8 +374,8 @@ struct SubtitleOverlays {
 }
 
 struct FilmRenderer::Impl {
-    HWND window = nullptr;
-    HMONITOR monitor = nullptr, target_monitor = nullptr;
+    mfk_surface surface{};
+    HMONITOR monitor = nullptr;
     IDXGIFactory1 *factory = nullptr;
     IDXGIOutput6 *display = nullptr;
     DXGI_OUTPUT_DESC1 display_info{};
@@ -365,17 +384,17 @@ struct FilmRenderer::Impl {
     ID3D11Query *completion = nullptr;
     pl_renderer renderer = nullptr;
     pl_swapchain swapchain = nullptr;
+    IDXGISwapChain3 *composition = nullptr;
     AVBufferRef *hardware = nullptr;
     const AVStream *stream = nullptr;
     std::recursive_mutex gpu_lock;
     ASS_Library *ass = nullptr;
     ASS_Renderer *ass_renderer = nullptr;
     ASS_Track *ass_track = nullptr;
-    bool hdr = false, dovi = false, lost = false, bitmap_subtitles = false, target_hdr = false;
+    bool hdr = false, dovi = false, lost = false, bitmap_subtitles = false;
     std::atomic<uint64_t> submitted{0};
     int subtitle_width = 0, subtitle_height = 0, text_order = 0;
     double subtitle_position = -std::numeric_limits<double>::infinity();
-    pl_color_space color{};
 
     struct FrameTextures {
         pl_tex software[4]{}, copy_planes[2]{};
@@ -433,6 +452,7 @@ struct FilmRenderer::Impl {
         if (ass) ass_library_done(ass);
         av_buffer_unref(&hardware);
         pl_swapchain_destroy(&swapchain);
+        release(composition);
         pl_renderer_destroy(&renderer);
         release(completion); release(context);
         pl_d3d11_destroy(&device);
@@ -620,22 +640,19 @@ struct FilmRenderer::Impl {
 
     int check_output(const pl_swapchain_frame &output)
     {
-        if (!hdr) return MFK_OK;
-        const auto transfer = output.color_space.transfer;
-        if (transfer != PL_COLOR_TRC_SCRGB && transfer != PL_COLOR_TRC_PQ)
-            return MFK_HDR_DISPLAY_UNSUPPORTED;
-        if (output.fbo->params.format->component_depth[0] < 10)
-            return MFK_HDR_DISPLAY_UNSUPPORTED;
-        IDXGISwapChain *native = pl_d3d11_swapchain_unwrap(swapchain);
-        IDXGISwapChain3 *extended = nullptr;
+        if (output.color_space.transfer != PL_COLOR_TRC_SCRGB ||
+            output.color_space.primaries != PL_COLOR_PRIM_BT_709 ||
+            output.fbo->params.format->type != PL_FMT_FLOAT ||
+            output.fbo->params.format->num_components != 4 ||
+            output.fbo->params.format->component_depth[0] != 16)
+            return MFK_RENDER_FAILED;
+        DXGI_SWAP_CHAIN_DESC1 desc{};
         UINT support = 0;
-        const bool supported = native && SUCCEEDED(native->QueryInterface(__uuidof(IDXGISwapChain3),
-                                                    reinterpret_cast<void **>(&extended))) &&
-            SUCCEEDED(extended->CheckColorSpaceSupport(transfer == PL_COLOR_TRC_SCRGB ?
-                DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 :
-                DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020, &support)) &&
+        const bool supported = composition && SUCCEEDED(composition->GetDesc1(&desc)) &&
+            desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+            SUCCEEDED(composition->CheckColorSpaceSupport(
+                DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) &&
             (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT);
-        release(extended); release(native);
         return device_status(supported ? MFK_OK : MFK_HDR_DISPLAY_UNSUPPORTED);
     }
 
@@ -660,56 +677,101 @@ struct FilmRenderer::Impl {
         return metadata;
     }
 
-    int configure_target()
+    int configure_target(const mfk_surface &target)
     {
-        if (!window || !IsWindow(window)) return MFK_RENDER_FAILED;
-        RECT rect{};
-        if (!GetClientRect(window, &rect)) return MFK_RENDER_FAILED;
-        int width = std::max(1L, rect.right - rect.left);
-        int height = std::max(1L, rect.bottom - rect.top);
-        auto hint = color;
-        // Output metadata must describe the display-mapped signal, not the
-        // original mastering peak; otherwise PQ targets may tone-map twice.
-        if (hdr) hint.hdr = display_metadata();
-        pl_swapchain_colorspace_hint(swapchain, &hint);
-        // v7.387 applies a hinted format on the following resize call.
+        if (!swapchain || !composition) return MFK_RENDER_FAILED;
+        if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
+        int width = std::max(1, target.width), height = std::max(1, target.height);
+        // v7.387 wraps the external chain and ResizeBuffers preserves its COM
+        // identity. Never send format hints: the UI owns that same identity.
         if (!pl_swapchain_resize(swapchain, &width, &height))
             return device_status(MFK_RENDER_FAILED);
+        DXGI_MATRIX_3X2_F matrix{};
+        matrix._11 = 1.0f / target.scale_x;
+        matrix._22 = 1.0f / target.scale_y;
+        if (FAILED(composition->SetMatrixTransform(&matrix)))
+            return device_status(MFK_RENDER_FAILED);
+        surface = target;
         return device_status();
     }
 
-    int create_swapchain(HWND target)
+    int create_swapchain(const mfk_surface &target, void **result)
     {
-        if (!device || !renderer || !target || !IsWindow(target)) return MFK_RENDER_FAILED;
+        if (!device || !renderer) return MFK_RENDER_FAILED;
+        if (swapchain || composition) return MFK_INVALID_REQUEST;
         if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
-        const auto current = MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
-        if (swapchain && window == target && target_monitor == current && target_hdr == hdr)
-            return configure_target();
-        int status = drain();
-        if (status != MFK_OK) return status;
-        context->ClearState();
-        pl_swapchain_destroy(&swapchain);
-        // Flip-model swapchains must actually be released before reusing HWND.
-        context->Flush();
+        UINT format_support = 0;
+        constexpr UINT required = D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_DISPLAY |
+            D3D11_FORMAT_SUPPORT_SHADER_SAMPLE | D3D11_FORMAT_SUPPORT_RENDER_TARGET |
+            D3D11_FORMAT_SUPPORT_BLENDABLE;
+        if (FAILED(device->device->CheckFormatSupport(DXGI_FORMAT_R16G16B16A16_FLOAT, &format_support)) ||
+            (format_support & required) != required)
+            return device_status(MFK_RENDER_FAILED);
+        IDXGIDevice *dxgi = nullptr;
+        IDXGIAdapter *adapter = nullptr;
+        IDXGIFactory2 *creator = nullptr;
+        HRESULT status = device->device->QueryInterface(__uuidof(IDXGIDevice),
+                                                       reinterpret_cast<void **>(&dxgi));
+        if (SUCCEEDED(status)) status = dxgi->GetAdapter(&adapter);
+        if (SUCCEEDED(status)) status = adapter->GetParent(__uuidof(IDXGIFactory2),
+                                                         reinterpret_cast<void **>(&creator));
+        release(adapter); release(dxgi);
+        if (FAILED(status)) { release(creator); return device_status(MFK_RENDER_FAILED); }
+        DXGI_SWAP_CHAIN_DESC1 desc{};
+        desc.Width = std::max(1, target.width);
+        desc.Height = std::max(1, target.height);
+        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        desc.SampleDesc.Count = 1;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT |
+            DXGI_USAGE_UNORDERED_ACCESS;
+        desc.BufferCount = 2;
+        desc.Scaling = DXGI_SCALING_STRETCH;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        IDXGISwapChain1 *native = nullptr;
+        status = creator->CreateSwapChainForComposition(device->device, &desc, nullptr, &native);
+        release(creator);
+        if (SUCCEEDED(status))
+            status = native->QueryInterface(__uuidof(IDXGISwapChain3),
+                                           reinterpret_cast<void **>(&composition));
+        UINT support = 0;
+        if (SUCCEEDED(status))
+            status = composition->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+                                                         &support);
+        if (SUCCEEDED(status) && !(support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT))
+            status = DXGI_ERROR_UNSUPPORTED;
+        if (SUCCEEDED(status))
+            status = composition->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
+        if (FAILED(status)) {
+            release(composition); release(native);
+            return device_status(status == DXGI_ERROR_UNSUPPORTED ?
+                MFK_HDR_DISPLAY_UNSUPPORTED : MFK_RENDER_FAILED);
+        }
         pl_d3d11_swapchain_params parameters{};
-        parameters.window = target;
-        parameters.color_bits = hdr ? 16 : 10;
-        parameters.alpha_bits = 0;
+        parameters.swapchain = native;
+        // v7.387 selects initial color configuration even for external chains.
+        // Request FP16 there too, then verify rather than accepting a downgrade.
+        parameters.color_bits = parameters.alpha_bits = 16;
         swapchain = pl_d3d11_create_swapchain(device, &parameters);
-        if (!swapchain) return device_status(MFK_RENDER_FAILED);
-        window = target; target_monitor = current; target_hdr = hdr;
-        status = configure_target();
-        if (status == MFK_OK) {
+        int code = swapchain ? configure_target(target) : device_status(MFK_RENDER_FAILED);
+        if (code == MFK_OK) {
             pl_swapchain_frame output{};
             if (!pl_swapchain_start_frame(swapchain, &output))
-                status = device_status(MFK_RENDER_FAILED);
+                code = device_status(MFK_RENDER_FAILED);
             else {
-                status = check_output(output);
-                if (!pl_swapchain_submit_frame(swapchain)) status = device_status(MFK_RENDER_FAILED);
+                code = check_output(output);
+                if (!pl_swapchain_submit_frame(swapchain)) code = device_status(MFK_RENDER_FAILED);
             }
         }
-        if (status != MFK_OK) pl_swapchain_destroy(&swapchain);
-        return status;
+        if (code != MFK_OK) {
+            pl_swapchain_destroy(&swapchain);
+            release(composition); release(native);
+            surface = {};
+        } else {
+            // Transfer CreateSwapChainForComposition's IDXGISwapChain1 reference.
+            *result = native;
+        }
+        return code;
     }
 
     void prune_subtitles(double position)
@@ -728,13 +790,13 @@ struct FilmRenderer::Impl {
 FilmRenderer::FilmRenderer() : impl(std::make_unique<Impl>()) { }
 FilmRenderer::~FilmRenderer() = default;
 
-int FilmRenderer::open(void *hwnd)
+int FilmRenderer::open(void *window)
 {
     auto &p = *impl;
     std::lock_guard guard(p.gpu_lock);
     if (p.device) return MFK_INVALID_REQUEST;
-    p.window = static_cast<HWND>(hwnd);
-    if (!p.window || !IsWindow(p.window)) return MFK_RENDER_FAILED;
+    const auto target = static_cast<HWND>(window);
+    if (target && !display_window(target)) return MFK_INVALID_REQUEST;
     pl_d3d11_params parameters = pl_d3d11_default_params;
     parameters.allow_software = false;
     parameters.min_feature_level = D3D_FEATURE_LEVEL_11_0;
@@ -742,7 +804,7 @@ int FilmRenderer::open(void *hwnd)
     // Choose the window's output adapter before sharing the device with FFmpeg.
     // A later monitor move keeps that same decoder/render device and lets DWM
     // compose across adapters, subject to the target's actual HDR support.
-    p.read_display(p.window);
+    if (target) p.read_display(target);
     IDXGIAdapter *adapter = nullptr;
     if (p.display)
         p.display->GetParent(__uuidof(IDXGIAdapter), reinterpret_cast<void **>(&adapter));
@@ -789,23 +851,38 @@ int FilmRenderer::open(void *hwnd)
 
 void FilmRenderer::set_stream(const AVStream *stream) { impl->stream = stream; }
 AVBufferRef *FilmRenderer::hardware_device() const { return impl->hardware; }
-int FilmRenderer::attach(void *hwnd)
+int FilmRenderer::attach(const mfk_surface *surface, void **swapchain)
 {
+    if (!swapchain) return MFK_INVALID_REQUEST;
+    *swapchain = nullptr;
     auto &p = *impl;
     std::lock_guard guard(p.gpu_lock);
-    const auto target = static_cast<HWND>(hwnd);
-    if (!target) {
+    if (!surface) {
         int status = p.drain();
-        if (status != MFK_OK) return status;
         if (p.context) p.context->ClearState();
         pl_swapchain_destroy(&p.swapchain);
+        release(p.composition);
+        p.surface = {};
         if (p.context) p.context->Flush();
-        return MFK_OK;
+        return status;
     }
-    if (!IsWindow(target)) return MFK_RENDER_FAILED;
+    if (!valid_surface(*surface)) return MFK_INVALID_REQUEST;
+    if (!display_window(static_cast<HWND>(surface->display_window))) return MFK_INVALID_REQUEST;
     if (p.device_status() != MFK_OK) return MFK_DEVICE_LOST;
-    if (p.hdr && !p.read_display(target)) return MFK_HDR_DISPLAY_UNSUPPORTED;
-    return p.create_swapchain(target);
+    if (p.hdr && !p.read_display(static_cast<HWND>(surface->display_window)))
+        return MFK_HDR_DISPLAY_UNSUPPORTED;
+    return p.create_swapchain(*surface, swapchain);
+}
+
+int FilmRenderer::surface_update(const mfk_surface &surface)
+{
+    if (!valid_surface(surface)) return MFK_INVALID_REQUEST;
+    auto &p = *impl;
+    std::lock_guard guard(p.gpu_lock);
+    if (p.hdr && surface.visible && surface.width > 0 && surface.height > 0 &&
+        !p.read_display(static_cast<HWND>(surface.display_window)))
+        return MFK_HDR_DISPLAY_UNSUPPORTED;
+    return p.configure_target(surface);
 }
 
 int FilmRenderer::inspect(const AVFrame *base, const AVFrame *enhancement)
@@ -845,14 +922,12 @@ int FilmRenderer::inspect(const AVFrame *base, const AVFrame *enhancement)
     }
     p.dovi = dovi;
     p.hdr = hdr;
-    p.color = source.color;
-    // Parking a previously validated surface is not a request to output HDR on
-    // the parking window's monitor. Validate the actual monitor on remount.
-    const bool parked = p.swapchain && p.target_hdr && p.window && !IsWindowVisible(p.window);
-    // Silent preparation has no presentation target yet. A parked candidate
-    // must be checked against its actual output monitor at attach, not here.
-    if (p.hdr && p.swapchain &&
-        (!p.window || !IsWindow(p.window) || (!parked && !p.read_display(p.window))))
+    // Silent candidates and invisible/zero-sized surfaces have no HDR output.
+    // A monitor move or HDR setting change must be rechecked before presenting.
+    if (p.hdr && p.swapchain && p.surface.visible &&
+        p.surface.width > 0 && p.surface.height > 0 &&
+        (!display_window(static_cast<HWND>(p.surface.display_window)) ||
+         !p.read_display(static_cast<HWND>(p.surface.display_window))))
         return MFK_HDR_DISPLAY_UNSUPPORTED;
     return MFK_OK;
 }
@@ -869,13 +944,7 @@ int FilmRenderer::present(const AVFrame *base, const AVFrame *enhancement,
     p.subtitle_position = position;
     p.prune_subtitles(position);
     if (!p.swapchain) return MFK_RENDER_FAILED;
-    if (!IsWindowVisible(p.window) || IsIconic(GetAncestor(p.window, GA_ROOT)))
-        return MFK_OK;
-    status = p.create_swapchain(p.window); // Also recreates on monitor migration.
-    if (status != MFK_OK) return status;
-    RECT rect{};
-    if (!GetClientRect(p.window, &rect)) return MFK_RENDER_FAILED;
-    if (rect.right <= rect.left || rect.bottom <= rect.top || IsIconic(p.window))
+    if (!p.surface.visible || p.surface.width == 0 || p.surface.height == 0)
         return MFK_OK;
     MappedFrame source(p.device->gpu), layer(p.device->gpu);
     status = p.map_frame(base, source, p.textures, true);

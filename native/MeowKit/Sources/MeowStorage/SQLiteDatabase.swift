@@ -80,7 +80,7 @@ public final class SQLiteConnection {
     }
 
     private func prepare(_ sql: String, _ bindings: [SQLiteValue]) throws -> OpaquePointer {
-        guard !sql.utf8.contains(0), bindings.allSatisfy({ $0.byteCount <= 16 * 1024 * 1024 }) else {
+        guard !sql.utf8.contains(0), bindings.allSatisfy({ $0.byteCount <= Int(Int32.max) }) else {
             throw SQLiteStorageError.invalidValue
         }
         let statement: OpaquePointer
@@ -152,13 +152,11 @@ public final class SQLiteConnection {
         return Int(sqlite3_changes(handle))
     }
 
-    public func query(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = 100_000) throws -> [SQLiteRow] {
+    public func query(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max) throws -> [SQLiteRow] {
         guard maximumRows > 0 else { throw SQLiteStorageError.invalidValue }
         var result: [SQLiteRow] = []
-        var bytes = 0
         try rows(sql, bindings) { row in
-            bytes += row.values.reduce(64) { $0 + $1.key.utf8.count + $1.value.byteCount + 32 }
-            guard result.count < maximumRows, bytes <= 32 * 1024 * 1024 else { throw SQLiteStorageError.queueFull }
+            guard result.count < maximumRows else { throw SQLiteStorageError.queueFull }
             result.append(row)
         }
         return result
@@ -175,7 +173,6 @@ public final class SQLiteConnection {
             guard result == SQLITE_ROW else { throw Self.failure(result) }
             var values: [String: SQLiteValue] = [:]
             for column in 0..<sqlite3_column_count(statement) {
-                guard sqlite3_column_bytes(statement, column) <= 16 * 1024 * 1024 else { throw SQLiteStorageError.queueFull }
                 let name = String(cString: sqlite3_column_name(statement, column))
                 switch sqlite3_column_type(statement, column) {
                 case SQLITE_INTEGER: values[name] = .integer(sqlite3_column_int64(statement, column))
@@ -487,7 +484,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private func admit(_ bytes: Int) throws {
         admission.lock(); defer { admission.unlock() }
         guard !closing else { throw SQLiteStorageError.closed }
-        guard bytes >= 0, pending < maximumPending, bytes <= maximumPendingBytes - pendingBytes else {
+        guard bytes >= 0, pending < maximumPending, pending == 0 || bytes <= maximumPendingBytes - pendingBytes else {
             throw SQLiteStorageError.queueFull
         }
         pending += 1; pendingBytes += bytes

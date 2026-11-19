@@ -38,11 +38,9 @@ class NovelManagementPage: ManagementPageViewController {
     }
     func addressDialog(label: String, placeholder: String, load: @escaping (String) async throws -> Void, completed: @escaping () -> Void) {
         let dialog = ManagementDialog(title: "网络导入", themeProvider: themeProvider)
-        let title = UILabel(); title.text = label; title.font = .systemFont(ofSize: 14)
-        title.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).ink) }
         let input = ManagementDialog.input(placeholder: placeholder); input.keyboardType = .URL
         input.autocorrectionType = .no; input.autocapitalizationType = .none; input.accessibilityIdentifier = "management.import.url"
-        dialog.body.addArrangedSubview(title); dialog.body.addArrangedSubview(input)
+        dialog.addInput(input, title: label)
         dialog.submit = { let url = (input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines); guard !url.isEmpty else { throw NovelError.invalidRule([placeholder]) }; try await load(url); return true }
         dialog.accepted = completed; present(dialog, animated: true)
     }
@@ -84,7 +82,7 @@ private final class NovelGroupsPage: NovelTablePage {
     private func edit(_ old: String?) {
         let dialog = ManagementDialog(title: old == nil ? "新增分组" : "编辑分组", action: "保存", themeProvider: themeProvider)
         let input = ManagementDialog.input(placeholder: "分组名称"); input.text = old
-        dialog.body.addArrangedSubview(input)
+        dialog.addInput(input, title: "分组名称")
         dialog.submit = { [weak self] in
             guard let self else { return false }; let name = (input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard NovelGroups.split(name).count == 1 else { throw NovelError.invalidRule(["请填写单个分组名称"]) }

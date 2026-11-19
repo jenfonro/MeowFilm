@@ -217,12 +217,14 @@ relation(sections, "filters", "array", "title:t group:t", identity="id")
 tabs = relation(sections, "tabs", "array", "title:t", identity="id")
 for parent in (sections, tabs):
     items = relation(parent, "items", "array",
-                     "title:t subtitle:t artwork:t recommendationReason:t coverLabel:t requiresAccount:b", identity="id")
+                     "title:t subtitle:t artwork:t recommendationReason:t coverLabel:t requiresAccount:b kind:t label:t contextText:t playCount:i presentation:t", identity="id")
     values(items, "previewSongIDs")
+    relation(items, "coverRef", "object", "platform:t kind:t id:t")
+    relation(items, "displayOnlyPreviews", "array", "title:t artist:t album:t artwork:t duration:r")
     ranking = relation(items, "ranking", "object", "songArtwork:t updateFrequency:t")
     relation(ranking, "preview", "array", "id:t title:t artist:t artwork:t rank:i lastRank:i")
     content = relation(items, "content", "object", "kind:t record:t")
-    relation(content, "collection", "object", "platform:t nativeID:t kind:t title:t creator:t artwork:t count:i")
+    relation(content, "collection", "object", "platform:t nativeID:t kind:t title:t creator:t artwork:t count:i playCount:i")
     relation(content, "channel", "object", "id:t title:t kind:t pageCode:t platform:t")
     action = relation(content, "action", "object",
                       "type:t provider:t mode:t submode:t entry:t ruleId:t tabTagId:t sourceName:t sourceType:t branch:t songId:t")
@@ -277,7 +279,8 @@ def sql(records=None):
             columns += ["FOREIGN KEY(song_id) REFERENCES music_songs(song_id)"]
         for name, kind in row.fields:
             if kind == "t" and name in ("songId", "songID", "seedSongId", "basedOnSongId") and \
-                    not row.name.startswith("music_home_display"):
+                    not row.name.startswith("music_home_display") and not (row.name.startswith("windows_home_") and
+                    row.name.endswith(("_action", "_playbackSource"))):
                 columns += [f"FOREIGN KEY({quote(column(row, name))}) REFERENCES music_songs(song_id)"]
         if row.name == "music_collection_members" or row.name == "music_collections_bindings_map":
             columns += ["FOREIGN KEY(value) REFERENCES music_songs(song_id)"]

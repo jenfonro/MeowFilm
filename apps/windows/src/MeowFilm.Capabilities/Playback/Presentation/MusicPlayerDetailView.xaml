@@ -1,225 +1,17 @@
 <UserControl x:Class="MeowFilm.Capabilities.MusicPlayerDetailView"
- xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
- xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:local="clr-namespace:MeowFilm.Capabilities"
- xmlns:desktop="clr-namespace:MeowFilm.Desktop;assembly=MeowFilm.Desktop"
- PreviewKeyDown="Detail_PreviewKeyDown" PreviewKeyUp="Detail_PreviewKeyUp"
- LostKeyboardFocus="Detail_LostKeyboardFocus">
- <UserControl.Style>
-  <Style TargetType="UserControl">
-   <!-- The page's only backdrop; detail content and footer stay transparent over it. -->
-   <Setter Property="Background" Value="{Binding PlayerBackground}"/>
-   <Style.Triggers>
-    <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-     <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-    </Trigger>
-   </Style.Triggers>
-  </Style>
- </UserControl.Style>
- <UserControl.Resources>
-  <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Presentation/CapabilityTheme.xaml"/>
-    <ResourceDictionary Source="/MeowFilm.Capabilities;component/Lyrics/Presentation/LyricTypography.xaml"/>
-   </ResourceDictionary.MergedDictionaries>
-   <local:MusicLyricRowMarginConverter x:Key="Player.LyricRowMargin"/>
-   <ResourceDictionary x:Key="Player.FooterPalette">
-    <SolidColorBrush x:Key="Capability.Player.Foreground" Color="#C5C3C8"/>
-    <SolidColorBrush x:Key="Capability.Player.Text" Color="#EBEAED"/>
-    <SolidColorBrush x:Key="Capability.Player.Muted" Color="#C5C3C8"/>
-    <SolidColorBrush x:Key="Capability.Player.Hover" Color="#14FFFFFF"/>
-    <SolidColorBrush x:Key="Capability.Player.Pressed" Color="#22FFFFFF"/>
-    <SolidColorBrush x:Key="Capability.Player.Rail" Color="#26FFFFFF"/>
-   </ResourceDictionary>
-   <Style TargetType="TextBlock">
-    <Setter Property="Foreground" Value="#EBEAED"/>
-    <Style.Triggers>
-     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-     </Trigger>
-    </Style.Triggers>
-   </Style>
-   <Style x:Key="Player.LyricText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Lyric.Text}">
-    <Setter Property="Foreground" Value="#8B898C"/>
-    <Style.Triggers>
-     <DataTrigger Binding="{Binding IsSelected,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-      <Setter Property="Foreground" Value="#EBEAED"/>
-     </DataTrigger>
-     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-     </Trigger>
-    </Style.Triggers>
-   </Style>
-   <Style x:Key="Player.LyricOptionalText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Lyric.Text}">
-    <Setter Property="FontSize" Value="14"/><Setter Property="Margin" Value="0,5,0,0"/>
-    <Setter Property="Foreground" Value="#8B898C"/>
-    <Style.Triggers>
-     <Trigger Property="Text" Value=""><Setter Property="Visibility" Value="Collapsed"/></Trigger>
-     <Trigger Property="Text" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></Trigger>
-     <DataTrigger Binding="{Binding IsSelected,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-      <Setter Property="Foreground" Value="#EBEAED"/>
-     </DataTrigger>
-     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-     </Trigger>
-    </Style.Triggers>
-   </Style>
-   <Style x:Key="Player.LyricWord" TargetType="local:MusicLyricWordView" BasedOn="{StaticResource MeowFilm.Lyric}">
-    <Setter Property="Foreground" Value="#68666A"/>
-    <Setter Property="Highlight" Value="#928F90"/>
-    <Style.Triggers>
-     <DataTrigger Binding="{Binding IsSelected,RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
-      <Setter Property="Foreground" Value="#8B898C"/>
-      <Setter Property="Highlight" Value="#F4F3F6"/>
-     </DataTrigger>
-    </Style.Triggers>
-   </Style>
-   <Style x:Key="Player.DetailTab" TargetType="RadioButton">
-    <Setter Property="Foreground" Value="#9B969B"/><Setter Property="Padding" Value="12,6"/>
-    <Setter Property="Margin" Value="0"/><Setter Property="GroupName" Value="PlayerDetail"/>
-    <Setter Property="Template">
-     <Setter.Value><ControlTemplate TargetType="RadioButton">
-      <Border x:Name="TabSurface" Background="Transparent" CornerRadius="14" Padding="{TemplateBinding Padding}">
-       <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-      </Border>
-      <ControlTemplate.Triggers>
-       <Trigger Property="IsChecked" Value="True">
-        <Setter TargetName="TabSurface" Property="Background" Value="#18FFFFFF"/>
-        <Setter Property="Foreground" Value="#F3F1F4"/>
-       </Trigger>
-       <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="TabSurface" Property="Background" Value="#10FFFFFF"/></Trigger>
-      </ControlTemplate.Triggers>
-     </ControlTemplate></Setter.Value>
-    </Setter>
-   </Style>
-   <Style x:Key="Player.LyricAdjust" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
-    <Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/>
-    <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/>
-    <Setter Property="FontSize" Value="10"/><Setter Property="Foreground" Value="#EBEAED"/>
-    <Setter Property="BorderBrush" Value="#30FFFFFF"/>
-    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
-     <Border CornerRadius="18" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-             BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
-      <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-     </Border>
-    </ControlTemplate></Setter.Value></Setter>
-    <Setter Property="IsEnabled" Value="{Binding CanAdjustLyricOffset}"/>
-    <Style.Triggers>
-     <Trigger Property="IsMouseOver" Value="True">
-      <Setter Property="Background" Value="#14FFFFFF"/><Setter Property="BorderBrush" Value="#60FFFFFF"/>
-     </Trigger>
-     <Trigger Property="IsPressed" Value="True">
-      <Setter Property="Background" Value="#22FFFFFF"/><Setter Property="BorderBrush" Value="#80FFFFFF"/>
-     </Trigger>
-     <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="BorderBrush" Value="#E0FFFFFF"/></Trigger>
-     <Trigger Property="IsEnabled" Value="False">
-      <Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#18FFFFFF"/>
-     </Trigger>
-     <Trigger Property="desktop:DesktopTheme.IsHighContrast" Value="True">
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-     </Trigger>
-     <MultiTrigger><MultiTrigger.Conditions>
-      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsKeyboardFocused" Value="True"/>
-     </MultiTrigger.Conditions><Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/></MultiTrigger>
-     <MultiTrigger><MultiTrigger.Conditions>
-      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsMouseOver" Value="True"/>
-     </MultiTrigger.Conditions>
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
-     </MultiTrigger>
-     <MultiTrigger><MultiTrigger.Conditions>
-      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsPressed" Value="True"/>
-     </MultiTrigger.Conditions>
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
-     </MultiTrigger>
-     <MultiTrigger><MultiTrigger.Conditions>
-      <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/><Condition Property="IsEnabled" Value="False"/>
-     </MultiTrigger.Conditions>
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
-     </MultiTrigger>
-    </Style.Triggers>
-   </Style>
-   <Style x:Key="Player.LyricTranslation" TargetType="Button" BasedOn="{StaticResource Player.LyricAdjust}">
-    <Setter Property="Margin" Value="0,10,0,0"/>
-    <Setter Property="IsEnabled" Value="{Binding IsLyrics}"/>
-    <Setter Property="AutomationProperties.Name" Value="显示译文歌词"/>
-    <Setter Property="AutomationProperties.ItemStatus" Value="已隐藏"/>
-    <Setter Property="ToolTip" Value="显示译文歌词"/>
-    <Style.Triggers>
-     <DataTrigger Binding="{Binding ShowLyricTranslation}" Value="True">
-      <Setter Property="Background" Value="#18FFFFFF"/>
-      <Setter Property="BorderBrush" Value="#60FFFFFF"/>
-      <Setter Property="AutomationProperties.Name" Value="隐藏译文歌词"/>
-      <Setter Property="AutomationProperties.ItemStatus" Value="已显示"/>
-      <Setter Property="ToolTip" Value="隐藏译文歌词"/>
-     </DataTrigger>
-     <MultiDataTrigger>
-      <MultiDataTrigger.Conditions>
-       <Condition Binding="{Binding ShowLyricTranslation}" Value="True"/>
-       <Condition Binding="{Binding IsEnabled,RelativeSource={RelativeSource Self}}" Value="False"/>
-      </MultiDataTrigger.Conditions>
-      <Setter Property="Background" Value="Transparent"/>
-      <Setter Property="BorderBrush" Value="#18FFFFFF"/>
-     </MultiDataTrigger>
-     <MultiDataTrigger>
-      <MultiDataTrigger.Conditions>
-       <Condition Binding="{Binding ShowLyricTranslation}" Value="True"/>
-       <Condition Binding="{Binding (desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="True"/>
-      </MultiDataTrigger.Conditions>
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"/>
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.HighlightTextBrushKey}}"/>
-     </MultiDataTrigger>
-     <MultiDataTrigger>
-      <MultiDataTrigger.Conditions>
-       <Condition Binding="{Binding ShowLyricTranslation}" Value="False"/>
-       <Condition Binding="{Binding (desktop:DesktopTheme.IsHighContrast),RelativeSource={RelativeSource Self}}" Value="True"/>
-      </MultiDataTrigger.Conditions>
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.WindowTextBrushKey}}"/>
-     </MultiDataTrigger>
-     <MultiTrigger>
-      <MultiTrigger.Conditions>
-       <Condition Property="desktop:DesktopTheme.IsHighContrast" Value="True"/>
-       <Condition Property="IsEnabled" Value="False"/>
-      </MultiTrigger.Conditions>
-      <Setter Property="Background" Value="{DynamicResource {x:Static SystemColors.WindowBrushKey}}"/>
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static SystemColors.GrayTextBrushKey}}"/>
-     </MultiTrigger>
-    </Style.Triggers>
-   </Style>
-   <Style x:Key="Player.LyricPreviewAction" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
-    <Setter Property="Height" Value="24"/><Setter Property="MinHeight" Value="0"/>
-    <Setter Property="Padding" Value="6,1"/><Setter Property="FontSize" Value="12"/>
-    <Setter Property="Foreground" Value="#C5C3C8"/><Setter Property="Background" Value="#08FFFFFF"/>
-    <Setter Property="BorderBrush" Value="#30FFFFFF"/>
-    <Setter Property="Template">
-     <Setter.Value><ControlTemplate TargetType="Button">
-      <Border CornerRadius="12" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-              BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
-       <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-      </Border>
-     </ControlTemplate></Setter.Value>
-    </Setter>
-   </Style>
-  </ResourceDictionary>
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities" x:Name="Root" Foreground="#EBEAED">
+ <UserControl.Resources><local:MusicVisibilityConverter x:Key="Visible"/>
+  <Style x:Key="Player.LyricAdjust" TargetType="Button"><Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/><Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="0"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#30FFFFFF"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="18"/></Style>
+  <Style TargetType="Button"><Setter Property="FontWeight" Value="Normal"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="12"/></Style>
  </UserControl.Resources>
  <Grid>
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <Border x:Name="PageBackdrop" Grid.RowSpan="2" IsHitTestVisible="False"
-          Background="{Binding Background,RelativeSource={RelativeSource AncestorType=UserControl}}"/>
+          Background="{Binding PlayerBackground}"/>
  <Grid MaxWidth="1240" Margin="0,88,0,0">
   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-  <Viewbox Margin="12,0,0,0" MaxWidth="500" MaxHeight="560" Stretch="Uniform" StretchDirection="DownOnly" VerticalAlignment="Center">
+  <Viewbox Margin="12,0,0,0" MaxWidth="500" MaxHeight="560" Stretch="Uniform" VerticalAlignment="Center">
    <Canvas Width="520" Height="600">
     <Ellipse Canvas.Left="53" Canvas.Top="103" Width="414" Height="414" Fill="#0AFFFFFF" Stroke="#20FFFFFF" StrokeThickness="1"/>
     <local:MusicRecordView x:Name="DetailRecord" Canvas.Left="66" Canvas.Top="116" Width="388" Height="388"
@@ -246,169 +38,56 @@
    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <StackPanel>
-    <TextBlock x:Name="DetailTitle" Text="{Binding CurrentTitle}"
-               FontSize="{StaticResource MeowFilm.Font.Size.Heading}"
-               TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
-    <WrapPanel Opacity=".68" Margin="0,0,0,18">
-     <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
-      <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers>
-       <DataTrigger Binding="{Binding CurrentAlbum}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-       <DataTrigger Binding="{Binding CurrentAlbum}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-      </Style.Triggers></Style></StackPanel.Style>
-      <TextBlock Text="专辑：" FontSize="14"/><TextBlock Text="{Binding CurrentAlbum}" FontSize="14" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
-     </StackPanel>
-     <StackPanel Orientation="Horizontal" Margin="0,0,18,0">
-      <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers>
-       <DataTrigger Binding="{Binding CurrentArtist}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-       <DataTrigger Binding="{Binding CurrentArtist}" Value="{x:Null}"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-      </Style.Triggers></Style></StackPanel.Style>
-      <TextBlock Text="歌手：" FontSize="14"/><TextBlock Text="{Binding CurrentArtist}" FontSize="14" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
-     </StackPanel>
-     <StackPanel Orientation="Horizontal">
-      <StackPanel.Style><Style TargetType="StackPanel"><Style.Triggers>
-       <DataTrigger Binding="{Binding CurrentSource}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-      </Style.Triggers></Style></StackPanel.Style>
-      <TextBlock Text="来源：" FontSize="14"/><TextBlock Text="{Binding CurrentSource}" FontSize="14" MaxWidth="150" TextTrimming="CharacterEllipsis"/>
-     </StackPanel>
-    </WrapPanel>
+    <TextBlock x:Name="DetailTitle" Text="{Binding CurrentTitle}" FontSize="26" TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
+    <local:MusicWrapPanel Opacity=".68" Margin="0,0,0,18">
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentAlbum,Converter={StaticResource Visible}}"><TextBlock Text="专辑："/><TextBlock Text="{Binding CurrentAlbum}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentArtist,Converter={StaticResource Visible}}"><TextBlock Text="歌手："/><TextBlock Text="{Binding CurrentArtist}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Visibility="{Binding CurrentSource,Converter={StaticResource Visible}}"><TextBlock Text="来源："/><TextBlock Text="{Binding CurrentSource}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+    </local:MusicWrapPanel>
    </StackPanel>
-    <Border Grid.Row="1" Margin="0,0,0,8" Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
-     <StackPanel Orientation="Horizontal">
-      <RadioButton Content="歌词" Style="{StaticResource Player.DetailTab}" IsChecked="True"/>
-      <RadioButton Content="相似推荐" Style="{StaticResource Player.DetailTab}" IsHitTestVisible="False"/>
-      <Button Content="心动模式" Click="Heartbeat_Click" IsEnabled="{Binding CanHeartbeatCurrent}" Visibility="{Binding CanHeartbeatCurrent,Converter={StaticResource MeowFilm.BoolToVisibility}}"
-              Style="{StaticResource MeowFilm.QuietButton}" FontSize="13" Padding="12,6" Margin="4,0"
-              AutomationProperties.Name="从当前歌曲开始心动"/>
-     </StackPanel>
-    </Border>
+   <Border Grid.Row="1" Margin="0,0,0,8" Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
+    <StackPanel Orientation="Horizontal"><RadioButton Content="歌词" IsChecked="True" FontWeight="Normal"/><RadioButton Content="相似推荐" IsHitTestVisible="False" FontWeight="Normal"/>
+     <Button Content="心动模式" Click="Heartbeat_Click" IsEnabled="{Binding CanHeartbeatCurrent}" Visibility="{Binding CanHeartbeatCurrent,Converter={StaticResource Visible}}" Padding="12,6" Margin="4,0" AutomationProperties.Name="从当前歌曲开始心动"/>
+    </StackPanel>
+   </Border>
    <Grid x:Name="LyricViewport" Grid.Row="2" Margin="-76,0,0,0">
-    <!-- Fade only the viewport edges; lyric glyphs stay outside the intermediate composition surface. -->
-    <Grid x:Name="LyricFadeViewport" Background="Transparent" ClipToBounds="True">
-    <local:MusicLyricList Background="Transparent" BorderThickness="0" Padding="0"
-     Position="{Binding LyricPositionSeconds}" IsPlaying="{Binding IsPlaying}"
-     PlaybackRate="{Binding AcceptedPlaybackRate}" PresentationKey="{Binding PlaybackPresentationKey}"
-     ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
-     ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True"
-     VirtualizingPanel.VirtualizationMode="Recycling" VirtualizingPanel.ScrollUnit="Pixel"
-     VirtualizingPanel.CacheLength="1,1" VirtualizingPanel.CacheLengthUnit="Page"
-     IsTabStop="True"
-     x:Name="LyricList" ItemsSource="{Binding Lyrics}" SelectedIndex="{Binding LyricDisplayIndex,Mode=OneWay}"
-     AutomationProperties.Name="歌词">
-     <ListBox.Resources><Style TargetType="ScrollViewer" BasedOn="{StaticResource Capability.OverlayScrollViewer}"/></ListBox.Resources>
-     <ListBox.Template><ControlTemplate TargetType="ListBox">
-      <ScrollViewer Focusable="False" CanContentScroll="True" VerticalScrollBarVisibility="Hidden"
-                    HorizontalScrollBarVisibility="Disabled" Style="{StaticResource Capability.OverlayScrollViewer}">
-       <ItemsPresenter/>
-      </ScrollViewer>
-     </ControlTemplate></ListBox.Template>
-     <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
-      <Setter Property="IsHitTestVisible" Value="False"/><Setter Property="Focusable" Value="False"/>
-      <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/>
-      <Setter Property="Margin"><Setter.Value><MultiBinding Converter="{StaticResource Player.LyricRowMargin}">
-       <Binding Path="DataContext" RelativeSource="{RelativeSource Self}"/>
-       <Binding Path="DataContext.FirstLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
-       <Binding Path="DataContext.LastLyric" RelativeSource="{RelativeSource AncestorType=local:MusicPlayerDetailView}"/>
-       <Binding Path="ViewportHeight" RelativeSource="{RelativeSource AncestorType=ScrollViewer}"/>
-       <Binding Path="ActualHeight" RelativeSource="{RelativeSource Self}"/>
-      </MultiBinding></Setter.Value></Setter>
-      <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
-       <ContentPresenter/>
-      </ControlTemplate></Setter.Value></Setter>
-     </Style></ListBox.ItemContainerStyle>
-     <ListBox.ItemTemplate><DataTemplate>
-      <Border Padding="76,11,16,11" MinHeight="47">
-        <StackPanel>
-         <TextBlock Text="{Binding Text}" FontSize="20" TextWrapping="Wrap">
-          <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Player.LyricText}">
-           <Setter Property="Visibility" Value="Collapsed"/>
-           <Style.Triggers><DataTrigger Binding="{Binding Words.Count}" Value="0"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-            <DataTrigger Binding="{Binding Words}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
-          </Style></TextBlock.Style>
-         </TextBlock>
-         <ItemsControl ItemsSource="{Binding Words}" AutomationProperties.Name="逐字歌词">
-          <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-          <ItemsControl.ItemTemplate><DataTemplate>
-           <local:MusicLyricWordView Word="{Binding}" Style="{StaticResource Player.LyricWord}" FontSize="20"/>
-          </DataTemplate></ItemsControl.ItemTemplate>
-         </ItemsControl>
-         <TextBlock x:Name="LyricTranslation" Text="{Binding Translation}" TextWrapping="Wrap">
-          <TextBlock.Style><Style TargetType="TextBlock" BasedOn="{StaticResource Player.LyricOptionalText}">
-           <Style.Triggers>
-            <DataTrigger Binding="{Binding DataContext.ShowLyricTranslation,RelativeSource={RelativeSource AncestorType=local:MusicPlayerDetailView}}" Value="False">
-             <Setter Property="Visibility" Value="Collapsed"/>
-            </DataTrigger>
-           </Style.Triggers>
-          </Style></TextBlock.Style>
-         </TextBlock>
-         <TextBlock Text="{Binding Romanization}" Style="{StaticResource Player.LyricOptionalText}" TextWrapping="Wrap"/>
-        </StackPanel>
-      </Border>
-     </DataTemplate></ListBox.ItemTemplate>
+    <Grid x:Name="LyricFadeViewport">
+    <local:MusicLyricList x:Name="LyricList" Background="Transparent" BorderThickness="0" Padding="0" Position="{Binding LyricPositionSeconds}" IsPlaying="{Binding IsPlaying}" PlaybackRate="{Binding AcceptedPlaybackRate}" PresentationKey="{Binding PlaybackPresentationKey}" ItemsSource="{Binding Lyrics}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" AutomationProperties.Name="歌词">
+     <ListView.Header><Border x:Name="LyricLeadingSpace"/></ListView.Header><ListView.Footer><Border x:Name="LyricTrailingSpace"/></ListView.Footer>
+     <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="IsHitTestVisible" Value="False"/><Setter Property="IsTabStop" Value="False"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/></Style></ListView.ItemContainerStyle>
+     <ListView.ItemTemplate><DataTemplate><local:MusicLyricRowView/></DataTemplate></ListView.ItemTemplate>
     </local:MusicLyricList>
-    <desktop:SidebarBackdrop x:Name="LyricEdgeFade" IsHitTestVisible="False" Focusable="False" Source="{Binding ElementName=PageBackdrop}">
-     <desktop:SidebarBackdrop.OpacityMask>
-      <LinearGradientBrush MappingMode="Absolute" StartPoint="0,0" EndPoint="0,1">
-       <GradientStop Color="Black" Offset="0"/><GradientStop Color="Transparent" Offset=".10"/>
-       <GradientStop Color="Transparent" Offset=".90"/><GradientStop Color="Black" Offset="1"/>
-      </LinearGradientBrush>
-     </desktop:SidebarBackdrop.OpacityMask>
-    </desktop:SidebarBackdrop>
+    <local:MusicArtworkFade x:Name="LyricEdgeFade" Source="{Binding ElementName=PageBackdrop}"/>
     </Grid>
-    <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12"
-            Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47"
-            Visibility="{Binding HasLyricPreview,Converter={StaticResource MeowFilm.BoolToVisibility}}">
-      <Button x:Name="ConfirmLyric" Click="PlayLyric_Click" HorizontalAlignment="Left" VerticalAlignment="Center"
-              Style="{StaticResource Player.LyricPreviewAction}" Margin="8,0,0,0"
-              IsEnabled="{Binding CanConfirmLyricPreview}" AutomationProperties.Name="播放此处">
-       <StackPanel Orientation="Horizontal">
-        <TextBlock Text="&#xE768;" FontFamily="{DynamicResource MeowFilm.Font.Icons}" FontSize="9" VerticalAlignment="Center"
-                   Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-        <TextBlock Text="{Binding LyricPreviewTime}" Margin="4,0,0,0" VerticalAlignment="Center"
-                   Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"
-                   Typography.NumeralAlignment="Tabular"/>
-       </StackPanel>
-      </Button>
+    <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12" Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47" Visibility="{Binding HasLyricPreview,Converter={StaticResource Visible}}">
+     <Button x:Name="ConfirmLyric" Padding="8,3" MinHeight="0" Height="24" MinWidth="0" CornerRadius="12" Background="#2AFFFFFF" Click="PlayLyric_Click" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0" IsEnabled="{Binding CanConfirmLyricPreview}" AutomationProperties.Name="播放此处">
+      <StackPanel Orientation="Horizontal" Spacing="4"><FontIcon Glyph="&#xE768;" FontSize="9"/><TextBlock Text="{Binding LyricPreviewTime}" FontSize="12"/></StackPanel>
+     </Button>
     </Border>
-    <TextBlock x:Name="LyricState" Text="{Binding LyricStatus}" FontSize="20"
-               HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
-
+    <TextBlock x:Name="LyricState" Text="{Binding LyricStatus}" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
    </Grid>
    <StackPanel x:Name="LyricControlRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
     <StackPanel x:Name="LyricTimingRail">
-     <Button x:Name="DelayLyricButton" Click="DelayLyric_Click"
-             Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒">
+     <Button x:Name="DelayLyricButton" Click="DelayLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{Binding CanAdjustLyricOffset}" ToolTipService.ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒">
       <Grid Width="26" Height="26" IsHitTestVisible="False">
-       <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2"
-             StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-             Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
-                  Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+       <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{Binding Foreground,ElementName=DelayLyricButton}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{Binding Foreground,ElementName=DelayLyricButton}"/>
       </Grid>
      </Button>
-     <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click"
-             Style="{StaticResource Player.LyricAdjust}" ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒">
+     <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{Binding CanAdjustLyricOffset}" ToolTipService.ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒">
       <Grid Width="26" Height="26" IsHitTestVisible="False">
-       <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2"
-             StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-             Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center"
-                  Foreground="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
+       <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{Binding Foreground,ElementName=AdvanceLyricButton}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{Binding Foreground,ElementName=AdvanceLyricButton}"/>
       </Grid>
      </Button>
     </StackPanel>
-    <Border Height="1" Margin="9,2,9,0" Background="#30FFFFFF" IsHitTestVisible="False"/>
-    <Button x:Name="LyricTranslationButton" Click="Translation_Click"
-            Style="{StaticResource Player.LyricTranslation}">
-     <Viewbox Width="24" Height="24" Stretch="Uniform" IsHitTestVisible="False">
-      <Path Data="M3,5 L15,5 M9,3 L9,5 M12,5 C11,11 8,14 3,16 M5,8 C6,12 9,14 12,16 M13,21 L17,10 L21,21 M14.5,17 L19.5,17"
-            StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
-            Stroke="{Binding Foreground,RelativeSource={RelativeSource AncestorType=Button}}"/>
-     </Viewbox>
+    <Border Height="1" Margin="9,2,9,0" Background="#30FFFFFF"/>
+    <Button x:Name="LyricTranslationButton" Click="Translation_Click" Style="{StaticResource Player.LyricAdjust}" Margin="0,10,0,0" IsEnabled="{Binding IsLyrics}">
+     <Viewbox Width="24" Height="24" Stretch="Uniform" IsHitTestVisible="False"><Path Data="M3,5 L15,5 M9,3 L9,5 M12,5 C11,11 8,14 3,16 M5,8 C6,12 9,14 12,16 M13,21 L17,10 L21,21 M14.5,17 L19.5,17" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{Binding Foreground,ElementName=LyricTranslationButton}"/></Viewbox>
     </Button>
    </StackPanel>
   </Grid>
  </Grid>
-  <ContentControl x:Name="DetailPlayerHost" Grid.Row="1" HorizontalContentAlignment="Stretch"
-                  VerticalContentAlignment="Stretch" Focusable="False" IsTabStop="False"/>
+ <ContentControl x:Name="DetailPlayerHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
  </Grid>
 </UserControl>

@@ -13,7 +13,7 @@ python3 -I -B scripts/ios-node-preflight.py --simulator <UDID>
 
 预检工具先分别调用准备工具，为本机构建架构的 simulator 和 device arm64 准备输入，再构建诊断 App；准备失败即停止，不用旧载荷继续构建。准备工具复用已校验的 NodeMobile archive／解包缓存，按明确的 iOS SDK 和架构准备原生引擎及载荷。device arm64 与 simulator arm64／x86_64 是不同目标，不能把 macOS arm64 二进制或另一种 iOS variant 改清单后使用；缓存按实际目标复用，不按测试轮次新建。
 
-`common-native` 公共闭包含业务模块、规则 SDK 和锁定依赖。通用默认入口仍为 music／cat／source；iOS 实际 entry 增加 pan、tmdb、douban，由 `connectFilmPlayback` 复用这些 provider 装配 film 和变更撤权 hook，再追加 netease 和借用其 token 的 music-platform。manifest 为 `platform: ios`、`transport: runtime.http.v1`、精确 `modules: ["music","cat","source","pan","tmdb","douban","film","netease","music-platform"]`，入口为 `app/ios/entries/aggregate.mjs`。App 发布连接前按实际依赖匹配九模块身份，版本／契约见[运行器契约](../runtime/runtime-bridge.md)。TMDB、netease 与 music-platform 还核对实际需要的方法存在；额外模块、方法或排列差异不拒绝连接，同一依赖模块身份歧义仍失败。旧帧协议、分片、asm.js／WASM 后端及“iOS 不装 source”的例外不保留。
+`common-native` 公共闭包含业务模块、规则 SDK 和锁定依赖。通用默认入口仍为 music／cat／source；iOS 实际 entry 增加 pan、tmdb、douban，由 `connectFilmPlayback` 复用这些 provider 装配 film 和变更撤权 hook，再追加 netease 和借用其 token 的 music-platform。manifest 声明 `platform: ios`、`transport: runtime.http.v1`，入口为 `app/ios/entries/aggregate.mjs`；准备、诊断和原生载荷读取不以完整模块数组作为准入条件。App 发布连接前核对实际依赖的模块 ID、版本和契约，见[运行器契约](../runtime/runtime-bridge.md)；同一依赖身份歧义仍失败。未调用方法的描述和额外模块、方法或排列差异不阻断连接，实际调用仍按路由和响应契约处理失败。旧帧协议、分片、asm.js／WASM 后端及“iOS 不装 source”的例外不保留。
 
 describe 不获取网易 token，也不下载或执行 Watchman。共同音乐模块仅在实际网易关系写准备时借用 token owner，原生等待 `sync.prepare` 的预算承接 Worker 的 45s 总预算，token 不交给原生。启动／脚本管理／普通账号业务不因该能力而依赖 SDK 网络。合成 SDK 与真实 jsdom Worker 在正式 NodeMobile 中运行才能证明嵌入承载；真实无账号 token 探测仅按显式选择执行，不作为默认联网门禁，结果只记录结构。Linux Node 24 结果不能作为 NodeMobile 18.20.4 的证明。
 
@@ -48,7 +48,7 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 
 `RuntimeEmbeddedLauncher(..., settings: RuntimeSettingsAccess?)` 在注入时向一次启动配置加入 `nativeSettings:true`；未注入仍为 `{sessionId,dataRoot}`，不创建设置能力。`MeowfilmNativeSettings.access` 允许读取共同契约中的六块，唯一可写块为 `pan.accounts`。Node 在 `configuration` 阶段读齐快照后才装配业务模块；端点帧仍只有 `{baseUrl}`，没有凭据。
 
-通道使用 LF 分隔 JSON，单帧正文最多 8 MiB（不含 LF）：
+通道使用 LF 分隔 JSON，不设置单帧正文的业务字节配额：
 
 | 方向 | 帧 |
 | --- | --- |

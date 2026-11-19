@@ -7,20 +7,16 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    public const string LyricDisplayNamespace = MusicPresentationCache.Namespace;
     private static string DisplayKey(JsonObject song) => MusicPresentationCache.SongKey(song);
 
     private static void ValidateDisplayLines(JsonArray lines)
     {
-        LJ.Require(lines.Count is > 0 and <= 10000, "INVALID_LYRIC_RESPONSE");
+        LJ.Require(lines.Count > 0, "INVALID_LYRIC_RESPONSE");
         double previous = -1;
-        int characters = 0, words = 0;
         void Text(JsonNode? value)
         {
             LJ.Require(value is JsonValue v && v.TryGetValue<string>(out var text) &&
-                text.Length <= 65536 && !text.Contains('\0'), "INVALID_LYRIC_RESPONSE");
-            characters += LJ.S(value).Length;
-            LJ.Require(characters <= 4 * 65536, "LIMIT");
+                !text.Contains('\0'), "INVALID_LYRIC_RESPONSE");
         }
         double Seconds(JsonNode? value)
         {
@@ -41,7 +37,6 @@ public sealed partial class MusicLibraryOwner
             if (row["words"] is not null)
                 foreach (var wordValue in LJ.Array(row["words"]))
                 {
-                    LJ.Require(++words <= 65536, "LIMIT");
                     var word = LJ.Object(wordValue);
                     LJ.Fields(word, "time duration text offset", "time duration text");
                     // Negative word timestamps can occur with a negative LRC
@@ -113,9 +108,10 @@ public sealed partial class MusicLibraryOwner
         bool entered = false;
         try
         {
+            lock (repositoryGate) LJ.Require(!closed && !preparing, "CLOSED");
             bool save = method == "music.lyrics.display.save";
             LJ.Require(save || method == "music.lyrics.display.get", "CAPABILITY_UNAVAILABLE");
-            var p = LJ.Parameters(parameters, 512 * 1024);
+            var p = LJ.Parameters(parameters);
             LJ.Fields(p, save ? "song sourceKey lines" : "song sourceKey", save ? "song sourceKey lines" : "song");
             var song = NativeMusicSong.Normalize(p["song"]);
             string key = DisplayKey(song);
@@ -130,10 +126,27 @@ public sealed partial class MusicLibraryOwner
                     .Any(source => LJ.S(source["sourceKey"]) == requested), "TARGET_CHANGED");
             JsonObject? saved = null;
             var presentations = PresentationCache;
-            try { await presentations.LoadAsync(token).ConfigureAwait(false); }
-            catch (DocumentStoreException) { }
-            long cacheEpoch = presentations.LyricEpoch;
-            await EnterAsync(token).ConfigureAwait(false); entered = true;
+            long cacheEpoch = 0;
+            if (save)
+            {
+                await EnterAsync(token).ConfigureAwait(false); entered = true;
+                LJ.Require(!closed && !preparing, "CLOSED");
+                cacheEpoch = presentations.LyricEpoch;
+            }
+            else
+            {
+                for (;;)
+                {
+                    long version = presentations.LyricVersion;
+                    try { saved = key.Length == 0 ? null : await presentations.ReadLyricsAsync(key, token).ConfigureAwait(false); }
+                    catch (DocumentStoreException) { saved = null; }
+                    await EnterAsync(token).ConfigureAwait(false); entered = true;
+                    // A save completed while this individual read or gate wait
+                    // was in flight wins. Re-read only that song, outside the gate.
+                    if (key.Length == 0 || version == presentations.LyricVersion) break;
+                    gate.Release(); entered = false;
+                }
+            }
             LJ.Require(!closed && !preparing, "CLOSED");
             token.ThrowIfCancellationRequested();
             await LoadAsync(token).ConfigureAwait(false);
@@ -142,11 +155,8 @@ public sealed partial class MusicLibraryOwner
             JsonObject result;
             if (!save)
             {
-                gate.Release(); entered = false;
-                // The database lane orders this one-song read after admitted saves.
                 try
                 {
-                    saved = await presentations.ReadLyricsAsync(key, token).ConfigureAwait(false);
                     if (saved is not null)
                     {
                         saved["lines"] = DecodeCachedDisplayLines(saved["lines"]);
@@ -155,11 +165,6 @@ public sealed partial class MusicLibraryOwner
                 catch (OperationCanceledException) { throw; }
                 catch (DocumentStoreException) { saved = null; }
                 catch (MusicLibraryException) { saved = null; }
-                await EnterAsync(token).ConfigureAwait(false); entered = true;
-                LJ.Require(!closed && !preparing, "CLOSED");
-                await LoadAsync(token).ConfigureAwait(false);
-                token.ThrowIfCancellationRequested();
-                doc = document!;
                 if (!LJ.B(Settings(doc)["lyrics"])) result = LJ.Obj(("state", "disabled"), ("lines", new JsonArray()));
                 else if (saved is null ||
                     requested is not null && LJ.S(saved["sourceKey"]) != requested)
@@ -193,6 +198,7 @@ public sealed partial class MusicLibraryOwner
             return LJ.Element(LJ.Merge(LJ.Obj(("ok", true)), result));
         }
         catch (OperationCanceledException) { return LJ.Element(LJ.Obj(("ok", false), ("code", "CANCELLED"))); }
+        catch (ObjectDisposedException) when (closed) { return LJ.Element(LJ.Obj(("ok", false), ("code", "CLOSED"))); }
         catch (MusicLibraryException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Code))); }
         catch (DocumentStoreException error) { return LJ.Element(LJ.Obj(("ok", false), ("code", error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE"))); }
         catch { return LJ.Element(LJ.Obj(("ok", false), ("code", "INVALID_REQUEST"))); }

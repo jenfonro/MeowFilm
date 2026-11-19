@@ -82,7 +82,6 @@ export function createSourceLibrary({ dataRoot, storage, host, owner, web, netwo
   }
   function parseDefinition(definition) {
     require(typeof definition === 'string' && definition.trim().length > 0);
-    require(Buffer.byteLength(definition) <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
     const normalized = normalizeSourceDefinition(definition.replace(/^\uFEFF/, ''));
     require(['legado', 'qysg'].includes(normalized.protocol), 'UNSUPPORTED_PROTOCOL');
     return normalized;
@@ -305,7 +304,6 @@ export function createSourceLibrary({ dataRoot, storage, host, owner, web, netwo
         typeof item.enabled === 'boolean' && typeof item.enabledExplore === 'boolean');
       require(!next.has(item.installationId) && !urls.has(item.sourceUrl), 'SOURCE_INTEGRITY');
       require(['legado', 'qysg'].includes(item.protocol), 'UNSUPPORTED_PROTOCOL');
-      require(Buffer.byteLength(item.definition) <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
       require(!externalInstallation(item.installationId), 'STALE_SOURCE');
       require(!liveIds.has(item.installationId) || records.has(item.installationId) ||
         states.has(item.installationId), 'STALE_SOURCE');

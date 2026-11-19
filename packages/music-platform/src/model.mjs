@@ -7,6 +7,8 @@ export const first = (...values) => values.find(value => value !== undefined && 
 export const text = value => typeof value === 'string' ? value : '';
 export const scalar = value => typeof value === 'string' ? value :
   typeof value === 'number' || typeof value === 'bigint' ? String(value) : isRawJSON(value) ? value.rawJSON : '';
+export const array = value => Array.isArray(value) ? value : [];
+export const record = value => value !== null && typeof value === 'object' && !Array.isArray(value) ? value : {};
 export function required(value, code = 'INVALID_RESPONSE') {
   const result = scalar(value);
   if (!result) fail(code);
@@ -89,13 +91,20 @@ export function image(value) {
   const address = text(value).replaceAll('{size}', '480');
   if (!address) return '';
   try {
-    const url = new URL(address);
+    const url = new URL(address.startsWith('//') ? 'https:' + address : address);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return '';
     if (url.protocol === 'http:' && /(?:^|\.)music\.(?:126\.net|163\.com)$/i.test(url.hostname))
       url.protocol = 'https:';
     // A resource query is part of its identity. Do not discard rendition fields.
     return url.href;
   } catch { return ''; }
+}
+export function images(...values) {
+  for (const value of values) {
+    const address = image(value);
+    if (address) return address;
+  }
+  return '';
 }
 export function mediaURL(value, base) {
   try {
@@ -121,41 +130,44 @@ export function sourceKey(platform, info) {
     platform === 'kg' ? scalar(first(info.hash, info.albumAudioId)).toLowerCase() : '']);
 }
 export function song(platform, id, title, artist, album, duration, cover, native = {}, artistNames) {
-  const info = { ...native, source: platform, songmid: required(id), name: text(title),
+  const info = { ...native, source: platform, songmid: scalar(id), name: text(title),
     singer: text(artist), albumName: text(album), duration, img: image(cover),
     ...(artistNames === undefined ? {} : { artistNames }) };
   // Permanent identity belongs to the native repository, never to a provider.
   return { title: info.name, artist: info.singer, album: info.albumName, duration,
     cover_url: info.img, ...(artistNames === undefined ? {} : { artistNames }),
-    sources: [{ sourceKey: sourceKey(platform, info), source: platform, musicInfo: info }] };
+    sources: info.songmid ? [{ sourceKey: sourceKey(platform, info), source: platform, musicInfo: info }] : [] };
 }
 export function wySong(raw) {
-  const s = first(raw.songInfo, raw.songData, raw.song, raw);
+  raw = record(raw);
+  const s = record(first(raw.songInfo, raw.songData, raw.song, raw));
   const album = first(s.al, s.album) ?? {};
   const artists = first(s.ar, s.artists);
   const names = Array.isArray(artists) ? artists.map(a => text(a?.name)).filter(Boolean) : undefined;
   const types = [['128k', 'l'], ['192k', 'm'], ['320k', 'h'], ['flac', 'sq'], ['flac24bit', 'hr']]
-    .filter(([, key]) => Number(s[key]?.size) > 0).map(([type]) => ({ type }));
+    .filter(([, key]) => optionalNumber(s[key]?.size) > 0).map(([type]) => ({ type }));
   return song('wy', first(s.id, s.songId, s.resourceId), first(s.name, s.title),
     names?.join(' / ') ?? text(first(artists, s.artistName, s.artist)),
     typeof album === 'string' ? album : album.name,
     durationSeconds(first(s.dt, s.duration), 1000),
-    first(album.picUrl, s.picUrl, s.coverUrl), { albumId: scalar(album.id), types }, names);
+    images(album.picUrl, s.picUrl, s.coverUrl), { albumId: scalar(album.id), types }, names);
 }
 export function txSong(s) {
+  s = record(s);
   const album = s.album ?? {}, names = Array.isArray(s.singer) ? s.singer.map(a => text(a?.name)).filter(Boolean) : undefined;
   const types = [['128k', 'size_128mp3'], ['320k', 'size_320mp3'], ['flac', 'size_flac'], ['flac24bit', 'size_hires']]
-    .filter(([, field]) => Number(s.file?.[field]) > 0).map(([type]) => ({ type }));
+    .filter(([, field]) => optionalNumber(s.file?.[field]) > 0).map(([type]) => ({ type }));
   const albumMid = scalar(album.mid);
   return song('tx', s.mid, first(s.title, s.name), names?.join('、') ?? text(s.singer),
-    album.name, durationSeconds(s.interval), first(s.cover,
+    album.name, durationSeconds(s.interval), images(s.cover,
       albumMid ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${albumMid}.jpg` : ''),
-    { qqSongId: scalar(s.id), songId: scalar(s.id), songType: number(s.type),
+    { qqSongId: scalar(s.id), songId: scalar(s.id), songType: optionalNumber(s.type) ?? 0,
       albumId: albumMid, albumMid, strMediaMid: scalar(s.file?.media_mid), types }, names);
 }
 export function kgSong(s) {
+  s = record(s);
   const audio = s.audio_info ?? {}, album = first(s.albuminfo, s.album_info) ?? {};
-  const hash = required(first(s.hash, s.FileHash, audio.hash, audio.hash_128)).toUpperCase();
+  const hash = scalar(first(s.hash, s.FileHash, audio.hash, audio.hash_128)).toUpperCase();
   const full = text(first(s.name, s.FileName, s.filename)).replace(/\.(mp3|flac|m4a|wav|ape|ogg|aac|wma)$/i, '');
   const separator = full.indexOf(' - '), artists = first(s.singerinfo, s.Singers, s.authors);
   const names = Array.isArray(artists) ? artists.map(a =>
@@ -171,25 +183,27 @@ export function kgSong(s) {
     ['flac', first(s.hash_flac, s.SQFileHash, audio.hash_flac), first(s.filesize_flac, s.SQFileSize, audio.filesize_flac)],
     ['flac24bit', first(s.hash_high, s.ResFileHash, audio.hash_high), first(s.filesize_high, s.ResFileSize, audio.filesize_high)],
   ]) {
-    if (!h || !(Number(size) > 0)) continue;
+    if (!h || !(optionalNumber(size) > 0)) continue;
     const value = { hash: scalar(h).toUpperCase(), size: scalar(size) };
     types.push({ type, ...value }); nativeTypes[type] = value;
   }
   const milliseconds = first(s.timelen, s.timelength, audio.timelength, audio.duration_128);
   return song('kg', hash, title, artist, first(s.AlbumName, album.name, album.album_name, s.album_name),
     s.Duration == null ? durationSeconds(milliseconds, 1000) : durationSeconds(s.Duration),
-    first(s.cover, s.Image, s.trans_param?.union_cover, album.sizable_cover),
+    images(s.cover, s.Image, s.trans_param?.union_cover, album.sizable_cover),
     { hash, albumId: scalar(first(s.album_id, s.AlbumID, s.base?.album_id, album.id, album.album_id)),
       albumAudioId: scalar(first(s.mixsongid, s.add_mixsongid, s.album_audio_id, s.MixSongID, s.base?.album_audio_id)),
       audioId: scalar(first(s.audio_id, audio.audio_id)),
       types, _types: nativeTypes }, names);
 }
 export function collection(platform, raw) {
+  raw = record(raw);
   const id = platform === 'wy' ? first(raw.id, raw.playlistId) :
     platform === 'tx' ? first(raw.id, raw.tid, raw.dissid) : first(raw.global_collection_id, raw.gid);
-  return { id: required(id), name: text(first(raw.name, raw.title, raw.dissname, raw.dirName, raw.specialname)),
-    cover: image(first(raw.picUrl, raw.coverImgUrl, raw.picurl, raw.imgurl, raw.img, raw.cover, raw.logo, raw.pic)),
+  return { id: scalar(id), name: text(first(raw.name, raw.title, raw.dissname, raw.dirName, raw.specialname)),
+    cover: images(raw.picUrl, raw.coverImgUrl, raw.picurl, raw.imgurl, raw.img, raw.cover, raw.logo, raw.pic),
     count: optionalNumber(first(raw.trackCount, raw.songCount, raw.songnum, raw.songNum, raw.song_cnt, raw.songcount, raw.song_count, raw.count)),
+    playCount: optionalNumber(raw.playCount),
     creator: text(first(raw.creator?.nickname, raw.nickname, raw.creator_nick, raw.list_create_username)),
     source: platform, engine: { wy: 'Netease', tx: 'QQ', kg: 'Kugou', kw: 'Kuwo', mg: 'Migu' }[platform] };
 }

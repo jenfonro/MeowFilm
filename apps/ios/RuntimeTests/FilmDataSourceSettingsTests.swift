@@ -241,8 +241,14 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         page.view.layoutIfNeeded()
         XCTAssertGreaterThan(provider.bounds.height, 0)
         XCTAssertEqual(provider.layer.cornerRadius, provider.bounds.height / 2, accuracy: 0.5)
+        XCTAssertEqual(provider.convert(provider.bounds, to: page.view).minY -
+            page.pageHeader.convert(page.pageHeader.bounds, to: page.view).maxY,
+            SettingsVisualMetrics.contentTopSpacing, accuracy: 0.5)
         XCTAssertGreaterThan(api.bounds.width, api.bounds.height)
-        XCTAssertEqual(api.layer.cornerRadius, api.bounds.height / 2, accuracy: 0.5)
+        XCTAssertEqual(api.layer.cornerRadius, 0)
+        XCTAssertEqual(api.layer.borderWidth, 0)
+        XCTAssertEqual(api.backgroundColor, .clear)
+        XCTAssertEqual((api as? SettingsTextField)?.inputAppearance, .plain)
         XCTAssertFalse(descendants(form.view).compactMap { $0 as? UILabel }.contains {
             $0.text == "TMDB 设置" || $0.text == "豆瓣配置"
         })
@@ -302,6 +308,56 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         XCTAssertEqual(try storage.bytes(.tmdb), before)
         let savedDouban = try await storage.documents[.douban].read()
         XCTAssertNil(savedDouban)
+
+        let foreground = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive } }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [foreground], timeout: 10)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive })
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds
+        window.rootViewController = page; window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true; window.rootViewController = nil
+            previous?.makeKey()
+        }
+        let visible = expectation(for: NSPredicate { _, _ in
+            MainActor.assumeIsolated { window.isKeyWindow && page.canPresentPageAlert }
+        }, evaluatedWith: nil)
+        await fulfillment(of: [visible], timeout: 10)
+        let environments: [(CGFloat, UIContentSizeCategory)] = [
+            (320, .large), (390, .large), (320, .accessibilityExtraExtraExtraLarge),
+        ]
+        for (width, category) in environments {
+            window.frame.size.width = width
+            form.traitOverrides.preferredContentSizeCategory = category
+            for dark in [false, true] {
+                page.traitOverrides.userInterfaceStyle = dark ? .dark : .light
+                for index in 0...1 {
+                    provider.selectedSegmentIndex = index
+                    form.render(); page.applyTheme(); form.applyTheme()
+                    page.view.setNeedsLayout(); window.layoutIfNeeded(); page.view.layoutIfNeeded()
+                    form.form.setContentOffset(.zero, animated: false)
+                    for bottom in category.isAccessibilityCategory ? [false, true] : [false] {
+                        if bottom {
+                            form.form.setContentOffset(CGPoint(x: 0, y: max(0,
+                                form.form.contentSize.height - form.form.bounds.height)), animated: false)
+                        }
+                        window.layoutIfNeeded()
+                        var rendered = false
+                        let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                            rendered = window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+                        }
+                        XCTAssertTrue(rendered)
+                        let attachment = XCTAttachment(image: image)
+                        attachment.name = "film-scraping-native-\(index)-\(Int(width))-\(category.rawValue)-\(dark)-\(bottom)"
+                        attachment.lifetime = .keepAlways; add(attachment)
+                    }
+                }
+            }
+        }
     }
 
     private func field(_ form: FilmDataSourceFormController, _ id: String) throws -> UITextField {

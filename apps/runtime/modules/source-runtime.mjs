@@ -4,7 +4,6 @@ import {
   createNodeSourceCapabilities,
   createPortableSourceAdapter,
   createScriptHost,
-  SCRIPT_LIMITS,
   ScriptHostError,
 } from '@meowfilm/script-host';
 import {
@@ -13,7 +12,7 @@ import {
   SourceRuntimeError,
 } from '@meowfilm/source-runtime';
 
-import { BridgeError, encodeJSONValue, validateJSONValue } from '@meowfilm/runtime-bridge';
+import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
 import { cloneJSONValue, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createSourceLibrary } from './source-library.mjs';
@@ -22,7 +21,6 @@ import { createSourceRules } from './source-rules.mjs';
 import { contracts } from '../contracts.mjs';
 
 export const sourceRuntimeContract = contracts.source.contract;
-const sourceBytes = SCRIPT_LIMITS.maxSourceBytes;
 const protocols = new Set(['legado', 'qysg', 'cat']);
 const codes = contracts.source.codes;
 
@@ -39,9 +37,9 @@ const requireValue = (condition, code = 'INVALID_REQUEST') => {
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const digest = value => createHash('sha256').update(value).digest('hex');
 
-function text(value, maximum = 128) {
+function text(value) {
   requireValue(typeof value === 'string' && value.trim().length > 0 &&
-    value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value));
+    !/[\u0000-\u001f\u007f]/.test(value));
 }
 
 function identifier(value) {
@@ -56,7 +54,7 @@ function integer(value, minimum = 0) {
 function snapshot(value) { return cloneJSONValue(value); }
 function metadataValue(value) {
   requireValue(object(value));
-  requireValue(encodeJSONValue(value).length <= 32 * 1024, 'LIMIT');
+  validateJSONValue(value);
   return value;
 }
 
@@ -320,7 +318,6 @@ export function createSourceRuntimeModule({
           try {
             const normalized = normalizeSourceDefinition(uploaded.source, params.protocol);
             const source = stringifyJSONValue(normalized.source);
-            requireValue(Buffer.byteLength(source) <= sourceBytes, 'LIMIT');
             const hash = source === uploaded.source ? uploaded.contentHash
               : source === execution?.source ? execution.hash : digest(source);
             // Revision equality retains the existing object-order-independent

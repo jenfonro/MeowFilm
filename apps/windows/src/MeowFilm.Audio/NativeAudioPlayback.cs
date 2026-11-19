@@ -108,7 +108,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 lease.Revoked.ThrowIfCancellationRequested();
                 var content = lease.Content;
                 if (!content.CanRead || !content.CanSeek || content.CanWrite || lease.Length < 0 ||
-                    lease.Length > 1L << 40 || content.Length != lease.Length)
+                    content.Length != lease.Length)
                     throw Error(PlaybackError.InvalidReadLease);
             }
             catch (Exception error) when (error is not PlaybackException)

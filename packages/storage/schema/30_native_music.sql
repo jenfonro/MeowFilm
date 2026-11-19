@@ -2775,7 +2775,7 @@ CREATE TABLE "music_home_display_sections_items" (
     "sections_key" TEXT NOT NULL,
     "items_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 511),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 65535),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "title" TEXT,
     "subtitle" TEXT,
@@ -2783,12 +2783,22 @@ CREATE TABLE "music_home_display_sections_items" (
     "recommendationReason" TEXT,
     "coverLabel" TEXT,
     "requiresAccount" INTEGER CHECK("requiresAccount" IN (0,1)),
+    "kind" TEXT,
+    "label" TEXT,
+    "contextText" TEXT,
+    "playCount" INTEGER,
+    "presentation" TEXT,
     CHECK(("title" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     CHECK(("subtitle" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
     CHECK(("artwork" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
     CHECK(("recommendationReason" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
     CHECK(("coverLabel" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
     CHECK(("requiresAccount" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
+    CHECK(("kind" IS NULL)=((shape_mask & 64)=0 OR (null_mask & 64)<>0)),
+    CHECK(("label" IS NULL)=((shape_mask & 128)=0 OR (null_mask & 128)<>0)),
+    CHECK(("contextText" IS NULL)=((shape_mask & 256)=0 OR (null_mask & 256)<>0)),
+    CHECK(("playCount" IS NULL)=((shape_mask & 512)=0 OR (null_mask & 512)<>0)),
+    CHECK(("presentation" IS NULL)=((shape_mask & 1024)=0 OR (null_mask & 1024)<>0)),
     PRIMARY KEY("singleton","sections_key","items_key"),
     FOREIGN KEY("singleton","sections_key") REFERENCES "music_home_display_sections"("singleton","sections_key") ON DELETE CASCADE
 ) STRICT;
@@ -2804,6 +2814,45 @@ CREATE TABLE "music_home_display_sections_items_previewSongIDs" (
     "value" TEXT,
     CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     PRIMARY KEY("singleton","sections_key","items_key","previewSongIDs_key"),
+    FOREIGN KEY("singleton","sections_key","items_key") REFERENCES "music_home_display_sections_items"("singleton","sections_key","items_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_home_display_sections_items_coverRef" (
+    "singleton" TEXT NOT NULL,
+    "sections_key" TEXT NOT NULL,
+    "items_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "platform" TEXT,
+    "kind" TEXT,
+    "id" TEXT,
+    CHECK(("platform" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("kind" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("id" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    PRIMARY KEY("singleton","sections_key","items_key"),
+    FOREIGN KEY("singleton","sections_key","items_key") REFERENCES "music_home_display_sections_items"("singleton","sections_key","items_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_home_display_sections_items_displayOnlyPreviews" (
+    "singleton" TEXT NOT NULL,
+    "sections_key" TEXT NOT NULL,
+    "items_key" TEXT NOT NULL,
+    "displayOnlyPreviews_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 31),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "title" TEXT,
+    "artist" TEXT,
+    "album" TEXT,
+    "artwork" TEXT,
+    "duration" REAL,
+    CHECK(("title" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("artist" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("album" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    CHECK(("artwork" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
+    CHECK(("duration" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
+    PRIMARY KEY("singleton","sections_key","items_key","displayOnlyPreviews_key"),
     FOREIGN KEY("singleton","sections_key","items_key") REFERENCES "music_home_display_sections_items"("singleton","sections_key","items_key") ON DELETE CASCADE
 ) STRICT;
 
@@ -2866,7 +2915,7 @@ CREATE TABLE "music_home_display_sections_items_content_collection" (
     "sections_key" TEXT NOT NULL,
     "items_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 127),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 255),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "platform" TEXT,
     "nativeID" TEXT,
@@ -2875,6 +2924,7 @@ CREATE TABLE "music_home_display_sections_items_content_collection" (
     "creator" TEXT,
     "artwork" TEXT,
     "count" INTEGER,
+    "playCount" INTEGER,
     CHECK(("platform" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     CHECK(("nativeID" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
     CHECK(("kind" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
@@ -2882,6 +2932,7 @@ CREATE TABLE "music_home_display_sections_items_content_collection" (
     CHECK(("creator" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
     CHECK(("artwork" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
     CHECK(("count" IS NULL)=((shape_mask & 64)=0 OR (null_mask & 64)<>0)),
+    CHECK(("playCount" IS NULL)=((shape_mask & 128)=0 OR (null_mask & 128)<>0)),
     PRIMARY KEY("singleton","sections_key","items_key"),
     FOREIGN KEY("singleton","sections_key","items_key") REFERENCES "music_home_display_sections_items_content"("singleton","sections_key","items_key") ON DELETE CASCADE
 ) STRICT;
@@ -2974,7 +3025,7 @@ CREATE TABLE "music_home_display_sections_tabs_items" (
     "tabs_key" TEXT NOT NULL,
     "items_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 511),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 65535),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "title" TEXT,
     "subtitle" TEXT,
@@ -2982,12 +3033,22 @@ CREATE TABLE "music_home_display_sections_tabs_items" (
     "recommendationReason" TEXT,
     "coverLabel" TEXT,
     "requiresAccount" INTEGER CHECK("requiresAccount" IN (0,1)),
+    "kind" TEXT,
+    "label" TEXT,
+    "contextText" TEXT,
+    "playCount" INTEGER,
+    "presentation" TEXT,
     CHECK(("title" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     CHECK(("subtitle" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
     CHECK(("artwork" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
     CHECK(("recommendationReason" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
     CHECK(("coverLabel" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
     CHECK(("requiresAccount" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
+    CHECK(("kind" IS NULL)=((shape_mask & 64)=0 OR (null_mask & 64)<>0)),
+    CHECK(("label" IS NULL)=((shape_mask & 128)=0 OR (null_mask & 128)<>0)),
+    CHECK(("contextText" IS NULL)=((shape_mask & 256)=0 OR (null_mask & 256)<>0)),
+    CHECK(("playCount" IS NULL)=((shape_mask & 512)=0 OR (null_mask & 512)<>0)),
+    CHECK(("presentation" IS NULL)=((shape_mask & 1024)=0 OR (null_mask & 1024)<>0)),
     PRIMARY KEY("singleton","sections_key","tabs_key","items_key"),
     FOREIGN KEY("singleton","sections_key","tabs_key") REFERENCES "music_home_display_sections_tabs"("singleton","sections_key","tabs_key") ON DELETE CASCADE
 ) STRICT;
@@ -3004,6 +3065,47 @@ CREATE TABLE "music_home_display_sections_tabs_items_previewSongIDs" (
     "value" TEXT,
     CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     PRIMARY KEY("singleton","sections_key","tabs_key","items_key","previewSongIDs_key"),
+    FOREIGN KEY("singleton","sections_key","tabs_key","items_key") REFERENCES "music_home_display_sections_tabs_items"("singleton","sections_key","tabs_key","items_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_home_display_sections_tabs_items_coverRef" (
+    "singleton" TEXT NOT NULL,
+    "sections_key" TEXT NOT NULL,
+    "tabs_key" TEXT NOT NULL,
+    "items_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "platform" TEXT,
+    "kind" TEXT,
+    "id" TEXT,
+    CHECK(("platform" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("kind" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("id" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    PRIMARY KEY("singleton","sections_key","tabs_key","items_key"),
+    FOREIGN KEY("singleton","sections_key","tabs_key","items_key") REFERENCES "music_home_display_sections_tabs_items"("singleton","sections_key","tabs_key","items_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_home_display_sections_tabs_items_displayOnlyPreviews" (
+    "singleton" TEXT NOT NULL,
+    "sections_key" TEXT NOT NULL,
+    "tabs_key" TEXT NOT NULL,
+    "items_key" TEXT NOT NULL,
+    "displayOnlyPreviews_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 31),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "title" TEXT,
+    "artist" TEXT,
+    "album" TEXT,
+    "artwork" TEXT,
+    "duration" REAL,
+    CHECK(("title" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("artist" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("album" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    CHECK(("artwork" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
+    CHECK(("duration" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
+    PRIMARY KEY("singleton","sections_key","tabs_key","items_key","displayOnlyPreviews_key"),
     FOREIGN KEY("singleton","sections_key","tabs_key","items_key") REFERENCES "music_home_display_sections_tabs_items"("singleton","sections_key","tabs_key","items_key") ON DELETE CASCADE
 ) STRICT;
 
@@ -3070,7 +3172,7 @@ CREATE TABLE "music_home_display_sections_tabs_items_content_collection" (
     "tabs_key" TEXT NOT NULL,
     "items_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 127),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 255),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "platform" TEXT,
     "nativeID" TEXT,
@@ -3079,6 +3181,7 @@ CREATE TABLE "music_home_display_sections_tabs_items_content_collection" (
     "creator" TEXT,
     "artwork" TEXT,
     "count" INTEGER,
+    "playCount" INTEGER,
     CHECK(("platform" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     CHECK(("nativeID" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
     CHECK(("kind" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
@@ -3086,6 +3189,7 @@ CREATE TABLE "music_home_display_sections_tabs_items_content_collection" (
     CHECK(("creator" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
     CHECK(("artwork" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
     CHECK(("count" IS NULL)=((shape_mask & 64)=0 OR (null_mask & 64)<>0)),
+    CHECK(("playCount" IS NULL)=((shape_mask & 128)=0 OR (null_mask & 128)<>0)),
     PRIMARY KEY("singleton","sections_key","tabs_key","items_key"),
     FOREIGN KEY("singleton","sections_key","tabs_key","items_key") REFERENCES "music_home_display_sections_tabs_items_content"("singleton","sections_key","tabs_key","items_key") ON DELETE CASCADE
 ) STRICT;

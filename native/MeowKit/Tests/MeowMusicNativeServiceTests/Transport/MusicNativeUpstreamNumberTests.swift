@@ -39,12 +39,16 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         await service.close()
     }
 
-    func testMissingCanonicalRequiredLocatorFailsWithoutPublishingPartialRepository() async throws {
+    func testMissingCanonicalLocatorKeepsDisplayAndOnlyAdoptsIdentifiedRows() async throws {
         let valid = try MusicPlatformFixture.song(NativeMusicFixture.track())
         let peer = NativeMusicResultFixture([.object(["items": .array([valid, .object(["sources": .array([])])]), "total": .number(2)])])
         let store = NativeMusicTestLibrary(), service = try await NativeMusicFixture.service(store, platform: peer)
-        await assertMusicFailure(.upstreamInvalid) { _ = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30) }
-        XCTAssertEqual(store.snapshot().2, 0)
+        let page = try await service.search(platform: "tx", query: "Synthetic", page: 1, limit: 30)
+        XCTAssertEqual(page.items.count, 2)
+        XCTAssertFalse(page.items[0].songId.isEmpty); XCTAssertTrue(page.items[1].songId.isEmpty)
+        XCTAssertTrue(page.items[1].sources.isEmpty)
+        let state = try await service.read()
+        XCTAssertEqual(try state.songRows.allSongIDs().count, 1)
         await service.close()
     }
 
@@ -80,7 +84,8 @@ final class MusicNativeUpstreamNumberTests: XCTestCase {
         let nested = String(repeating: "[", count: 80) + "0" + String(repeating: "]", count: 80)
         XCTAssertEqual(try MJ.parse(Data(nested.utf8)).json, nested)
         for bad in ["01", "+1", "1.", "1e", "NaN", "Infinity", "[1,]", "1 2"] { XCTAssertThrowsError(try MJ.parse(Data(bad.utf8))) }
-        XCTAssertThrowsError(try MJ.parse(value.bytes, maximum: value.bytes.count - 1))
+        let large = MJ.obj([("text", .string(String(repeating: "x", count: 8 * 1024 * 1024 + 1)))])
+        XCTAssertEqual(try MJ.parse(large.bytes), large)
     }
 
     func testRelationalValuesPreserveExactNumbersAndDistinctUTF8Members() throws {

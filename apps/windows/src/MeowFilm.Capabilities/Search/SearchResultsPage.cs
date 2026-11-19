@@ -1,7 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Windows;
+using Microsoft.UI.Xaml;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -297,19 +297,19 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
     {
         if (tab == "novel") { novelScroll = view.NovelScroll.VerticalOffset; return; }
         if (tab != "film") return;
-        if (raw) rawScroll = view.FilmScroll.VerticalOffset; else aggregateScroll = view.FilmScroll.VerticalOffset;
+        if (raw) rawScroll = view.FilmScroll?.VerticalOffset ?? 0; else aggregateScroll = view.FilmScroll?.VerticalOffset ?? 0;
     }
     private void RestoreScroll()
     {
         if (!active || tab is not ("film" or "novel")) return;
         long operation = submission;
-        _ = view.Dispatcher.InvokeAsync(() =>
+        view.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             if (active && tab == "film" && operation == submission)
-                view.FilmScroll.ScrollToVerticalOffset(raw ? rawScroll : aggregateScroll);
+                view.FilmScroll?.ChangeView(null, raw ? rawScroll : aggregateScroll, null, true);
             if (active && tab == "novel" && operation == submission)
-                view.NovelScroll.ScrollToVerticalOffset(novelScroll);
-        }, System.Windows.Threading.DispatcherPriority.Loaded);
+                view.NovelScroll.ChangeView(null, novelScroll, null, true);
+        });
     }
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
 }

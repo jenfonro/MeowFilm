@@ -1,10 +1,12 @@
-using System.ComponentModel;
-using System.Windows.Data;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Shapes;
+using Microsoft.UI.Xaml.Media.Animation;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
@@ -31,12 +33,13 @@ public partial class MusicRecordView : UserControl
     public bool SwipeEnabled { get => (bool)GetValue(SwipeEnabledProperty); set => SetValue(SwipeEnabledProperty, value); }
     public string SwipeIdentity { get => (string)GetValue(SwipeIdentityProperty); set => SetValue(SwipeIdentityProperty, value); }
     public static readonly DependencyProperty PaletteBrushProperty = DependencyProperty.Register(nameof(PaletteBrush),
-        typeof(Brush), typeof(MusicRecordView), new PropertyMetadata(Brushes.DimGray, PaletteChanged));
+        typeof(Brush), typeof(MusicRecordView), new PropertyMetadata(null, PaletteChanged));
     public Brush PaletteBrush => (Brush)GetValue(PaletteBrushProperty);
     public event EventHandler? PaletteUpdated;
     private static void PaletteChanged(DependencyObject value, DependencyPropertyChangedEventArgs e)
         => ((MusicRecordView)value).PaletteUpdated?.Invoke(value, EventArgs.Empty);
-    private AnimationClock? clock;
+    private Storyboard? clock;
+    private Storyboard? swipeMotion;
     private double retainedAngle;
     private Point pointerOrigin;
     private double gestureOrigin;
@@ -44,7 +47,8 @@ public partial class MusicRecordView : UserControl
     private string? gestureIdentity;
     private string? pendingIdentity;
     private long swipeGeneration;
-    private Window? ownerWindow;
+    private MeowFilm.Desktop.DesktopWindow? window;
+    private bool IsVisible => MeowFilm.Desktop.DesktopVisual.IsVisible(this);
     internal bool IsSwiping { get; private set; }
     internal double SwipeOffset => SwipeTranslation.X;
     public event EventHandler<MusicRecordSwipeEventArgs>? SwipeCommitted;
@@ -53,42 +57,55 @@ public partial class MusicRecordView : UserControl
     {
         InitializeComponent();
         UpdateGrooves();
-        SetBinding(PaletteBrushProperty, new Binding(nameof(ArtworkImage.PaletteBrush)) { Source = Cover, Mode = BindingMode.OneWay });
-        Focusable = true;
-        IsManipulationEnabled = true;
+        SetBinding(PaletteBrushProperty, new Binding { Path = new PropertyPath(nameof(ArtworkImage.PaletteBrush)), Source = Cover, Mode = BindingMode.OneWay });
+        IsTabStop = true;
+        PointerPressed += OnPointerDown;
+        PointerMoved += OnPointerMove;
+        PointerReleased += OnPointerUp;
+        PointerCaptureLost += (_, _) => { if (pointerPending) CancelSwipe(); };
+        KeyDown += OnRecordKeyDown;
         Loaded += (_, _) =>
         {
-            SystemParameters.StaticPropertyChanged += SystemChanged;
-            ownerWindow = Window.GetWindow(this);
-            if (ownerWindow is not null) ownerWindow.Deactivated += OwnerDeactivated;
+            window = MeowFilm.Desktop.DesktopWindow.GetWindow(this);
+            if (window is not null)
+            { window.Deactivated += WindowDeactivated; window.VisibilityChanged += WindowVisibilityChanged; }
             Sync();
         };
         Unloaded += (_, _) =>
         {
-            SystemParameters.StaticPropertyChanged -= SystemChanged;
-            if (ownerWindow is not null) ownerWindow.Deactivated -= OwnerDeactivated;
-            ownerWindow = null;
-            CancelSwipe(immediate: true);
-            Release();
+            if (window is not null)
+            { window.Deactivated -= WindowDeactivated; window.VisibilityChanged -= WindowVisibilityChanged; }
+            window = null; CancelSwipe(immediate: true); Release();
         };
-        IsVisibleChanged += (_, _) =>
+        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
             if (!IsVisible) CancelSwipe(immediate: true);
             Sync();
-        };
+        });
         SizeChanged += (_, e) =>
         {
             UpdateGrooves();
-            if (e.PreviousSize.Width > 0 && e.WidthChanged &&
+            if (e.PreviousSize.Width > 0 && e.NewSize.Width != e.PreviousSize.Width &&
                 (pointerPending || IsSwiping || pendingIdentity is not null || Math.Abs(SwipeTranslation.X) > .5))
                 CancelSwipe();
         };
     }
+    private void WindowDeactivated(object? sender, EventArgs e) => CancelSwipe(immediate: true);
+    private void WindowVisibilityChanged(object? sender, EventArgs e)
+    { if (!IsVisible) CancelSwipe(immediate: true); Sync(); }
     internal Task<IDisposable> PrepareArtworkAsync(CancellationToken cancellationToken) =>
         Cover.PrepareForPresentationAsync(cancellationToken);
 
-    private void UpdateGrooves() => Grooves.Fill = Math.Min(ActualWidth, ActualHeight) < 160
-        ? MusicPlayerArtwork.CompactGrooves : MusicPlayerArtwork.Grooves;
+    private void UpdateGrooves()
+    {
+        Grooves.Children.Clear();
+        bool compact = Math.Min(ActualWidth, ActualHeight) < 160;
+        Grooves.Children.Add(new Ellipse { Fill = MusicVisuals.Brush("#161719"), Width = 300, Height = 300 });
+        for (double radius = 100; radius < 148; radius += compact ? 14 : 1.7)
+            Grooves.Children.Add(new Ellipse { Stroke = MusicVisuals.Brush("#3C444547"),
+                StrokeThickness = compact ? 4 : .65, Width = radius * 2, Height = radius * 2,
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center });
+    }
     private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs args)
     {
         var record = (MusicRecordView)value;
@@ -101,7 +118,7 @@ public partial class MusicRecordView : UserControl
         {
             // A committed swipe has already taken the old disc out of view.
             // Artwork updates and media retries do not end a track's posture.
-            record.Release(); record.retainedAngle = 0; record.Rotation.Angle = 0;
+            record.Release(); record.retainedAngle = 0; record.DiscRotation.Angle = 0;
         }
         record.Sync();
     }
@@ -111,119 +128,57 @@ public partial class MusicRecordView : UserControl
         if (e.Property == SwipeIdentityProperty || !record.SwipeEnabled)
             record.CancelSwipe(immediate: true);
     }
-    private void SystemChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        Sync();
-        if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast) CancelSwipe(immediate: true);
-    }
     private void Sync()
     {
-        if (!IsLoaded || !IsVisible || !SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast)
-        { Release(); return; }
+        if (!IsLoaded || !IsVisible || !MusicVisuals.CanAnimate(this)) { Release(); return; }
         if (Playing)
         {
-            if (clock is null)
-            {
-                clock = (AnimationClock)new DoubleAnimation(retainedAngle, retainedAngle + 360, TimeSpan.FromSeconds(24))
-                { RepeatBehavior = RepeatBehavior.Forever }.CreateClock(true);
-                Rotation.ApplyAnimationClock(RotateTransform.AngleProperty, clock);
-            }
-            clock.Controller?.Resume();
+            if (clock is null) clock = MusicVisuals.AnimateDouble(DiscRotation, "Angle", retainedAngle,
+                retainedAngle + 360, TimeSpan.FromSeconds(24), forever: true);
+            else clock.Resume();
         }
-        else clock?.Controller?.Pause();
+        else clock?.Pause();
     }
     private void Release()
     {
-        retainedAngle = Rotation.Angle % 360;
-        clock?.Controller?.Remove(); clock = null;
-        Rotation.ApplyAnimationClock(RotateTransform.AngleProperty, null);
-        Rotation.Angle = retainedAngle;
+        retainedAngle = DiscRotation.Angle % 360;
+        clock?.Stop(); clock = null; DiscRotation.Angle = retainedAngle;
     }
-
-    protected override void OnPreviewMouseLeftButtonDown(MouseButtonEventArgs e)
+    private void OnPointerDown(object sender, PointerRoutedEventArgs e)
     {
-        base.OnPreviewMouseLeftButtonDown(e);
-        if (!CanSwipe()) return;
-        Focus();
-        pointerOrigin = e.GetPosition(this);
-        gestureOrigin = InterruptSwipeMotion();
-        pointerPending = true;
-        gestureIdentity = SwipeIdentity;
+        if (!CanSwipe() || !e.GetCurrentPoint(this).IsInContact) return;
+        Focus(FocusState.Pointer);
+        pointerOrigin = e.GetCurrentPoint(this).Position;
+        gestureOrigin = InterruptSwipeMotion(); pointerPending = true; gestureIdentity = SwipeIdentity;
     }
-    protected override void OnPreviewMouseMove(MouseEventArgs e)
+    private void OnPointerMove(object sender, PointerRoutedEventArgs e)
     {
-        base.OnPreviewMouseMove(e);
-        if (!pointerPending || e.LeftButton != MouseButtonState.Pressed) return;
-        var delta = e.GetPosition(this).X - pointerOrigin.X;
-        if (!IsSwiping && Math.Abs(delta) < SystemParameters.MinimumHorizontalDragDistance) return;
-        if (!IsSwiping && !CaptureMouse()) { pointerPending = false; return; }
-        IsSwiping = true;
-        e.Handled = true;
-        UpdateSwipeOffset(gestureOrigin + delta);
+        if (!pointerPending) return;
+        var delta = e.GetCurrentPoint(this).Position.X - pointerOrigin.X;
+        if (!IsSwiping && Math.Abs(delta) < 4) return;
+        if (!IsSwiping && !CapturePointer(e.Pointer)) { pointerPending = false; return; }
+        IsSwiping = true; e.Handled = true; UpdateSwipeOffset(gestureOrigin + delta);
     }
-    protected override void OnPreviewMouseLeftButtonUp(MouseButtonEventArgs e)
+    private void OnPointerUp(object sender, PointerRoutedEventArgs e)
     {
-        base.OnPreviewMouseLeftButtonUp(e);
         if (!pointerPending) return;
         pointerPending = false;
-        if (!IsSwiping)
-        {
-            gestureIdentity = null;
-            if (Math.Abs(SwipeTranslation.X) > .5) AnimateSwipe(0, null);
-            return;
-        }
-        e.Handled = true;
-        if (IsMouseCaptured) ReleaseMouseCapture();
-        EndSwipe(commit: true);
+        if (!IsSwiping) { gestureIdentity = null; AnimateSwipe(0, null); return; }
+        e.Handled = true; ReleasePointerCapture(e.Pointer); EndSwipe(commit: true);
     }
-    protected override void OnLostMouseCapture(MouseEventArgs e)
+    private void OnRecordKeyDown(object sender, KeyRoutedEventArgs e)
+    { if (Navigate(e.Key)) e.Handled = true; }
+    internal bool Navigate(VirtualKey key)
     {
-        base.OnLostMouseCapture(e);
-        if (IsSwiping && pointerPending)
+        if (key is VirtualKey.Left or VirtualKey.Right && CanSwipe())
         {
-            pointerPending = false;
-            EndSwipe(commit: false);
-        }
-    }
-    protected override void OnPreviewKeyDown(KeyEventArgs e)
-    {
-        if (e.KeyboardDevice.Modifiers == ModifierKeys.None && e.Key is (Key.Left or Key.Right) && CanSwipe())
-        {
-            e.Handled = true;
             BeginSwipe(ActualWidth / 2);
-            UpdateSwipe(e.Key == Key.Right ? 0 : ActualWidth);
-            EndSwipe(commit: true);
-            return;
+            UpdateSwipe(key == VirtualKey.Right ? 0 : ActualWidth); EndSwipe(commit: true);
+            return true;
         }
-        if (e.Key == Key.Escape && (IsSwiping || pendingIdentity is not null))
-        {
-            e.Handled = true;
-            CancelSwipe();
-            return;
-        }
-        base.OnPreviewKeyDown(e);
-    }
-    protected override void OnManipulationStarting(ManipulationStartingEventArgs e)
-    {
-        base.OnManipulationStarting(e);
-        if (!CanSwipe()) return;
-        e.ManipulationContainer = this;
-        BeginSwipe(ActualWidth / 2);
-        e.Handled = true;
-    }
-    protected override void OnManipulationDelta(ManipulationDeltaEventArgs e)
-    {
-        base.OnManipulationDelta(e);
-        if (!IsSwiping) return;
-        UpdateSwipeOffset(SwipeTranslation.X + e.DeltaManipulation.Translation.X);
-        e.Handled = true;
-    }
-    protected override void OnManipulationCompleted(ManipulationCompletedEventArgs e)
-    {
-        base.OnManipulationCompleted(e);
-        if (!IsSwiping) return;
-        EndSwipe(commit: true);
-        e.Handled = true;
+        if (key == VirtualKey.Escape && (IsSwiping || pendingIdentity is not null))
+        { CancelSwipe(); return true; }
+        return false;
     }
 
     internal void BeginSwipe(double pointerX)
@@ -270,18 +225,17 @@ public partial class MusicRecordView : UserControl
     {
         pointerPending = IsSwiping = false;
         gestureIdentity = pendingIdentity = null;
-        if (IsMouseCaptured) ReleaseMouseCapture();
+        ReleasePointerCaptures();
         if (immediate)
         {
             swipeGeneration++;
-            SwipeTranslation.BeginAnimation(TranslateTransform.XProperty, null);
+            swipeMotion?.Stop(); swipeMotion = null;
             SwipeTranslation.X = 0;
         }
         else AnimateSwipe(0, null);
     }
     private bool CanSwipe() => IsLoaded && IsVisible && SwipeEnabled && pendingIdentity is null &&
         !string.IsNullOrEmpty(SwipeIdentity);
-    private void OwnerDeactivated(object? sender, EventArgs e) => CancelSwipe();
     private void UpdateSwipeOffset(double value)
     {
         var limit = Math.Max(1, ActualWidth);
@@ -291,7 +245,7 @@ public partial class MusicRecordView : UserControl
     {
         swipeGeneration++;
         var offset = SwipeTranslation.X;
-        SwipeTranslation.BeginAnimation(TranslateTransform.XProperty, null);
+        swipeMotion?.Stop(); swipeMotion = null;
         SwipeTranslation.X = offset;
         return offset;
     }
@@ -299,26 +253,19 @@ public partial class MusicRecordView : UserControl
     {
         var from = InterruptSwipeMotion();
         var generation = swipeGeneration;
-        if (!SystemParameters.ClientAreaAnimation || SystemParameters.HighContrast || Math.Abs(target - from) < .5)
+        if (!MusicVisuals.CanAnimate(this) || Math.Abs(target - from) < .5)
         {
             SwipeTranslation.X = target;
             completed?.Invoke();
             return;
         }
         var duration = TimeSpan.FromMilliseconds(260 * Math.Min(1, Math.Abs(target - from) / Math.Max(1, ActualWidth)));
-        var animation = new DoubleAnimation(from, target, duration)
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
-            FillBehavior = FillBehavior.Stop
-        };
-        animation.Completed += (_, _) =>
+        swipeMotion = MusicVisuals.AnimateDouble(SwipeTranslation, "X", from, target, duration, () =>
         {
             if (generation != swipeGeneration) return;
-            SwipeTranslation.BeginAnimation(TranslateTransform.XProperty, null);
-            SwipeTranslation.X = target;
-            completed?.Invoke();
-        };
-        SwipeTranslation.BeginAnimation(TranslateTransform.XProperty, animation, HandoffBehavior.SnapshotAndReplace);
+            swipeMotion?.Stop(); swipeMotion = null;
+            SwipeTranslation.X = target; completed?.Invoke();
+        });
     }
 }
 

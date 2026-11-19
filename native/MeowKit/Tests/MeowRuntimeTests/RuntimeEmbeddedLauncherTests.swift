@@ -10,8 +10,9 @@ final class RuntimeLaunchRecord: @unchecked Sendable {
     func get() -> [String]? { lock.lock(); defer { lock.unlock() }; return value }
 }
 
-private struct RuntimeBootstrapPeer {
+private final class RuntimeBootstrapPeer {
     let descriptor: Int32
+    private var buffered = Data()
     init(duplicating descriptor: Int32) {
         self.descriptor = Darwin.dup(descriptor)
         XCTAssertGreaterThanOrEqual(self.descriptor, 0)
@@ -19,13 +20,18 @@ private struct RuntimeBootstrapPeer {
     }
 
     func readLine() -> Data? {
-        var data = Data(), byte: UInt8 = 0
+        var searched = 0, bytes = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
-            let count = Darwin.read(descriptor, &byte, 1)
+            if let newline = buffered.dropFirst(searched).firstIndex(of: 10) {
+                let data = Data(buffered.prefix(upTo: newline))
+                buffered.removeSubrange(...newline)
+                return data
+            }
+            searched = buffered.count
+            let count = Darwin.read(descriptor, &bytes, bytes.count)
             if count < 0, errno == EINTR { continue }
             guard count > 0 else { return nil }
-            if byte == 10 { return data }
-            data.append(byte)
+            buffered.append(contentsOf: bytes.prefix(count))
         }
     }
     func endpoint(_ address: String = "http://127.0.0.1:43210") {
@@ -61,7 +67,7 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
     private func manifest(_ root: URL, changes: [String: Any] = [:]) throws {
         var value: [String: Any] = ["schemaVersion": 1, "status": "complete", "product": "aggregate",
             "entry": "app/ios/entries/aggregate.mjs", "platform": "ios", "transport": "runtime.http.v1",
-            "assemblyProfile": "common-native", "modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"]]
+            "assemblyProfile": "common-native"]
         value.merge(changes) { $1 }
         try JSONSerialization.data(withJSONObject: value).write(to: root.appendingPathComponent("runtime-manifest.json"))
     }
@@ -120,6 +126,38 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
         XCTAssertEqual(writes.get(), ["pan.accounts"])
         await launcher.close()
         XCTAssertTrue(client.isClosed)
+    }
+
+    func testLargeSettingsFramesRoundTripWithoutClosingTheChannel() async throws {
+        let root = try payload()
+        let document: RuntimeValue = .object(["value": .string(String(repeating: "x", count: 8 * 1024 * 1024 + 1))])
+        let completed = expectation(description: "large settings frame round trip")
+        let access = RuntimeSettingsAccess(blocks: ["pan.accounts"], writableBlocks: ["pan.accounts"], read: { _ in
+            .init(document: document, revision: 1)
+        }, update: { block, value in
+            XCTAssertEqual(block, "pan.accounts"); XCTAssertEqual(value, document)
+            return .init(document: value, revision: 2)
+        })
+        let launcher = RuntimeEmbeddedLauncher(payload: { try RuntimePayload(root: root) }, dataDirectory: root,
+            settings: access, start: { arguments in
+                let peer = RuntimeBootstrapPeer(duplicating: Int32(arguments[3])!)
+                defer { peer.close() }
+                guard peer.readLine() != nil else { return 1 }
+                peer.endpoint()
+                peer.frame(.object(["kind": .string("settings.pan.update"), "id": .number(1),
+                    "block": .string("pan.accounts"), "command": document]))
+                guard let bytes = peer.readLine(), case .object(let reply) = try? RuntimeJSON.decode(bytes) else {
+                    XCTFail("large frame missing"); completed.fulfill(); return 1
+                }
+                XCTAssertEqual(reply["ok"], .bool(true)); XCTAssertEqual(reply["document"], document)
+                completed.fulfill()
+                XCTAssertNil(peer.readLine())
+                return 0
+            })
+        let client = try await launcher.connect()
+        await fulfillment(of: [completed], timeout: 60)
+        XCTAssertFalse(client.isClosed)
+        await launcher.close()
     }
 
     func testPrivateSettingsConflictIsClosedErrorAndForbiddenWriteEndsLaunch() async throws {
@@ -342,25 +380,21 @@ final class RuntimeEmbeddedLauncherTests: XCTestCase {
         await session.close()
     }
 
-    func testPayloadRequiresTheCompleteNineModuleHTTPAssembly() throws {
+    func testPayloadReadsItsHTTPEntryWithoutModuleMetadataAdmission() throws {
         let root = try payload()
         XCTAssertEqual(try RuntimePayload(root: root).entry.lastPathComponent, "aggregate.mjs")
+        let metadata: [Any] = [[String](), ["future", "music"], ["music", "future", "music"], ["future": true]]
+        for modules in metadata {
+            try manifest(root, changes: ["modules": modules])
+            XCTAssertEqual(try RuntimePayload(root: root).entry.lastPathComponent, "aggregate.mjs")
+        }
+    }
+
+    func testPayloadRequiresCompleteIOSHTTPIdentityAndAnExistingSafeEntry() throws {
+        let root = try payload()
         for fields: [String: Any] in [
             ["status": "platform-pending"], ["platform": "win32"], ["transport": "other"],
-            ["assemblyProfile": "other"], ["modules": ["music", "cat"]],
-            ["modules": ["music", "cat", "source"]], ["modules": ["music", "cat", "source", "tmdb"]],
-            ["modules": ["music", "cat", "source", "tmdb", "douban"]],
-            ["modules": ["music", "cat", "source", "tmdb", "netease"]],
-            ["modules": ["music", "cat", "source", "tmdb", "netease", "douban"]],
-            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban"]],
-            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film"]],
-            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease"]],
-            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "music-platform", "netease"]],
-            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "unknown"]],
-            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "douban"]],
-            ["modules": ["music", "cat", "source", "tmdb", "pan", "douban", "film"]],
-            ["modules": ["music", "cat", "source", "pan", "tmdb", "douban", "film", "film"]],
-            ["modules": ["music", "cat", "source", "tmdb", "pan", "douban", "film", "netease"]],
+            ["assemblyProfile": "other"], ["product": "other"],
             ["entry": "../outside.mjs"], ["entry": "/tmp/aggregate.mjs"],
             ["entry": "app/ios/entries/missing.mjs"], ["entry": "app/ios/entries"], ["schemaVersion": 2]
         ] {

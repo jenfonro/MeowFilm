@@ -1,10 +1,14 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Threading;
-using MeowFilm.Capabilities;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI;
+using Windows.UI.Text;
 using MeowFilm.Desktop;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Controls;
+
+using MeowFilm.Capabilities;
 using MeowFilm.Desktop.Artwork;
 using static MeowFilm.Windows.Tests.FilmPlaybackFixture;
 
@@ -13,11 +17,11 @@ namespace MeowFilm.Windows.Tests;
 public static class FilmCacheConsumerTests
 {
     private static TestCase Test(string name, Func<Task> run) =>
-        new("film-cache-consumer: " + name, () => MusicQualityConsumerTests.Sta(run));
+        new("film-cache-consumer: " + name, () => TestUiHost.InvokeAsync(run));
 
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Test("supplement fills display gaps without changing Douban identity or episode coordinates", SupplementProjection);
+        yield return Test("stable work metadata owns display while browse supplements never replace work or entry identity", SupplementProjection);
         yield return Test("trusted Douban seasons take priority over raw related subjects and preserve owner episode coordinates", DoubanSeasonsProjection);
         yield return Test("auxiliary cache and supplement shapes never reject a valid main snapshot", AuxiliaryProjection);
         yield return Test("ordinary presentation restore asks owner without forced refresh or another address read", RestorePresentation);
@@ -97,19 +101,19 @@ public static class FilmCacheConsumerTests
                 seasons = new[] { new { season_number = 99, episode_count = 999 } }, number_of_episodes = 999
             }
         });
-        // The resolved metadata view may select Douban after the entry's TMDB
-        // lookup; its fresh owner metadata is not an unresolved seed summary.
         var root = JsonNode.Parse(Snapshot(Guid.NewGuid(), 1, target, detail,
             entryResolution: "matched").GetRawText())!.AsObject();
+        var workTarget = new FilmPlaybackTarget("tmdb:tv:900", "tv", "其他标题", "tmdb", "900");
+        root["workInfo"] = JsonNode.Parse(WorkInfo(workTarget, supplement.GetProperty("metadata")).GetRawText());
         root["metadataSupplement"] = JsonNode.Parse(supplement.GetRawText());
         root["metadataCache"] = Cache("fresh");
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
-        Check(page.Title == "豆瓣主资料" && page.ActiveTarget == target &&
+        Check(page.Title == "其他标题" && page.ActiveTarget == target && page.EntryTarget == target &&
             page.Overview == "补充简介" && page.Poster == "/v1/tmdb/images/original/poster.jpg" &&
             page.Backdrop == "/v1/tmdb/images/original/backdrop.jpg" && page.Logo == "/v1/tmdb/images/original/logo.png" &&
             page.Directors == "补充导演" && page.Cast == "补充演员" &&
             page.Recommendations.Single().PlaybackContext?.Target.MetadataId == "901",
-            "only allowed display gaps use the explicit supplementary TMDB identity");
+            "the complete stable work projection supplies all display fields without replacing the entry target");
         Check(page.Seasons.Single().Season == 1 && page.Episodes.Count == 2 && page.SelectedEpisode?.Number == 2 &&
             page.EpisodeCountLabel == "共2集" && page.CaptureRequest.Target == target &&
             page.CaptureRequest.Metadata?.GetProperty("seasons")[0].GetProperty("season_number").GetInt32() == 1,
@@ -132,6 +136,11 @@ public static class FilmCacheConsumerTests
                 playbackTarget = new FilmPlaybackTarget("douban:tv:101", "tv", "豆瓣推荐", "douban", "101").Wire() }
         } }).GetRawText());
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
+        Check(page.Overview == "补充简介" && page.Poster == "/v1/tmdb/images/original/poster.jpg" &&
+            page.Recommendations.Single().PlaybackContext?.Target.MetadataId == "901",
+            "changes to the browse metadata cannot change stable work fields or recommendations");
+        root["workInfo"] = JsonNode.Parse(WorkInfo(target, JsonSerializer.SerializeToElement(root["metadata"])).GetRawText());
+        page.Apply(new(JsonSerializer.SerializeToElement(root)));
         Check(page.Overview == "主简介" && page.Poster == "/v1/douban/images/main.jpg" &&
             page.Backdrop == "/v1/douban/images/backdrop.jpg" && page.Logo == "/v1/douban/images/logo.png" &&
             page.Directors == "主导演" && page.Cast == "主演员" &&
@@ -141,6 +150,7 @@ public static class FilmCacheConsumerTests
 
         root["metadataSupplement"] = null;
         root["metadata"] = JsonNode.Parse("""{"title":"豆瓣主资料","intro":"","pic":{"normal":""},"rating":{"value":0},"seasons":[]}""");
+        root["workInfo"] = JsonNode.Parse(WorkInfo(target, JsonSerializer.SerializeToElement(root["metadata"])).GetRawText());
         root["episodes"] = new JsonArray();
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
         Check(page.Poster == "" && page.Backdrop == "" && page.Logo == "" && page.Score == "" &&
@@ -153,8 +163,8 @@ public static class FilmCacheConsumerTests
             "a later failure retains an authoritative empty success instead of resurrecting the original card");
         root["metadataCache"]!["components"]!["detail"]!.AsObject().Remove("fetchedAt");
         page.Apply(new(JsonSerializer.SerializeToElement(root)));
-        Check(page.Poster == card.Poster && page.Score == card.Score && page.MetadataCache?.Status == "stale",
-            "an unfulfilled detail component may still use the matching original card");
+        Check(page.Poster == "" && page.Score == "" && page.MetadataCache?.Status == "stale",
+            "a missing browse cache timestamp cannot resurrect original card fields outside the stable work projection");
         return Task.CompletedTask;
     }
 
@@ -273,13 +283,15 @@ public static class FilmCacheConsumerTests
         response["metadataCache"] = Cache("stale", "UPSTREAM_ERROR");
         response["metadataError"] = "UPSTREAM_ERROR";
         response["metadata"]!["overview"] = "旧成功简介";
+        response["workInfo"]!["summary"] = "旧成功简介";
+        response["workInfo"]!["metadata"]!["overview"] = "旧成功简介";
         rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
             method == "film.session.command" && FilmJson.Text(input, "action") == "browse.refresh"
                 ? FilmRuntimeProbe.Ok(JsonSerializer.SerializeToElement(response))
                 : rig.Runtime.Handle(method, input));
         int before = rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt");
         await rig.Page.CommandAsync("browse.refresh");
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await FilmUiTest.Pump();
         var refresh = rig.Runtime.Calls.Last(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh");
         Check(FilmJson.Member(refresh.Parameters, "refresh").ValueKind == JsonValueKind.Undefined &&
             rig.Page.Overview == "旧成功简介" && rig.Page.MetadataCache?.Status == "stale" &&
@@ -361,7 +373,7 @@ public static class FilmCacheConsumerTests
             await Until(() => FilmJson.Text(FilmJson.Array(rig.Page.RawBrowsing, "originalEpisodes").Single(), "path") == "/准确目录/更新.mp4");
             Check(!directory.IsCurrent(rig.Page), "a genuinely changed original file list retires the old directory even under the same source and line");
         }
-        finally { finish.TrySetResult(); directory.Close(); }
+        finally { finish.TrySetResult(); directory.Hide(); }
     }
 
     private static async Task FailedDirectory()
@@ -458,7 +470,7 @@ public static class FilmCacheConsumerTests
                 !rig.Session.HasOutput && !rig.Runtime.Calls.Any(call => call.Method == "film.session.attempt"),
                 "only an actual other-source success replaces the directory with its exact files without reading or creating native media");
         }
-        finally { directory.Close(); }
+        finally { directory.Hide(); }
     }
 
     private static JsonNode DirectoryBrowsing(string sourceId, bool content, string? error = null)
@@ -555,28 +567,26 @@ public static class FilmCacheConsumerTests
         await rig.OpenAsync();
         await Play(rig);
         var view = new FilmPlaybackView { DataContext = rig.Page };
-        var window = new Window { Content = view, Width = 1150, Height = 850, Left = -10000, Top = -10000,
-            ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+        var window = FilmUiTest.Window(view, 1150, 850);
         var notices = new List<string>();
-        window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, args) =>
-        { if (args.Message.Length > 0) notices.Add(args.Message); }));
+        NoticeOutlet.SetReceiver(window.Root, args => { if (args.Message.Length > 0) notices.Add(args.Message); });
         try
         {
-            window.Show(); window.UpdateLayout();
+            window.Show(); window.Root.UpdateLayout();
             int refreshes = rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh");
             rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
                 method == "film.session.command" && FilmJson.Text(input, "action") == "media.retry"
                     ? FilmRuntimeProbe.Failure("UPSTREAM_ERROR") : rig.Runtime.Handle(method, input));
             var retry = (Button)view.FindName("RetryMediaButton");
             var settings = (Border)view.FindName("SettingsPanel");
-            Check(retry.IsEnabled && !settings.IsVisible,
+            Check(retry.IsEnabled && !FilmUiTest.Visible(settings),
                 "the media retry action belongs to the closed picture settings");
-            ((Button)view.FindName("SettingsButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Until(() => settings.IsVisible && retry.IsVisible);
-            Check(retry.IsDescendantOf(settings) &&
-                !((Button)view.FindName("RetryMediaRecoveryButton")).IsVisible,
+            FilmUiTest.Click(((Button)view.FindName("SettingsButton")));
+            await Until(() => FilmUiTest.Visible(settings) && FilmUiTest.Visible(retry));
+            Check(DesktopVisual.Contains(settings, retry) &&
+                !FilmUiTest.Visible(((Button)view.FindName("RetryMediaRecoveryButton"))),
                 "manual address retry is available inside the picture without covering healthy video");
-            retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            FilmUiTest.Click(retry);
             await Until(() => notices.Count == 1);
             Check(notices.All(message => message == "上游服务请求失败") &&
                 rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh") == refreshes &&
@@ -594,24 +604,23 @@ public static class FilmCacheConsumerTests
         rig.Runtime.Change(root => root["stage"] = "searching");
         await Until(() => !rig.Page.CanRetryMedia);
         var view = new FilmPlaybackView { DataContext = rig.Page };
-        var window = new Window { Content = view, Width = 1150, Height = 850, Left = -10000, Top = -10000,
-            ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None };
+        var window = FilmUiTest.Window(view, 1150, 850);
         try
         {
-            window.Show(); window.UpdateLayout();
+            window.Show(); window.Root.UpdateLayout();
             var retry = (Button)view.FindName("RetryMediaRecoveryButton");
-            Check(!retry.IsVisible && retry.IsDescendantOf((Grid)view.FindName("PlayerOverlay")),
+            Check(!FilmUiTest.Visible(retry) && DesktopVisual.Contains((Grid)view.FindName("PlayerOverlay"), retry),
                 "picture recovery starts hidden when there is no failed or pending media occurrence");
             rig.Runtime.Change(root => root["stage"] = "error");
-            await Until(() => retry.IsVisible);
-            retry.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Until(() => FilmUiTest.Visible(retry));
+            FilmUiTest.Click(retry);
             await Until(() => rig.Runtime.Calls.Any(call => FilmJson.Text(call.Parameters, "action") == "media.retry"));
             var call = rig.Runtime.Calls.Single(call => FilmJson.Text(call.Parameters, "action") == "media.retry");
             Check(FilmJson.Member(call.Parameters, "attemptId").ValueKind == JsonValueKind.Undefined &&
                 !rig.Runtime.Calls.Any(item => FilmJson.Text(item.Parameters, "action") is "play" or "switch" or "search.more"),
                 "the visible recovery action delegates the exact last failed candidate without rematching");
             await Play(rig);
-            await Until(() => !retry.IsVisible);
+            await Until(() => !FilmUiTest.Visible(retry));
             Check(rig.Session.HasOutput && rig.Native.Commits == 1,
                 "healthy output removes the central recovery action without replacing or pausing media");
         }
@@ -622,10 +631,10 @@ public static class FilmCacheConsumerTests
     {
         int reads = 0;
         const string address = "/v1/douban/images/view/photo/poster.jpg";
-        await using var artwork = new ArtworkService(readTrusted: (reference, budget, token) =>
+        await using var artwork = new ArtworkService(readTrusted: (reference, token) =>
         {
             token.ThrowIfCancellationRequested();
-            Check(reference == address && budget == ArtworkService.MaximumBytes, "the native image transport receives the exact runtime reference");
+            Check(reference == address, "the native image transport receives the exact runtime reference");
             reads++;
             return Task.FromResult(RuntimeImageTests.Png.ToArray());
         });

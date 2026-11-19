@@ -107,7 +107,7 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       identifier(input.installationId);
       integer(input.sourceRevision);
       requireValue(input.config === undefined || object(input.config));
-      requireValue(input.version === undefined || typeof input.version === 'string' && input.version.length > 0 && input.version.length <= 128);
+      requireValue(input.version === undefined || typeof input.version === 'string' && input.version.length > 0);
       requireValue(input.enabled === undefined || typeof input.enabled === 'boolean');
       if (input.name !== undefined) name(input.name);
       requireValue(input.sourceType === undefined || ['local', 'network'].includes(input.sourceType));

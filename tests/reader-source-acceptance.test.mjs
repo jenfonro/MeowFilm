@@ -43,6 +43,25 @@ function exitEvidence({ code, signal, stderr }) {
   return `code=${code}, signal=${signal}\n${stderr}`;
 }
 
+test('Reader inventory validates the complete large array before starting sources', async t => {
+  const { directory, output } = area(t);
+  const sources = Array.from({ length: 4097 }, (_, index) => ({
+    bookSourceName: `Source ${index}`,
+    bookSourceUrl: `https://books.invalid/${index}`,
+    ruleSearch: {},
+  }));
+  const path = join(directory, 'sources.json');
+  writeFileSync(path, JSON.stringify([...sources, null]));
+  const result = await run(['--scripts', path, '--output', output], { direct: true });
+  assert.equal(result.code, 1, exitEvidence(result));
+  assert.match(result.stderr, /UNSUPPORTED_PROTOCOL/);
+  assert.doesNotMatch(result.stderr, /SOURCE_LIMIT/);
+  writeFileSync(path, '[]');
+  const empty = await run(['--scripts', path, '--output', output], { direct: true });
+  assert.equal(empty.code, 1, exitEvidence(empty));
+  assert.match(empty.stderr, /SOURCE_LIMIT/);
+});
+
 test('Reader inventory accepts CatVod, QYSG, Legado and split JSON arrays without copying secrets', async t => {
   const { directory, output } = area(t);
   const privateValue = 'SYNTHETIC-PRIVATE-VALUE';

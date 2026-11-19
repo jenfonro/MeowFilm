@@ -63,6 +63,16 @@ public struct FilmPlayerPreferences: Codable, Equatable, Sendable {
         defaultRate = min(defaultRate, engine.maximumRate)
         holdRate = min(holdRate, engine.maximumRate)
     }
+
+    func hasSameGestureSettings(as other: Self) -> Bool {
+        holdRate == other.holdRate && seekStep == other.seekStep &&
+            singleTapCenter == other.singleTapCenter && singleTapSides == other.singleTapSides &&
+            doubleTapCenter == other.doubleTapCenter && doubleTapSides == other.doubleTapSides &&
+            swipeVolume == other.swipeVolume && swipeBrightness == other.swipeBrightness &&
+            swipeSeek == other.swipeSeek && swipeEpisodes == other.swipeEpisodes &&
+            hapticHold == other.hapticHold && hapticBrightness == other.hapticBrightness &&
+            hapticVolume == other.hapticVolume && hapticSeek == other.hapticSeek
+    }
 }
 
 private enum FilmPlayerPreferencesError: LocalizedError {
@@ -107,7 +117,7 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
         do {
             let next = try await database.read(Self.load)
             guard epoch == ticket, !closed else { return }
-            preferences = next; persistenceError = nil
+            if preferences != next { preferences = next }; persistenceError = nil
         }
         catch {
             if epoch == ticket, !closed { persistenceError = "播放器偏好读取失败" }
@@ -132,7 +142,7 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
             } else {
                 var local = preferences; local[keyPath: keyPath] = value; try local.normalize(); next = local
             }
-            if epoch == ticket, !closed { preferences = next; persistenceError = nil }
+            if epoch == ticket, !closed { if preferences != next { preferences = next }; persistenceError = nil }
             return true
         } catch {
             if epoch == ticket, !closed { persistenceError = "播放器偏好保存失败" }

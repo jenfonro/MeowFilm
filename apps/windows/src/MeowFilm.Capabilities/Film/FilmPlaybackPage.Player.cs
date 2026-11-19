@@ -42,13 +42,13 @@ public sealed partial class FilmPlaybackPage
     }
     public bool ShowPlayerSwitchActions => IsMetadataPlayback && HasCurrent;
     public FilmPlayerOption? SelectedPanOption => PlayerPanOptions.FirstOrDefault(option => option.IsSelected);
-    public bool PlayerBusy => !ConnectionFailed && (snapshot is null || HasExecution &&
+    public bool PlayerBusy => !ConnectionFailed && !ExecutionFailed && (snapshot is null || HasExecution &&
         PlayerStage is "loading" or "searching" or "history" or "manual" or "cached" or "resolving" or "pending");
     public bool PlayerBuffering => HasOutput && session?.IsBuffering == true;
     public string MetadataAssociationErrorMessage => MetadataAssociationFailed ? "关联资料加载失败" : "";
     public bool PlayerStatusVisible => PlayerStatusText.Length > 0 &&
-        (PlayerBusy || !HasOutput || ConnectionFailed || PlayerStage is "error" or "unavailable");
-    public string PlayerStatusText => ConnectionFailed ? StatusText : snapshot is null ? "加载中..." : PlayerStage switch
+        (PlayerBusy || !HasOutput || ConnectionFailed || ExecutionFailed || PlayerStage is "error" or "unavailable");
+    public string PlayerStatusText => ConnectionFailed || ExecutionFailed ? StatusText : snapshot is null ? "加载中..." : PlayerStage switch
         {
             "loading" => "加载中...",
             "searching" or "history" or "manual" or "cached" => "正在搜索片源...",
@@ -59,7 +59,7 @@ public sealed partial class FilmPlaybackPage
             _ => snapshot is null ? "加载中..." : StatusText
         };
     // Discrete search, address and native preparation phases, not download progress.
-    public double PlayerStageProgress => ConnectionFailed ? 0 : PlayerStage switch
+    public double PlayerStageProgress => ConnectionFailed || ExecutionFailed ? 0 : PlayerStage switch
     {
         "cached" or "history" or "manual" or "searching" => 1d / 6,
         "resolving" => 1d / 2,

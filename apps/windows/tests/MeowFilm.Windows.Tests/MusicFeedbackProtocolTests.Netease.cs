@@ -160,7 +160,7 @@ public static partial class MusicFeedbackProtocolTests
             controller.Select(new("entry", song)); controller.Started("entry", 0, 200); await controller.DrainAsync();
             var upload = f.Uploads.Single();
             Equal("42", upload.GetProperty("target").GetProperty("nativeId").GetString());
-            True(JsonSerializer.SerializeToUtf8Bytes(upload).Length <= NeteasePlaybackOutboxDocument.MaximumEventBytes);
+            True(JsonSerializer.SerializeToUtf8Bytes(upload).Length <= 32 * 1024);
             f.Clock.Advance(5); controller.Observe("entry", 5, 200, true); controller.Finish(); await controller.DrainAsync();
             Equal(2, f.Uploads.Count); Equal(0, f.Saved().Length); True(controller.LastError is null);
         });
@@ -201,15 +201,16 @@ public static partial class MusicFeedbackProtocolTests
                 await Error(() => f.Protocol.StartAsync(f.Account, input), "INVALID_REQUEST");
             Equal(0, f.Calls); Equal(0, f.Saved().Length);
         });
-        yield return Case("serialized event byte budget rejects admission and oversized current cold storage", async () => {
+        yield return Case("large event admission and current cold storage preserve complete facts", async () => {
             await using var f = await Fixture.Create();
-            var input = Start(f.Attempt) with { Source = new string('s', NeteasePlaybackOutboxDocument.MaximumEventBytes) };
-            await Error(() => f.Protocol.StartAsync(f.Account, input), "LIMIT"); Equal(0, f.Calls); Equal(0, f.Saved().Length);
+            var input = Start(f.Attempt) with { Source = new string('s', 4 * 1024 * 1024 + 1) };
+            await using var session = await f.Protocol.StartAsync(f.Account, input);
+            await f.Protocol.DrainAsync();
+            Equal(1, f.Uploads.Count); Equal(input.Source, f.Uploads.Single().GetProperty("target").GetProperty("source").GetString());
             var bytes = NeteasePlaybackOutboxDocument.Encode([NeteasePlaybackTransport.Start(f.Account, input, 1)]);
-            await Error(() => {
-                _ = NeteasePlaybackOutboxDocument.Decode(new(bytes, StorageRevision.Empty));
-                return Task.CompletedTask;
-            }, "CORRUPT_STORAGE");
+            True(bytes.Length > 4 * 1024 * 1024);
+            var restored = NeteasePlaybackOutboxDocument.Decode(new(bytes, StorageRevision.Empty));
+            Equal(input.Source, restored.Single().Source);
         });
         yield return Case("high-rate delayed-dispatch facts are not bounded by dispatch elapsed", async () => {
             await using var f = await Fixture.Create();

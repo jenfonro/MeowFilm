@@ -30,7 +30,6 @@ public sealed class TypedRecordRepository(IStorageDatabase database, string owne
     public Task<StorageRevision> WriteAsync(ReadOnlyMemory<byte> data, StorageRevision expected, CancellationToken token = default)
     {
         Check(); token.ThrowIfCancellationRequested();
-        if (data.Length > 16 * 1024 * 1024) throw new DocumentStoreException(DocumentStoreError.Limit);
         var value = JsonNode.Parse(data.Span) as JsonObject ?? throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         if (toRows is not null) value = toRows(value);
         return database.WriteAsync(db =>

@@ -33,6 +33,7 @@ const sources = [
   'GCC-Runtime-Library-Exception-3.1.txt',
   'MinGW-w64-runtime-NOTICE.txt', 'winpthreads-LICENSE.txt',
   'WebView2-LICENSE.txt', 'WebView2-NOTICE.txt',
+  'WindowsAppSDK-LICENSE.txt', 'WindowsAppSDK-NOTICE.txt', 'Win2D-MIT.txt',
   'NAudio-MIT.txt', 'FFmpeg.AutoGen-MIT.txt', 'dotnet-runtime-MIT.txt', 'FFmpeg-audio-NOTICES.txt',
   'sqlite-LICENSE.md',
 ].map(name => ({ source: `LICENSES/${name}`, path: name }));
@@ -137,13 +138,23 @@ for (const source of sources) {
     assert.equal(existsSync(f.output), false);
   });
 }
-for (const bytes of [Buffer.alloc(0), Buffer.alloc(1024 * 1024 + 1, 65)]) {
-  test(`licenses: ${bytes.length ? 'oversized' : 'empty'} legal input is not silently accepted`, settings, async () => {
-    const f = fixture({ override: { source: sources[0].source, bytes } });
-    await rejects(f, 'SOURCE_SIZE');
-    assert.equal(existsSync(f.output), false);
-  });
-}
+test('licenses: empty legal input is not silently accepted', settings, async () => {
+  const f = fixture({ override: { source: sources[0].source, bytes: Buffer.alloc(0) } });
+  await rejects(f, 'SOURCE_SIZE');
+  assert.equal(existsSync(f.output), false);
+});
+test('licenses: a large file is copied completely with its exact hash', settings, async () => {
+  const bytes = Buffer.alloc(1024 * 1024 + 1, 65);
+  const f = fixture({ override: { source: sources[0].source, bytes } });
+  verify(f, await packageLicenses(f));
+});
+test('licenses: a large combined inventory is copied without truncation', settings, async () => {
+  const f = fixture(), bytes = Buffer.alloc(1024 * 1024, 66);
+  for (const entry of sources.slice(0, 9)) writeFileSync(join(f.root, entry.source), bytes);
+  const result = await packageLicenses(f);
+  assert.ok(result.files.reduce((sum, file) => sum + file.bytes, 0) > 8 * 1024 * 1024);
+  verify(f, result);
+});
 test('licenses: a directory cannot substitute for a required file', async () => {
   const f = fixture({ omit: sources[0].source });
   mkdirSync(join(f.root, sources[0].source));

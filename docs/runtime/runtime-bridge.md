@@ -32,7 +32,7 @@
 
 合法请求正文与成功业务值各自按现有 64 层 JSON 契约校验；调用器的位置参数列表和内部结果信封不占业务值深度。普通业务对象即使包含 `ok/value` 字段也不豁免计深，65 层仍拒绝。此格式边界不同于脚本执行的真实栈限制。
 
-普通 JSON 没有总字节上限或大小分流；不增加正文摘要、压缩、加解密或预解析加工。请求与响应严格 UTF-8，业务 JSON 深度最多 64，支持不同码点序列的 Unicode 键并原样保留；重复键采用末值覆盖，不按未消费成员、Unicode 内容或数值范围拒绝整个业务值。纯 `@meowfilm/runtime-bridge/json` 入口提供 `parseJSONText/stringifyJSONValue/cloneJSONValue`，以同一 codec 和不透明数字载体保留会失真的整数、小数及指数值；Node 18、Node 24 与 QuickJS 不依赖新版 JSON API，原生端同样保留数字原材料和扩展成员。内存中的非有限 Number、循环、BigInt、getter 等不能无损序列化的非 JSON 值仍拒绝，实际数字运算在其消费者处解释。信封本身不挤占业务值的 64 层深度。源码保持 1 至 16 MiB 的输入契约及各协议 BOM 行为；config/metadata 的独立格式边界不等于普通正文配额。
+普通 JSON 没有总字节上限或大小分流；不增加正文摘要、压缩、加解密或预解析加工。请求与响应严格 UTF-8，业务 JSON 深度最多 64，支持不同码点序列的 Unicode 键并原样保留；重复键采用末值覆盖，不按未消费成员、Unicode 内容或数值范围拒绝整个业务值。纯 `@meowfilm/runtime-bridge/json` 入口提供 `parseJSONText/stringifyJSONValue/cloneJSONValue`，以同一 codec 和不透明数字载体保留会失真的整数、小数及指数值；Node 18、Node 24 与 QuickJS 不依赖新版 JSON API，原生端同样保留数字原材料和扩展成员。内存中的非有限 Number、循环、BigInt、getter 等不能无损序列化的非 JSON 值仍拒绝，实际数字运算在其消费者处解释。信封本身不挤占业务值的 64 层深度。源码保持非空、严格 UTF-8 及各协议 BOM 行为，不设字节配额；config/metadata 保留类型和 JSON 深度校验，不设独立字节上限。
 
 旧长度帧、stage/control/blob、Base64 传输、随机 token、offset、TTL 和 checksum 协议均已删除，没有兼容回退、续传或旧分块传输的 release 方法。影视的 `session.release`／`session.media.release` 释放业务会话／媒体资源，不是恢复旧传输协议，见[影视播放契约](film-playback.md)。底层 HTTP 分段读写属于标准流传输。媒体代理沿独立入口流式转发，不经控制 JSON 聚合。
 
@@ -40,9 +40,9 @@
 
 普通设置的唯一存储、离线提交与通知语义见[共同契约](../common/settings-storage.md)。`createAppRuntime({settingsChanged})` 可选提供上述通知路由，使用 `runtime.http.v1` 信封；它不增加业务模块、describe 方法或设置值传输接口。正文只消费 `block` 字段，附加成员不参与设置写入；具体块名由装配分派，非法或未知块不作为配置保存受理。
 
-`apps/runtime/native-settings.mjs` 为受信启动通道提供设置快照适配：启动时读齐六块，业务模块只读该原生值；后续通知重新读取对应块。元数据、影视规则和偏好的 HTTP 写设置方法在注入模式返回 `PERMISSION_DENIED`，Cat 来源意图也不由 HTTP 安装／编辑接口写入。pan 的在线凭据通过受限私密 CAS 能力写回同一原生 owner，不在公开 HTTP 增加读秘密的接口。各模块的确切读写接口见对应契约。
+`apps/runtime/native-settings.mjs` 为受信启动通道提供设置快照适配，完整设置帧不设字节配额，仍验证 UTF-8、JSON、块身份及 CAS 指纹：启动时读齐六块，业务模块只读该原生值；后续通知重新读取对应块。元数据、影视规则和偏好的 HTTP 写设置方法在注入模式返回 `PERMISSION_DENIED`，Cat 来源意图也不由 HTTP 安装／编辑接口写入。pan 的在线凭据通过受限私密 CAS 能力写回同一原生 owner，不在公开 HTTP 增加读秘密的接口。各模块的确切读写接口见对应契约。
 
-该能力不由公共 HTTP 授予，不向脚本提供；原生密钥及存储路径不进入公开通知。iOS 使用既有受信 socketpair，帧及生命周期见 [iOS 启动边界](../ios/runtime-preflight.md#原生设置私密通道)。私密帧的 8 MiB 资源边界不改变普通 HTTP JSON 无总字节配额的契约，也不是恢复旧分块协议。
+该能力不由公共 HTTP 授予，不向脚本提供；原生密钥及存储路径不进入公开通知。iOS 使用既有受信 socketpair，帧及生命周期见 [iOS 启动边界](../ios/runtime-preflight.md#原生设置私密通道)。私密帧按完整 JSON 行传输，不设字节配额，也不恢复旧分块协议。
 
 未注入时，通用独立入口保持原有 Node 设置文档和管理接口，不探测原生目录、不隐式迁移，也不静默从原生失败回退到 Node 文件。平台接入情况及验证分别记录，不能由可选公共能力推断全部平台已切换。
 

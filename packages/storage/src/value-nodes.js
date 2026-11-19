@@ -2,7 +2,6 @@ import { isRawJSON, rawJSON } from '@meowfilm/runtime-bridge/json';
 import { storageError } from './database.js';
 
 const MAX_DEPTH = 64;
-const MAX_NODES = 65536;
 const SAFE_MIN = -9007199254740991;
 const SAFE_MAX = 9007199254740991;
 
@@ -17,7 +16,7 @@ function plainObject(value) {
  * without serializing JSON blobs. Preserves null vs missing keys, array order,
  * -0, BigInt, and rawJSON exact decimal literals.
  */
-export function encodeValueNodes(rootValue, { maxDepth = MAX_DEPTH, maxNodes = MAX_NODES } = {}) {
+export function encodeValueNodes(rootValue, { maxDepth = MAX_DEPTH, maxNodes = Infinity } = {}) {
   const rows = [];
   function visit(value, parentId, propKey, itemIndex, depth) {
     if (depth > maxDepth || rows.length >= maxNodes) throw storageError('STORAGE_RESULT_LIMIT');

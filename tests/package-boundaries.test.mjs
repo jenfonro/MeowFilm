@@ -56,6 +56,8 @@ test('workspace dependency cycles are reported', t => {
 
 for (const [source, error] of [
   ["import 'node:fs';", /portable runtime imports Node builtin/],
+  ["import 'fs/promises';", /portable runtime imports Node builtin/],
+  ["import 'node:test';", /portable runtime imports Node builtin/],
   ['Buffer.alloc(1);', /portable runtime uses host global Buffer/],
   ['globalThis.process.exit(1);', /portable runtime uses host global process/],
   ['Packages.java.lang.String;', /portable runtime uses host global Packages/],
@@ -82,12 +84,22 @@ test('portable source runtime may inspect guest source strings without using hos
   assert.deepEqual(verifyBoundaries(f.root), { packages: 3 });
 });
 
-test('shared runtime may use its own modules and data-only builtins', t => {
+test('shared runtime may use its own modules and Node builtins', t => {
   const f = fixture(t);
   f.write('apps/runtime/bootstrap.mjs', "import './modules/music-script.mjs';");
-  f.write('apps/runtime/modules/music-script.mjs', "import { createHash } from 'node:crypto';");
-  f.write('apps/runtime/modules/source-candidates.mjs', "import { isUtf8 } from 'node:buffer';");
-  f.write('apps/runtime/modules/source-library.mjs', "import { Readable } from 'node:stream';");
+  f.write('apps/runtime/modules/music-script.mjs', `
+    import { createHash } from 'node:crypto';
+    import { fileURLToPath } from 'node:url';
+  `);
+  f.write('apps/runtime/modules/source-candidates.mjs', `
+    import { isUtf8 } from 'node:buffer';
+    import { inspect } from 'util';
+    import 'fs/promises';
+  `);
+  f.write('apps/runtime/modules/source-library.mjs', `
+    import { Readable } from 'node:stream';
+    import 'node:test';
+  `);
   assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
 });
 
@@ -124,6 +136,28 @@ test('shared runtime accepts a declared public workspace subpath without a per-p
     "import '@meowfilm/film-playback/src/index.js';");
   assert.throws(() => verifyBoundaries(f.root), /shared runtime platform\/private import/);
 });
+
+for (const owner of ['packages/a/src/index.js', 'apps/runtime/modules/helpers.mjs']) {
+  test(`${owner} resolves conditional public exports and referenced helpers`, t => {
+    const f = fixture(t);
+    f.write('packages/b/package.json', {
+      name: '@meowfilm/b',
+      exports: {
+        '.': { import: './src/index.js', require: './src/index.cjs' },
+        './helpers/*': { node: './src/helpers/*.js', default: './browser/*.js' },
+      },
+    });
+    f.write('packages/b/src/index.cjs', 'module.exports = {};');
+    f.write('packages/b/src/helpers/value.js', 'export const value = 1;');
+    f.write(owner, "import '@meowfilm/b/helpers/value';\nrequire('@meowfilm/b');");
+    assert.deepEqual(verifyBoundaries(f.root), { packages: 2 });
+    rmSync(join(f.root, 'packages/b/src/helpers/value.js'));
+    assert.throws(() => verifyBoundaries(f.root), /private import/);
+    f.write('packages/b/src/helpers/value.js', 'export const value = 1;');
+    f.write(owner, "import '@meowfilm/b/src/helpers/value.js';");
+    assert.throws(() => verifyBoundaries(f.root), /private import/);
+  });
+}
 
 test('comments and string literals are not treated as module imports', t => {
   const f = fixture(t);
@@ -217,9 +251,11 @@ for (const platform of ['windows', 'ios']) {
 }
 
 for (const owner of ['modules/music-script.mjs', 'modules/metadata/network.mjs']) {
-  for (const specifier of ['node:net', 'node:fs', 'node:child_process', '@meowfilm/script-host/src/host.js']) {
+  for (const specifier of ['node:meowfilm-missing', '@meowfilm/script-host/src/host.js']) {
     test(`shared runtime ${owner} rejects platform/private import: ${specifier}`, t => {
       const f = fixture(t);
+      f.workspace('@meowfilm/script-host');
+      f.write('packages/script-host/src/host.js', 'export {};');
       f.write(`apps/runtime/${owner}`, `import '${specifier}';`);
       assert.throws(() => verifyBoundaries(f.root), /shared runtime platform\/private import/);
     });

@@ -135,3 +135,14 @@ test('independent process owners use a shared writer lock without lost updates',
   assert.equal((await db.query('SELECT revision FROM owner_revisions'))[0].revision, 41);
   await db.close();
 }));
+
+test('one large typed value is accepted while concurrent retained work stays bounded', () => fixture(async root => {
+  const db = openDatabase(root);
+  try {
+    const text = 'x'.repeat(17 * 1024 * 1024);
+    const writing = db.execute('INSERT INTO owner_revisions VALUES(?,?,?)', ['large', 1, text]);
+    await assert.rejects(db.query('SELECT 1'), {code:'STORAGE_BUSY'});
+    await writing;
+    assert.equal((await db.query("SELECT receipt FROM owner_revisions WHERE owner='large'"))[0].receipt, text);
+  } finally { await db.close(); }
+}));

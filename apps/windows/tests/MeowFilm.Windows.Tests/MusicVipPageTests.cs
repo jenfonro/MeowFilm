@@ -143,7 +143,7 @@ public static class MusicVipPageTests
     private static async Task Drain()
     {
         for (var index = 0; index < 3; index++)
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await MusicTestUi.Drain();
     }
     private static async Task Until(Func<bool> predicate)
     {
@@ -213,51 +213,5 @@ public static class MusicVipPageTests
     }
 
     private static async Task OnSta(Func<Task> action)
-    {
-        var completed = new TaskCompletionSource<Exception?>(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var stopped = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            SynchronizationContext.SetSynchronizationContext(
-                new DispatcherSynchronizationContext(dispatcher));
-            dispatcher.BeginInvoke(async () =>
-            {
-                Exception? error = null;
-                try
-                {
-                    await action();
-                    await Drain();
-                }
-                catch (Exception exception)
-                {
-                    error = exception;
-                }
-                finally
-                {
-                    completed.TrySetResult(error);
-                    dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
-                }
-            });
-            try
-            {
-                Dispatcher.Run();
-            }
-            finally
-            {
-                stopped.TrySetResult();
-            }
-        })
-        {
-            IsBackground = true,
-            Name = "music-vip-page-test"
-        };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        var failure = await completed.Task.WaitAsync(TimeSpan.FromSeconds(30));
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
-    }
+    { await TestUiHost.InvokeAsync(async () => { await action(); await MusicTestUi.Drain(); }); }
 }

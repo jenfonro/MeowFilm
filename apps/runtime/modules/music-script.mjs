@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  createScriptHost, createNodeNetwork, createSourceDownload, PrivateSources, ScriptHostError, SCRIPT_LIMITS,
+  createScriptHost, createNodeNetwork, createSourceDownload, PrivateSources, ScriptHostError,
 } from '@meowfilm/script-host';
 import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
 import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
@@ -46,6 +46,7 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const shape = (value, keys) => object(value) && Object.keys(value).length === keys.length &&
   keys.every(key => Object.hasOwn(value, key));
 const digest = value => createHash('sha256').update(value).digest('hex');
+const encodedLength = value => Buffer.byteLength(stringifyJSONValue(value, -Infinity));
 const scalars = value => [...value].length;
 const control = /[\u0000-\u001f\u007f]/;
 function fields(value, allowed, required = allowed) {
@@ -55,15 +56,12 @@ function fields(value, allowed, required = allowed) {
 function integer(value, min = 0) {
   requireValue(Number.isSafeInteger(value) && value >= min);
 }
-function text(value, max = 128) {
-  requireValue(typeof value === 'string' && value.trim().length > 0 && value.length <= max && !control.test(value));
-}
 function installation(value) {
   requireValue(typeof value === 'string' && uuidPattern.test(value));
 }
 function snapshot(value) { return cloneJSONValue(value); }
 const plainText = (value, max, empty = true) => typeof value === 'string' &&
-  (empty || value.length > 0) && scalars(value) <= max && !control.test(value);
+  (empty || value.length > 0) && (max === undefined || scalars(value) <= max) && !control.test(value);
 // Object ordering is not a content change; array ordering remains meaningful.
 function canonical(value) {
   function ordered(item) {
@@ -83,32 +81,31 @@ function decode(bytes) {
   requireValue(source.trim().length > 0 && Buffer.from(source).equals(bytes), 'SCRIPT_ENCODING');
   return source;
 }
-function clean(value, max) {
+function clean(value) {
   const trimmed = value.trim();
   if (!trimmed || control.test(trimmed)) return '';
-  const characters = [...trimmed];
-  return characters.length > max ? characters.slice(0, max).join('') : trimmed;
+  return trimmed;
 }
-function headerField(header, name, max) {
+function headerField(header, name) {
   const match = new RegExp(`(?:^|\\n)\\s*(?:\\/\\/|\\/\\*|\\*)?\\s*@${name}\\s+([^\\r\\n]*)`).exec(header);
-  return match ? clean(match[1].replaceAll('*/', ''), max) : '';
+  return match ? clean(match[1].replaceAll('*/', '')) : '';
 }
 /** Leading LX comment metadata. It describes the file; it never authorizes anything. */
 function describe(source, basename) {
-  const header = headerPattern.exec(source.slice(0, 8192))?.[0] ?? '';
-  const fallback = clean(basename.replace(/\.js$/i, ''), 255);
+  const header = headerPattern.exec(source)?.[0] ?? '';
+  const fallback = clean(basename.replace(/\.js$/i, ''));
   return {
-    name: headerField(header, 'name', 255) || fallback || 'LX 音源',
-    version: headerField(header, 'version', 128) || '1',
-    author: headerField(header, 'author', 1024),
-    description: headerField(header, 'description', 1024),
-    homepage: headerField(header, 'homepage', 1024),
+    name: headerField(header, 'name') || fallback || 'LX 音源',
+    version: headerField(header, 'version') || '1',
+    author: headerField(header, 'author'),
+    description: headerField(header, 'description'),
+    homepage: headerField(header, 'homepage'),
   };
 }
 function sourceURL(value) {
   requireValue(typeof value === 'string', 'INVALID_SOURCE_URL');
   const input = value.trim();
-  requireValue(input.length > 0 && input.length <= 2048 && !/[\u0000-\u0020\u007f]/.test(input),
+  requireValue(input.length > 0 && !/[\u0000-\u0020\u007f]/.test(input),
     'INVALID_SOURCE_URL');
   let url;
   try { url = new URL(input); } catch { throw new Failure('INVALID_SOURCE_URL'); }
@@ -126,16 +123,16 @@ const validCode = value => value === null || typeof value === 'string' && codePa
 function validVersion(value) {
   return shape(value, ['contentHash', 'bytes', 'version', 'author', 'description', 'homepage']) &&
     typeof value.contentHash === 'string' && hashPattern.test(value.contentHash) &&
-    Number.isSafeInteger(value.bytes) && value.bytes > 0 && value.bytes <= SCRIPT_LIMITS.maxSourceBytes &&
-    plainText(value.version, 128, false) && plainText(value.author, 1024) &&
-    plainText(value.description, 1024) && plainText(value.homepage, 1024);
+    Number.isSafeInteger(value.bytes) && value.bytes > 0 &&
+    plainText(value.version, undefined, false) && plainText(value.author) &&
+    plainText(value.description) && plainText(value.homepage);
 }
 function validOrigin(value) {
   if (shape(value, ['kind'])) return value.kind === 'file';
   if (!shape(value, ['kind', 'url']) || value.kind !== 'network') return false;
   try { return sourceURL(value.url) === value.url; } catch { return false; }
 }
-const validList = (value, max) => Array.isArray(value) && value.length <= 32 &&
+const validList = (value, max) => Array.isArray(value) &&
   value.every(item => plainText(item, max, false)) && new Set(value).size === value.length;
 function validDeclared(value) {
   if (!shape(value, ['contentHash', 'capabilities']) || !hashPattern.test(value.contentHash) ||
@@ -160,7 +157,7 @@ function validCatalog(value) {
   for (const item of value.installations) {
     if (!shape(item, ['id', 'name', 'origin', 'enabled', 'current', 'previous', 'declared', 'check']) ||
         typeof item.id !== 'string' || !uuidPattern.test(item.id) || ids.has(item.id) ||
-        !plainText(item.name, 255, false) || item.name.trim().length === 0 || typeof item.enabled !== 'boolean' ||
+        !plainText(item.name, undefined, false) || item.name.trim().length === 0 || typeof item.enabled !== 'boolean' ||
         !validOrigin(item.origin) || !validVersion(item.current) ||
         item.previous !== null && !validVersion(item.previous) ||
         item.declared !== null && !validDeclared(item.declared) ||
@@ -172,13 +169,11 @@ function validCatalog(value) {
 function validData(value) {
   if (!shape(value, ['schema', 'sites']) || value.schema !== 1 || !object(value.sites)) return false;
   const sites = Object.entries(value.sites);
-  return sites.length <= 32 && sites.every(([site, values]) => sitePattern.test(site) && Array.isArray(values) &&
-    values.length <= 64 && values.every(entry => shape(entry, ['key', 'value']) &&
-      typeof entry.key === 'string' && entry.key.length > 0 && entry.key.length <= 256) &&
+  return sites.every(([site, values]) => sitePattern.test(site) && Array.isArray(values) &&
+    values.every(entry => shape(entry, ['key', 'value']) &&
+      typeof entry.key === 'string' && entry.key.length > 0) &&
     new Set(values.map(entry => entry.key)).size === values.length);
 }
-// Internal document wrappers do not consume the guest value's JSON depth budget.
-const encodedLength = value => Buffer.byteLength(stringifyJSONValue(value, -Infinity));
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
   if (error instanceof BridgeError) return 'INVALID_REQUEST';
@@ -210,14 +205,12 @@ const truthy = value => value !== null && value !== undefined &&
   (typeof value === 'object' || Boolean(value));
 function mediaHeaders(value) {
   if (value === undefined || value === null) return {};
-  requireValue(object(value) && Object.keys(value).length <= 32, 'INVALID_MEDIA_CANDIDATE');
+  requireValue(object(value), 'INVALID_MEDIA_CANDIDATE');
   const seen = new Set(), headers = {};
-  let bytes = 0;
   for (const [name, item] of Object.entries(value)) {
     const lower = name.toLowerCase();
-    requireValue(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,128}$/.test(name) && !seen.has(lower) &&
-      typeof item === 'string' && item.length <= 8192 && /^[\u0020-\u007e]*$/.test(item) &&
-      (bytes += name.length + item.length) <= 16384, 'INVALID_MEDIA_CANDIDATE');
+    requireValue(/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(name) && !seen.has(lower) &&
+      typeof item === 'string' && /^[\u0020-\u007e]*$/.test(item), 'INVALID_MEDIA_CANDIDATE');
     requireValue(!forbiddenHeaders.has(lower) &&
       !['if-', 'content-', 'proxy-', 'sec-'].some(prefix => lower.startsWith(prefix)), 'MEDIA_HEADERS_UNSUPPORTED');
     seen.add(lower);
@@ -232,7 +225,7 @@ function mediaCandidate(raw, clock, expected, duration = 0) {
   const candidate = typeof raw === 'string' ? { url: raw } : raw;
   requireValue(object(candidate), 'INVALID_MEDIA_CANDIDATE');
   const url = candidate.url;
-  requireValue(typeof url === 'string' && url.length > 0 && url.length <= 8192 &&
+  requireValue(typeof url === 'string' && url.length > 0 &&
     !/[\u0000-\u0020\u007f]/.test(url), 'INVALID_MEDIA_CANDIDATE');
   let parsed;
   try { parsed = new URL(url); } catch { throw new Failure('INVALID_MEDIA_CANDIDATE'); }
@@ -276,7 +269,7 @@ function lxInfo(musicInfo) {
  */
 export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost,
   network = createNodeNetwork(),
-  download = createSourceDownload({ maxSourceBytes: SCRIPT_LIMITS.maxSourceBytes, maxRedirects: 0 }),
+  download = createSourceDownload({ maxRedirects: 0 }),
   clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
     typeof network === 'function' && typeof download === 'function' && typeof clock === 'function' &&
@@ -387,7 +380,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   function prepare(bytes, basename, trustedHash) {
     requireValue(bytes.length > 0, 'SCRIPT_ENCODING');
-    requireValue(bytes.length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
     const header = describe(decode(bytes), basename);
     const contentHash = trustedHash ?? digest(bytes), name = `sources/${contentHash}.js`;
     const existing = sourceFiles.read(name);
@@ -434,7 +426,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       requireValue(!(response?.statusCode >= 300 && response.statusCode < 400), 'SOURCE_REDIRECT');
       requireValue(response?.statusCode === 200 && Buffer.isBuffer(response.body) && response.body.length > 0,
         'SOURCE_DOWNLOAD_FAILED');
-      requireValue(response.body.length <= SCRIPT_LIMITS.maxSourceBytes, 'LIMIT');
       return response.body;
     } catch (error) { response?.body?.fill?.(0); throw error; }
   }
@@ -444,7 +435,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     try {
       requireValue(object(input) && typeof input.installationId === 'string' && uuidPattern.test(input.installationId) &&
         Number.isSafeInteger(input.generation) && input.generation > 0 && typeof input.siteId === 'string' &&
-        sitePattern.test(input.siteId) && typeof input.key === 'string' && input.key.length > 0 && input.key.length <= 256, 'PERMISSION_DENIED');
+        sitePattern.test(input.siteId) && typeof input.key === 'string' && input.key.length > 0, 'PERMISSION_DENIED');
       const check = () => {
         requireValue(!closed && input.signal instanceof AbortSignal && !input.signal.aborted &&
           typeof input.isCurrent === 'function' && input.isCurrent() === true, 'STALE_SOURCE');
@@ -453,7 +444,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         requireValue(Object.hasOwn(record.capabilities,input.siteId),'PERMISSION_DENIED');
       };
       if (operation === 'set') {
-        validateJSONValue(input.value);requireValue(encodedLength(input.value) <= 16384,'LIMIT');
+        validateJSONValue(input.value);
       }
       const value = await persistence.kv(operation,input,encodedLength,check);
       return operation === 'get' ? lxValue(value) : null;
@@ -798,7 +789,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     'music.script.sources.edit': business(['installationId', 'name', 'url'], ['installationId'], (params, signal) => {
       installation(params.installationId);
       requireValue(params.name !== undefined || params.url !== undefined);
-      if (params.name !== undefined) text(params.name, 255);
+      if (params.name !== undefined) requireValue(plainText(params.name, undefined, false) && params.name.trim().length > 0);
       const url = params.url === undefined ? undefined : sourceURL(params.url);
       requireValue(url === undefined || find(params.installationId).origin.kind === 'network');
       return locked(params.installationId, signal, async () => {

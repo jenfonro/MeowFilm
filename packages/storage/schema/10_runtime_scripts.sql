@@ -63,7 +63,7 @@ CREATE TABLE music_script_kv_entries (
     site_id TEXT NOT NULL,
     entry_key TEXT NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
-    encoded_bytes INTEGER NOT NULL CHECK (encoded_bytes >= 0 AND encoded_bytes <= 16384),
+    encoded_bytes INTEGER NOT NULL CHECK (encoded_bytes >= 0),
     PRIMARY KEY (installation_id, site_id, entry_key)
 ) STRICT;
 

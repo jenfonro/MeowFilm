@@ -31,18 +31,62 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     int? DayOfMonth = null, string Decoration = "",
     bool RequiresAccount = false, bool Display = true, string Placement = "",
     bool DirectPlay = true, JsonElement? PlaybackSource = null, string RankText = "", string SalesText = "",
-    bool IsCloudFavorites = false, bool IsManagedPlaylist = false, int? Count = null) : INotifyPropertyChanged
+    bool IsCloudFavorites = false, bool IsManagedPlaylist = false, int? Count = null,
+    string Label = "", MusicCatalogCoverReference? CoverRef = null, bool UsesSongDisplay = true, string ChannelKind = "",
+    string ContextText = "", long? PlayCount = null, string CoverLabel = "") : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
     private string title = Title, subtitle = Subtitle, cover = Cover;
-    public string Title { get => Song?.Title ?? title; init => title = value; }
-    public string Subtitle { get => Song?.Artist ?? subtitle; init => subtitle = value; }
-    public string Cover { get => Song?.Cover ?? cover; init => cover = value; }
+    private string contextText = ContextText;
+    private long? playCount = PlayCount;
+    public string Title { get => UsesSongDisplay ? Song?.Title ?? title : title; init => title = value; }
+    public string Subtitle { get => UsesSongDisplay ? Song?.Artist ?? subtitle : subtitle; init => subtitle = value; }
+    public string Cover { get => UsesSongDisplay ? Song?.Cover ?? cover : cover; init => cover = value; }
+    public bool HasLabel => Label.Length > 0;
+    public long? PlayCount { get => playCount; init => playCount = value; }
+    public string ContextText { get => contextText; init => contextText = value; }
+    public bool HasPlayCount => PlayCount.HasValue;
+    public bool HasCoverLabel => CoverLabel.Length > 0;
+    public string PlayCountText => PlayCount is not { } count ? "" : count >= 100_000_000 ?
+        (count / 100_000_000d).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "亿" : count >= 10_000 ?
+        (count / 10_000d).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture) + "万" :
+        count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    public string Caption => !HasLabel ? Title : ContextText.Length == 0 ? Subtitle :
+        Kind == "fm" ? $"从「{ContextText}」开启无限漫游" : ContextText;
+    internal void FillCover(string value)
+    {
+        if (Cover.Length > 0 || value.Length == 0) return;
+        cover = value;
+        foreach (var name in new[] { nameof(Cover), nameof(FirstPreviewCover) })
+            PropertyChanged?.Invoke(this, new(name));
+    }
+    internal void FillCollectionMetadata(string name, string artwork, long? plays)
+    {
+        FillCover(artwork);
+        if (!HasLabel && (IsPreviewEntry || Title.Length == 0) && name.Length > 0 && title != name)
+        {
+            title = name;
+            foreach (var property in new[] { nameof(Title), nameof(Caption) })
+                PropertyChanged?.Invoke(this, new(property));
+        }
+        if (HasLabel && contextText.Length == 0 && name.Length > 0 && name != Label)
+        {
+            contextText = name;
+            PropertyChanged?.Invoke(this, new(nameof(ContextText)));
+            PropertyChanged?.Invoke(this, new(nameof(Caption)));
+        }
+        if (plays.HasValue && plays != playCount)
+        {
+            playCount = plays;
+            foreach (var property in new[] { nameof(PlayCount), nameof(HasPlayCount), nameof(PlayCountText) })
+                PropertyChanged?.Invoke(this, new(property));
+        }
+    }
     internal void RefreshSong(JsonElement? value)
     {
         if (Song is null || value is null) return;
         Song.ApplyRepository(value);
-        foreach (var name in new[] { nameof(Title), nameof(Subtitle), nameof(Cover), nameof(CanAlbum) })
+        foreach (var name in new[] { nameof(Title), nameof(Subtitle), nameof(Cover), nameof(CanAlbum), nameof(Caption) })
             PropertyChanged?.Invoke(this, new(name));
     }
     private IReadOnlyList<MusicRankPreview>? initializedPreview;
@@ -63,6 +107,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     }
     internal void InitializePreview(IReadOnlyList<MusicRankPreview> songs)
     {
+        if (ReferenceEquals(initializedPreview, songs) || Preview is { Count: > 0 }) return;
         initializedPreview = songs;
         foreach (var name in new[] { nameof(PreviewSongs), nameof(PreviewTitles), nameof(HasPreview),
             nameof(FirstPreviewCover), nameof(SecondPreviewCover), nameof(ThirdPreviewCover),
@@ -86,10 +131,12 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public bool IsOverlayEntry => Presentation == MusicCatalogEntryPresentation.Overlay;
     public bool IsAnimatedEntry => Presentation == MusicCatalogEntryPresentation.Animated;
     public bool CanRequestPreview => Display && IsPreviewEntry && CanOpen && Kind is "playlist" or "daily" or "album";
-    public bool CanPlay => DirectPlay && CanOpen && (Song is not null || Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "heartbeat" or "album");
-    public bool CanOpen => Available && (Song is not null || MusicCatalogDto.SupportsAction(Platform, Kind));
+    public bool CanRequestFMArtwork => Display && CanOpen && Kind == "fm" && Cover.Length == 0;
+    public bool CanPlay => DirectPlay && CanOpen && Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "heartbeat" or "album";
+    public bool CanOpen => Available && (Kind == "song" && Song is not null ||
+        ActionId.Length > 0 && MusicCatalogDto.SupportsAction(Platform, Kind));
     public bool CanSavePlaylist => CanOpen && Kind == "playlist" && !IsManagedPlaylist && Locator is null;
-    public bool CanFavorite => Available && Song is not null;
+    public bool CanFavorite => Available && Kind == "song" && Song is not null;
     public bool CanSimilar => CanFavorite && Recommendations.RecommendationJson.NativeId(Song!.Raw).Length > 0;
     public bool CanHeartbeatFavorites => CanOpen && Platform == "wy" && IsCloudFavorites;
     public string AlbumId => Song is { } song ? MusicCatalogDto.Text(SongJson.PrimaryInfo(song.Raw), "albumId") : "";
@@ -98,8 +145,9 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public string ContentKey => Platform + "/" + Kind + "/" + Identity;
     private string Identity => MemberId.Length > 0 ? MemberId : ActionId.Length > 0 ? ActionId : Song?.Id ?? Id;
 }
+public sealed record MusicCatalogCoverReference(string Kind, string Id);
+public sealed record MusicCatalogTab(string Id, string Title, IReadOnlyList<MusicCatalogCard> Items);
 public sealed record MusicCatalogSongColumn(IReadOnlyList<MusicCatalogCard> Items);
-public sealed record MusicCatalogPlaylistRow(IReadOnlyList<MusicCatalogCard> Items);
 public enum MusicCatalogSectionPresentation
 {
     Shelf,
@@ -112,19 +160,30 @@ public enum MusicCatalogSectionPresentation
 }
 public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalogCard> Items,
     string Id = "", string Type = "", MusicCatalogCard? Action = null, string Layout = "",
-    bool IsLoading = false)
+    bool IsLoading = false, IReadOnlyList<MusicCatalogTab>? Tabs = null, string SelectedTab = "", string ErrorCode = "") : INotifyPropertyChanged
 {
-    public double HorizontalOffset { get; set; }
-    public MusicCatalogSectionPresentation Presentation => Type switch
+    public event PropertyChangedEventHandler? PropertyChanged;
+    private IReadOnlyList<MusicCatalogCard> items = Items;
+    private string selectedTab = SelectedTab;
+    public IReadOnlyList<MusicCatalogCard> Items { get => items; init => items = value; }
+    public string SelectedTab { get => selectedTab; init => selectedTab = value; }
+    public bool HasTabs => Tabs is { Count: > 0 };
+    internal void SelectTab(MusicCatalogTab tab)
     {
-        "entries" => MusicCatalogSectionPresentation.Entries,
+        if (Tabs?.Contains(tab) != true || selectedTab == tab.Id) return;
+        items = tab.Items; selectedTab = tab.Id; HorizontalOffset = 0;
+        foreach (var name in new[] { nameof(Items), nameof(SelectedTab), nameof(SongColumns), nameof(HorizontalOffset) })
+            PropertyChanged?.Invoke(this, new(name));
+    }
+    public double HorizontalOffset { get; set; }
+    public MusicCatalogSectionPresentation Presentation => Layout switch
+    {
+        "feature-rail" => MusicCatalogSectionPresentation.Entries,
         "banner" => MusicCatalogSectionPresentation.Banner,
-        "artists" => MusicCatalogSectionPresentation.Artists,
-        "rankings" when Layout is "ranked-songs" or "vip-ranked-songs" ||
-            Layout.Equals("TOP_3", StringComparison.OrdinalIgnoreCase) =>
-            MusicCatalogSectionPresentation.RankingPreviews,
-        "rankings" => MusicCatalogSectionPresentation.RankingCovers,
-        _ when Items.Count > 0 && Items.All(item => item.Song is not null) => MusicCatalogSectionPresentation.Songs,
+        "artist-grid" => MusicCatalogSectionPresentation.Artists,
+        "ranking" or "ranked-songs" or "vip-ranked-songs" => MusicCatalogSectionPresentation.RankingPreviews,
+        "ranking-small" => MusicCatalogSectionPresentation.RankingCovers,
+        "song-columns" or "song-list" or "vip-songs" => MusicCatalogSectionPresentation.Songs,
         _ => MusicCatalogSectionPresentation.Shelf
     };
     public bool IsSongSection => Presentation == MusicCatalogSectionPresentation.Songs;
@@ -133,10 +192,11 @@ public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalo
     public bool IsRankingCoverSection => Presentation == MusicCatalogSectionPresentation.RankingCovers;
     public bool IsBannerSection => Presentation == MusicCatalogSectionPresentation.Banner;
     public bool IsEntrySection => Presentation == MusicCatalogSectionPresentation.Entries;
-    public bool IsAlbumChart => Type == "albums" && Layout == "ranking";
-    public bool IsSongShelfSection => IsSongSection && Layout is "rail" or "grid";
-    public bool IsPlaylistSection => Presentation == MusicCatalogSectionPresentation.Shelf &&
-        Items.Count > 0 && Items.All(item => item.Kind is "playlist" or "album");
+    public bool IsAlbumChart => Layout == "album-ranking";
+    public bool IsSongShelfSection => Layout == "song-columns";
+    public bool IsPlaylistSection => Layout is "playlist-rail" or "playlist-grid";
+    public bool IsGridSection => Layout is "playlist-grid" or "channel-grid";
+    public bool IsArtistUpdatesSection => Layout == "artist-updates";
     public IReadOnlyList<MusicCatalogSongColumn> SongColumns => Items
         .Chunk(3).Select(items => new MusicCatalogSongColumn(items)).ToArray();
     public MusicCatalogSection DisplayableCards(bool includeAccountEntries = true) => this with
@@ -160,236 +220,125 @@ public static class MusicCatalogDto
     public static string Text(JsonElement element, string name) =>
         element.ValueKind == JsonValueKind.Object && element.TryGetProperty(name, out var value) &&
         value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
-    public static MusicCatalogCard[] SearchResults(JsonElement items, string kind)
-    {
-        MusicDto.Require(kind is "songs" or "playlists" && items.ValueKind == JsonValueKind.Array);
-        return ReadItems(items, item => SearchResult(item, kind));
-    }
-    internal static MusicCatalogCard SearchResult(JsonElement item, string kind)
-    {
-        MusicDto.Require(kind is "songs" or "playlists");
-        string platform = kind == "songs" ? SongJson.Platform(item) : Text(item, "source");
-        MusicDto.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg");
-        return Card(item, platform, kind == "songs" ? "song" : "playlist");
-    }
+    internal static JsonElement Field(JsonElement value, string key) =>
+        value.ValueKind == JsonValueKind.Object && value.TryGetProperty(key, out var field) ? field : default;
+    internal static IEnumerable<JsonElement> Rows(JsonElement value) =>
+        value.ValueKind == JsonValueKind.Array ? value.EnumerateArray() : [];
+    internal static int? Number(JsonElement value, string key) =>
+        Field(value, key) is { ValueKind: JsonValueKind.Number } number && number.TryGetInt32(out int result) ? result : null;
+    internal static long? LongNumber(JsonElement value, string key) =>
+        Field(value, key) is { ValueKind: JsonValueKind.Number } number && number.TryGetInt64(out long result) ? result : null;
+    internal static bool Boolean(JsonElement value, string key, bool fallback) => Field(value, key).ValueKind switch
+    { JsonValueKind.True => true, JsonValueKind.False => false, _ => fallback };
+    private static JsonElement? Object(JsonElement value) => value.ValueKind == JsonValueKind.Object ? value.Clone() : null;
+    private static SongRow? Song(JsonElement value) => Text(value, "songId").Length > 0 ? new(value.Clone()) : null;
+
+    public static MusicCatalogCard[] SearchResults(JsonElement items, string kind) =>
+        Rows(items).Select(item => SearchResult(item, kind)).ToArray();
+    internal static MusicCatalogCard SearchResult(JsonElement item, string kind) => kind == "songs"
+        ? SongCard(item, SongJson.Platform(item)) : Collection(item, Text(item, "source"));
 
     public static IReadOnlyList<MusicCatalogSection> Read(JsonElement reply, string platform, string operation,
         string title, string searchKind = "songs")
     {
-        var sections = new List<MusicCatalogSection>();
-        MusicDto.Require(reply.ValueKind == JsonValueKind.Object);
-        bool content = false, valid = false;
-        if (reply.TryGetProperty("sections", out var groups) && groups.ValueKind == JsonValueKind.Array)
-        {
-            content = true;
-            if (groups.GetArrayLength() == 0) valid = true;
-            foreach (var group in groups.EnumerateArray())
+        if (operation is "home" or "channel" or "artistActivity" or "chart" or "charts")
+            return Rows(Field(reply, "sections")).Select(group =>
             {
-                try
-                {
-                    MusicDto.Require(group.ValueKind == JsonValueKind.Object);
-                    if (!Boolean(group, "display", true)) { valid = true; continue; }
-                    var heading = Text(group, "title");
-                    MusicCatalogCard? action = null;
-                    if (group.TryGetProperty("action", out var a) && a.ValueKind == JsonValueKind.Object)
-                        try { action = Card(SectionActionItem(group, heading, a), platform, "resource"); }
-                        catch (Exception error) when (IsItemFailure(error)) { }
-                    var type = Text(group, "type");
-                    sections.Add(new(heading, Cards(group.GetProperty("items"), platform, "resource"),
-                        MusicDto.Text(group, "id"), type, action, Text(group, "layout")));
-                    valid = true;
-                }
-                catch (Exception error) when (IsItemFailure(error)) { }
-            }
-        }
-        if (reply.TryGetProperty("entries", out var entries))
-        {
-            content = true;
-            try
-            {
-                var cards = Cards(entries, platform, "resource");
-                if (cards.Length > 0) sections.Insert(0, new("", cards, "entries", "entries"));
-                valid = true;
-            }
-            catch (Exception error) when (IsItemFailure(error)) { }
-        }
-        if (reply.TryGetProperty("items", out var items))
-        {
-            content = true;
-            try
-            {
-                var cards = Cards(items, platform, operation == "channels" ? "descriptor" :
-                    operation == "personalPlaylists" || operation == "search" && searchKind == "playlists" ? "playlist" : "song");
-                sections.Add(new(title, cards, "items", operation));
-                valid = true;
-            }
-            catch (Exception error) when (IsItemFailure(error)) { }
-        }
-        MusicDto.Require(content && valid);
-        return sections;
-    }
-    private static JsonElement SectionActionItem(JsonElement group, string heading, JsonElement action)
-    {
-        var item = new Dictionary<string, object?>
-        {
-            ["name"] = heading,
-            ["action"] = action.Clone()
-        };
-        foreach (var name in new[] { "available", "errorCode", "requiresAccount", "display" })
-            if (group.TryGetProperty(name, out var value)) item[name] = value.Clone();
-        return JsonSerializer.SerializeToElement(item);
+                var heading = Text(group, "title");
+                var action = Object(Field(group, "action"));
+                var tabs = Rows(Field(group, "tabs")).Select(tab => new MusicCatalogTab(Text(tab, "id"),
+                    Text(tab, "name"), Cards(Field(tab, "items"), platform))).ToArray();
+                return new MusicCatalogSection(heading, Cards(Field(group, "items"), platform), Text(group, "id"),
+                    Action: action is { } a ? new MusicCatalogCard("", heading, "", "", Text(a, "type"), platform,
+                        ActionId: ActionId(a), Action: a, Locator: Object(Field(a, "locator")),
+                        PageCode: Text(Field(a, "channel"), "pageCode"),
+                        ChannelKind: Text(Field(a, "channel"), "channelKind"),
+                        RequiresAccount: Boolean(group, "requiresAccount", false)) : null,
+                    Layout: Text(group, "layout"), Tabs: tabs, SelectedTab: Text(group, "selectedTab"),
+                    ErrorCode: Text(group, "errorCode"));
+            }).ToArray();
+        bool collections = operation is "personalPlaylists" or "playlists" || operation == "search" && searchKind == "playlists";
+        var cards = Rows(Field(reply, "items")).Select(item => operation == "channels" ? Descriptor(item, platform) :
+            collections ? Collection(item, platform) : SongCard(item, platform)).ToArray();
+        return [new(title, cards, "items", Layout: operation == "channels" ? "channel-grid" : collections ? "playlist-rail" : "song-list")];
     }
     public static IReadOnlyList<MusicCatalogTag> Tags(JsonElement reply)
     {
         var tags = new List<MusicCatalogTag>();
         void Add(JsonElement value, string inheritedSelection)
         {
-            if (!value.TryGetProperty("tags", out var list)) return;
             var selected = Text(value, "selectedTag");
             if (selected.Length == 0) selected = inheritedSelection;
-            foreach (var tag in list.EnumerateArray())
+            foreach (var tag in Rows(Field(value, "tags")))
             {
-                var id = MusicDto.Text(tag, "id");
-                var group = "";
-                if (tag.TryGetProperty("group", out var declaredGroup))
-                {
-                    MusicDto.Require(declaredGroup.ValueKind == JsonValueKind.String);
-                    group = declaredGroup.GetString()!;
-                }
-                var row = new MusicCatalogTag(id, MusicDto.Text(tag, "name"), group,
-                    tag.TryGetProperty("selected", out var active) && active.ValueKind == JsonValueKind.True || id == selected);
+                var id = Text(tag, "id");
+                var row = new MusicCatalogTag(id, Text(tag, "name"), Text(tag, "group"),
+                    Boolean(tag, "selected", false) || id == selected);
                 if (!tags.Any(existing => existing.Group == row.Group && existing.Id == row.Id)) tags.Add(row);
             }
         }
         var rootSelection = Text(reply, "selectedTag");
         Add(reply, rootSelection);
-        if (reply.TryGetProperty("feed", out var feed) && feed.ValueKind == JsonValueKind.Object) Add(feed, rootSelection);
+        foreach (var section in Rows(Field(reply, "sections"))) Add(section, rootSelection);
         return tags;
     }
-    private static bool IsItemFailure(Exception error) => error is MusicOperationException or JsonException or
-        InvalidOperationException or KeyNotFoundException or FormatException or OverflowException;
-    private static MusicCatalogCard[] Cards(JsonElement items, string platform, string fallback) =>
-        ReadItems(items, item => Card(item, platform, fallback));
-    private static MusicCatalogCard[] ReadItems(JsonElement items, Func<JsonElement, MusicCatalogCard> read)
+    private static MusicCatalogCard[] Cards(JsonElement items, string platform) =>
+        Rows(items).Select(item => Card(item, platform)).ToArray();
+    private static string ActionId(JsonElement action) => Text(action, "type") switch
     {
-        MusicDto.Require(items.ValueKind == JsonValueKind.Array);
-        var cards = new List<MusicCatalogCard>();
-        int hidden = 0;
-        foreach (var item in items.EnumerateArray())
-        {
-            try
-            {
-                MusicDto.Require(item.ValueKind == JsonValueKind.Object);
-                if (!Boolean(item, "display", true)) { hidden++; continue; }
-                cards.Add(read(item));
-            }
-            catch (Exception error) when (IsItemFailure(error)) { }
-        }
-        MusicDto.Require(items.GetArrayLength() == hidden || cards.Count > 0);
-        return cards.ToArray();
-    }
-    private static MusicCatalogCard Card(JsonElement item, string platform, string fallback)
+        "daily" or "fm" or "similar" or "heartbeat" => Text(action, "type"),
+        "channel" => Text(Field(action, "channel"), "id"),
+        _ => Text(action, "id")
+    };
+    private static MusicCatalogCard Card(JsonElement item, string platform)
     {
-        MusicDto.Require(item.ValueKind == JsonValueKind.Object);
-        var presentation = EntryPresentation(item);
-        var available = !item.TryGetProperty("available", out var enabled) || enabled.ValueKind == JsonValueKind.True;
-        var error = Text(item, "errorCode");
-        var requiresAccount = Boolean(item, "requiresAccount", false);
-        var display = Boolean(item, "display", true);
-        SongRow? song = null;
-        if (fallback != "descriptor")
-        {
-            if (item.TryGetProperty("songId", out _)) song = SongRow.Read(item);
-            else if (item.TryGetProperty("song", out var nested) && nested.ValueKind == JsonValueKind.Object) song = SongRow.Read(nested);
-        }
-        if (song is not null)
-        {
-            return new(song.Id, song.Title, song.Artist, song.Cover, "song", SongJson.Platform(song.Raw), song,
-                SongJson.NativeId(song.Raw), Available: available, ErrorCode: error, StableKey: Text(item, "key"),
-                MemberId: SongJson.NativeId(song.Raw), Presentation: presentation,
-                PlaybackSource: item.TryGetProperty("playbackSource", out var playback) && playback.ValueKind == JsonValueKind.Object ? playback.Clone() : null,
-                RequiresAccount: requiresAccount, Display: display);
-        }
-        var id = Text(item, "id");
-        var kind = Text(item, "kind");
-        bool cloudFavorites = platform == "wy" && kind == "favorites" && Text(item, "relationship") == "owned";
-        var actionId = id; var pageCode = Text(item, "pageCode");
-        var placement = "";
-        JsonElement? actionValue = null, locator = null;
-        if (fallback == "descriptor")
-        {
-            placement = Text(item, "placement");
-        }
-        else if (item.TryGetProperty("action", out var action) && action.ValueKind == JsonValueKind.Object)
-        {
-            actionValue = action.Clone();
-            kind = Text(action, "type");
-            actionId = Text(action, "id");
-            if (kind == "channel" && action.TryGetProperty("channel", out var channel))
-            {
-                actionId = Text(channel, "id"); pageCode = Text(channel, "pageCode");
-            }
-            available &= SupportsAction(platform, kind);
-            if (kind is "daily" or "fm" or "similar" or "heartbeat") actionId = kind;
-            if (action.TryGetProperty("locator", out var value) && value.ValueKind == JsonValueKind.Object)
-                locator = value.Clone();
-        }
-        else
-        {
-            if (kind.Length == 0) kind = fallback;
-            available &= kind is "playlist" or "artist"; // Never guess that an unknown entry is a channel.
-        }
-        if (locator is null && item.TryGetProperty("locator", out var rawLocator) && rawLocator.ValueKind == JsonValueKind.Object)
-            locator = rawLocator.Clone();
-        available &= actionId.Length > 0;
-        return new(id.Length == 0 ? actionId : id, Text(item, "name"),
-            Text(item, "subtitle") is { Length: > 0 } subtitle ? subtitle : Text(item, "creator"),
-            Text(item, "cover"), kind, platform, ActionId: actionId, PageCode: pageCode,
-            Available: available, ErrorCode: available ? "" : error.Length == 0 ? "UNSUPPORTED" : error, StableKey: Text(item, "key"),
-            Action: actionValue, Locator: locator, Preview: Preview(item), UpdateFrequency: Text(item, "updateFrequency"),
-            Presentation: presentation, DayOfMonth: CalendarDay(item),
-            Decoration: Text(item, "decoration"), RequiresAccount: requiresAccount, Display: display, Placement: placement,
-            DirectPlay: Boolean(item, "canPlay", true), RankText: Text(item, "rankText"), SalesText: Text(item, "salesText"),
-            IsCloudFavorites: cloudFavorites, IsManagedPlaylist: Text(item, "relationship") == "owned",
-            Count: item.TryGetProperty("count", out var count) && count.ValueKind != JsonValueKind.Null
-                ? checked((int)MusicDto.Integer(item, "count")) : null);
+        var action = Field(item, "action");
+        var reference = Field(item, "coverRef");
+        return new(Text(item, "id"), Text(item, "title"), Text(item, "subtitle"), Text(item, "cover"),
+            Text(item, "kind"), platform, Song(Field(item, "song")), ActionId(action),
+            Text(Field(action, "channel"), "pageCode"), Boolean(item, "available", true), Text(item, "errorCode"),
+            Text(item, "key"), Object(action), Object(Field(item, "locator")) ?? Object(Field(action, "locator")),
+            Preview: Preview(item), UpdateFrequency: Text(item, "updateFrequency"), Presentation: EntryPresentation(item),
+            DayOfMonth: Number(item, "dayOfMonth") is >= 1 and <= 31 ? Number(item, "dayOfMonth") : null, Decoration: Text(item, "decoration"),
+            RequiresAccount: Boolean(item, "requiresAccount", false), Display: Boolean(item, "display", true),
+            DirectPlay: Boolean(item, "canPlay", true), PlaybackSource: Object(Field(item, "playbackSource")),
+            RankText: Text(item, "rankText"), SalesText: Text(item, "salesText"), Count: Number(item, "count"),
+            IsManagedPlaylist: Text(item, "relationship") == "owned",
+            Label: Text(item, "label"), ChannelKind: Text(Field(action, "channel"), "channelKind"),
+            CoverRef: Text(reference, "kind") == "playlist" && Text(reference, "id").Length > 0
+                ? new("playlist", Text(reference, "id")) : null, UsesSongDisplay: false,
+            ContextText: Text(item, "contextText"), PlayCount: LongNumber(item, "playCount"), CoverLabel: Text(item, "coverLabel"));
     }
-    private static bool Boolean(JsonElement item, string name, bool fallback)
+    private static MusicCatalogCard SongCard(JsonElement item, string platform) =>
+        new(Text(item, "songId"), Text(item, "title"), Text(item, "artist"), Text(item, "cover_url"), "song", platform,
+            Song(item), SongJson.NativeId(item), MemberId: SongJson.NativeId(item));
+    internal static MusicCatalogCard Collection(JsonElement item, string platform) =>
+        new(Text(item, "id"), Text(item, "name"), Text(item, "creator"), Text(item, "cover"), "playlist", platform,
+            ActionId: Text(item, "id"), Locator: Object(Field(item, "locator")),
+            RequiresAccount: Boolean(item, "requiresAccount", false), Display: Boolean(item, "display", true),
+            IsCloudFavorites: platform == "wy" && Text(item, "kind") == "favorites" && Text(item, "relationship") == "owned",
+            IsManagedPlaylist: Text(item, "relationship") == "owned", Count: Number(item, "count"), PlayCount: LongNumber(item, "playCount"));
+    private static MusicCatalogCard Descriptor(JsonElement item, string platform) =>
+        new(Text(item, "id"), Text(item, "name"), "", Text(item, "cover"), "channel", platform,
+            ActionId: Text(item, "id"), PageCode: Text(item, "pageCode"), Placement: Text(item, "placement"),
+            Available: Boolean(item, "available", true), Display: Boolean(item, "display", true),
+            ChannelKind: Text(item, "channelKind"));
+    private static MusicCatalogEntryPresentation EntryPresentation(JsonElement item) => Text(item, "presentation") switch
     {
-        if (!item.TryGetProperty(name, out var value)) return fallback;
-        MusicDto.Require(value.ValueKind is JsonValueKind.True or JsonValueKind.False);
-        return value.GetBoolean();
-    }
-    private static int? CalendarDay(JsonElement item)
-    {
-        if (!item.TryGetProperty("dayOfMonth", out var day) || day.ValueKind == JsonValueKind.Null) return null;
-        long value = MusicDto.Integer(item, "dayOfMonth");
-        MusicDto.Require(value is >= 1 and <= 31);
-        return (int)value;
-    }
-    private static MusicCatalogEntryPresentation EntryPresentation(JsonElement item) =>
-        Text(item, "presentation") switch
-        {
-            "preview" => MusicCatalogEntryPresentation.Preview,
-            "overlay" => MusicCatalogEntryPresentation.Overlay,
-            "animated" => MusicCatalogEntryPresentation.Animated,
-            "static" => MusicCatalogEntryPresentation.Static,
-            _ => MusicCatalogEntryPresentation.Static
-        };
-    private static MusicRankPreview[] Preview(JsonElement item)
-    {
-        if (!item.TryGetProperty("preview", out var rows) || rows.ValueKind != JsonValueKind.Array) return [];
-        int Rank(JsonElement row, string key) => row.TryGetProperty(key, out var n) && n.ValueKind == JsonValueKind.Number && n.TryGetInt32(out var value) ? Math.Max(0, value) : 0;
-        return rows.EnumerateArray().Take(3).Select(row => new MusicRankPreview(Text(row, "title"), Text(row, "artist"),
-            Text(row, "cover"), Rank(row, "rank"), row.TryGetProperty("lastRank", out _) ? Rank(row, "lastRank") : null,
-            row.TryGetProperty("song", out var song) && song.ValueKind == JsonValueKind.Object ? SongRow.Read(song) : null)).ToArray();
-    }
+        "preview" => MusicCatalogEntryPresentation.Preview,
+        "overlay" => MusicCatalogEntryPresentation.Overlay,
+        "animated" => MusicCatalogEntryPresentation.Animated,
+        _ => MusicCatalogEntryPresentation.Static
+    };
+    private static MusicRankPreview[] Preview(JsonElement item) => Rows(Field(item, "preview")).Take(3)
+        .Select(row => new MusicRankPreview(Text(row, "title"), Text(row, "artist"), Text(row, "cover"),
+            Number(row, "rank") ?? 0, Number(row, "lastRank"), Song(Field(row, "song")))).ToArray();
     public static string CursorKey(JsonElement? value)
     {
         if (value is null) return "";
         // Progress cursor, not opaque scope/order fields that may change while stalled.
         foreach (var key in new[] { "cursor", "offset", "page", "before" })
-            if (value.Value.TryGetProperty(key, out var cursor)) return key + ":" + cursor.ToString();
+            if (value.Value.ValueKind == JsonValueKind.Object && value.Value.TryGetProperty(key, out var cursor)) return key + ":" + cursor.ToString();
         return Canonical(value.Value);
     }
     private static string Canonical(JsonElement v) => v.ValueKind switch

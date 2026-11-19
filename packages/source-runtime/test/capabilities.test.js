@@ -6,10 +6,34 @@ import {
   createCapabilityClient,
   hostApiVersion,
 } from '../src/index.js';
-import { SourceHttpClient, trustedCapabilityContext } from '../src/http.js';
+import { SourceHttpClient, normalizeHeaders, trustedCapabilityContext } from '../src/http.js';
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const encoded = value => new TextEncoder().encode(value);
+
+test('HTTP and cookie capabilities retain large fields and collections without byte quotas', async () => {
+  const headers = Object.fromEntries(Array.from({ length: 129 }, (_, index) => [`x-header-${index}`, ['value']]));
+  headers['x-' + 'n'.repeat(129)] = Array.from({ length: 33 }, () => 'x'.repeat(16385));
+  const url = 'https://fixture.invalid/?query=' + 'x'.repeat(16385);
+  const statusText = 'x'.repeat(257), cookies = Array.from({ length: 65 }, () => 'cookie=' + 'x'.repeat(16385));
+  const calls = [];
+  const client = createCapabilityClient({ async invoke(name, input) {
+    calls.push(input);
+    return name === 'http.request'
+      ? { version: hostApiVersion, status: 200, statusText, url, headers, body: encoded('complete') }
+      : null;
+  } });
+  const result = await client.call('http.request', { version: hostApiVersion, url, headers });
+  assert.deepEqual(normalizeHeaders(headers), headers);
+  assert.deepEqual(calls[0].headers, headers);
+  assert.equal(calls[0].url, url);
+  assert.deepEqual(result.headers, headers);
+  assert.equal(result.statusText, statusText);
+  await client.call('cookie.set', { version: hostApiVersion, url, profile: 'fixture', values: cookies });
+  assert.deepEqual(calls[1].values, cookies);
+  assert.throws(() => normalizeHeaders({ 'bad name': 'value' }), { code: 'INVALID_ARGUMENT' });
+  assert.throws(() => normalizeHeaders({ 'x-header': 'value\ninjected' }), { code: 'INVALID_ARGUMENT' });
+});
 
 test('capability JSON business values accept 64 levels while control fields do not consume depth', async () => {
   const nested = (depth, objects = false, leaf = null) => {
@@ -62,9 +86,10 @@ test('capability JSON values preserve exact numbers and UTF-16 strings through s
     '"zero":-0,"\\ud800":"\\udc00","é":1,"é":2}';
   const values = [parseJSONText(exact), Number.MAX_SAFE_INTEGER + 1,
     '\ud800', '\udc00', 'a\ud800b', '\udc00\ud800', { ['\ud800']: 1 }, { ['\udc00']: 1 }];
-  const input = { version: hostApiVersion, profile: 'exact:storage', key: 'key' };
+  const input = { version: hostApiVersion, profile: 'exact:storage', key: 'k'.repeat(257) };
   let saved;
   const client = createCapabilityClient({ invoke(name, input) {
+    assert.equal(input.key, 'k'.repeat(257));
     if (name === 'storage.set') { saved = input.value; return true; }
     return saved;
   } });
@@ -287,7 +312,7 @@ test('cookie and AES retain their format contracts while text has no byte quota'
     version: hostApiVersion,
     profile: 'fixture',
     url: 'https://fixture.invalid/',
-    values: Array.from({ length: 65 }, (_, index) => `k${index}=v`),
+    values: ['invalid\nheader=value'],
   }), { code: 'INVALID_ARGUMENT' });
   assert.deepEqual(await client.call('encoding.encode', {
     version: hostApiVersion,

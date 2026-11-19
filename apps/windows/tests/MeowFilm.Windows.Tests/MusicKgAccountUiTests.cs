@@ -3,14 +3,16 @@ using System.Runtime.CompilerServices;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using System.Windows.Threading;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -53,30 +55,13 @@ public static class MusicKgAccountUiTests
         { throw new TimeoutException($"KG account wait at {member}:{line}: {expression}"); }
     }
     private static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); }
-                catch (Exception e) { done.TrySetException(e); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(35));
-        Check(thread.Join(TimeSpan.FromSeconds(5)));
-    }
+    { await TestUiHost.InvokeAsync(action); }
     private static async Task Login()
     {
         await using var f = await Fixture.Create();
         Check(f.Module.CanBeginAccountQr && !f.Module.CanSaveAccountQr);
         await f.Module.BeginAccountQrAsync();
-        Check(f.Module.HasAccountQr && f.Module.AccountQrImage is { IsFrozen: true } &&
-            f.Module.AccountQrImage.Format == PixelFormats.Gray8 &&
+        Check(f.Module.HasAccountQr && f.Module.AccountQrImage is { PixelWidth: > 0, PixelHeight: > 0 } &&
             f.Module.AccountQrAccessibleName == "酷狗音乐登录二维码" && f.Module.CanSaveAccountQr);
         await f.Module.CheckAccountQrAsync();
         Check(!f.Module.HasAccountQr && f.Module.SelectedAccount!.State == "verified" &&
@@ -88,23 +73,21 @@ public static class MusicKgAccountUiTests
     {
         string url = "https://h5.kugou.com/apps/loginQRCode/html/index.html?qrcode=SYNTHETIC_QR";
         var image = MusicAccountQrImage.Create(url);
-        Check(image.IsFrozen && image.PixelWidth is > 100 and < 1024);
-        byte[] pixels = new byte[image.PixelWidth * image.PixelHeight];
-        image.CopyPixels(pixels, image.PixelWidth, 0); Check(pixels.Contains((byte)0) && pixels.Contains((byte)255));
+        Check(image.PixelWidth is > 100 and < 1024);
+        byte[] pixels = MusicTestUi.Pixels(image); Check(pixels.Contains((byte)0) && pixels.Contains((byte)255));
         foreach (var address in new[] { url.Replace("h5.kugou.com", "attacker.invalid"), url + "&token=x", url + "#x",
             url.Replace("https:", "http:"), url.Replace(".com/", ".com:8443/"), url.Replace("qrcode=", "codekey="),
             url.Replace("h5.", "user@h5."), url + "%20", url + new string('a', 257), "file:///fixture", "relative-text" })
         {
             var encoded = MusicAccountQrImage.Create(address);
-            Check(encoded.IsFrozen && encoded.PixelWidth == encoded.PixelHeight && encoded.PixelWidth <= 1024);
+            Check(encoded.PixelWidth == encoded.PixelHeight && encoded.PixelWidth <= 1024);
         }
-        Check(MusicAccountQrImage.Create("https://music.163.com/login?codekey=synthetic").IsFrozen);
+        Check(MusicAccountQrImage.Create("https://music.163.com/login?codekey=synthetic").PixelWidth > 0);
         return Task.CompletedTask;
     }
-    private static Window Offscreen(object content) => new() { Content = content, Width = 500, Height = 700,
-        Left = -20000, Top = -20000, ShowInTaskbar = false, WindowStyle = WindowStyle.ToolWindow };
+    private static DesktopWindow Offscreen(UIElement content) => MusicTestUi.Window(content, 500, 700);
     private static void OpenLogin(MusicAccountsView view) =>
-        ((Popup)view.FindName("LoginPopup")).IsOpen = true;
+        MusicTestUi.OpenAccountLogin(view);
     private static async Task Visibility()
     {
         await using var f = await Fixture.Create(); f.Transport.Status = 1;
@@ -112,7 +95,7 @@ public static class MusicKgAccountUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             await Task.Delay(2200); Check(f.Transport.Calls == 0);
             OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
@@ -132,7 +115,7 @@ public static class MusicKgAccountUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             OpenLogin(view);
             var begin = f.Module.BeginAccountQrAsync(); await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(4));
             Check(f.Store.Writes == 0);
@@ -220,7 +203,7 @@ public static class MusicKgAccountUiTests
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenLogin(view);
+            window.Show(); await MusicTestUi.Drain(); OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
             view.DataContext = other.Module;
             await Until(() => !f.Module.HasAccountQr);
@@ -241,11 +224,11 @@ public static class MusicKgAccountUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded); OpenLogin(view);
+            window.Show(); await MusicTestUi.Drain(); OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
-            window.WindowState = WindowState.Minimized;
+            window.WindowState = DesktopWindowState.Minimized;
             await Until(() => !f.Module.HasAccountQr);
-            int calls = f.Transport.Calls; window.WindowState = WindowState.Normal; await Task.Delay(2200);
+            int calls = f.Transport.Calls; window.WindowState = DesktopWindowState.Normal; await Task.Delay(2200);
             Check(!f.Module.HasAccountQr && f.Transport.Calls == calls);
         }
         finally { window.Close(); }
@@ -257,16 +240,16 @@ public static class MusicKgAccountUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             OpenLogin(view);
             var save = (Button)view.FindName("SaveQrButton");
-            Check(save.IsEnabled); save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(save.IsEnabled); DesktopTestUi.Invoke(save);
             Check(File.Exists(f.Dialogs.Path) && f.Module.AccountStatus == "二维码已保存" &&
                 f.Dialogs.Confirmations == 1 && f.Dialogs.Selections == 1 && f.Transport.Calls == 1);
             using var stream = File.OpenRead(f.Dialogs.Path!);
-            var png = new PngBitmapDecoder(stream, BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+            var png = new System.Windows.Media.Imaging.PngBitmapDecoder(stream, System.Windows.Media.Imaging.BitmapCreateOptions.None, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
             Check(png.Frames.Count == 1 && png.Frames[0].PixelWidth == f.Module.AccountQrImage!.PixelWidth);
-            Check(png.Frames[0].Metadata is null || !((BitmapMetadata)png.Frames[0].Metadata).ContainsQuery("/tEXt"));
+            Check(png.Frames[0].Metadata is null || !((System.Windows.Media.Imaging.BitmapMetadata)png.Frames[0].Metadata).ContainsQuery("/tEXt"));
         }
         finally { window.Close(); }
     }

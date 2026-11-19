@@ -128,11 +128,7 @@ def archive_for(source):
                         opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxy))
                         request = urllib.request.Request(source['url'], headers={'User-Agent': 'Meowfilm-source-prepare'})
                         with opener.open(request, timeout=60) as response, partial.open('wb') as stream:
-                            count = 0
                             for block in iter(lambda: response.read(1024 * 1024), b''):
-                                count += len(block)
-                                if count > 64 * 1024 * 1024:
-                                    raise ValueError('source archive exceeds boundary')
                                 stream.write(block)
                         break
                     except OSError:

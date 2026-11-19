@@ -2,11 +2,16 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using FontWeights = Microsoft.UI.Text.FontWeights;
+using Color = Windows.UI.Color;
+using PixelFormats = System.Windows.Media.PixelFormats;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
@@ -107,15 +112,15 @@ public static class NovelSettingsPersistenceTests
             scene.Module.Notice.Split('\n').Length == 7 && scene.Runtime.Calls == 0,
             "Import lost valid rule data or accepted invalid field types, required fields, or timeouts.");
     }
-    private static void Click(DependencyObject root, string label) => NovelTests.Find<Button>(root)
-        .Single(button => Equals(button.Content, label)).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+    private static void Click(DependencyObject root, string label) => NovelTestUi.Invoke(NovelTests.Find<Button>(root)
+        .Single(button => Equals(button.Content, label)));
     private static async Task Until(Func<bool> condition)
     {
         var clock = Stopwatch.StartNew();
         while (!condition())
         {
             if (clock.Elapsed > TimeSpan.FromSeconds(5)) throw new TimeoutException("Rule persistence operation did not finish.");
-            await Task.Delay(10); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await Task.Delay(10); await DesktopTestUi.DrainAsync();
         }
     }
     private sealed class Scene : IAsyncDisposable
@@ -131,12 +136,12 @@ public static class NovelSettingsPersistenceTests
         {
             Module = new(new NovelSourceService(Runtime, sources), new NovelLibrary(Store), new NovelRuleProgram(Runtime));
             var root = new Grid(); root.Children.Add(Settings); root.Children.Add(Host);
-            window = GeneralAppearanceTests.Window(root); NovelUi.Theme(window); Host.Attach(window);
+            window = NovelTestUi.Window(root); NovelUi.Theme(DesktopTestUi.WindowRoot(window)); Host.Attach(window);
         }
         internal async Task Ready()
         {
             await Module.Library.InitializeAsync(); await Module.Sources.RefreshAsync();
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Render);
+            window.Activate(); await DesktopTestUi.DrainAsync();
         }
         internal TextBox Field(string key) => NovelTests.Find<TextBox>(Host).Single(input =>
             AutomationProperties.GetAutomationId(input) == "novel.rule.field." + key);

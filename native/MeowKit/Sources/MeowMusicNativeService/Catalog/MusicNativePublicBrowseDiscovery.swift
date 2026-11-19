@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Native consumers of fixed iWebPlus discovery-normalize.js, not a DSL interpreter.
+// Native consumers of the common runtime's canonical browse cards.
 import Foundation
 import MeowMusicFeature
 
@@ -18,8 +18,14 @@ struct MusicNativePublicBrowseItem: Sendable {
     var previewSongs: [MusicNativeTrackData] = []
     var recommendationReason = ""
     var coverLabel = ""
-    var previewSongIDs: [String] = []
+    var previewSongIDs: [String?] = []
     var requiresAccount = false
+    var kind: MusicPublicBrowseItem.Kind? = nil
+    var label = ""
+    var contextText = ""
+    var playCount: Int? = nil
+    var presentation = ""
+    var coverRef: MusicPublicBrowseItem.CoverReference? = nil
 }
 struct MusicNativePublicBrowseSectionTab: Sendable {
     let id: String

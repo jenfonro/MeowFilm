@@ -83,6 +83,62 @@ final class MeowfilmFilmSettingsHostTests: XCTestCase {
         add(attachment)
     }
 
+    func testRuleDialogDismissesBeforeRealNodePreviewAndPreservesNativeSavedRules() async throws {
+        let resources = try await hostResources(), client = try await resources.scriptSession.connection()
+        let app = try XCTUnwrap(UIApplication.shared.delegate as? MeowfilmAppDelegate)
+        let assembly = try XCTUnwrap(app.readyAssembly())
+        let service = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })
+        addTeardownBlock { await service.close() }
+        let owner = FilmRulesDraft(service: service)
+        try await owner.load()
+        let before = try await resources.filmSettings[.rules].read()
+        let runtimeBefore = try await client.call(module: .film, operation: "rules.get")
+        if owner.rules(.search).isEmpty { owner.add(.search) }
+        while owner.rules(.search).count > 1 { owner.delete(.search, index: owner.rules(.search).count - 1) }
+        owner.edit(.search, index: 0, rule: .init(pattern: "原文"))
+        await waitForFilmUI {
+            UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive }
+        }
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive })
+        let previousWindow = scene.windows.first { $0.isKeyWindow }
+        let page = FilmRulePageViewController(owner: owner, group: .search, themeProvider: assembly.appearance)
+        let window = UIWindow(windowScene: scene)
+        window.frame = scene.coordinateSpace.bounds; window.windowLevel = .normal + 1
+        window.rootViewController = page; window.makeKeyAndVisible()
+        defer {
+            PageViewController.invalidatePages(in: page)
+            window.isHidden = true; window.rootViewController = nil; previousWindow?.makeKey()
+        }
+        await waitForFilmUI { page.canPresentPageAlert && page.editors.count == 1 }
+        func descendants(_ view: UIView) -> [UIView] { [view] + view.subviews.flatMap(descendants) }
+        let test = try XCTUnwrap(descendants(page.view).first { $0.accessibilityIdentifier == "film.rules.test" } as? UIButton)
+        test.sendActions(for: .touchUpInside)
+        await waitForFilmUI { page.presentedViewController is ManagementDialog && page.presentedViewController?.isBeingPresented == false }
+        let dialog = try XCTUnwrap(page.presentedViewController as? ManagementDialog)
+        XCTAssertFalse(page.testing); XCTAssertNil(page.result)
+        XCTAssertTrue(page.testFields.input.window === window)
+        page.testFields.input.text = "原文标题原文"
+        page.testFields.input.delegate?.textViewDidChange?(page.testFields.input)
+        page.testFields.query.text = ""
+        page.testFields.query.sendActions(for: .editingChanged)
+        attachFilmWindow(window, "film-rule-real-node-test-input")
+        let confirm = try XCTUnwrap(descendants(dialog.view).first {
+            $0.accessibilityIdentifier == "management.dialog.confirm"
+        } as? UIButton)
+        confirm.sendActions(for: .touchUpInside)
+        await waitForFilmUI { page.result?.outputText.displayString == "标题" && !page.testing }
+        XCTAssertNil(page.presentedViewController); XCTAssertNil(dialog.view.window)
+        XCTAssertTrue(page.isPageActive && page.isPageVisible)
+        XCTAssertEqual(page.editors.first?.resultLabel.text, "测试结果：标题")
+        XCTAssertEqual(owner.rules(.search), [.init(pattern: "原文")])
+        let persisted = try await resources.filmSettings[.rules].read()
+        XCTAssertEqual(persisted, before)
+        let runtimeAfter = try await client.call(module: .film, operation: "rules.get")
+        XCTAssertEqual(runtimeAfter, runtimeBefore)
+        attachFilmWindow(window, "film-rule-real-node-inline-result")
+    }
+
     func testNodeMobileRulesUseSameSavedAndDraftEntryAndKeepIsolatedUTF16() async throws {
         let resources = try await hostResources(), client = try await resources.scriptSession.connection()
         let service = FilmRuleService(settingsDocument: resources.filmSettings[.rules], connection: { client })

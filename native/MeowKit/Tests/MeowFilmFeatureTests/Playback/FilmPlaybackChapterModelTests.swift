@@ -157,9 +157,7 @@ final class FilmPlaybackChapterModelTests: XCTestCase {
         XCTAssertNil(model.error)
         for input in [[PlaybackVideoChapter(title: "Opening", start: -.infinity, end: 10)],
                       [.init(title: "Opening", start: 0, end: .nan)],
-                      [.init(title: "Opening", start: 1, end: 1)],
-                      [.init(title: String(repeating: "😀", count: 129), start: 0, end: 10)],
-                      Array(repeating: chapters[0], count: 257)] {
+                      [.init(title: "Opening", start: 1, end: 1)]] {
             update(model, chapters: input)
             XCTAssertEqual(model.error?.code, "INVALID_REQUEST")
             XCTAssertNil(model.task)
@@ -167,6 +165,23 @@ final class FilmPlaybackChapterModelTests: XCTestCase {
         update(model, attempt: " ")
         XCTAssertEqual(model.error?.code, "INVALID_REQUEST")
         let calls = await rpc.log(); XCTAssertTrue(calls.isEmpty)
+        model.close()
+    }
+
+    func testLargeChapterSnapshotAndLongTitlesReachTheOwner() async throws {
+        let rpc = FilmChapterRequests(), model = FilmPlaybackChapterModel(transport: rpc.transport)
+        let title = String(repeating: "章", count: 300)
+        let chapters = (0..<300).map { PlaybackVideoChapter(title: title, start: Double($0), end: Double($0 + 1)) }
+        update(model, chapters: chapters)
+        let work = try XCTUnwrap(model.task)
+        await rpc.wait(for: 1)
+        let calls = await rpc.log()
+        guard case .object(let fields) = calls[0].1, case .array(let rows)? = fields["chapters"] else {
+            return XCTFail("Missing chapters")
+        }
+        XCTAssertEqual(rows.count, chapters.count)
+        await rpc.resolve(0, with: .object(["segments": .array([])])); await work.value
+        XCTAssertNil(model.error)
         model.close()
     }
 

@@ -1,52 +1,48 @@
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml.Media;
+using Windows.UI;
+using System.IO;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace MeowFilm.Capabilities;
 
-// Palette-style muted roles, evaluated only when an entry receives new artwork.
+// Shared entry roles, evaluated only when an entry receives new artwork.
 // Shared artwork/player palettes keep their original semantics.
 internal static class MusicEntryPalette
 {
-    internal static SolidColorBrush Sample(BitmapSource? source)
+    internal static SolidColorBrush Sample(BitmapSource? source, bool preview = false)
     {
-        if (source is null) return Brushes.Gray;
-        var small = new TransformedBitmap(source, new ScaleTransform(
-            Math.Min(32, source.PixelWidth) / (double)source.PixelWidth,
-            Math.Min(32, source.PixelHeight) / (double)source.PixelHeight));
-        var rgba = new FormatConvertedBitmap(small, PixelFormats.Bgra32, null, 0);
-        var bytes = new byte[rgba.PixelWidth * rgba.PixelHeight * 4];
-        rgba.CopyPixels(bytes, rgba.PixelWidth * 4, 0);
-        var bins = new Dictionary<int, Swatch>();
+        if (source is null) return MusicVisuals.Brush("#808080");
+        // ArtworkImage borrows the cache owner's shared WriteableBitmap. Read that buffer
+        // once per source change; never acquire/decode the artwork a second time.
+        if (source is not WriteableBitmap bitmap) throw new ArgumentException("Entry artwork must expose decoded pixels.", nameof(source));
+        var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
+        using (var input = bitmap.PixelBuffer.AsStream()) input.ReadExactly(pixels);
+        const int width = 48, height = 48;
+        var bytes = new byte[width * height * 4];
+        for (int y = 0; y < height; y++)
+        for (int x = 0; x < width; x++)
+        {
+            int from = ((y * bitmap.PixelHeight / height) * bitmap.PixelWidth + x * bitmap.PixelWidth / width) * 4;
+            int to = (y * width + x) * 4;
+            int alpha = pixels[from + 3]; bytes[to + 3] = (byte)alpha;
+            for (int channel = 0; channel < 3; channel++)
+                bytes[to + channel] = alpha == 0 ? (byte)0 : (byte)Math.Min(255, (pixels[from + channel] * 255 + alpha / 2) / alpha);
+        }
+        double red = 0, green = 0, blue = 0, weight = 0;
         for (int i = 0; i < bytes.Length; i += 4)
         {
-            int b = bytes[i], g = bytes[i + 1], r = bytes[i + 2], alpha = bytes[i + 3];
-            if (alpha == 0) continue;
-            int key = (r >> 3) << 10 | (g >> 3) << 5 | b >> 3;
-            var prior = bins.GetValueOrDefault(key);
-            bins[key] = new(prior.Red + r * alpha, prior.Green + g * alpha,
-                prior.Blue + b * alpha, prior.Weight + alpha);
+            double alpha = bytes[i + 3];
+            blue += bytes[i] * alpha; green += bytes[i + 1] * alpha; red += bytes[i + 2] * alpha;
+            weight += alpha;
         }
-        if (bins.Count == 0) return Brushes.Gray;
-        var swatches = bins.OrderBy(pair => pair.Key).Select(pair =>
-        {
-            var s = pair.Value;
-            return (Color: Lab.FromRgb(s.Red / (255d * s.Weight),
-                s.Green / (255d * s.Weight), s.Blue / (255d * s.Weight)), s.Weight);
-        }).ToArray();
-        double total = swatches.Sum(s => s.Weight);
-        double lightness = swatches.Sum(s => s.Color.L * s.Weight) / total;
-        // White/black padding and tiny accent flecks must not win over a real color region.
-        var candidates = swatches.Where(s => s.Weight >= total * .01 &&
-            s.Color.L is > .15 and < .96 && s.Color.Chroma >= .018).ToArray();
-        if (candidates.Length == 0) candidates = swatches;
-        double population = candidates.Max(s => s.Weight);
-        var selected = candidates.MaxBy(s => .6 * s.Weight / population +
-            .25 * (1 - Math.Min(1, Math.Abs(s.Color.Chroma - .06) / .2)) +
-            .15 * (1 - Math.Abs(s.Color.L - lightness))).Color;
-        double tone = Math.Clamp(selected.L * .75 + lightness * .25, .42, .76);
-        double chroma = Math.Min(selected.Chroma * .65, .07);
-        var color = selected.WithTone(tone, chroma);
-        var brush = new SolidColorBrush(color); brush.Freeze(); return brush;
+        if (weight == 0) return MusicVisuals.Brush("#808080");
+        red /= weight; green /= weight; blue /= weight;
+        if (!preview) { red = red * .35 + 75 * .65; green = green * .35 + 56 * .65; blue = blue * .35 + 50 * .65; }
+        double luminance = .2126 * red + .7152 * green + .0722 * blue;
+        double scale = Math.Min(1, (preview ? 170d : 96d) / luminance);
+        static byte Channel(double value) => (byte)Math.Clamp(Math.Round(value, MidpointRounding.AwayFromZero), 0, 255);
+        return new SolidColorBrush(Color.FromArgb(255, Channel(red * scale), Channel(green * scale), Channel(blue * scale)));
     }
 
     internal static Color TitleShade(Color source)
@@ -55,8 +51,6 @@ internal static class MusicEntryPalette
         // Protect the title using its own backdrop, without lifting dark artwork.
         return color.WithTone(Math.Min(color.L * .8, .44), .035);
     }
-
-    private readonly record struct Swatch(int Red, int Green, int Blue, int Weight);
 
     // Standard Oklab transforms: change lightness/chroma without rotating the source hue.
     private readonly record struct Lab(double L, double A, double B)
@@ -85,7 +79,7 @@ internal static class MusicEntryPalette
                 x = Math.Clamp(x, 0, 1);
                 return (byte)Math.Round(255 * (x <= .0031308 ? 12.92 * x : 1.055 * Math.Pow(x, 1 / 2.4) - .055));
             }
-            return Color.FromRgb(Encoded(4.0767416621 * l - 3.3077115913 * m + .2309699292 * s),
+            return Color.FromArgb(255, Encoded(4.0767416621 * l - 3.3077115913 * m + .2309699292 * s),
                 Encoded(-1.2684380046 * l + 2.6097574011 * m - .3413193965 * s),
                 Encoded(-.0041960863 * l - .7034186147 * m + 1.707614701 * s));
         }

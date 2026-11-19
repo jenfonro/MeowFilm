@@ -216,10 +216,9 @@ test('interpreted workspace files still reject unsupported negative rules', asyn
   await fails(f, 'UNSAFE_PATH');
 });
 
-test('common runtime packaging stages the nine-module App closure with exact hashes', async () => {
+test('common runtime packaging stages the App dependency closure with exact hashes', async () => {
   const f = fixture(), manifest = await f.pack();
   assert.equal(manifest.product, 'aggregate');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.equal(manifest.schemaVersion, 1);
   assert.equal(manifest.status, 'complete');
   assert.equal(manifest.assemblyProfile, 'common-native');
@@ -308,6 +307,23 @@ test('package LICENSE, NOTICE, nested license and source attribution survive wor
   assert.equal(existsSync(join(f.output(), 'node_modules/fixture-lib/data/table.json')), true);
 });
 
+test('the delivery inventory distinguishes documentation from executable and runtime data inputs', async () => {
+  const f = fixture();
+  for (const [file, content] of [
+    ['README.md', 'Package documentation.\n'], ['LICENSE.APACHE', 'License text.\n'],
+    ['LICENSE.js', sourceCode], ['data/text.txt', 'Consumed runtime text.\n'],
+  ]) f.file(`node_modules/shared/${file}`, content);
+  const manifest = await f.pack();
+  for (const file of ['LICENSE', 'LICENSE.APACHE', 'README.md']) {
+    const record = manifest.files.find(value => value.path === `node_modules/shared/${file}`);
+    assert.equal(record.role, 'documentation');
+    assert.equal(record.sha256, sha256(readFileSync(join(f.output(), record.path))));
+  }
+  for (const file of ['LICENSE.js', 'package.json', 'src/index.js', 'data/text.txt']) {
+    assert.equal(manifest.files.find(value => value.path === `node_modules/shared/${file}`).role, undefined);
+  }
+});
+
 test('extensionless Node main entries resolve locally without loading package code', async () => {
   const f = fixture();
   f.update('node_modules/shared', { main: './src/index' });
@@ -383,13 +399,21 @@ test('new shared helpers are automatically included in the runtime payload', asy
     file.path === 'app/modules/metadata/new-helper/unlisted-helper.mjs'));
 });
 
+test('unreferenced runtime documents are not build inputs or payload dependencies', async () => {
+  const f = fixture();
+  f.file('apps/runtime/fixture.json', '{"example":true}');
+  f.file('apps/runtime/README.md', 'Runtime notes.\n');
+  const manifest = await f.pack();
+  assert.equal(manifest.files.some(file => file.path === 'app/fixture.json' || file.path === 'app/README.md'), false);
+});
+
 test('shared runtime packaging accepts ordinary method names named import', async () => {
   const f = fixture();
   f.file('apps/runtime/modules/cat-script.mjs', `${sourceCode}\nconst methods = { 'import': () => null };\nmethods.import('installationId');\n`);
   assert.equal((await f.pack('aggregate')).status, 'complete');
 });
 
-for (const specifier of ['../../windows/runtime/bootstrap.mjs', 'node:net', '@meowfilm/script-host/src/host.js']) {
+for (const specifier of ['../../windows/runtime/bootstrap.mjs', '@meowfilm/script-host/src/host.js']) {
   test(`shared runtime packaging cannot bypass its platform/public closure: ${specifier}`, async () => {
     const f = fixture();
     f.file('apps/runtime/modules/music-script.mjs', `import '${specifier}';\n${sourceCode}`);
@@ -397,11 +421,11 @@ for (const specifier of ['../../windows/runtime/bootstrap.mjs', 'node:net', '@me
   });
 }
 
-for (const statement of ["import'node:net';", "import('node:net');", "require('node:net');"]) {
-  test(`shared runtime packaging rejects compact module syntax: ${statement}`, async () => {
+for (const statement of ["import'node:net';", "import('node:fs/promises');", "require('node:net');"]) {
+  test(`shared runtime packaging resolves Node builtins: ${statement}`, async () => {
     const f = fixture();
     f.file('apps/runtime/modules/music-script.mjs', `${statement}\n${sourceCode}`);
-    await fails(f, 'SHARED_IMPORT');
+    assert.equal((await f.pack()).status, 'complete');
   });
 }
 
@@ -676,29 +700,17 @@ test('the App cannot pull in an unselected workspace through dependency metadata
   await fails(f, 'PRODUCT_CLOSURE', 'aggregate');
 });
 
-test('jsdom cannot silently enter the App script payload', async () => {
-  const f = fixture();
-  f.add('node_modules/jsdom', 'jsdom', '26.1.0');
-  const dependencies = readJSON(join(f.root, 'packages/script-host/package.json')).dependencies;
-  f.update('packages/script-host', { dependencies: { ...dependencies, jsdom: '26.1.0' } });
-  await fails(f, 'PRODUCT_CLOSURE', 'aggregate');
-});
-
-test('only the token owner may package the exact Node 18 compatible jsdom', async () => {
-  const accepted = fixture();
-  accepted.add('node_modules/jsdom', 'jsdom', '24.1.3');
-  accepted.update('packages/netease-token', { dependencies: { jsdom: '24.1.3' } });
-  const manifest = await accepted.pack();
-  assert.ok(manifest.dependencies.some(value => value.name === 'jsdom' && value.version === '24.1.3'));
-  assert.ok(manifest.files.some(value => value.path === 'node_modules/jsdom/LICENSE'));
-  for (const [owner, version] of [['script-host', '24.1.3'], ['netease-token', '26.1.0']]) {
-    const denied = fixture();
-    denied.add('node_modules/jsdom', 'jsdom', version);
+test('jsdom follows the same declared dependency, version and license closure as other packages', async () => {
+  for (const [owner, version] of [['netease-token', '24.1.3'], ['script-host', '24.1.3'], ['netease-token', '26.1.0']]) {
+    const f = fixture();
+    f.add('node_modules/jsdom', 'jsdom', version);
     const dependencies = owner === 'script-host'
-      ? { ...readJSON(join(denied.root, 'packages/script-host/package.json')).dependencies, jsdom: version }
+      ? { ...readJSON(join(f.root, 'packages/script-host/package.json')).dependencies, jsdom: version }
       : { jsdom: version };
-    denied.update(`packages/${owner}`, { dependencies });
-    await fails(denied, 'PRODUCT_CLOSURE', 'aggregate');
+    f.update(`packages/${owner}`, { dependencies });
+    const manifest = await f.pack();
+    assert.ok(manifest.dependencies.some(value => value.name === 'jsdom' && value.version === version));
+    assert.ok(manifest.files.some(value => value.path === 'node_modules/jsdom/LICENSE'));
   }
 });
 

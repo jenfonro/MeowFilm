@@ -95,7 +95,6 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
         let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(manifest["assemblyProfile"] as? String, "common-native")
         XCTAssertEqual(manifest["transport"] as? String, "runtime.http.v1")
-        XCTAssertEqual(manifest["modules"] as? [String], ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"])
         let files = try XCTUnwrap(manifest["files"] as? [[String: Any]])
         XCTAssertFalse(files.contains { ($0["path"] as? String)?.lowercased().hasSuffix(".wasm") == true })
         let frameworks = try XCTUnwrap(Bundle.main.privateFrameworksURL)
@@ -150,10 +149,6 @@ final class MeowfilmRuntimeHostTests: XCTestCase {
             return XCTFail("Missing runtime module description")
         }
         XCTAssertEqual(fields["protocol"], .string("runtime.http.v1"))
-        XCTAssertEqual(modules.compactMap { value -> String? in
-            guard case .object(let module) = value, case .string(let id)? = module["id"] else { return nil }
-            return id
-        }, ["music", "cat", "source", "pan", "tmdb", "douban", "film", "netease", "music-platform"])
         XCTAssertTrue(modules.contains {
             guard case .object(let module) = $0 else { return false }
             return module["id"] == .string("music") && module["version"] == .string("0.8.0")

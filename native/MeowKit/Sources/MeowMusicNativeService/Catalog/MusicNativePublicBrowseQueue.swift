@@ -2,7 +2,7 @@ import Foundation
 import MeowMusicFeature
 
 /// Per-open-page snapshot buffer, not a service, account, document or queue owner.
-/// Native rows are bounded identically to MusicRemoteQueueSource and released on close.
+/// Native rows are released on close.
 actor MusicNativePublicBrowseQueueRead {
     private var load: (@Sendable (MusicQueueAuthorization) async throws -> [MusicQueueTrackReference])?
     private var loading: (id: UUID, task: Task<[MusicQueueTrackReference], Error>)?
@@ -29,7 +29,6 @@ actor MusicNativePublicBrowseQueueRead {
                     try Task.checkCancellation()
                     let value = try await load(intent)
                     try Task.checkCancellation()
-                    try musicRequire(value.reduce(0, { $0 + $1.byteCount }) <= MusicRemoteQueueSource.maximumBytes, .limit)
                     return value
                 })
                 loading = flight
@@ -79,10 +78,6 @@ extension NativeMusicService {
             publicQueueSources.removeValue(forKey: id); access.remove(id)
             retainSimilarDrain(Task { await entry.reader.close() })
         }
-        let bytes = snapshot.tracks.reduce(0) { $0 + $1.byteCount }
-        // Bound retained native snapshots across open sources, not merely each
-        // source. This is a byte budget, not an estimate of the App's RSS.
-        try musicRequire(publicQueueSources.values.reduce(bytes, { $0 + $1.bytes }) <= 12 * 1024 * 1024, .limit)
         let authorization = MusicQueueAuthorization(), fence = access
         let reader = MusicNativePublicBrowseQueueRead { [weak self] _ in
             guard let self else { throw MusicServiceError.closed }
@@ -93,7 +88,7 @@ extension NativeMusicService {
             authorization.revoke()
             Task { await reader.close() }
         }
-        publicQueueSources[id] = (request.collection.id, authorization, reader, bytes)
+        publicQueueSources[id] = (request.collection.id, authorization, reader)
         let source = MusicRemoteQueueSource(context: .init(kind: request.collection.kind == .album ? .album : .playlist,
             id: request.collection.id, title: snapshot.collection.title, platform: request.collection.platform.rawValue,
             unavailableCount: max(0, (snapshot.collection.count ?? snapshot.tracks.count) - snapshot.tracks.count),

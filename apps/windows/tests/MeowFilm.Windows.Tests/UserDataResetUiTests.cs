@@ -1,13 +1,18 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Key = System.Windows.Input.Key;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
+using KeyInterop = System.Windows.Input.KeyInterop;
+using Microsoft.UI.Xaml.Media;
+using Color = global::Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -17,7 +22,7 @@ public static class UserDataResetUiTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("entry is optional and follows cache contributions without a new tab", Entry);
-        yield return Case("confirmation defaults to cancel and supports Escape and keyboard cancellation", Confirmation);
+        yield return Case("confirmation defaults to cancel and preserves cancellation admission", Confirmation);
         yield return Case("confirmed work is single flight and fences late requests and navigation", SingleFlight);
         yield return Case("failure keeps the old shell locked and explicit retry closes without normal shutdown", Retry);
         yield return Case("failed exit stays locked and requires an explicit successful abort", Exit);
@@ -30,21 +35,21 @@ public static class UserDataResetUiTests
     }
 
     private static TestCase Case(string name, Func<Task> body) =>
-        new("user data reset UI: " + name, () => MusicQualityConsumerTests.Sta(body));
+        new("user data reset UI: " + name, () => TestUiHost.InvokeAsync(body));
 
     private static async Task Entry()
     {
         await using (var absent = await Fixture.Create(withReset: false))
         {
             await absent.OpenCache();
-            Check(!absent.Entry.IsVisible && !absent.SettingsElement<Border>("UserDataSection").IsVisible,
+            Check(!DesktopVisual.IsVisible(absent.Entry) && !DesktopVisual.IsVisible(absent.SettingsElement<Border>("UserDataSection")),
                 "without an App callback neither the section nor its action is shown");
             Click(absent.Entry);
             Check(!absent.Dialog.IsOpen && absent.ResetCalls == 0, "no callback means no reset admission");
         }
         await using var f = await Fixture.Create();
         await f.OpenCache();
-        Check(f.Entry.IsVisible && f.Entry.IsEnabled && Equals(f.Entry.Content, "清除全部数据"), "cache action");
+        Check(DesktopVisual.IsVisible(f.Entry) && f.Entry.IsEnabled && Equals(f.Entry.Content, "清除全部数据"), "cache action");
         var areas = f.SettingsElement<StackPanel>("Areas").Children.OfType<RadioButton>().ToArray();
         Check(areas.Select(item => item.Content).SequenceEqual(new[] { "外观", "首页数据源", "缓存控制", "窗口行为" }),
             "local data adds a section, not a settings category");
@@ -68,24 +73,22 @@ public static class UserDataResetUiTests
                      "无法撤销", "云端数据和 App 外的原始文件不受影响" })
             Check(text.Contains(required, StringComparison.Ordinal), "confirmation discloses " + required);
         Check(!text.Contains("重启", StringComparison.Ordinal), "Windows does not request a process restart");
-        Check(ReferenceEquals(FocusManager.GetFocusedElement(f.Shell), f.Cancel) ||
-            ReferenceEquals(Keyboard.FocusedElement, f.Cancel), "initial focus is Cancel");
-        Check(!f.Confirm.IsDefault && !f.Confirm.IsDefaulted && f.ResetCalls == 0 && f.ShutdownCalls == 0,
+        Check(ReferenceEquals(DesktopVisual.Focused(f.Dialog), f.Cancel), "initial focus is Cancel");
+        Check(!ReferenceEquals(DesktopVisual.Focused(f.Dialog), f.Confirm) && f.ResetCalls == 0 && f.ShutdownCalls == 0,
             "opening the dialog is not consent and Enter cannot default to deletion");
-        Check(KeyboardNavigation.GetTabNavigation(f.Dialog) == KeyboardNavigationMode.Cycle &&
-            KeyboardNavigation.GetControlTabNavigation(f.Dialog) == KeyboardNavigationMode.Cycle,
+        Check(f.Dialog.TabFocusNavigation == Microsoft.UI.Xaml.Input.KeyboardNavigationMode.Cycle,
             "keyboard navigation stays inside the modal surface");
         Click(f.Cancel);
         await Drain();
         Check(!f.Dialog.IsOpen && f.Root.IsEnabled && f.Entry.IsEnabled && f.ResetCalls == 0, "button cancellation");
         await f.OpenConfirmation();
-        Check(RaiseKey(f.Cancel, Key.Escape).Handled, "Escape is consumed by the confirmation");
+        RequestCancel(f.Dialog);
         await Drain();
-        Check(!f.Dialog.IsOpen && f.Root.IsEnabled && f.ResetCalls == 0, "Escape does not call the App");
+        Check(!f.Dialog.IsOpen && f.Root.IsEnabled && f.ResetCalls == 0, "cancellation does not call the App");
         await f.OpenConfirmation();
-        RaiseKey(f.Cancel, Key.Enter);
+        DesktopTestUi.Invoke(f.Cancel);
         await Drain();
-        Check(!f.Dialog.IsOpen && f.Root.IsEnabled && f.ResetCalls == 0, "Enter on the default focused Cancel cancels");
+        Check(!f.Dialog.IsOpen && f.Root.IsEnabled && f.ResetCalls == 0, "invoking the default focused Cancel cancels");
         await f.OpenConfirmation();
         Click(f.DialogElement<Button>("DismissButton"));
         Check(!f.Dialog.IsOpen && f.ResetCalls == 0 && f.ShutdownCalls == 0 && f.ForceCalls == 0,
@@ -107,7 +110,7 @@ public static class UserDataResetUiTests
         Click(f.Confirm);
         await Until(() => f.ResetCalls == 1, "confirmed reset");
         Check(f.Dialog.IsPending && !f.Root.IsEnabled && !f.Confirm.IsEnabled && !f.ExitButton.IsEnabled &&
-            !f.Cancel.IsVisible && !f.Closed, "busy state has no cancel, repeat or exit action");
+            !DesktopVisual.IsVisible(f.Cancel) && !f.Closed, "busy state has no cancel, repeat or exit action");
         await Until(() => f.Module.HeldToken.IsCancellationRequested, "old request retired");
         var navigations = f.Module.Navigations;
         f.Module.Request("late");
@@ -115,7 +118,7 @@ public static class UserDataResetUiTests
         Click(f.ShellElement<Button>("BackButton"));
         Click(f.ShellElement<Button>("SettingsButton"));
         f.Shell.Close();
-        RaiseKey(f.Dialog, Key.Escape);
+        RequestCancel(f.Dialog);
         Click(f.ExitButton);
         await Drain();
         Check(f.Module.Navigations == navigations && f.ResetCalls == 1 && f.ForceCalls == 0 &&
@@ -139,7 +142,7 @@ public static class UserDataResetUiTests
             !Descendants(f.Dialog).OfType<TextBlock>().Any(text => text.Text.Contains("secret", StringComparison.Ordinal)),
             "only fixed safe error text is displayed");
         var navigations = f.Module.Navigations;
-        RaiseKey(f.Dialog, Key.Escape);
+        RequestCancel(f.Dialog);
         Click(f.Cancel);
         f.Module.Request("late");
         f.Shell.Close();
@@ -174,7 +177,7 @@ public static class UserDataResetUiTests
         var release = Pending();
         f.Force = () => release.Task;
         Click(f.ExitButton); Click(f.ExitButton); Click(f.Confirm);
-        RaiseKey(f.Dialog, Key.Escape); f.Shell.Close(); f.Tray.ExitApplication();
+        RequestCancel(f.Dialog); f.Shell.Close(); f.Tray.ExitApplication();
         await Drain();
         Check(f.Dialog.IsPending && f.ForceCalls == 2 && f.ResetCalls == 1 && !f.Closed && f.ShutdownCalls == 0,
             "exit waits for actual abort and excludes every competing action");
@@ -198,10 +201,10 @@ public static class UserDataResetUiTests
         f.Reset = async () => { await release.Task; throw new InvalidOperationException(); };
         await f.OpenConfirmation();
         Click(f.Confirm);
-        f.Shell.WindowState = WindowState.Minimized;
+        f.Shell.WindowState = DesktopWindowState.Minimized;
         f.Tray.Restore(); f.Tray.ExitApplication(); f.Tray.Unavailable(); f.Shell.Close();
         await Drain();
-        Check(f.Shell.IsVisible && f.Shell.WindowState != WindowState.Minimized && f.Dialog.IsPending &&
+        Check(f.Shell.IsVisible && f.Shell.WindowState != DesktopWindowState.Minimized && f.Dialog.IsPending &&
             !f.Root.IsEnabled && !f.CloseDialog.IsOpen && f.ResetCalls == 1 && f.ShutdownCalls == 0,
             "tray restore may reveal the locked dialog but never reopens owners or normal shutdown");
         release.TrySetResult();
@@ -326,33 +329,35 @@ public static class UserDataResetUiTests
         await f.OpenConfirmation();
         foreach (var size in new[] { new Size(860, 600), new Size(1110, 869) })
         {
-            f.Shell.Width = size.Width; f.Shell.Height = size.Height;
+            f.Shell.Resize(size.Width, size.Height);
             await Drain();
             AssertLayout(f);
         }
         var surface = f.DialogElement<Border>("DialogSurface");
-        var theme = new SolidColorBrush(Color.FromRgb(220, 230, 240));
+        var theme = new SolidColorBrush(Color.FromArgb(255, 220, 230, 240));
         f.Shell.Resources["MeowFilm.Brush.FloatingSurface"] = theme;
         await Drain();
         Check(ReferenceEquals(surface.Background, theme), "the dialog uses the shell floating-surface theme token");
-        DesktopTheme.SetIsHighContrast(f.Shell, true);
-        await Drain();
-        Check(surface.Background == SystemColors.WindowBrush && surface.BorderBrush == SystemColors.WindowTextBrush &&
-            surface.Effect is null && f.Dialog.Foreground == SystemColors.WindowTextBrush,
-            "high contrast follows the existing dialog theme");
+        if (new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
+        {
+            var colors = new global::Windows.UI.ViewManagement.UISettings();
+            Check(surface.Background is SolidColorBrush fill && fill.Color == colors.GetColorValue(global::Windows.UI.ViewManagement.UIColorType.Background) &&
+                f.Dialog.Foreground is SolidColorBrush ink && ink.Color == colors.GetColorValue(global::Windows.UI.ViewManagement.UIColorType.Foreground),
+                "actual OS high contrast uses the system foreground and background");
+        }
         f.Reset = () => Task.FromException(new InvalidOperationException());
         Click(f.Confirm);
         await Until(() => !f.Dialog.IsPending, "failure layout");
-        f.Shell.Width = 860; f.Shell.Height = 600;
+        f.Shell.Resize(860, 600);
         await Drain();
         AssertLayout(f);
-        Check(f.Confirm.IsVisible && f.ExitButton.IsVisible && !f.Cancel.IsVisible, "only recovery actions remain");
+        Check(DesktopVisual.IsVisible(f.Confirm) && DesktopVisual.IsVisible(f.ExitButton) && !DesktopVisual.IsVisible(f.Cancel), "only recovery actions remain");
     }
 
     private static void AssertFailed(Fixture f)
     {
         Check(f.Dialog.IsOpen && !f.Dialog.IsPending && !f.Root.IsEnabled &&
-            !f.ShellElement<Grid>("ContentDeck").IsEnabled && !f.Cancel.IsVisible &&
+            !f.ShellElement<Button>("SettingsButton").IsEnabled && !DesktopVisual.IsVisible(f.Cancel) &&
             Equals(f.Confirm.Content, "重试清除") && f.Confirm.IsEnabled && f.ExitButton.IsEnabled &&
             f.DialogElement<TextBlock>("DialogTitle").Text == "清除未完成" && !f.Closed,
             "failure must retain the business fence and explicit retry/exit actions");
@@ -364,12 +369,12 @@ public static class UserDataResetUiTests
         var surface = f.DialogElement<Border>("DialogSurface");
         Check(Math.Abs(root.ActualWidth - f.Dialog.ActualWidth) < 2 &&
             Math.Abs(root.ActualHeight - f.Dialog.ActualHeight) < 2, "the modal covers the whole shell");
-        var position = surface.TranslatePoint(new Point(), f.Dialog);
+        var position = surface.TransformToVisual(f.Dialog).TransformPoint(new Point());
         Check(Math.Abs(position.X * 2 + surface.ActualWidth - f.Dialog.ActualWidth) < 2 &&
             Math.Abs(position.Y * 2 + surface.ActualHeight - f.Dialog.ActualHeight) < 2, "centered dialog");
-        foreach (var button in Descendants(surface).OfType<Button>().Where(button => button.IsVisible))
+        foreach (var button in Descendants(surface).OfType<Button>().Where(button => DesktopVisual.IsVisible(button)))
         {
-            var point = button.TranslatePoint(new Point(), surface);
+            var point = button.TransformToVisual(surface).TransformPoint(new Point());
             Check(AutomationProperties.GetName(button).Length > 0 && button.ActualWidth > 20 &&
                 button.ActualHeight >= 30 && point.X >= 0 && point.Y >= 0 &&
                 point.X + button.ActualWidth <= surface.ActualWidth + 1 &&
@@ -377,15 +382,9 @@ public static class UserDataResetUiTests
         }
     }
 
-    private static void Click(Button button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-    private static KeyEventArgs RaiseKey(UIElement target, Key key)
-    {
-        var args = new KeyEventArgs(new TestKeyboard(), PresentationSource.FromVisual(target)!, 0, key)
-        { RoutedEvent = Keyboard.PreviewKeyDownEvent };
-        target.RaiseEvent(args);
-        if (!args.Handled) { args.RoutedEvent = Keyboard.KeyDownEvent; target.RaiseEvent(args); }
-        return args;
-    }
+    private static void Click(Button button) => DesktopTestUi.Invoke(button);
+    private static void RequestCancel(UserDataResetDialog dialog) =>
+        FilmUiTest.Call(dialog, "OnCancelClick", dialog, new RoutedEventArgs());
     private static IEnumerable<DependencyObject> Descendants(DependencyObject root)
     {
         yield return root;
@@ -394,14 +393,14 @@ public static class UserDataResetUiTests
     }
     private static TaskCompletionSource Pending() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Drain()
-    { for (int i = 0; i < 4; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
+    { for (int i = 0; i < 4; i++) await DesktopTestUi.DrainAsync(); }
     private static async Task Until(Func<bool> condition, string label)
     {
         var watch = Stopwatch.StartNew();
         while (!condition())
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(3)) throw new InvalidOperationException("Timed out: " + label);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             if (!condition()) await Task.Delay(1);
         }
         await Drain();
@@ -410,11 +409,6 @@ public static class UserDataResetUiTests
     {
         if (!condition) throw new InvalidOperationException(message);
     }
-    private sealed class TestKeyboard() : KeyboardDevice(InputManager.Current)
-    {
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
-    }
-
     private sealed class Fixture : IAsyncDisposable
     {
         internal ProbeModule Module { get; } = new();
@@ -429,7 +423,7 @@ public static class UserDataResetUiTests
         internal GeneralSettingsView Settings => Descendants(ShellElement<Grid>("ContentDeck")).OfType<GeneralSettingsView>().Single();
         internal UserDataResetDialog Dialog => ShellElement<UserDataResetDialog>("ResetDialog");
         internal CloseWindowDialog CloseDialog => ShellElement<CloseWindowDialog>("CloseDialog");
-        internal Grid Root => ShellElement<Grid>("RootLayout");
+        internal ContentControl Root => ShellElement<ContentControl>("RootInteractionGate");
         internal Button Entry => SettingsElement<Button>("ClearUserDataButton");
         internal Button Confirm => DialogElement<Button>("ConfirmChoice");
         internal Button Cancel => DialogElement<Button>("CancelChoice");
@@ -446,8 +440,6 @@ public static class UserDataResetUiTests
                     return Tray;
                 }, resetUserData: withReset ? () => { ResetCalls++; return Reset(); } : null)
             {
-                WindowStartupLocation = WindowStartupLocation.Manual, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false
             };
             Shell.Closed += (_, _) => Closed = true;
         }
@@ -460,7 +452,7 @@ public static class UserDataResetUiTests
             return result;
         }
         internal T ShellElement<T>(string name) where T : FrameworkElement =>
-            Shell.FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
+            DesktopTestUi.WindowRoot(Shell).FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
         internal T SettingsElement<T>(string name) where T : FrameworkElement =>
             Settings.FindName(name) as T ?? throw new InvalidOperationException("Missing settings element: " + name);
         internal T DialogElement<T>(string name) where T : FrameworkElement =>
@@ -478,7 +470,7 @@ public static class UserDataResetUiTests
         internal async Task OpenConfirmation()
         {
             await OpenCache();
-            Entry.Focus();
+            Entry.Focus(FocusState.Programmatic);
             Click(Entry);
             await Until(() => Dialog.IsOpen, "reset confirmation");
         }

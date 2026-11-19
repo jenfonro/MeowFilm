@@ -1,6 +1,8 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,7 +15,7 @@ public sealed class AccountLoginSurface : ContentControl
     public event RoutedEventHandler? CloseRequested;
     private Button? close;
 
-    public override void OnApplyTemplate()
+    protected override void OnApplyTemplate()
     {
         if (close is not null) close.Click -= Close;
         base.OnApplyTemplate();
@@ -21,10 +23,10 @@ public sealed class AccountLoginSurface : ContentControl
         if (close is not null) close.Click += Close;
     }
     private void Close(object sender, RoutedEventArgs e) => CloseRequested?.Invoke(this, e);
-    protected override void OnKeyDown(KeyEventArgs e)
+    protected override void OnKeyDown(KeyRoutedEventArgs e)
     {
         base.OnKeyDown(e);
-        if (e.Handled || e.Key != Key.Escape) return;
+        if (e.Handled || e.Key != VirtualKey.Escape) return;
         e.Handled = true;
         CloseRequested?.Invoke(this, new());
     }

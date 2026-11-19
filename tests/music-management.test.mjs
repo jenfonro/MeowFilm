@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createScriptHost, ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
+import { createScriptHost, ScriptHostError } from '@meowfilm/script-host';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { until } from '../packages/runtime-bridge/test/http-fixture.js';
 import { createMusicScriptModule, musicScriptContract, musicPlatforms } from '../apps/runtime/modules/music-script.mjs';
@@ -225,6 +225,8 @@ test('musicUrl results are checked once for playback: empty, malformed, restrict
     space: 'https://media.invalid/a b', trial: { url: 'https://media.invalid/a', freeTrialInfo: { start: 0 } },
     drm: { url: 'https://media.invalid/a', drm: true }, expired: { url: 'https://media.invalid/a', expiresAt: 1000 },
     future: { url: 'https://media.invalid/a', expiresAt: 4102444800000, headers: { Referer: 'https://ref.invalid' } },
+    large: { url: 'https://media.invalid/' + 'u'.repeat(8193),
+      headers: Object.fromEntries(Array.from({length:33},(_,index)=>['x-'+index+'n'.repeat(129),'v'.repeat(8193)])) },
     range: { url: 'https://media.invalid/a', headers: { Range: 'bytes=0-' } },
     proxy: { url: 'https://media.invalid/a', headers: { 'Proxy-Authorization': 'x' } },
     changed: { url: 'https://media.invalid/a', siteKey: 'tx' },
@@ -246,6 +248,10 @@ test('musicUrl results are checked once for playback: empty, malformed, restrict
   const future = okay(await media({ case: 'future' }));
   assert.equal(future.expiresAt, 4102444800000);
   assert.deepEqual(future.headers, { Referer: 'https://ref.invalid' });
+  const large = okay(await media({ case: 'large' }));
+  assert.equal(large.url, 'https://media.invalid/' + 'u'.repeat(8193));
+  assert.deepEqual(large.headers, Object.fromEntries(Array.from({ length: 33 }, (_, index) =>
+    ['x-' + index + 'n'.repeat(129), 'v'.repeat(8193)])));
   assert.equal(okay(await media({ case: 'interval', duration: 245.9 })).url, 'https://media.invalid/04:05');
 });
 
@@ -372,8 +378,10 @@ test('network sources download over HTTPS without redirects; update re-downloads
   const file = await imported(rpc);
   denied(await rpc('sources.edit', { installationId: file.installationId, url: 'https://other.invalid/x.js' }),
     'INVALID_REQUEST');
-  for (const name of ['', '   ', 'a\u0000b', 'x'.repeat(256)])
+  for (const name of ['', '   ', 'a\u0000b'])
     denied(await rpc('sources.edit', { installationId: file.installationId, name }), 'INVALID_REQUEST');
+  assert.equal(okay(await rpc('sources.edit', { installationId: file.installationId, name: 'x'.repeat(256) })).item.name,
+    'x'.repeat(256));
   denied(await rpc('sources.edit', { installationId: file.installationId }), 'INVALID_REQUEST');
 });
 
@@ -441,8 +449,9 @@ test('guest storage is request bound, isolated by installation and site, and rem
   assert.deepEqual(await value(rpc, a, 'kw', { op: 'get' }), { nested: ['猫'] });
   assert.equal(await value(rpc, a, 'tx', { op: 'get' }), null);
   assert.equal(await value(rpc, b, 'kw', { op: 'get' }), null);
-  denied(await rpc('invoke', { installationId: a.installationId, siteId: 'kw', operation: 'musicUrl',
-    payload: { type: '320k', musicInfo: { op: 'set', key: 'big', value: 'x'.repeat(16385) } } }), 'LIMIT');
+  assert.equal(await value(rpc, a, 'kw', { op: 'set', key: 'big', value: 'x'.repeat(16385) }), null);
+  assert.equal(await value(rpc, a, 'kw', { op: 'get', key: 'big' }), 'x'.repeat(16385));
+  assert.equal(await value(rpc, a, 'kw', { op: 'delete', key: 'big' }), null);
   assert.equal(await value(rpc, a, 'kw', { op: 'delete' }), null);
   assert.equal(await value(rpc, a, 'kw', { op: 'get' }), null);
   assert.equal(await value(rpc, a, 'kw', { op: 'set', value: 1 }), null);
@@ -459,7 +468,7 @@ test('guest storage is request bound, isolated by installation and site, and rem
   denied(await rpc('sources.detail', { installationId: a.installationId }), 'SOURCE_NOT_FOUND');
 });
 
-test('complete uploads retain independent candidates and enforce the source data bound', async t => {
+test('complete uploads retain independent candidates above the former source data bound', async t => {
   const { rpc } = setup(t);
   const candidates = [];
   for (let index = 0; index < 12; index++) {
@@ -474,11 +483,9 @@ test('complete uploads retain independent candidates and enforce the source data
     assert.equal(item.contentHash, hash(source));
   }
   const installationId = randomUUID();
-  const source = Buffer.alloc(SCRIPT_LIMITS.maxSourceBytes, 0x20);
+  const source = Buffer.alloc(16 * 1024 * 1024 + 1, 0x20);
   source.write('// complete source');
   const sourceRevision = await upload(rpc, installationId, source);
-  denied(await rpc.upload(installationId, sourceRevision + 1, Buffer.alloc(SCRIPT_LIMITS.maxSourceBytes + 1, 0x20),
-    { basename: 'oversize.js' }), 'LIMIT');
   const item = okay(await rpc('sources.add', { installationId, sourceRevision })).item;
   assert.equal(item.contentHash, hash(source));
 });

@@ -1,35 +1,12 @@
 using System.Buffers.Binary;
-using System.IO;
-using System.Windows.Media.Imaging;
+using System.Runtime.InteropServices;
+using SkiaSharp;
 
 namespace MeowFilm.Desktop.Artwork;
 
 internal static class ArtworkRaster
 {
-    // BitmapImage retains StreamSource even with OnLoad. Drop the inner stream
-    // after decoding so the frozen image cannot retain the encoded byte array.
-    private sealed class DecodeStream(byte[] bytes) : Stream
-    {
-        private MemoryStream? input = new(bytes, writable: false);
-        private MemoryStream Input => input ?? throw new ObjectDisposedException(nameof(DecodeStream));
-        public override bool CanRead => input?.CanRead ?? false;
-        public override bool CanSeek => input?.CanSeek ?? false;
-        public override bool CanWrite => false;
-        public override long Length => Input.Length;
-        public override long Position { get => Input.Position; set => Input.Position = value; }
-        public override void Flush() => Input.Flush();
-        public override int Read(byte[] buffer, int offset, int count) => Input.Read(buffer, offset, count);
-        public override long Seek(long offset, SeekOrigin origin) => Input.Seek(offset, origin);
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing) { input?.Dispose(); input = null; }
-            base.Dispose(disposing);
-        }
-    }
-
-    internal static BitmapSource Decode(byte[] bytes)
+    internal static ArtworkPixels Decode(byte[] bytes)
     {
         try
         {
@@ -38,22 +15,41 @@ internal static class ArtworkRaster
                 return ArtworkWebP.Decode(bytes);
             var (width, height) = Dimensions(bytes);
             CheckDimensions(width, height);
-            using var input = new DecodeStream(bytes);
-            var image = new BitmapImage();
-            image.BeginInit();
-            image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-            image.CacheOption = BitmapCacheOption.OnLoad;
-            image.StreamSource = input;
-            if (width >= height) image.DecodePixelWidth = Math.Min(512, width);
-            else image.DecodePixelHeight = Math.Min(512, height);
-            image.EndInit();
-            if (image.PixelWidth is <= 0 or > 512 || image.PixelHeight is <= 0 or > 512)
-                throw new ArtworkException("ARTWORK_LIMIT");
-            image.Freeze();
-            return image;
+            using var data = SKData.CreateCopy(bytes);
+            using var codec = SKCodec.Create(data);
+            if (codec is null || codec.EncodedFormat is not (SKEncodedImageFormat.Png or SKEncodedImageFormat.Jpeg or SKEncodedImageFormat.Gif) ||
+                codec.Info.Width != width || codec.Info.Height != height)
+                throw new ArtworkException("ARTWORK_FORMAT");
+            return Decode(codec);
         }
         catch (ArtworkException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FORMAT"); }
+    }
+
+    internal static ArtworkPixels Decode(SKCodec codec)
+    {
+        var original = codec.Info;
+        CheckDimensions(original.Width, original.Height);
+        double scale = Math.Min(1d, 512d / Math.Max(original.Width, original.Height));
+        int width = Math.Max(1, (int)Math.Round(original.Width * scale));
+        int height = Math.Max(1, (int)Math.Round(original.Height * scale));
+        // JPEG chooses a supported decode scale; PNG/GIF decode within the checked
+        // source-pixel budget. WebP can decode directly at the requested size.
+        var size = codec.EncodedFormat == SKEncodedImageFormat.Webp
+            ? new SKSizeI(width, height) : codec.GetScaledDimensions((float)scale);
+        CheckDimensions(size.Width, size.Height);
+        using var decoded = new SKBitmap(new SKImageInfo(size.Width, size.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
+        if (codec.GetPixels(decoded.Info, decoded.GetPixels()) != SKCodecResult.Success)
+            throw new ArtworkException("ARTWORK_FORMAT");
+        using var resized = size.Width == width && size.Height == height ? null :
+            decoded.Resize(new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul),
+                new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None));
+        var raster = size.Width == width && size.Height == height ? decoded :
+            resized ?? throw new ArtworkException("ARTWORK_FORMAT");
+        byte[] pixels = new byte[checked(width * height * 4)];
+        for (int row = 0; row < height; row++)
+            Marshal.Copy(IntPtr.Add(raster.GetPixels(), row * raster.RowBytes), pixels, row * width * 4, width * 4);
+        return ArtworkPixels.TakeOwnership(width, height, pixels);
     }
 
     internal static void CheckDimensions(int width, int height)
@@ -105,7 +101,7 @@ internal static class ArtworkRaster
 
     private static void RequireCompletePng(ReadOnlySpan<byte> bytes)
     {
-        // WIC may return usable pixels after IDAT even when the PNG tail is missing.
+        // A decoder may return usable pixels after IDAT even when the PNG tail is missing.
         // Walk declared chunks, not a byte-pattern search that could match compressed data.
         int position = 8;
         bool imageData = false;

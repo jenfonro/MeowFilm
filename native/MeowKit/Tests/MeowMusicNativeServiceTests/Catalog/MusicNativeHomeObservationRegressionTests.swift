@@ -103,8 +103,8 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
             if let gate = homeGate { homeGate = nil; await gate.wait() }
             try checkNativeHomeBinding(binding)
             if let failure { throw failure }
-            let section = MJ.obj([("id", .string("songs")), ("type", .string("songs")),
-                ("items", .array([MusicNativePublicBrowseFixture.song("41")]))])
+            let section = MJ.obj([("id", .string("songs")), ("layout", .string("song-columns")),
+                ("items", .array([try MJ.parse(RuntimeJSON.encode(NativeDiscoveryFixture.song("41")))]))])
             return MJ.obj([("sections", .array([section]))]).bytes
         case .artistActivity: return Data(#"{"sections":[]}"#.utf8)
         case .songMetadata(let ids):
@@ -125,8 +125,8 @@ private actor HomeObservationAccount: MusicNativeAccountProviding, MusicNativeHo
             installationID: UUID(), siteKey: "wy"), accountID: UUID())
         let accounts = AccountSessionCoordinator(store: GuestHomeCredentialStore())
         let peer = NativeMusicResultFixture([.object(["sections": .array([.object([
-            "id": .string("songs"), "type": .string("songs"),
-            "items": .array([try MusicPlatformFixture.song(MusicNativePublicBrowseFixture.track("41"))])
+            "id": .string("songs"), "layout": .string("song-columns"),
+            "items": .array([try NativeDiscoveryFixture.song("41")])
         ])])])])
         let client = try peer.makeClient()
         let owner = NativeMusicAccountService(accounts: accounts, scopes: [.netease: identity],

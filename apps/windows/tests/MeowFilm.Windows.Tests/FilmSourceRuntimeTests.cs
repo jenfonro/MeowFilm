@@ -929,7 +929,7 @@ public static class FilmSourceRuntimeTests
         string bundles = Environment.GetEnvironmentVariable("MEOWFILM_TEST_RUNTIME_ROOT")
             ?? throw new InvalidOperationException("Run scripts/windows/test.ps1; prepare-test-bundles aggregate inputs are required.");
         RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
-        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate", modules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), "aggregate");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         await using var store = new NativeDatabase(Path.Combine(root, "documents"));
         IStorageDatabase documents = decorateStore?.Invoke(store) ?? store;

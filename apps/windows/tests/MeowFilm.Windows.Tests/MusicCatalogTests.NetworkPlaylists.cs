@@ -1,9 +1,13 @@
+using MeowFilm.Desktop;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Interop;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
@@ -77,32 +81,30 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
             var page = (MusicView)f.Module.View;
-            using var source = new HwndSource(new HwndSourceParameters("network-detail-button-fixture")
-                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                    Width = 900, Height = 700, PositionX = -32000, PositionY = -32000 });
-            source.RootVisual = page;
+            using var source = new DesktopTestUi.Host(new Grid(), 900, 700);
+            source.Mount(page);
             page.Measure(new(900, 700)); page.Arrange(new Rect(0, 0, 900, 700)); page.UpdateLayout(); await Drain();
             var button = (Button)page.FindName("NetworkPlaylistButton");
-            True(button.IsVisible && button.IsEnabled, "network detail favorite button is mounted");
+            True(DesktopVisual.IsVisible(button) && button.IsEnabled, "network detail favorite button is mounted");
             Equal("收藏", button.Content); Equal("收藏", AutomationProperties.GetName(button));
             int reads = f.Client.Count("music.catalog.playlist");
-            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            DesktopTestUi.Invoke(button);
             await Until(() => f.Module.NetworkPlaylistSaved && !f.Module.Busy && button.Content as string == "取消收藏");
             Equal(reads, f.Client.Count("music.catalog.playlist"));
             Equal(0, f.Client.Count("music.catalog.playlist.prepare"));
-            var menu = new ContextMenu();
+            var menu = new MenuFlyout();
             f.Module.PopulateSongMenu(menu, f.Module.Songs[0], null, () => true);
-            True(menu.Items.OfType<MenuItem>().Select(item => item.Header).SequenceEqual(
+            True(menu.Items.Select(MenuLabel).SequenceEqual(
                 new object[] { "播放", "下一首播放", "收藏", "添加到歌单" }), "no member delete, rename or order action");
-            var add = menu.Items.OfType<MenuItem>().Single(item => item.Header as string == "添加到歌单");
-            True(add.Items.OfType<MenuItem>().Select(item => item.Header).SequenceEqual(f.Module.Playlists.Select(item => (object)item.Name)),
+            var add = menu.Items.OfType<MenuFlyoutSubItem>().Single(item => item.Text == "添加到歌单");
+            True(add.Items.OfType<MenuFlyoutItem>().Select(item => item.Text).SequenceEqual(f.Module.Playlists.Select(item => item.Name)),
                 "single songs can still be added to managed collections only");
-            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            DesktopTestUi.Invoke(button);
             await Until(() => !f.Module.NetworkPlaylistSaved && !f.Module.Busy && button.Content as string == "收藏");
             Equal(1, f.Client.Count("music.library.network.remove"));
             Equal(0, f.Client.Count("music.library.remove"));
             Equal(0, f.Playback.Opens.Count);
-            source.RootVisual = null;
+            source.Window.Content = null;
         });
         foreach (bool keepOpen in new[] { true, false })
         {
@@ -116,19 +118,16 @@ public static partial class MusicCatalogTests
                 await f.Module.FavoriteCatalogCardAsync(card);
                 var captured = f.Module.NetworkPlaylists.Single();
                 var view = new MusicCatalogView { DataContext = f.Module };
-                var host = (Button)((DataTemplate)view.FindResource(keepOpen ? "Catalog.PlaylistCard" : "Catalog.PlaylistRow")).LoadContent();
+                var host = new MusicCatalogCardView { Presentation = keepOpen ? MusicCatalogCardLayout.Playlist : MusicCatalogCardLayout.Row };
                 view.Content = host; host.DataContext = card;
-                using var source = new HwndSource(new HwndSourceParameters("network-menu-cancel-fixture")
-                    { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                        Width = 700, Height = 400, PositionX = -32000, PositionY = -32000 });
-                source.RootVisual = view;
+                using var source = new DesktopTestUi.Host(new Grid(), 700, 400);
+                source.Mount(view);
                 view.Measure(new(700, 400)); view.Arrange(new Rect(0, 0, 700, 400)); view.UpdateLayout(); await Drain();
-                OpenContentMenu(host);
-                var menu = host.ContextMenu;
-                var stale = menu.Items.OfType<MenuItem>().Single(item => item.Header as string == "取消收藏");
+                var menu = OpenContentMenu(host);
+                var stale = menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "取消收藏");
                 True(stale.IsEnabled, "the captured cancel is initially applicable");
-                menu.IsOpen = true; await Until(() => menu.IsOpen);
-                if (!keepOpen) { menu.IsOpen = false; await Drain(); }
+                await Until(() => menu.IsOpen);
+                if (!keepOpen) { menu.Hide(); await Drain(); }
                 try
                 {
                     await f.Rpc("music.library.network.remove", new { id = captured.Id, ifRevision = captured.Revision });
@@ -140,7 +139,7 @@ public static partial class MusicCatalogTests
                         "same-page sync leaves the captured card and its native menu target current");
                     Equal(keepOpen, menu.IsOpen);
                     int calls = f.Client.Log.Count;
-                    stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+                    MusicTestUi.Invoke(stale); await Drain();
                     Equal(calls, f.Client.Log.Count);
                     Equal(0, f.Module.NetworkPlaylists.Count);
 
@@ -149,23 +148,23 @@ public static partial class MusicCatalogTests
                     Equal(captured.Id, replacement.Id);
                     True(replacement.Revision > captured.Revision, "same identity has a new incarnation revision");
                     Equal(keepOpen, menu.IsOpen);
-                    Equal("取消收藏", stale.Header);
-                    True(stale.IsEnabled && host.IsLoaded && host.IsVisible && f.Module.CanCatalogBrowse && f.Module.CanEdit,
+                    Equal("取消收藏", stale.Text);
+                    True(stale.IsEnabled && host.IsLoaded && DesktopVisual.IsVisible(host) && f.Module.CanCatalogBrowse && f.Module.CanEdit,
                         "the old native action remains callable on the unchanged idle page");
                     calls = f.Client.Log.Count;
-                    stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+                    MusicTestUi.Invoke(stale); await Drain();
                     Equal(calls, f.Client.Log.Count);
                     Equal(replacement, f.Module.NetworkPlaylists.Single());
                     var persisted = await f.Rpc("music.library.network.get", new { platform = card.Platform, id = card.ActionId });
                     True(persisted.GetProperty("present").GetBoolean(), "old cancel cannot delete the replacement reference");
                     Equal(replacement.Revision, persisted.GetProperty("collection").GetProperty("revision").GetInt64());
 
-                    menu.IsOpen = false; await Drain(); OpenContentMenu(host);
-                    var current = menu.Items.OfType<MenuItem>().Single(item => item.Header as string == "取消收藏");
+                    menu.Hide(); await Drain(); menu = OpenContentMenu(host);
+                    var current = menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "取消收藏");
                     True(current.IsEnabled, "a newly opened menu can cancel the replacement");
-                    menu.IsOpen = true; await Until(() => menu.IsOpen);
+                    await Until(() => menu.IsOpen);
                     int removes = f.Client.Count("music.library.network.remove");
-                    current.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    MusicTestUi.Invoke(current);
                     await Until(() => !f.Module.Busy && f.Module.NetworkPlaylists.Count == 0);
                     Equal(removes + 1, f.Client.Count("music.library.network.remove"));
                     Equal(replacement.Id, f.Client.Last("music.library.network.remove").GetProperty("id").GetString());
@@ -174,7 +173,7 @@ public static partial class MusicCatalogTests
                     Equal(0, f.Client.Count("music.catalog.playlist.prepare"));
                     Equal(0, f.Playback.Opens.Count);
                 }
-                finally { menu.IsOpen = false; source.RootVisual = null; }
+                finally { menu.Hide(); source.Window.Content = null; }
             });
             yield return Case("network native playlist menu never turns old favorite into cancel: " +
                 (keepOpen ? "open" : "retained item"), async () =>
@@ -184,19 +183,16 @@ public static partial class MusicCatalogTests
                 await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
                 var card = f.Module.CatalogSections.SelectMany(section => section.Items).First(item => item.CanSavePlaylist);
                 var view = new MusicCatalogView { DataContext = f.Module };
-                var host = (Button)((DataTemplate)view.FindResource(keepOpen ? "Catalog.PlaylistCard" : "Catalog.PlaylistRow")).LoadContent();
+                var host = new MusicCatalogCardView { Presentation = keepOpen ? MusicCatalogCardLayout.Playlist : MusicCatalogCardLayout.Row };
                 view.Content = host; host.DataContext = card;
-                using var source = new HwndSource(new HwndSourceParameters("network-menu-favorite-fixture")
-                    { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                        Width = 700, Height = 400, PositionX = -32000, PositionY = -32000 });
-                source.RootVisual = view;
+                using var source = new DesktopTestUi.Host(new Grid(), 700, 400);
+                source.Mount(view);
                 view.Measure(new(700, 400)); view.Arrange(new Rect(0, 0, 700, 400)); view.UpdateLayout(); await Drain();
-                OpenContentMenu(host);
-                var menu = host.ContextMenu;
-                var stale = menu.Items.OfType<MenuItem>().Single(item => item.Header as string == "收藏");
+                var menu = OpenContentMenu(host);
+                var stale = menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "收藏");
                 True(stale.IsEnabled, "the captured favorite is initially applicable");
-                menu.IsOpen = true; await Until(() => menu.IsOpen);
-                if (!keepOpen) { menu.IsOpen = false; await Drain(); }
+                await Until(() => menu.IsOpen);
+                if (!keepOpen) { menu.Hide(); await Drain(); }
                 try
                 {
                     await f.Module.FavoriteCatalogCardAsync(card); await Drain();
@@ -206,31 +202,31 @@ public static partial class MusicCatalogTests
                         f.Module.CatalogSections.SelectMany(section => section.Items).Any(item => ReferenceEquals(item, card)),
                         "the unrelated favorite leaves the original page and card current");
                     Equal(keepOpen, menu.IsOpen);
-                    Equal("收藏", stale.Header);
-                    True(stale.IsEnabled && host.IsLoaded && host.IsVisible, "the old favorite remains callable");
+                    Equal("收藏", stale.Text);
+                    True(stale.IsEnabled && host.IsLoaded && DesktopVisual.IsVisible(host), "the old favorite remains callable");
                     int calls = f.Client.Log.Count;
-                    stale.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+                    MusicTestUi.Invoke(stale); await Drain();
                     Equal(calls, f.Client.Log.Count);
                     Equal(saved, f.Module.NetworkPlaylists.Single());
                     var persisted = await f.Rpc("music.library.network.get", new { platform = card.Platform, id = card.ActionId });
                     True(persisted.GetProperty("present").GetBoolean(), "old favorite cannot reverse into cancellation");
                     Equal(saved.Revision, persisted.GetProperty("collection").GetProperty("revision").GetInt64());
 
-                    menu.IsOpen = false; await Drain(); OpenContentMenu(host);
-                    var cancel = menu.Items.OfType<MenuItem>().Single(item => item.Header as string == "取消收藏");
+                    menu.Hide(); await Drain(); menu = OpenContentMenu(host);
+                    var cancel = menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "取消收藏");
                     True(cancel.IsEnabled, "a fresh menu can cancel the saved reference");
-                    menu.IsOpen = true; await Until(() => menu.IsOpen);
+                    await Until(() => menu.IsOpen);
                     int removes = f.Client.Count("music.library.network.remove");
-                    cancel.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    MusicTestUi.Invoke(cancel);
                     await Until(() => !f.Module.Busy && f.Module.NetworkPlaylists.Count == 0);
                     Equal(removes + 1, f.Client.Count("music.library.network.remove"));
                     Equal(saved.Revision, f.Client.Last("music.library.network.remove").GetProperty("ifRevision").GetInt64());
-                    menu.IsOpen = false; await Drain(); OpenContentMenu(host);
-                    var favorite = menu.Items.OfType<MenuItem>().Single(item => item.Header as string == "收藏");
+                    menu.Hide(); await Drain(); menu = OpenContentMenu(host);
+                    var favorite = menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "收藏");
                     True(favorite.IsEnabled, "a fresh menu can save an absent reference");
-                    menu.IsOpen = true; await Until(() => menu.IsOpen);
+                    await Until(() => menu.IsOpen);
                     int saves = f.Client.Count("music.catalog.playlist.save");
-                    favorite.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+                    MusicTestUi.Invoke(favorite);
                     await Until(() => !f.Module.Busy && !card.IsPreparing && f.Module.NetworkPlaylists.Count == 1);
                     Equal(saves + 1, f.Client.Count("music.catalog.playlist.save"));
                     Equal(card.Platform, f.Client.Last("music.catalog.playlist.save").GetProperty("platform").GetString());
@@ -239,7 +235,7 @@ public static partial class MusicCatalogTests
                     Equal(0, f.Client.Count("music.catalog.playlist.prepare"));
                     Equal(0, f.Playback.Opens.Count);
                 }
-                finally { menu.IsOpen = false; source.RootVisual = null; }
+                finally { menu.Hide(); source.Window.Content = null; }
             });
         }
         yield return Case("network reference keeps full playback single-song favorite and next actions", async () =>
@@ -257,8 +253,8 @@ public static partial class MusicCatalogTests
             Equal(1, f.Playback.Opens.Count);
             f.Module.SelectedSong = f.Module.Songs[0]; await f.Module.FavoriteAsync();
             Equal(1, (await f.Rpc("music.library.detail", new { id = "favorites" })).GetProperty("total").GetInt32());
-            var menu = new ContextMenu(); f.Module.PopulateSongMenu(menu, f.Module.Songs[0], null, () => true);
-            ((MenuItem)menu.Items[1]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            var menu = new MenuFlyout(); f.Module.PopulateSongMenu(menu, f.Module.Songs[0], null, () => true);
+            MusicTestUi.Invoke(menu.Items[1]);
             await Until(() => !f.Module.Busy && f.Client.Count("music.queue.append") == 1);
             Equal(206, (await f.Rpc("music.queue.get", new { limit = 1 })).GetProperty("total").GetInt32());
             Equal(reference.Id, f.Module.NetworkPlaylists.Single().Id);
@@ -269,15 +265,15 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             f.Client.Transform("music.catalog.home", reply => Edit(reply, page =>
                 page["sections"]!.AsArray().Add(JsonSerializer.SerializeToNode(new {
-                    id = "owned-fixture", title = "Owned", type = "playlists", items = new[] {
-                        new { id = "500", name = "Owned", kind = "playlist", relationship = "owned", writable = true, count = 205 }
+                    id = "owned-fixture", title = "Owned", layout = "playlist-rail", items = new[] {
+                        new { id = "500", title = "Owned", kind = "playlist", action = new { type = "playlist", id = "500" }, relationship = "owned", writable = true, count = 205 }
                     }
                 }))));
             await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization; await f.Module.CatalogEntryInitialization;
             var card = f.Module.CatalogSections.Single(section => section.Id == "owned-fixture").Items.Single();
             True(card.IsManagedPlaylist && !card.CanSavePlaylist, "account directory ownership is retained by the consumer");
-            var menu = new ContextMenu(); f.Module.PopulatePlaylistMenu(menu, card, () => true);
-            True(!menu.Items.OfType<MenuItem>().Any(item => item.Header as string is "收藏" or "取消收藏"),
+            var menu = new MenuFlyout(); f.Module.PopulatePlaylistMenu(menu, card, () => true);
+            True(!menu.Items.OfType<MenuFlyoutItem>().Any(item => item.Text is "收藏" or "取消收藏"),
                 "owned card does not offer network subscription");
             int saves = f.Client.Count("music.catalog.playlist.save");
             await f.Module.FavoriteCatalogCardAsync(card);

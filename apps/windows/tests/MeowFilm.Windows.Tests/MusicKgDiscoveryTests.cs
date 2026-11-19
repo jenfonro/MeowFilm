@@ -11,8 +11,8 @@ public static class MusicKgDiscoveryTests
             await using var f = new MusicPlatformRuntimeFixture();
             var song = MusicSongFixture.Online("kg", "known-hash", "Synthetic track", duration: 279);
             f.OnRequest = (_, _) => Task.FromResult(MusicPlatformRuntimeFixture.Json(new { platform = "kg", sections = new[] { new {
-                id = "rankings", title = "榜单", type = "rankings", items = new[] { new { id = "rank-8888", title = "Current rank", cover = "",
-                    action = new { type = "channel", channel = new { id = "rank-8888", pageCode = "156133" } },
+                id = "rankings", title = "榜单", layout = "ranking", items = new[] { new { id = "rank-8888", kind = "channel", title = "Current rank", canPlay = false, cover = "",
+                    action = new { type = "channel", channel = new { id = "rank-8888", pageCode = "156133", channelKind = "ranking" } },
                     preview = new[] { new { title = "Synthetic track", artist = "Synthetic artist", cover = "", song } } }
                 } } }, more = false }));
             var result = await f.Catalog.HomeAsync(new("kg"));
@@ -24,7 +24,7 @@ public static class MusicKgDiscoveryTests
         {
             await using var f = new MusicPlatformRuntimeFixture();
             f.OnRequest = (_, _) => Task.FromResult(MusicPlatformRuntimeFixture.Json(new { platform = "kg", sections = Enumerable.Range(0, 80).Select(i => new {
-                id = "section-" + i, title = "栏目" + i, type = "playlists", items = new[] { new { id = "playlist-" + i, name = "歌单", cover = "", action = new { type = "playlist", id = "playlist-" + i } } }
+                id = "section-" + i, title = "栏目" + i, layout = "playlist-rail", items = new[] { new { id = "playlist-" + i, kind = "playlist", title = "歌单", cover = "", action = new { type = "playlist", id = "playlist-" + i } } }
             }).ToArray(), more = true, continuation = new { cursor = "actual-next" } }));
             var result = await f.Catalog.HomeAsync(new("kg")); Check(result.GetProperty("sections").GetArrayLength() == 80);
             Check(result.GetProperty("continuation").GetProperty("cursor").GetString() == "actual-next");

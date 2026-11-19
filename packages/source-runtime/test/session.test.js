@@ -381,6 +381,36 @@ test('Legado Cookie-only login status does not consume Reader variables', async 
   assert.equal(session.stats().pendingAdapterTasks, 0);
 });
 
+test('portable session variables preserve long UTF-8 keys and clone their values', async t => {
+  const prefix = '变量'.repeat(1024);
+  const keys = [prefix, `${prefix}-other`];
+  let sync;
+  const session = new SourceSession({
+    installationId: 'long-session-keys', protocol: 'legado',
+    source: legadoSource, capabilities: capabilitiesFor({}),
+    createSandbox: sandboxFactory({ load(options) {
+      sync = (name, input) => options.onSync(`legado.${name}`, input, {});
+      for (const [index, key] of keys.entries()) {
+        const value = { index, values: ['complete'] };
+        sync('variableSet', { key, value });
+        value.values[0] = 'changed input';
+      }
+    } }),
+  });
+  t.after(() => session.close());
+  await session.start();
+  for (const [index, key] of keys.entries()) {
+    assert.ok(body(key).length > 4096);
+    const value = sync('variableGet', { key });
+    assert.deepEqual(value, { index, values: ['complete'] });
+    value.values[0] = 'changed output';
+    assert.deepEqual(sync('variableGet', { key }), { index, values: ['complete'] });
+  }
+  assert.equal(sync('variableGet', { key: `${prefix}-missing` }), null);
+  await session.close();
+  assert.equal(sync('variableGet', { key: keys[0] }), null);
+});
+
 test('persistent Reader values use incremental typed writes and preserve untouched exact material', async t => {
   const saved = new Map([['kept', parseJSONText('9007199254740993')]]);
   let revision = 0, variable, operation, failWrite = false;

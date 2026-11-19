@@ -2,17 +2,19 @@ using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.IO;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using System.Windows.Threading;
 using System.Text.Json.Nodes;
 using System.IO.Compression;
 using System.Buffers.Binary;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
@@ -23,6 +25,7 @@ public static class MusicQqAccountUiTests
     {
         yield return Case("native-owner-png-profile-save-readback-logout", Login);
         yield return Case("png-native-decode-bounds-pixels-only", Image);
+        yield return Case("large-png-decode-and-explicit-save-no-byte-quota", LargeImageSave);
         yield return Case("visible-user-challenge-only-poll-hide-cancel-no-background", Visibility);
         yield return Case("pending-generation-hidden-before-png-never-publishes", PendingHidden);
         yield return Case("manual-and-visible-query-single-flight", SingleFlight);
@@ -40,29 +43,13 @@ public static class MusicQqAccountUiTests
         [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
     { if (!condition) throw new InvalidOperationException($"QQ account assertion at {member}:{line}: {expression}"); }
     private static async Task Sta(Func<Task> action)
-    {
-        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher;
-            _ = dispatcher.InvokeAsync(async () =>
-            {
-                try { await action(); done.TrySetResult(); }
-                catch (Exception e) { done.TrySetException(e); }
-                finally { dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            Dispatcher.Run();
-        }) { IsBackground = true };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        await done.Task.WaitAsync(TimeSpan.FromSeconds(35));
-        Check(thread.Join(TimeSpan.FromSeconds(5)));
-    }
+    { await TestUiHost.InvokeAsync(action); }
     private static async Task Login()
     {
         await using var f = await Fixture.Create();
         Check(f.Module.CanBeginAccountQr);
         await f.Module.BeginAccountQrAsync();
-        Check(f.Module.HasAccountQr && f.Module.AccountQrImage is { IsFrozen: true, PixelWidth: 16 } &&
+        Check(f.Module.HasAccountQr && f.Module.AccountQrImage is { PixelWidth: 16, PixelHeight: 16 } &&
             f.Module.AccountQrAccessibleName == "QQ 音乐登录二维码");
         await f.Module.CheckAccountQrAsync();
         Check(!f.Module.HasAccountQr && f.Module.SelectedAccount!.State == "verified" &&
@@ -76,8 +63,8 @@ public static class MusicQqAccountUiTests
     {
         string png = Convert.ToBase64String(Png());
         var image = MusicAccountQrImage.DecodePng(png);
-        Check(image.IsFrozen && image.Format == PixelFormats.Bgra32 && image.PixelWidth == 16);
-        byte[] pixels = new byte[16 * 16 * 4]; image.CopyPixels(pixels, 64, 0);
+        Check(image.PixelWidth == 16);
+        byte[] pixels = MusicTestUi.Pixels(image);
         Check(pixels.Contains((byte)0) && pixels.Contains((byte)255));
         foreach (var text in new[] { "https://attacker.invalid/secret", "data:image/svg+xml,<svg/>", "not-base64",
             Convert.ToBase64String(Png(width: 2048)),
@@ -88,6 +75,24 @@ public static class MusicQqAccountUiTests
         }
         return Task.CompletedTask;
     }
+    private static async Task LargeImageSave()
+    {
+        byte[] png = MusicAccountRuntimeFixture.QrPng(width: 1024, height: 1024, noise: true, chunkBytes: 2048);
+        string encoded = Convert.ToBase64String(png);
+        Check(png.Length > 524288 && encoded.Length > 699052);
+        var image = MusicAccountQrImage.DecodePng(encoded);
+        Check(image.PixelWidth == 1024 && image.PixelHeight == 1024);
+        await using var f = await Fixture.Create();
+        f.Transport.Image = png;
+        await f.Module.BeginAccountQrAsync();
+        Check(f.Module.CanSaveAccountQr);
+        await f.Module.SaveAccountQrAsync();
+        Check(f.Module.AccountStatus == "二维码已保存" && new FileInfo(f.Dialogs.Path).Length > 524288);
+        var saved = MusicAccountQrImage.DecodePng(Convert.ToBase64String(File.ReadAllBytes(f.Dialogs.Path)));
+        Check(saved.PixelWidth == image.PixelWidth && saved.PixelHeight == image.PixelHeight);
+        byte[] expected = MusicTestUi.Pixels(image), actual = MusicTestUi.Pixels(saved);
+        Check(actual.AsSpan().SequenceEqual(expected));
+    }
     private static async Task Visibility()
     {
         await using var f = await Fixture.Create(); f.Transport.Status = 66;
@@ -95,7 +100,7 @@ public static class MusicQqAccountUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             await Task.Delay(2200); Check(f.Transport.Calls == 0); // No idle/background timer requests.
             OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
@@ -116,7 +121,7 @@ public static class MusicQqAccountUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             OpenLogin(view);
             var begin = f.Module.BeginAccountQrAsync();
             await f.Transport.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
@@ -187,7 +192,7 @@ public static class MusicQqAccountUiTests
         var view = new MusicAccountsView { DataContext = f.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
             window.Content = new Border();
@@ -205,13 +210,13 @@ public static class MusicQqAccountUiTests
         var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             OpenLogin(view);
             await f.Module.BeginAccountQrAsync();
-            window.WindowState = WindowState.Minimized;
+            window.WindowState = DesktopWindowState.Minimized;
             await Until(() => !f.Module.HasAccountQr && !f.Module.AccountBusy);
             int calls = f.Transport.Calls;
-            await Task.Delay(2200); window.WindowState = WindowState.Normal; await Task.Delay(2200);
+            await Task.Delay(2200); window.WindowState = DesktopWindowState.Normal; await Task.Delay(2200);
             Check(f.Transport.Calls == calls && !f.Module.HasAccountQr);
         }
         finally { window.Close(); }
@@ -224,7 +229,7 @@ public static class MusicQqAccountUiTests
         var view = new MusicAccountsView { DataContext = first.Module }; var window = Offscreen(view);
         try
         {
-            window.Show(); await Dispatcher.Yield(DispatcherPriority.Loaded);
+            window.Show(); await MusicTestUi.Drain();
             await first.Module.ActivatePlatformSettingsAsync();
             await next.Module.ActivatePlatformSettingsAsync();
             OpenLogin(view);
@@ -249,13 +254,9 @@ public static class MusicQqAccountUiTests
         }
         finally { window.Close(); }
     }
-    private static Window Offscreen(UIElement view) => new()
-    {
-        Content = view, Left = -32000, Top = -32000, Width = 500, Height = 700,
-        ShowInTaskbar = false, ShowActivated = false, WindowStyle = WindowStyle.None
-    };
+    private static DesktopWindow Offscreen(UIElement view) => MusicTestUi.Window(view, 500, 700);
     private static void OpenLogin(MusicAccountsView view) =>
-        ((Popup)view.FindName("LoginPopup")).IsOpen = true;
+        MusicTestUi.OpenAccountLogin(view);
     private static async Task Until(Func<bool> predicate,
         [CallerArgumentExpression(nameof(predicate))] string expression = "",
         [CallerMemberName] string member = "", [CallerLineNumber] int line = 0)
@@ -269,13 +270,13 @@ public static class MusicQqAccountUiTests
     {
         byte[] pixels = new byte[width * 16 * 4];
         for (int i = 0; i < pixels.Length; i += 8) Array.Fill(pixels, (byte)255, i, Math.Min(4, pixels.Length - i));
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(BitmapSource.Create(width, 16, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4)));
-        using var output = new MemoryStream(); encoder.Save(output);
-        if (inflated is null) return output.ToArray();
+        using var bitmap = new SkiaSharp.SKBitmap(new SkiaSharp.SKImageInfo(width, 16, SkiaSharp.SKColorType.Bgra8888, SkiaSharp.SKAlphaType.Premul));
+        System.Runtime.InteropServices.Marshal.Copy(pixels, 0, bitmap.GetPixels(), pixels.Length);
+        using var encoded = bitmap.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100);
+        byte[] original = encoded.ToArray();
+        if (inflated is null) return original;
         // Keep a valid small IHDR but replace IDAT by excessive decompressed data.
         // The native image boundary must reject it before publishing pixels.
-        byte[] original = output.ToArray();
         using var compressed = new MemoryStream();
         using (var zlib = new ZLibStream(compressed, CompressionLevel.SmallestSize, leaveOpen: true))
             zlib.Write(new byte[inflated.Value]);
@@ -307,6 +308,7 @@ public static class MusicQqAccountUiTests
     private sealed class QrScenario
     {
         internal int Calls, Polls, Status;
+        internal byte[]? Image;
         internal long ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(2).ToUnixTimeMilliseconds();
         internal string? HoldAt;
         internal readonly TaskCompletionSource Arrived = MusicAccountRuntimeFixture.Signal(), Release = MusicAccountRuntimeFixture.Signal();
@@ -319,7 +321,7 @@ public static class MusicQqAccountUiTests
                 challengeId = call.Parameters.GetProperty("challengeId").GetString(),
                 expiresAt = ExpiresAt,
                 url = "",
-                imageBase64 = Convert.ToBase64String(Png()) });
+                imageBase64 = Convert.ToBase64String(Image ?? Png()) });
             if (call.Operation == "qr.poll")
             {
                 Polls++;
@@ -339,6 +341,7 @@ public static class MusicQqAccountUiTests
         internal MusicNativeApplication Application;
         internal MusicAccountFixtureApplication Calls;
         internal MusicCapability Module;
+        internal Dialogs Dialogs;
         private Fixture()
         {
             string root = TestWorkspace.DataPath("qq-account-ui", Guid.NewGuid().ToString("N"));
@@ -347,7 +350,8 @@ public static class MusicQqAccountUiTests
             Runtime.Platform.OnRequest = Transport.Read;
             Application = new(Store, MusicTestStores.For(Store), Runtime);
             Calls = new(Application);
-            Module = new(Calls, Store, new Output(), new Dialogs());
+            Dialogs = new(System.IO.Path.Combine(root, "explicit-qr.png"));
+            Module = new(Calls, Store, new Output(), Dialogs);
         }
         internal static async Task<Fixture> Create()
         {
@@ -368,10 +372,12 @@ public static class MusicQqAccountUiTests
             finally { await Runtime.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
-    private sealed class Dialogs : IMusicDialogs
+    private sealed class Dialogs(string path) : IMusicDialogs, IMusicAccountQrSaveDialog
     {
+        internal string Path { get; } = path;
         public bool Confirm(string message, string title) => true;
         public string[]? SelectAudioFiles() => null;
+        public string? SelectQrPngPath() => Path;
     }
     private sealed class Output : IMusicPlayback
     {

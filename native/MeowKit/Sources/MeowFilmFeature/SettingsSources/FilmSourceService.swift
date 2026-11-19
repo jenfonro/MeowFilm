@@ -592,7 +592,7 @@ public actor FilmSourceService {
     }
     private static func readSource(_ url: URL) async throws -> String {
         guard url.pathExtension.lowercased() == "js" else { throw FilmSourceError(code: "INVALID_SOURCE") }
-        var bytes = try await ImportedFileReader.read(url, maximumBytes: CatLocalSourceInput.maximumBytes)
+        var bytes = try await ImportedFileReader.read(url)
         defer { bytes.resetBytes(in: 0..<bytes.count) }
         guard let source = String(data: bytes, encoding: .utf8) else { throw FilmSourceError(code: "INVALID_SOURCE") }
         return source

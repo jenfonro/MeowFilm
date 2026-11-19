@@ -22,13 +22,12 @@ private final class HomeSnapshotFixture: MusicHomeSnapshotStoring, @unchecked Se
 }
 private func canonicalHome(_ ids: [String] = ["41"], next: Bool = false, artists: Bool = true) -> Data {
     let items = ids.enumerated().map { index, id -> MJ in
-        let track = MusicNativePublicBrowseFixture.track(id, title: "Synthetic song " + id)
-        var item = try! MJ.parse(RuntimeJSON.encode(MusicPlatformFixture.song(track)))
+        var item = try! MJ.parse(RuntimeJSON.encode(NativeDiscoveryFixture.song(id, title: "Synthetic song " + id)))
         item["key"] = .string("songs:\(id):\(index)")
         return item
     }
     var sections: [MJ] = [.obj([("id", .string("songs")), ("title", .string("完整栏目")),
-        ("type", .string("songs")), ("items", .array(items))])]
+        ("layout", .string("song-columns")), ("items", .array(items))])]
     if artists { sections.append(canonicalArtistSection()) }
     var page = MJ.obj([("sections", .array(sections))])
     if next { page["continuation"] = .obj([("cursor", .string("4"))]) }
@@ -40,9 +39,9 @@ private func canonicalArtistSection() -> MJ {
         ("action", .obj([("type", .string("channel")), ("channel", .obj([
             ("id", .string("artist-activity")), ("channelKind", .string("artist-activity")), ("name", .string("艺人新作"))]))])),
         ("items", .array([.obj([("key", .string("wy:album:42")), ("id", .string("42")),
-            ("name", .string("新专辑")), ("creator", .string("艺人")), ("count", .n(8)),
+            ("title", .string("新专辑")), ("kind", .string("album")), ("creator", .string("艺人")), ("count", .n(8)),
             ("cover", .string("https://p1.music.126.net/album.jpg")), ("coverLabel", .string("新专辑")),
-            ("action", .obj([("type", .string("album"))]))])]))])
+            ("action", .obj([("type", .string("album")), ("id", .string("42"))]))])]))])
 }
 private actor HomeAccountFixture: MusicNativeAccountProviding, MusicNativeHomeDisplayProviding {
     var binding: MusicNativeHomeBinding
@@ -117,8 +116,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
     private func heartbeatHome(songID: String? = nil) -> Data {
         var action = MJ.obj([("type", .string("heartbeat"))])
         if let songID { action["songId"] = .string(songID) }
-        let item = MJ.obj([("name", .string("心动")), ("action", action)])
-        let section = MJ.obj([("id", .string("entries")), ("type", .string("entries")), ("items", .array([item]))])
+        let item = MJ.obj([("title", .string("心动")), ("kind", .string("heartbeat")), ("action", action)])
+        let section = MJ.obj([("id", .string("entries")), ("layout", .string("feature-rail")), ("items", .array([item]))])
         return MJ.obj([("sections", .array([section]))]).bytes
     }
     private func heartbeatAction(_ page: MusicPublicBrowsePage) throws -> MusicHomeAction {
@@ -217,7 +216,7 @@ final class MusicNativeHomeServiceTests: XCTestCase {
         let before = await account.calls; XCTAssertEqual(before, [.home()])
         let text = String(decoding: try XCTUnwrap(store.read()), as: UTF8.self)
         XCTAssertFalse(text.contains("cursor")); XCTAssertFalse(text.contains("authorization")); XCTAssertFalse(text.contains("synthetic-account"))
-        XCTAssertFalse(text.contains("musicInfo")); XCTAssertFalse(text.contains("Synthetic song"))
+        XCTAssertFalse(text.contains("musicInfo")); XCTAssertTrue(text.contains("Synthetic song"))
         let snapshot = try await value.restoredHome(), restored = try XCTUnwrap(snapshot)
         XCTAssertNil(restored.cursor); XCTAssertEqual(restored.sections.map(\.layout), first.sections.map(\.layout))
         XCTAssertEqual(restored.sections[0].tracks.first?.ref, first.sections[0].tracks.first?.ref)
@@ -293,8 +292,8 @@ final class MusicNativeHomeServiceTests: XCTestCase {
     }
     func testImageQueriesSurviveRepositoryAndHomeReferenceRestoreWithoutCredentials() async throws {
         let image = "http://p1.music.126.net/cover.jpg?param=800y800&quality=90&extra=a%2Fb", expected = image.replacingOccurrences(of: "http:", with: "https:")
-        let peer = NativeMusicResultFixture([.object(["sections": .array([.object(["id": .string("songs"), "type": .string("songs"),
-            "items": .array([try MusicPlatformFixture.song(MusicNativePublicBrowseFixture.track("41", artwork: image))])])])])])
+        let peer = NativeMusicResultFixture([.object(["sections": .array([.object(["id": .string("songs"), "layout": .string("song-columns"),
+            "items": .array([try NativeDiscoveryFixture.song("41", cover: image)])])])])])
         let account = HomeAccountFixture(loggedIn: false), store = HomeSnapshotFixture(), document = NativeMusicTestLibrary()
         let value = try await service(account, store: store, peer: peer, document: document), page = try await value.homePage(cursor: nil, refresh: true)
         XCTAssertEqual(page.sections.first?.tracks.first?.artwork?.absoluteString, expected); await value.close()

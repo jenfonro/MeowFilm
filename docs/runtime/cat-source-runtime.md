@@ -50,7 +50,7 @@ QuickJS realm 提供受限 `Buffer`、URL、定时器、HTTP helper、作用域�
 
 本输入只支持 CatVod JS Spider。TVBox Android JAR／DEX、任意 JVM 插件和 Android API 不在当前范围，也不提供 CatNode 的文件、服务和管理 API。Node-independent 仅指 source-runtime 纯规则包，当前通用执行由 Node 主控和原生 QuickJS 线程承载；iOS 与 Windows 均通过当前 HTTP 接入，平台载体及验证边界分别见[iOS 运行底座](../ios/runtime-preflight.md)与[Windows 平台接入](../windows/app-runtime.md)。
 
-一次 raw HTTP 源码上传、普通 JSON、完整候选和 CAS 与[Reader 来源入口](reader-source-runtime.md#生命周期与-rpc)相同。源码 16 MiB、栈、60 秒初始化/请求和 3 秒清理保持；取消、真实线程退出见[共用运行时](script-runtime.md#quickjs-执行边界)。虚拟路由、变量、Cookie、存储和响应不再有运行器累计内存配额，不进行 OOM 自动重启；`maximumParseBytes` 仅限制解析，不限制普通 body 或状态。资源仍按 owner 释放，无固定实例/并发/timer/网络/profile 数量。通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
+一次 raw HTTP 源码上传、普通 JSON、完整候选和 CAS 与[Reader 来源入口](reader-source-runtime.md#生命周期与-rpc)相同。源码无字节配额，栈、60 秒初始化/请求和 3 秒清理保持；取消、真实线程退出见[共用运行时](script-runtime.md#quickjs-执行边界)。虚拟路由、变量、Cookie、存储和响应不再有运行器累计内存配额，不进行 OOM 自动重启；`maximumParseBytes` 仅限制解析，不限制普通 body 或状态。资源仍按 owner 释放，无固定实例/并发/timer/网络/profile 数量。通用原生构建与定向回归已通过，适用环境及未覆盖项见[通用验证范围](script-runtime.md#构建发布与验证边界)。
 
 ## CatNode 媒体交接边界
 
@@ -58,6 +58,6 @@ QuickJS realm 提供受限 `Buffer`、URL、定时器、HTTP helper、作用域�
 
 CatNode aggregate 代理的连接与等待响应头仍受 `requestTimeoutMs` 限制；二进制响应头成功后不再套用脚本绝对60秒截止，按真实背压传输，由客户端断连、来源撤权或 owner close 取消。Range／If-Range、HEAD 与上游状态保留，不整片缓冲。每条上游请求独占连接；停止来源及关闭 owner 等待 ClientRequest、上游响应和 socket 的真实 close，超过有限清理期限明确失败，重复 close 复用原结果。
 
-HLS／DASH 清单是有限控制文档：读取原始输入最多8MiB，读取期间仍受控制请求期限约束，已知超额长度或读取中超额均在发送下游成功响应头前报 `RESOURCE_LIMIT`（HTTP 413），不静默截断。HLS 仅改写真实资源引用，`EXTINF` 自由标题保持原文。DASH 与影视媒体层共用无网络副作用的结构化解析，保留 namespace、继承的 `BaseURL`／`xml:base`、模板及相对引用；按块、受背压输出。
+HLS／DASH 清单完整读取，不设原始或解压后字节/条目上限；读取期间仍受控制请求期限和取消信号约束，格式错误在发送下游成功响应头前报告，不静默截断。HLS 仅改写真实资源引用，`EXTINF` 自由标题保持原文。DASH 与影视媒体层共用无网络副作用的结构化解析，保留 namespace、继承的 `BaseURL`／`xml:base`、模板及相对引用；按块、受背压输出。
 
 DASH 的模板和准确子资源映射附属于已有 Cat proxy，只用于寻址，不是 URL 访问许可图；普通 suffix 与 query 按原基址解析，正常 HTTP(S) 绝对资源和重定向可用。HLS 先替换 DEFINE／IMPORT／QUERYPARAM 变量再解析 URL，清单重定向保留真实基址和变量上下文。调用输入及当前媒体上下文提供所需头，不借用其它账号或资源凭据；内部 request scope 不发送到外部资源。路由映射随原 endpoint／session 回收，没有第二媒体缓存或授权预算。这些能力不表示支持任意 DASH／DRM 结构。

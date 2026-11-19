@@ -2,10 +2,27 @@ import Foundation
 import XCTest
 import MeowStorage
 import MeowStorageTestSupport
+import Combine
 @testable import MeowFilmFeature
 
 @MainActor
 final class FilmPlayerPreferencesTests: XCTestCase {
+    func testReloadAndSameValueDoNotPublishDuplicatePreferences() async throws {
+        try await isolated { database in
+            let store = await makeStore(database)
+            var values: [FilmPlayerPreferences] = []
+            let observation = store.$preferences.dropFirst().sink { values.append($0) }
+            defer { observation.cancel() }
+            await store.reload()
+            let unchanged = await store.set(\.holdRate, 2); XCTAssertTrue(unchanged)
+            await store.reload()
+            XCTAssertTrue(values.isEmpty)
+            let changed = await store.set(\.seekStep, 30); XCTAssertTrue(changed)
+            await store.reload()
+            XCTAssertEqual(values.count, 1)
+        }
+    }
+
     private func isolated(_ body: (SQLiteDatabase) async throws -> Void) async throws {
         try await body(storageTestDatabase(self))
     }

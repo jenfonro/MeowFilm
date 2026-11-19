@@ -44,9 +44,9 @@ internal static class AccountRules
     { Require(value is "wy" or "tx" or "kg"); return value; }
     internal static bool Match(string value, string pattern) =>
         Regex.IsMatch(value, pattern, RegexOptions.CultureInvariant | RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(100));
-    internal static string Text(string? value, int max, string code = "INVALID_RESPONSE", bool empty = false)
+    internal static string Text(string? value, int? max, string code = "INVALID_RESPONSE", bool empty = false)
     {
-        Require(value is not null && (empty || value.Length > 0) && value.Length <= max, code);
+        Require(value is not null && (empty || value.Length > 0) && (max is null || value.Length <= max), code);
         for (int i = 0; i < value!.Length; i++)
         {
             char c = value[i];
@@ -81,10 +81,9 @@ internal static class AccountRules
     }
     internal static Dictionary<string, string> Cookies(string cookie)
     {
-        Text(cookie, 16384, "INVALID_CREDENTIALS");
+        Text(cookie, null, "INVALID_CREDENTIALS");
         Require(cookie.All(c => c is >= ' ' and <= '~'), "INVALID_CREDENTIALS");
         var parts = cookie.Split(';');
-        Require(parts.Length <= 64, "INVALID_CREDENTIALS");
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         for (int i = 0; i < parts.Length; i++)
         {

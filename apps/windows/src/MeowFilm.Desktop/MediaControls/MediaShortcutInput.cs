@@ -1,63 +1,71 @@
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Media3D;
+using Microsoft.UI.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Windows.System;
+using Windows.UI.Core;
+using Key = System.Windows.Input.Key;
+using KeyInterop = System.Windows.Input.KeyInterop;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
 
 namespace MeowFilm.Desktop;
 
 internal static class MediaShortcutInput
 {
-    internal static Key Key(KeyEventArgs args) => args.Key == System.Windows.Input.Key.System ? args.SystemKey : args.Key;
+    // Keep the persisted WPF enum contract, but convert the native virtual key
+    // explicitly. WinUI's enum values are not WPF Key values.
+    internal static Key Key(KeyRoutedEventArgs args) =>
+        KeyInterop.KeyFromVirtualKey((int)args.OriginalKey);
 
-    internal static ModifierKeys Modifiers(KeyboardDevice keyboard)
+    internal static ModifierKeys Modifiers() => Modifiers(Down(VirtualKey.Control), Down(VirtualKey.Menu),
+        Down(VirtualKey.Shift), Down(VirtualKey.LeftWindows), Down(VirtualKey.RightWindows));
+
+    internal static ModifierKeys Modifiers(bool control, bool alt, bool shift, bool leftWindows, bool rightWindows)
     {
-        // WPF's Modifiers property reports only Alt, Control and Shift.
-        return keyboard.Modifiers |
-            (keyboard.IsKeyDown(System.Windows.Input.Key.LWin) || keyboard.IsKeyDown(System.Windows.Input.Key.RWin)
-                ? ModifierKeys.Windows : ModifierKeys.None);
+        ModifierKeys modifiers = ModifierKeys.None;
+        if (control) modifiers |= ModifierKeys.Control;
+        if (alt) modifiers |= ModifierKeys.Alt;
+        if (shift) modifiers |= ModifierKeys.Shift;
+        if (leftWindows || rightWindows) modifiers |= ModifierKeys.Windows;
+        return modifiers;
     }
 
-    internal static bool AllowsLocal(Window window, HwndSource source, object? target)
+    private static bool Down(VirtualKey key) =>
+        (InputKeyboardSource.GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates.Down) != 0;
+
+    internal static bool AllowsLocal(FrameworkElement root, object? target)
     {
-        for (var node = target as DependencyObject; node is not null; node = Parent(node))
+        if (HasPopup(root)) return false;
+        for (var node = target as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node))
         {
             if (Protected(node)) return false;
-            if (node is Visual visual && PresentationSource.FromVisual(visual) is HwndSource input && input != source)
-                return false;
-            if (ReferenceEquals(node, window)) return true;
+            if (ReferenceEquals(node, root)) return true;
         }
         return false;
     }
 
-    internal static bool ProtectsForeground(Window window, HwndSource source, MediaShortcutNative native)
+    internal static bool ProtectsForeground(FrameworkElement root, nint hwnd, MediaShortcutNative native)
     {
         nint foreground = native.ForegroundWindow;
-        // A background window's retained WPF focus is not the current input target.
-        if (!native.OwnsWindow(source.Handle, foreground)) return false;
-        if (foreground != source.Handle || native.HasMenuOrChildFocus(source.Handle) || InputManager.Current.IsInMenuMode)
-            return true;
+        // A background root's retained XAML focus is not the current input target.
+        if (!native.OwnsWindow(hwnd, foreground)) return false;
+        if (foreground != hwnd || native.HasMenuOrChildFocus(hwnd, root) || HasPopup(root)) return true;
         bool editor = false;
-        for (var node = native.FocusedElement as DependencyObject; node is not null; node = Parent(node))
+        for (var node = native.FocusedElement(root); node is not null; node = VisualTreeHelper.GetParent(node))
         {
             editor |= Protected(node);
-            if (node is Visual visual && PresentationSource.FromVisual(visual) is HwndSource input && input != source)
-                return native.OwnsWindow(source.Handle, input.Handle);
-            if (ReferenceEquals(node, window)) return editor;
+            if (ReferenceEquals(node, root)) return editor;
         }
         return false;
     }
 
-    private static bool Protected(DependencyObject node) =>
-        node is PlayerDialogHost or TextBoxBase or PasswordBox or ComboBox { IsEditable: true } or MenuBase or MenuItem or Popup;
+    private static bool HasPopup(FrameworkElement root) => root.XamlRoot is { } xamlRoot &&
+        VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).Any(popup => popup.IsOpen && popup.Child is not ToolTip);
 
-    private static DependencyObject? Parent(DependencyObject node) => node switch
-    {
-        Visual or Visual3D => VisualTreeHelper.GetParent(node) ?? LogicalTreeHelper.GetParent(node),
-        FrameworkContentElement content => content.Parent,
-        ContentElement content => ContentOperations.GetParent(content),
-        _ => LogicalTreeHelper.GetParent(node)
-    };
+    private static bool Protected(DependencyObject node) =>
+        node is PlayerDialogHost or TextBox or RichEditBox or PasswordBox or AutoSuggestBox or
+            ComboBox { IsEditable: true } or MenuFlyoutPresenter or MenuFlyoutItemBase or MenuBar or
+            MenuBarItem or FlyoutPresenter or Popup or ContentDialog or WebView2;
 }

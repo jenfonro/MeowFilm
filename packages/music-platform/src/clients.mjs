@@ -45,7 +45,7 @@ function qimeiRequest(device, clock) {
   const secured = publicEncrypt({ key: qimeiPublicKey, padding: constants.RSA_PKCS1_PADDING }, Buffer.from(key)).toString('base64');
   const params = aes(JSON.stringify(payload), key, 'cbc', key).toString('base64');
   const extra = '{"appKey":"0AND0HD6FE4HY80F"}';
-  return { url: 'https://api.tencentmusic.com/tme/trpc/proxy', method: 'POST', maximumBytes: 65536,
+  return { url: 'https://api.tencentmusic.com/tme/trpc/proxy', method: 'POST',
     headers: { method: 'GetQimei', service: 'trpc.tme_datasvr.qimeiproxy.QimeiProxy', appid: 'qimei_qq_android',
       sign: md5('qimei_qq_androidpzAuCmaFAaFaHrdakPjLIEqKrGnSOOvH' + timestamp),
       'User-Agent': 'QQMusic', timestamp, 'Content-Type': 'application/json' },
@@ -126,7 +126,7 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
       const request = txRequest('music.getSession.session', 'GetSession', {
         uid: client.session?.uid ?? '', vkey: 0, caller: client.session ? 1 : 2,
       }, { ...client, session: null }, null, clock);
-      const data = txSuccess((await transport({ ...request, maximumBytes: 65536, signal })).value);
+      const data = txSuccess((await transport({ ...request, signal })).value);
       const session = object(data.session);
       signal.throwIfAborted();
       client = await save('tx', { ...client, session: { uid: required(session.uid), sid: required(session.sid), savedAt: now } });
@@ -158,7 +158,7 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
       const request = kgRequest('/risk/v2/r_register_dev', { part: '1', platid: '1', p: portrait },
         client, null, clock, null, encrypted, 'https://userservice.kugou.com');
       request.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-      const response = await transport({ ...request, json: false, maximumBytes: 1048576, signal });
+      const response = await transport({ ...request, json: false, signal });
       if (response.headers.get('ssa-code')) fail('VERIFICATION_REQUIRED');
       let plain;
       try { plain = decrypt(response.value, key, 'cbc', iv); }

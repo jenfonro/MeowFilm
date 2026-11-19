@@ -54,7 +54,7 @@ let package = Package(
         .testTarget(name: "MeowCoreTests", dependencies: ["MeowContracts", "MeowStorage", "MeowStorageTestSupport"]),
         .testTarget(name: "MeowMusicFeatureTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowStorage", "MeowUI", "MeowStorageTestSupport"]),
         .testTarget(name: "MeowMusicNativeServiceTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicNativeService", "MeowMusicPlatform", "MeowMusicTestSupport", "MeowPlayback", "MeowRuntime", "MeowStorage", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowMusicPlatformTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicTestSupport", "MeowRuntime", "MeowStorage", "MeowStorageTestSupport"]),
+        .testTarget(name: "MeowMusicPlatformTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicTestSupport", "MeowRuntime", "MeowStorage", "MeowUI", "MeowStorageTestSupport"]),
         .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowAudio", "MeowPlaybackVideo", "MeowStorage", "MeowStorageTestSupport",
             .product(name: "MeowVideoKernel", package: "videokernel")],
                     resources: [.copy("Video/Fixtures")]),

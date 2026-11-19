@@ -9,10 +9,10 @@ final class MusicNativeArtistActivityTests: XCTestCase {
     private let channel = MusicPublicBrowseChannel(id: "artist-activity", title: "艺人新作", kind: .artistActivity)
     private func album(_ id: String = "42", count: Int? = 8, title: String = "新专辑",
                        label: String = "新专辑", cover: String = "https://p1.music.126.net/album.jpg") -> RuntimeValue {
-        .object(["key": .string("wy:album:" + id), "id": .string(id), "name": .string(title),
+        .object(["key": .string("wy:album:" + id), "id": .string(id), "title": .string(title), "kind": .string("album"),
             "creator": .string("艺人"), "cover": .string(cover), "coverLabel": .string(label),
             "count": count.map { .number(Double($0)) } ?? .null,
-            "action": .object(["type": .string("album")])])
+            "action": .object(["type": .string("album"), "id": .string(id)])])
     }
     private func page(_ items: [RuntimeValue], before: String? = nil) -> RuntimeValue {
         .object(["sections": .array([.object(["id": .string("artists"), "title": .string("艺人新作"),
@@ -89,7 +89,7 @@ final class MusicNativeArtistActivityTests: XCTestCase {
     func testCanonicalAlbumIdentityAndDeclaredSummaryAreNotRecomputedFromPreview() async throws {
         var value = album("42", count: 3)
         if case .object(var row) = value {
-            row["previewSongs"] = .array([try NativeDiscoveryFixture.song("43", title: "别的专辑预览")]); value = .object(row)
+            row["previewSongs"] = .array([try NativeDiscoveryFixture.songValue("43", title: "别的专辑预览")]); value = .object(row)
         }
         let (service, _, result) = try await load(page([value]))
         let item = result.sections[0].items[0]

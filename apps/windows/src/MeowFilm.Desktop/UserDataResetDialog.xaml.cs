@@ -1,11 +1,12 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace MeowFilm.Desktop;
 
-internal partial class UserDataResetDialog : UserControl
+public partial class UserDataResetDialog : UserControl
 {
     internal event Action? ConfirmRequested;
     internal event Action? CancelRequested;
@@ -29,8 +30,7 @@ internal partial class UserDataResetDialog : UserControl
         FailureNotice.Clear();
         Visibility = Visibility.Visible;
         // Retain the safe initial choice even while the host window is inactive.
-        FocusManager.SetFocusedElement(FocusManager.GetFocusScope(CancelChoice), CancelChoice);
-        CancelChoice.Focus();
+        CancelChoice.Focus(FocusState.Programmatic);
     }
 
     internal void SetBusy(string title)
@@ -44,7 +44,7 @@ internal partial class UserDataResetDialog : UserControl
         AutomationProperties.SetName(ConfirmChoice, "重试清除");
         ConfirmChoice.IsEnabled = ExitChoice.IsEnabled = false;
         FailureNotice.Clear();
-        DialogSurface.Focus();
+        DialogFocusTarget.Focus(FocusState.Programmatic);
     }
 
     internal void ShowFailure(string message)
@@ -53,7 +53,7 @@ internal partial class UserDataResetDialog : UserControl
         DialogTitle.Text = "清除未完成";
         ConfirmChoice.IsEnabled = ExitChoice.IsEnabled = true;
         FailureNotice.Show(this, message);
-        DialogSurface.Focus();
+        DialogFocusTarget.Focus(FocusState.Programmatic);
     }
 
     private void OnConfirmClick(object sender, RoutedEventArgs e)
@@ -71,10 +71,10 @@ internal partial class UserDataResetDialog : UserControl
         if (IsOpen && confirming && !IsPending) CancelRequested?.Invoke();
     }
 
-    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key != Key.Escape || e.KeyboardDevice.Modifiers != ModifierKeys.None) return;
+        if (e.Key != VirtualKey.Escape || DesktopVisual.Modifiers != VirtualKeyModifiers.None) return;
         e.Handled = true;
-        OnCancelClick(sender, e);
+        OnCancelClick(sender, new RoutedEventArgs());
     }
 }

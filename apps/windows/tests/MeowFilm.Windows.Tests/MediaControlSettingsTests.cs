@@ -1,5 +1,7 @@
 using System.Text.Json.Nodes;
-using System.Windows.Input;
+using Key = System.Windows.Input.Key;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
+using KeyInterop = System.Windows.Input.KeyInterop;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop;

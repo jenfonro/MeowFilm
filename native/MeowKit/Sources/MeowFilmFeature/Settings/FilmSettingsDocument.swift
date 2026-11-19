@@ -160,10 +160,11 @@ public final class FilmSettingsDocument: @unchecked Sendable {
             }
             return .object(["version": .number(1), "rules": .object(rules)])
         case .preferences:
-            guard let row = try db.query("SELECT iosAutoPrepare FROM ios_film_preferences WHERE singleton=1").first else {
+            guard let row = try db.query("SELECT iosAutoPrepare,metadataViewProvider FROM ios_film_preferences WHERE singleton=1").first else {
                 throw FilmSettingsStorageError.invalidDocument
             }
-            var fields: RuntimeObject = ["iosAutoPrepare": .bool(try row.bool("iosAutoPrepare"))]
+            var fields: RuntimeObject = ["iosAutoPrepare": .bool(try row.bool("iosAutoPrepare")),
+                "metadataViewProvider": .string(try row.text("metadataViewProvider"))]
             for list in Self.preferenceLists {
                 fields[list] = .array(try db.query("SELECT value FROM ios_film_preference_items WHERE list=? ORDER BY ordinal",
                                                   [.text(list)]).map { .string(try $0.text("value")) })
@@ -267,10 +268,10 @@ public final class FilmSettingsDocument: @unchecked Sendable {
                              key: ["rule_group", "ordinal"], rows: rows)
         case .preferences:
             guard let fields = root["preferences"]?.filmObject,
-                  Set(fields.keys) == Set(Self.preferenceLists + ["iosAutoPrepare"]),
+                  Set(fields.keys) == Set(Self.preferenceLists + ["iosAutoPrepare", "metadataViewProvider"]),
                   (try? FilmPlaybackPreferences(.object(fields))) != nil else { throw FilmSettingsStorageError.invalidDocument }
-            try Self.saveFlat(db, table: "ios_film_preferences", columns: ["iosAutoPrepare"],
-                              fields: ["iosAutoPrepare": fields["iosAutoPrepare"]!])
+            try Self.saveFlat(db, table: "ios_film_preferences", columns: ["iosAutoPrepare", "metadataViewProvider"],
+                              fields: ["iosAutoPrepare": fields["iosAutoPrepare"]!, "metadataViewProvider": fields["metadataViewProvider"]!])
             var rows: [[SQLiteValue]] = []
             for list in Self.preferenceLists {
                 guard let items = fields[list]?.filmArray else { throw FilmSettingsStorageError.invalidDocument }

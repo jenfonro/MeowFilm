@@ -176,27 +176,5 @@ public static partial class MusicRecommendationTests
         public void Dispose() { Release(); entered.Dispose(); release.Dispose(); }
     }
 
-    private static async Task OnRecommendationSta(Func<Task> body)
-    {
-        var done = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var stopped = NewSignal(); Dispatcher? owner = null;
-        var thread = new Thread(() =>
-        {
-            var dispatcher = Dispatcher.CurrentDispatcher; Volatile.Write(ref owner, dispatcher);
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
-            dispatcher.BeginInvoke(async () =>
-            {
-                Exception? failure = null;
-                try { await body(); } catch (Exception error) { failure = error; }
-                finally { done.TrySetResult(failure); dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            try { Dispatcher.Run(); } finally { stopped.TrySetResult(); }
-        }) { IsBackground = true, Name = "recommendation-responsiveness-test" };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        Exception? result;
-        try { result = await done.Task.WaitAsync(TimeSpan.FromSeconds(45)); }
-        catch { Volatile.Read(ref owner)?.BeginInvokeShutdown(DispatcherPriority.Send); throw; }
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (result is not null) ExceptionDispatchInfo.Capture(result).Throw();
-    }
+    private static Task OnRecommendationSta(Func<Task> body) => TestUiHost.InvokeAsync(body);
 }

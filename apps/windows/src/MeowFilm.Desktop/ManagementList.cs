@@ -1,34 +1,30 @@
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Threading;
+using System.Collections.ObjectModel;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Desktop;
 
 public sealed record ManagementRow(string Id, string Title, string Detail, bool Enabled,
-    Action Edit, Action<bool> Toggle, ContextMenu Menu, bool Failed = false,
+    Action Edit, Action<bool> Toggle, MenuFlyout Menu, bool Failed = false,
     Func<IReadOnlyList<FrameworkElement>>? Cells = null);
-
 public sealed record ManagementColumn(string Header, GridLength Width, double MaxWidth = double.PositiveInfinity);
 
-/// <summary>Reusable settings list chrome; item policy and persistence belong to the caller.</summary>
-public sealed class ManagementList : Grid
+/// <summary>Virtualized settings rows; native ListView owns drag, auto-scroll and keyboard reordering.</summary>
+public sealed class ManagementList : UserControl
 {
-    public TextBox Search { get; } = new() { MinWidth = 120, Padding = new(12, 9, 12, 9), Margin = new(0, 0, 12, 0) };
+    public TextBox Search { get; } = new() { MinWidth = 120, Padding = new(12, 9, 12, 9), Margin = new(0, 0, 12, 0), PlaceholderText = "搜索" };
     public StackPanel Tools { get; } = new() { Orientation = Orientation.Horizontal };
     public Button More { get; }
     public IReadOnlySet<string> Selected => selected;
     public event Action? SelectionChanged;
     public event Action? Delete;
-    public bool EnableRowDrag
-    {
-        get => enableRowDrag;
-        set { enableRowDrag = value; if (!value) CancelRowDrag(); }
-    }
     public event Action<IReadOnlyList<string>>? OrderChanged;
+    private readonly Grid layout = new();
+    private bool enableRowDrag;
+    public bool EnableRowDrag { get => enableRowDrag; set { enableRowDrag = value; UpdateDragAdmission(); } }
     public bool ShowToolbar { get => toolbar.Visibility == Visibility.Visible; set => toolbar.Visibility = value ? Visibility.Visible : Visibility.Collapsed; }
     public bool ShowBulkActions
     {
@@ -38,192 +34,111 @@ public sealed class ManagementList : Grid
     private readonly DockPanel toolbar;
     private readonly Border card, floating;
     private readonly Grid header = new() { Margin = new(7, 0, 7, 6), MinHeight = 32, Visibility = Visibility.Collapsed };
-    private readonly CheckBox headerAll = new() { Tag = "round", VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+    private readonly CheckBox headerAll = new() { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
     private IReadOnlyList<ManagementColumn> columns = [new("名称", new(1, GridUnitType.Star)), new("启用", GridLength.Auto), new("", GridLength.Auto), new("", GridLength.Auto)];
-    private Point dragStart;
-    private string? dragId;
-    private bool enableRowDrag;
-    private sealed record RowDrag(string Id);
-    private RowDrag? activeDrag;
-    private Window? dragWindow;
-    private DispatcherTimer? dragScrollTimer;
-    private ScrollViewer? dragScroll;
-    private int dragScrollDirection;
-    private Point dragPosition;
     private readonly HashSet<string> selected = [];
-    private readonly ListBox list = new() { BorderThickness = new(0), Background = Brushes.Transparent, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+    private readonly ListView list = new() { BorderThickness = new(0), Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), HorizontalContentAlignment = HorizontalAlignment.Stretch, SelectionMode = ListViewSelectionMode.None, AllowDrop = true };
     private readonly TextBlock empty = new() { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, Margin = new(0, 80, 0, 0) };
     private readonly CheckBox all = new() { VerticalAlignment = VerticalAlignment.Center };
     private readonly Button inverse, remove;
+    private readonly ObservableCollection<ManagementRowState> items = [];
     private IReadOnlyList<ManagementRow> rows = [];
     private int total;
+    private string[]? draggingOrder;
+    private IDisposable? visibility;
+    private readonly HashSet<Grid> columnRows = [];
+    private double[] sharedWidths = [];
+    private bool measuringColumns;
+    private void MeasureColumns(object? sender, object args)
+    {
+        if (measuringColumns) return;
+        measuringColumns = true;
+        try
+        {
+            var widths = new double[columns.Count];
+            foreach (var grid in columnRows.Prepend(header))
+                foreach (var cell in grid.Children.OfType<FrameworkElement>())
+                {
+                    int index = Grid.GetColumn(cell) - 1;
+                    if (index < 0 || index >= columns.Count || !columns[index].Width.IsAuto) continue;
+                    cell.Measure(new Windows.Foundation.Size(columns[index].MaxWidth, double.PositiveInfinity));
+                    widths[index] = Math.Min(columns[index].MaxWidth, Math.Max(widths[index], cell.DesiredSize.Width));
+                }
+            if (sharedWidths.SequenceEqual(widths)) return;
+            sharedWidths = widths;
+            foreach (var grid in columnRows.Prepend(header))
+                for (int index = 0; index < columns.Count && index + 1 < grid.ColumnDefinitions.Count; index++)
+                    if (columns[index].Width.IsAuto && widths[index] > 0) grid.ColumnDefinitions[index + 1].Width = new GridLength(widths[index]);
+        }
+        finally { measuringColumns = false; }
+    }
+    internal void AttachColumns(Grid row)
+    {
+        if (columnRows.Add(row)) row.LayoutUpdated += MeasureColumns;
+    }
+    internal void DetachColumns(Grid row) { columnRows.Remove(row); row.LayoutUpdated -= MeasureColumns; }
+
     public ManagementList()
     {
-        RowDefinitions.Add(new() { Height = GridLength.Auto }); RowDefinitions.Add(new());
-        toolbar = new DockPanel { Margin = new(0, 0, 0, 8) }; DockPanel.SetDock(Tools, Dock.Right); toolbar.Children.Add(Tools); toolbar.Children.Add(Search); Children.Add(toolbar);
-        Search.Tag = "搜索"; Search.SetResourceReference(StyleProperty, "MeowFilm.ManagementSearch"); AutomationProperties.SetName(Search, "搜索");
-        card = new Border { CornerRadius = new(22), BorderThickness = new(1), Padding = new(8, 8, 8, 76), ClipToBounds = true };
-        card.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
-        card.Effect = null;
-        var items = new Grid(); items.RowDefinitions.Add(new() { Height = GridLength.Auto }); items.RowDefinitions.Add(new());
-        items.Children.Add(header); SetRow(list, 1); SetRow(empty, 1); items.Children.Add(list); items.Children.Add(empty); card.Child = items; SetRow(card, 1); Children.Add(card);
-        items.SizeChanged += (_, e) => items.Clip = new RectangleGeometry(new Rect(new Point(), e.NewSize), 14, 14);
-        list.SetResourceReference(StyleProperty, "MeowFilm.ManagementList");
-        var template = new DataTemplate(typeof(ManagementRow)) { VisualTree = new FrameworkElementFactory(typeof(ManagementRowView)) }; list.ItemTemplate = template;
-        list.SetValue(VirtualizingPanel.IsVirtualizingProperty, true); list.SetValue(VirtualizingPanel.VirtualizationModeProperty, VirtualizationMode.Recycling);
-        list.SetValue(ScrollViewer.HorizontalScrollBarVisibilityProperty, ScrollBarVisibility.Disabled);
-        list.SetValue(ScrollViewer.VerticalScrollBarVisibilityProperty, ScrollBarVisibility.Auto);
-        list.SetResourceReference(ItemsControl.ItemContainerStyleProperty, "MeowFilm.ManagementListItem");
-        list.SetValue(ScrollViewer.CanContentScrollProperty, true); empty.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.MutedText");
-        var footer = new DockPanel { LastChildFill = true }; var actions = new StackPanel { Orientation = Orientation.Horizontal };
-        inverse = Button("反选", () => { selected.SymmetricExceptWith(rows.Select(r => r.Id)); Changed(); });
+        Content = layout;
+        layout.RowDefinitions.Add(new() { Height = GridLength.Auto }); layout.RowDefinitions.Add(new());
+        toolbar = new DockPanel { Margin = new(0, 0, 0, 8) }; DockPanel.SetDock(Tools, Dock.Right); toolbar.Children.Add(Tools); toolbar.Children.Add(Search); layout.Children.Add(toolbar);
+        Search.UseResource(StyleProperty, "MeowFilm.ManagementSearch"); AutomationProperties.SetName(Search, "搜索");
+        card = new Border { CornerRadius = new(22), BorderThickness = new(1), Padding = new(8, 8, 8, 76) };
+        card.UseResource(StyleProperty, "MeowFilm.FloatingSurface");
+        var content = new Grid(); content.RowDefinitions.Add(new() { Height = GridLength.Auto }); content.RowDefinitions.Add(new());
+        content.Children.Add(header); Grid.SetRow(list, 1); Grid.SetRow(empty, 1); content.Children.Add(list); content.Children.Add(empty); card.Child = content; Grid.SetRow(card, 1); layout.Children.Add(card);
+        list.UseResource(StyleProperty, "MeowFilm.ManagementList");
+        list.UseResource(ItemsControl.ItemContainerStyleProperty, "MeowFilm.ManagementListItem");
+        ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Disabled);
+        ScrollViewer.SetVerticalScrollBarVisibility(list, ScrollBarVisibility.Auto);
+        list.ItemsSource = items;
+        empty.UseResource(StyleProperty, "MeowFilm.MutedText");
+        var footer = new DockPanel(); var actions = new StackPanel { Orientation = Orientation.Horizontal };
+        inverse = Button("反选", () => { selected.SymmetricExceptWith(rows.Select(row => row.Id)); Changed(); });
         remove = Button("删除", () => Delete?.Invoke()); More = Button("···", () => OpenMenu(More!));
         AutomationProperties.SetName(More, "批量更多操作"); actions.Children.Add(inverse); actions.Children.Add(remove); actions.Children.Add(More); DockPanel.SetDock(actions, Dock.Right); footer.Children.Add(actions); footer.Children.Add(all);
-        floating = new Border { CornerRadius = new(26), BorderThickness = new(1), Padding = new(14, 8, 12, 8), Margin = new(12, 0, 12, 12), Height = 52, VerticalAlignment = VerticalAlignment.Bottom, Child = footer,
-            Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 22, ShadowDepth = 6, Opacity = .12 } };
-        floating.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
-        SetRow(floating, 1); Children.Add(floating);
-        foreach (var button in new[] { inverse, remove, More }) { button.Height = 32; button.MinHeight = 32; button.Padding = new(16, 0, 16, 0); button.SetResourceReference(Control.BackgroundProperty, "MeowFilm.Brush.InputSurface"); }
-        all.Tag = "round"; all.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");
-        all.Click += (_, _) => { selected.Clear(); if (all.IsChecked == true) selected.UnionWith(rows.Select(r => r.Id)); Changed(); };
-        AutomationProperties.SetAutomationId(all, "management.selectAll"); AutomationProperties.SetAutomationId(list, "management.list");
-        SetIsSharedSizeScope(this, true);
-        headerAll.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");
-        AutomationProperties.SetName(headerAll, "全选");
-        headerAll.Click += (_, _) => { selected.Clear(); if (headerAll.IsChecked == true) selected.UnionWith(rows.Select(r => r.Id)); Changed(); };
-        list.AllowDrop = true;
-        list.PreviewMouseLeftButtonDown += (_, e) =>
+        floating = new Border { CornerRadius = new(26), BorderThickness = new(1), Padding = new(14, 8, 12, 8), Margin = new(12, 0, 12, 12), Height = 52, VerticalAlignment = VerticalAlignment.Bottom, Child = footer };
+        floating.UseResource(StyleProperty, "MeowFilm.FloatingSurface"); Grid.SetRow(floating, 1); layout.Children.Add(floating);
+        foreach (var button in new[] { inverse, remove, More }) { button.Height = button.MinHeight = 32; button.Padding = new(16, 0, 16, 0); button.UseResource(Control.BackgroundProperty, "MeowFilm.Brush.InputSurface"); }
+        all.UseResource(StyleProperty, "MeowFilm.ManagementCheck");
+        all.Click += (_, _) => SelectAll(all.IsChecked == true);
+        headerAll.UseResource(StyleProperty, "MeowFilm.ManagementCheck"); headerAll.Click += (_, _) => SelectAll(headerAll.IsChecked == true);
+        AutomationProperties.SetName(headerAll, "全选"); AutomationProperties.SetAutomationId(all, "management.selectAll"); AutomationProperties.SetAutomationId(list, "management.list");
+        list.DragItemsStarting += (_, args) =>
         {
-            dragId = null;
-            if (!CanDragRows || IsInteractive(e.OriginalSource as DependencyObject)) return;
-            if (RowAt(e.OriginalSource as DependencyObject) is { } row) { dragId = row.Id; dragStart = e.GetPosition(list); }
+            if (!CanDragRows) { args.Cancel = true; return; }
+            draggingOrder = rows.Select(row => row.Id).ToArray();
         };
-        list.PreviewMouseMove += (_, e) =>
+        list.DragItemsCompleted += (_, args) =>
         {
-            if (dragId is null) return;
-            if (!CanDragRows || e.LeftButton != MouseButtonState.Pressed) { dragId = null; return; }
-            var point = e.GetPosition(list);
-            if (Math.Abs(point.X - dragStart.X) < SystemParameters.MinimumHorizontalDragDistance &&
-                Math.Abs(point.Y - dragStart.Y) < SystemParameters.MinimumVerticalDragDistance) return;
-            var data = BeginRowDrag(dragId);
-            if (data is null) return;
-            try { DragDrop.DoDragDrop(list, data, DragDropEffects.Move); }
-            finally { CancelRowDrag(); }
+            var before = draggingOrder; draggingOrder = null;
+            if (before is null || !CanDragRows || args.DropResult != Windows.ApplicationModel.DataTransfer.DataPackageOperation.Move) { Fill(); return; }
+            var after = items.Select(item => item.Row.Id).ToArray();
+            if (!before.SequenceEqual(after)) OrderChanged?.Invoke(after);
         };
-        list.PreviewMouseLeftButtonUp += (_, _) => dragId = null;
-        list.DragOver += (_, e) =>
+        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, _ => UpdateDragAdmission());
+        Unloaded += (_, _) =>
         {
-            e.Effects = UpdateRowDrag(e.Data, e.GetPosition(list)) ? DragDropEffects.Move : DragDropEffects.None;
-            e.Handled = true;
+            visibility?.Dispose(); visibility = null;
+            draggingOrder = null; list.CanDragItems = list.CanReorderItems = false;
         };
-        list.DragLeave += (sender, e) => { if (DragViewport(e.GetPosition(list), out _, out _) is null) StopDragScroll(); };
-        list.Drop += (_, e) =>
-        {
-            e.Effects = DropRowDrag(e.Data, e.GetPosition(list)) ? DragDropEffects.Move : DragDropEffects.None;
-            e.Handled = true;
-        };
-        list.QueryContinueDrag += (_, e) =>
-        {
-            if (!CanDragRows || activeDrag is null) e.Action = DragAction.Cancel;
-            if (e.EscapePressed || e.Action == DragAction.Cancel) CancelRowDrag();
-        };
-        Unloaded += (_, _) => CancelRowDrag();
-        IsVisibleChanged += (_, _) => { if (!IsVisible) CancelRowDrag(); };
-        IsEnabledChanged += (_, _) => { if (!IsEnabled) CancelRowDrag(); };
+        IsEnabledChanged += (_, _) => UpdateDragAdmission();
     }
-    private bool CanDragRows => EnableRowDrag && IsEnabled && IsVisible && rows.Count == total;
-    internal bool IsDragAutoScrolling => dragScrollTimer?.IsEnabled == true;
-    internal IDataObject? BeginRowDrag(string id)
+    private bool CanDragRows => EnableRowDrag && IsEnabled && DesktopVisual.IsVisible(this) && rows.Count == total;
+    private void UpdateDragAdmission()
     {
-        CancelRowDrag();
-        if (!CanDragRows || !rows.Any(row => row.Id == id)) return null;
-        activeDrag = new(id);
-        dragWindow = Window.GetWindow(this);
-        if (dragWindow is not null) dragWindow.Deactivated += DragWindowDeactivated;
-        return new DataObject("MeowFilm.ManagementRow", activeDrag);
+        list.CanDragItems = list.CanReorderItems = CanDragRows;
+        if (!CanDragRows) draggingOrder = null;
     }
-    private void DragWindowDeactivated(object? sender, EventArgs e) => CancelRowDrag();
-    internal void CancelRowDrag()
-    {
-        dragId = null; activeDrag = null; StopDragScroll();
-        if (dragWindow is not null) dragWindow.Deactivated -= DragWindowDeactivated;
-        dragWindow = null;
-    }
-    private bool IsCurrentDrag(IDataObject data) => CanDragRows && activeDrag is not null &&
-        ReferenceEquals(data.GetData("MeowFilm.ManagementRow", false), activeDrag);
-    private static T? FindVisual<T>(DependencyObject parent) where T : DependencyObject
-    {
-        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
-        {
-            var child = VisualTreeHelper.GetChild(parent, index);
-            if (child is T found) return found;
-            if (FindVisual<T>(child) is { } nested) return nested;
-        }
-        return null;
-    }
-    private ScrollViewer? DragViewport(Point position, out Point point, out double height)
-    {
-        point = default; height = 0;
-        var scroll = FindVisual<ScrollViewer>(list);
-        if (scroll?.Template.FindName("PART_ScrollContentPresenter", scroll) is not ScrollContentPresenter viewport) return null;
-        point = list.TranslatePoint(position, viewport); height = viewport.ActualHeight;
-        return height > 0 && point.X >= 0 && point.X < viewport.ActualWidth && point.Y >= 0 && point.Y < height ? scroll : null;
-    }
-    internal bool UpdateRowDrag(IDataObject data, Point position)
-    {
-        if (!IsCurrentDrag(data)) { CancelRowDrag(); return false; }
-        if (DragViewport(position, out var point, out double height) is not { } scroll) { StopDragScroll(); return false; }
-        dragPosition = position;
-        double edge = Math.Min(32, height / 3);
-        int direction = point.Y < edge ? -1 : point.Y >= height - edge ? 1 : 0;
-        if (direction == 0 || (direction < 0 ? scroll.VerticalOffset <= 0 : scroll.VerticalOffset >= scroll.ScrollableHeight))
-        { StopDragScroll(); return true; }
-        dragScroll = scroll; dragScrollDirection = direction;
-        if (dragScrollTimer is null)
-        {
-            dragScrollTimer = new DispatcherTimer(DispatcherPriority.Input, Dispatcher) { Interval = TimeSpan.FromMilliseconds(80) };
-            dragScrollTimer.Tick += DragScrollTick;
-        }
-        dragScrollTimer.Start();
-        return true;
-    }
-    private void DragScrollTick(object? sender, EventArgs e)
-    {
-        if (!CanDragRows || activeDrag is null) { CancelRowDrag(); return; }
-        if (dragScroll is not { } scroll || !ReferenceEquals(DragViewport(dragPosition, out _, out _), scroll) ||
-            (dragScrollDirection < 0 ? scroll.VerticalOffset <= 0 : scroll.VerticalOffset >= scroll.ScrollableHeight))
-        { StopDragScroll(); return; }
-        // Line scrolling respects the virtualizing panel's logical or pixel scroll units.
-        if (dragScrollDirection < 0) scroll.LineUp(); else scroll.LineDown();
-    }
-    private void StopDragScroll()
-    {
-        if (dragScrollTimer is not null)
-        {
-            dragScrollTimer.Stop(); dragScrollTimer.Tick -= DragScrollTick; dragScrollTimer = null;
-        }
-        dragScroll = null; dragScrollDirection = 0;
-    }
-    internal bool DropRowDrag(IDataObject data, Point position)
-    {
-        string? sourceId = IsCurrentDrag(data) && DragViewport(position, out _, out _) is not null ? activeDrag!.Id : null;
-        CancelRowDrag();
-        if (sourceId is null || list.InputHitTest(position) is not DependencyObject hit ||
-            RowAt(hit) is not { } target || ItemsControl.ContainerFromElement(list, hit) is not ListBoxItem container) return false;
-        ReportOrder(sourceId, target.Id, list.TranslatePoint(position, container).Y >= container.ActualHeight / 2);
-        return true;
-    }
+    private void SelectAll(bool value) { selected.Clear(); if (value) selected.UnionWith(rows.Select(row => row.Id)); Changed(); }
     public void SetColumns(IReadOnlyList<ManagementColumn> value)
     {
-        columns = value.ToArray(); header.Children.Clear(); ApplyColumns(header);
-        header.Children.Add(headerAll);
+        columns = value.ToArray(); sharedWidths = []; header.Children.Clear(); ApplyColumns(header); header.Children.Add(headerAll);
         for (int index = 0; index < columns.Count; index++)
         {
-            var title = new TextBlock { Text = columns[index].Header, VerticalAlignment = VerticalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(6, 0, 6, 0),
-                HorizontalAlignment = columns[index].Width.IsStar ? HorizontalAlignment.Left : HorizontalAlignment.Center };
-            title.SetResourceReference(StyleProperty, "MeowFilm.MutedText");
-            SetColumn(title, index + 1); header.Children.Add(title);
+            var title = new TextBlock { Text = columns[index].Header, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(6, 0, 6, 0), HorizontalAlignment = columns[index].Width.IsStar ? HorizontalAlignment.Left : HorizontalAlignment.Center };
+            title.UseResource(StyleProperty, "MeowFilm.MutedText"); Grid.SetColumn(title, index + 1); header.Children.Add(title);
         }
         header.Visibility = Visibility.Visible; Fill(); Count();
     }
@@ -231,52 +146,40 @@ public sealed class ManagementList : Grid
     {
         grid.ColumnDefinitions.Clear(); grid.ColumnDefinitions.Add(new() { Width = new(48) });
         for (int index = 0; index < columns.Count; index++)
-            grid.ColumnDefinitions.Add(new() { Width = columns[index].Width, MaxWidth = columns[index].MaxWidth,
-                SharedSizeGroup = columns[index].Width.IsAuto ? "managementColumn" + index : null });
-    }
-    internal static bool IsInteractive(DependencyObject? source)
-    {
-        for (var current = source; current is not null; current = ParentOf(current))
         {
-            if (current is ButtonBase or TextBoxBase or PasswordBox or Selector or System.Windows.Documents.Hyperlink) return true;
-            if (current is ManagementRowView or ListBoxItem) break;
+            var column = columns[index];
+            grid.ColumnDefinitions.Add(new() { Width = column.Width.IsAuto && index < sharedWidths.Length && sharedWidths[index] > 0 ? new GridLength(sharedWidths[index]) : column.Width, MaxWidth = column.MaxWidth });
         }
-        return false;
     }
-    private static DependencyObject? ParentOf(DependencyObject value) => value is Visual or System.Windows.Media.Media3D.Visual3D
-        ? VisualTreeHelper.GetParent(value) : LogicalTreeHelper.GetParent(value);
-    private ManagementRow? RowAt(DependencyObject? source) =>
-        (ItemsControl.ContainerFromElement(list, source) as ListBoxItem)?.DataContext is ManagementRowState state ? state.Row : null;
     internal void ReportOrder(string sourceId, string targetId, bool after)
     {
         if (!EnableRowDrag || rows.Count != total || sourceId == targetId || !rows.Any(row => row.Id == sourceId) || !rows.Any(row => row.Id == targetId)) return;
-        var order = rows.Select(row => row.Id).ToList(); order.Remove(sourceId);
-        order.Insert(order.IndexOf(targetId) + (after ? 1 : 0), sourceId);
+        var order = rows.Select(row => row.Id).ToList(); order.Remove(sourceId); order.Insert(order.IndexOf(targetId) + (after ? 1 : 0), sourceId);
         if (!order.SequenceEqual(rows.Select(row => row.Id))) OrderChanged?.Invoke(order.ToArray());
     }
     public void SetRows(IReadOnlyList<ManagementRow> value, int total, IEnumerable<string> validIds, string emptyMessage)
     {
-        rows = value; this.total = total; selected.IntersectWith(validIds); empty.Text = emptyMessage; empty.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        Fill(); Count();
+        rows = value; this.total = total; selected.IntersectWith(validIds); empty.Text = emptyMessage;
+        empty.Visibility = rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed; Fill(); Count();
     }
     private void Fill()
     {
-        CancelRowDrag();
-        // Only realized rows allocate native controls; state is keyed by stable item IDs.
-        list.ItemsSource = rows.Select(row => new ManagementRowState(this, row, selected.Contains(row.Id), value => { if (value) selected.Add(row.Id); else selected.Remove(row.Id); Count(); SelectionChanged?.Invoke(); })).ToArray();
+        draggingOrder = null; items.Clear();
+        foreach (var row in rows) items.Add(new(this, row, selected.Contains(row.Id), value => { if (value) selected.Add(row.Id); else selected.Remove(row.Id); Count(); SelectionChanged?.Invoke(); }));
+        UpdateDragAdmission();
     }
     private void Count()
     {
-        headerAll.IsChecked = all.IsChecked = rows.Count > 0 && rows.All(r => selected.Contains(r.Id)); all.Content = $"全选（{selected.Count}/{total}）";
+        headerAll.IsChecked = all.IsChecked = rows.Count > 0 && rows.All(row => selected.Contains(row.Id)); all.Content = $"全选（{selected.Count}/{total}）";
         inverse.IsEnabled = rows.Count > 0; remove.IsEnabled = More.IsEnabled = selected.Count > 0;
     }
     private void Changed() { Fill(); Count(); SelectionChanged?.Invoke(); }
     public static Button Button(string title, Action action)
     {
         var button = new Button { Content = title, Padding = new(12, 8, 12, 8), MinHeight = 36, Margin = new(4, 0, 0, 0) };
-        button.SetResourceReference(StyleProperty, "MeowFilm.QuietButton"); AutomationProperties.SetName(button, title); button.Click += (_, _) => action(); return button;
+        button.UseResource(StyleProperty, "MeowFilm.QuietButton"); AutomationProperties.SetName(button, title); button.Click += (_, _) => action(); return button;
     }
-    public static void OpenMenu(Button button) { if (button.ContextMenu is not { } menu) return; menu.PlacementTarget = button; menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom; menu.IsOpen = true; }
+    public static void OpenMenu(Button button) => (button.ContextFlyout as MenuFlyout)?.ShowAt(button, new FlyoutShowOptions { Placement = FlyoutPlacementMode.Bottom });
 }
 internal sealed class ManagementRowState(ManagementList owner, ManagementRow row, bool selected, Action<bool> select)
 {
@@ -288,16 +191,21 @@ internal sealed class ManagementRowState(ManagementList owner, ManagementRow row
 
 public sealed class ManagementRowView : Grid
 {
+    private ManagementList? owner;
     public ManagementRowView()
     {
         DataContextChanged += (_, _) => Render();
+        Loaded += (_, _) => { if (DataContext is ManagementRowState state) { owner = state.Owner; owner.AttachColumns(this); } };
+        Unloaded += (_, _) => { owner?.DetachColumns(this); owner = null; };
         Margin = new(6, 0, 6, 0); MinHeight = 64;
     }
     private void Render()
     {
+        owner?.DetachColumns(this); owner = null;
         Children.Clear(); if (DataContext is not ManagementRowState state) return;
+        if (IsLoaded) { owner = state.Owner; owner.AttachColumns(this); }
         state.Owner.ApplyColumns(this); var row = state.Row;
-        var check = new CheckBox { IsChecked = state.Selected, Tag = "round", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }; check.SetResourceReference(StyleProperty, "MeowFilm.ManagementCheck");
+        var check = new CheckBox { IsChecked = state.Selected, Tag = "round", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }; check.UseResource(StyleProperty, "MeowFilm.ManagementCheck");
         AutomationProperties.SetName(check, "选择 " + row.Title); check.Click += (_, _) => state.Select(check.IsChecked == true); Children.Add(check);
         if (row.Cells is not null)
         {
@@ -308,13 +216,13 @@ public sealed class ManagementRowView : Grid
         }
         var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 8, 12, 8) };
         var title = new TextBlock { Text = row.Title, TextTrimming = TextTrimming.CharacterEllipsis };
-        title.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Body");
-        title.SetResourceReference(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Normal");
-        title.SetResourceReference(FrameworkElement.StyleProperty, "MeowFilm.Text"); text.Children.Add(title);
-        if (row.Detail.Length > 0) { var detail = new TextBlock { Text = row.Detail, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) }; detail.SetResourceReference(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Caption"); detail.SetResourceReference(FrameworkElement.StyleProperty, row.Failed ? "MeowFilm.ErrorText" : "MeowFilm.MutedText"); text.Children.Add(detail); }
+        title.UseResource(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Body");
+        title.UseResource(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Normal");
+        title.UseResource(FrameworkElement.StyleProperty, "MeowFilm.Text"); text.Children.Add(title);
+        if (row.Detail.Length > 0) { var detail = new TextBlock { Text = row.Detail, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) }; detail.UseResource(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Caption"); detail.UseResource(FrameworkElement.StyleProperty, row.Failed ? "MeowFilm.ErrorText" : "MeowFilm.MutedText"); text.Children.Add(detail); }
         SetColumn(text, 1); Children.Add(text);
-        var enabled = new CheckBox { IsChecked = row.Enabled, VerticalAlignment = VerticalAlignment.Center, Margin = new(8, 0, 12, 0) }; enabled.SetResourceReference(StyleProperty, "MeowFilm.ManagementSwitch"); AutomationProperties.SetName(enabled, "启用 " + row.Title); enabled.Click += (_, _) => row.Toggle(enabled.IsChecked == true); SetColumn(enabled, 2); Children.Add(enabled);
-        var edit = ManagementList.Button("编辑", row.Edit); edit.ClearValue(MinHeightProperty); edit.ClearValue(Control.PaddingProperty); edit.SetResourceReference(StyleProperty, "MeowFilm.ManagementRowButton"); AutomationProperties.SetName(edit, "编辑 " + row.Title); SetColumn(edit, 3); Children.Add(edit);
-        Button? more = null; more = ManagementList.Button("···", () => ManagementList.OpenMenu(more!)); more.ClearValue(MinHeightProperty); more.ClearValue(Control.PaddingProperty); more.SetResourceReference(StyleProperty, "MeowFilm.ManagementRowButton"); more.ContextMenu = row.Menu; AutomationProperties.SetName(more, row.Title + "更多操作"); SetColumn(more, 4); Children.Add(more);
+        var enabled = new CheckBox { IsChecked = row.Enabled, VerticalAlignment = VerticalAlignment.Center, Margin = new(8, 0, 12, 0) }; enabled.UseResource(StyleProperty, "MeowFilm.ManagementSwitch"); AutomationProperties.SetName(enabled, "启用 " + row.Title); enabled.Click += (_, _) => row.Toggle(enabled.IsChecked == true); SetColumn(enabled, 2); Children.Add(enabled);
+        var edit = ManagementList.Button("编辑", row.Edit); edit.ClearValue(MinHeightProperty); edit.ClearValue(Control.PaddingProperty); edit.UseResource(StyleProperty, "MeowFilm.ManagementRowButton"); AutomationProperties.SetName(edit, "编辑 " + row.Title); SetColumn(edit, 3); Children.Add(edit);
+        Button? more = null; more = ManagementList.Button("···", () => ManagementList.OpenMenu(more!)); more.ClearValue(MinHeightProperty); more.ClearValue(Control.PaddingProperty); more.UseResource(StyleProperty, "MeowFilm.ManagementRowButton"); more.ContextFlyout = row.Menu; AutomationProperties.SetName(more, row.Title + "更多操作"); SetColumn(more, 4); Children.Add(more);
     }
 }

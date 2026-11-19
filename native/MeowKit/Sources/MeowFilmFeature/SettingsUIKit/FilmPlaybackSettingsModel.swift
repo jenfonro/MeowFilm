@@ -21,10 +21,28 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
 
     public func loadPreferences() async throws {
         try beginPreferences(); defer { preferencesBusy = false }
+        try await reloadPreferences()
+    }
+
+    func reloadPreferences() async throws {
         let value = try await FilmPlaybackPreferences(Self.preferences(in: settingsDocument.read()))
         try Task.checkCancellation()
-        preferences = value
+        if preferences != value { preferences = value }
         if draft == nil { draft = value }
+    }
+
+    func setMetadataViewProvider(_ provider: FilmMetadataProvider) async throws {
+        try beginPreferences(); defer { preferencesBusy = false }
+        let document = try await settingsDocument.update { current in
+            var value = try FilmPlaybackPreferences(Self.preferences(in: current))
+            value.metadataViewProvider = provider
+            var envelope = current?.filmObject ?? ["version": .number(1)]
+            envelope["preferences"] = value.value
+            return .object(envelope)
+        }
+        let saved = try FilmPlaybackPreferences(Self.preferences(in: document))
+        if preferences != saved { preferences = saved }
+        if draft == nil { draft = saved }
     }
 
     public func loadLibrary(area: FilmPlaybackLibrary.Area = .manual) async throws {
@@ -74,10 +92,13 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
     public func savePreferences() async throws {
         guard let draft else { throw FilmPlaybackError(code: "INVALID_REQUEST") }
         try beginPreferences(); defer { preferencesBusy = false }
-        let patch = try Self.normalize(draft.editedValues)
+        // The settings form does not own the independently saved directory view.
+        var patch = try Self.normalize(draft.editedValues)
+        patch["metadataViewProvider"] = nil
+        let savedPatch = patch
         let document = try await settingsDocument.update { current in
             var values = try Self.preferences(in: current).filmRequiredObject()
-            for (key, value) in patch { values[key] = value }
+            for (key, value) in savedPatch { values[key] = value }
             var envelope = current?.filmObject ?? ["version": .number(1)]
             envelope["preferences"] = .object(values)
             return .object(envelope)
@@ -102,6 +123,12 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         var result = RuntimeObject()
         for (key, value) in patch {
             if key == "iosAutoPrepare" { result[key] = value; continue }
+            if key == "metadataViewProvider" {
+                guard value.filmText.flatMap(FilmMetadataProvider.init(rawValue:)) != nil else {
+                    throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+                }
+                result[key] = value; continue
+            }
             guard let rows = value.filmArray, rows.allSatisfy({ $0.filmText != nil }) else {
                 throw FilmPlaybackError(code: "INVALID_PREFERENCES")
             }

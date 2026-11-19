@@ -304,9 +304,7 @@ export class CatRuntime {
       const file = this.sourcePath(sourceHash);
       const state = statSync(file);
       requireValue(state.isFile(), 'CORRUPT_STORAGE');
-      requireValue(state.size <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       const bytes = readFileSync(file);
-      requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       if (this.configuration) requireValue(hash(bytes) === sourceHash, 'CORRUPT_STORAGE');
       return bytes;
     } catch (error) { throw safeError(error, 'CORRUPT_STORAGE'); }
@@ -450,9 +448,8 @@ export class CatRuntime {
     try {
       requireValue(typeof spec.localPath === 'string' && isAbsolute(spec.localPath) && !/[\u0000-\u001f]/.test(spec.localPath), 'CORRUPT_STORAGE');
       const state = statSync(spec.localPath);
-      requireValue(state.isFile() && state.size <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
+      requireValue(state.isFile(), 'CORRUPT_STORAGE');
       const bytes = readFileSync(spec.localPath);
-      requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
       if (hash(bytes) !== spec.localHash) { bytes.fill(0); throw fault('STORAGE_CONFLICT'); }
       return Promise.resolve(bytes);
     } catch (error) { return Promise.reject(safeError(error, 'CORRUPT_STORAGE')); }
@@ -680,7 +677,7 @@ export class CatRuntime {
     if (proposal.name !== undefined) catName(proposal.name);
     requireValue(proposal.enabled === undefined || typeof proposal.enabled === 'boolean');
     requireValue(proposal.version === undefined || typeof proposal.version === 'string' &&
-      proposal.version.length > 0 && proposal.version.length <= 128);
+      proposal.version.length > 0);
     requireValue(proposal.sourceType === undefined || ['local', 'network'].includes(proposal.sourceType));
     const spec = { ...previous, installationId: proposal.installationId,
       config: proposal.config ?? previous?.config ?? {},
@@ -704,7 +701,6 @@ export class CatRuntime {
     requireValue(typeof source === 'string');
     requireValue(contentHash === undefined || typeof contentHash === 'string' && /^[a-f0-9]{64}$/.test(contentHash));
     const bytes = Buffer.from(source);
-    requireValue(bytes.length <= this.limit('maxSourceBytes'), 'RESOURCE_LIMIT');
     decodeSource(bytes);
     try { parse(source, { ecmaVersion: 'latest', allowReturnOutsideFunction: true }); }
     catch { throw fault('SCRIPT_EXCEPTION'); }
@@ -744,8 +740,7 @@ export class CatRuntime {
     });
   }
   downloadSource(sourceUrl, signal) {
-    return downloadCatSource(sourceUrl, { signal, maxSourceBytes: this.limit('maxSourceBytes'),
-      timeoutMs: this.limit('requestTimeoutMs') });
+    return downloadCatSource(sourceUrl, { signal, timeoutMs: this.limit('requestTimeoutMs') });
   }
   async edit(input, { signal } = {}) {
     const { installationId, name, sourceUrl } = clone(input);
@@ -1380,7 +1375,7 @@ export class CatRuntime {
         delete outHeaders['content-length']; delete outHeaders.etag;
         delete outHeaders['content-md5']; delete outHeaders.digest;
         delete outHeaders['content-encoding'];
-        const text = await control.race(readProxyPlaylist(input.stream, upstream.headers));
+        const text = await control.race(readProxyPlaylist(input.stream));
         control.close();
         controlActive = false;
         const body = proxyPlaylistBody(text, target, input.format, entry, map, hlsVariables);

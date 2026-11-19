@@ -6,9 +6,8 @@ function cloneJSONValue(value) {
   try { return copyJSON(value); } catch { throw fault('INVALID_ARGUMENT'); }
 }
 
-/** Source and stack contracts shared by every protocol. */
+/** Stack contract shared by every protocol. */
 export const SCRIPT_LIMITS = Object.freeze({
-  maxSourceBytes: 16 * 1024 * 1024,
   maxStackBytes: 256 * 1024,
 });
 
@@ -49,14 +48,13 @@ function permissions(raw = {}) {
   return { storage: [...new Set(storage)] };
 }
 
-function revision(spec, base, maxSourceBytes = SCRIPT_LIMITS.maxSourceBytes) {
+function revision(spec, base) {
   requireValue(spec && typeof spec === 'object' && !Array.isArray(spec));
   const source = spec.source ?? base?.source;
   const version = spec.version ?? base?.version ?? '0.0.0';
   const protocol = spec.protocol ?? base?.protocol ?? 'lx';
   requireValue(typeof source === 'string' && source.trim().length > 0);
-  requireValue(Buffer.byteLength(source, 'utf8') <= maxSourceBytes, 'RESOURCE_LIMIT');
-  requireValue(typeof version === 'string' && version.length > 0 && version.length <= 128);
+  requireValue(typeof version === 'string' && version.length > 0);
   identifier(protocol);
   const config = cloneJSONValue(spec.config ?? base?.config ?? {});
   const metadata = cloneJSONValue(spec.metadata ?? base?.metadata ?? {});
@@ -301,7 +299,7 @@ export class ScriptHost {
     requireValue(!signal?.aborted, 'CANCELLED');
     requireValue(spec && typeof spec === 'object');
     const id = identifier(spec.installationId);
-    const rev = revision(spec, undefined, this.limits.maxSourceBytes);
+    const rev = revision(spec);
     requireValue(Object.hasOwn(this.adapters, rev.protocol), 'UNSUPPORTED_PROTOCOL');
     requireValue(spec.enabled === undefined || typeof spec.enabled === 'boolean');
     return this.#locked(id, async () => {
@@ -408,7 +406,7 @@ export class ScriptHost {
     const current = this.#records.get(id);
     if (current) {
       try {
-        const next = revision(proposal, current.revision, this.limits.maxSourceBytes);
+        const next = revision(proposal, current.revision);
         requireValue(Object.hasOwn(this.adapters, next.protocol), 'UNSUPPORTED_PROTOCOL');
         if (proposal.source !== undefined) proposal.contentHash = next.hash;
       }
@@ -418,7 +416,7 @@ export class ScriptHost {
     return this.#locked(id, () => {
       requireValue(!signal?.aborted, 'CANCELLED');
       const record = this.#record(id);
-      const next = revision(proposal, record.revision, this.limits.maxSourceBytes);
+      const next = revision(proposal, record.revision);
       requireValue(Object.hasOwn(this.adapters, next.protocol), 'UNSUPPORTED_PROTOCOL');
       return this.#replace(record, next, signal);
     });

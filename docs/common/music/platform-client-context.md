@@ -23,17 +23,38 @@
 
 - 操作只取用需要的参数。未使用的额外合法 JSON 字段不拒绝，也不透传为地址、请求头或凭据；不存在的模块、平台或操作仍无法派发。
 - 固定 URL、方法、请求头、版本和签名输入由配方直接定义，不逐层证明常量或构造另一份原生 wire 请求。
-- 只消费 A、B 时，C 缺失、为 null、变为其他合法类型或新增 D，不影响 A、B。真正必需字段无法转换，在实际消费处报告解析失败；非法 JSON 和真实传输超限仍失败。
+- 普通内容读取只提取当前字段，不设置字段完整性、类型、成员数量、非空全坏或可执行身份放行门禁。缺少文字、图片、数字或动作只影响对应材料，不否定卡片、栏目或页面；非法 JSON、真实传输失败和资源超限仍失败，程序错误不伪装为空成功。
 - 平台定位保留字符串精度，不按猜测的位数、字符集或名称长度拒绝。协议实际要求的编码、数值转换和批次仍执行。
 - 首页直接使用可呈现栏目、卡片和真实游标；允许增加、删除、重排及推荐变化。动作直接使用必要定位，不以前次首页摘要、成员列表、seed 证明或 handle 一致作为准入条件。
-- 首页顶部入口与频道推荐组沿用运行器返回的 `entries`／栏目 `items`；顺序、标题、动作及 `requiresAccount`、`display`、`available` 由 Node 配方发布。每日推荐（含风格日推）和心动推荐在没有当前已发布账号会话时为 `display:false`、`available:false`，有账号时才显示；FM 与相似推荐保留真实匿名能力。客户端消费显示声明，不另建固定入口或按动作类型重算登录可见性；展示快照不授予当前账号权限。
+- 首页顶部入口与频道推荐组统一为 `sections` 中的 `feature-rail`；顺序、标题、动作及 `requiresAccount`、`display`、`available` 由 Node 配方发布。每日推荐（含风格日推）和心动推荐在没有当前已发布账号会话时为 `display:false`、`available:false`，有账号时才显示；FM 与相似推荐保留真实匿名能力。客户端消费显示声明，不另建固定入口或按动作类型重算登录可见性；展示快照不授予当前账号权限。
 - 分页使用真实 cursor、nextpage、结束标记及 consumed 位置；短页不自动证明结束。同组多版本、顺序和重复 occurrence 不因展示数量裁剪。
-- 分页只解析当前所需成员和可关联详情，不提前消费后页元数据；canonical 返回保留真实身份，不能给未确认的别名关联补造成员位置。可选 artist、格式成员或动作不可读时只舍弃该材料，仍使用真实定位；坏根、实际所需身份缺失及非空全坏结果不变成空成功。
+- 分页只解析当前成员和可关联详情，不提前消费后页元数据；canonical 返回保留真实身份，不能给未确认的别名关联补造成员位置。身份缺失的歌曲仍可保留展示，但不制造永久歌曲或可执行定位；仓库采用结果不反向删除父卡或其他展示材料。
 - 普通全集读取只取得所需内容，不前后双读确认快照；实际规范 ID、条数和正常内容变化不与本地预估二次比较。真实远端写事务单独保留其提交保障。
-- 元数据补全只为实际缺项请求，不联网证明已有封面，不改变队列 revision、顺序、当前 occurrence 或播放位置。封面、描述、翻译／罗马音等可选信息不阻断可执行的主要操作。
+- 运行器在首页／频道转换中不因缺标题、图片或歌手自行追加摘要／详情请求。原生业务 owner 按可见展示需求复用已读集合根资料，必要时显式请求已有摘要配方；只有明确请求成员时才执行所需的多步成员读取。已有 URL 不联网证明，资料回填不改变队列 revision、顺序、当前 occurrence 或播放位置，详见[共享图片与展示资源](presentation-resources.md#缺少图片引用的按需读取)。
 - 官方音频按真实 URL、品质、完整版／试听事实消费；游客可使用配方确实支持的能力。网络或解析失败不推断需要登录、无资源或错源。专有歌词解密和 chorus 字段转换由 Node 完成。
 - 歌词主轨与翻译／罗马音分别消费；附属轨失败保留主轨、健康兄弟及有限错误码，取消、超时、会话失效和资源超限继续终止。Base64 接受等价空白与省略 padding，仍拒绝非法字符、坏密文、压缩流和时钟材料。签名始终使用上游原文，不先作数值规范化。
 - 播放反馈按平台和 start／end 取实际编码字段。QQ 使用已取得的曲目时长；网易不消费调用者 duration／position；酷狗 start 只消费时长，end 保留真实录音时长与播放位置关联，不消费 media。附加回执成员不改变真实成功／拒绝及一次结算。
+
+## 固定内容协议
+
+平台适配只在 Node 执行。两端各自只有一份下列字段消费规则，不认识上游 DSL、容器、字段别名或图片地址配方。固定协议不意味着五平台均支持所有操作：目前首页／频道由网易、酷狗提供，其他平台不虚构配方。
+
+| 结果 | 共同字段与职责 |
+| --- | --- |
+| BrowsePage | `home/channel/artistActivity/charts` 返回 `platform/id/title/sections/tags/selectedTag/continuation`；不再同时返回另一套顶层 `entries`／`feed` 展示树 |
+| Section | `id/title/layout/items/action/tabs/selectedTab/tags/selectedTag/errorCode/avatars/requiresAccount`；`layout` 是最终组件分类，不按 `type`、成员形状或平台二次分类 |
+| Card | `key/id/kind/label/title/subtitle/contextText/cover/coverRef/action/song`，以及 `presentation/preview/previewSongs/decoration/count/playCount/coverLabel/dayOfMonth/display/available/requiresAccount/canPlay` 等独立展示材料 |
+| ChannelDirectory | `{platform,items:[descriptor]}`；descriptor 使用 `id/name/channelKind/pageCode/cover/placement/available/display`，不从 id 前缀猜频道类型 |
+| Song | `title/artist/album/duration/cover_url/sources`；独立歌曲列表不嵌套第二层 `song`，排行可附加 `rank`。`sources` 保存真实来源，不伪造永久 songId |
+| Collection | `id/name/cover/count/playCount/creator/source/engine`；详情另保留其现有根资料、歌曲 `items` 与分页材料 |
+
+- `layout` 为 `feature-rail/banner/playlist-rail/playlist-grid/song-columns/song-list/artist-grid/channel-grid/ranking/ranking-small/ranked-songs/artist-updates/vip-songs/vip-ranked-songs/album-ranking`。`TOP_3/ONLY_COVER/rail/list` 等上游／适配中间值不进入端侧分派。
+- `kind` 为 `song/playlist/album/artist/channel/chart/daily/fm/similar/heartbeat/song-collection/unsupported`，表达内容与动作类别，不能由 `sources`、`available` 或动作形状重算。未知／缺动作保留展示，仅不执行操作。
+- `title` 是卡片业务标题。`label` 只表达首页入口上方栏目标签；频道为空。`contextText` 独立保留动态业务文字材料，未提供时为空。Windows 首页上方显示 `label`、底栏优先采用 `contextText`（FM 按该歌曲材料组合漫游文案），缺失时使用 `subtitle`；频道底栏显示 `title`。iOS 保留自己的既有标题／副标题位置。
+- `count` 是歌曲数量，`playCount` 是可选数值播放量，缺失为 null，真实 0 保留；两者不混用。`coverLabel` 为封面独立标识，例如频道 FM 的“欧美漫游”，不占首页 `label` 的语义。
+- `cover` 是该卡片展示图，不因 `song.cover_url`、动作目标或仓库采用而被覆盖。`coverRef` 为同一展示图的显式元数据定位；目前网易普通歌单为 `{kind:"playlist",id}`，其余为 null，banner 始终为 null。
+- 显式 `playlists` 操作接收 `{ids:[...]}`，返回 `{platform,items:[Collection]}`。客户端不为集合图读取完整成员、不取第一首歌图冒充集合图。
+- 结构诊断仅包含固定提取路径、阶段、JSON 类型及数量，不含账号、ID、URL、原始响应或其他业务值；诊断附于 `diagnostics`，不参与放行或客户端分类。正常缺项、真实网络失败和程序错误分别处理。
 
 ## 匿名连续性、账号发布与缓存
 
@@ -52,10 +73,10 @@
 
 | 边界 | 保留的真实职责 |
 | --- | --- |
-| 通信／字段消费 | JSON 解码及本次所需字段转换，不验证整份未消费对象 |
+| 通信／字段消费 | JSON 解码及固定字段提取，不将内容完整性或类型证明当作读取成功条件 |
 | 控制面 | 实际派发、resume／cancel 关联和真实保存回执，不套到普通歌曲字段 |
 | 协议与认证 | 真实签名、加解密、prepare、候选认证和账号归属 |
-| 传输与资源 | TLS、动态携密目标限制、已有字节预算／deadline、取消和关闭；元素数不是字节预算 |
+| 传输与资源 | TLS、动态携密目标限制、deadline、取消和关闭；普通业务传输不设应用字节配额，缓存和播放缓冲预算独立 |
 | 安全保存与发布 | 原生凭据保护、条件保存与授权撤销，未知不假报成功 |
 | 本地提交 | 队列／曲库／设置原子提交、真实保存回执、当前操作归属及迟到隔离 |
 | 远端写事务 | 真实确认、journal／outbox 和未知写只读核对，不自动重放，不扩散到普通读 |

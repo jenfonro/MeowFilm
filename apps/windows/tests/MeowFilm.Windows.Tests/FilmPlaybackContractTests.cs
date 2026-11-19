@@ -8,7 +8,7 @@ namespace MeowFilm.Windows.Tests;
 public static class FilmPlaybackContractTests
 {
     private static TestCase Test(string name, Func<Task> action) =>
-        new("film-wire-consumer: " + name, () => MusicQualityConsumerTests.Sta(action));
+        new("film-wire-consumer: " + name, () => TestUiHost.InvokeAsync(action));
     private static JsonNode Node(JsonElement value) => JsonNode.Parse(value.GetRawText())!;
     private static JsonElement SourceBrowsing() => FilmJson.Encode(new
     {
@@ -491,12 +491,15 @@ public static class FilmPlaybackContractTests
             Check(rig.Page.HasMetadataMappings && rig.Runtime.Calls.Count == before, "rendering the proven menu performs no business fetch");
             await rig.Page.BrowseMetadataMappingAsync(association);
             var command = rig.Runtime.Calls.Last().Parameters;
-            Check(FilmJson.Text(command, "action") == "browse" && FilmJson.Text(command, "sourceId") == "site-choice" &&
-                FilmJson.Text(command, "metadataSourceId") == "douban:200", "only mapping selection keeps the actual station");
+            Check(FilmJson.Text(command, "action") == "browse.metadata" && FilmJson.Bool(command, "keepSource") &&
+                FilmJson.Text(command, "sourceId") == "site-choice" &&
+                FilmJson.Text(command, "metadataSourceId") == "douban:200", "only explicit view selection changes its mapping and keeps the station");
             await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.MetadataSourceId == "douban:200"));
             command = rig.Runtime.Calls.Last().Parameters;
             Check(FilmJson.Text(command, "action") == "browse" && FilmJson.Text(command, "sourceId").Length == 0,
-                "normal metadata selection returns to pure information");
+                "aggregate source selection returns to aggregate browsing without changing the view provider");
+            string poster = rig.Page.Poster, score = rig.Page.Score;
+            var recommendations = rig.Page.Recommendations;
             rig.Runtime.Change(root =>
             {
                 root["metadata"] = Node(FilmJson.Encode(new { title = "当前豆瓣资料", rating = new { value = 8.3 } }));
@@ -509,10 +512,10 @@ public static class FilmPlaybackContractTests
                 root["browsing"] = Node(FilmJson.Encode(new { sourceId = (string?)null, season = 1, lines = Array.Empty<object>(), episodes = Array.Empty<object>() }));
                 root["episodes"] = new JsonArray();
             });
-            await Until(() => rig.Page.Score == "8.3");
-            Check(rig.Page.ActiveTarget == rig.Runtime.Target && !rig.Page.HasImageEpisodes && rig.Page.Poster == "" &&
-                rig.Page.Score == "8.3" && rig.Page.Recommendations.Count == 0,
-                $"old TMDB provider artwork and similar items do not leak into the new identity; provider={rig.Page.ActiveTarget.MetadataProvider}, episodes={rig.Page.Episodes.Count}, poster={rig.Page.Poster}, score={rig.Page.Score}, recommendations={rig.Page.Recommendations.Count}");
+            await Until(() => !rig.Page.HasImageEpisodes);
+            Check(rig.Page.ActiveTarget == rig.Runtime.Target && rig.Page.Poster == poster &&
+                rig.Page.Score == score && ReferenceEquals(rig.Page.Recommendations, recommendations),
+                "an empty Douban browse response changes only its directory, not the stable TMDB work display");
         });
         yield return Test("season-filtered third row and original directory use different real lists with exact candidate playback", async () =>
         {

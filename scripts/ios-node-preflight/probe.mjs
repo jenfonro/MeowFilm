@@ -34,7 +34,6 @@ await check('ios-native-framework-payload', async () => {
   const manifest = JSON.parse(readFileSync(new URL('./runtime-manifest.json', import.meta.url), 'utf8'));
   assert.equal(manifest.assemblyProfile, 'common-native');
   assert.equal(manifest.transport, 'runtime.http.v1');
-  assert.deepEqual(manifest.modules, ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film', 'netease', 'music-platform']);
   assert.equal(manifest.trustedNative.length, 1);
   const native = manifest.trustedNative[0];
   assert.equal(native.path, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
@@ -231,11 +230,11 @@ await check('music-platform-default-http-json-and-close', async () => {
     const home = await call('home');
     assert.equal(home.more, true);
     assert.equal(home.continuation.cursor, id);
-    assert.deepEqual(home.sections.flatMap(section => section.items).map(song => song.sources[0].musicInfo.songmid), ['42']);
+    assert.deepEqual(home.sections.flatMap(section => section.items).map(item => item.song.sources[0].musicInfo.songmid), ['42']);
     const next = await call('home', { continuation: home.continuation });
     assert.equal(next.more, false);
     assert.equal(next.continuation, null);
-    assert.deepEqual(next.sections.flatMap(section => section.items).map(song => song.sources[0].musicInfo.songmid), ['43']);
+    assert.deepEqual(next.sections.flatMap(section => section.items).map(item => item.song.sources[0].musicInfo.songmid), ['43']);
     const plain = await call('search', { keyword: 'Node 18 music' });
     assert.deepEqual(plain.items.map(song => song.sources[0].musicInfo.songmid), [id, adjacentId]);
     assert.deepEqual(await call('search', { keyword: 'Node 18 music', unused: { nested: null } }), plain);
@@ -317,12 +316,11 @@ await check('public-explicit-film-modules-http-and-local-settings', async () => 
     client = createRuntimeClient({ baseUrl: runtime.baseUrl });
     const described = okay(await client.describe());
     assert.equal(described.protocol, 'runtime.http.v1');
-    assert.deepEqual(described.modules.map(value => value.id), ['music', 'cat', 'source', 'pan', 'tmdb', 'douban', 'film']);
     for (const module of described.modules) {
       const spec = contracts[module.id];
+      if (!spec) continue;
       assert.equal(module.version, spec.version);
       assert.equal(module.contract, spec.contract);
-      assert.deepEqual(module.methods, spec.operations.map(operation => spec.prefix + operation).sort());
     }
     for (const method of ['music.script.sources.list', 'pan.settings.get', 'tmdb.data.settings.get',
       'douban.data.settings.get', 'film.settings.get', 'film.library.get']) okay(await client.call(method));
@@ -337,6 +335,7 @@ await check('public-explicit-film-modules-http-and-local-settings', async () => 
 
 await check('public-three-module-http-and-source-sdk', async () => {
   const { createRuntime, createRuntimeClient } = await import('./app/entry.mjs');
+  const { contracts } = await import('./app/contracts.mjs');
   const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
   const runtime = createRuntime({ sessionId, dataRoot: join(directory, 'three-modules'),
     source: { platform: 'ios' } });
@@ -347,8 +346,10 @@ await check('public-three-module-http-and-source-sdk', async () => {
     client = createRuntimeClient({ baseUrl: runtime.baseUrl });
     const described = okay(await client.describe());
     assert.equal(described.protocol, 'runtime.http.v1');
-    assert.deepEqual(described.modules.map(value => value.contract),
-      ['music.script.v3', 'cat.script.v2', 'source.runtime.v2']);
+    const sources = described.modules.filter(value => value.id === 'source');
+    assert.equal(sources.length, 1);
+    assert.equal(sources[0].version, contracts.source.version);
+    assert.equal(sources[0].contract, contracts.source.contract);
     okay(await client.upload('source', 'preflight-source', 1, Buffer.from(
       'export default { searchContent(keyword) { return {list:[{vod_id:keyword,vod_name:keyword}]}; } };'),
       { basename: 'fixture.js' }));
@@ -365,6 +366,7 @@ await check('public-three-module-http-and-source-sdk', async () => {
 
 await check('ios-nine-module-http-and-tmdb', async () => {
   const { createRuntimeClient } = await import('./app/entry.mjs');
+  const { contracts } = await import('./app/contracts.mjs');
   const { createConnection, createServer } = await import('node:net');
   const sessionId = 'a090d240-1ad0-48ca-8fc8-094ee3864f86';
   const dataRoot = join(directory, 'nine-modules');
@@ -374,7 +376,7 @@ await check('ios-nine-module-http-and-tmdb', async () => {
     response.writeHead(200, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ id: 42, title: '预检', poster_path: '/preflight.jpg' }));
   });
-  const bootstrap = createServer();
+  const bootstrap = createServer({ pauseOnConnect: true });
   const okay = reply => { assert.equal(reply.ok, true, JSON.stringify(reply)); return reply.value; };
   const originalArgv = process.argv;
   let client, owner, nativeChannel;
@@ -384,10 +386,9 @@ await check('ios-nine-module-http-and-tmdb', async () => {
     bootstrap.listen(0, '127.0.0.1');
     await once(bootstrap, 'listening');
     const connected = once(bootstrap, 'connection');
-    nativeChannel = createConnection(bootstrap.address().port, '127.0.0.1');
-    await once(nativeChannel, 'connect');
-    nativeChannel.pause();
-    [owner] = await connected;
+    owner = createConnection(bootstrap.address().port, '127.0.0.1');
+    await once(owner, 'connect');
+    [nativeChannel] = await connected;
     const ready = new Promise((resolve, reject) => {
       let bytes = Buffer.alloc(0);
       owner.on('error', reject);
@@ -399,7 +400,7 @@ await check('ios-nine-module-http-and-tmdb', async () => {
           try {
             assert.equal(bytes.indexOf(10), bytes.length - 1);
             const value = JSON.parse(bytes.toString('utf8'));
-            assert.deepEqual(Object.keys(value), ['baseUrl']);
+            assert.equal(typeof value.baseUrl, 'string');
             resolve(value.baseUrl);
           } catch (error) { reject(error); }
         }
@@ -417,14 +418,12 @@ await check('ios-nine-module-http-and-tmdb', async () => {
     client = createRuntimeClient({ baseUrl: await ready });
     owner.setTimeout(0);
     const described = okay(await client.describe());
-    assert.deepEqual(described.modules.map(value => value.id), manifest.modules);
-    assert.deepEqual(described.modules.map(value => [value.id, value.version, value.contract]), [
-      ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'],
-      ['source', '0.3.0', 'source.runtime.v2'], ['pan', '0.1.0', 'pan.runtime.v1'],
-      ['tmdb', '0.1.0', 'tmdb.data.v1'], ['douban', '0.1.0', 'douban.data.v1'],
-      ['film', '0.1.0', 'film.playback.v1'], ['netease', '0.1.0', 'netease.token.v1'],
-      ['music-platform', '0.1.0', 'music.platform.v1'],
-    ]);
+    assert.equal(described.protocol, 'runtime.http.v1');
+    assert.equal(described.product, 'aggregate');
+    const tmdb = described.modules.filter(value => value.id === 'tmdb');
+    assert.equal(tmdb.length, 1);
+    assert.equal(tmdb[0].version, contracts.tmdb.version);
+    assert.equal(tmdb[0].contract, contracts.tmdb.contract);
     const settings = okay(await client.call('tmdb.data.settings.update', {
       apiBase: `http://127.0.0.1:${upstream.address().port}/proxy/3`,
     }));

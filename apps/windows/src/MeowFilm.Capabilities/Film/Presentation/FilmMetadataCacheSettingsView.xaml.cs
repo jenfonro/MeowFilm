@@ -1,5 +1,6 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,7 +14,7 @@ public partial class FilmMetadataCacheSettingsView : UserControl
     }
     private async void Clear_Click(object sender, RoutedEventArgs e)
     {
-        if (!IsLoaded || !IsVisible || !Actions.IsEnabled || sender is not Button { Tag: string provider }) return;
+        if (!IsLoaded || !MeowFilm.Desktop.DesktopVisual.IsVisible(this) || !Actions.IsEnabled || sender is not Button { Tag: string provider }) return;
         Actions.IsEnabled = false;
         try
         {

@@ -119,6 +119,9 @@ public sealed class PanAccountRow : INotifyPropertyChanged
     public bool CanEdit => Available;
     public bool CanRefresh => Available && Status == "signedIn" && SupportsRefresh;
     public bool CanLogout => Available && Configured && Status is "signedIn" or "expired";
+    public bool ShowLogin => HasSnapshot && Status != "signedIn";
+    public bool ShowEdit => Status == "signedIn";
+    public bool ShowLogout => Status is "signedIn" or "expired";
     public string LoginText => Status == "expired" ? "重新登录" : "登录";
     internal long Generation;
     internal CancellationTokenSource? Request;
@@ -137,7 +140,8 @@ public sealed class PanAccountRow : INotifyPropertyChanged
     internal void Changed()
     {
         foreach (string name in new[] { nameof(Revision), nameof(Configured), nameof(Status), nameof(StatusText), nameof(ErrorCode),
-            nameof(HasSnapshot), nameof(IsBusy), nameof(CanLogin), nameof(CanEdit), nameof(CanRefresh), nameof(CanLogout), nameof(LoginText) })
+            nameof(HasSnapshot), nameof(IsBusy), nameof(CanLogin), nameof(CanEdit), nameof(CanRefresh), nameof(CanLogout),
+            nameof(ShowLogin), nameof(ShowEdit), nameof(ShowLogout), nameof(LoginText) })
             PropertyChanged?.Invoke(this, new(name));
     }
     public event PropertyChangedEventHandler? PropertyChanged;

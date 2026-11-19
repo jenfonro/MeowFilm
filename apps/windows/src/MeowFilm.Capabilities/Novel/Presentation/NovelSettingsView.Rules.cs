@@ -1,12 +1,13 @@
 using System.IO;
 using System.Net.Http;
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Microsoft.UI.Xaml.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using MeowFilm.Desktop;
-using Microsoft.Win32;
 
 namespace MeowFilm.Capabilities;
 
@@ -25,10 +26,10 @@ public sealed partial class NovelSettingsView
     private void RuleMenus()
     {
         var menu = Menu(Item("分组管理", () => Run(ct => ManageGroupsAsync(false, ct))), Item("全部分组", () => { ruleGroup = null; ungroupedRules = false; RefreshRules(); }, ruleGroup is null && !ungroupedRules), Item("无分组", () => { ruleGroup = null; ungroupedRules = true; RefreshRules(); }, ungroupedRules));
-        foreach (string group in module.Library.Rules.SelectMany(r => NovelGroups.Split(r.Group)).Distinct().Order(StringComparer.CurrentCulture)) menu.Items.Add(Item(group, () => { ruleGroup = group; ungroupedRules = false; RefreshRules(); }, ruleGroup == group)); ruleGroups.ContextMenu = menu;
-        ruleMore.ContextMenu = Menu(Item("新建替换", () => Run(ct => EditRuleAsync(new NovelRule { Order = module.Library.Rules.Count }, ct))),
+        foreach (string group in module.Library.Rules.SelectMany(r => NovelGroups.Split(r.Group)).Distinct().Order(StringComparer.CurrentCulture)) menu.Items.Add(Item(group, () => { ruleGroup = group; ungroupedRules = false; RefreshRules(); }, ruleGroup == group)); ruleGroups.ContextFlyout = menu;
+        ruleMore.ContextFlyout = Menu(Item("新建替换", () => Run(ct => EditRuleAsync(new NovelRule { Order = module.Library.Rules.Count }, ct))),
             Item("本地导入", () => Run(ImportRuleFileAsync)), Item("网络导入", () => Run(ImportRuleUrlAsync)), Item("二维码导入", () => Run(ImportRuleQrAsync)), Item("导出替换规则", () => Run(ct => ExportRulesAsync(module.Library.Rules, ct))));
-        ruleList.More.ContextMenu = Menu(Item("导出选中规则", () => Run(ct => ExportRulesAsync(module.Library.Rules.Where(r => ruleList.Selected.Contains(r.Id)).ToArray(), ct))));
+        ruleList.More.ContextFlyout = Menu(Item("导出选中规则", () => Run(ct => ExportRulesAsync(module.Library.Rules.Where(r => ruleList.Selected.Contains(r.Id)).ToArray(), ct))));
     }
     private async Task EditRuleAsync(NovelRule rule, CancellationToken token)
     {
@@ -64,12 +65,14 @@ public sealed partial class NovelSettingsView
     }
     private async Task ImportRuleFileAsync(CancellationToken token)
     {
-        var dialog = new OpenFileDialog { Filter = "规则文件|*.json;*.txt|所有文件|*.*" }; if (dialog.ShowDialog(Window.GetWindow(this)) == true) await PreviewRulesAsync(await File.ReadAllTextAsync(dialog.FileName, token), token);
+        string? path = await NovelPresentation.OpenFileAsync(this, ".json", ".txt", "*");
+        token.ThrowIfCancellationRequested(); if (path is not null) await PreviewRulesAsync(await File.ReadAllTextAsync(path, token), token);
     }
     private async Task ImportRuleQrAsync(CancellationToken token)
     {
-        var dialog = new OpenFileDialog { Filter = "二维码图片|*.png;*.jpg;*.jpeg;*.bmp|所有文件|*.*" }; if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
-        string text = await ReadRuleQrAsync(dialog.FileName, token);
+        string? path = await NovelPresentation.OpenFileAsync(this, ".png", ".jpg", ".jpeg", ".bmp", "*");
+        token.ThrowIfCancellationRequested(); if (path is null) return;
+        string text = await ReadRuleQrAsync(path, token);
         await PreviewRulesAsync(text, token);
     }
     internal static async Task<string> ReadRuleQrAsync(string path, CancellationToken token)
@@ -138,8 +141,9 @@ public sealed partial class NovelSettingsView
     }
     private async Task ExportRulesAsync(IReadOnlyList<NovelRule> rules, CancellationToken token)
     {
-        var dialog = new SaveFileDialog { Filter = "JSON|*.json", FileName = "replace-rules.json" }; if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
-        await File.WriteAllTextAsync(dialog.FileName, JsonSerializer.Serialize(rules, NovelJson.Options), token); module.Notify("净化规则已导出");
+        string? path = await NovelPresentation.SaveJsonAsync(this, "replace-rules.json");
+        token.ThrowIfCancellationRequested(); if (path is null) return;
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(rules, NovelJson.Options), token); module.Notify("净化规则已导出");
     }
     private async Task ManageGroupsAsync(bool sources, CancellationToken token)
     {
@@ -151,7 +155,7 @@ public sealed partial class NovelSettingsView
             (string? Group, bool Remove)? selected = null;
             var panel = new StackPanel(); var list = new StackPanel();
             void Choose(string? group, bool remove) { selected = (group, remove); choice.Cancel(); }
-            var add = NovelUi.Button("新增分组", () => Choose(null, false)); add.IsEnabled = ids.Length > 0; add.ToolTip = "为所选项目新增分组"; panel.Children.Add(add); panel.Children.Add(list);
+            var add = NovelUi.Button("新增分组", () => Choose(null, false)); add.IsEnabled = ids.Length > 0; ToolTipService.SetToolTip(add, "为所选项目新增分组"); panel.Children.Add(add); panel.Children.Add(list);
             foreach (string group in Groups())
             {
                 var row = new DockPanel(); var actions = NovelUi.Bar(NovelUi.Button("编辑", () => Choose(group, false)), NovelUi.Button("删除", () => Choose(group, true))); DockPanel.SetDock(actions, Dock.Right); row.Children.Add(actions); row.Children.Add(NovelUi.Text(group)); list.Children.Add(row);

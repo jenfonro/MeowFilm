@@ -216,8 +216,7 @@ final class PlaybackSystemSession {
     }
 
     private static func makeArtwork(_ data: Data) -> MPMediaItemArtwork? {
-        guard data.count <= PlaybackNowPlayingArtwork.maximumBytes,
-              let source = CGImageSourceCreateWithData(data as CFData,
+        guard let source = CGImageSourceCreateWithData(data as CFData,
                   [kCGImageSourceShouldCache: false] as CFDictionary),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,

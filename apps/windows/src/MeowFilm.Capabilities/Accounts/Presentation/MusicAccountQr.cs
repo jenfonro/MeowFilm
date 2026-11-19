@@ -1,7 +1,8 @@
 using System.Text.Json;
 using System.IO;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using System.Runtime.InteropServices.WindowsRuntime;
+using SkiaSharp;
+using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Capabilities.Accounts;
 
 namespace MeowFilm.Capabilities;
@@ -9,32 +10,27 @@ namespace MeowFilm.Capabilities;
 /// <summary>Local pixels only. No image URL, process, browser or disk cache.</summary>
 public static class MusicAccountQrImage
 {
-    public static BitmapSource DecodePng(string base64)
+    public static WriteableBitmap DecodePng(string base64)
     {
         try
         {
-            if (base64.Length is < 1 or > 699052) throw new MusicOperationException("LIMIT");
             byte[] bytes = Convert.FromBase64String(base64);
             AccountQrPng.Validate(bytes);
-            using var stream = new MemoryStream(bytes, writable: false);
-            var decoder = new PngBitmapDecoder(stream, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-            if (decoder.Frames.Count != 1) throw new MusicOperationException("INVALID_RESPONSE");
-            var frame = decoder.Frames[0];
-            if (frame.PixelWidth is < 1 or > 1024 || frame.PixelHeight is < 1 or > 1024)
+            using var decoded = SKBitmap.Decode(bytes);
+            if (decoded is null) throw new MusicOperationException("INVALID_RESPONSE");
+            if (decoded.Width is < 1 or > 1024 || decoded.Height is < 1 or > 1024)
                 throw new MusicOperationException("LIMIT");
-            var converted = new FormatConvertedBitmap(frame, PixelFormats.Bgra32, null, 0);
-            int stride = checked(frame.PixelWidth * 4);
-            byte[] pixels = new byte[checked(stride * frame.PixelHeight)];
-            converted.CopyPixels(pixels, stride, 0);
-            // Publish pixels only: no source stream, URI, metadata or native decoder retained.
-            var bitmap = BitmapSource.Create(frame.PixelWidth, frame.PixelHeight, 96, 96, PixelFormats.Bgra32, null, pixels, stride);
-            bitmap.Freeze(); return bitmap;
+            using var pixels = decoded.Copy(SKColorType.Bgra8888);
+            var bitmap = new WriteableBitmap(pixels.Width, pixels.Height);
+            using (var output = bitmap.PixelBuffer.AsStream()) output.Write(pixels.Bytes);
+            bitmap.Invalidate();
+            return bitmap;
         }
         catch (MusicOperationException) { throw; }
         catch (MusicAccountException e) { throw new MusicOperationException(e.Code); }
         catch { throw new MusicOperationException("INVALID_RESPONSE"); }
     }
-    public static BitmapSource Create(string address)
+    public static WriteableBitmap Create(string address)
     {
         var bitmap = QrCodeImage.Create(address);
         if (bitmap.PixelWidth > 1024) throw new MusicOperationException("LIMIT");
@@ -46,8 +42,8 @@ public sealed partial class MusicCapability
 {
     private sealed record AccountQr(string Platform, string Id, long ExpiresAt);
     private AccountQr? accountQr;
-    private BitmapSource? accountQrImage;
-    public BitmapSource? AccountQrImage => accountQrImage;
+    private WriteableBitmap? accountQrImage;
+    public WriteableBitmap? AccountQrImage => accountQrImage;
     public bool HasAccountQr => accountQr is not null && accountQrImage is not null;
     public bool CanBeginAccountQr => CanManageAccount && !accountSaveUncertain && selectedAccount?.Platform is "wy" or "tx" or "kg";
     public bool CanCheckAccountQr => CanManageAccount && accountQr?.Platform == selectedAccount?.Platform;
@@ -71,7 +67,7 @@ public sealed partial class MusicCapability
         MusicDto.Require(MusicDto.Text(challenge, "platform") == platform);
         string id = MusicDto.Text(challenge, "challengeId");
         long expires = MusicDto.Integer(challenge, "expiresAt");
-        BitmapSource image;
+        WriteableBitmap image;
         if (MusicDto.Text(challenge, "displayKind") == "png")
         {
             var content = challenge.GetProperty("imageBase64");

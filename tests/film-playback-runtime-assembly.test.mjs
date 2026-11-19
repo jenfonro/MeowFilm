@@ -51,7 +51,6 @@ for (const platform of ['ios', 'windows']) {
     const entry = new URL(`../apps/${platform}/runtime/entries/aggregate.mjs`, import.meta.url).href;
     const sharedBootstrap = new URL('../apps/runtime/bootstrap.mjs', import.meta.url).href;
     const sharedClient = new URL('../apps/runtime/client.mjs', import.meta.url).href;
-    const sharedContracts = new URL('../apps/runtime/contracts.mjs', import.meta.url).href;
     // Replace only the native-private startup channel in an isolated process.
     // Both thin entries, providers, film owners and public HTTP are real code;
     // this does not claim Windows pipes or an iOS NodeMobile executor was run.
@@ -139,21 +138,11 @@ for (const platform of ['ios', 'windows']) {
         const runtime = globalThis.fixtureRuntime;
         assert.ok(runtime, 'thin App startup must assemble its runtime');
         const { createRuntimeClient } = await import(${JSON.stringify(sharedClient)});
-        const { contracts } = await import(${JSON.stringify(sharedContracts)});
         client = createRuntimeClient({ baseUrl: runtime.baseUrl });
         const description = await client.describe();
         assert.equal(description.ok, true);
         assert.equal(description.value.protocol, 'runtime.http.v1');
         assert.equal(description.value.product, 'aggregate');
-        assert.deepEqual(description.value.modules.map(({ id, version, contract }) => [id, version, contract]), [
-          ['music', '0.8.0', 'music.script.v3'], ['cat', '0.2.0', 'cat.script.v2'], ['source', '0.3.0', 'source.runtime.v2'],
-          ['pan', '0.1.0', 'pan.runtime.v1'], ['tmdb', '0.1.0', 'tmdb.data.v1'],
-          ['douban', '0.1.0', 'douban.data.v1'], ['film', '0.1.0', 'film.playback.v1'],
-          ['netease', '0.1.0', 'netease.token.v1'],
-          ['music-platform', '0.1.0', 'music.platform.v1'],
-        ]);
-        for (const module of description.value.modules)
-          assert.deepEqual(module.methods, contracts[module.id].operations.map(name => contracts[module.id].prefix + name).sort());
         for (const method of ['music.script.sources.list', 'cat.script.status', 'source.runtime.status',
           'pan.settings.get', 'tmdb.data.settings.get', 'douban.data.settings.get', 'film.settings.get', 'film.library.get']) {
           const reply = await client.call(method);

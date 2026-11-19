@@ -32,9 +32,9 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 
 `SettingsVisualMetrics`、`SettingsRowBackgroundView` 共同定义卡片轮廓、行内间距和分割线；UIKit 设置表使用 `SettingsTableView`／`SettingsTableCell`，SwiftUI 音乐设置保留 `List` 并使用薄适配绘制同一底板。设置根页及其下级页面隐藏胶囊播放器，同时撤销其底部占位；导航与播放器均不显示时，Dock 的背景及触摸层也不再覆盖页面。返回设置栈外恢复原播放器状态，不停止播放。
 
-全部设置子页以设置首页的文字角色为基准：主标签和操作为系统 Body Regular，次要资料和分组标题为 Subheadline Regular，继续响应 Dynamic Type。普通单行由正文行高、上下各 12pt 内边距及 44pt 最小行框决定；菜单、开关和数字附件使用紧凑视觉高度，不额外撑大普通行，触达区与视觉尺寸分离。两行账号及真实多行表单可按内容增长。同级主文字字号一致，分组标题不采用系统 increased／加粗样式；SwiftUI 与 UIKit 沿用同一 insetGrouped 首组布局，不单独清零音乐顶部间距，公共页头高度不变。
+全部设置子页以设置首页的文字角色为基准：主标签和操作为系统 Body Regular，次要资料和分组标题为 Subheadline Regular，继续响应 Dynamic Type。普通单行由正文行高、上下各 12pt 内边距及 44pt 最小行框决定；菜单、开关和数字附件使用紧凑视觉高度，不额外撑大普通行，触达区与视觉尺寸分离。共享开关保护 44pt 横向占位，填充分配不能移动其共同右边缘。两行账号及真实多行表单可按内容增长。同级主文字字号一致，分组标题不采用系统 increased／加粗样式；首内容外边界以搜索净化页为基准，由 `SettingsVisualMetrics.contentTopSpacing` 统一为 20pt。有首节标题时标题是首内容；没有标题时取首卡，供应商切换和管理搜索同样取实际可见边界。UIKit 首节 header、SwiftUI 公开内容 margin、手动滚动及整体表单分别消费共同度量，后续组间距、表单内部边距和公共页头高度不变。
 
-浅色设置输入为白色，深色使用对应输入表面，边框与文字继续由公共主题提供。UIKit 的 `SettingsTextField`／`SettingsTextView` 在真实布局后更新两端半圆及文本内边距；SwiftUI 使用原生 `Capsule`。整体表单、管理搜索和编辑浮层遵守相同输入外观，多行输入保留换行、滚动及编辑空间。离散状态由业务选择语义，`SettingsStatusBadge` 统一呈现小图标、同色浅底／深字及动态胶囊。
+输入呈现由字段所有者显式选择 `SettingsInputAppearance`，主题刷新和布局使用同一语义。多项卡片／整体表单采用无框输入并复用字段分隔线；单项输入卡片采用卡内标题、下方输入和底部下划线，设置输入浮窗复用 `SettingsInputSection`。规则字段使用下划线，刮削字段无独立边框且无额外输入下划线。仍需独立外框的单行输入为胶囊、多行输入为方框；管理搜索、音乐数字与账号组合胶囊保留独立轮廓。独立输入浅色底为白色，深色使用对应输入表面；无框／下划线字段背景透明并移除曲率缩进。多行输入保留换行、滚动及编辑空间，主题和尺寸更新不重建字段。离散状态由业务选择语义，`SettingsStatusBadge` 统一呈现小图标、同色浅底／深字及动态胶囊。
 
 ### 启动与首页发布
 
@@ -69,7 +69,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | `native/AudioKernel` | 锁定 FFmpeg 9.0.1 音频闭包、隐藏上游符号的动态框架与最小 C ABI | 无业务或视频依赖 |
 | `packages/film-rules`／`packages/film-search` | Node 加载的共享规则／搜索程序，不再作为 SwiftPM 依赖 | 共享 script-host 原生载体 |
 
-共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。
+共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。源码按 target 的实际输入和工程成员核对，未使用的 App 职责目录不必存在或非空，整个 target 仍须有有效源码。系统模块按 SwiftPM 声明类型、接口成员和实际 import 核对依赖；`CSQLite` 保留 SDK sqlite3 头及链接要求，不限制系统模块名称、消费者或接口文件的完整文本形状。
 
 音乐依赖闭包不包含视频目标；应用装配共享一个 `FilmPlayerPreferencesStore` 给设置、播放模型与媒体桥接，候选工厂通过 `makePlaybackVideoDecoder(engine:)` 读取首选内核。出厂默认 KSPlayer，设置变更只对下一媒体候选生效，当前实例不热切；播放页消费事件里的实际内核，不用首选值代替运行事实。选择、能力过滤及控制生效时机见[播放器设置](film-settings.md#播放器设置)，候选回退见[影视](film.md#内核选择与候选回退)。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
 
@@ -79,7 +79,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 
 原生源码检查仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码。Node 根测试可用 `node scripts/test-root.mjs --platform ios` 选择 iOS 与共享契约测试；共享 packager 用例不读取 Windows 入口源码，iOS 入口及生成载荷由本端 wrapper 用例验证。
 
-平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 和私密帧字节预算保留。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 保留，私密帧不设业务字节配额。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
 
 ## UI 技术选型
 
@@ -118,8 +118,8 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 - 推荐、频道、影视、我的由主页面外壳保留，首次切换到时创建并加载。
 - 推荐／频道／影视／我的是四个独立页面；切换时各页连同自己的页头按页面顺序左右滑动，页头不在页面间移动或共用，底部栏选中态在切换开始时同步；减少动态效果时直接切换。底部入口为「首页／影视／我的」，「首页」进入推荐页；频道页也高亮「首页」，但仍保持真实频道页面身份和不透明 dock 背景。
 - 推荐页头依次为菜单、搜索胶囊与原功能按钮；频道页头依次为菜单、频道滚动条、频道选择及圆形搜索按钮，不再提供「推荐／频道」页面切换控件。频道切换条在频道数据到达后显示，搜索进入既有搜索页。频道通过现有内容入口或侧边栏「频道」进入；底部「首页」、音乐侧边栏「首页」及屏幕左边缘右滑均返回推荐。边缘返回沿用统一距离／速度规则，短滑或取消保留当前频道；频道内容区横滑切换频道，分页、栏目、轮播和列表滚动都等待边缘手势失败后才接管触摸。
-- 影视页头为菜单与占据其余标题区域的搜索胶囊；菜单打开影视侧边栏，胶囊暂时进入既有音乐搜索页，返回保留原影视页面与滚动位置。影视侧边栏「首页」返回影视首页，数据源选择位于侧边栏。播放器与底部栏固定在屏幕底部，不随键盘升起，键盘只增加内容的底部避让。进入／返回非主页面时底部栏只做上下收放，按钮行保持固定高度与横向位置，不随页面左右滑动；这是既定效果。
-- 音乐、影视与小说共用侧边栏框架：保留原窗口底色和顶部居中 App 图标，菜单按内容高度排列，图标槽与文字列统一对齐，选中项使用圆角底色与主题强调色；普通文字保持系统 Regular。菜单区域可独立滚动，带图标、左对齐文字和尾部箭头的“设置”固定在底部安全区上方，不随列表滚动。音乐主菜单为首页／频道，快捷音乐数据源另组保留；“我的”沿用音乐内容。影视主菜单为首页／视频源，快捷影视数据源另组保留。小说主菜单为首页／分类／已添加书源。视频源、书源与小说分类当前仅展示，不接入首页切源或分类导航；二级页仍使用返回入口。
+- 影视页头为菜单与占据其余标题区域的搜索胶囊；菜单打开影视侧边栏，胶囊暂时进入既有音乐搜索页，返回保留原影视页面与滚动位置。影视侧边栏「首页」返回影视首页。播放器与底部栏固定在屏幕底部，不随键盘升起，键盘只增加内容的底部避让。进入／返回非主页面时底部栏只做上下收放，按钮行保持固定高度与横向位置，不随页面左右滑动；这是既定效果。
+- 音乐、影视与小说共用侧边栏框架：保留原窗口底色和顶部居中 App 图标，菜单按内容高度排列，图标槽与文字列统一对齐，选中项使用圆角底色与主题强调色；普通文字保持系统 Regular。菜单区域可独立滚动，带图标、左对齐文字和尾部箭头的“设置”固定在底部安全区上方，不随列表滚动。音乐主菜单为首页／频道；“我的”沿用音乐内容。影视主菜单为首页／视频源。音乐与影视侧边栏均不提供数据源快捷切换。小说主菜单为首页／分类／已添加书源。视频源、书源与小说分类当前仅展示，不接入首页切源或分类导航；二级页仍使用返回入口。
 - 页面跳转由路由显式调用，不通过业务状态标志触发。
 - 上层呈现通过视图层级阻挡下层触摸。
 - 资源活跃、页面可见及浮层呈现时机分别管理；待处理的错误在页面稳定出现或导航／呈现转场完成后处理，不因此重新加载业务。
@@ -191,7 +191,8 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | `music_accounts` / 音乐相关关系表 | 音乐账号、歌曲、平台状态与缓存索引的 SQLite owner tables |
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
-| `music.presentation-resources.v1`、`music.home.display.v1`、`music.source-checks.v1` | 共享图片／歌词资源、首页展示快照和来源发现观察 |
+| `music.presentation-resources.v2` | 共享图片／歌词原始字节叶子，首用文件 metadata 仅保留在内存 |
+| `music.home.display.v2`、`music.source-checks.v1` | 首页展示快照和来源发现观察 |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |

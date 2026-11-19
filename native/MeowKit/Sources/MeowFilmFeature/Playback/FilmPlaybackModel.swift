@@ -35,6 +35,8 @@ public final class FilmPlaybackModel: ObservableObject {
     @Published public private(set) var opening = false
     @Published public private(set) var observationError: FilmPlaybackError?
     @Published public private(set) var actionError: FilmPlaybackError?
+    @Published public private(set) var metadataViewProvider: FilmMetadataProvider = .tmdb
+    @Published private var selectedAggregateProvider: FilmMetadataProvider?
     /// Independent close failures; media.stop includes its media-receipt drain.
     @Published public private(set) var mediaStopError: FilmPlaybackError?
     @Published public private(set) var sessionReleaseError: FilmPlaybackError?
@@ -74,16 +76,19 @@ public final class FilmPlaybackModel: ObservableObject {
     public var canSelectFromPresentation: Bool {
         guard executionStage != nil, !restoringRead, let presentation else { return false }
         return !presentation.browsing.loading && presentation.browsing.error == nil &&
-            presentation.entryResolution != "loading" && presentation.entryResolution != "error" &&
-            presentation.stage != "loading"
+            presentation.entryResolution != "loading" && presentation.entryResolution != "error"
     }
     public var directoryHasNoVideoSource: Bool {
         guard let presentation, canSelectFromPresentation else { return false }
         if presentation.browsing.sourceID != nil {
             return !presentation.browsing.files.contains { $0.candidateID != nil }
         }
-        return presentation.stage == "unavailable" ||
-            presentation.searchComplete && presentation.sources.isEmpty && presentation.candidates.isEmpty
+        return presentation.searchComplete && presentation.sources.isEmpty && presentation.candidates.isEmpty
+    }
+    public var aggregateSourceProvider: FilmMetadataProvider? {
+        guard let presentation, presentation.browsing.sourceID == nil else { return nil }
+        return presentation.metadataSources.first { $0.provider == selectedAggregateProvider }?.provider ??
+            presentation.metadataSources.first?.provider
     }
     public var playerPreferences: FilmPlayerPreferences { preferencesStore.preferences }
     public var actualEngine: PlaybackVideoEngine { mediaState.engine }
@@ -127,13 +132,17 @@ public final class FilmPlaybackModel: ObservableObject {
     private var reentryError: String?
     private let media: any FilmPlaybackMediaControlling
     private let preferencesStore: FilmPlayerPreferencesStore
+    private let playbackPreferences: FilmPlaybackSettingsModel?
     private let chapterModel: FilmPlaybackChapterModel
     private var preferencesObservation: AnyCancellable?
+    private var metadataPreferencesObservation: AnyCancellable?
     private var chaptersObservation: AnyCancellable?
     private var chapterErrorObservation: AnyCancellable?
     private var heldRate: (token: UUID, identity: FilmPlayerControlIdentity)?
     private var allocatedSessionID: UUID?
     private var openingTask: Task<Void, Never>?
+    private var metadataSelectionTask: Task<Void, Never>?
+    private var metadataSelectionAdmission = UUID()
     private var observationTask: Task<Void, Never>?
     private var observationAdmission = UUID()
     private var runtimeClosureTask: Task<Void, Never>?
@@ -221,17 +230,31 @@ public final class FilmPlaybackModel: ObservableObject {
     public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
                 searchContext: FilmSearchContext? = nil,
                 playerPreferences: FilmPlayerPreferencesStore? = nil,
+                playbackPreferences: FilmPlaybackSettingsModel? = nil,
                 request: @escaping @Sendable () async throws -> FilmPlaybackRequest) {
         self.transport = transport; self.media = media; makeRequest = request
         self.searchContext = searchContext
         preferencesStore = playerPreferences ?? FilmPlayerPreferencesStore()
+        self.playbackPreferences = playbackPreferences
         chapterModel = FilmPlaybackChapterModel(transport: transport)
-        preferencesObservation = preferencesStore.$preferences.dropFirst().sink { [weak self] value in
+        var previousPreferences = preferencesStore.preferences
+        preferencesObservation = preferencesStore.$preferences.removeDuplicates().dropFirst().sink { [weak self] value in
             guard let self else { return }
-            cancelTemporaryRate()
-            updateChapters(enabled: value.recognizesChapters)
+            if !previousPreferences.hasSameGestureSettings(as: value) {
+                cancelTemporaryRate()
+            }
+            if previousPreferences.recognizesChapters != value.recognizesChapters {
+                updateChapters(enabled: value.recognizesChapters)
+            }
+            previousPreferences = value
             objectWillChange.send()
         }
+        metadataPreferencesObservation = playbackPreferences?.$preferences.compactMap { $0?.metadataViewProvider }
+            .removeDuplicates().sink { [weak self] provider in
+                guard let self, metadataViewProvider != provider else { return }
+                metadataViewProvider = provider
+                reconcileMetadataView()
+            }
         chaptersObservation = chapterModel.$segments.dropFirst().sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -247,8 +270,19 @@ public final class FilmPlaybackModel: ObservableObject {
         if let openingTask { return openingTask }
         guard !closed else { return nil }
         if snapshot != nil {
-            observeRuntimeClosure(); observe(); observeSearchContext()
-            return nil
+            let generation = generation
+            openingTask = Task { [weak self] in
+                guard let self else { return }
+                defer { openingTask = nil }
+                do { try await playbackPreferences?.reloadPreferences() }
+                catch {
+                    if !closed, self.generation == generation { actionError = Self.failure(error) }
+                    return
+                }
+                guard !closed, self.generation == generation else { return }
+                observeRuntimeClosure(); observe(); observeSearchContext()
+            }
+            return openingTask
         }
         if allocatedSessionID != nil { return reopenAfterDrain() }
         opening = true; actionError = nil
@@ -257,6 +291,7 @@ public final class FilmPlaybackModel: ObservableObject {
             guard let self else { return }
             defer { self.opening = false; self.openingTask = nil }
             do {
+                try await self.playbackPreferences?.reloadPreferences()
                 let previous = self.presentation
                 let base = try await self.makeRequest()
                 var request = self.reentryTarget.map { base.retargeted($0, errorCode: self.reentryError) } ?? base
@@ -308,6 +343,7 @@ public final class FilmPlaybackModel: ObservableObject {
             guard !Task.isCancelled, self.reopeningAdmission == admission else { return }
             if self.retained {
                 self.closed = false; self.retained = false
+                self.reconcileMetadataView()
                 self.observe(); self.observeSearchContext()
                 return
             }
@@ -461,6 +497,14 @@ public final class FilmPlaybackModel: ObservableObject {
     private func accept(_ value: FilmPlaybackSnapshot, reconcileMedia: Bool = true) {
         guard value.sessionID == allocatedSessionID else { return }
         if let current = snapshot, current.sessionID == value.sessionID, value.sequence <= current.sequence { return }
+        if snapshot?.previewEpisodes != value.previewEpisodes, value.metadataError == nil,
+           !value.browsing.loading, value.browsing.error == nil {
+            for key in directoryOrder where key.metadata == value.metadataSourceID && key.season == value.browsing.season {
+                guard var cached = directories[key] else { continue }
+                cached.episodes = value.episodes
+                directories[key] = cached
+            }
+        }
         snapshot = value
         if let previous = restorePresentation {
             if !value.browsing.loading {
@@ -473,6 +517,10 @@ public final class FilmPlaybackModel: ObservableObject {
                 }
             }
         } else { publishDirectory(value) }
+        if selectedAggregateProvider == nil {
+            selectedAggregateProvider = value.entryTarget?.metadataProvider ?? value.target.metadataProvider
+        }
+        reconcileMetadataView()
         reentryTarget = value.target
         reentryError = value.error
         if reconcileMedia { reconcilePreparation() }
@@ -482,33 +530,52 @@ public final class FilmPlaybackModel: ObservableObject {
     private func publishDirectory(_ value: FilmPlaybackSnapshot) {
         let key = FilmPlaybackDirectoryKey(value)
         if value.browsing.error == "STALE_SOURCE" || value.browsing.error == "SOURCE_NOT_FOUND" {
-            directories.removeValue(forKey: key); directoryOrder.removeAll { $0 == key }
+            let revoked = directoryOrder.filter { $0.source == key.source }
+            for key in revoked { directories.removeValue(forKey: key) }
+            directoryOrder.removeAll { revoked.contains($0) }
         }
-        let completed = !value.browsing.loading && value.browsing.error == nil &&
+        let completed = !value.browsing.loading && !value.browsing.refreshing && value.browsing.error == nil &&
             value.entryResolution != "loading" && value.entryResolution != "error" &&
-            (value.browsing.sourceID != nil || value.metadataError == nil) && value.stage != "loading"
+            (value.browsing.sourceID != nil || value.metadataError == nil)
         if completed {
             directories[key] = .init(value)
             if !directoryOrder.contains(key) { directoryOrder.append(key) }
         }
+        let base = value.retainingLoadedPresentation(presentation)
         if selectedDirectory == nil || !directorySelectionExplicit { selectedDirectory = key }
         if selectedDirectory?.accepts(key) == true {
-            if directorySelectionExplicit, !directoryLoading, value.browsing.loading || value.browsing.error != nil,
-               let selectedDirectory, let cached = directories[selectedDirectory] {
-                presentation = value.displaying(cached)
-                return
-            }
             selectedDirectory = key
             directoryLoading = value.browsing.loading
             directoryError = value.browsing.error
-            presentation = value.retainingLoadedPresentation(presentation).displaying(.init(value))
+            if let error = value.browsing.error {
+                directoryLoading = false
+                presentation = base.loadingDirectory(key, error: error)
+                return
+            }
+            if value.browsing.loading || value.browsing.refreshing ||
+                value.browsing.sourceID == nil && value.metadataError != nil,
+               let cached = directories[key] {
+                directoryLoading = false
+                presentation = value.browsing.loading || value.browsing.refreshing
+                    ? base.refreshingDirectory(cached) : base.displaying(cached)
+                return
+            }
+            presentation = base.displaying(.init(value))
         } else if let selectedDirectory {
-            if !directoryLoading, let cached = directories[selectedDirectory] {
-                presentation = value.displaying(cached)
+            if !directoryLoading, directoryError == nil, let cached = directories[selectedDirectory] {
+                presentation = base.displaying(cached)
             } else {
-                presentation = value.loadingDirectory(selectedDirectory, error: directoryError)
+                presentation = base.loadingDirectory(selectedDirectory, error: directoryError)
             }
         }
+    }
+
+    private func reconcileMetadataView() {
+        guard !closed, !runtimeClosed, !restoringRead, let snapshot,
+              let selected = snapshot.metadataSources.first(where: { $0.provider == metadataViewProvider }) ??
+                snapshot.metadataSources.first,
+              presentation?.metadataSourceID != selected.id else { return }
+        browseMetadataDirectory(selected.id)
     }
 
     func loadedDirectory(sourceID: String, lineID: FilmPlaybackIdentifier?,
@@ -657,7 +724,7 @@ public final class FilmPlaybackModel: ObservableObject {
             intent = commandAdmission
             // Blocking or retry may reject without replacing anything.
             // Hold publication, not the exact pending media/receipt it can retain.
-            if action != "block" && action != "media.retry" {
+            if action != "block" && action != "media.retry" && action != "select.target" {
                 blockedAttemptID = snapshot?.attempt?.id
                 cancelPreparation()
             }
@@ -713,7 +780,7 @@ public final class FilmPlaybackModel: ObservableObject {
                     awaitingIntent = nil; blockedAttemptID = nil
                 }
                 accept(value, reconcileMedia: false)
-                if command.action != "browse.refresh" { reconcilePreparation() }
+                reconcilePreparation()
                 if command.action == "play", command.intent == commandAdmission,
                    let previousCurrent, committed === previousCurrent,
                    previousCurrent.started, !previousCurrent.retired, !previousCurrent.terminal,
@@ -727,8 +794,19 @@ public final class FilmPlaybackModel: ObservableObject {
                     guard admission == directoryAdmission else { continue }
                     directoryLoading = false
                     directoryError = Self.failure(error).code
+                    if directoryError == "STALE_SOURCE" || directoryError == "SOURCE_NOT_FOUND",
+                       let source = selectedDirectory?.source {
+                        directories = directories.filter { $0.key.source != source }
+                        directoryOrder.removeAll { $0.source == source }
+                    }
                     if let snapshot, let selectedDirectory {
-                        presentation = snapshot.loadingDirectory(selectedDirectory, error: directoryError)
+                        let base = snapshot.retainingLoadedPresentation(presentation)
+                        if command.action == "browse.refresh", let cached = directories[selectedDirectory] {
+                            directoryError = nil
+                            presentation = base.displaying(cached)
+                        } else {
+                            presentation = base.loadingDirectory(selectedDirectory, error: directoryError)
+                        }
                     }
                 }
                 if !Self.cancelled(error), command.intent == nil || command.intent == commandAdmission,
@@ -736,7 +814,9 @@ public final class FilmPlaybackModel: ObservableObject {
                    command.ui || (error as? FilmPlaybackError)?.code != "STALE_SESSION" {
                     actionError = Self.failure(error)
                 }
-                if command.action == "block" || command.action == "media.retry" { reconcilePreparation() }
+                if command.action == "block" || command.action == "media.retry" || command.action == "select.target" {
+                    reconcilePreparation()
+                }
             }
         }
         commandWorker = nil
@@ -776,6 +856,11 @@ public final class FilmPlaybackModel: ObservableObject {
         }) { return }
         send("browse", parameters: browsingFields(requested))
     }
+    public func browseAggregate(_ provider: FilmMetadataProvider) {
+        guard snapshot?.metadataSources.contains(where: { $0.provider == provider }) == true else { return }
+        selectedAggregateProvider = provider
+        browse(sourceID: nil)
+    }
     public func browseSeason(_ number: Int) {
         let key = FilmPlaybackDirectoryKey(source: presentation?.browsing.sourceID, line: presentation?.browsing.lineID,
             metadata: presentation?.metadataSourceID, season: number)
@@ -787,9 +872,12 @@ public final class FilmPlaybackModel: ObservableObject {
         actionError = nil
         directoryAdmission = UUID()
         if let key = selectedDirectory {
-            directories.removeValue(forKey: key); directoryOrder.removeAll { $0 == key }
-            directoryLoading = true; directoryError = nil
-            if let snapshot { presentation = snapshot.loadingDirectory(key) }
+            directoryLoading = directories[key] == nil; directoryError = nil
+            if let snapshot {
+                let base = snapshot.retainingLoadedPresentation(presentation)
+                if let cached = directories[key] { presentation = base.refreshingDirectory(cached) }
+                else { presentation = base.loadingDirectory(key) }
+            }
         }
         return send("browse.refresh", parameters: selectedDirectory.map(browsingFields) ?? [:])
     }
@@ -799,13 +887,41 @@ public final class FilmPlaybackModel: ObservableObject {
         actionError = nil
         return send("media.retry", parameters: id.map { ["attemptId": .string($0)] } ?? [:])
     }
-    public func browseMetadata(_ id: String, keepSource: Bool = false) {
-        let source = keepSource ? presentation?.browsing.sourceID : nil
-        let key = FilmPlaybackDirectoryKey(source: source, line: keepSource ? presentation?.browsing.lineID : nil,
+    public func browseMetadata(_ id: String) {
+        guard !closed, let selected = snapshot?.metadataSources.first(where: { $0.id == id }) else { return }
+        guard let playbackPreferences else {
+            metadataViewProvider = selected.provider
+            browseMetadataDirectory(id)
+            return
+        }
+        let previous = metadataSelectionTask
+        let admission = UUID(); metadataSelectionAdmission = admission
+        let generation = generation
+        metadataSelectionTask = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            defer { if metadataSelectionAdmission == admission { metadataSelectionTask = nil } }
+            guard !closed, self.generation == generation else { return }
+            do { try await playbackPreferences.setMetadataViewProvider(selected.provider) }
+            catch {
+                if !closed, self.generation == generation, metadataSelectionAdmission == admission {
+                    actionError = Self.failure(error)
+                }
+                return
+            }
+            guard !closed, self.generation == generation, metadataSelectionAdmission == admission else { return }
+            metadataViewProvider = selected.provider
+            browseMetadataDirectory(id)
+        }
+    }
+    private func browseMetadataDirectory(_ id: String) {
+        if presentation?.metadataSourceID == id { return }
+        let source = presentation?.browsing.sourceID
+        let key = FilmPlaybackDirectoryKey(source: source, line: presentation?.browsing.lineID,
             metadata: id, season: nil)
         if selectDirectory(key, matching: { $0.source == source && $0.metadata == id && $0.line == key.line }) { return }
         var fields = browsingFields(key)
-        if keepSource { fields["keepSource"] = .bool(true) }
+        fields["keepSource"] = .bool(true)
         send("browse.metadata", parameters: fields)
     }
     public func selectPan(_ provider: FilmPanProvider) { send("pan", parameters: ["provider": .string(provider.rawValue)]) }
@@ -1175,6 +1291,7 @@ public final class FilmPlaybackModel: ObservableObject {
         let keepNative = retained
         closingAdmission = UUID()
         closingTask = Task { [self] in
+            await metadataSelectionTask?.value
             await searchUpdateTask?.value
             await observationTask?.value; observationTask = nil
             await preparationWorker?.value
@@ -1233,9 +1350,10 @@ public final class FilmPlaybackModel: ObservableObject {
         await recoveryTask?.value
         await reopeningTask?.value
         await closingTask?.value
-        while openingTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
+        while openingTask != nil || metadataSelectionTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
             cancellingPreparation != nil || stoppingMedia != nil {
-            await openingTask?.value; await searchUpdateTask?.value; await commandWorker?.value; await preparationWorker?.value
+            await openingTask?.value; await metadataSelectionTask?.value
+            await searchUpdateTask?.value; await commandWorker?.value; await preparationWorker?.value
             await cancellingPreparation?.value; await stoppingMedia?.value
         }
     }

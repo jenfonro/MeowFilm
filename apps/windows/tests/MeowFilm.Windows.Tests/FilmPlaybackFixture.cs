@@ -4,9 +4,11 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Channels;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Platform.Storage;
 
@@ -15,9 +17,27 @@ namespace MeowFilm.Windows.Tests;
 // Explicit isolated wire fixtures. No product composition, source account, HTTP or libVLC.
 internal static class FilmPlaybackFixture
 {
-    internal const string Assets = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/";
+    internal const string Assets = "ms-appx:///MeowFilm.Capabilities/Film/Presentation/Assets/";
     internal static readonly string[] Posters = ["poster-bad-kids.jpg", "poster-long-night.jpg", "poster-day-and-night.jpg",
         "poster-burning-ice.jpg", "poster-reset.jpg", "poster-knockout.jpg", "poster-long-season.jpg"];
+    internal sealed class BundledArtworkLoader : IArtworkLoader
+    {
+        public async Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var file = await global::Windows.Storage.StorageFile.GetFileFromApplicationUriAsync(new Uri(address, UriKind.Absolute));
+            var bytes = await global::Windows.Storage.FileIO.ReadBufferAsync(file);
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ArtworkLease(ArtworkRaster.Decode(System.Runtime.InteropServices.WindowsRuntime.WindowsRuntimeBufferExtensions.ToArray(bytes)));
+        }
+
+        private sealed class ArtworkLease(ArtworkPixels image) : IArtworkLease
+        {
+            public ArtworkPixels Image => image;
+            public void Dispose() { }
+        }
+    }
+
     internal static FilmCardItem Card(string kind = "tv", int number = 100, string? title = null, string? poster = null)
     {
         var target = new FilmPlaybackTarget($"tmdb:{kind}:{number}", kind, title ?? $"契约样例 {number}", "tmdb", number.ToString());
@@ -70,13 +90,8 @@ internal static class FilmPlaybackFixture
             sessionId = id.ToString(), sequence, target = target.Wire(), entryTarget = (entryTarget ?? target).Wire(),
             entrySurface, entryResolution, stage = "idle", error = (string?)null, metadata,
             metadataSources,
-            workInfo = target.MetadataProvider is not null && target.Kind is ("movie" or "tv") ? JsonSerializer.SerializeToElement(new
-            {
-                provider = target.MetadataProvider, metadataId = target.MetadataId, kind = target.Kind,
-                title = target.Title, summary = FilmJson.Text(metadata, "overview"),
-                seasonCount = target.Kind == "tv" ? (int?)FilmJson.Array(metadata, "seasons").Length : null,
-                episodeCount = target.Kind == "tv" ? (int?)episodes.Length : null
-            }) : JsonSerializer.SerializeToElement<object?>(null),
+            workInfo = target.MetadataProvider is not null && target.Kind is ("movie" or "tv") &&
+                metadata.ValueKind == JsonValueKind.Object ? WorkInfo(target, metadata) : JsonSerializer.SerializeToElement<object?>(null),
             metadataSourceId = target.MetadataProvider is null ? null : target.MetadataProvider + ":" + target.MetadataId,
             sources = Array.Empty<object>(), search = Array.Empty<object>(),
             browsing = browsing ?? FilmJson.Encode(new { sourceId = (string?)null, lineId = (string?)null, season = target.Season ?? 1,
@@ -86,6 +101,14 @@ internal static class FilmPlaybackFixture
             searchComplete = false, preferences = FilmPreferences.Defaults, shortVideo = false, previewEpisodes = false
         });
     }
+    internal static JsonElement WorkInfo(FilmPlaybackTarget target, JsonElement metadata) => JsonSerializer.SerializeToElement(new
+    {
+        provider = target.MetadataProvider, metadataId = target.MetadataId, kind = target.Kind,
+        title = target.Title, summary = FilmJson.Text(metadata, "overview") is { Length: > 0 } overview ? overview : FilmJson.Text(metadata, "intro"),
+        seasonCount = target.Kind == "tv" ? (int?)FilmJson.Array(metadata, "seasons").Length : null,
+        episodeCount = target.Kind == "tv" ? (int?)FilmJson.Array(metadata, "seasons").Sum(row => FilmJson.Array(row, "episodes").Length) : null,
+        metadata
+    });
     internal static JsonElement Candidate(string id, int? episode = 1, object? detail = null, object? line = null, string quality = "1080p") =>
         FilmJson.Encode(new { id, businessId = "fixture:file:" + id,
             playbackTarget = new FilmPlaybackTarget("fixture:source", "source", $"资源 {id}", Source: FilmJson.Encode(new
@@ -130,12 +153,14 @@ internal sealed class FilmMemoryStore : NativeTestDatabase
         FailWrite ? throw new DocumentStoreException(DocumentStoreError.Storage) : base.WriteAsync(write, token, retainedBytes, commit);
 }
 
-internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSource
+internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSource, IRuntimeSettingsNotifications
 {
     private readonly object gate = new();
     internal readonly CancellationTokenSource Owner = new();
     private readonly List<(string Method, JsonElement Parameters)> calls = [];
     internal IReadOnlyList<(string Method, JsonElement Parameters)> Calls { get { lock (gate) return calls.ToArray(); } }
+    internal readonly List<string> Notifications = [];
+    public void SettingsChanged(string block) => Notifications.Add(block);
     internal readonly ConcurrentDictionary<string, JsonElement> Receipts = new(StringComparer.Ordinal);
     private readonly HashSet<string> released = new(StringComparer.Ordinal);
     internal IReadOnlySet<string> Released { get { lock (gate) return new HashSet<string>(released, StringComparer.Ordinal); } }
@@ -286,7 +311,11 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
             Change(root =>
             {
                 root["metadataSourceId"] = FilmJson.RequiredText(input, "metadataSourceId");
-                if (!FilmJson.Bool(input, "keepSource")) root["browsing"]!["sourceId"] = null;
+                if (input.TryGetProperty("sourceId", out var source))
+                    root["browsing"]!["sourceId"] = source.ValueKind == JsonValueKind.Null ? null : source.GetString();
+                else if (!FilmJson.Bool(input, "keepSource")) root["browsing"]!["sourceId"] = null;
+                if (input.TryGetProperty("lineId", out var line)) root["browsing"]!["lineId"] = JsonNode.Parse(line.GetRawText());
+                if (input.TryGetProperty("season", out var season)) root["browsing"]!["season"] = season.GetInt32();
                 root["browsing"]!["loading"] = false;
             });
         }
@@ -346,8 +375,6 @@ internal sealed class FilmRuntimeProbe : IRuntimeSession, IRuntimeConnectionSour
     internal void DisconnectEvents() { lock (gate) events?.Writer.TryComplete(); }
     public Task<JsonElement> UploadSourceAsync(string module, string installation, long revision, ReadOnlyMemory<byte> source,
         string? basename = null, CancellationToken token = default) => throw new BridgeException("METHOD_UNAVAILABLE");
-    public Task<byte[]> ReadImageAsync(string reference, int maximumBytes, CancellationToken cancellationToken = default) =>
-        throw new InvalidOperationException("Image requests are not part of this fixture.");
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Image requests are not part of this fixture.");
     public ValueTask DisposeAsync() { Connected = false; Owner.Cancel(); events?.Writer.TryComplete(); Owner.Dispose(); return ValueTask.CompletedTask; }
@@ -360,19 +387,22 @@ internal sealed class FilmPlaybackRig : IAsyncDisposable
     internal readonly FilmMemoryStore Store = new();
     internal readonly FilmLibrary Library;
     internal readonly FilmPlaybackSession Session;
+    internal readonly FilmNativeSettingsFixture PreferencesStore = new();
+    internal readonly FilmPlaybackSettings Preferences;
     internal Func<CancellationToken, Task<RuntimeConnection>>? Capture;
     internal FilmPlaybackPage Page { get; private set; } = null!;
-    internal FilmPlaybackRig(ContentControl? view = null)
+    internal FilmPlaybackRig(FrameworkElement? view = null)
     {
         Native = new(view);
         Library = new(Store);
         Session = new(token => (Capture ?? Runtime.CaptureConnectionAsync)(token), Native);
+        Preferences = new(Runtime, PreferencesStore);
     }
     internal async Task OpenAsync(FilmCardItem? item = null, FilmPlaybackRequest? request = null, CancellationToken token = default)
     {
         item ??= FilmPlaybackFixture.Card();
         request ??= item.PlaybackContext!;
-        Page = new(item, request, Session, Library);
+        Page = new(item, request, Session, Library, Preferences);
         await Session.OpenAsync(Page, new
         {
             platform = "windows", entrySurface = request.EntrySurface, target = request.Target.Wire(),
@@ -385,13 +415,13 @@ internal sealed class FilmPlaybackRig : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         try { await Session.DisposeAsync(); }
-        finally { await Library.DisposeAsync(); await Runtime.DisposeAsync(); }
+        finally { await Library.DisposeAsync(); await Runtime.DisposeAsync(); await PreferencesStore.DisposeAsync(); }
     }
 }
 
-internal sealed class FilmNativeProbe(ContentControl? view = null) : IFilmNativeMedia
+internal sealed class FilmNativeProbe(FrameworkElement? view = null) : IFilmNativeMedia
 {
-    public ContentControl View { get; } = view ?? new ContentControl();
+    public FrameworkElement View { get; } = view ?? new ContentControl();
     public NativePlaybackScope? Scope { get; private set; }
     public string? Identity { get; private set; }
     public bool HasOutput { get; private set; }

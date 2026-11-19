@@ -1,113 +1,71 @@
-using System.Windows;
-using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
 
 namespace MeowFilm.Desktop;
 
-/// <summary>One window's blank-surface gesture; never consumes a control's native input.</summary>
+/// <summary>One root's blank-surface gesture, fenced by activation and actual pointer lifetime.</summary>
 public sealed class PlayerSurfaceInput : IDisposable
 {
-    public static readonly DependencyProperty QueueOpenProperty = DependencyProperty.RegisterAttached(
-        "QueueOpen", typeof(bool), typeof(PlayerSurfaceInput), new FrameworkPropertyMetadata(false, FrameworkPropertyMetadataOptions.Inherits));
-    public static bool GetQueueOpen(DependencyObject value) => (bool)value.GetValue(QueueOpenProperty);
+    public static readonly DependencyProperty QueueOpenProperty = DependencyProperty.RegisterAttached("QueueOpen", typeof(bool), typeof(PlayerSurfaceInput), new PropertyMetadata(false));
+    private static readonly DependencyProperty DismissProperty = DependencyProperty.RegisterAttached("Dismiss", typeof(RoutedEventHandler), typeof(PlayerSurfaceInput), new PropertyMetadata(null));
+    public static bool GetQueueOpen(DependencyObject value) =>
+        value is FrameworkElement { XamlRoot.Content: FrameworkElement root } ? (bool)root.GetValue(QueueOpenProperty) : (bool)value.GetValue(QueueOpenProperty);
     public static void SetQueueOpen(DependencyObject value, bool open) => value.SetValue(QueueOpenProperty, open);
-    public static readonly RoutedEvent DismissRequestedEvent = EventManager.RegisterRoutedEvent(
-        "DismissRequested", RoutingStrategy.Bubble, typeof(RoutedEventHandler), typeof(PlayerSurfaceInput));
-    public static void AddDismissRequestedHandler(DependencyObject value, RoutedEventHandler handler) => ((UIElement)value).AddHandler(DismissRequestedEvent, handler);
-    public static void RemoveDismissRequestedHandler(DependencyObject value, RoutedEventHandler handler) => ((UIElement)value).RemoveHandler(DismissRequestedEvent, handler);
-
-    private readonly Window window;
+    public static void AddDismissRequestedHandler(DependencyObject value, RoutedEventHandler handler) => value.SetValue(DismissProperty, (RoutedEventHandler?)value.GetValue(DismissProperty) + handler);
+    public static void RemoveDismissRequestedHandler(DependencyObject value, RoutedEventHandler handler) => value.SetValue(DismissProperty, (RoutedEventHandler?)value.GetValue(DismissProperty) - handler);
+    private readonly DesktopWindow window;
+    private readonly FrameworkElement root;
     private readonly FrameworkElement surface;
     private readonly Func<bool> layersOpen;
-    private readonly Dictionary<Visual, HwndSource> sources = [];
+    private readonly IDisposable visibility;
     private readonly SurfaceGesture gesture = new();
-    private bool nativeDown;
-    private bool disposed;
-
-    public PlayerSurfaceInput(Window window, FrameworkElement surface, Func<bool> layersOpen)
+    private bool pressed, disposed;
+    public PlayerSurfaceInput(DesktopWindow window, FrameworkElement surface, Func<bool> layersOpen)
     {
-        this.window = window; this.surface = surface; this.layersOpen = layersOpen;
-        window.SourceInitialized += SourceInitialized;
-        window.Deactivated += Deactivated;
-        InputManager.Current.PreProcessInput += BeforeInput;
-        InputManager.Current.PostProcessInput += AfterInput;
-        Observe(window);
-    }
-    private void SourceInitialized(object? sender, EventArgs e) => Observe(window);
-    public void Observe(Visual visual)
-    {
-        if (disposed) return;
-        Forget(visual);
-        if (PresentationSource.FromVisual(visual) is HwndSource source)
-        { sources.Add(visual, source); source.AddHook(Message); }
-    }
-    public void Forget(Visual visual)
-    {
-        if (sources.Remove(visual, out var source) && !source.IsDisposed) source.RemoveHook(Message);
+        this.window = window; root = window.Root; this.surface = surface; this.layersOpen = layersOpen;
+        window.NativeMessage += Message; window.Deactivated += Deactivated;
+        root.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(KeyDown), true);
+        root.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released), true);
+        root.AddHandler(UIElement.PointerCanceledEvent, new PointerEventHandler(Cancelled), true);
+        visibility = DesktopVisual.ObserveVisibility(surface, visible => { if (!visible) Cancel(); });
     }
     private nint Message(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
-        if (!surface.IsVisible) return 0;
-        if ((message is 0x201 or 0x203) && sources.Values.FirstOrDefault(value => value.Handle == hwnd) is { RootVisual: Visual root } source)
-        {
-            var point = new Point((short)(lParam.ToInt64() & 0xffff), (short)((lParam.ToInt64() >> 16) & 0xffff));
-            var logical = source.CompositionTarget.TransformFromDevice.Transform(point);
-            PlayerMenuInput.For(window).NativeDown(root.PointToScreen(logical));
-        }
+        if (!DesktopVisual.IsVisible(surface)) return 0;
         gesture.Message(message, wParam, lParam, window.IsActive, layersOpen() || GetQueueOpen(surface));
-        if (message is 0x201 or 0x203) nativeDown = true;
-        else if (message == 0x1f || message == 0x6 && (wParam.ToInt64() & 0xffff) == 0) nativeDown = false;
+        if (message is 0x201 or 0x203) pressed = true;
         return 0;
     }
-    private void BeforeInput(object sender, PreProcessInputEventArgs e)
-    {
-        if (disposed || !surface.IsVisible) return;
-        if (e.StagingItem.Input is MouseButtonEventArgs menuMouse &&
-            (PlayerMenuInput.For(window).HasPendingGesture ||
-            (menuMouse.Source as Visual ?? menuMouse.MouseDevice.DirectlyOver as Visual) is { } visual &&
-            PresentationSource.FromVisual(visual) is HwndSource inputSource &&
-            (sources.Values.Contains(inputSource) || ReferenceEquals(inputSource, PresentationSource.FromVisual(surface)))))
-            PlayerMenuInput.For(window).Preview(menuMouse);
-        if (e.StagingItem.Input is MouseButtonEventArgs mouse && mouse.ChangedButton == MouseButton.Left &&
-            mouse.RoutedEvent == Mouse.PreviewMouseDownEvent)
-        {
-            if (!nativeDown) gesture.Down(window.IsActive, layersOpen() || GetQueueOpen(surface));
-            nativeDown = false;
-        }
-    }
-    private void AfterInput(object sender, ProcessInputEventArgs e)
-    {
-        if (e.StagingItem.Input is MouseButtonEventArgs mouse && mouse.ChangedButton == MouseButton.Left &&
-            mouse.RoutedEvent == Mouse.MouseUpEvent) Cancel();
-    }
+    private void KeyDown(object sender, KeyRoutedEventArgs args) => gesture.Keyboard();
+    private void Released(object sender, PointerRoutedEventArgs args) => window.DispatcherQueue.TryEnqueue(Cancel);
+    private void Cancelled(object sender, PointerRoutedEventArgs args) => Cancel();
     public void Press(bool blank)
     {
-        gesture.Arm(blank);
+        if (disposed || !DesktopVisual.IsVisible(surface)) { Cancel(); return; }
+        if (!pressed) gesture.Down(window.IsActive, layersOpen() || GetQueueOpen(surface));
+        pressed = true; gesture.Arm(blank);
         if (blank && gesture.CanDismiss && GetQueueOpen(surface))
         {
             gesture.Block();
-            surface.RaiseEvent(new RoutedEventArgs(DismissRequestedEvent));
+            (root.GetValue(DismissProperty) as RoutedEventHandler)?.Invoke(surface, new RoutedEventArgs());
         }
     }
-    public bool Release(bool blank) => gesture.Up(blank && window.IsActive && surface.IsVisible &&
-        !layersOpen() && !GetQueueOpen(surface));
-    public void LayerClosed()
+    public bool Release(bool blank)
     {
-        // A close during a pressed gesture cannot grant admission, including synthetic WPF input.
-        if (Mouse.LeftButton == MouseButtonState.Pressed) gesture.Block();
+        pressed = false;
+        return gesture.Up(!disposed && blank && window.IsActive && DesktopVisual.IsVisible(surface) && !layersOpen() && !GetQueueOpen(surface));
     }
-    private void Deactivated(object? sender, EventArgs e) => Cancel();
-    public void Cancel() { gesture.Cancel(); nativeDown = false; }
+    public void LayerClosed() { if (pressed) gesture.Block(); }
+    private void Deactivated(object? sender, EventArgs args) => Cancel();
+    public void Cancel() { gesture.Cancel(); pressed = false; }
     public void Dispose()
     {
         if (disposed) return;
-        disposed = true; Cancel();
-        window.SourceInitialized -= SourceInitialized; window.Deactivated -= Deactivated;
-        InputManager.Current.PreProcessInput -= BeforeInput;
-        InputManager.Current.PostProcessInput -= AfterInput;
-        foreach (var source in sources.Values) if (!source.IsDisposed) source.RemoveHook(Message);
-        sources.Clear();
+        disposed = true; visibility.Dispose(); Cancel(); window.NativeMessage -= Message; window.Deactivated -= Deactivated;
+        root.RemoveHandler(UIElement.KeyDownEvent, new KeyEventHandler(KeyDown));
+        root.RemoveHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released));
+        root.RemoveHandler(UIElement.PointerCanceledEvent, new PointerEventHandler(Cancelled));
     }
 }
 

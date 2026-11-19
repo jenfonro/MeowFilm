@@ -312,7 +312,10 @@ function constrainedFixture(known) {
   } }, shares: { share: [file('share-other', '720p', 'uc')] }, pages: { a: [[result('searched')]] } });
 }
 async function seedConstrainedStages(f) {
-  f.library.update(document => { document.history.unshift(history('history')); });
+  f.library.update(document => {
+    const row = history('history');
+    document.history = [row, ...document.history.filter(item => item.targetId !== row.targetId)];
+  });
   (await f.service.updateManual({ action: 'save', item: manualSite('manual') }));
   (await f.service.updateManual({ action: 'save', item: manualShare('share', 'uc') }));
 }

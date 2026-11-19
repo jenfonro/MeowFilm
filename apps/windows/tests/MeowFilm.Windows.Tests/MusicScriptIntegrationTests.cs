@@ -70,7 +70,7 @@ public static class MusicScriptIntegrationTests
                 RuntimeModule[] modules = RuntimeHttpClientTests.Modules;
                 await Store.Ready;
                 return Child = await NodeRuntime.StartAsync(node,
-                    RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate", modules),
+                    RuntimeBundle.Verify(System.IO.Path.Combine(bundles, "aggregate"), "aggregate"),
                     modules,
                     path, token, settingsStore: new MeowFilm.Capabilities.FilmRuntimeSettings(Store));
             });

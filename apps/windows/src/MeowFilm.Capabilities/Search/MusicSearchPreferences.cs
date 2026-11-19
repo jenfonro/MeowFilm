@@ -145,7 +145,6 @@ public sealed partial class MusicCapability
     {
         long revision = MusicDto.Integer(value, "revision");
         var rows = value.GetProperty("items").EnumerateArray().ToArray();
-        MusicDto.Require(rows.Length <= 60);
         foreach (var item in rows)
         {
             _ = MusicDto.Text(item, "text");

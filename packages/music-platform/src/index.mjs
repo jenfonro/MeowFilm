@@ -12,6 +12,7 @@ import { kwProvider } from './providers/kw.mjs';
 import { mgProvider } from './providers/mg.mjs';
 import { createAccountOperations } from './accounts.mjs';
 import { createMutations } from './mutations.mjs';
+import { projectContent } from './content.mjs';
 
 export { MusicPlatformError, musicPlatformCodes };
 const providers = { wy: wyProvider, tx: txProvider, kg: kgProvider, kw: kwProvider, mg: mgProvider };
@@ -66,6 +67,14 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
     const c = {
       platform, account: entry.account, signal, clock, transport,
       client: () => { assertCurrent(); return clients.get(platform); }, errorCode,
+      observe(path, value) {
+        const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+        const key = path + ':' + type;
+        if (entry.observations.size < 32 || entry.observations.has(key))
+          entry.observations.set(key, { stage: 'extract', path, type,
+            ...(Array.isArray(value) ? { count: value.length } : {}) });
+        return value;
+      },
       cancel() { controller.abort(new MusicPlatformError('CANCELLED')); },
       drain() { return entry.work.catch(() => {}); },
       isCurrent() { return !signal.aborted && (entry.candidate || session === sessions.get(platform)); },
@@ -94,10 +103,9 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
         const recipe = wyRequest(path, data, client, c.account, clock, weapi, options.token, options.vip);
         assertCurrent();
         const reply = await transport({ ...recipe,
-          signal, dispatched: options.dispatched, json: !options.vip,
-          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+          signal, dispatched: options.dispatched, json: !options.vip });
         assertCurrent();
-        if (options.vip) reply.value = encryptedWyResponse(reply.value, options.maximumBytes);
+        if (options.vip) reply.value = encryptedWyResponse(reply.value);
         if (!options.raw) try { wySuccess(reply.value); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
         if (!entry.committed) await clients.acceptWy(reply.cookies, c.account, new URL(recipe.url).hostname);
@@ -108,8 +116,7 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
         const client = prepare ? await clients.prepare('tx') : clients.get('tx');
         assertCurrent();
         const recipe = txRequest(module, method, data, client, c.account, clock, options);
-        const reply = await transport({ ...recipe, signal, dispatched: options.dispatched,
-          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+        const reply = await transport({ ...recipe, signal, dispatched: options.dispatched });
         assertCurrent();
         try { return txSuccess(reply.value); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
@@ -118,8 +125,7 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
         assertCurrent();
         const request = kgRequest(path, data, clients.get('kg'), c.account, clock, router, body, origin, salt);
         if (options.headers) Object.assign(request.headers, options.headers);
-        const reply = await transport({ ...request, signal, dispatched: options.dispatched,
-          ...(options.maximumBytes == null ? {} : { maximumBytes: options.maximumBytes }) });
+        const reply = await transport({ ...request, signal, dispatched: options.dispatched });
         assertCurrent();
         if (reply.headers.get('ssa-code')) { options.rejected?.(); fail('VERIFICATION_REQUIRED'); }
         try { return kgSuccess(reply.value); }
@@ -145,7 +151,7 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
               'x-router': 'kmr.service.kugou.com', 'Cache-Control': 'no-store',
               mid: cookies.KUGOU_API_MID ?? client.mid, dfid: cookies.dfid ?? client.dfid ?? '-', clienttime: String(time),
               'User-Agent': 'Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi',
-              'kg-rc': '1', 'kg-thash': '5d816a0', 'kg-rec': '1', 'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F' }, maximumBytes: 2 * 1024 * 1024,
+              'kg-rc': '1', 'kg-thash': '5d816a0', 'kg-rec': '1', 'kg-rf': 'B9EDA08A64250DEFFBCADDEE00F8F25F' },
             body: JSON.stringify({ appid: 1005, clienttime: time, clientver: 20489, data: [{ hash: hash.toLowerCase() }],
               dfid: cookies.dfid ?? client.dfid ?? '-', key: md5('1005' + kgSalt + '20489' + time),
               mid: cookies.KUGOU_API_MID ?? client.mid, show_privilege: 0, show_author_alias: 0,
@@ -158,7 +164,7 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
         }
         const raw = await c.kg('/kmr/v2/audio', {}, 'openapi.kugou.com',
           { data: [{ entity_id: protocolInteger(mix) }], fields: 'base,audio_info,album_info,authors.base' },
-          undefined, undefined, { maximumBytes: 2 * 1024 * 1024, headers: { 'KG-TID': '238', 'Cache-Control': 'no-store' } });
+          undefined, undefined, { headers: { 'KG-TID': '238', 'Cache-Control': 'no-store' } });
         const values = rows(raw.data), row = values[0], audio = row?.audio_info;
         if (values.length !== 1 || Number(row?.__status) !== 1 || scalar(row.base?.album_audio_id) !== mix ||
             !['hash', 'hash_320', 'hash_flac', 'hash_high'].some(key => scalar(audio?.[key]).toUpperCase() === hash) ||
@@ -232,7 +238,8 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
     const controller = new AbortController(), session = sessions.get(platform);
     if (expectedSession !== undefined && (expectedSession === null ? session !== undefined :
       expectedSession.scope !== session?.scope || expectedSession.generation !== session?.generation)) fail('STALE_SESSION');
-    const entry = { platform, operation, controller, session, committed: false, readback: null, candidate: candidate !== undefined,
+    const entry = { platform, operation, controller, session, committed: false, readback: null,
+      observations: new Map(), candidate: candidate !== undefined,
       account: candidate === undefined ? session : candidate === null ? null :
         { userId: scalar(candidate.userId), cookie: input(candidate.cookie) } };
     const timer = setTimeout(() => controller.abort(new MusicPlatformError('TIMEOUT')),
@@ -247,7 +254,11 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
       await clients.ready;
       controller.signal.throwIfAborted();
       if (closed) fail('CLOSED');
-      const c = context(entry, params), value = await action(c, params);
+      const c = context(entry, params);
+      let value = projectContent(platform, operation, await action(c, params));
+      if (Object.hasOwn(providers[platform], operation) && !writes.has(operation) &&
+          entry.observations.size && value && typeof value === 'object' && !Array.isArray(value))
+        value = { ...value, diagnostics: [...entry.observations.values()] };
       // Only the already projected public result is inspected for credential
       // reflection. Unconsumed upstream branches are never walked or validated.
       if (c.account && !['account.verify', 'account.profile', 'account.refresh', 'sms.login', 'qr.poll'].includes(operation)) {

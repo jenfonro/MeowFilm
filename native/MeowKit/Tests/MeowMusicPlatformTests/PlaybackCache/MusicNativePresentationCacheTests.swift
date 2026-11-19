@@ -1,6 +1,9 @@
 import Foundation
+import CryptoKit
+import Darwin
 import XCTest
 import MeowMusicFeature
+import MeowUI
 import MeowStorage
 import MeowStorageTestSupport
 @testable import MeowMusicPlatform
@@ -20,6 +23,11 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         addTeardownBlock { await cache.close() }
         return (database.dataRoot, database, cache, clock)
     }
+    private func rawFixture() throws -> (URL, ResourceFileStore, MusicAccountTestClock) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return (root, try ResourceFileStore(baseURL: root, namespace: "presentation-resource-tests"), MusicAccountTestClock())
+    }
     private func artwork() throws -> Data {
         try XCTUnwrap(Data(base64Encoded:
             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5HcAAAAASUVORK5CYII="))
@@ -27,6 +35,12 @@ final class MusicNativePresentationCacheTests: XCTestCase {
     private func lyrics(_ cache: MusicNativePresentationCache, song: String? = nil) async {
         await cache.storeLyrics(lines, sourceKey: "native", songID: song ?? songID,
             revision: cache.lyricRevision, authorization: .init())
+    }
+    private func key(_ resource: String, kind: String = "image") -> String {
+        kind + "-" + SHA256.hash(data: Data(resource.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    private func directory(_ root: URL) -> URL {
+        root.appendingPathComponent("presentation-resource-tests", isDirectory: true)
     }
 
     func testCurrentResourcesRoundTripThroughASeparateColdOwnerWithoutSongImageCopies() async throws {
@@ -128,12 +142,15 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         XCTAssertTrue(try before.allSatisfy { try $0.double("updated_at") == start.timeIntervalSince1970 })
         await cache.played(songID: songID, artwork: imageURL, confirmedAt: clock.now())
         clock.advance(2 * 86_400)
-        let retained = await cache.read(imageURL), expired = await cache.read(other)
-        let lyric = await cache.lyrics(songID: songID, authorization: .init())
+        await cache.close()
+        let cold = MusicNativePresentationCache(database: database, clock: { clock.now() })
+        addTeardownBlock { await cold.close() }
+        let retained = await cold.read(imageURL), expired = await cold.read(other)
+        let lyric = await cold.lyrics(songID: songID, authorization: .init())
         XCTAssertEqual(retained?.expiresAt, start.addingTimeInterval(59 * 86_400))
         XCTAssertNil(expired); XCTAssertEqual(lyric?.lines, lines)
         clock.advance(29 * 86_400)
-        let gone = await cache.read(imageURL), oldLyrics = await cache.lyrics(songID: songID, authorization: .init())
+        let gone = await cold.read(imageURL), oldLyrics = await cold.lyrics(songID: songID, authorization: .init())
         XCTAssertNil(gone); XCTAssertNil(oldLyrics)
     }
 
@@ -177,4 +194,258 @@ final class MusicNativePresentationCacheTests: XCTestCase {
         let rawBytes = try files.filter { $0.pathExtension == "bin" }.reduce(0) { try $0 + $1.resourceValues(forKeys: [.fileSizeKey]).fileSize! }
         XCTAssertLessThanOrEqual(rawBytes, bytes)
     }
+
+    func testWarmReadsAndUnchangedPlaybackLeaveRowsUnchanged() async throws {
+        let (_, database, cache, clock) = try fixture()
+        let image = try artwork(), start = clock.now()
+        _ = await cache.store(image, for: imageURL, revision: cache.revision); await lyrics(cache)
+        let before = try await database.read { try $0.query("SELECT updated_at FROM ios_music_images").first!.double("updated_at") }
+        for _ in 0..<8 {
+            let hit = await cache.read(imageURL), lyric = await cache.lyrics(songID: songID, authorization: .init())
+            XCTAssertEqual(hit?.data, image); XCTAssertEqual(lyric?.lines, lines)
+            await cache.played(songID: songID, artwork: imageURL, confirmedAt: start)
+            await cache.played(songID: songID, artwork: imageURL, confirmedAt: start.addingTimeInterval(-1))
+        }
+        let after = try await database.read { try $0.query("SELECT updated_at FROM ios_music_images").first!.double("updated_at") }
+        XCTAssertEqual(after, before)
+    }
+
+    func testRevokedAuthorizationCannotReadOrReplaceLyrics() async throws {
+        let (_, _, cache, _) = try fixture()
+        await lyrics(cache)
+        let revoked = MusicQueueAuthorization(); revoked.revoke()
+        let denied = await cache.lyrics(songID: songID, authorization: revoked)
+        await cache.storeLyrics([.init(index: 0, time: 0, end: 1, text: "denied")],
+            sourceKey: "denied", songID: songID, revision: cache.lyricRevision, authorization: revoked)
+        XCTAssertNil(denied)
+        let healthy = await cache.lyrics(songID: songID, authorization: .init())
+        XCTAssertEqual(healthy?.lines, lines); XCTAssertEqual(healthy?.sourceKey, "native")
+    }
+
+    func testMissingImageLeafIsAnIndividualMissAndCanBeStoredAgain() async throws {
+        let (_, database, cache, _) = try fixture()
+        let image = try artwork()
+        _ = await cache.store(image, for: imageURL, revision: cache.revision); await lyrics(cache)
+        let files = try FileManager.default.contentsOfDirectory(at: database.dataRoot.appendingPathComponent("resources-v1/music-images"), includingPropertiesForKeys: nil)
+        for file in files where file.pathExtension == "bin" { try FileManager.default.removeItem(at: file) }
+        let missing = await cache.read(imageURL), healthy = await cache.lyrics(songID: songID, authorization: .init())
+        XCTAssertNil(missing); XCTAssertEqual(healthy?.lines, lines)
+        _ = await cache.store(image, for: imageURL, revision: cache.revision)
+        let fresh = await cache.read(imageURL); XCTAssertEqual(fresh?.data, image)
+    }
+
+    func testCancelledWriterDoesNotReplaceHealthyResourceBytes() async throws {
+        let (_, _, cache, _) = try fixture()
+        let image = try artwork(), url = imageURL
+        _ = await cache.store(image, for: url, revision: cache.revision)
+        let gate = PresentationCacheTestIOGate()
+        let writer = Task.detached {
+            gate.wait()
+            return await cache.store(image + Data([1]), for: url, revision: cache.revision)
+        }
+        await fulfillment(of: [gate.entered], timeout: 3)
+        writer.cancel(); gate.release()
+        let cancelled = await writer.value, healthy = await cache.read(url)
+        XCTAssertNil(cancelled); XCTAssertEqual(healthy?.data, image)
+    }
+
+    func testSingleResourceByteLimitsDoNotReplaceHealthyLeaves() async throws {
+        let (_, _, cache, _) = try fixture()
+        let image = try artwork()
+        _ = await cache.store(image, for: imageURL, revision: cache.revision); await lyrics(cache)
+        let oversized = await cache.store(Data(repeating: 0, count: 4 * 1024 * 1024 + 1),
+            for: imageURL, revision: cache.revision)
+        let empty = await cache.store(Data(), for: imageURL, revision: cache.revision)
+        await cache.storeLyrics([.init(index: 0, time: 0, end: 1, text: String(repeating: "x", count: 1024 * 1024))],
+            sourceKey: "oversized", songID: songID, revision: cache.lyricRevision, authorization: .init())
+        let retainedImage = await cache.read(imageURL), retainedLyrics = await cache.lyrics(songID: songID, authorization: .init())
+        XCTAssertNil(oversized); XCTAssertNil(empty); XCTAssertEqual(retainedImage?.data, image)
+        XCTAssertEqual(retainedLyrics?.lines, lines); XCTAssertEqual(retainedLyrics?.sourceKey, "native")
+    }
+
+    func testResourceStoreFencesPublicationAndOnlyTouchesChangedModificationTime() async throws {
+        let (root, store, clock) = try rawFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = try artwork(), start = clock.now(), imageKey = key(imageURL.absoluteString)
+        try store.write(image, key: imageKey, modifiedAt: start)
+        var retainedStage: ResourceFileStore.Metadata?
+        XCTAssertThrowsError(try store.write(Data([1]), key: imageKey, modifiedAt: start.addingTimeInterval(1),
+            retainedStage: { retainedStage = $0 }, commit: { _ in throw CancellationError() })) {
+            XCTAssertTrue($0 is CancellationError)
+        }
+        XCTAssertNil(retainedStage); XCTAssertEqual(try store.inventory().count, 1)
+        XCTAssertEqual(try store.read(key: imageKey, maximumBytes: 4 * 1024 * 1024), image)
+        for at in [start, start.addingTimeInterval(-1)] {
+            XCTAssertEqual(try store.touch(key: imageKey, modifiedAt: at, commit: { _ in
+                XCTFail("An unchanged mtime must not invoke the persistent mutation")
+            }), start)
+        }
+        XCTAssertThrowsError(try store.touch(key: imageKey, modifiedAt: start.addingTimeInterval(1),
+            commit: { _ in throw CancellationError() }))
+        XCTAssertEqual(try store.inventory().first?.modifiedAt, start)
+        let renewed = start.addingTimeInterval(1)
+        XCTAssertEqual(try store.touch(key: imageKey, modifiedAt: renewed), renewed)
+        XCTAssertEqual(try store.inventory().first?.modifiedAt, renewed)
+        XCTAssertEqual(try store.read(key: imageKey, maximumBytes: 4 * 1024 * 1024), image)
+    }
+
+    func testResourceStoreRejectsLinkedReadsAndTouchesWithoutChangingTheTarget() async throws {
+        let (root, store, clock) = try rawFixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let image = try artwork(), imageKey = key(imageURL.absoluteString)
+        try store.write(image, key: imageKey, modifiedAt: clock.now())
+        let leaf = directory(root).appendingPathComponent(imageKey + ".bytes")
+        let target = root.appendingPathComponent("outside.bytes"), original = Data("outside".utf8)
+        try original.write(to: target)
+        let targetTime = try target.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        try FileManager.default.removeItem(at: leaf)
+        try FileManager.default.createSymbolicLink(at: leaf, withDestinationURL: target)
+        XCTAssertThrowsError(try store.read(key: imageKey, maximumBytes: 4 * 1024 * 1024)) {
+            XCTAssertEqual($0 as? ResourceFileError, .unsafePath)
+        }
+        XCTAssertThrowsError(try store.touch(key: imageKey, modifiedAt: clock.now().addingTimeInterval(1))) {
+            XCTAssertEqual($0 as? ResourceFileError, .unsafePath)
+        }
+        try store.write(image, key: imageKey, modifiedAt: clock.now())
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        try store.remove(key: imageKey)
+        XCTAssertEqual(Darwin.link(target.path, leaf.path), 0)
+        XCTAssertThrowsError(try store.read(key: imageKey, maximumBytes: 4 * 1024 * 1024)) {
+            XCTAssertEqual($0 as? ResourceFileError, .unsafePath)
+        }
+        XCTAssertThrowsError(try store.touch(key: imageKey, modifiedAt: clock.now().addingTimeInterval(1))) {
+            XCTAssertEqual($0 as? ResourceFileError, .unsafePath)
+        }
+        try store.remove(key: imageKey)
+        XCTAssertEqual(try Data(contentsOf: target), original)
+        XCTAssertEqual(try target.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate, targetTime)
+    }
+
+    func testFailedFirstClearDoesNotReadoptOldRowsAfterRecoveryOrFreshWrite() async throws {
+        let (_, database, cache, clock) = try fixture()
+        let image = try artwork(), other = URL(string: "https://images.invalid/uncleared")!
+        _ = await cache.store(image, for: imageURL, revision: cache.revision)
+        _ = await cache.store(image, for: other, revision: cache.revision); await lyrics(cache)
+        await cache.close()
+        let recovering = MusicNativePresentationCache(database: database, clock: { clock.now() })
+        addTeardownBlock { await recovering.close() }
+        try storageTestReadOnly(database, true)
+        await recovering.clearImages()
+        try storageTestReadOnly(database, false)
+        let missing = await recovering.read(imageURL), healthy = await recovering.lyrics(songID: songID, authorization: .init())
+        XCTAssertNil(missing); XCTAssertEqual(healthy?.lines, lines)
+        let replacement = image + Data([1])
+        _ = await recovering.store(replacement, for: imageURL, revision: recovering.revision)
+        let fresh = await recovering.read(imageURL), stillCleared = await recovering.read(other)
+        XCTAssertEqual(fresh?.data, replacement); XCTAssertNil(stillCleared)
+    }
+
+    func testClearRevokesImageAndLyricWritersBeforeWaitingForBlockedStorage() async throws {
+        for images in [true, false] {
+            let (_, database, cache, clock) = try fixture()
+            let image = try artwork(), url = imageURL, id = songID, value = lines
+            _ = await cache.store(image, for: url, revision: cache.revision); await lyrics(cache)
+            await cache.close()
+            let gate = PresentationCacheTestIOGate()
+            defer { gate.release() }
+            let blocked = MusicNativePresentationCache(database: database, clock: { gate.wait(); return clock.now() })
+            addTeardownBlock { await blocked.close() }
+            let expected = images ? blocked.revision : blocked.lyricRevision
+            let writer = Task.detached {
+                if images { return await blocked.store(image + Data([1]), for: url, revision: expected) }
+                await blocked.storeLyrics(value, sourceKey: "stale", songID: id, revision: expected, authorization: .init())
+                return nil as ArtworkBytes?
+            }
+            await fulfillment(of: [gate.entered], timeout: 3)
+            let clearing = Task.detached {
+                if images { await blocked.clearImages() } else { await blocked.clearLyrics() }
+            }
+            let deadline = Date().addingTimeInterval(3)
+            while (images ? blocked.revision : blocked.lyricRevision) == expected && Date() < deadline { await Task.yield() }
+            XCTAssertNotEqual(images ? blocked.revision : blocked.lyricRevision, expected)
+            gate.release()
+            let stale = await writer.value; await clearing.value
+            XCTAssertNil(stale)
+            let currentImage = await blocked.read(url), currentLyrics = await blocked.lyrics(songID: id, authorization: .init())
+            if images { XCTAssertNil(currentImage); XCTAssertEqual(currentLyrics?.lines, value) }
+            else { XCTAssertEqual(currentImage?.data, image); XCTAssertNil(currentLyrics) }
+        }
+    }
+
+    func testFailedImageDeletionRemainsChargedAndUnreadableAfterDirectoryRecovery() async throws {
+        let (root, database, cache, _) = try fixture()
+        let image = try artwork()
+        _ = await cache.store(image, for: imageURL, revision: cache.revision); await lyrics(cache)
+        let resources = root.appendingPathComponent("resources-v1/music-images"), held = root.appendingPathComponent("held-resources")
+        try FileManager.default.moveItem(at: resources, to: held)
+        try Data("blocked namespace".utf8).write(to: resources)
+        await cache.clearImages()
+        let charged = try await database.read { try $0.query("SELECT bytes,ready FROM ios_music_images") }
+        XCTAssertEqual(charged.count, 1); XCTAssertEqual(try charged.first?.integer("bytes"), image.count)
+        XCTAssertEqual(try charged.first?.integer("ready"), 0)
+        try FileManager.default.removeItem(at: resources)
+        try FileManager.default.moveItem(at: held, to: resources)
+        let missing = await cache.read(imageURL), healthy = await cache.lyrics(songID: songID, authorization: .init())
+        XCTAssertNil(missing); XCTAssertEqual(healthy?.lines, lines)
+        _ = await cache.store(image, for: imageURL, revision: cache.revision)
+        let fresh = await cache.read(imageURL)
+        XCTAssertEqual(fresh?.data, image)
+        let rows = try await database.read { try $0.query("SELECT ready FROM ios_music_images") }
+        XCTAssertEqual(rows.count, 1); XCTAssertEqual(try rows.first?.integer("ready"), 1)
+    }
+
+    func testUnpublishedImageLeavesAreRecoveredBeforeBudgetAdmissionAndLyricsClearDoesNotTouchThem() async throws {
+        let (root, database, cache, clock) = try fixture()
+        let image = try artwork()
+        _ = await cache.store(image, for: imageURL, revision: cache.revision); await lyrics(cache)
+        await cache.close()
+        let resources = root.appendingPathComponent("resources-v1/music-images")
+        let stage = resources.appendingPathComponent(UUID().uuidString.lowercased() + ".part")
+        let orphan = resources.appendingPathComponent(UUID().uuidString.lowercased() + ".bin")
+        try image.write(to: stage); try image.write(to: orphan)
+        let cold = MusicNativePresentationCache(database: database, clock: { clock.now() })
+        addTeardownBlock { await cold.close() }
+        await cold.clearLyrics()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stage.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.path))
+        let hit = await cold.read(imageURL)
+        XCTAssertEqual(hit?.data, image)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stage.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.path))
+        let lyric = await cold.lyrics(songID: songID, authorization: .init()); XCTAssertNil(lyric)
+        let rows = try await database.read { try $0.query("SELECT filename FROM ios_music_images") }
+        XCTAssertEqual(rows.count, 1)
+    }
+
+    func testCancelledReplacementAfterWritingRowsPreservesTheCommittedResource() async throws {
+        let (_, database, cache, clock) = try fixture()
+        let image = try artwork(), id = songID, value = lines
+        _ = await cache.store(image, for: imageURL, revision: cache.revision); await lyrics(cache)
+        await cache.close()
+        let gate = PresentationCacheTestIOGate()
+        defer { gate.release() }
+        let blocked = MusicNativePresentationCache(database: database, clock: { gate.wait(); return clock.now() })
+        addTeardownBlock { await blocked.close() }
+        let expected = blocked.lyricRevision
+        let writer = Task.detached {
+            await blocked.storeLyrics(value, sourceKey: "cancelled", songID: id, revision: expected, authorization: .init())
+        }
+        await fulfillment(of: [gate.entered], timeout: 3)
+        writer.cancel(); gate.release(); await writer.value
+        let healthy = await blocked.lyrics(songID: id, authorization: .init())
+        XCTAssertEqual(healthy?.sourceKey, "native"); XCTAssertEqual(healthy?.lines, value)
+    }
+
+}
+
+private final class PresentationCacheTestIOGate: @unchecked Sendable {
+    let entered = XCTestExpectation(description: "store factory entered")
+    private let condition = NSCondition()
+    private var released = false
+    func wait() {
+        condition.lock(); defer { condition.unlock() }
+        if !released { entered.fulfill() }
+        while !released { condition.wait() }
+    }
+    func release() { condition.lock(); released = true; condition.broadcast(); condition.unlock() }
 }

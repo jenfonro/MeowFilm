@@ -19,13 +19,23 @@ function encrypt(bytes, key, uuid) {
 }
 /** Official NCBL v3 file channel. Frame sizes are protocol resources, not song counts. */
 export function playbackLog(metadata, records) {
-  if (metadata.length > 8192 || records.length > 65536) fail('LIMIT');
+  if (metadata.length > 0xffff - 74 || records.length > 0xffffffff) fail('INVALID_REQUEST');
   let key, numeric;
   do { key = randomBytes(32); numeric = BigInt('0x' + key.toString('hex')); } while (numeric >= modulus);
-  const uuid = randomBytes(16), wrapped = wrapKey(numeric), compressed = Buffer.alloc(records.length + 12);
-  compressed.writeUInt32LE(0xfd2fb528); compressed[4] = 0xa0; compressed.writeUInt32LE(records.length, 5);
-  compressed.writeUIntLE((records.length << 3) | 1, 9, 3); records.copy(compressed, 12);
+  const uuid = randomBytes(16), wrapped = wrapKey(numeric), frameHeader = Buffer.alloc(9);
+  frameHeader.writeUInt32LE(0xfd2fb528); frameHeader[4] = 0xa0; frameHeader.writeUInt32LE(records.length, 5);
+  const blocks = [frameHeader];
+  // Zstandard raw blocks carry at most 128 KiB; each block has its own last flag.
+  for (let at = 0; ; at += 128 * 1024) {
+    const block = records.subarray(at, at + 128 * 1024), last = at + block.length === records.length;
+    const header = Buffer.alloc(3);
+    header.writeUIntLE((block.length << 3) | Number(last), 0, 3);
+    blocks.push(header, block);
+    if (last) break;
+  }
+  const compressed = Buffer.concat(blocks);
   const count = Math.ceil(compressed.length / 32768), headerSize = 74 + metadata.length, header = Buffer.alloc(headerSize);
+  if (compressed.length + count * 6 > 0xffffffff) fail('INVALID_REQUEST');
   header.write('NCBL'); header.writeUInt32LE(3, 4); header.writeUInt16LE(headerSize, 8);
   uuid.copy(header, 10); wrapped.copy(header, 26); header.writeUInt32LE(count - 1, 62);
   header.writeUInt32LE(compressed.length + count * 6, 66); header.writeUInt16LE(0x4343, 70);

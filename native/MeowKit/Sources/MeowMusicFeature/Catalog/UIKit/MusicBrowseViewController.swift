@@ -295,6 +295,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                                forItemAt indexPath: IndexPath) {
         if isPageVisible { MusicArtworkView.retryFailedLoads(in: cell) }
         (cell as? MusicBannerCarouselCell)?.setActive(isPageVisible && !tags.isExpanded)
+        updateVisibleArtworkDemand(including: indexPath)
         guard let row = row(at: indexPath) else { return }
         if let cell = cell as? MusicBrowseCell {
             configurePlaybackLoading(cell, section: row.section, item: row.item)
@@ -319,6 +320,18 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         (cell as? MusicBrowseCell)?.resetPressFeedback()
         (cell as? MusicBrowseCell)?.setDisplayVisible(false)
         (cell as? MusicBannerCarouselCell)?.setActive(false)
+        updateVisibleArtworkDemand(excluding: indexPath)
+    }
+
+    private func updateVisibleArtworkDemand(including: IndexPath? = nil, excluding: IndexPath? = nil) {
+        guard isPageVisible else { page?.setVisibleArtworkItems([]); return }
+        var paths = Set(collection.indexPathsForVisibleItems)
+        if let including { paths.insert(including) }
+        if let excluding { paths.remove(excluding) }
+        page?.setVisibleArtworkItems(paths.compactMap { path in
+            guard let row = row(at: path), row.section.layout != .banner else { return nil }
+            return row.item
+        })
     }
 
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
@@ -523,6 +536,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
         configureActions()
         loadVisibleFMPreviews()
+        updateVisibleArtworkDemand()
         showActionErrorIfNeeded()
         showReadErrorIfNeeded()
     }
@@ -550,7 +564,9 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         guard lhs.id == rhs.id, lhs.title == rhs.title, lhs.subtitle == rhs.subtitle,
               lhs.artwork == rhs.artwork, lhs.previewSongs == rhs.previewSongs,
               lhs.recommendationReason == rhs.recommendationReason, lhs.coverLabel == rhs.coverLabel,
-              lhs.requiresAccount == rhs.requiresAccount,
+              lhs.requiresAccount == rhs.requiresAccount, lhs.kind == rhs.kind, lhs.label == rhs.label,
+              lhs.presentation == rhs.presentation, lhs.coverRef == rhs.coverRef,
+              lhs.contextText == rhs.contextText, lhs.playCount == rhs.playCount,
               sameRanking(lhs.ranking, rhs.ranking) else { return false }
         switch (lhs.content, rhs.content) {
         case (.collection(let lhs), .collection(let rhs)): return lhs == rhs
@@ -989,9 +1005,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             guard let self, self.sections.indices.contains(index) else { return nil }
             let section = self.sections[index]
             let width = environment.container.effectiveContentSize.width
-            let trackList = section.items.allSatisfy {
-                if case .track = $0.content { return true }; return false
-            }
             let item = NSCollectionLayoutItem(layoutSize: NSCollectionLayoutSize(
                 widthDimension: .fractionalWidth(1), heightDimension: .fractionalHeight(1)))
             let group: NSCollectionLayoutGroup
@@ -1011,7 +1024,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
                 group = .horizontal(layoutSize: .init(widthDimension: .absolute(bannerWidth),
                     heightDimension: .absolute(bannerWidth / 2.56)), subitems: [item])
                 scrolling = .groupPagingCentered
-            case .grid:
+            case .grid, .artistGrid, .channelGrid:
                 let count = width < 359 ? 2 : 3
                 group = .horizontal(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute((width - 32 - CGFloat(count - 1) * 12) / CGFloat(count) + 42)),
@@ -1032,14 +1045,9 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             case .vipRankedSongs:
                 group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute(210)), subitems: [item])
-            case .list where trackList:
+            case .list, .albumRanking:
                 group = .vertical(layoutSize: .init(widthDimension: .fractionalWidth(1),
                     heightDimension: .absolute(64)), subitems: [item])
-            case .list:
-                let card = min(216, max(112, width * 0.36))
-                group = .horizontal(layoutSize: .init(widthDimension: .absolute(card),
-                    heightDimension: .absolute(card + 58)), subitems: [item])
-                scrolling = .continuous
             case .playlistRail, .rankingSmall:
                 let card = section.layout == .rankingSmall ? max(1, (width - 32) * 0.24) :
                     min(216, max(112, width * 0.36))

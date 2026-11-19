@@ -45,7 +45,7 @@ public static class MusicCatalogClientStorageTests
         await using (var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime))
         {
             var home = Ok(await app.ExecuteAsync("music.catalog.home", new { platform = "wy" }));
-            var song = home.GetProperty("sections")[0].GetProperty("items")[0];
+            var song = home.GetProperty("sections")[0].GetProperty("items")[0].GetProperty("song");
             id = song.GetProperty("songId").GetString()!;
             Check(Guid.TryParse(id, out _), "Catalog did not adopt a permanent identity");
             Ok(await app.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
@@ -153,7 +153,7 @@ public static class MusicCatalogClientStorageTests
         return runtime;
     }
     private static JsonElement Home() => MusicPlatformRuntimeFixture.Json(new {
-        platform = "wy", sections = new[] { new { id = "tracks", title = "Synthetic", type = "songs", items = new[] { Song } } },
+        platform = "wy", sections = new[] { new { id = "tracks", title = "Synthetic", layout = "song-list", items = new[] { new { kind = "song", title = "Synthetic track", song = Song } } } },
         more = false, continuation = (object?)null });
     private sealed class Store : NativeTestDatabase
     {

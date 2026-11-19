@@ -192,7 +192,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var publicCollectionRefreshes = 0
     private var accessTransitions = 0
     var publicQueueSources: [UUID: (collectionID: String, authorization: MusicQueueAuthorization,
-                                   reader: MusicNativePublicBrowseQueueRead, bytes: Int)] = [:]
+                                   reader: MusicNativePublicBrowseQueueRead)] = [:]
     var spent = Set<String>()
     var operations: [UUID: @Sendable () -> Void] = [:]
     var operationTasks: [UUID: Task<Void, Never>] = [:]
@@ -571,7 +571,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             let observed = try await recordSearchPage(result, observation: observation)
             let projected = try await projectSongMetadata(observed)
             try check(own)
-            let items = try metadataTracks(projected).items
+            let items = try displayTracks(result.items, candidates: result.items.map { try? MusicModel.normalize($0) },
+                                          songs: projected)
             return .init(platform: platform, query: query, page: page, limit: limit, total: result.total,
                          nextPage: result.nextPage, items: items, observation: observation)
         } catch {

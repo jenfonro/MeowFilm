@@ -16,8 +16,6 @@ class SourceScopeTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.write('scripts/verify-storage-boundaries.mjs',
-                   (ROOT / 'scripts/verify-storage-boundaries.mjs').read_text())
         targets = []
         for folder, names in (("Sources", {"MeowUI", "MeowJSON", "MeowAccounts", "MeowMusicPlatform"}), ("Tests", {"MeowUITests"})):
             for name in sorted(names):
@@ -143,6 +141,28 @@ let package = Package(name: "Fixture", products: [
         self.write("apps/ios/Composition/Unlisted.swift", "import Foundation")
         self.assertTrue(any("Source membership for Meowfilm:" in e for e in scope.check(self.root)))
 
+    def remove_app_sources(self, directories):
+        project = self.root / "apps/ios/Meowfilm.xcodeproj/project.pbxproj"
+        text = project.read_text()
+        for directory in directories:
+            path = directory + "/Fixture.swift"
+            (self.root / "apps/ios" / path).unlink()
+            reference = hashlib.sha256(path.encode()).hexdigest()[:24].upper()
+            build = hashlib.sha256(("build:" + path).encode()).hexdigest()[:24].upper()
+            text = "\n".join(line for line in text.splitlines() if not line.startswith((reference, build)))
+            text = text.replace(build + ",", "")
+        project.write_text(text)
+        return text
+
+    def test_app_membership_allows_unused_responsibility_directories(self):
+        text = self.remove_app_sources(("Composition", "Navigation"))
+        (self.root / "apps/ios/Navigation").rmdir()
+        self.assertEqual(scope.application_membership(self.root / "apps/ios", text), [])
+
+    def test_app_target_requires_real_source_input(self):
+        text = self.remove_app_sources(scope.APPLICATION_DIRECTORIES)
+        self.assertIn("Empty App source target: Meowfilm", scope.application_membership(self.root / "apps/ios", text))
+
     def test_unowned_app_sources_are_rejected(self):
         self.write("apps/ios/Legacy.swift", "import Foundation\n")
         self.assertIn("Unowned App source: Legacy.swift", scope.check(self.root))
@@ -262,12 +282,114 @@ let package = Package(name: "Fixture", products: [
         self.sqlite_target(consumer="UnownedSQLiteConsumer")
         self.assertIn("Unapproved binary dependency: UnownedSQLiteConsumer", scope.check(self.root))
 
-    def test_unknown_system_targets_are_rejected(self):
+    def system_sqlite_target(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        path.write_text(path.read_text().replace("targets: [\n",
+            'targets: [\n.systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),\n'))
+        self.write("native/MeowKit/Sources/CSQLite/module.modulemap",
+            'module CSQLite [system] { header "shim.h" link "sqlite3" export * }\n')
+        self.write("native/MeowKit/Sources/CSQLite/shim.h", "#include <sqlite3.h>\n")
+
+    def test_system_sqlite_accepts_equivalent_declared_paths_providers_and_headers(self):
+        self.system_sqlite_target()
+        path = self.root / "native/MeowKit/Package.swift"
+        path.write_text(path.read_text().replace('.systemLibrary(name: "CSQLite", pkgConfig: "sqlite3")',
+            '.systemLibrary(name: "CSQLite", path: "SystemInterfaces/../SystemInterfaces/SQLite", pkgConfig: "sqlite3", '
+            'providers: [.brew(["sqlite3"]), .apt(["libsqlite3-dev"])])'))
+        directory = self.root / "native/MeowKit/SystemInterfaces/SQLite"
+        directory.parent.mkdir()
+        (self.root / "native/MeowKit/Sources/CSQLite").rename(directory)
+        (directory / "shim.h").rename(directory / "SDK.h")
+        (directory / "SDK.h").write_text('#pragma once\n/* SDK declarations */\n# include "SQLite.h"\n')
+        (directory / "SQLite.h").write_text('#pragma once\n#include "SDK.h"\n# include <sqlite3.h>\n')
+        (directory / "Helpers.h").write_text("#pragma once\n")
+        (directory / "module.modulemap").write_text('''// The SDK is linked by this system interface.
+module "CSQLite" [system] {
+    header "../SQLite/SDK.h"
+    textual header "Helpers.h"
+    link "sqlite3"
+    export *
+}
+''')
+        self.assertEqual(scope.check(self.root), [])
+
+    def test_system_sqlite_accepts_umbrella_headers_and_sdk_imports(self):
+        self.system_sqlite_target()
+        self.write("native/MeowKit/Sources/CSQLite/include/SQLite.h", '#pragma once\n#import "sqlite3.h"\n')
+        for declaration in ('umbrella "include"', 'umbrella header "include/SQLite.h"'):
+            with self.subTest(declaration=declaration):
+                self.write("native/MeowKit/Sources/CSQLite/module.modulemap",
+                    'module CSQLite [system] { ' + declaration + ' link "sqlite3" export * }\n')
+                self.assertEqual(scope.check(self.root), [])
+        self.write("native/MeowKit/Sources/CSQLite/include/sqlite3.h", "// Local file is not the SDK header.\n")
+        self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
+
+    def test_system_sqlite_requires_the_actual_sdk_header_and_link(self):
+        self.system_sqlite_target()
+        self.write("native/MeowKit/Sources/CSQLite/shim.h", "// #include <sqlite3.h>\n")
+        self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
+        self.write("native/MeowKit/Sources/CSQLite/shim.h", "#include <sqlite3.h>\n")
+        self.write("native/MeowKit/Sources/CSQLite/module.modulemap",
+                   'module CSQLite { header "shim.h" /* link "sqlite3" */ export * }\n')
+        self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
+
+    def foreign_target(self):
         path = self.root / "native/MeowKit/Package.swift"
         path.write_text(path.read_text().replace("targets: [\n", 'targets: [\n.systemLibrary(name: "Foreign"),\n'))
         self.write("native/MeowKit/Sources/Foreign/module.modulemap", 'module Foreign { header "shim.h" export * }\n')
         self.write("native/MeowKit/Sources/Foreign/shim.h", "#include <sqlite3.h>\n")
-        self.assertIn("Unapproved system target", scope.check(self.root))
+
+    def test_system_modules_use_their_manifest_identity_and_declared_dependencies(self):
+        self.foreign_target()
+        path = self.root / "native/MeowKit/Package.swift"
+        path.write_text(path.read_text().replace('.target(name: "MeowUI", dependencies: [])',
+                                                '.target(name: "MeowUI", dependencies: ["Foreign"])'))
+        self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", "@preconcurrency import Foreign\n")
+        self.assertEqual(scope.check(self.root), [])
+
+    def test_unfamiliar_system_imports_cannot_bypass_dependency_checks(self):
+        self.foreign_target()
+        for imported in ("import Foreign", "  @preconcurrency import Foreign", "import func Foreign.sqlite3_initialize"):
+            with self.subTest(imported=imported):
+                self.write("native/MeowKit/Sources/MeowUI/Fixture.swift", imported + "\n")
+                self.assertIn("Undeclared imports for MeowUI: ['Foreign']", scope.check(self.root))
+
+    def test_every_system_module_requires_its_declared_interface_and_real_headers(self):
+        self.foreign_target()
+        for text in ('module Other { header "shim.h" export * }',
+                     '/* module Foreign {} */ module Other { header "shim.h" export * }',
+                     'module Foreign { header "missing.h" export * }'):
+            with self.subTest(modulemap=text):
+                self.write("native/MeowKit/Sources/Foreign/module.modulemap", text + "\n")
+                self.assertIn("Invalid system module: Foreign", scope.check(self.root))
+        (self.root / "native/MeowKit/Sources/Foreign/module.modulemap").unlink()
+        self.assertIn("Invalid system module: Foreign", scope.check(self.root))
+
+    def test_system_paths_require_real_members_within_the_package(self):
+        self.foreign_target()
+        path = self.root / "native/MeowKit/Package.swift"
+        original = path.read_text()
+        for declared in ("Sources/Missing", "../Foreign"):
+            with self.subTest(path=declared):
+                path.write_text(original.replace('.systemLibrary(name: "Foreign")',
+                    '.systemLibrary(name: "Foreign", path: "' + declared + '")'))
+                self.assertTrue(scope.check(self.root))
+        path.write_text(original)
+        header = self.root / "native/MeowKit/Sources/Foreign/shim.h"
+        header.unlink()
+        header.symlink_to(self.root / "native/MeowKit/Sources/MeowUI/Fixture.swift")
+        self.assertIn("Invalid system module: Foreign", scope.check(self.root))
+
+    def test_declared_system_paths_do_not_hide_unowned_source_members(self):
+        self.foreign_target()
+        path = self.root / "native/MeowKit/Package.swift"
+        path.write_text(path.read_text().replace('.systemLibrary(name: "Foreign")',
+            '.systemLibrary(name: "Foreign", path: "Sources/Interfaces/Foreign")'))
+        directory = self.root / "native/MeowKit/Sources/Interfaces/Foreign"
+        directory.parent.mkdir()
+        (self.root / "native/MeowKit/Sources/Foreign").rename(directory)
+        self.write("native/MeowKit/Sources/Interfaces/Orphan.swift", "import Foundation\n")
+        self.assertIn("Unowned package source: native/MeowKit/Sources/Interfaces/Orphan.swift", scope.check(self.root))
 
 if __name__ == "__main__":
     unittest.main()

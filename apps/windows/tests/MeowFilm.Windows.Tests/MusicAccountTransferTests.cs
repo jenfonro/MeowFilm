@@ -295,10 +295,18 @@ public static class MusicAccountTransferTests
             }
             Check(f.Requests.Values.Sum() == 0 && f.Store.Writes == 0 && f.Store.Reads == 0);
         });
-        yield return Case("actual file read rejects over one MiB and file stream errors stay finite", async () =>
+        yield return Case("actual account file over one MiB preserves complete content and file stream errors", async () =>
         {
-            using var oversized = new MemoryStream(new byte[MusicAccountTransferFile.MaximumBytes + 1]);
-            await Expect("LIMIT", () => MusicAccountTransferFile.ReadAsync(oversized));
+            await using var f = new TransferFixture();
+            var root = TransferFixture.Shared();
+            root["extra"] = new string('x', 1024 * 1024 + 1);
+            byte[] bytes = Encoding.UTF8.GetBytes(root.ToJsonString());
+            using var input = new MemoryStream(bytes);
+            using var large = await MusicAccountTransferFile.ReadAsync(input);
+            using var output = new MemoryStream(); await large.WriteAsync(output);
+            Check(output.ToArray().SequenceEqual(bytes));
+            using var plan = await f.Owner.PrepareAccountTransferAsync(large);
+            Check(plan.Entries.Count == root["accounts"]!.AsArray().Count && f.Store.Writes == 0);
             using var broken = new BrokenStream(); await Expect("TRANSFER_FILE", () => MusicAccountTransferFile.ReadAsync(broken));
             using var file = await TransferFixture.File(TransferFixture.Shared());
             await Expect("TRANSFER_FILE", () => file.WriteAsync(broken));

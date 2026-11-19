@@ -124,7 +124,7 @@ test('malformed official session fields fail at the encrypted response without a
   }
 });
 
-test('encrypted audio consumes one gzip JSON document and rejects corruption, trailing bytes, bad padding and byte bombs', async () => {
+test('encrypted audio consumes one gzip JSON document and rejects corruption, trailing bytes, bad padding and malformed large JSON', async () => {
   const gzip = gzipSync(Buffer.from(JSON.stringify(audio)));
   const values = [
     [encrypt(gzip, 'e82ckenh8dichen8'), null],
@@ -135,7 +135,7 @@ test('encrypted audio consumes one gzip JSON document and rejects corruption, tr
     [Buffer.from('BK+u/eo6ubcSKJsnT6mW5A==', 'base64'), 'INVALID_RESPONSE'],
     [Buffer.from('ZW1y8lrlpR85IKm1Tsz3kA==', 'base64'), 'INVALID_RESPONSE'],
     [Buffer.from('qkIOF2CwpVUkeAIFRlB9cQ==', 'base64'), 'INVALID_RESPONSE'],
-    [encrypt(gzipSync(Buffer.alloc(4 * 1024 * 1024 + 1, 32)), 'e82ckenh8dichen8'), 'LIMIT'],
+    [encrypt(gzipSync(Buffer.alloc(4 * 1024 * 1024 + 1, 32)), 'e82ckenh8dichen8'), 'INVALID_RESPONSE'],
   ];
   for (const [bytes, code] of values) {
     const server = xeapi();

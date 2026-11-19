@@ -81,11 +81,34 @@ private final class ArtworkPresentationFixture: MusicPresentationCaching, @unche
     private let lock = NSLock()
     private var imageRevision = UUID()
     private var bytes: [URL: ArtworkBytes] = [:]
+    private var readURLs: [URL] = [], storeURLs: [URL] = []
+    private var readGates: [URL: ArtworkFlightGate] = [:], storeGates: [URL: ArtworkFlightGate] = [:]
     let lyricRevision = UUID()
     var revision: UUID { lock.withLock { imageRevision } }
-    func read(_ url: URL) async -> ArtworkBytes? { lock.withLock { bytes[url] } }
+    func blockReads(_ urls: [URL], on gate: ArtworkFlightGate) {
+        lock.withLock { for url in urls { readGates[url] = gate } }
+    }
+    func blockStores(_ urls: [URL], on gate: ArtworkFlightGate) {
+        lock.withLock { for url in urls { storeGates[url] = gate } }
+    }
+    func statistics() -> (reads: [URL], stores: [URL], saved: Int) {
+        lock.withLock { (readURLs, storeURLs, bytes.count) }
+    }
+    func read(_ url: URL) async -> ArtworkBytes? {
+        let (value, gate) = lock.withLock {
+            readURLs.append(url)
+            return (bytes[url], readGates.removeValue(forKey: url))
+        }
+        await gate?.wait()
+        return value
+    }
     func store(_ data: Data, for url: URL, revision: UUID) async -> ArtworkBytes? {
-        lock.withLock {
+        let gate = lock.withLock {
+            storeURLs.append(url)
+            return storeGates.removeValue(forKey: url)
+        }
+        await gate?.wait()
+        return lock.withLock {
             guard revision == imageRevision else { return nil }
             let value = ArtworkBytes(data: data, expiresAt: Date().addingTimeInterval(30 * 86_400))
             bytes[url] = value; return value
@@ -98,6 +121,55 @@ private final class ArtworkPresentationFixture: MusicPresentationCaching, @unche
     func played(songID: String, artwork: URL?, confirmedAt: Date) async { XCTFail("Unexpected playback renewal") }
     func clearLyrics() async { XCTFail("Unexpected lyric clear") }
     func clear() async { await clearImages(); await clearLyrics() }
+}
+
+private actor ArtworkFlightGate {
+    private let entered: XCTestExpectation
+    private let cancelled: XCTestExpectation?
+    private var released = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    init(_ entered: XCTestExpectation, cancelled: XCTestExpectation? = nil) {
+        self.entered = entered; self.cancelled = cancelled
+    }
+    func wait() async {
+        entered.fulfill()
+        let cancelled = self.cancelled
+        // Observe logical cancellation without claiming that the physical read
+        // or save has stopped. Only release resumes that operation.
+        await withTaskCancellationHandler {
+            if !released { await withCheckedContinuation { waiters.append($0) } }
+        } onCancel: { cancelled?.fulfill() }
+    }
+    func release() {
+        released = true
+        waiters.forEach { $0.resume() }; waiters.removeAll()
+    }
+}
+
+private actor ArtworkFlightNetwork {
+    private let data: Data
+    private var gates: [URL: ArtworkFlightGate] = [:]
+    private var requests: [URL] = []
+    private var activeURLs: [URL: Int] = [:]
+    private var active = 0, peak = 0
+    private var overlapped = false
+    init(_ data: Data) { self.data = data }
+    func block(_ urls: [URL], on gate: ArtworkFlightGate) {
+        for url in urls { gates[url] = gate }
+    }
+    func statistics() -> (requests: [URL], active: Int, peak: Int, overlapped: Bool) {
+        (requests, active, peak, overlapped)
+    }
+    func read(_ url: URL) async -> Data {
+        requests.append(url)
+        overlapped = overlapped || activeURLs[url, default: 0] > 0
+        activeURLs[url, default: 0] += 1
+        active += 1; peak = max(peak, active)
+        let gate = gates.removeValue(forKey: url)
+        await gate?.wait()
+        activeURLs[url, default: 0] -= 1; active -= 1
+        return data
+    }
 }
 
 private actor ArtworkSelectionFixture: MusicArtworkSelecting {
@@ -118,6 +190,309 @@ final class MusicArtworkImagesTests: XCTestCase {
     private func png(_ color: UIColor = .red) -> Data {
         UIGraphicsImageRenderer(size: CGSize(width: 20, height: 20)).pngData { context in
             color.setFill(); context.fill(CGRect(x: 0, y: 0, width: 20, height: 20))
+        }
+    }
+    private func cancelled<T>(_ task: Task<T, Error>, file: StaticString = #filePath, line: UInt = #line) async {
+        do { _ = try await task.value; XCTFail("Cancelled consumer succeeded", file: file, line: line) }
+        catch { XCTAssertTrue(error is CancellationError, file: file, line: line) }
+    }
+
+    func testSharedArtworkLimitsHTTPFlightsToFourAndCompletesQueuedURLs() async throws {
+        let data = png(), cache = ArtworkPresentationFixture(), images = images()
+        images.configure(cache: cache, selector: nil)
+        let started = expectation(description: "four physical HTTP reads"); started.expectedFulfillmentCount = 4
+        let active = (0..<4).map { _ in
+            ArtworkImageFixture([.init(status: 200, data: data, held: true)], started: { _ in started.fulfill() })
+        }
+        let nextStarted = expectation(description: "queued HTTP reads admitted"); nextStarted.expectedFulfillmentCount = 4
+        let waiting = (0..<4).map { _ in
+            ArtworkImageFixture([.init(status: 200, data: data, held: true)], started: { _ in nextStarted.fulfill() })
+        }
+        defer { (active + waiting).forEach { $0.close() } }
+        let first = active.map { fixture in Task { try await images.read(fixture.url) } }
+        await fulfillment(of: [started], timeout: 3)
+        let entered = expectation(description: "queued consumers entered"); entered.expectedFulfillmentCount = 4
+        let queued = waiting.map { fixture in
+            Task { entered.fulfill(); return try await images.read(fixture.url) }
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertEqual(active.reduce(0) { $0 + $1.requestCount }, 4)
+        XCTAssertTrue(waiting.allSatisfy { $0.requestCount == 0 })
+        XCTAssertEqual(Set(cache.statistics().reads), Set(active.map(\.url)), "Waiting URLs must not read cache bytes")
+        XCTAssertTrue(cache.statistics().stores.isEmpty)
+        active.forEach { $0.finish() }
+        await fulfillment(of: [nextStarted], timeout: 3)
+        for task in first {
+            let value = try await task.value
+            XCTAssertEqual(value.1, data)
+        }
+        waiting.forEach { $0.finish() }
+        for task in queued {
+            let value = try await task.value
+            XCTAssertEqual(value.1, data)
+        }
+        XCTAssertTrue((active + waiting).allSatisfy { $0.requestCount == 1 })
+        XCTAssertEqual(cache.statistics().reads.count, 8); XCTAssertEqual(cache.statistics().stores.count, 8)
+        XCTAssertEqual(cache.statistics().saved, 8)
+        await images.close()
+    }
+
+    func testArtworkSlotsCoverByteReadDecodeAndStoreIncludingSuppliedBytes() async throws {
+        let cache = ArtworkPresentationFixture(), data = png(), supplied = png(.blue)
+        let network = ArtworkFlightNetwork(data)
+        let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
+            await network.read($0)
+        }
+        let urls = (0..<6).map { URL(string: "https://artwork-cdn.invalid/slots/\($0).png")! }
+        let readEntered = expectation(description: "four physical cache reads"); readEntered.expectedFulfillmentCount = 4
+        let storeEntered = expectation(description: "four physical saves"); storeEntered.expectedFulfillmentCount = 4
+        let readGate = ArtworkFlightGate(readEntered), storeGate = ArtworkFlightGate(storeEntered)
+        cache.blockReads(Array(urls.prefix(4)), on: readGate)
+        cache.blockStores(Array(urls.prefix(4)), on: storeGate)
+        let first = urls.prefix(4).map { url in Task { try await images.read(url) } }
+        await fulfillment(of: [readEntered], timeout: 3)
+        let entered = expectation(description: "cold and supplied-byte demands queued"); entered.expectedFulfillmentCount = 2
+        let cold = Task { entered.fulfill(); return try await images.read(urls[4]) }
+        var suppliedFinished = false
+        let provided = Task {
+            entered.fulfill()
+            let value = try await images.read(urls[5], cachedData: supplied)
+            suppliedFinished = true
+            return value
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        XCTAssertEqual(cache.statistics().reads.count, 4); XCTAssertFalse(suppliedFinished)
+        let beforeReadRelease = await network.statistics(); XCTAssertTrue(beforeReadRelease.requests.isEmpty)
+        await readGate.release()
+        await fulfillment(of: [storeEntered], timeout: 3)
+        XCTAssertEqual(cache.statistics().reads.count, 4); XCTAssertEqual(cache.statistics().stores.count, 4)
+        XCTAssertFalse(suppliedFinished, "Supplied bytes must not decode ahead of the shared execution boundary")
+        let beforeStoreRelease = await network.statistics()
+        XCTAssertEqual(Set(beforeStoreRelease.requests), Set(urls.prefix(4)))
+        await storeGate.release()
+        for task in first { _ = try await task.value }
+        let coldValue = try await cold.value
+        XCTAssertEqual(coldValue.1, data)
+        let suppliedValue = try await provided.value
+        XCTAssertEqual(suppliedValue.1, supplied); XCTAssertTrue(images.cached(urls[5]) === suppliedValue.0)
+        let hot = try await images.read(urls[5])
+        XCTAssertTrue(hot.0 === suppliedValue.0); XCTAssertNil(hot.1)
+        let final = await network.statistics()
+        XCTAssertEqual(Set(final.requests), Set(urls.prefix(5)))
+        XCTAssertEqual(Set(cache.statistics().reads), Set(urls.prefix(5)))
+        XCTAssertEqual(Set(cache.statistics().stores), Set(urls.prefix(5)))
+        XCTAssertEqual(cache.statistics().saved, 5)
+        await images.close()
+    }
+
+    func testQueuedLastArtworkConsumerCancelsWithoutByteReadOrHTTP() async throws {
+        let cache = ArtworkPresentationFixture(), data = png(), images = images()
+        images.configure(cache: cache, selector: nil)
+        let started = expectation(description: "four HTTP slots occupied"); started.expectedFulfillmentCount = 4
+        let active = (0..<4).map { _ in
+            ArtworkImageFixture([.init(status: 200, data: data, held: true)], started: { _ in started.fulfill() })
+        }
+        let waiting = ArtworkImageFixture([.init(status: 200, data: data, held: true)])
+        defer { (active + [waiting]).forEach { $0.close() } }
+        let first = active.map { fixture in Task { try await images.read(fixture.url) } }
+        await fulfillment(of: [started], timeout: 3)
+        let entered = expectation(description: "last queued consumer entered"), settled = expectation(description: "pure queued cancellation settled")
+        let queued = Task {
+            entered.fulfill()
+            defer { settled.fulfill() }
+            return try await images.read(waiting.url)
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        queued.cancel()
+        await fulfillment(of: [settled], timeout: 3)
+        XCTAssertEqual(waiting.requestCount, 0); XCTAssertFalse(cache.statistics().reads.contains(waiting.url))
+        await cancelled(queued)
+        active.forEach { $0.finish() }
+        for task in first { _ = try await task.value }
+        XCTAssertEqual(waiting.requestCount, 0)
+        XCTAssertEqual(Set(cache.statistics().reads), Set(active.map(\.url)))
+        XCTAssertEqual(Set(cache.statistics().stores), Set(active.map(\.url)))
+        await images.close()
+    }
+
+    func testSharedArtworkConsumerCancellationDoesNotReleaseAnOccupiedSlot() async throws {
+        let data = png(), images = images()
+        let started = expectation(description: "four active HTTP flights"); started.expectedFulfillmentCount = 4
+        let active = (0..<4).map { _ in
+            ArtworkImageFixture([.init(status: 200, data: data, held: true)], started: { _ in started.fulfill() })
+        }
+        let admitted = expectation(description: "queued HTTP flight starts after shared producer finishes")
+        let waiting = ArtworkImageFixture([.init(status: 200, data: data, held: true)], started: { _ in admitted.fulfill() })
+        defer { (active + [waiting]).forEach { $0.close() } }
+        let first = active.map { fixture in Task { try await images.read(fixture.url) } }
+        await fulfillment(of: [started], timeout: 3)
+        let entered = expectation(description: "second shared consumer and queued demand entered"); entered.expectedFulfillmentCount = 2
+        let remaining = Task { entered.fulfill(); return try await images.read(active[0].url) }
+        let queued = Task { entered.fulfill(); return try await images.read(waiting.url) }
+        await fulfillment(of: [entered], timeout: 3)
+        first[0].cancel(); await cancelled(first[0])
+        XCTAssertEqual(active[0].stopCount, 0); XCTAssertEqual(active[0].requestCount, 1)
+        XCTAssertEqual(waiting.requestCount, 0, "Detaching one shared consumer does not return the producer's slot")
+        active[0].finish()
+        let remainingValue = try await remaining.value
+        XCTAssertEqual(remainingValue.1, data)
+        await fulfillment(of: [admitted], timeout: 3)
+        (Array(active.dropFirst()) + [waiting]).forEach { $0.finish() }
+        for task in first.dropFirst() { _ = try await task.value }
+        _ = try await queued.value
+        XCTAssertTrue((active + [waiting]).allSatisfy { $0.requestCount == 1 })
+        await images.close()
+    }
+
+    func testSharedQueuedArtworkConsumersUseOneSlotAndCancelIndependently() async throws {
+        let data = png(), images = images()
+        let started = expectation(description: "all four slots active"); started.expectedFulfillmentCount = 4
+        let active = (0..<4).map { _ in
+            ArtworkImageFixture([.init(status: 200, data: data, held: true)], started: { _ in started.fulfill() })
+        }
+        let admitted = expectation(description: "one shared queued HTTP read")
+        let waiting = ArtworkImageFixture([.init(status: 200, data: data, held: true)], started: { _ in admitted.fulfill() })
+        defer { (active + [waiting]).forEach { $0.close() } }
+        let first = active.map { fixture in Task { try await images.read(fixture.url) } }
+        await fulfillment(of: [started], timeout: 3)
+        let entered = expectation(description: "both queued consumers entered"); entered.expectedFulfillmentCount = 2
+        let cancelledConsumer = Task { entered.fulfill(); return try await images.read(waiting.url) }
+        let remaining = Task { entered.fulfill(); return try await images.read(waiting.url) }
+        await fulfillment(of: [entered], timeout: 3)
+        cancelledConsumer.cancel(); await cancelled(cancelledConsumer)
+        XCTAssertEqual(waiting.requestCount, 0)
+        active[0].finish(); _ = try await first[0].value
+        await fulfillment(of: [admitted], timeout: 3)
+        waiting.finish()
+        let remainingValue = try await remaining.value
+        XCTAssertEqual(remainingValue.1, data)
+        active.dropFirst().forEach { $0.finish() }
+        for task in first.dropFirst() { _ = try await task.value }
+        XCTAssertEqual(waiting.requestCount, 1, "Shared queued demand must not reserve a slot per consumer")
+        await images.close()
+    }
+
+    func testLastArtworkCancellationKeepsSlotUntilUncooperativeReadReturns() async throws {
+        let cache = ArtworkPresentationFixture(), network = ArtworkFlightNetwork(png())
+        let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
+            await network.read($0)
+        }
+        let urls = (0..<5).map { URL(string: "https://artwork-cdn.invalid/cancel/\($0).png")! }
+        let started = expectation(description: "four occupied slots"); started.expectedFulfillmentCount = 4
+        let cancellation = expectation(description: "last consumer's physical cancellation observed")
+        let lastGate = ArtworkFlightGate(started, cancelled: cancellation), otherGate = ArtworkFlightGate(started)
+        await network.block([urls[0]], on: lastGate)
+        await network.block(Array(urls[1..<4]), on: otherGate)
+        var lastSettled = false
+        let last = Task {
+            defer { lastSettled = true }
+            return try await images.read(urls[0])
+        }
+        let other = urls[1..<4].map { url in Task { try await images.read(url) } }
+        await fulfillment(of: [started], timeout: 3)
+        let entered = expectation(description: "replacement URL queued")
+        let waiting = Task { entered.fulfill(); return try await images.read(urls[4]) }
+        await fulfillment(of: [entered], timeout: 3)
+        last.cancel()
+        await fulfillment(of: [cancellation], timeout: 3)
+        XCTAssertFalse(lastSettled, "Logical cancellation must retain the physical producer and its slot")
+        let draining = await network.statistics()
+        XCTAssertEqual(draining.active, 4); XCTAssertEqual(draining.requests.count, 4)
+        XCTAssertFalse(cache.statistics().reads.contains(urls[4]))
+        await lastGate.release()
+        await cancelled(last)
+        _ = try await waiting.value
+        XCTAssertTrue(lastSettled); XCTAssertFalse(cache.statistics().stores.contains(urls[0]))
+        let admitted = await network.statistics()
+        XCTAssertEqual(admitted.requests.filter { $0 == urls[4] }.count, 1)
+        await otherGate.release()
+        for task in other { _ = try await task.value }
+        let final = await network.statistics()
+        XCTAssertEqual(final.active, 0); XCTAssertEqual(final.peak, 4)
+        XCTAssertEqual(cache.statistics().saved, 4)
+        await images.close()
+    }
+
+    func testArtworkCloseSettlesQueuedDemandAndWaitsForUncooperativePhysicalReads() async {
+        let cache = ArtworkPresentationFixture(), network = ArtworkFlightNetwork(png())
+        let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
+            await network.read($0)
+        }
+        let urls = (0..<6).map { URL(string: "https://artwork-cdn.invalid/close/\($0).png")! }
+        let started = expectation(description: "four physical reads"); started.expectedFulfillmentCount = 4
+        let cancelledReads = expectation(description: "four physical reads observe cancellation"); cancelledReads.expectedFulfillmentCount = 4
+        let gate = ArtworkFlightGate(started, cancelled: cancelledReads)
+        await network.block(Array(urls.prefix(4)), on: gate)
+        let active = urls.prefix(4).map { url in Task { try await images.read(url) } }
+        await fulfillment(of: [started], timeout: 3)
+        let entered = expectation(description: "queued close demands entered"); entered.expectedFulfillmentCount = 2
+        let settled = expectation(description: "queued close demands settle without physical work"); settled.expectedFulfillmentCount = 2
+        let waiting = urls.suffix(2).map { url in
+            Task { entered.fulfill(); defer { settled.fulfill() }; return try await images.read(url) }
+        }
+        await fulfillment(of: [entered], timeout: 3)
+        var closed = false
+        let closing = Task { await images.close(); closed = true }
+        await fulfillment(of: [cancelledReads, settled], timeout: 3)
+        XCTAssertFalse(closed, "Task.cancel cannot acknowledge a still-running physical read")
+        let draining = await network.statistics()
+        XCTAssertEqual(draining.active, 4); XCTAssertEqual(draining.requests.count, 4)
+        XCTAssertEqual(Set(cache.statistics().reads), Set(urls.prefix(4)))
+        await gate.release()
+        await closing.value
+        for task in active + waiting { await cancelled(task) }
+        let final = await network.statistics()
+        XCTAssertTrue(closed); XCTAssertEqual(final.active, 0); XCTAssertEqual(final.peak, 4)
+        XCTAssertEqual(final.requests.count, 4); XCTAssertTrue(cache.statistics().stores.isEmpty)
+        XCTAssertEqual(cache.statistics().saved, 0)
+    }
+
+    func testArtworkRevisionChangesDrainOldSameURLAndDiscardQueuedDemand() async throws {
+        for replaceCache in [false, true] {
+            let cache = ArtworkPresentationFixture(), freshCache = replaceCache ? ArtworkPresentationFixture() : cache
+            let network = ArtworkFlightNetwork(png())
+            let images = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024, byteCache: cache) {
+                await network.read($0)
+            }
+            let urls = (0..<5).map { URL(string: "https://artwork-cdn.invalid/revision/\($0).png")! }
+            let started = expectation(description: "old physical reads"); started.expectedFulfillmentCount = 4
+            let cancellation = expectation(description: "old producer cancellation observed")
+            cancellation.expectedFulfillmentCount = replaceCache ? 4 : 1
+            let sameKeyGate = ArtworkFlightGate(started, cancelled: cancellation)
+            let otherGate = ArtworkFlightGate(started, cancelled: replaceCache ? cancellation : nil)
+            await network.block([urls[0]], on: sameKeyGate)
+            await network.block(Array(urls[1..<4]), on: otherGate)
+            let old = urls.prefix(4).map { url in Task { try await images.read(url) } }
+            await fulfillment(of: [started], timeout: 3)
+            let entered = expectation(description: "old queued demand entered")
+            let waiting = Task { entered.fulfill(); return try await images.read(urls[4]) }
+            await fulfillment(of: [entered], timeout: 3)
+            if replaceCache { images.setByteCache(freshCache) } else { await cache.clearImages() }
+            let successorEntered = expectation(description: "same-key successor entered")
+            let successor = Task { successorEntered.fulfill(); return try await images.read(urls[0]) }
+            await fulfillment(of: [successorEntered, cancellation], timeout: 3)
+            let draining = await network.statistics()
+            XCTAssertEqual(draining.active, 4); XCTAssertEqual(draining.requests.count, 4)
+            XCTAssertFalse(cache.statistics().reads.contains(urls[4]))
+            // Make three slots available while the old same-key read is still
+            // physically held. Capacity alone cannot mask overlapping successors.
+            await otherGate.release()
+            for task in old.dropFirst() { await cancelled(task) }
+            await cancelled(waiting)
+            let sameKeyDraining = await network.statistics()
+            XCTAssertEqual(sameKeyDraining.active, 1); XCTAssertEqual(sameKeyDraining.requests.count, 4)
+            await sameKeyGate.release()
+            await cancelled(old[0])
+            _ = try await successor.value
+            let final = await network.statistics()
+            XCTAssertFalse(final.overlapped, "The old resource must physically drain before its same-key successor")
+            XCTAssertEqual(final.peak, 4); XCTAssertEqual(final.active, 0)
+            XCTAssertEqual(final.requests.filter { $0 == urls[0] }.count, 2)
+            XCTAssertFalse(final.requests.contains(urls[4]))
+            XCTAssertEqual(freshCache.statistics().stores, [urls[0]])
+            XCTAssertEqual(freshCache.statistics().saved, 1)
+            if replaceCache { XCTAssertTrue(cache.statistics().stores.isEmpty); XCTAssertEqual(cache.statistics().saved, 0) }
+            await images.close()
         }
     }
 
@@ -159,7 +534,7 @@ final class MusicArtworkImagesTests: XCTestCase {
         configuration.protocolClasses = [ArtworkImageProtocol.self]
         let http = MusicArtworkHTTP(configuration: configuration)
         let music = images()
-        let film = ArtworkImages(maximumBytes: MusicArtworkHTTP.maximumBytes) { try await http.read($0) }
+        let film = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { try await http.read($0) }
         let musicRead = Task { try await music.read(fixture.url) }
         let filmRead = Task { try await film.read(fixture.url) }
         await fulfillment(of: [started], timeout: 3)

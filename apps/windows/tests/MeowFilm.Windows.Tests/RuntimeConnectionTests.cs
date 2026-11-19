@@ -14,7 +14,7 @@ public static class RuntimeConnectionTests
     private static async Task<NodeRuntime> StartAsync(CancellationToken startup = default, CancellationToken owner = default)
     {
         var modules = RuntimeHttpClientTests.Modules;
-        var bundle = RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"), "aggregate", modules);
+        var bundle = RuntimeBundle.Verify(Path.Combine(Required("MEOWFILM_TEST_RUNTIME_ROOT"), "aggregate"), "aggregate");
         string root = Path.Combine(Required("MEOWFILM_TEST_DATA_ROOT"), Guid.NewGuid().ToString("N"), "script-runtime");
         var database = new NativeTestDatabase(root);
         await database.Ready;

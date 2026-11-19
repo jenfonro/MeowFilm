@@ -74,12 +74,14 @@ final class SQLiteDatabaseTests: XCTestCase {
         XCTAssertEqual(row["bytes"], .blob(Data()))
         XCTAssertEqual(try row.text("text"), "a\u{0}b")
     }
-    func testOversizedAdmissionAndClosedOperationsNeverExecuteTheirBodies() async throws {
+    func testLargeSingleOperationAndClosedAdmission() async throws {
         let (_, db) = try await fixture()
-        do {
-            try await db.transaction(ownedBytes: 40 * 1024 * 1024) { _ in XCTFail("oversized body executed") }
-            XCTFail("oversized input admitted")
-        } catch { XCTAssertEqual(error as? SQLiteStorageError, .queueFull) }
+        let text = String(repeating: "x", count: 17 * 1024 * 1024)
+        let saved = try await db.transaction(ownedBytes: text.utf8.count) { connection in
+            try connection.execute("INSERT INTO owner_revisions VALUES(?,?,?)", [.text("large"), .integer(1), .text(text)])
+            return try connection.query("SELECT receipt FROM owner_revisions WHERE owner='large'").first!.text("receipt")
+        }
+        XCTAssertEqual(saved, text)
         try await db.close()
         do { try await db.transaction { _ in XCTFail("closed body executed") }; XCTFail("closed input admitted") }
         catch { XCTAssertEqual(error as? SQLiteStorageError, .closed) }

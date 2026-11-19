@@ -4,6 +4,19 @@ import MeowRuntime
 
 @MainActor
 final class FilmPlaybackCacheTests: XCTestCase {
+    func testCachedAndLoadingDirectoriesCannotReplaceTheCurrentEntryResolution() throws {
+        let previous = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot())
+        let directory = FilmPlaybackDirectorySlice(previous)
+        for state in ["loading", "error", "unmatched"] {
+            var fields = try FilmPlaybackFixture.snapshot().filmRequiredObject()
+            fields["entryResolution"] = .string(state)
+            let current = try FilmPlaybackSnapshot(value: .object(fields))
+            XCTAssertEqual(current.retainingLoadedPresentation(previous).entryResolution, state)
+            XCTAssertEqual(current.displaying(directory).entryResolution, state)
+            XCTAssertEqual(current.loadingDirectory(directory.key).entryResolution, state)
+            XCTAssertEqual(current.loadingDirectory(directory.key, error: "UPSTREAM_HTTP").entryResolution, state)
+        }
+    }
     func testSnapshotConsumesCacheStatusAndComponentsWithoutClearingStaleMetadata() throws {
         let metadata: RuntimeValue = .object(["overview": .string("旧简介")])
         let cache: RuntimeValue = .object([
@@ -50,9 +63,10 @@ final class FilmPlaybackCacheTests: XCTestCase {
 
     func testUnknownCacheStatusRetainsIndependentComponentCompletionEvidence() throws {
         let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
-            metadata: .object(["name": .string("新资料")]),
+            metadata: .object(["name": .string("浏览资料")]),
             metadataCache: .object(["status": .string("refreshing"),
-                                    "components": .object(["detail": .object(["status": .string("ready")])])])))
+                                    "components": .object(["detail": .object(["status": .string("ready")])])]),
+            workInfo: FilmPlaybackFixture.workInfo(title: "新资料")))
         let detail = FilmPlaybackPresentation.detail(snapshot, original: originalDetail())
         XCTAssertEqual(snapshot.metadataCache?.status, .stale)
         XCTAssertEqual(detail.title, "新资料")
@@ -240,215 +254,53 @@ final class FilmPlaybackCacheTests: XCTestCase {
         await model.close()
     }
 
-    func testSuccessfulEmptyFieldsAndCreditsRemoveOldPresentationWhileMissingFieldsKeepIt() throws {
+    func testCompleteEmptyWorkProjectionClearsOldFieldsAndFailureRetainsThatResult() throws {
         let original = originalDetail()
-        let empty: RuntimeValue = .object([
-            "overview": .string(""), "poster_path": .null, "backdrop_path": .null,
-            "images": .object(["logos": .array([])]),
-            "credits": .object(["crew": .array([]), "cast": .array([])]),
-            "similar": .object(["results": .array([])]),
-            "seasons": .array([]), "number_of_seasons": .null, "number_of_episodes": .null,
-            "release_date": .null, "vote_average": .null
-        ])
-        let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
-            metadata: empty, metadataCache: .object(["status": .string("fresh"), "components": .object([
-                "detail": .object(["status": .string("ready")]), "credits": .object(["status": .string("empty")])
-            ])])))
-        let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
-        XCTAssertEqual(detail.item.identity, original.item.identity)
-        XCTAssertTrue(detail.summary.isEmpty)
-        XCTAssertNil(detail.item.posterURL)
-        XCTAssertNil(detail.item.largePosterURL)
-        XCTAssertNil(detail.backdropURL)
-        XCTAssertNil(detail.logoURL)
-        XCTAssertTrue(detail.cast.isEmpty)
-        XCTAssertTrue(detail.similarItems.isEmpty)
-        XCTAssertTrue(detail.seasons.isEmpty)
-        XCTAssertNil(detail.seasonCount)
-        XCTAssertNil(detail.episodeCount)
-        XCTAssertNil(detail.releaseDate)
-        XCTAssertTrue(detail.item.score.isEmpty)
-        let missing = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadataError: "UPSTREAM_HTTP",
-            metadataCache: .object(["status": .string("stale"), "error": .object(["code": .string("UPSTREAM_HTTP")]),
-                                   "components": .object(["detail": .object(["status": .string("failed")])])])))
-        let kept = FilmPlaybackPresentation.detail(missing, original: original)
-        XCTAssertTrue(kept.summary.isEmpty)
-        XCTAssertEqual(kept.item.posterURL, original.item.posterURL)
-        XCTAssertEqual(kept.cast, original.cast)
-        XCTAssertEqual(kept.seasons, original.seasons)
-    }
-
-    func testSuccessfulDetailOmissionsClearOldFieldsAndLaterFailureCannotReviveThem() throws {
-        let original = originalDetail()
-        for detail in [
-            RuntimeValue.object(["status": .string("ready")]),
-            .object(["status": .string("empty")]),
-            .object(["status": .string("failed"), "fetchedAt": .number(10)])
-        ] {
+        for metadata in [RuntimeObject(), ["poster_path": .null, "credits": .object(["cast": .array([])]),
+            "similar": .object(["results": .array([])]), "images": .object(["logos": .array([])])]] {
             let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
-                metadata: .object(["name": .string("新资料")]),
-                metadataCache: .object(["status": .string("stale"),
-                                       "components": .object(["detail": detail])])))
-            let projected = FilmPlaybackPresentation.detail(snapshot, original: original)
-            XCTAssertTrue(projected.summary.isEmpty)
-            XCTAssertNil(projected.item.posterURL)
-            XCTAssertNil(projected.item.largePosterURL)
-            XCTAssertNil(projected.backdropURL)
-            XCTAssertTrue(projected.item.score.isEmpty)
-            XCTAssertNil(projected.releaseDate)
-            XCTAssertNil(projected.seasonCount)
-            XCTAssertNil(projected.episodeCount)
-            XCTAssertEqual(projected.logoURL, original.logoURL, "Unrequested append data owns separate success evidence.")
-            XCTAssertEqual(projected.cast, original.cast)
-            XCTAssertEqual(projected.similarItems, original.similarItems)
+                metadata: .object(["poster_path": .string("https://artwork.invalid/browse.jpg")]),
+                workInfo: FilmPlaybackFixture.workInfo(title: "稳定作品", metadata: metadata)))
+            let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
+            XCTAssertEqual(detail.item.identity, original.item.identity)
+            XCTAssertTrue(detail.summary.isEmpty); XCTAssertTrue(detail.item.score.isEmpty)
+            XCTAssertNil(detail.item.posterURL); XCTAssertNil(detail.item.largePosterURL)
+            XCTAssertNil(detail.backdropURL); XCTAssertNil(detail.logoURL); XCTAssertNil(detail.releaseDate)
+            XCTAssertNil(detail.seasonCount); XCTAssertNil(detail.episodeCount)
+            XCTAssertTrue(detail.cast.isEmpty); XCTAssertTrue(detail.similarItems.isEmpty); XCTAssertTrue(detail.seasons.isEmpty)
+            let failed = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadataError: "UPSTREAM_HTTP"))
+                .retainingLoadedPresentation(snapshot)
+            XCTAssertEqual(failed.workInfo, snapshot.workInfo)
+            XCTAssertEqual(FilmPlaybackPresentation.detail(failed, original: original), detail)
         }
-        let failed = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
-            metadata: .object(["name": .string("摘要")]), metadataError: "UPSTREAM_HTTP",
-            metadataCache: .object(["status": .string("stale"), "components": .object([
-                "detail": .object(["status": .string("failed")])
-            ])])))
-        let retained = FilmPlaybackPresentation.detail(failed, original: original)
-        XCTAssertTrue(retained.summary.isEmpty)
-        XCTAssertEqual(retained.item.posterURL, original.item.posterURL)
-        XCTAssertEqual(retained.backdropURL, original.backdropURL)
-        XCTAssertEqual(retained.releaseDate, original.releaseDate)
-        XCTAssertNil(retained.seasonCount)
-        XCTAssertNil(retained.episodeCount)
     }
 
-    func testAppendSuccessAndFailureUseTheirOwnEvidenceWhenFieldsAreOmitted() throws {
-        let original = originalDetail()
-        for component in [
-            RuntimeValue.object(["status": .string("ready")]),
-            .object(["status": .string("empty")]),
-            .object(["status": .string("failed"), "fetchedAt": .number(10)])
-        ] {
-            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
-                metadata: .object(["name": .string("摘要")]),
-                metadataCache: .object(["status": .string("stale"), "components": .object([
-                    "detail": .object(["status": .string("failed")]), "credits": component,
-                    "images": component, "similar": component, "seasons": component
-                ])])))
-            let projected = FilmPlaybackPresentation.detail(snapshot, original: original)
-            XCTAssertTrue(projected.summary.isEmpty)
-            XCTAssertEqual(projected.item.posterURL, original.item.posterURL)
-            XCTAssertNil(projected.logoURL)
-            XCTAssertTrue(projected.cast.isEmpty)
-            XCTAssertTrue(projected.similarItems.isEmpty)
-            XCTAssertTrue(projected.seasons.isEmpty)
-        }
-        let missing = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
-            metadata: .object(["name": .string("摘要")]),
-            metadataCache: .object(["status": .string("stale"), "components": .object([
-                "credits": .object(["status": .string("failed")]),
-                "images": .object(["status": .string("missing")]),
-                "similar": .object(["status": .string("failed")])
-            ])])))
-        let retained = FilmPlaybackPresentation.detail(missing, original: original)
-        XCTAssertEqual(retained.logoURL, original.logoURL)
-        XCTAssertEqual(retained.cast, original.cast)
-        XCTAssertEqual(retained.similarItems, original.similarItems)
-    }
-
-    func testReliableTMDBSupplementFillsDoubanDisplayWithoutChangingIdentityCountsOrEpisodes() throws {
-        let target = FilmPlaybackTarget(id: "douban:tv:100", kind: .tv, title: "豆瓣",
-            metadataProvider: .douban, metadataID: "100", position: .init(season: 2, episode: 7))
-        let seasonTarget = FilmPlaybackTarget(id: target.id, kind: .tv, title: target.title,
-            metadataProvider: .douban, metadataID: "100", position: .init(season: 2))
-        let similarTarget = try FilmPlaybackTarget(.object([
-            "id": .string("tmdb:tv:1000"), "kind": .string("tv"), "title": .string("补充关联"),
-            "metadataProvider": .string("tmdb"), "metadataId": .number(1000)
-        ]))
-        let main: RuntimeValue = .object([
-            "title": .string("豆瓣主资料"), "intro": .string(""), "pic": .null, "backdrop_path": .null,
-            "images": .object(["logos": .array([])]), "directors": .array([]), "actors": .array([]),
-            "similar": .object(["results": .array([])]), "episodes_count": .number(9),
-            "seasons": .array([.object(["season_number": .number(2), "name": .string("主季度"),
-                "businessId": .string("douban:tv:100:season:2"), "playbackTarget": .object(seasonTarget.value)])])
-        ])
-        let supplement: RuntimeValue = .object([
-            "provider": .string("tmdb"), "metadataId": .number(999), "kind": .string("tv"),
-            "metadata": .object([
-                "overview": .string("补充简介"), "poster_path": .string("/v1/tmdb/images/original/extra.jpg"),
-                "backdrop_path": .string("/v1/tmdb/images/original/backdrop.jpg"),
-                "images": .object(["logos": .array([.object(["file_path": .string("/v1/tmdb/images/original/logo.png")])])]),
-                "credits": .object(["cast": .array([.object(["id": .number(1), "name": .string("补充演员")])])]),
-                "similar": .object(["results": .array([.object(["id": .number(1000), "name": .string("补充关联"),
-                    "businessId": .string(similarTarget.id), "playbackTarget": .object(similarTarget.value)])])]),
-                "seasons": .array([.object(["season_number": .number(99)])]),
-                "number_of_seasons": .number(100), "number_of_episodes": .number(999)
-            ])
-        ])
-        let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: main,
-            episodes: [.object(["season": .number(2), "episode": .number(7), "name": .string("主集")])],
-            target: .object(target.value), metadataSupplement: supplement))
+    func testNoWorkProjectionRetainsEntryWithoutUsingBrowseSupplement() throws {
         let original = originalDetail(provider: "douban", id: "100")
-        let detail = FilmPlaybackPresentation.detail(snapshot, original: original)
-        XCTAssertEqual(detail.item.identity, original.item.identity)
-        XCTAssertEqual(detail.title, "豆瓣主资料")
-        XCTAssertTrue(detail.summary.isEmpty, "Supplemental browse data is not workInfo")
-        XCTAssertEqual(detail.item.posterURL?.absoluteString, "/v1/tmdb/images/original/extra.jpg")
-        XCTAssertEqual(detail.backdropURL?.absoluteString, "/v1/tmdb/images/original/backdrop.jpg")
-        XCTAssertEqual(detail.logoURL?.absoluteString, "/v1/tmdb/images/original/logo.png")
-        XCTAssertEqual(detail.cast.map(\.name), ["补充演员"])
-        XCTAssertEqual(detail.similarItems.first?.identity, .init(sourceID: "tmdb", itemID: "1000", kind: .tv,
-            businessID: similarTarget.id, playbackTarget: similarTarget))
-        XCTAssertNil(detail.episodeCount)
-        XCTAssertNil(detail.seasonCount)
-        XCTAssertEqual(detail.seasons.map(\.number), [2])
-        XCTAssertEqual(detail.seasons.first?.episodes.map(\.number), [7])
-        XCTAssertEqual(snapshot.target.position, target.position)
+        let supplemental: RuntimeValue = .object(["provider": .string("tmdb"), "metadataId": .number(999),
+            "kind": .string("tv"), "metadata": .object(["title": .string("其他标题"),
+                "poster_path": .string("https://artwork.invalid/browse.jpg"),
+                "credits": .object(["cast": .array([.object(["name": .string("浏览演员")])])])])])
+        let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+            metadata: .object(["title": .string("浏览标题")]), metadataSupplement: supplemental))
+        XCTAssertEqual(FilmPlaybackPresentation.detail(snapshot, original: original), original)
+    }
 
-        var associated = try main.filmRequiredObject()
-        associated["doubanSeasons"] = associated["seasons"]
-        associated["seasons"] = .array([.object([
-            "id": .string("101"), "title": .string("关联豆瓣条目")
-        ])])
-        let associatedSnapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: .object(associated),
-            episodes: [.object(["season": .number(2), "episode": .number(7), "name": .string("主集")])],
-            target: .object(target.value), metadataSupplement: supplement))
-        let associatedDetail = FilmPlaybackPresentation.detail(associatedSnapshot, original: original)
-        XCTAssertEqual(associatedDetail.seasons.map(\.number), [2])
-        XCTAssertEqual(associatedDetail.seasons.map(\.title), ["主季度"])
-        XCTAssertEqual(associatedDetail.seasons.first?.episodes.map(\.number), [7])
-        XCTAssertEqual(associatedDetail.seasons.first?.episodes.map(\.title), ["主集"])
-
-        var emptySeasons = try main.filmRequiredObject()
-        emptySeasons["doubanSeasons"] = .array([])
-        let emptySnapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: .object(emptySeasons),
-            target: .object(target.value), metadataSupplement: supplement))
-        XCTAssertTrue(FilmPlaybackPresentation.detail(emptySnapshot, original: original).seasons.isEmpty)
-
-        let cleared = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: main,
-            target: .object(target.value)))
-        let withoutSupplement = FilmPlaybackPresentation.detail(cleared, original: original)
-        XCTAssertTrue(withoutSupplement.summary.isEmpty)
-        XCTAssertNil(withoutSupplement.item.posterURL)
-        XCTAssertNil(withoutSupplement.item.largePosterURL)
-        XCTAssertTrue(withoutSupplement.cast.isEmpty)
-        XCTAssertTrue(withoutSupplement.similarItems.isEmpty)
-
-        var populated = try main.filmRequiredObject()
-        populated["intro"] = .string("主简介")
-        populated["pic"] = .object(["normal": .string("https://artwork.invalid/main.jpg"),
-                                   "large": .string("https://artwork.invalid/main-large.jpg")])
-        populated["backdrop_path"] = .string("https://artwork.invalid/main-backdrop.jpg")
-        populated["images"] = .object(["logos": .array([.object(["file_path": .string("https://artwork.invalid/main-logo.png")])])])
-        populated["actors"] = .array([.string("主演")])
-        let mainSimilarTarget = FilmPlaybackTarget(id: "douban:tv:main-similar", kind: .tv, title: "主关联",
-            metadataProvider: .douban, metadataID: "main-similar")
-        populated["similar"] = .object(["results": .array([.object(["id": .string("main-similar"), "title": .string("主关联"),
-            "businessId": .string(mainSimilarTarget.id), "playbackTarget": .object(mainSimilarTarget.value)])])])
-        let nonempty = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(metadata: .object(populated),
-            target: .object(target.value), metadataSupplement: supplement))
-        let primary = FilmPlaybackPresentation.detail(nonempty, original: original)
-        XCTAssertTrue(primary.summary.isEmpty, "Only workInfo owns the main summary")
-        XCTAssertEqual(primary.item.posterURL?.absoluteString, "https://artwork.invalid/main.jpg")
-        XCTAssertEqual(primary.item.largePosterURL?.absoluteString, "https://artwork.invalid/main-large.jpg")
-        XCTAssertEqual(primary.backdropURL?.absoluteString, "https://artwork.invalid/main-backdrop.jpg")
-        XCTAssertEqual(primary.logoURL?.absoluteString, "https://artwork.invalid/main-logo.png")
-        XCTAssertEqual(primary.cast.map(\.name), ["主演"])
-        XCTAssertEqual(primary.similarItems.map(\.id), ["main-similar"])
+    func testDoubanDirectorySeasonsUseTheirOwnRowsNotWorkOrSupplement() throws {
+        let target = FilmPlaybackTarget(id: "douban:tv:100", kind: .tv, title: "豆瓣",
+            metadataProvider: .douban, metadataID: "100", position: .init(season: 2))
+        let row: RuntimeValue = .object(["season_number": .number(2), "name": .string("目录季度"),
+            "businessId": .string("douban:tv:100:season:2"), "playbackTarget": .object(target.value)])
+        for rows in [[row], []] {
+            let snapshot = try FilmPlaybackSnapshot(value: FilmPlaybackFixture.snapshot(
+                metadata: .object(["doubanSeasons": .array(rows), "seasons": .array([.object(["title": .string("其他条目")])])]),
+                episodes: [.object(["season": .number(2), "episode": .number(7), "name": .string("目录集")])],
+                target: .object(target.value), workInfo: FilmPlaybackFixture.workInfo(title: "主作品")))
+            let seasons = FilmPlaybackPresentation.seasons(snapshot)
+            XCTAssertEqual(seasons.map(\.number), rows.isEmpty ? [] : [2])
+            XCTAssertEqual(seasons.first?.episodes.map(\.number) ?? [], rows.isEmpty ? [] : [7])
+            XCTAssertTrue(FilmPlaybackPresentation.detail(snapshot, original: originalDetail()).seasons.isEmpty)
+        }
     }
 
     private func makeModel(_ server: FilmPlaybackWireServer, _ media: FilmPlaybackTestMedia) -> FilmPlaybackModel {

@@ -1,12 +1,14 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Input;
-using System.Windows.Interop;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Input;
+using Windows.UI.ViewManagement;
+using Windows.System;
+
 using System.Windows.Threading;
 
 namespace MeowFilm.Desktop;
@@ -70,7 +72,7 @@ public sealed partial class ShellWindow : DesktopWindow
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
         Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
-        Func<Window, Action, Action, Action, IDesktopTrayIcon>? trayIconFactory = null,
+        Func<DesktopWindow, Action, Action, Action, IDesktopTrayIcon>? trayIconFactory = null,
         IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -98,6 +100,19 @@ public sealed partial class ShellWindow : DesktopWindow
         _closePreferences = closePreferences;
         _trayIconFactory = trayIconFactory;
         InitializeComponent();
+        AttachRoot();
+        SessionEnding += (_, _) => PrepareForSessionEnding();
+        Root.Loaded += OnLoaded;
+        Root.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnPreviewKeyDown), true);
+        Root.AddHandler(UIElement.KeyUpEvent, new KeyEventHandler(OnPreviewKeyUp), true);
+        Root.PointerPressed += OnChannelHeaderPointer;
+        Root.PointerReleased += OnChannelHeaderPointer;
+        Root.GotFocus += OnGotKeyboardFocus;
+        PlayerSurfaceInput.AddDismissRequestedHandler(Root, OnQueueDismissClick);
+        ShellWindowStartupSize.ApplyToPrimaryScreen(this, Handle);
+        _nativeCaption = new(this, CaptionDragRegion, PageHeaderHost, CaptionBar, PlayerDetailSurface,
+            ChannelDialogHost, CloseDialog, ResetDialog, NotificationOverlay);
+        InitializeTrayIcon();
         ChannelDialogHost.Attach(this);
         InitializeGeneralSettings(appearance, closePreferences);
         CloseDialog.ChoiceRequested += OnCloseChoiceRequested;
@@ -105,15 +120,11 @@ public sealed partial class ShellWindow : DesktopWindow
         ResetDialog.ConfirmRequested += OnUserDataResetConfirmed;
         ResetDialog.CancelRequested += CancelUserDataReset;
         ResetDialog.ExitRequested += OnUserDataResetExit;
-        AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
-        {
-            Notices.Show(e.Identity, e.Message);
-            e.Handled = true;
-        }));
-        InitializePresentationMotion();
-        DataContext = _state;
-        DesktopTheme.SetIsHighContrast(this, SystemParameters.HighContrast);
-        SystemParameters.StaticPropertyChanged += OnSystemSettingChanged;
+        NoticeOutlet.SetReceiver(Root, notice => Notices.Show(notice.Identity, notice.Message));
+        Root.DataContext = _state;
+        _state.PropertyChanged += (_, _) => UpdateStatusPresentation();
+        _uiSettings.ColorValuesChanged += OnAccessibilityChanged;
+        ApplyAccessibilityPresentation();
         foreach (var session in _sessions)
         {
             session.Module.PropertyChanged += OnModulePropertyChanged;
@@ -147,13 +158,8 @@ public sealed partial class ShellWindow : DesktopWindow
         UpdateCaption();
     }
 
-    private void UpdatePlayerDetailChrome()
-    {
-        var maximized = WindowState == WindowState.Maximized;
-        PlayerDetailMaximizeGlyph.Text = maximized ? "\uE923" : "\uE922";
-        var label = maximized ? "还原" : "最大化";
-        AutomationProperties.SetName(PlayerDetailMaximizeButton, label);
-    }
+    private readonly AccessibilitySettings _accessibility = new();
+    private readonly UISettings _uiSettings = new();
 
     /// <summary>
     /// Completes after the initial shutdown wait succeeds, fails, or reaches five seconds.
@@ -166,23 +172,11 @@ public sealed partial class ShellWindow : DesktopWindow
     public bool ShutdownSucceeded { get; private set; }
     public bool CleanupCompleted { get; private set; }
 
-    protected override void OnSourceInitialized(EventArgs e)
-    {
-        // Install before WindowChrome's SourceInitialized handler so the custom maximize button
-        // can retain the native HTMAXBUTTON/Snap Layout hit target.
-        ShellWindowStartupSize.ApplyToPrimaryScreen(this, new WindowInteropHelper(this).Handle);
-        _nativeCaption = new(this, MaximizeButton, ToggleMaximize);
-        base.OnSourceInitialized(e);
-        _nativeCaption.SetImmersiveBorder(false);
-        InitializeTrayIcon();
-    }
-
     protected override void OnStateChanged(EventArgs e)
     {
         base.OnStateChanged(e);
-        if (WindowState != WindowState.Minimized) _trayRestoreState = WindowState;
-        if (MaximizeGlyph is not null) UpdateCaption();
-        if (PlayerDetailMaximizeGlyph is not null) UpdatePlayerDetailChrome();
+        if (WindowState != DesktopWindowState.Minimized) _trayRestoreState = WindowState;
+        UpdateCaption();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -265,9 +259,9 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private static void ValidateView(FrameworkElement view, ContentControl host)
     {
-        if (!view.Dispatcher.CheckAccess()) throw new InvalidOperationException();
+        if (!view.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException();
         if (!ReferenceEquals(host.Content, view) &&
-            (LogicalTreeHelper.GetParent(view) is not null || System.Windows.Media.VisualTreeHelper.GetParent(view) is not null))
+            Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(view) is not null)
             throw new InvalidOperationException();
     }
 
@@ -314,6 +308,7 @@ public sealed partial class ShellWindow : DesktopWindow
         PageHeaderHost.Visibility = immersive ? Visibility.Collapsed : Visibility.Visible;
         SidebarBackground.Visibility = Brand.Visibility = SidebarScroll.Visibility =
             immersive ? Visibility.Collapsed : Visibility.Visible;
+        SidebarEdge.Visibility = immersive || _accessibility.HighContrast ? Visibility.Collapsed : Visibility.Visible;
         if (immersive) PlayerFrame.Visibility = Visibility.Collapsed;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
             current.IsSettingsOpen || _history.Count > 1;
@@ -424,9 +419,9 @@ public sealed partial class ShellWindow : DesktopWindow
         var resources = (current.MainHost.Content as FrameworkElement ?? current.Module.View)?.Resources;
         foreach (var key in keys)
         {
-            if (resources?.Contains(key) == true && resources[key] is System.Windows.Media.Brush brush)
+            if (resources?.ContainsKey(key) == true && resources[key] is Microsoft.UI.Xaml.Media.Brush brush)
             {
-                if (!RootLayout.Resources.Contains(key) || !ReferenceEquals(RootLayout.Resources[key], brush))
+                if (!RootLayout.Resources.ContainsKey(key) || !ReferenceEquals(RootLayout.Resources[key], brush))
                     RootLayout.Resources[key] = brush;
             }
             else RootLayout.Resources.Remove(key);
@@ -451,8 +446,8 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void OnNavigationSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSelection || _isClosing || (!ReferenceEquals(e.Source, NavigationList) && !ReferenceEquals(e.Source, CollectionNavigationList)) || _current is not { } current) return;
-        if (sender is not ListBox { SelectedItem: ShellNavigationEntry item }) return;
+        if (_suppressSelection || _isClosing || (!ReferenceEquals(e.OriginalSource, NavigationList) && !ReferenceEquals(e.OriginalSource, CollectionNavigationList)) || _current is not { } current) return;
+        if (sender is not ListView { SelectedItem: ShellNavigationEntry item }) return;
         RunUiAction(() => NavigateFromUiAsync(item.Owner, item.Route));
     }
 
@@ -564,7 +559,7 @@ public sealed partial class ShellWindow : DesktopWindow
         LeavePublicPage();
         CancelActive();
         if (!leftPublicPage) RetireHeaderPresentation();
-        if (current.MainHost.IsKeyboardFocusWithin) current.ContentFocus = Keyboard.FocusedElement;
+        if (DesktopVisual.ContainsFocus(current.MainHost)) current.ContentFocus = DesktopVisual.Focused(Root);
         _settingsReturn = current;
         current.IsSettingsOpen = true;
         _generalSettingsOpen = _generalSettingsHost.Content is not null;
@@ -574,7 +569,7 @@ public sealed partial class ShellWindow : DesktopWindow
         QueueUi(() =>
         {
             if (ReferenceEquals(_current, current) && current.IsSettingsOpen)
-                (_generalSettingsOpen ? _generalSettingsHost : current.SettingsHost).MoveFocus(new(FocusNavigationDirection.First));
+                DesktopVisual.FocusFirst((_generalSettingsOpen ? _generalSettingsHost : current.SettingsHost));
         });
         if (!_generalSettingsOpen && !current.Initialized) await RunRequestAsync(new(current));
     });
@@ -640,9 +635,9 @@ public sealed partial class ShellWindow : DesktopWindow
             QueueUi(() =>
             {
                 if (!ReferenceEquals(_current, restore) || restore.IsSettingsOpen) return;
-                if (restore.ContentFocus is UIElement { IsVisible: true, IsEnabled: true, Focusable: true } focus)
-                    Keyboard.Focus(focus);
-                else restore.MainHost.MoveFocus(new(FocusNavigationDirection.First));
+                if (restore.ContentFocus is Control { Visibility: Visibility.Visible, IsEnabled: true, IsTabStop: true } focus)
+                    focus.Focus(FocusState.Programmatic);
+                else DesktopVisual.FocusFirst(restore.MainHost);
             });
             // No navigation replay: returning from settings reveals the same view and scroll state.
             if (!restore.Initialized) await RunRequestAsync(new(restore));
@@ -655,12 +650,15 @@ public sealed partial class ShellWindow : DesktopWindow
         }
     }
 
-    protected override void OnGotKeyboardFocus(KeyboardFocusChangedEventArgs e)
+    private void OnGotKeyboardFocus(object sender, RoutedEventArgs e)
     {
-        base.OnGotKeyboardFocus(e);
-        if (_current is { } current && current.MainHost.IsKeyboardFocusWithin)
-            current.ContentFocus = e.NewFocus;
+        if (_current is { } current && DesktopVisual.ContainsFocus(current.MainHost))
+            current.ContentFocus = DesktopVisual.Focused(Root);
     }
+    private bool _searchComposing;
+    private void OnSearchCompositionStarted(TextBox sender, TextCompositionStartedEventArgs args) => _searchComposing = true;
+    private void OnSearchCompositionEnded(TextBox sender, TextCompositionEndedEventArgs args) => _searchComposing = false;
+
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
     {
         if (_suppressSearch) return;
@@ -669,12 +667,18 @@ public sealed partial class ShellWindow : DesktopWindow
             owner.SearchDrafts[owner.ActiveSearchKey] = SearchBox.Text;
     }
 
-    private void OnSearchKeyDown(object sender, KeyEventArgs e)
+    private void OnSearchKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        // Key.ImeProcessed is intentionally not interpreted as Enter while composing text.
-        if (_isClosing || e.Key != Key.Enter || e.KeyboardDevice.Modifiers != ModifierKeys.None) return;
-        e.Handled = true;
+        // Composition commits are not shell search submissions.
+        if (e.Handled || e.Key != VirtualKey.Enter) return;
+        e.Handled = TrySubmitSearch(DesktopVisual.Modifiers, _searchComposing);
+    }
+
+    internal bool TrySubmitSearch(VirtualKeyModifiers modifiers, bool composing)
+    {
+        if (_isClosing || composing || modifiers != VirtualKeyModifiers.None || !SearchBox.IsEnabled) return false;
         RunUiAction(SearchAsync);
+        return true;
     }
 
     private Task SearchAsync()
@@ -699,73 +703,78 @@ public sealed partial class ShellWindow : DesktopWindow
         return RunRequestAsync(new(owner, new(SearchBox.Text.Trim(), IsSearch: true)));
     }
 
-    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (e.Handled) return;
         if (CloseDialog.IsOpen || ResetDialog.IsOpen) return; // The active dialog owns keyboard navigation and Escape.
         if (_isClosing) return;
         if (ChannelDialogHost.IsOpen)
         {
             if (!ChannelDialogHost.HandleEscape(e)) ProtectChannelKeyboard(e);
-            if (e.Key is Key.F or Key.K && e.KeyboardDevice.Modifiers == ModifierKeys.Control ||
-                (e.Key is Key.Left or Key.Right || e.SystemKey is Key.Left or Key.Right) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
+            if (e.Key is VirtualKey.F or VirtualKey.K && DesktopVisual.Modifiers == VirtualKeyModifiers.Control ||
+                e.Key is VirtualKey.Left or VirtualKey.Right && DesktopVisual.Modifiers == VirtualKeyModifiers.Menu)
                 e.Handled = true;
             return;
         }
-        // Let a native range editor cancel its own gesture before Escape closes
-        // the full player. The shell must not depend on a music-specific type.
-        if (e.Key == Key.Escape && (Mouse.Captured is Slider || Keyboard.FocusedElement is Slider)) return;
-        if (e.Key is Key.F or Key.K && e.KeyboardDevice.Modifiers == ModifierKeys.Control &&
-            SearchInput.Visibility == Visibility.Visible && SearchBox.IsEnabled)
-        {
-            e.Handled = true;
-            SearchBox.Focus();
-            SearchBox.SelectAll();
-        }
-        else if ((e.Key == Key.Left || e.SystemKey == Key.Left) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
-        {
-            e.Handled = true;
-            RunUiAction(GoBackAsync);
-        }
-        else if ((e.Key == Key.Right || e.SystemKey == Key.Right) && e.KeyboardDevice.Modifiers == ModifierKeys.Alt)
-        {
-            e.Handled = true;
-            RunUiAction(GoForwardAsync);
-        }
-        else if (e.Key == Key.Escape && e.KeyboardDevice.Modifiers == ModifierKeys.None && _state.CanCancel)
-        {
-            e.Handled = true;
-            OnCancelClick(this, e);
-        }
-        else if (e.Key == Key.Escape && e.KeyboardDevice.Modifiers == ModifierKeys.None &&
-            (_queueOpen || _playerDetailOpen))
-        {
-            e.Handled = true;
-            RunUiAction(GoBackAsync);
-        }
+        e.Handled = TryExecuteShortcut(e.Key, DesktopVisual.Modifiers);
     }
 
-    private void ProtectChannelKeyboard(KeyEventArgs e)
+    internal bool TryExecuteShortcut(VirtualKey key, VirtualKeyModifiers modifiers)
+    {
+        if (_isClosing || CloseDialog.IsOpen || ResetDialog.IsOpen || ChannelDialogHost.IsOpen) return false;
+        // Let a native range editor cancel its own gesture before Escape closes
+        // the full player. The shell must not depend on a music-specific type.
+        if (key == VirtualKey.Escape && DesktopVisual.Focused(Root) is Slider) return false;
+        if (key is VirtualKey.F or VirtualKey.K && modifiers == VirtualKeyModifiers.Control &&
+            SearchInput.Visibility == Visibility.Visible && SearchBox.IsEnabled)
+        {
+            SearchBox.Focus(FocusState.Programmatic);
+            SearchBox.SelectAll();
+            return true;
+        }
+        else if (key == VirtualKey.Left && modifiers == VirtualKeyModifiers.Menu)
+        {
+            RunUiAction(GoBackAsync);
+            return true;
+        }
+        else if (key == VirtualKey.Right && modifiers == VirtualKeyModifiers.Menu)
+        {
+            RunUiAction(GoForwardAsync);
+            return true;
+        }
+        else if (key == VirtualKey.Escape && modifiers == VirtualKeyModifiers.None && _state.CanCancel)
+        {
+            OnCancelClick(this, new RoutedEventArgs());
+            return true;
+        }
+        else if (key == VirtualKey.Escape && modifiers == VirtualKeyModifiers.None &&
+            (_queueOpen || _playerDetailOpen))
+        {
+            RunUiAction(GoBackAsync);
+            return true;
+        }
+        return false;
+    }
+
+    private void ProtectChannelKeyboard(KeyRoutedEventArgs e)
     {
         // Only controls within the active channel keep their own keyboard input.
         if (e.OriginalSource is not DependencyObject target ||
-            !ChannelDialogHost.IsAncestorOf(target)) e.Handled = true;
+            !DesktopVisual.Contains(ChannelDialogHost, target)) e.Handled = true;
     }
 
-    private void OnPreviewKeyUp(object sender, KeyEventArgs e)
+    private void OnPreviewKeyUp(object sender, KeyRoutedEventArgs e)
     {
         if (!CloseDialog.IsOpen && !ResetDialog.IsOpen && ChannelDialogHost.IsOpen)
             ProtectChannelKeyboard(e);
     }
 
-    private void OnChannelHeaderPointer(object sender, MouseButtonEventArgs e)
+    private void OnChannelHeaderPointer(object sender, PointerRoutedEventArgs e)
     {
         if (CloseDialog.IsOpen || ResetDialog.IsOpen || !ChannelDialogHost.IsOpen) return;
-        bool In(FrameworkElement control) => e.OriginalSource is DependencyObject target &&
-            (ReferenceEquals(target, control) || control.IsAncestorOf(target));
-        if (ChannelDialogHost.HasOutsidePress || In(SearchChrome) || In(SearchInput) || In(SettingsButton) || In(PlayerDetailBackButton) ||
-            In(PageHeaderHost) && e.OriginalSource is IInputElement node &&
-            System.Windows.Shell.WindowChrome.GetIsHitTestVisibleInChrome(node))
-            ChannelDialogHost.HandleOutsidePointer(e, RootLayout);
+        bool In(FrameworkElement control) => e.OriginalSource is DependencyObject target && DesktopVisual.Contains(control, target);
+        if (ChannelDialogHost.HasOutsidePress || In(SearchChrome) || In(SearchInput) || In(SettingsButton) ||
+            In(PlayerDetailBackButton) || In(PageHeaderHost)) ChannelDialogHost.HandleOutsidePointer(e, RootLayout);
     }
 
     private async Task RunRequestAsync(RequestPlan plan, CancellationToken cancellationToken = default, bool reportOutcome = false)
@@ -965,7 +974,7 @@ public sealed partial class ShellWindow : DesktopWindow
     {
         _state.SetStatus(message, busy, error, retry);
         if (StatusText.IsLoaded && AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
-            UIElementAutomationPeer.FromElement(StatusText)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+            FrameworkElementAutomationPeer.FromElement(StatusText)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
     }
 
     private void RunUiAction(Func<Task> action)
@@ -995,34 +1004,31 @@ public sealed partial class ShellWindow : DesktopWindow
         catch (InvalidOperationException) { /* The dispatcher is already closing. */ }
     }
 
-    private void OnSystemSettingChanged(object? sender, PropertyChangedEventArgs e)
+    private void OnAccessibilityChanged(UISettings sender, object args) => QueueUi(() =>
     {
-        if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName is nameof(SystemParameters.HighContrast) or nameof(SystemParameters.ClientAreaAnimation))
-            QueueUi(() =>
-            {
-                DesktopTheme.SetIsHighContrast(this, SystemParameters.HighContrast);
-                ApplyPresentation();
-            });
-    }
-
-    private void UpdateCaption()
+        ApplyAccessibilityPresentation();
+        ApplyPresentation();
+    });
+    private void ApplyAccessibilityPresentation()
     {
-        var maximized = WindowState == WindowState.Maximized;
-        MaximizeGlyph.Text = maximized ? "\uE923" : "\uE922";
-        var label = maximized ? "还原" : "最大化";
-        AutomationProperties.SetName(MaximizeButton, label);
-        UpdatePlayerDetailChrome();
+        DesktopTheme.SetIsHighContrast(Root, _accessibility.HighContrast);
+        ApplicationBackground.Background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
+            _accessibility.HighContrast ? "MeowFilm.Brush.Window" : "MeowFilm.Brush.AppBackground");
+        SidebarMaterial.Visibility = SidebarTint.Visibility = _accessibility.HighContrast ? Visibility.Collapsed : Visibility.Visible;
+        SidebarEdge.Visibility = _accessibility.HighContrast || SidebarBackground.Visibility == Visibility.Collapsed
+            ? Visibility.Collapsed : Visibility.Visible;
+        UpdateStatusPresentation();
     }
-
-    private void ToggleMaximize()
+    private void UpdateCaption() => AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
+    private void UpdateStatusPresentation()
     {
-        if (WindowState == WindowState.Maximized) SystemCommands.RestoreWindow(this);
-        else SystemCommands.MaximizeWindow(this);
+        StatusPanel.Visibility = (_state.HasStatus && !_state.IsBusy) || _state.IsShutdownConfirmationOpen
+            ? Visibility.Visible : Visibility.Collapsed;
+        StatusPanel.Background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
+            _state.IsError ? "MeowFilm.Brush.ErrorSurface" : "MeowFilm.Brush.Surface");
+        StatusPanel.BorderBrush = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
+            _state.IsError ? "MeowFilm.Brush.Error" : "MeowFilm.Brush.Border");
     }
-
-    private void OnMinimizeClick(object sender, RoutedEventArgs e) => SystemCommands.MinimizeWindow(this);
-    private void OnMaximizeClick(object sender, RoutedEventArgs e) => ToggleMaximize();
-    private void OnCloseClick(object sender, RoutedEventArgs e) => Close();
 
     protected override void OnClosing(CancelEventArgs e)
     {
@@ -1147,8 +1153,8 @@ public sealed partial class ShellWindow : DesktopWindow
         SetStatus(timedOut ? "关闭超时" : "关闭失败", error: true);
         _state.SetShutdownConfirmation(true, canWait: timedOut, canForce: _forceShutdown is not null,
             canCancel: !timedOut && _cancelShutdown is not null && !_forceStarted);
-        if (timedOut) WaitForShutdownButton.Focus();
-        else ShutdownConfirmation.Focus(); // Enter must never implicitly choose destructive exit.
+        if (timedOut) WaitForShutdownButton.Focus(FocusState.Programmatic);
+        else ShutdownFocusTarget.Focus(FocusState.Programmatic); // Enter must never implicitly choose destructive exit.
     }
 
     private void OnWaitForShutdownClick(object sender, RoutedEventArgs e)
@@ -1178,7 +1184,7 @@ public sealed partial class ShellWindow : DesktopWindow
         CancelPageActivation();
         foreach (var request in _requests.ToArray()) request.Cancel();
         ModuleNavigationList.ItemsSource = null;
-        SystemParameters.StaticPropertyChanged -= OnSystemSettingChanged;
+        _uiSettings.ColorValuesChanged -= OnAccessibilityChanged;
         foreach (var session in _sessions)
         {
             session.Module.PropertyChanged -= OnModulePropertyChanged;

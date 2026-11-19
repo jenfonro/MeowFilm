@@ -1,13 +1,18 @@
+using FontWeights = Microsoft.UI.Text.FontWeights;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Media;
-using System.Windows.Input;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Input;
 using System.Globalization;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
@@ -211,9 +216,9 @@ public static partial class MusicOfficialPlaybackScopeTests
                 using var surface = new PlayerSurface(f.Module);
                 int resolutions = f.App.Resolutions.Count, plans = f.App.Plans.Count;
                 await surface.OpenQuality(keyboard);
-                Check(surface.Menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "lossless")).IsChecked);
-                surface.Menu.IsOpen = false;
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(surface.Menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => Equals(item.Tag, "lossless")).IsChecked);
+                surface.Menu.Hide();
+                await MusicTestUi.Drain();
                 Check(f.App.Resolutions.Count == resolutions && f.App.Plans.Count == plans &&
                     f.App.Completions.Count == 0, "opening either context entry does not resolve or search");
                 f.App.MediaQuality = "320k";
@@ -223,143 +228,41 @@ public static partial class MusicOfficialPlaybackScopeTests
                 resolutions = f.App.Resolutions.Count;
                 int completions = f.App.Completions.Count;
                 await surface.OpenQuality(keyboard);
-                Check(surface.Menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "high")).IsChecked &&
-                    !surface.Menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, "lossless")).IsChecked,
+                Check(surface.Menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => Equals(item.Tag, "high")).IsChecked &&
+                    !surface.Menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => Equals(item.Tag, "lossless")).IsChecked,
                     "context reopen reflects the newly accepted quality, not the previous menu");
                 Check(f.App.Resolutions.Count == resolutions && f.App.Completions.Count == completions);
             }
         });
-        yield return Case("spatial popup registers and releases hooks and consumes dismissal through WPF blank input", async () =>
+        yield return Case("native spatial submenu closes with its parent and fences the blank gesture without fabricated input", async () =>
         {
-            await using var f = await Scene.Create();
-            await f.Play(Song("first"));
+            await using var f = await Scene.Create(); await f.Play(Song("first"));
             using var surface = new PlayerSurface(f.Module);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await MusicTestUi.Drain();
             var view = (MusicPlayerView)f.Module.PlayerView;
-            var window = Window.GetWindow(view) ?? throw new InvalidOperationException("player has no loaded window");
-            var blank = (Grid)view.Content;
-            var inputField = typeof(MusicPlayerView).GetField("surfaceInput", BindingFlags.Instance | BindingFlags.NonPublic)!;
-            var input = inputField.GetValue(view) as PlayerSurfaceInput ??
-                throw new InvalidOperationException("loaded player has no input owner");
-            var sources = (Dictionary<Visual, System.Windows.Interop.HwndSource>)typeof(PlayerSurfaceInput)
-                .GetField("sources", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(input)!;
-            var activeKey = typeof(Window).GetFields(BindingFlags.Static | BindingFlags.NonPublic)
-                .Where(field => field.FieldType == typeof(DependencyPropertyKey))
-                .Select(field => (DependencyPropertyKey)field.GetValue(null)!)
-                .Single(key => key.DependencyProperty == Window.IsActiveProperty);
             int requests = 0;
-            f.Module.GlobalSurfaceRequested += (_, args) =>
-            { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
-            var trace = new List<string>();
-            var arrivals = new List<RoutedEvent>();
-            var events = new[] { Mouse.PreviewMouseDownEvent, Mouse.MouseDownEvent, Mouse.PreviewMouseUpEvent,
-                Mouse.MouseUpEvent, UIElement.PreviewMouseLeftButtonDownEvent, UIElement.MouseLeftButtonUpEvent };
-            void Snapshot(string point, MouseButtonEventArgs mouse) => trace.Add(
-                $"{point}/{mouse.RoutedEvent.Name}: Source={mouse.Source} OriginalSource={mouse.OriginalSource} " +
-                $"Handled={mouse.Handled} IsActive={window.IsActive} requests={requests}");
-            MouseButtonEventHandler observer = (_, mouse) =>
-            { arrivals.Add(mouse.RoutedEvent); Snapshot("view", mouse); };
-            foreach (var routed in events) blank.AddHandler(routed, observer, true);
-            string phase = "load";
-            async Task Gesture(string label, Action? close = null)
-            {
-                phase = label; trace.Clear(); arrivals.Clear();
-                MusicUiTests.ProcessBlankInput(blank, Mouse.PreviewMouseDownEvent, Snapshot);
-                close?.Invoke();
-                MusicUiTests.ProcessBlankInput(blank, Mouse.PreviewMouseUpEvent, Snapshot);
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(events.All(routed => arrivals.Count(value => value == routed) == 1),
-                    "preview, bubbling and player Down/Up each arrive once");
-            }
-            async Task<(MenuItem Item, Popup Popup, Visual Child)> OpenSpatial()
-            {
-                var item = surface.Menu.Items.OfType<MenuItem>().Single(value => value.HasItems);
-                item.IsSubmenuOpen = true;
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                var popup = (Popup)item.Template.FindName("PART_Popup", item);
-                Check(popup.IsOpen && popup.Child is Visual, "the real quality template opens its spatial HWND");
-                var child = popup.Child as Visual ?? throw new InvalidOperationException("spatial popup has no visual child");
-                Check(sources.Count == 3 && sources.TryGetValue(child, out var source) &&
-                    ReferenceEquals(source, PresentationSource.FromVisual(child)),
-                    "window, root menu and actual spatial popup HWND are registered");
-                return (item, popup, child);
-            }
-            try
-            {
-                Check(sources.Count == 1, "loaded player initially observes only its window");
-                await surface.OpenQuality();
-                Check(sources.Count == 2, "OpenQuality closes its keyboard-tested submenu and releases that hook");
-                var spatial = await OpenSpatial();
-                bool spatialClosed = false;
-                EventHandler onSpatialClosed = (_, _) => spatialClosed = true;
-                spatial.Popup.Closed += onSpatialClosed;
-                try
-                {
-                    spatial.Item.IsSubmenuOpen = false;
-                    await Until(() => spatialClosed);
-                }
-                finally { spatial.Popup.Closed -= onSpatialClosed; }
-                Check(!spatial.Popup.IsOpen && surface.Menu.IsOpen &&
-                    !sources.ContainsKey(spatial.Child) && sources.Count == 2,
-                    "closing only the spatial submenu unregisters its HWND but retains the parent");
-                spatial = await OpenSpatial();
-                // Offscreen readonly-DP injection; this is not desktop activation or capture ordering.
-                window.SetValue(activeKey, true);
-                int before = requests;
-                spatialClosed = false;
-                bool menuClosed = false;
-                RoutedEventHandler onMenuClosed = (_, _) => menuClosed = true;
-                spatial.Popup.Closed += onSpatialClosed;
-                surface.Menu.Closed += onMenuClosed;
-                try
-                {
-                    await Gesture("spatial/dismiss", () =>
-                    { spatial.Item.IsSubmenuOpen = false; surface.Menu.IsOpen = false; });
-                    await Until(() => menuClosed && spatialClosed);
-                }
-                finally
-                {
-                    spatial.Popup.Closed -= onSpatialClosed;
-                    surface.Menu.Closed -= onMenuClosed;
-                }
-                Check(requests == before && !spatial.Popup.IsOpen && !surface.Menu.IsOpen &&
-                    sources.Count == 1 && !sources.ContainsKey(spatial.Child),
-                    "closing both menus in this blank gesture releases popup hooks without opening detail");
-                await Gesture("spatial/next");
-                Check(requests == before + 1, "the following normal blank gesture opens detail exactly once");
-                await surface.OpenQuality();
-                spatial = await OpenSpatial();
-                phase = "spatial/unload";
-                spatialClosed = menuClosed = false;
-                bool unloaded = false;
-                RoutedEventHandler onUnloaded = (_, _) => unloaded = true;
-                view.Unloaded += onUnloaded;
-                spatial.Popup.Closed += onSpatialClosed;
-                surface.Menu.Closed += onMenuClosed;
-                try
-                {
-                    window.Content = null;
-                    await Until(() => unloaded && menuClosed && spatialClosed);
-                }
-                finally
-                {
-                    view.Unloaded -= onUnloaded;
-                    spatial.Popup.Closed -= onSpatialClosed;
-                    surface.Menu.Closed -= onMenuClosed;
-                }
-                Check(!view.IsLoaded && inputField.GetValue(view) is null && sources.Count == 0 &&
-                    !spatial.Popup.IsOpen && !surface.Menu.IsOpen,
-                    "real host detachment closes the spatial popup and releases every input hook");
-            }
-            catch (Exception error)
-            {
-                throw new InvalidOperationException($"{phase}: {error.Message}\n" + string.Join("\n", trace), error);
-            }
-            finally
-            {
-                foreach (var routed in events) blank.RemoveHandler(routed, observer);
-                window.SetValue(activeKey, false);
-            }
+            f.Module.GlobalSurfaceRequested += (_, args) => { if (args.Surface == DesktopGlobalSurface.PlayerDetail) requests++; };
+            var blank = DesktopTestUi.Hit(view, new Point(300, 12))!;
+            await surface.OpenQuality();
+            var spatial = surface.Menu.Items.OfType<MenuFlyoutSubItem>().Single();
+            var expansion = (Microsoft.UI.Xaml.Automation.Provider.IExpandCollapseProvider)
+                Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(spatial)!
+                    .GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.ExpandCollapse);
+            expansion.Expand(); await MusicTestUi.Drain();
+            Check(expansion.ExpandCollapseState == Microsoft.UI.Xaml.Automation.ExpandCollapseState.Expanded && surface.Menu.IsOpen,
+                "actual native submenu opens while its parent remains");
+            expansion.Collapse(); await MusicTestUi.Drain();
+            Check(expansion.ExpandCollapseState == Microsoft.UI.Xaml.Automation.ExpandCollapseState.Collapsed && surface.Menu.IsOpen,
+                "collapsing the submenu retains its real parent");
+            expansion.Expand(); await MusicTestUi.Drain();
+            view.BeginSurfaceGesture(blank); surface.Menu.Hide(); await Until(() => !surface.Menu.IsOpen);
+            await view.EndSurfaceGesture(blank).Work; Check(requests == 0, "menu dismissal cannot open the detail");
+            view.BeginSurfaceGesture(blank); await view.EndSurfaceGesture(blank).Work;
+            Check(requests == 1, "the next independent blank gesture opens exactly once");
+            await surface.OpenQuality();
+            surface.Unmount(); await MusicTestUi.Drain();
+            Check(!view.IsLoaded && !surface.Menu.IsOpen, "real unmount closes the parent and submenus");
+            await view.EndSurfaceGesture(blank).Work; Check(requests == 1, "retirement prevents a late release");
         });
         yield return Case("quality and source text follows disabled and high contrast control states", async () =>
         {
@@ -367,66 +270,71 @@ public static partial class MusicOfficialPlaybackScopeTests
             await f.Play(Song("first"));
             using var surface = new PlayerSurface(f.Module);
             await surface.OpenQuality();
-            var current = surface.Menu.Items.OfType<MenuItem>().First(item => item.IsChecked);
-            var other = surface.Menu.Items.OfType<MenuItem>().First(item => !item.IsChecked);
-            var highlighted = (DependencyPropertyKey)typeof(MenuItem).GetField("IsHighlightedPropertyKey",
-                BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
-            DesktopTheme.SetIsHighContrast(surface.Menu, false);
-            other.SetValue(highlighted, true);
-            Check(current.Background == (Brush)current.FindResource("MeowFilm.Brush.ItemSelected") &&
-                other.Background == (Brush)other.FindResource("MeowFilm.Brush.ItemHover") &&
-                current.Background != other.Background, "current quality and hovered action have distinct backgrounds");
-            current.SetValue(highlighted, true);
-            Check(current.Background == (Brush)current.FindResource("MeowFilm.Brush.ItemSelected") &&
-                current.FontWeight == FontWeights.Normal, "hovering current quality preserves its current identity");
-            current.SetValue(highlighted, false); other.SetValue(highlighted, false);
-            foreach (var item in surface.Menu.Items.OfType<MenuItem>().Where(item => item.IsChecked || item.HasItems).ToArray())
+            var current = surface.Menu.Items.OfType<ToggleMenuFlyoutItem>().First(item => item.IsChecked);
+            var other = surface.Menu.Items.OfType<ToggleMenuFlyoutItem>().First(item => !item.IsChecked);
+            var submenu = surface.Menu.Items.OfType<MenuFlyoutSubItem>().Single();
+            other.Focus(FocusState.Programmatic); await MusicTestUi.Drain();
+            Check(DesktopTestUi.HasFocus(other), "the native unselected quality receives actual focus");
+            Check(SameBrush(current.Background, (Brush)DesktopVisual.Resource(current, "MeowFilm.Brush.ItemSelected")) &&
+                SameBrush(other.Background, (Brush)DesktopVisual.Resource(other, "MeowFilm.Brush.ItemHover")) &&
+                !SameBrush(current.Background, other.Background), "current quality and focused action have distinct backgrounds");
+            current.Focus(FocusState.Programmatic); await MusicTestUi.Drain();
+            Check(SameBrush(current.Background, (Brush)DesktopVisual.Resource(current, "MeowFilm.Brush.ItemSelected")) &&
+                current.FontWeight == FontWeights.Normal, "focusing current quality preserves its current identity");
+            foreach (var item in new Control[] { current, submenu })
             {
-                void TextMatches(Brush expected)
+                void TextMatches(global::Windows.UI.Color expected)
                 {
-                    Check(System.Windows.Documents.TextElement.GetForeground(
-                        (ContentPresenter)item.Template.FindName("Header", item)) == expected,
-                        "header presenter inherits the menu state color without restricting header content");
-                    foreach (string name in new[] { "Check", "Arrow" })
-                        Check(((TextBlock)item.Template.FindName(name, item)).Foreground == expected,
-                            $"{name} inherits the actual menu item's state color");
-                    Check(((TextBlock)item.Template.FindName("Check", item)).Visibility == Visibility.Collapsed,
-                        "current quality is represented by background, never a check glyph");
+                    var label = PlayerVisuals(item).OfType<TextBlock>().Single(text => text.Text ==
+                        (item is ToggleMenuFlyoutItem toggle ? toggle.Text : ((MenuFlyoutSubItem)item).Text));
+                    Check(label.Foreground is SolidColorBrush ink && ink.Color == expected,
+                        "actual native menu text follows its enabled and accessibility states");
+                    Check(label.FontWeight == FontWeights.Normal);
+                    foreach (var icon in PlayerVisuals(item).OfType<FontIcon>())
+                        Check(icon.Foreground is SolidColorBrush glyph && glyph.Color == expected,
+                            "the native submenu chevron uses the same state color");
+                    Check(!PlayerVisuals(item).OfType<FontIcon>().Any(icon => icon.Name == "CheckGlyph" && icon.Opacity > 0),
+                        "current quality is represented by its background, not a check glyph");
                 }
-                DesktopTheme.SetIsHighContrast(surface.Menu, false);
-                item.IsEnabled = false; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                TextMatches((Brush)item.FindResource("MeowFilm.Brush.Disabled"));
+                item.IsEnabled = false; await MusicTestUi.Drain();
+                TextMatches(((SolidColorBrush)DesktopVisual.Resource(item, item is MenuFlyoutSubItem ?
+                    "MenuFlyoutSubItemForegroundDisabled" : "MeowFilm.Brush.Disabled")).Color);
                 item.IsEnabled = true;
-                DesktopTheme.SetIsHighContrast(surface.Menu, true);
-                var highlightKey = (DependencyPropertyKey)typeof(MenuItem).GetField("IsHighlightedPropertyKey",
-                    BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
-                item.SetValue(highlightKey, true);
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(item.IsHighlighted, "the actual menu row is in the highlighted state for the color check");
-                TextMatches(SystemColors.HighlightTextBrush);
-                item.IsEnabled = false; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                TextMatches(SystemColors.GrayTextBrush);
-                Check(item.Background == SystemColors.WindowBrush, "disabled high contrast uses the system window background");
-                item.IsEnabled = true;
-                item.SetValue(highlightKey, false);
+                if (item is MusicPlayerMenuChoice choice)
+                {
+                    DesktopTheme.SetIsHighContrast(choice, true);
+                    choice.Focus(FocusState.Programmatic); await MusicTestUi.Drain();
+                    Check(DesktopTestUi.HasFocus(choice), "high contrast observes actual focus");
+                    TextMatches(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText));
+                    choice.IsEnabled = false; await MusicTestUi.Drain();
+                    TextMatches(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.GrayText));
+                    Check(SameBrush(choice.Background, new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window))),
+                        "disabled high contrast uses the system window background");
+                    choice.IsEnabled = true; DesktopTheme.SetIsHighContrast(choice, false);
+                }
+                else if (new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
+                {
+                    item.IsEnabled = false; await MusicTestUi.Drain();
+                    TextMatches(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.GrayText));
+                    item.IsEnabled = true;
+                }
             }
-            DesktopTheme.SetIsHighContrast(surface.Menu, false);
             await surface.List();
             f.Module.SourceChoices.Add(new("failed-fixture", "不可用音源", "QQ", "无损", "不可用", false, false));
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            var rows = PlayerVisuals(surface.SourceDialog.Child).OfType<Button>()
+            await MusicTestUi.Drain();
+            var rows = PlayerVisuals(surface.SourcePanel).OfType<Button>()
                 .Where(button => button.Tag is MusicSourceChoice).ToArray();
             Check(rows.Any(row => !row.IsEnabled), "the source view includes a genuinely unavailable candidate");
             foreach (bool contrast in new[] { false, true })
             {
-                DesktopTheme.SetIsHighContrast(surface.SourceDialog.Child, contrast);
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                DesktopTheme.SetIsHighContrast(surface.SourcePanel, contrast);
+                await MusicTestUi.Drain();
                 foreach (var row in rows)
                 {
                     if (!row.IsEnabled)
-                        Check(row.Foreground == (contrast ? SystemColors.GrayTextBrush :
-                            (Brush)row.FindResource("MeowFilm.Brush.Disabled")));
-                    Check(PlayerVisuals(row).OfType<TextBlock>().All(text => text.Foreground == row.Foreground),
+                        Check(SameBrush(row.Foreground, contrast ? new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.GrayText)) :
+                            (Brush)DesktopVisual.Resource(row, "MeowFilm.Brush.Disabled")));
+                    Check(PlayerVisuals(row).OfType<TextBlock>().All(text => SameBrush(text.Foreground, row.Foreground)),
                         "actual quality, provider and state text respects enabled/disabled contrast colors");
                 }
             }
@@ -464,8 +372,8 @@ public static partial class MusicOfficialPlaybackScopeTests
             f.App.HoldDiscovery = true;
             surface.Search();
             await f.App.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            surface.CloseSourcesWithEscape();
-            // WPF destroys the popup window and raises Closed from its dispatcher, not inside the IsOpen setter.
+            surface.CloseSources();
+            // Native flyout closure releases the discovery owner after its actual Closed boundary.
             await Until(() => f.App.DiscoveryToken.IsCancellationRequested);
             f.App.DiscoveryRelease.TrySetResult();
             await Until(() => !f.Module.Busy);
@@ -485,11 +393,11 @@ public static partial class MusicOfficialPlaybackScopeTests
             surface.Search();
             await f.App.DiscoveryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var cancelled = f.App.DiscoveryToken;
-            surface.CloseSourcesWithEscape();
+            surface.CloseSources();
             await Until(() => cancelled.IsCancellationRequested);
             f.App.DiscoveryRelease.TrySetResult();
             await Until(() => f.App.DiscoveryReturns == 1);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await MusicTestUi.Drain();
             Check(!f.Module.SourceChoices.Any(row => row.Platform == "QQ"),
                 "the cancelled late discovery must not populate the closed dialog");
 
@@ -571,7 +479,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         while (!predicate())
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(5)) throw new TimeoutException("official playback scope");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await MusicTestUi.Drain();
             if (!predicate()) await Task.Delay(1);
         }
     }
@@ -614,7 +522,7 @@ public static partial class MusicOfficialPlaybackScopeTests
             foreach (var operation in queued)
                 if (operation.Status == DispatcherOperationStatus.Pending) operation.Priority = DispatcherPriority.Normal;
         }
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await MusicTestUi.Drain();
     }
     private sealed class Scene : IAsyncDisposable
     {
@@ -851,124 +759,74 @@ public static partial class MusicOfficialPlaybackScopeTests
         private readonly MusicPlayerView view;
         private readonly Window window;
         private readonly MusicCapability module;
-        internal ContextMenu Menu => (ContextMenu)view.FindName("QualityMenu");
-        internal Popup SourceDialog => (Popup)view.FindName("SourcePopup");
+        internal MenuFlyout Menu => (MenuFlyout)view.FindName("QualityMenu");
+        internal Flyout SourceDialog => (Flyout)view.FindName("SourcePopup");
+        internal FrameworkElement SourcePanel => (FrameworkElement)SourceDialog.Content;
         internal PlayerSurface(MusicCapability module)
         {
-            this.module = module;
-            view = (MusicPlayerView)module.PlayerView;
-            window = new Window { Content = view, Width = 1000, Height = 160, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None };
-            window.Show(); window.UpdateLayout();
+            this.module = module; view = (MusicPlayerView)module.PlayerView;
+            window = MusicTestUi.Window(view, 1110, 160); window.Activate();
         }
         internal async Task OpenQuality(bool? contextKeyboard = null)
         {
+            await MusicTestUi.Drain();
             var button = (Button)view.FindName("QualityButton");
             var badge = (Border)button.Content;
             Check(badge.Width == 72 && ((TextBlock)badge.Child).TextAlignment == TextAlignment.Center,
-                "fixed-width quality badge centers short labels without changing playback state");
-            if (contextKeyboard is { } keyboard)
-            {
-                // Raise WPF's actual routed request without injecting input into the desktop.
-                double position = keyboard ? -1 : 12;
-                var request = (ContextMenuEventArgs)typeof(ContextMenuEventArgs)
-                    .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null,
-                        [typeof(object), typeof(bool), typeof(double), typeof(double)], null)!
-                    .Invoke([button, true, position, position]);
-                button.RaiseEvent(request);
-                Check(request.Handled, "context requests use the same initialization owner as left-click");
-            }
-            else button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Until(() => Menu.IsOpen);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(Menu.IsOpen, "actual quality menu must open");
-            var choices = Menu.Items.OfType<MenuItem>().ToArray();
-            Check(Equals(choices[0].Header, "查看更多") && choices.Skip(1).Where(item => !item.HasItems)
+                "fixed-width quality badge retains its label geometry");
+            PlayerMenuInput.For(view).CloseCurrent(); await Until(() => !Menu.IsOpen);
+            if (contextKeyboard is not null) view.OpenQualityMenu();
+            else DesktopTestUi.Invoke(button);
+            await Until(() => Menu.IsOpen); await MusicTestUi.Drain();
+            Check(Menu.Items[0] is MenuFlyoutItem { Text: "查看更多" } && Menu.Items.OfType<ToggleMenuFlyoutItem>()
                 .Select(item => item.Tag as string).SequenceEqual(module.QualityChoices().Select(item => item.Key)),
-                "the existing category order is retained with more sources first");
-            double widestLabel = choices.Max(item => new FormattedText(item.Header.ToString()!, CultureInfo.CurrentCulture,
-                item.FlowDirection, new Typeface(item.FontFamily, item.FontStyle, item.FontWeight, item.FontStretch),
-                item.FontSize, Brushes.Black, VisualTreeHelper.GetDpi(item).PixelsPerDip).WidthIncludingTrailingWhitespace);
-            var menuPanel = PlayerVisuals(Menu).OfType<Border>().Single(border =>
-                ReferenceEquals(border.Style, Menu.FindResource("MeowFilm.FloatingSurface")));
-            Check(double.IsNaN(Menu.Width) && menuPanel.ActualWidth >= widestLabel && menuPanel.ActualWidth - widestLabel < 80,
-                "menu fits its labels with only padding, selection and submenu glyph slots");
-            GeneralAppearanceTests.SavePreview(Menu, "refinement-quality-menu",
-                (int)Math.Ceiling(Menu.ActualWidth), (int)Math.Ceiling(Menu.ActualHeight));
-            var spatial = choices.SingleOrDefault(item => item.HasItems);
-            if (spatial is not null)
+                "more sources remains first, followed by the existing quality order");
+            var root = MenuPresenter(Menu.Items[0]);
+            Check(root.ActualWidth > 0 && root.ActualHeight > 0 && root.FontWeight == FontWeights.Normal,
+                "the actual native menu presenter is arranged with regular text");
+            foreach (var item in Menu.Items.Where(item => item is not MenuFlyoutSeparator))
+                Check(item.FontWeight == FontWeights.Normal, "native quality and submenu text is regular");
+            if (Menu.Items.OfType<MenuFlyoutSubItem>().SingleOrDefault() is { } spatial)
             {
-                Check(Equals(spatial.Header, "空间／全景") && spatial.Items.OfType<MenuItem>().Select(item => item.Header)
-                    .SequenceEqual(module.SpatialChoices().Select(item => item.Label)), "spatial names agree with settings");
-                spatial.Focus();
-                spatial.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(spatial), 0, System.Windows.Input.Key.Right)
-                { RoutedEvent = UIElement.KeyDownEvent });
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(spatial.IsSubmenuOpen && Menu.IsOpen, "Right opens the submenu without closing its parent");
-                var popup = (Popup)spatial.Template.FindName("PART_Popup", spatial);
-                var submenu = (FrameworkElement)((Border)popup.Child).Child;
-                var row = (Border)spatial.Template.FindName("Row", spatial);
-                var rowStart = row.PointToScreen(new());
-                var rowEnd = row.PointToScreen(new(row.ActualWidth, row.ActualHeight));
-                var menuStart = submenu.PointToScreen(new());
-                var menuEnd = submenu.PointToScreen(new(submenu.ActualWidth, submenu.ActualHeight));
-                Check(Math.Min(Math.Abs(menuStart.X - rowEnd.X), Math.Abs(menuEnd.X - rowStart.X)) < 3 &&
-                    menuStart.Y <= rowEnd.Y && menuEnd.Y >= rowStart.Y,
-                    "the actual submenu joins the corresponding parent row on either side");
-                GeneralAppearanceTests.SavePreview(submenu, "refinement-spatial-menu",
-                    (int)Math.Ceiling(submenu.ActualWidth), (int)Math.Ceiling(submenu.ActualHeight));
-                var first = (MenuItem)spatial.Items[0];
-                first.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(first), 0, System.Windows.Input.Key.Left)
-                { RoutedEvent = UIElement.KeyDownEvent });
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(!spatial.IsSubmenuOpen && Menu.IsOpen, "Left returns to the still-open parent menu");
+                Check(spatial.Text == "空间／全景" && spatial.Items.OfType<ToggleMenuFlyoutItem>().Select(item => item.Text)
+                    .SequenceEqual(module.SpatialChoices().Select(item => item.Label)), "spatial labels agree with the actual settings");
+                var expansion = (Microsoft.UI.Xaml.Automation.Provider.IExpandCollapseProvider)
+                    Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(spatial)!
+                        .GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.ExpandCollapse);
+                expansion.Expand(); await MusicTestUi.Drain();
+                var submenu = MenuPresenter(spatial.Items[0]);
+                var bounds = DesktopTestUi.Bounds(submenu, view.XamlRoot.Content);
+                var row = DesktopTestUi.Bounds(spatial, view.XamlRoot.Content);
+                Check(Math.Min(Math.Abs(bounds.X - row.Right), Math.Abs(bounds.Right - row.X)) < 4 &&
+                    bounds.Y <= row.Bottom && bounds.Bottom >= row.Y, "the native submenu joins its real parent row");
+                expansion.Collapse(); await MusicTestUi.Drain();
+                Check(Menu.IsOpen && expansion.ExpandCollapseState == Microsoft.UI.Xaml.Automation.ExpandCollapseState.Collapsed,
+                    "collapsing returns to the still-open native parent");
             }
         }
+        private MenuFlyoutPresenter MenuPresenter(MenuFlyoutItemBase item) =>
+            Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(view.XamlRoot)
+                .SelectMany(popup => DesktopTestUi.Visuals(popup.Child)).OfType<MenuFlyoutPresenter>()
+                .First(presenter => DesktopTestUi.Visuals(presenter).Contains(item));
         internal async Task List()
         {
-            var more = (MenuItem)view.FindName("SourceListItem");
-            more.Focus();
-            more.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(more), 0, System.Windows.Input.Key.Enter)
-            { RoutedEvent = UIElement.KeyDownEvent });
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(!Menu.IsOpen && SourceDialog.IsOpen && MeowFilm.Desktop.DialogPlacement.GetCentered(SourceDialog),
-                "Enter on more sources leaves the menu for an independent centered dialog");
-            SourceDialog.Child.UpdateLayout();
-            var panel = (FrameworkElement)SourceDialog.Child;
-            GeneralAppearanceTests.SavePreview(panel, "refinement-source-dialog",
-                (int)Math.Ceiling(panel.ActualWidth + panel.Margin.Left + panel.Margin.Right),
-                (int)Math.Ceiling(panel.ActualHeight + panel.Margin.Top + panel.Margin.Bottom));
+            var more = Menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "查看更多");
+            Check(more.IsEnabled, "real more-sources action is enabled");
+            MusicTestUi.Invoke(more); await Until(() => !Menu.IsOpen && SourceDialog.IsOpen); await MusicTestUi.Drain();
+            Check(SourceDialog.Placement == Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.Full && SourcePanel.IsLoaded,
+                "more sources opens the independent native in-root centered flyout");
         }
-        internal async Task OpenSources()
-        {
-            var button = (Button)view.FindName("QualityButton");
-            Check(button.IsVisible && button.IsEnabled, "the quality entry is available for source discovery");
-            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            await Until(() => Menu.IsOpen);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            var more = (MenuItem)view.FindName("SourceListItem");
-            Check(more.IsVisible && more.IsEnabled, "the actual more-sources menu action is available");
-            // Source lifetime tests use the click route, independently of submenu keyboard/capture tests.
-            more.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            await Until(() => SourceDialog.IsOpen && !Menu.IsOpen);
-            Check(DialogPlacement.GetCentered(SourceDialog), "the source action opens the centered dialog");
-        }
-        internal void CloseSourcesWithEscape() =>
-            SourceDialog.Child.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice,
-                PresentationSource.FromVisual(SourceDialog.Child), 0, System.Windows.Input.Key.Escape)
-            { RoutedEvent = UIElement.KeyDownEvent });
-        internal void Search()
-        {
-            var button = (Button)view.FindName("LoadMoreSourcesButton");
-            Check(button.IsVisible && button.IsEnabled, "source search must be a usable UI action");
-            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-        }
+        internal async Task OpenSources() { await OpenQuality(); await List(); }
+        internal void CloseSources() => DesktopTestUi.Invoke((Button)view.FindName("CloseSourcesButton"));
+        internal void Search() => DesktopTestUi.Invoke((Button)view.FindName("LoadMoreSourcesButton"));
+        internal void Unmount() { window.Content = null; }
         public void Dispose()
         {
-            Menu.IsOpen = false; SourceDialog.IsOpen = false;
-            window.Content = null; window.Close();
+            view.Deactivate(); window.Content = null; window.Close();
         }
     }
+    private static bool SameBrush(Brush? first, Brush? second) => ReferenceEquals(first, second) ||
+        first is SolidColorBrush a && second is SolidColorBrush b && a.Color == b.Color;
     private static IEnumerable<DependencyObject> PlayerVisuals(DependencyObject root)
     {
         yield return root;

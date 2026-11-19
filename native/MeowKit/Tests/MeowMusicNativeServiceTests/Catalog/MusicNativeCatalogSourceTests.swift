@@ -1,6 +1,7 @@
 import XCTest
 import MeowMusicFeature
 import MeowMusicTestSupport
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 private typealias F = KugouDiscoveryFixture
@@ -63,8 +64,8 @@ private actor CatalogAccount: MusicNativeAccountProviding, MusicNativeHomeDispla
         guard binding.loggedIn else { throw MusicServiceError.authRequired }
         switch request {
         case .home, .featured:
-            let section = MJ.obj([("id", .string("songs")), ("type", .string("songs")),
-                ("items", .array([MusicNativePublicBrowseFixture.song("41")]))])
+            let section = MJ.obj([("id", .string("songs")), ("layout", .string("song-columns")),
+                ("items", .array([try MJ.parse(RuntimeJSON.encode(NativeDiscoveryFixture.song("41")))]))])
             return MJ.obj([("sections", .array([section]))]).bytes
         case .artistActivity:
             return Data(#"{"sections":[]}"#.utf8)

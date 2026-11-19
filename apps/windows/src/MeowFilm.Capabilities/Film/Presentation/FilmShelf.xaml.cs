@@ -1,5 +1,6 @@
-using System.Windows;
-using System.Windows.Controls;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
 
@@ -18,7 +19,7 @@ public partial class FilmShelf : UserControl
 
     private void Retry_Click(object sender, RoutedEventArgs e)
     {
-        e.Handled = true;
+
         RetryRequested?.Invoke(this, EventArgs.Empty);
     }
 }

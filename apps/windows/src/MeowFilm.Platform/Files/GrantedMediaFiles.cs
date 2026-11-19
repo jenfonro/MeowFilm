@@ -10,7 +10,6 @@ public sealed record GrantedFile(string Id, string Path, string Title);
 /// <summary>Explicit native file grants. Ordinary playback resolves one typed row, not the full collection.</summary>
 public sealed class GrantedMediaFiles
 {
-    private const int MaximumItems = 100_000;
     private readonly IStorageDatabase database;
     private readonly HashSet<string> extensions;
     public GrantedMediaFiles(IStorageDatabase database, IEnumerable<string> extensions)
@@ -22,7 +21,7 @@ public sealed class GrantedMediaFiles
     public async Task<IReadOnlyList<GrantedFile>> GrantAsync(IEnumerable<string> selectedPaths, CancellationToken cancellationToken = default)
     {
         var selected = selectedPaths?.ToArray() ?? throw new InvalidDataException("FILE_LIMIT");
-        if (selected.Length is 0 or > 1000) throw new InvalidDataException("FILE_LIMIT");
+        if (selected.Length == 0) throw new InvalidDataException("FILE_LIMIT");
         var files = await Task.Run(() => selected.Select(Grant).DistinctBy(file => file.Id).ToArray(), cancellationToken).ConfigureAwait(false);
         try { await database.WriteAsync(db =>
         {
@@ -37,7 +36,6 @@ public sealed class GrantedMediaFiles
                     "VALUES('device',$id,$ordinal,3,0,$path,$title) ON CONFLICT(scope_key,Items_key) DO UPDATE SET Path=excluded.Path,Title=excluded.Title",
                     ("$id", file.Id), ("$ordinal", count++), ("$path", file.Path), ("$title", file.Title));
             }
-            if (db.Scalar<long>("SELECT count(*) FROM windows_file_grants_Items WHERE scope_key='device'") > MaximumItems) throw new InvalidDataException("FILE_LIMIT");
             return true;
         }, cancellationToken, files.Sum(file => (file.Id.Length + file.Path.Length + file.Title.Length) * 2)).ConfigureAwait(false); }
         catch (DocumentStoreException error) when (error.Error is DocumentStoreError.Storage or DocumentStoreError.Io)

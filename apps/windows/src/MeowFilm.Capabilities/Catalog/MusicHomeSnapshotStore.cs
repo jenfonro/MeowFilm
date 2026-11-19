@@ -10,7 +10,7 @@ internal sealed record MusicHomeSnapshot(string Platform, JsonElement[] Pages);
 // Display content only. Restored actions still require current account authority.
 internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
 {
-    internal const string Namespace = "music.home.v2";
+    internal const string Namespace = "music.home.v3";
     private readonly TypedRecordRepository store = new(database, Namespace, HomeStorageRecords.Home);
     private readonly SemaphoreSlim gate = new(1, 1);
 
@@ -98,17 +98,9 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
     private static JsonObject ProjectPage(JsonElement page, string platform, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        Require(page.ValueKind == JsonValueKind.Object && MusicCatalogDto.Text(page, "platform") == platform);
-        Require(!page.TryGetProperty("ok", out var ok) || ok.ValueKind == JsonValueKind.True);
         var result = new JsonObject { ["platform"] = platform };
-        foreach (string name in new[] { "entries", "sections", "items" })
-            if (page.TryGetProperty(name, out var rows))
-            {
-                Require(rows.ValueKind == JsonValueKind.Array);
-                result[name] = new JsonArray(rows.EnumerateArray().Select(row =>
-                    Project(row, name == "sections" ? "section" : "card", token)).OfType<JsonObject>().Cast<JsonNode?>().ToArray());
-            }
-        Require(result.Count > 1);
+        result["sections"] = new JsonArray(MusicCatalogDto.Rows(MusicCatalogDto.Field(page, "sections"))
+            .Select(row => Project(row, "section", token)).ToArray());
         return result;
     }
 
@@ -120,59 +112,65 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
             return new JsonObject { ["display"] = false };
         string fields = kind switch
         {
-            "section" => "id title type layout available errorCode requiresAccount display",
-            "action" => "type id branch pageCode",
-            "channel" => "id pageCode",
+            "section" => "id title layout available errorCode requiresAccount display selectedTab selectedTag",
+            "tab" => "id name",
+            "tag" => "id name group selected",
+            "action" => "type id branch pageCode provider mode submode ruleId tabTagId sourceType sourceName entry songId",
+            "channel" => "id name pageCode channelKind placement",
+            "coverRef" => "kind id",
             "locator" => "kind id playlistId dirId listId version totalVersion creatorId creatorListId",
             "preview" => "title artist cover rank lastRank",
             "song" => "songId",
-            _ => "songId id key name subtitle creator cover kind pageCode available errorCode requiresAccount display placement canPlay rankText salesText relationship count presentation dayOfMonth decoration updateFrequency"
+            _ => "id key title label subtitle contextText creator cover coverLabel kind pageCode channelKind available errorCode requiresAccount display placement canPlay rankText salesText relationship count playCount presentation dayOfMonth decoration updateFrequency"
         };
         var result = new JsonObject();
         foreach (string field in fields.Split(' '))
             if (value.TryGetProperty(field, out var scalar))
             {
-                if (scalar.ValueKind is JsonValueKind.Object or JsonValueKind.Array) return null;
+                if (scalar.ValueKind is JsonValueKind.Object or JsonValueKind.Array) continue;
                 result[field] = JsonNode.Parse(scalar.GetRawText());
             }
         if (kind == "song") return result;
-        bool bound = value.TryGetProperty("songId", out var id) && id.ValueKind == JsonValueKind.String;
+        if (kind == "action")
+            foreach (string field in new[] { "sourceIds", "ids" })
+                if (value.TryGetProperty(field, out var ids) && ids.ValueKind == JsonValueKind.Array)
+                    result[field] = new JsonArray(ids.EnumerateArray().Where(id => id.ValueKind == JsonValueKind.String)
+                        .Select(id => (JsonNode?)JsonValue.Create(id.GetString())).ToArray());
         if (kind is "card" or "preview" && value.TryGetProperty("song", out var song))
-        {
             result["song"] = Project(song, "song", token);
-            bound = true;
-        }
-        if (bound)
-            foreach (string field in new[] { "title", "artist", "cover" }) result.Remove(field);
         foreach (string field in kind switch
         {
             "section" => new[] { "action" },
-            "card" => new[] { "action", "locator", "playbackSource" },
+            "card" => new[] { "action", "locator", "playbackSource", "coverRef" },
             "action" => new[] { "channel", "locator" },
             _ => Array.Empty<string>()
         })
             if (value.TryGetProperty(field, out var nested))
                 result[field] = Project(nested, field == "playbackSource" ? "action" : field, token);
-        if (kind == "section" && value.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
-            result["items"] = new JsonArray(items.EnumerateArray().Select(item => Project(item, "card", token)).OfType<JsonObject>().Cast<JsonNode?>().ToArray());
+        if (kind is "section" or "tab" && value.TryGetProperty("items", out var items) && items.ValueKind == JsonValueKind.Array)
+            result["items"] = new JsonArray(items.EnumerateArray().Select(item => Project(item, "card", token)).ToArray());
+        if (kind == "section")
+            foreach (var field in new[] { "tabs", "tags" })
+                result[field] = new JsonArray(MusicCatalogDto.Rows(MusicCatalogDto.Field(value, field))
+                    .Select(item => Project(item, field == "tabs" ? "tab" : "tag", token)).ToArray());
         if (kind == "card" && value.TryGetProperty("preview", out var preview) && preview.ValueKind == JsonValueKind.Array)
             result["preview"] = new JsonArray(preview.EnumerateArray().Take(3).Select(item => Project(item, "preview", token)).OfType<JsonObject>().Cast<JsonNode?>().ToArray());
         return result;
     }
-    private static JsonNode? Restore(JsonNode? value, Func<string, JsonElement?> song, CancellationToken token)
+    private static JsonNode? Restore(JsonNode? value, Func<string, JsonElement?> song, CancellationToken token, bool songReference = false)
     {
         token.ThrowIfCancellationRequested();
-        if (value is JsonObject reference && reference["songId"] is JsonValue id)
+        if (songReference && value is JsonObject reference && reference["songId"] is JsonValue id)
         {
             var current = song(id.GetValue<string>());
-            Require(current is not null);
-            var restored = JsonNode.Parse(current!.Value.GetRawText())!.AsObject();
+            if (current is null) return null;
+            var restored = JsonNode.Parse(current.Value.GetRawText())!.AsObject();
             foreach (var field in reference)
                 if (field.Key != "songId") restored[field.Key] = field.Value?.DeepClone();
             return restored;
         }
         if (value is JsonObject obj)
-            return new JsonObject(obj.Select(pair => KeyValuePair.Create(pair.Key, Restore(pair.Value, song, token))));
+            return new JsonObject(obj.Select(pair => KeyValuePair.Create(pair.Key, Restore(pair.Value, song, token, pair.Key == "song"))));
         if (value is JsonArray array) return new JsonArray(array.Select(item => Restore(item, song, token)).ToArray());
         return value?.DeepClone();
     }

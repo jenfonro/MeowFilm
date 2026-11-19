@@ -136,8 +136,8 @@ function validateControl(value, native) {
   }
   unique(value.groups, row => row.id);
   if (!native) {
-    fields(value.preferences, [...preferenceLists,'iosAutoPrepare']);
-    requireValue(typeof value.preferences.iosAutoPrepare === 'boolean' &&
+    fields(value.preferences, [...preferenceLists,'iosAutoPrepare','metadataViewProvider']);
+    requireValue(['tmdb','douban'].includes(value.preferences.metadataViewProvider) && typeof value.preferences.iosAutoPrepare === 'boolean' &&
       preferenceLists.every(key => Array.isArray(value.preferences[key]) && value.preferences[key].every(item => typeof item === 'string')));
   }
 }
@@ -150,7 +150,7 @@ function relations(value) {
     ['film_group_keys',['group_id','position','aggregation_key'],['group_id','position'],value.groups.flatMap(row => row.keys.map((key,index) => [row.id,index,key]))],
     ['film_group_members',['group_id','position','member_identity'],['group_id','position'],value.groups.flatMap(row => row.members.map((key,index) => [row.id,index,key]))],
     ...(value.preferences ? [
-      ['film_preferences_state',['singleton','ios_auto_prepare','row_revision'],['singleton'],[[1,Number(value.preferences.iosAutoPrepare),1]]],
+      ['film_preferences_state',['singleton','ios_auto_prepare','metadata_view_provider','row_revision'],['singleton'],[[1,Number(value.preferences.iosAutoPrepare),value.preferences.metadataViewProvider,1]]],
       ['film_preference_items',['list_kind','position','item_value'],['list_kind','position'],preferenceLists.flatMap(key => value.preferences[key].map((item,index) => [key,index,item]))],
     ] : []),
   ];
@@ -189,7 +189,7 @@ export function createPlaybackLibrary({dataRoot,nativePreferences} = {}) {
       members:members.filter(item => item.group_id === row.group_id).map(item => item.member_identity)}))};
     if (!nativePreferences) {
       value.preferences = defaultPreferences();
-      if (prefs[0]) value.preferences.iosAutoPrepare = !!prefs[0].ios_auto_prepare;
+      if (prefs[0]) { value.preferences.iosAutoPrepare = !!prefs[0].ios_auto_prepare; value.preferences.metadataViewProvider = prefs[0].metadata_view_provider; }
       for (const key of preferenceLists) {
         const list = items.filter(row => row.list_kind === key);
         if (prefs[0]) value.preferences[key] = list.map(row => row.item_value);

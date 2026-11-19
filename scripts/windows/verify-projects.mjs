@@ -57,7 +57,7 @@ export function verifyWindowsProjects(directory = root, {
     projects: [...graph.values()].map(item => item.name).sort(), assemblies } };
 }
 
-export function verifyPublishedGraph(dataIdentity, deps, filenames, policy) {
+export function verifyPublishedGraph(dataIdentity, deps, filenames, policy, publishItems = []) {
   const app = policy.application;
   if (dataIdentity !== app.dataIdentity) fail('application data identity differs');
   const declared = Object.entries(deps.libraries ?? {}).filter(([, value]) => value.type === 'project')
@@ -86,7 +86,13 @@ export function verifyPublishedGraph(dataIdentity, deps, filenames, policy) {
       if (!filenames.includes(basename(asset))) fail('missing runtime target asset: ' + asset);
     }
   }
-  if (filenames.some(name => /\.dll$/i.test(name) && !assets.has(name)))
+  // SDK targets publish native DLLs and WinUI resources outside .deps.json.
+  for (const { RelativePath: destination } of publishItems) {
+    const path = destination.replaceAll('\\', '/');
+    assets.add(path);
+    if (!filenames.includes(path)) fail('missing resolved publish asset: ' + path);
+  }
+  if (filenames.some(name => !name.includes('/') && /\.dll$/i.test(name) && !assets.has(name)))
     fail('published project assemblies are missing or unlisted');
   return { application: app.name, dataIdentity, projects: declared };
 }
@@ -95,10 +101,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const args = process.argv.slice(2);
   if (!args.length) console.log(JSON.stringify(verifyWindowsProjects(), null, 2));
   else {
-    const [flag, directory, identityFlag, identity, ...propertyArgs] = args;
-    if (args.length < 4 || flag !== '--build' || identityFlag !== '--identity' || !isAbsolute(directory)
+    const [flag, directory, identityFlag, identity, publishFlag, publishPath, ...propertyArgs] = args;
+    if (args.length < 6 || flag !== '--build' || identityFlag !== '--identity' || !isAbsolute(directory)
+        || publishFlag !== '--publish-items' || !isAbsolute(publishPath)
         || propertyArgs.some(arg => !/^-p:[A-Za-z_][A-Za-z0-9_]*=.+$/.test(arg)))
-      fail('usage: --build <absolute output> --identity <data identity> [-p:Name=Value ...]');
+      fail('usage: --build <absolute output> --identity <data identity> --publish-items <absolute MSBuild JSON> [-p:Name=Value ...]');
     const properties = Object.fromEntries(propertyArgs.map(arg => {
       const index = arg.indexOf('=');
       return [arg.slice(3, index), arg.slice(index + 1)];
@@ -108,6 +115,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       fail('publish verification requires Configuration, RuntimeIdentifier and SelfContained properties');
     const policy = verifyWindowsProjects(root, { properties });
     const deps = JSON.parse(readFileSync(resolve(directory, policy.application.name + '.deps.json'), 'utf8'));
-    console.log(JSON.stringify(verifyPublishedGraph(identity, deps, readdirSync(directory), policy), null, 2));
+    const publishItems = JSON.parse(readFileSync(publishPath, 'utf8')).Items.ResolvedFileToPublish;
+    const filenames = readdirSync(directory, { recursive: true }).map(path => path.replaceAll('\\', '/'));
+    console.log(JSON.stringify(verifyPublishedGraph(identity, deps, filenames, policy, publishItems), null, 2));
   }
 }

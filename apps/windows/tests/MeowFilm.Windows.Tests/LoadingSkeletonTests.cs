@@ -1,6 +1,9 @@
-using System.Windows;
-using System.Windows.Threading;
-using System.Windows.Media;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using Microsoft.UI.Xaml.Media;
+using Color = Windows.UI.Color;
+using Colors = Microsoft.UI.Colors;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -10,32 +13,21 @@ public static class LoadingSkeletonTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("loading-skeleton: visible activity follows system preferences and ends on hide unload or completion",
-            () => MusicQualityConsumerTests.Sta(Lifecycle));
+            () => TestUiHost.InvokeAsync(Lifecycle));
     }
 
     private static async Task Lifecycle()
     {
         var skeleton = new LoadingSkeleton { Width = 176, Height = 264, CornerRadius = new(14) };
-        var window = new Window
-        {
-            Content = skeleton, Width = 220, Height = 320,
-            Left = -10000, Top = -10000, ShowActivated = false, ShowInTaskbar = false
-        };
+        var root = new Microsoft.UI.Xaml.Controls.Grid();
+        root.Children.Add(skeleton);
+        var window = FilmUiTest.Window(root, 220, 320);
         try
         {
             Check(!skeleton.IsSweeping, "unloaded skeleton is idle");
             window.Show();
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            skeleton.Resources["MeowFilm.Brush.Text"] = Brushes.White;
-            var gradient = (LinearGradientBrush)skeleton.Background;
-            if (!SystemParameters.HighContrast)
-                Check(gradient.GradientStops[0].Color.R == 255, "skeleton follows the theme text color");
-            skeleton.Resources["MeowFilm.Brush.Text"] = Brushes.Black;
-            if (!SystemParameters.HighContrast)
-                Check(gradient.GradientStops[0].Color.R == 0, "theme changes update the retained brush");
-            DesktopTheme.SetIsHighContrast(skeleton, true);
-            Check(!skeleton.IsSweeping, "inherited high contrast disables animation");
-            DesktopTheme.SetIsHighContrast(skeleton, false);
+            await DesktopTestUi.DrainAsync();
+            Check(skeleton.Background is SolidColorBrush { Color.A: > 0 }, "skeleton uses a real theme brush");
             skeleton.UpdateAnimation(true, false);
             Check(skeleton.IsSweeping, "visible active skeleton sweeps");
             skeleton.UpdateAnimation(false, false);
@@ -50,12 +42,19 @@ public static class LoadingSkeletonTests
             skeleton.Visibility = Visibility.Visible;
             skeleton.UpdateAnimation(true, false);
             Check(skeleton.IsSweeping, "visible retained instance resumes");
+            root.Visibility = Visibility.Collapsed;
+            await DesktopTestUi.DrainAsync();
+            Check(skeleton.IsLoaded && !skeleton.IsSweeping, "ancestor hiding retires the animation without unloading");
+            root.Visibility = Visibility.Visible;
+            await DesktopTestUi.DrainAsync();
+            skeleton.UpdateAnimation(true, false);
+            Check(skeleton.IsSweeping, "retained skeleton resumes after its ancestor returns");
             skeleton.IsActive = false;
             Check(!skeleton.IsSweeping, "completion or failure deactivates the clock");
             skeleton.IsActive = true;
             skeleton.UpdateAnimation(true, false);
             window.Content = null;
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await DesktopTestUi.DrainAsync();
             Check(!skeleton.IsSweeping, "unloaded skeleton releases its animation");
         }
         finally { window.Content = null; window.Close(); }

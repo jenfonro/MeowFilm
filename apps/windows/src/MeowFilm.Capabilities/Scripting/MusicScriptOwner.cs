@@ -129,7 +129,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         switch (command)
         {
             case "list": LJ.Fields(p, ""); break;
-            case "download": LJ.Fields(p, "url", "url"); LJ.Text(p["url"], 2048); break;
+            case "download": LJ.Fields(p, "url", "url"); LJ.Text(p["url"], null); break;
             case "edit": LJ.Fields(p, "installationId name url", "installationId"); break;
             case "add": LJ.Fields(p, "installationId sourceRevision", "installationId sourceRevision"); break;
             case "update": LJ.Fields(p, "installationId sourceRevision", "installationId"); break;

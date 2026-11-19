@@ -314,8 +314,7 @@ public sealed partial class MusicCapability
     }
     private static long? CatalogExpiry(JsonElement reply)
     {
-        if (!reply.TryGetProperty("expiresAt", out var expires) || expires.ValueKind == JsonValueKind.Null) return null;
-        MusicDto.Require(expires.ValueKind == JsonValueKind.Number && expires.TryGetInt64(out var value) && value >= 0);
-        return expires.GetInt64();
+        var expires = MusicCatalogDto.Field(reply, "expiresAt");
+        return expires.ValueKind == JsonValueKind.Number && expires.TryGetInt64(out var value) ? value : null;
     }
 }

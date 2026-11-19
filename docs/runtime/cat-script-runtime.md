@@ -37,7 +37,7 @@ contract: cat.script.v2
 
 普通请求一次 JSON POST，成功 `{ok:true,contract:"cat.script.v2",value}`；value 是原业务对象、数组、标量或 null。没有普通 JSON 大小分流、总字节配额、正文压缩或自动加工；旧 stage/control/blob、Base64、分片 token、TTL、offset 和传输 checksum 已删除。HTTP 取消和实际排空见 [公共传输](runtime-bridge.md#取消与清理)。
 
-源码保持 1 至 16 MiB、严格无 BOM UTF-8、非空。同 installation/sourceRevision 的仍持有内容幂等，内容冲突报 INVALID_ARGUMENT，不存在版本报 NOT_FOUND，编码错误报 SCRIPT_PROTOCOL_ERROR，超限报 RESOURCE_LIMIT。新完整上传只替换尚未采用候选，部分上传不能覆盖；字段前置拒绝不消费，安装取入后失败释放，重试须显式上传。当前执行版本、已取入操作及未采用候选各由实际所有者持有，不缓存全版本历史；卸载/关闭释放候选。
+源码严格无 BOM UTF-8、非空，不设人为字节上限。同 installation/sourceRevision 的仍持有内容幂等，内容冲突报 INVALID_ARGUMENT，不存在版本报 NOT_FOUND，编码错误报 SCRIPT_PROTOCOL_ERROR。新完整上传只替换尚未采用候选，部分上传不能覆盖；字段前置拒绝不消费，安装取入后失败释放，重试须显式上传。当前执行版本、已取入操作及未采用候选各由实际所有者持有，不缓存全版本历史；卸载/关闭释放候选。
 
 `install` 将实际给定源码原子写入普通文件 `sources/<importhash>.js`，设置的 `sourceHash` 只作为导入时的文件引用和内容标识；上传生成的可信内容 hash 在安装内复用，不接受用户提交 contentHash。不加密源码，不保护其字节不可变，读取时不比较历史 hash 或导入长度。显式重新导入会原子替换该文件，即使设置和导入内容标识未变也重新应用目标实例。不迁移旧 settings 记录，不提供内联源码回退。
 
@@ -72,7 +72,7 @@ Cat 工厂启动参数提供当前网站／账户协议的默认命名空间：`
 
 停用／卸载可以取消正在初始化的更新，但尚未提交的后续命令不能改变旧安装的持久启用意图。因此失败更新先完整恢复原启用源码，随后在同一安装队列中执行停用／卸载；后续命令取消或保存失败时，旧源仍可调用。正常停用可能在更新回滚完成后再停止恢复的旧 Worker，两者不会重叠访问私有卷。关闭运行器不恢复实例。启停和 refresh 同时核对宿主实际启用状态，启用项还须 ready，不能仅因持久配置未变就跳过实际状态协调。
 
-`import/update` 的下载由 Node 执行，保留用户提供的完整 URL，使用源码专用下载路径，最多5次重定向，限制实际传输及解压后源码各16MiB，并沿用请求超时；取消等待连接与解压流真实关闭，不增加域名或安装数量白名单。非 2xx 返回 `HTTP_ERROR`，连接或响应中断为 `NETWORK_ERROR`，超时为 `TIMEOUT`，超源码边界为 `RESOURCE_LIMIT`，非法 UTF-8/BOM 为 `SCRIPT_PROTOCOL_ERROR`；语法或执行失败为 `SCRIPT_EXCEPTION`。这些错误均通过上述失败包装返回。
+`import/update` 的下载由 Node 执行，保留用户提供的完整 URL，使用源码专用下载路径，最多5次重定向，完整保留实际传输及解压后源码，并沿用请求超时；取消等待连接与解压流真实关闭，不增加域名或安装数量白名单。非 2xx 返回 `HTTP_ERROR`，连接或响应中断为 `NETWORK_ERROR`，超时为 `TIMEOUT`，非法 UTF-8/BOM 为 `SCRIPT_PROTOCOL_ERROR`；语法或执行失败为 `SCRIPT_EXCEPTION`。这些错误均通过上述失败包装返回。
 
 设置原子替换后若持久同步报告失败，返回 `COMMIT_UNKNOWN`，并按实际文件协调内存状态；已经提交的候选不回滚为旧源码，updateState 也不伪装为 failed。提交后的旧源码清理失败也可能返回错误而候选已经生效。遇到这些错误应读取 status，不能仅凭 RPC 的 ok=false 推断没有提交。
 
@@ -92,7 +92,7 @@ Cat 的网关配置、provider 映射和安装事实由运行器 owner 保存在
 
 importedAt 和 updatedAt 均为 epoch 毫秒或 null。新安装成功时记录 importedAt，updatedAt 初始为 null；显示修改时间取 `updatedAt ?? importedAt`。内容成功改变才记录 updatedAt；编辑、无变化、失败、启停和重启不刷新。updateState 只允许 idle/updated/unchanged/failed，updateError 在 failed 时为错误码字符串，其余为 null。首次成功导入为 idle，成功重新导入按内容是否改变为 updated/unchanged。
 
-`start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后在各自 Worker 启动；慢实例不阻止另一实例或 status，不增加并发数量配置。每个目标实例启动时读取一次当前源码，按实际字节检查 16 MiB 上限并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码、超限或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。无注入模式允许合法手工编辑后重新启用或冷启动运行；运行中不监视文件变化。注入模式还校验来源文件摘要，不能用改写旧文件代替保存新意图。
+`start` 完成数据根、设置读取和聚合 server 监听后返回与 `status` 相同的快照，各已启用脚本随后在各自 Worker 启动；慢实例不阻止另一实例或 status，不增加并发数量配置。每个目标实例启动时读取一次当前源码，验证完整输入并解码，不做全量源码预检；禁用实例不读取源码，也无需创建 host revision。源码缺失、非法编码或引擎语法/执行错误只使对应实例失败并列入 `failures`，不阻止聚合入口或其他实例就绪。无注入模式允许合法手工编辑后重新启用或冷启动运行；运行中不监视文件变化。注入模式还校验来源文件摘要，不能用改写旧文件代替保存新意图。
 
 每个 enabled installation 使用独立 worker thread 直接运行 CatSession、Node 脚本、私有卷访问和 listener；主线程保留 ScriptHost 记录、CatRuntime 网关、SQLite 设置 owner 与平台适配器。实例就绪即可调用；尚未启动或正在启动的实例在 `status` 中报告 `starting`，对它的 `invoke`、管理和会话访问立即返回 `STARTING`，不隐藏等待；聚合 HTTP 入口对 `STARTING` 返回 503。禁用实例的调用和管理访问返回 `DISABLED`。同 installation 的安装、启用、刷新目标和卸载有序，设置提交按发布顺序处理；不以全局初始化队列阻塞其他 installation。与目标一致的实例不重复启动。每次切换先等旧 Worker 和资源真实退出，再在同卷启动候选；update 失败恢复旧源码，refresh 失败则报告真实 failed。正常运行变量自然保留，不保存/恢复执行内存，不新增闲置回收。
 
@@ -146,7 +146,7 @@ Fastify 通过标准 `fastify.initialization` 诊断频道和 `onRoute` hook 收
 
 标准 Cat HTTP `category` 输入为 `{id,page,filter,filters}`，`search` 为 `{wd,quick,page}`，`detail` 为 `{id}`，`play` 为 `{flag,id,flags}`。HTTP 服务保留这些字段；direct spider 在调用边界转为其位置参数，亦接受直接调用习惯的 `tid/pg/extend`。明确路由方法优先于只有路径的比较、switch 或正则分派证据，启动期不同加载源码也统一合并；只有没有明确方法时才补 POST 缺省，不因同路径方法保护将 GET 改成 POST。同一路由实际同时声明 GET 与 POST 时仍优先 POST，否则使用其实际注册方法；GET／HEAD 将字段编码为查询参数，对象与数组使用 JSON，不丢弃输入。
 
-启动期通过受控 `vm` 接口动态执行的源码及框架注册也参与发现，仍留在同一 Worker，不保留额外完整源码或按动作数量截断。整份源码在完整上传和 ScriptHost install/update 保留 16 MiB 输入校验；运行期动态代码不扩大已发布能力。
+启动期通过受控 `vm` 接口动态执行的源码及框架注册也参与发现，仍留在同一 Worker，不保留额外完整源码或按动作数量截断。整份源码在完整上传和 ScriptHost install/update 验证编码和身份，不设字节配额；运行期动态代码不扩大已发布能力。
 
 HTTP 请求与 `url.format` 仅消费实际使用的字段，库自用 transport 元数据、循环对象和无关 getter 不成为额外权限。`lookup/fd/socketPath` 及替换受控连接的 `createConnection` 仍拒绝；显式受控 Agent 或 `agent:false` 按 Node 建连，其不消费的请求级 createConnection 不执行。HTTP 模块和 URL 协议错配保留 ERR_INVALID_PROTOCOL，不自动替换协议。框架 inject 在 Worker 中使用 Node HTTP/流语义，不为模拟请求额外开启端口；真实 headers/rawHeaders 的对象身份和解压器修改保留。
 

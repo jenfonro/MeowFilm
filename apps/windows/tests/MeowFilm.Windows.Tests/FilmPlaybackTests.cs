@@ -1,17 +1,24 @@
-using System.Windows;
-using System.Text.Json.Nodes;
-using System.Windows.Automation;
-using System.Windows.Automation.Peers;
-using System.Windows.Automation.Provider;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Data;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
-using MeowFilm.Capabilities;
+using Windows.UI;
+using Windows.System;
+using Windows.UI.ViewManagement;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Microsoft.UI;
+using Windows.UI.Text;
 using MeowFilm.Desktop;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using System.Text.Json.Nodes;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Data;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+
+using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -20,27 +27,27 @@ public static class FilmPlaybackTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return new("film-playback: unseeded route is empty and explicit wire cards preserve movie or series identity",
-            () => MusicQualityConsumerTests.Sta(ExplicitData));
-        yield return new("film-playback: episode buttons and mouse or keyboard layout switches retain one selection",
-            () => MusicQualityConsumerTests.Sta(EpisodeInteraction));
+            () => TestUiHost.InvokeAsync(ExplicitData));
+        yield return new("film-playback: episode buttons and native layout controls retain one selection",
+            () => TestUiHost.InvokeAsync(EpisodeInteraction));
         yield return new("film-playback: unavailable player and responsive page keep scrolling in each region",
-            () => MusicQualityConsumerTests.Sta(ResponsivePlayer));
+            () => TestUiHost.InvokeAsync(ResponsivePlayer));
         yield return new("film-playback: recommendations and navigation restore the original page directory and browsing state",
-            () => MusicQualityConsumerTests.Sta(NavigationRecovery));
+            () => TestUiHost.InvokeAsync(NavigationRecovery));
         yield return new("film-playback: a captured recommendation opens its exact identity after the displayed recommendation list changes",
-            () => MusicQualityConsumerTests.Sta(StaleRecommendation));
+            () => TestUiHost.InvokeAsync(StaleRecommendation));
         yield return new("film-playback: flat tiles mark one current episode and keep system outlines in high contrast",
-            () => MusicQualityConsumerTests.Sta(FlatTiles));
+            () => TestUiHost.InvokeAsync(FlatTiles));
         yield return new("film-playback: hover or focus lifts episode cards rows and recommendations around a centered play mark",
-            () => MusicQualityConsumerTests.Sta(HoverLift));
+            () => TestUiHost.InvokeAsync(HoverLift));
         yield return new("film-playback: normal poster cards retain their crop while metadata uses the shared canvas",
-            () => MusicQualityConsumerTests.Sta(PosterCards));
+            () => TestUiHost.InvokeAsync(PosterCards));
         yield return new("film-playback: centered hero actions allow retry and persist each film favorite",
-            () => MusicQualityConsumerTests.Sta(HeroActions));
+            () => TestUiHost.InvokeAsync(HeroActions));
         yield return new("film-playback: text stays readable on the default and custom application canvas",
-            () => MusicQualityConsumerTests.Sta(SharedCanvasReadability));
+            () => TestUiHost.InvokeAsync(SharedCanvasReadability));
         yield return new("film-playback: the shared canvas follows global color rather than scrolling or film posters",
-            () => MusicQualityConsumerTests.Sta(SharedCanvasNavigation));
+            () => TestUiHost.InvokeAsync(SharedCanvasNavigation));
     }
 
     private static async Task ExplicitData()
@@ -53,7 +60,7 @@ public static class FilmPlaybackTests
         Check(FilmCapability.PlaybackRoute == "film-playback" && module.IsPlayback && module.Heading == "播放页" &&
             !module.HasPlayback && module.Playback is null,
             "an unseeded direct route never invents a default film");
-        Check(!scene.Playback.IsVisible && Named<TextBlock>(scene.View, "PlaybackEmpty").IsVisible,
+        Check(!FilmUiTest.Visible(scene.Playback) && FilmUiTest.Visible(Named<TextBlock>(scene.View, "PlaybackEmpty")),
             "the unseeded route renders its real empty state, not an unbound playback layout");
         Check(scene.Source.Calls == 0 && scene.Runtime.Calls.Count == 0,
             "an unseeded route performs no business request");
@@ -78,13 +85,13 @@ public static class FilmPlaybackTests
                 "a movie uses real file candidates; series use actual wire episodes");
             Check(scene.Source.Calls == calls && !scene.Runtime.Calls.Any(call => call.Method.StartsWith("film.data.", StringComparison.Ordinal)),
                 "the native consumer does not repeat metadata or detail loading");
-            Check(ReferenceEquals(scene.Playback.DataContext, page) && Named<Grid>(scene.View, "PlaybackPage").IsVisible,
+            Check(ReferenceEquals(scene.Playback.DataContext, page) && FilmUiTest.Visible(Named<Grid>(scene.View, "PlaybackPage")),
                 "FilmView binds the seeded playback page");
             var playerOverlay = Named<Grid>(scene.Playback, "PlayerOverlay");
             var shortVideo = Named<CheckBox>(scene.Playback, "ShortVideoButton");
             Check(Visuals(scene.Playback).OfType<FrameworkElement>()
-                    .Where(element => !element.IsDescendantOf(playerOverlay) && !ReferenceEquals(element, shortVideo))
-                    .All(element => element.ToolTip is null),
+                    .Where(element => !DesktopVisual.Contains(playerOverlay, element) && !ReferenceEquals(element, shortVideo))
+                    .All(element => ToolTipService.GetToolTip(element) is null),
                 "film titles and descriptions remain free of hover hints; picture icon controls and prefetch state have their own labels");
             Check(((IDesktopHeaderSource)scene.View).Header is
                 { Title: "播放页", SearchVisible: true, SearchEnabled: true, SearchTargetId: "film" },
@@ -109,16 +116,16 @@ public static class FilmPlaybackTests
         var list = Named<ItemsControl>(view, "EpisodeList");
         var rail = Named<Shelf>(view, "EpisodeShelf").ScrollHost!;
         Check(page.Episodes.Count > 1 && page.IsHorizontalLayout && !page.IsListLayout &&
-            rail.IsVisible && !list.IsVisible, "the explicit TMDB snapshot starts with horizontal episode cards");
+            FilmUiTest.Visible(rail) && !FilmUiTest.Visible(list), "the explicit TMDB snapshot starts with horizontal episode cards");
         await CheckEpisodeContent(cards, page);
         var chosen = page.Episodes[1];
         Click(EpisodeButton(cards, chosen));
         await Drain();
         CheckSelection(scene, chosen);
 
-        Click(Named<Button>(view, "ListLayout"));
+        Click(Named<ToggleButton>(view, "ListLayout"));
         await Drain();
-        Check(page.IsListLayout && !page.IsHorizontalLayout && list.IsVisible && !rail.IsVisible,
+        Check(page.IsListLayout && !page.IsHorizontalLayout && FilmUiTest.Visible(list) && !FilmUiTest.Visible(rail),
             "the list button switches the actual episode presentation");
         CheckSelection(scene, chosen);
         await CheckEpisodeContent(list, page);
@@ -127,18 +134,18 @@ public static class FilmPlaybackTests
         await Drain();
         CheckSelection(scene, last);
 
-        PressEnter(Named<Button>(view, "HorizontalLayout"));
+        InvokeAction(Named<ToggleButton>(view, "HorizontalLayout"));
         await Drain();
-        Check(page.IsHorizontalLayout && !page.IsListLayout && rail.IsVisible && !list.IsVisible,
-            "Enter activates the horizontal layout button");
+        Check(page.IsHorizontalLayout && !page.IsListLayout && FilmUiTest.Visible(rail) && !FilmUiTest.Visible(list),
+            "Automation activates the horizontal layout button");
         CheckSelection(scene, last);
-        PressEnter(Named<Button>(view, "ListLayout"));
+        InvokeAction(Named<ToggleButton>(view, "ListLayout"));
         await Drain();
-        Check(page.IsListLayout && list.IsVisible, "Enter also activates the list layout button");
+        Check(page.IsListLayout && FilmUiTest.Visible(list), "Automation also activates the list layout button");
         CheckSelection(scene, last);
-        Click(Named<Button>(view, "HorizontalLayout"));
+        Click(Named<ToggleButton>(view, "HorizontalLayout"));
         await Drain();
-        Check(page.IsHorizontalLayout && rail.IsVisible, "the mouse action returns to horizontal cards");
+        Check(page.IsHorizontalLayout && FilmUiTest.Visible(rail), "the mouse action returns to horizontal cards");
         CheckSelection(scene, last);
 
         Named<Shelf>(view, "EpisodeShelf").ScrollToIndex(0);
@@ -180,13 +187,13 @@ public static class FilmPlaybackTests
         foreach (double width in new[] { 1160d, 840d, 839d, 700d })
         {
             scene.View.Width = width;
-            scene.Window.Width = width;
-            scene.Window.UpdateLayout();
+            scene.Window.Resize(width, 850);
+            DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
             await Drain();
             bool stacked = width < 840;
             Check(Math.Abs(view.ActualWidth - width) < .5, "responsive test uses the content width");
-            var playerOrigin = player.TranslatePoint(new Point(), hero);
-            var metadataOrigin = metadata.TranslatePoint(new Point(), hero);
+            var playerOrigin = player.TransformToVisual(hero).TransformPoint(new Point());
+            var metadataOrigin = metadata.TransformToVisual(hero).TransformPoint(new Point());
             Check(player.ActualWidth > 0 && metadata.ActualWidth > 0 &&
                 Math.Abs(Named<Grid>(view, "VideoPicture").ActualHeight - player.ActualWidth * 9 / 16) < 1,
                 "the player keeps its sixteen-to-nine frame");
@@ -206,11 +213,11 @@ public static class FilmPlaybackTests
                 var details = Visuals(metadata).OfType<ScrollViewer>().Single();
                 double pageOffset = scroll.VerticalOffset;
                 Check(details.ScrollableHeight > 0, "wide metadata has its own vertical scroll range");
-                details.ScrollToBottom();
+                details.ChangeView(null, details.ScrollableHeight, null, true);
                 await Drain();
                 Check(details.VerticalOffset > 0 && Math.Abs(scroll.VerticalOffset - pageOffset) < .5,
                     "scrolling metadata leaves the page viewport in place");
-                CheckSharedCanvas(view);
+                await CheckSharedCanvas(view);
                 Click(Named<Button>(view, "OverviewToggle"));
                 await Drain();
             }
@@ -222,10 +229,10 @@ public static class FilmPlaybackTests
             CheckInsideViewport(scroll, metadata);
         }
         Check(scroll.ScrollableHeight > 0, "narrow content scrolls vertically");
-        scroll.ScrollToBottom();
+        scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
         await Drain();
         Check(scroll.VerticalOffset > 0, "the page scroll reaches content below the player");
-        Click(Named<Button>(view, "ListLayout"));
+        Click(Named<ToggleButton>(view, "ListLayout"));
         await Drain();
         CheckInsideViewport(scroll, Named<ItemsControl>(view, "EpisodeList"));
         CheckInsideViewport(scroll, Named<Grid>(view, "MetadataPanel"));
@@ -310,7 +317,7 @@ public static class FilmPlaybackTests
         var captured = scene.Page.Recommendations[0];
         var request = captured.PlaybackContext!;
         int homeCalls = scene.Source.Calls;
-        scene.Runtime.Change(root => root["metadata"]!["similar"]!["results"] = new JsonArray());
+        scene.Runtime.Change(root => root["workInfo"]!["metadata"]!["similar"]!["results"] = new JsonArray());
         await FilmPlaybackFixture.Until(() => scene.Page.Recommendations.Count == 0);
         await scene.Module.OpenRecommendationAsync(captured); await Drain();
         var opened = scene.Runtime.Calls.Last(call => call.Method == "film.session.open").Parameters;
@@ -331,8 +338,8 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var page = scene.Page;
         var metadata = Named<Grid>(view, "MetadataPanel");
-        Check(!Visuals(metadata).OfType<Border>().Any(border => border.IsVisible &&
-                border.TemplatedParent is not ButtonBase &&
+        Check(!Visuals(metadata).OfType<Border>().Any(border => FilmUiTest.Visible(border) &&
+                !Visuals(border).OfType<ButtonBase>().Any() &&
                 ((border.BorderThickness != default && border.BorderBrush is SolidColorBrush { Color.A: > 0 }) ||
                 (border.ActualWidth > metadata.ActualWidth / 2 && border.Background is SolidColorBrush { Color.A: > 0 }))),
             "metadata sits directly on the page without a surface or outlined card");
@@ -343,19 +350,19 @@ public static class FilmPlaybackTests
         await Drain();
         CheckSelection(scene, chosen);
         CheckCurrentStatus(view, page);
-        Click(Named<Button>(view, "ListLayout"));
+        Click(Named<ToggleButton>(view, "ListLayout"));
         await Drain();
         CheckSelection(scene, chosen);
         CheckCurrentStatus(view, page);
 
-        DesktopTheme.SetIsHighContrast(scene.Window, true);
+        using var contrast = new FilmUiTest.HighContrastResources(view);
         await Drain();
-        Check(view.Background is SolidColorBrush background && background.Color == SystemColors.WindowColor &&
-            Named<TextBlock>(view, "FilmTitle").Foreground is SolidColorBrush ink && ink.Color == SystemColors.WindowTextColor,
-            "high contrast pairs the shared page with the system background and text");
+        Check(Named<Grid>(view, "PageCanvas").Background is SolidColorBrush background && background.Color == FilmUiTest.ResourceColor(view, "Film.PageBackground") &&
+            Named<TextBlock>(view, "FilmTitle").Foreground is SolidColorBrush ink && ink.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Text"),
+            "the shipped high-contrast resources pair the page with the system background and text");
         CheckFlat(view, page, outline: true);
         CheckSelection(scene, chosen);
-        Click(Named<Button>(view, "HorizontalLayout"));
+        Click(Named<ToggleButton>(view, "HorizontalLayout"));
         await Drain();
         CheckFlat(view, page, outline: true);
         CheckSelection(scene, chosen);
@@ -364,25 +371,23 @@ public static class FilmPlaybackTests
 
     private static void CheckFlat(FilmPlaybackView view, FilmPlaybackPage page, bool outline)
     {
-        var text = SystemColors.WindowTextColor;
-        var highlight = SystemColors.HighlightColor;
+        var text = outline ? FilmUiTest.ResourceColor(view, "Film.TileBorder") : default;
         string host = page.IsListLayout ? "EpisodeList" : "EpisodeShelf";
         foreach (var tile in Tiles(view, host).Concat(Tiles(view, "RelatedItems")))
         {
-            var frame = (Border)VisualTreeHelper.GetChild(tile, 0);
-            bool current = tile.Tag is FilmEpisodeItem { IsSelected: true };
+            var frame = Visuals(tile).OfType<ContentPresenter>().First();
             Check(tile.Background is SolidColorBrush { Color.A: 0 } && frame.Background is SolidColorBrush { Color.A: 0 },
                 "tiles have no resting surface");
             Check(outline
                 ? frame.BorderThickness == new Thickness(2) && frame.BorderBrush is SolidColorBrush brush &&
-                    brush.Color == (current ? highlight : text)
+                    brush.Color == text
                 : frame.BorderThickness == default,
-                outline ? "high contrast outlines tiles with WindowText and the current episode with Highlight"
+                outline ? "high contrast outlines tiles with system text while the current badge remains non-color status"
                     : "tiles have no resting border");
         }
         foreach (var row in Visuals(Named<ItemsControl>(view, "EpisodeList")).OfType<Border>()
             .Where(border => border.Name == "RowHover"))
-            Check(outline ? !row.IsVisible : row.Opacity == 0, "the list row hover surface rests transparent");
+            Check(row.Opacity == 0, "the list row hover surface rests transparent");
     }
 
     private static void CheckCurrentStatus(FilmPlaybackView view, FilmPlaybackPage page)
@@ -403,15 +408,15 @@ public static class FilmPlaybackTests
         var current = page.SelectedEpisode!;
         await CheckLift(Tiles(view, "EpisodeShelf")[1], EpisodeItems(view), 144);
         await CheckLift(Tiles(view, "RelatedItems")[0], Named<ItemsControl>(view, "RelatedItems"), 234);
-        Click(Named<Button>(view, "ListLayout"));
+        Click(Named<ToggleButton>(view, "ListLayout"));
         await Drain();
         var row = Tiles(view, "EpisodeList")[1];
         var rowHover = Visuals(row).OfType<Border>().Single(border => border.Name == "RowHover");
         await CheckLift(row, Named<ItemsControl>(view, "EpisodeList"), 99);
-        CardMotion.Transition(row, true, animate: false);
+        CardMotion.SetProgress(row, 1);
         await Drain();
         Check(rowHover.Opacity == 1, "a lifted list row fades in its soft hover surface");
-        CardMotion.Transition(row, false, animate: false);
+        CardMotion.SetProgress(row, 0);
         await Drain();
         Check(rowHover.Opacity == 0, "the row hover surface returns to transparent");
         Check(ReferenceEquals(page.SelectedEpisode, current) && current.IsSelected &&
@@ -431,7 +436,7 @@ public static class FilmPlaybackTests
             "a resting tile has no lift scrim or play mark");
         Check(Math.Abs(frame.ActualHeight - frameHeight) < .5, "tile artwork keeps its frame size");
 
-        CardMotion.Transition(tile, true, animate: false);
+        CardMotion.SetProgress(tile, 1);
         await Drain();
         var lifted = Bounds(tile, host);
         double scale = lifted.Width / rest.Width;
@@ -440,11 +445,11 @@ public static class FilmPlaybackTests
         Check(image.RenderTransform is ScaleTransform { ScaleX: > 1.04 and < 1.06 },
             "the artwork zooms inside its clipped frame");
         Check(mark.Opacity == 1 && shade.Opacity == 1, "lifted artwork shows the shared scrim and play mark");
-        var center = mark.TranslatePoint(new Point(mark.ActualWidth / 2, mark.ActualHeight / 2), frame);
+        var center = mark.TransformToVisual(frame).TransformPoint(new Point(mark.ActualWidth / 2, mark.ActualHeight / 2));
         Check(Math.Abs(center.X - frame.ActualWidth / 2) <= .5 && Math.Abs(center.Y - frame.ActualHeight / 2) <= .5,
             "the play mark is centered on the artwork");
 
-        CardMotion.Transition(tile, false, animate: false);
+        CardMotion.SetProgress(tile, 0);
         await Drain();
         var settled = Bounds(tile, host);
         Check(Math.Abs(settled.Width - rest.Width) < .01 && mark.Opacity == 0 && shade.Opacity == 0,
@@ -453,46 +458,46 @@ public static class FilmPlaybackTests
 
     private static async Task PosterCards()
     {
-        const string poster = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/poster-long-season.jpg";
-        const string still = "pack://application:,,,/MeowFilm.Capabilities;component/Film/Presentation/Assets/episode-01.jpg";
-        CheckPosterCard(poster, 400, 300, 2d / 3);
-        CheckPosterCard(poster, 150, 300, 2d / 3);
-        CheckPosterCard(still, 400, 300, 16d / 9);
+        const string poster = "ms-appx:///MeowFilm.Capabilities/Film/Presentation/Assets/poster-long-season.jpg";
+        const string still = "ms-appx:///MeowFilm.Capabilities/Film/Presentation/Assets/episode-01.jpg";
+        await CheckPosterCard(poster, 400, 300, 2d / 3);
+        await CheckPosterCard(poster, 150, 300, 2d / 3);
+        await CheckPosterCard(still, 400, 300, 16d / 9);
 
         await using var scene = new Scene();
         await scene.OpenAsync();
         await Drain();
         var view = scene.Playback;
         var panel = Named<Grid>(view, "MetadataPanel");
-        CheckSharedCanvas(view);
+        await CheckSharedCanvas(view);
         scene.View.Width = 700;
-        scene.Window.Width = 700;
-        scene.Window.UpdateLayout();
+        scene.Window.Resize(700, 850);
+        DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
         await Drain();
         var details = Named<ScrollViewer>(view, "MetadataScroll");
         Check(double.IsNaN(panel.Height) && Math.Abs(panel.ActualHeight - details.DesiredSize.Height) < 1,
             "stacked metadata sizes to its content on the shared canvas");
-        CheckSharedCanvas(view);
+        await CheckSharedCanvas(view);
         double collapsedHeight = panel.ActualHeight;
         Click(Named<Button>(view, "OverviewToggle"));
         await Drain();
-        Check(panel.ActualHeight > collapsedHeight && Named<TextBlock>(view, "OverviewText").IsVisible,
+        Check(panel.ActualHeight > collapsedHeight && FilmUiTest.Visible(Named<TextBlock>(view, "OverviewText")),
             "the expanded overview grows the narrow information region");
-        CheckSharedCanvas(view);
+        await CheckSharedCanvas(view);
     }
 
-    private static void CheckSharedCanvas(FilmPlaybackView view)
+    private static async Task CheckSharedCanvas(FilmPlaybackView view)
     {
         var panel = Named<Grid>(view, "MetadataPanel");
         var scroll = Named<ScrollViewer>(view, "MetadataScroll");
-        Check(view.Background is SolidColorBrush { Color.A: 0 },
+        Check(Named<Grid>(view, "PageCanvas").Background is SolidColorBrush { Color.A: 0 },
             "the playback page exposes its application's background");
         var visibility = scroll.Visibility;
-        scroll.Visibility = Visibility.Hidden;
+        scroll.Visibility = Visibility.Collapsed;
         try
         {
             panel.UpdateLayout();
-            var pixels = Pixels(panel);
+            var pixels = await Pixels(panel);
             Check(Enumerable.Range(0, pixels.Length / 4).All(index => pixels[index * 4 + 3] == 0),
                 "the entire metadata region exposes the shared canvas behind its scrolling foreground");
         }
@@ -515,13 +520,14 @@ public static class FilmPlaybackTests
         var favorite = Named<ToggleButton>(view, "FavoriteButton");
         var play = Named<Button>(view, "HeroPlayButton");
         Check(title.TextAlignment == TextAlignment.Center && metadata.TextAlignment == TextAlignment.Center &&
-            content.IsDescendantOf(details) && details.IsDescendantOf(Named<Grid>(view, "MetadataPanel")),
-            "identity and actions scroll inside the metadata region on the shared canvas");
+            content.VerticalAlignment == VerticalAlignment.Top &&
+            DesktopVisual.Contains(details, content) && DesktopVisual.Contains(Named<Grid>(view, "MetadataPanel"), details),
+            "one top-aligned work tree owns identity and actions inside the metadata region");
         foreach (double width in new[] { 1237d, 907d, 840d })
         {
-            scene.Window.Width = scene.View.Width = width;
-            scene.Window.UpdateLayout();
-            details.ScrollToTop();
+            scene.View.Width = width; scene.Window.Resize(width, 800);
+            DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
+            details.ChangeView(null, 0, null, true);
             await Drain();
             foreach (var element in new FrameworkElement[] { title, metadata, Named<WrapPanel>(view, "FilmFacts"), actions })
             {
@@ -532,12 +538,12 @@ public static class FilmPlaybackTests
             Check(Bounds(title, details).Top >= 0 && Bounds(actions, details).Bottom <= details.ViewportHeight + 1 &&
                 Bounds(Named<Button>(view, "OverviewToggle"), details).Bottom <= details.ViewportHeight + 1,
                 "the short title playback favorite and overview action fit the desktop metadata viewport");
-            CheckSharedCanvas(view);
+            await CheckSharedCanvas(view);
         }
         Check(play.IsEnabled && AutomationProperties.GetName(play) == "播放当前选择" &&
             Visuals(play).OfType<TextBlock>().Any(text => text.Text == "播放") && !page.HasOutput,
             "the hero offers explicit playback of the current target without claiming a native media output");
-        Check(favorite.IsEnabled && favorite.IsTabStop && favorite.Focusable && !page.IsFavorite &&
+        Check(favorite.IsEnabled && favorite.IsTabStop && favorite.IsTabStop && !page.IsFavorite &&
             favorite.IsChecked == false && Named<TextBlock>(view, "FavoriteLabel").Text == "收藏",
             "favorite starts off with a labelled keyboard-accessible toggle");
         var toggle = (IToggleProvider)new ToggleButtonAutomationPeer(favorite).GetPattern(PatternInterface.Toggle);
@@ -565,15 +571,12 @@ public static class FilmPlaybackTests
         page = scene.Page;
         Check(page.IsFavorite && favorite.IsChecked == true && scene.Store.Writes == 2,
             "return navigation reads the original film favorite from its one durable owner");
-        favorite.BringIntoView();
-        var source = PresentationSource.FromVisual(favorite)!;
-        var keyboard = new KeyboardProbe();
-        favorite.RaiseEvent(new KeyEventArgs(keyboard, source, 0, Key.Space) { RoutedEvent = Keyboard.KeyDownEvent });
-        favorite.RaiseEvent(new KeyEventArgs(keyboard, source, 1, Key.Space) { RoutedEvent = Keyboard.KeyUpEvent });
+        favorite.StartBringIntoView();
+        FilmUiTest.Click(favorite);
         await Drain();
         Check(!page.IsFavorite && favorite.IsChecked == false &&
             Named<TextBlock>(view, "FavoriteLabel").Text == "收藏" && scene.Store.Writes == 3,
-            "Space removes the favorite once and updates its label without a second binding-triggered write");
+            "native toggle removes the favorite once and updates its label without a second binding-triggered write");
         var overview = Named<TextBlock>(view, "OverviewText");
         var overviewToggle = Named<Button>(view, "OverviewToggle");
         Check(!page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
@@ -582,7 +585,7 @@ public static class FilmPlaybackTests
         double collapsedHeight = content.ActualHeight;
         Click(overviewToggle);
         await Drain();
-        Check(page.OverviewExpanded && overview.IsVisible && overview.Text == page.Overview &&
+        Check(page.OverviewExpanded && FilmUiTest.Visible(overview) && overview.Text == page.Overview &&
             overview.TextAlignment == TextAlignment.Left && overview.TextTrimming == TextTrimming.None &&
             (string)overviewToggle.Content == "收起简介" && content.ActualHeight > collapsedHeight,
             "clicking the overview action reveals the complete text and changes its label");
@@ -593,24 +596,24 @@ public static class FilmPlaybackTests
         await module.RestoreNavigationAsync(location, default);
         await Drain();
         page = scene.Page;
-        Check(!page.OverviewExpanded && !overview.IsVisible, "new presentation does not reuse an old expanded overview");
-        PressEnter(overviewToggle);
+        Check(!page.OverviewExpanded && !FilmUiTest.Visible(overview), "new presentation does not reuse an old expanded overview");
+        InvokeAction(overviewToggle);
         await Drain();
-        Check(page.OverviewExpanded && overview.IsVisible, "Enter expands the actual current presentation");
-        PressEnter(overviewToggle);
+        Check(page.OverviewExpanded && FilmUiTest.Visible(overview), "Automation expands the actual current presentation");
+        InvokeAction(overviewToggle);
         await Drain();
         Check(!page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
             Math.Abs(content.ActualHeight - collapsedHeight) < 1 &&
             AutomationProperties.GetItemStatus(overviewToggle) == "已收起",
-            "Enter collapses the overview and reclaims its layout space");
-        DesktopTheme.SetIsHighContrast(scene.Window, true);
-        details.ScrollToTop();
+            "Automation collapses the overview and reclaims its layout space");
+        using var contrast = new FilmUiTest.HighContrastResources(view);
+        details.ChangeView(null, 0, null, true);
         await Drain();
-        Check(view.Background is SolidColorBrush background && background.Color == SystemColors.WindowColor &&
+        Check(Named<Grid>(view, "PageCanvas").Background is SolidColorBrush background && background.Color == FilmUiTest.ResourceColor(view, "Film.PageBackground") &&
             Bounds(title, content).Top < 1 &&
-            favorite.Foreground is SolidColorBrush ink && ink.Color == SystemColors.WindowTextColor &&
-            play.Foreground is SolidColorBrush actionInk && actionInk.Color == SystemColors.HighlightTextColor,
-            "high contrast keeps the metadata layout and uses system colors for the canvas and both actions");
+            favorite.Foreground is SolidColorBrush ink && ink.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Text") &&
+            play.Foreground is SolidColorBrush actionInk && actionInk.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.OnAccent"),
+            "high-contrast resources keep the metadata layout and system canvas and action colors");
         Check(scene.Source.Calls == 0, "hero and favorite interactions issue no source requests");
     }
 
@@ -630,13 +633,13 @@ public static class FilmPlaybackTests
             scene.Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background(selected);
             await Drain();
             var region = Bounds(panel, scene.Canvas);
-            region.Intersect(new Rect(scene.Canvas.RenderSize));
+            region.Intersect(new Rect(0, 0, scene.Canvas.ActualWidth, scene.Canvas.ActualHeight));
             Check(region.Width > 40 && region.Height > 44, "contrast samples cover the visible metadata region");
-            scroll.Visibility = Visibility.Hidden;
+            scroll.Visibility = Visibility.Collapsed;
             try
             {
                 await Drain();
-                var pixels = Pixels(scene.Canvas);
+                var pixels = await Pixels(scene.Canvas);
                 int width = (int)scene.Canvas.ActualWidth;
                 foreach (var label in labels)
                 {
@@ -648,7 +651,7 @@ public static class FilmPlaybackTests
                             int offset = (y * width + x) * 4;
                             Check(pixels[offset + 3] == 255,
                                 "contrast samples contain the actual application's opaque canvas");
-                            var color = Color.FromRgb(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
+                            var color = Color.FromArgb(255, pixels[offset + 2], pixels[offset + 1], pixels[offset]);
                             worst = Math.Min(worst, Contrast(ink, color));
                         }
                     Check(worst >= 4.5, $"actual text stays readable on the shared application color {selected}: {worst}");
@@ -658,40 +661,35 @@ public static class FilmPlaybackTests
         }
     }
 
-    private static void CheckPosterCard(string address, int width, int height, double ratio)
+    private static async Task CheckPosterCard(string address, int width, int height, double ratio)
     {
         var poster = new FilmPlaybackPoster { Address = address, Width = width, Height = height };
         var host = new Grid { Width = width, Height = height, Children = { poster } };
+        var window = FilmUiTest.Window(host, width, height); window.Show();
+        try
+        {
+        await Drain();
         host.Measure(new Size(width, height));
         host.Arrange(new Rect(0, 0, width, height));
         host.UpdateLayout();
         var image = poster.Children.OfType<Image>().Single();
+        await FilmPlaybackFixture.Until(() => image.Source is BitmapSource { PixelWidth: > 0 });
         var slot = Bounds(image, poster);
         Check(image.Visibility == Visibility.Visible && image.Source is BitmapSource source &&
             Math.Abs((double)source.PixelWidth / source.PixelHeight - ratio) < .01 &&
-            image.Stretch == Stretch.UniformToFill && poster.ClipToBounds &&
+            image.Stretch == Stretch.UniformToFill && poster.Clip is RectangleGeometry &&
             slot.Left <= 0 && slot.Top <= 0 && slot.Right >= width - 1 && slot.Bottom >= height - 1,
             "normal portrait and landscape cards retain their source ratio and clipped fill");
-        var pixels = Pixels(host);
+        var pixels = await Pixels(host);
         Check(new[] { (1, 1), (width - 2, 1), (1, height / 2), (width - 2, height / 2),
                 (width / 2, height / 2), (1, height - 2), (width - 2, height - 2) }
             .All(point => Alpha(pixels, width, point.Item1, point.Item2) > 240),
             "ordinary poster cards fill their whole frame without letterboxing");
+        }
+        finally { window.Close(); }
     }
 
-    private static byte[] Pixels(FrameworkElement element)
-    {
-        int width = (int)element.ActualWidth, height = (int)element.ActualHeight;
-        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-        // Render into local coordinates; a mounted panel's parent offset is outside this bitmap.
-        var visual = new DrawingVisual();
-        using (var drawing = visual.RenderOpen())
-            drawing.DrawRectangle(new VisualBrush(element), null, new Rect(0, 0, width, height));
-        bitmap.Render(visual);
-        var pixels = new byte[width * height * 4];
-        bitmap.CopyPixels(pixels, width * 4, 0);
-        return pixels;
-    }
+    private static Task<byte[]> Pixels(FrameworkElement element) => FilmUiTest.Pixels(element);
 
     private static byte Alpha(byte[] pixels, int width, int x, int y) => pixels[(y * width + x) * 4 + 3];
 
@@ -706,13 +704,13 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         string originalPoster = scene.Page.Poster;
         Point[] samples = [new(8, 4), new(8, 200), new(8, scene.Canvas.ActualHeight - 4)];
-        var first = CanvasColors(scene.Canvas, samples);
-        CheckSharedCanvas(view);
+        var first = (await CanvasColors(scene.Canvas, samples));
+        await CheckSharedCanvas(view);
 
         var scroll = Named<ScrollViewer>(view, "PageScroll");
-        scroll.ScrollToEnd();
+        scroll.ChangeView(scroll.ScrollableWidth, scroll.ScrollableHeight, null, true);
         await Drain();
-        Check(scroll.VerticalOffset > 0 && CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+        Check(scroll.VerticalOffset > 0 && (await CanvasColors(scene.Canvas, samples)).SequenceEqual(first),
             "the application canvas stays fixed while the page scrolls");
 
         var recommendation = scene.Page.Recommendations.First(item => item.Poster != scene.Page.Poster);
@@ -735,8 +733,8 @@ public static class FilmPlaybackTests
         await Drain();
         Check(scene.Page.Item.Id == recommendation.Id && scene.Page.Poster == recommendation.Poster &&
             scene.Page.Poster != originalPoster, "the recommendation opens its own film identity and real poster");
-        CheckSharedCanvas(view);
-        Check(CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+        await CheckSharedCanvas(view);
+        Check((await CanvasColors(scene.Canvas, samples)).SequenceEqual(first),
             "opening a different poster does not change the application canvas");
 
         await module.NavigateAsync(FilmCapability.HomeRoute, default);
@@ -745,28 +743,28 @@ public static class FilmPlaybackTests
         await module.OpenPlaybackAsync(blank);
         await Drain();
         Check(scene.Page.Item.Id == blank.Id && scene.Page.Poster.Length == 0 &&
-            CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+            (await CanvasColors(scene.Canvas, samples)).SequenceEqual(first),
             "a film without a poster keeps the same application canvas");
-        CheckSharedCanvas(view);
+        await CheckSharedCanvas(view);
         scene.Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background("#FF0000");
         await Drain();
-        Check(!CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+        Check(!(await CanvasColors(scene.Canvas, samples)).SequenceEqual(first),
             "the selected global application color changes the playback canvas");
         scene.Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.DefaultBackground;
         await Drain();
-        Check(CanvasColors(scene.Canvas, samples).SequenceEqual(first),
+        Check((await CanvasColors(scene.Canvas, samples)).SequenceEqual(first),
             "restoring the global default restores the same playback canvas");
     }
 
-    private static Color[] CanvasColors(FrameworkElement canvas, IEnumerable<Point> samples)
+    private static async Task<Color[]> CanvasColors(FrameworkElement canvas, IEnumerable<Point> samples)
     {
-        var pixels = Pixels(canvas);
+        var pixels = await Pixels(canvas);
         int width = (int)canvas.ActualWidth;
         return samples.Select(point =>
         {
             int offset = ((int)point.Y * width + (int)point.X) * 4;
             Check(pixels[offset + 3] == 255, "canvas samples contain the opaque application background");
-            return Color.FromRgb(pixels[offset + 2], pixels[offset + 1], pixels[offset]);
+            return Color.FromArgb(255, pixels[offset + 2], pixels[offset + 1], pixels[offset]);
         }).ToArray();
     }
 
@@ -787,8 +785,8 @@ public static class FilmPlaybackTests
         Visuals(host == "EpisodeShelf" ? EpisodeItems(view) : Named<ItemsControl>(view, host))
             .OfType<Button>().Where(button => button.Tag is not null).ToArray();
 
-    private static Rect Bounds(FrameworkElement element, Visual root) =>
-        element.TransformToAncestor(root).TransformBounds(new Rect(element.RenderSize));
+    private static Rect Bounds(FrameworkElement element, UIElement root) =>
+        element.TransformToVisual(root).TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
 
     private static void CheckData(FilmPlaybackPage page)
     {
@@ -807,7 +805,7 @@ public static class FilmPlaybackTests
         Check(host.Items.Count == page.Episodes.Count, "the episode presentation binds the complete season");
         foreach (var episode in page.Episodes)
         {
-            if (host is ListBox list)
+            if (host is ListView list)
             {
                 list.ScrollIntoView(episode);
                 list.UpdateLayout();
@@ -829,7 +827,7 @@ public static class FilmPlaybackTests
             scene.Page.CurrentLabel.Length == 0 && !scene.Page.HasOutput,
             "one exact target is selected, but no player title is invented before actual media output");
         var host = scene.Page.IsListLayout ? Named<ItemsControl>(scene.Playback, "EpisodeList") : EpisodeItems(scene.Playback);
-        var badges = Visuals(host).OfType<TextBlock>().Where(text => text.IsVisible && text.Text == "当前").ToArray();
+        var badges = Visuals(host).OfType<TextBlock>().Where(text => FilmUiTest.Visible(text) && text.Text == "当前").ToArray();
         var selectedButton = Visuals(host).OfType<Button>().SingleOrDefault(button => ReferenceEquals(button.Tag, selected));
         Check(selectedButton is null ? badges.Length == 0 :
             badges.Length == 1 && Visuals(selectedButton).Contains(badges[0]),
@@ -838,7 +836,7 @@ public static class FilmPlaybackTests
 
     private static void CheckInsideViewport(ScrollViewer scroll, FrameworkElement element)
     {
-        var origin = element.TranslatePoint(new Point(), scroll);
+        var origin = element.TransformToVisual(scroll).TransformPoint(new Point());
         Check(scroll.HorizontalScrollBarVisibility == ScrollBarVisibility.Disabled &&
             scroll.ScrollableWidth < .5 && scroll.ExtentWidth <= scroll.ViewportWidth + .5 &&
             origin.X >= -.5 && origin.X + element.ActualWidth <= scroll.ViewportWidth + .5,
@@ -850,7 +848,7 @@ public static class FilmPlaybackTests
 
     private static Button EpisodeButton(ItemsControl host, FilmEpisodeItem episode)
     {
-        if (host is ListBox list)
+        if (host is ListView list)
         {
             list.ScrollIntoView(episode);
             list.UpdateLayout();
@@ -859,28 +857,19 @@ public static class FilmPlaybackTests
     }
 
     private static T Named<T>(FrameworkElement root, string name) where T : FrameworkElement =>
-        root.FindName(name) as T ?? throw new InvalidOperationException("Missing playback control " + name);
+        FilmUiTest.Named<T>(root, name);
 
-    private static void Click(Button button)
+    private static void Click(ButtonBase button)
     {
-        Check(button.IsVisible && button.IsEnabled, "the clicked control is available");
-        button.BringIntoView();
-        button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        Check(FilmUiTest.Visible(button) && button.IsEnabled, "the clicked control is available");
+        button.StartBringIntoView();
+        FilmUiTest.Click(button);
     }
 
-    private static void PressEnter(Button button)
+    private static void InvokeAction(ButtonBase button)
     {
-        Check(button.IsVisible && button.IsEnabled && button.Focusable && button.IsTabStop,
-            "the layout control supports keyboard activation");
-        button.BringIntoView();
-        var source = PresentationSource.FromVisual(button) ?? throw new InvalidOperationException("Missing presentation source");
-        button.RaiseEvent(new KeyEventArgs(new KeyboardProbe(), source, 0, Key.Enter)
-            { RoutedEvent = Keyboard.KeyDownEvent });
-    }
-
-    private sealed class KeyboardProbe() : KeyboardDevice(InputManager.Current)
-    {
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
+        Check(FilmUiTest.Visible(button) && button.IsEnabled && button.IsTabStop, "the action remains accessible");
+        FilmUiTest.Click(button);
     }
 
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
@@ -892,7 +881,7 @@ public static class FilmPlaybackTests
 
     private static async Task Drain()
     {
-        for (int i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        for (int i = 0; i < 3; i++) await FilmUiTest.Pump();
     }
 
     private static void Check(bool value, string message)
@@ -920,17 +909,12 @@ public static class FilmPlaybackTests
             // Explicit content width avoids native offscreen window constraints.
             View.Width = width;
             Canvas = new() { Child = View };
-            Canvas.SetBinding(FrameworkElement.WidthProperty, new Binding(nameof(View.Width)) { Source = View });
-            Canvas.SetResourceReference(Border.BackgroundProperty, "MeowFilm.Brush.AppBackground");
-            Window = new()
-            {
-                Content = Canvas, Width = width, Height = 800, WindowStyle = WindowStyle.None,
-                ResizeMode = ResizeMode.NoResize, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false
-            };
+            Canvas.SetBinding(FrameworkElement.WidthProperty, new Binding { Path = new PropertyPath(nameof(View.Width)), Source = View });
+            Canvas.UseResource(Border.BackgroundProperty, "MeowFilm.Brush.AppBackground");
+            Window = FilmUiTest.Window(Canvas, width, 800);
             Window.Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.DefaultBackground;
             Window.Show();
-            Window.UpdateLayout();
+            DesktopTestUi.WindowRoot(Window).UpdateLayout();
         }
 
         internal Task OpenAsync()

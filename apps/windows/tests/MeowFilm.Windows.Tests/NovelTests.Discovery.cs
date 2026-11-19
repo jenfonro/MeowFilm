@@ -1,8 +1,13 @@
 using System.Text.Json;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
+using Microsoft.UI.Xaml;
+using Windows.Foundation;
+using Windows.System;
+using Window = MeowFilm.Desktop.DesktopWindow;
+using WindowState = MeowFilm.Desktop.DesktopWindowState;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
 using System.Windows.Threading;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -396,21 +401,21 @@ public static partial class NovelTests
             Check(module.Notice.Contains("发现加载失败") &&
                 !Find<TextBlock>(module.View).Any(t => t.Text.Contains("发现加载失败")),
                 "Discovery inserted an error explanation into its permanent page layout.");
-            Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")));
             await Until(() => Find<TextBlock>(dialogs).Any(t => t.Text == "发现加载失败，请重试") &&
                 Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")).IsEnabled);
             Check(dialogs.IsOpen && ReferenceEquals(surface.Parent, dialogs), "A failed retry replaced or closed its error dialog.");
             fail = false;
-            Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")));
             await Until(() => !dialogs.IsOpen && !module.LoadingDiscovery);
             Check(module.DiscoverBooks.Single().Name == "重试结果" && module.ExploreSource?.InstallationId == "a");
 
             fail = true; await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
             await Until(() => dialogs.IsOpen);
             hold = true;
-            Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "重试")));
             await accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Find<Button>(dialogs).Single(b => Equals(b.Content, "取消")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "取消")));
             Check(!dialogs.IsOpen && module.LoadingDiscovery, "Closing a busy retry acknowledged an undrained source invocation.");
             release.TrySetResult();
             await Until(() => !module.LoadingDiscovery);
@@ -437,16 +442,14 @@ public static partial class NovelTests
         var window = GeneralAppearanceTests.Window(module.View); window.Show();
         try
         {
-            Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "加入书架")
-                .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "加入书架"));
             await Until(() => module.Notice == "已加入书架");
             Check(module.Library.Entries.Single() == saved && module.Session is null,
                 "Adding an alternate source removed or rewrote the canonical shelf/history entry.");
             await module.LoadDiscoveryAsync(runtime.Records[0], null, true);
             await Until(() => Find<Button>(module.View).Any(b =>
-                b.IsLoaded && b.IsVisible && AutomationProperties.GetName(b) == "移出书架"));
-            Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "移出书架")
-                .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                b.IsLoaded && DesktopVisual.IsVisible(b) && AutomationProperties.GetName(b) == "移出书架"));
+            DesktopTestUi.Invoke(Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "移出书架"));
             await Until(() => module.Notice == "已移出书架");
             Check(module.Library.Entries.Single() is { BookId: "canonical", OnShelf: false } retained &&
                 retained.ReadAt == saved.ReadAt && retained.Anchor == saved.Anchor && module.Session is null);
@@ -479,11 +482,10 @@ public static partial class NovelTests
             var window = GeneralAppearanceTests.Window(module.View); window.Show();
             try
             {
-                await Dispatcher.Yield(DispatcherPriority.Render);
+                await DesktopTestUi.DrainAsync();
                 Check(store.Writes == writes && module.Library.Entries.Single(e => e.BookId == latest.BookId).Anchor == latest.Anchor,
                     "Opening a book or displaying continuation wrote reading history.");
-                Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "接着读")
-                    .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                DesktopTestUi.Invoke(Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "接着读"));
                 await Until(() => requested == NovelCapability.ReaderRoute);
                 Check(module.Session is { HasContent: true } session && session.Entry.BookId == latest.BookId &&
                     session.Entry.Anchor == latest.Anchor && session.Chapter?.ChapterUrl == latest.Anchor!.ChapterUrl,
@@ -513,9 +515,8 @@ public static partial class NovelTests
                         "Ambiguous discovery navigation changed the retained session or saved records.");
                     await module.Library.DeleteHistoryAsync(latest.BookId);
                     await Until(() => Find<Button>(module.View).Any(b =>
-                        b.IsLoaded && b.IsVisible && AutomationProperties.GetName(b) == "开始阅读"));
-                    Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "开始阅读")
-                        .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                        b.IsLoaded && DesktopVisual.IsVisible(b) && AutomationProperties.GetName(b) == "开始阅读"));
+                    DesktopTestUi.Invoke(Find<Button>(module.View).Single(b => AutomationProperties.GetName(b) == "开始阅读"));
                     await Until(() => requested == NovelCapability.ReaderRoute);
                     Check(module.Session is { HasContent: true } canonical && canonical.Entry.BookId == older.BookId,
                         "Starting a discovered book rejected its existing canonical session from another source.");
@@ -537,19 +538,19 @@ public static partial class NovelTests
         var dialogs = new PlayerDialogHost(); Grid.SetColumnSpan(dialogs, 2); root.Children.Add(dialogs);
         var emitted = new List<DesktopNoticeEventArgs>();
         var window = GeneralAppearanceTests.Window(root); dialogs.Attach(window);
-        window.AddHandler(NoticeOutlet.NoticeEvent, new EventHandler<DesktopNoticeEventArgs>((_, e) =>
-        { if (e.Message.Length > 0) emitted.Add(e); e.Handled = true; }));
+        NoticeOutlet.SetReceiver(DesktopTestUi.WindowRoot(window), e =>
+        { if (e.Message.Length > 0) emitted.Add(e); });
         window.Show();
         try
         {
             var import = Find<Button>(module.SidebarView).Single(b => AutomationProperties.GetName(b) == "导入书源");
-            import.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(import);
             await Until(() => dialogs.IsOpen && Find<TextBox>(dialogs).Any(t =>
-                AutomationProperties.GetName(t) == "书源地址或内容" && t.IsLoaded && t.IsVisible));
+                AutomationProperties.GetName(t) == "书源地址或内容" && t.IsLoaded && DesktopVisual.IsVisible(t)));
             var input = Find<TextBox>(dialogs).Single(t => AutomationProperties.GetName(t) == "书源地址或内容");
             input.Text = server.BaseUrl + "/list.json";
             Check(!server.HasConnection && runtime.SourceStore.Writes == 0 && runtime.SourceStore.Bytes!.SequenceEqual(before));
-            Find<Button>(dialogs).Single(b => Equals(b.Content, "预览")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "预览")));
             await using (var request = await server.AcceptAsync())
             {
                 Check(request.Method == "GET" && request.Path == "/list.json" && request.Body.Length == 0);
@@ -561,14 +562,14 @@ public static partial class NovelTests
                 }).ToArray()));
             }
             await Until(() => Find<ManagementImportSelection>(dialogs).Any() &&
-                Find<CheckBox>(dialogs).Any(c => AutomationProperties.GetName(c) == "选择 书源c" && c.IsLoaded && c.IsVisible) &&
-                Find<Button>(dialogs).Any(b => Equals(b.Content, "确定导入") && b.IsLoaded && b.IsVisible));
+                Find<CheckBox>(dialogs).Any(c => AutomationProperties.GetName(c) == "选择 书源c" && c.IsLoaded && DesktopVisual.IsVisible(c)) &&
+                Find<Button>(dialogs).Any(b => Equals(b.Content, "确定导入") && b.IsLoaded && DesktopVisual.IsVisible(b)));
             Check(runtime.SourceStore.Writes == 0 && runtime.SourceStore.Bytes!.SequenceEqual(before) &&
                 module.Sources.Sources.Single().InstallationId == "a" && emitted.Count == 0 && !server.HasConnection,
                 "Preview changed the native configuration or emitted an import receipt before confirmation.");
             var second = Find<CheckBox>(dialogs).Single(c => AutomationProperties.GetName(c) == "选择 书源c");
-            second.IsChecked = false; second.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
-            Find<Button>(dialogs).Single(b => Equals(b.Content, "确定导入")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            second.IsChecked = false; DesktopTestUi.Invoke(second);
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "确定导入")));
             await Until(() => !dialogs.IsOpen && runtime.SourceStore.Writes == 1 && emitted.Count == 1);
             var saved = JsonSerializer.Deserialize<NovelSourceConfigurationSnapshot>(runtime.SourceStore.Bytes!, NovelJson.Options)!;
             var previous = JsonSerializer.Deserialize<NovelSourceConfigurationSnapshot>(before, NovelJson.Options)!;
@@ -597,11 +598,10 @@ public static partial class NovelTests
             finally { await reopened.PrepareShutdownAsync(); }
 
             var committed = runtime.SourceStore.Bytes!.ToArray();
-            Find<Button>(module.SidebarView).Single(b => AutomationProperties.GetName(b) == "导入书源")
-                .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(module.SidebarView).Single(b => AutomationProperties.GetName(b) == "导入书源"));
             await Until(() => dialogs.IsOpen && Find<Button>(dialogs).Any(b =>
-                Equals(b.Content, "取消") && b.IsLoaded && b.IsVisible));
-            Find<Button>(dialogs).Single(b => Equals(b.Content, "取消")).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                Equals(b.Content, "取消") && b.IsLoaded && DesktopVisual.IsVisible(b)));
+            DesktopTestUi.Invoke(Find<Button>(dialogs).Single(b => Equals(b.Content, "取消")));
             await Until(() => !dialogs.IsOpen);
             Check(runtime.SourceStore.Writes == 1 && runtime.SourceStore.Bytes!.SequenceEqual(committed) &&
                 !server.HasConnection && emitted.Count == 1,
@@ -623,15 +623,15 @@ public static partial class NovelTests
         var root = new Grid { Width = 1440, Height = 900 };
         root.ColumnDefinitions.Add(new() { Width = new(216) }); root.ColumnDefinitions.Add(new());
         var sidebar = module.SidebarView; root.Children.Add(sidebar); Grid.SetColumn(module.View, 1); root.Children.Add(module.View);
-        var host = GeneralAppearanceTests.Window(root); host.Width = 1440; host.Height = 900;
+        var host = GeneralAppearanceTests.Window(root); DesktopTestUi.ResizeWindow(host, 1440, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 900);
         host.Show();
         try
         {
-            await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            await DesktopTestUi.DrainAsync(); root.UpdateLayout();
             Check(Math.Abs(root.ActualWidth - 1440) < 1, $"Unexpected component width: {root.ActualWidth}.");
             var grid = Find<Panel>(module.View).Single(p => AutomationProperties.GetName(p) == "发现书籍");
             var tiles = grid.Children.Cast<FrameworkElement>().ToArray();
-            var positions = tiles.Select(t => t.TranslatePoint(new Point(), grid)).ToArray();
+            var positions = tiles.Select(t => t.TransformToVisual(grid).TransformPoint(new Point())).ToArray();
             Check(tiles.Length == 6 && positions.All(p => Math.Abs(p.Y - positions[0].Y) < 1) &&
                 positions.Zip(positions.Skip(1)).All(p => p.Second.X > p.First.X),
                 $"The home covers lost their six column row: view={module.View.ActualWidth}, grid={grid.ActualWidth}, positions={string.Join("; ", positions)}.");
@@ -647,77 +647,77 @@ public static partial class NovelTests
                 Find<Button>(sidebar).Any(b => AutomationProperties.GetName(b) == "书源b") &&
                 !Find<Button>(sidebar).Any(b => AutomationProperties.GetName(b) == "书源c"));
             int settings = 0; module.SettingsRequested += (_, _) => settings++;
-            Find<Button>(sidebar).Single(b => AutomationProperties.GetName(b) == "书源管理").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(sidebar).Single(b => AutomationProperties.GetName(b) == "书源管理"));
             Check(settings == 1, "The source management icon did not request the existing settings owner.");
-            Find<Button>(sidebar).Single(b => AutomationProperties.GetName(b) == "书源b").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            DesktopTestUi.Invoke(Find<Button>(sidebar).Single(b => AutomationProperties.GetName(b) == "书源b"));
             await Until(() => !module.LoadingDiscovery && module.ExploreSource?.InstallationId == "b");
             Check(module.DiscoverBooks.All(b => b.InstallationId == "b") && ReferenceEquals(sidebar, module.SidebarView));
             var sourcePicker = Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source");
-            Check(sourcePicker.Focus(), "The source selector could not receive keyboard focus.");
+            Check(sourcePicker.Focus(FocusState.Programmatic), "The source selector could not receive keyboard focus.");
             sourcePicker.SelectedItem = module.Sources.Sources.Single(s => s.InstallationId == "a");
             await Until(() => !module.LoadingDiscovery && module.ExploreSource?.InstallationId == "a");
             await Dispatcher.Yield(DispatcherPriority.Input);
-            Check(Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source").IsKeyboardFocusWithin,
+            Check(DesktopTestUi.HasFocus(Find<ComboBox>(module.View).Single(c => AutomationProperties.GetAutomationId(c) == "novel.discovery.source")),
                 "Changing source lost the source selector's keyboard focus.");
             Check(Find<RadioButton>(module.View).Where(r => r.GroupName == "novel.discovery.channels")
                 .Select(r => r.Content).SequenceEqual(new[] { "源站月榜" }),
                 "Home exposed a non-ranking category.");
             await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
-            await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            await DesktopTestUi.DrainAsync(); root.UpdateLayout();
             var filter = Find<Grid>(module.View).Single(g => AutomationProperties.GetName(g) == "当前频道筛选");
             var kindPicker = Find<RadioButton>(filter).Single(r =>
                 AutomationProperties.GetAutomationId(r) == "novel.discovery.kind:https://catalog.invalid/new");
-            Check(kindPicker.Focus(), "A source category could not receive keyboard focus."); kindPicker.IsChecked = true;
+            Check(kindPicker.Focus(FocusState.Programmatic), "A source category could not receive keyboard focus."); kindPicker.IsChecked = true;
             await Until(() => !module.LoadingDiscovery && module.ExploreKind?.Title == "源站新作");
             await Dispatcher.Yield(DispatcherPriority.Input);
-            Check(Find<RadioButton>(module.View).Single(r => Equals(r.Content, "源站新作")).IsKeyboardFocusWithin,
+            Check(DesktopTestUi.HasFocus(Find<RadioButton>(module.View).Single(r => Equals(r.Content, "源站新作"))),
                 "Changing category lost the category control's keyboard focus.");
-            await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            await DesktopTestUi.DrainAsync(); root.UpdateLayout();
             var catalog = Find<Panel>(module.View).Single(p => AutomationProperties.GetName(p) == "分类结果");
             var cards = catalog.Children.Cast<FrameworkElement>().ToArray();
-            var points = cards.Select(c => c.TranslatePoint(new Point(), catalog)).ToArray();
+            var points = cards.Select(c => c.TransformToVisual(catalog).TransformPoint(new Point())).ToArray();
             Check(cards.Length == 6 && Math.Abs(points[0].Y - points[2].Y) < 1 && points[3].Y > points[0].Y &&
                 Math.Abs(points[0].X - points[3].X) < 1, "The catalog did not keep three image/text columns in source order.");
             var channels = Find<RadioButton>(module.View).Where(r => r.GroupName == "novel.discovery.channels").ToArray();
             Check(channels.Select(r => r.Content).SequenceEqual(new[] { "源站分组", "源站题材" }) &&
-                channels.All(r => ReferenceEquals(r.Style.BasedOn, module.View.FindResource("MeowFilm.SettingsArea"))) &&
+                channels.All(r => ReferenceEquals(r.Style.BasedOn, DesktopVisual.Resource(module.View, "MeowFilm.SettingsArea"))) &&
                 Find<TextBlock>(module.View).Any(t => t.Text == "源题材 · 源字数"));
             filter = Find<Grid>(module.View).Single(g => AutomationProperties.GetName(g) == "当前频道筛选");
             Check(Find<RadioButton>(filter).Select(r => r.Content).SequenceEqual(new[] { "源站月榜", "源站新作" }) &&
                 !Find<RadioButton>(module.View).Any(r => Equals(r.Content, "原生分类")));
             channels[1].IsChecked = true;
             await Until(() => !module.LoadingDiscovery && module.ExploreKind?.Title == "原生分类");
-            await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            await DesktopTestUi.DrainAsync(); root.UpdateLayout();
             filter = Find<Grid>(module.View).Single(g => AutomationProperties.GetName(g) == "当前频道筛选");
             Check(Equals(Find<RadioButton>(filter).Single().Content, "原生分类") &&
                 !Find<RadioButton>(module.View).Any(r => Equals(r.Content, "源站新作")),
                 "Changing channel did not replace the single current filter row.");
             catalog = Find<Panel>(module.View).Single(p => AutomationProperties.GetName(p) == "分类结果");
-            root.Width = host.Width = 780; await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            root.Width = 780; DesktopTestUi.ResizeWindow(host, 780, DesktopTestUi.WindowSize(host).Height); await DesktopTestUi.DrainAsync(); root.UpdateLayout();
             Check(Math.Abs(root.ActualWidth - 780) < 1, $"Unexpected narrow component width: {root.ActualWidth}.");
             foreach (var card in catalog.Children.Cast<FrameworkElement>())
             {
-                var bounds = card.TransformToAncestor(module.View).TransformBounds(new Rect(card.RenderSize));
+                var bounds = card.TransformToVisual(module.View).TransformBounds(new Rect(new Point(), card.RenderSize));
                 Check(bounds.Left >= 0 && bounds.Right <= module.View.ActualWidth + 1, "The narrow catalog overflowed its content column.");
             }
             await module.NavigateAsync(NovelCapability.HomeRoute, default);
-            await Dispatcher.Yield(DispatcherPriority.Render); root.UpdateLayout();
+            await DesktopTestUi.DrainAsync(); root.UpdateLayout();
             var selected = Find<Border>(module.View).Single(b => AutomationProperties.GetName(b) == "选读");
             var continuing = Find<Border>(module.View).Single(b => AutomationProperties.GetName(b) == "继续阅读");
-            Check(continuing.TranslatePoint(new Point(), module.View).Y >= selected.TranslatePoint(new Point(), module.View).Y + selected.ActualHeight,
+            Check(continuing.TransformToVisual(module.View).TransformPoint(new Point()).Y >= selected.TransformToVisual(module.View).TransformPoint(new Point()).Y + selected.ActualHeight,
                 "The narrow home squeezed continuation beside its selected book.");
             DesktopTheme.SetIsHighContrast(root, true); root.UpdateLayout();
-            Check(selected.Background == SystemColors.WindowBrush && continuing.Background == SystemColors.WindowBrush &&
-                Find<TextBlock>(selected).Single(t => t.Text == "真实书名1").Foreground == SystemColors.WindowTextBrush,
+            Check(((SolidColorBrush)selected.Background).Color == new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window) && ((SolidColorBrush)continuing.Background).Color == new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window) &&
+                ((SolidColorBrush)Find<TextBlock>(selected).Single(t => t.Text == "真实书名1").Foreground).Color == new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText),
                 "The discovery cards ignored the inherited high contrast canvas or text colors.");
             Check(Find<TextBlock>(module.View).Where(t => t.Text == "暂无封面")
-                .All(t => t.Foreground == SystemColors.WindowTextBrush),
+                .All(t => ((SolidColorBrush)t.Foreground).Color == new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText)),
                 "Missing-cover status must retain system text contrast.");
             var search = new TextBox { Width = 160, Height = 32, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
-            Grid.SetColumn(search, 1); root.Children.Add(search); Check(search.Focus());
+            Grid.SetColumn(search, 1); root.Children.Add(search); Check(search.Focus(FocusState.Programmatic));
             await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true);
             await Dispatcher.Yield(DispatcherPriority.Input);
-            Check(search.IsKeyboardFocusWithin, "Discovery presentation stole focus from the surrounding search control.");
+            Check(DesktopTestUi.HasFocus(search), "Discovery presentation stole focus from the surrounding search control.");
         }
         finally { host.Close(); }
     }

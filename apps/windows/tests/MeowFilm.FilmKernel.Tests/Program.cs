@@ -4,8 +4,12 @@ namespace MeowFilm.FilmKernel.Tests;
 
 internal static class Program
 {
-    private static async Task<int> Main(string[] args)
+    [STAThread]
+    private static int Main(string[] args) => TestUiHost.Run(() => RunAsync(args));
+
+    private static async Task<int> RunAsync(string[] args)
     {
+        if (!TestDesktopContext.Verify()) return 1;
         TestWorkspace.Initialize();
         var groups = new Dictionary<string, Func<IEnumerable<TestCase>>>(StringComparer.Ordinal)
         {
@@ -14,13 +18,23 @@ internal static class Program
             [nameof(NativeVideoInputTests)] = NativeVideoInputTests.Cases,
             [nameof(NativeHttpMediaTransferTests)] = NativeHttpMediaTransferTests.Cases
         };
-        if (args.Length < 2 || args[0] != "--group" || args.Skip(1).Any(name => !groups.ContainsKey(name)))
-            throw new ArgumentException("Choose --group <explicit direct-test groups>; no full App target.");
-        var selected = args.Skip(1).Distinct(StringComparer.Ordinal).ToArray();
-        var cases = selected.SelectMany(name => groups[name]()).ToArray();
+        TestCase[] cases;
+        string scope;
+        if (args.Length > 1 && args[0] == "--group" && args.Skip(1).All(groups.ContainsKey))
+        {
+            var selected = args.Skip(1).Distinct(StringComparer.Ordinal).ToArray();
+            cases = selected.SelectMany(name => groups[name]()).ToArray();
+            scope = string.Join(',', selected);
+        }
+        else if (args is ["--case", var name])
+        {
+            cases = groups.Values.SelectMany(factory => factory()).Where(test => test.Name == name).ToArray();
+            scope = "case:" + name;
+        }
+        else throw new ArgumentException("Choose --group <explicit direct-test groups> or --case <exact case name>; no full App target.");
         if (cases.Length == 0 || cases.Select(test => test.Name).Distinct().Count() != cases.Length)
             throw new InvalidOperationException("Empty or duplicate direct-test inventory.");
-        Console.WriteLine("SCOPE film-kernel-direct:" + string.Join(',', selected));
+        Console.WriteLine("SCOPE film-kernel-direct:" + scope);
         int failed = 0;
         foreach (var test in cases)
         {

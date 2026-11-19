@@ -113,7 +113,7 @@ final class MusicFullPlayerMotionTests: XCTestCase {
             XCTAssertTrue(fixture.content.artwork === fixture.images.cached(fixture.secondArtwork))
             XCTAssertFalse(fixture.content.artwork === original)
             self.assertAngle(fixture.rotor, degrees: 60)
-            let selected = try await appStorageTestWait { await fixture.content.appearance.selectFixedPalette(.preset(.sky)) }
+            let selected = await fixture.content.appearance.selectFixedPalette(.preset(.sky))
             XCTAssertTrue(selected)
             await self.drainUpdates()
             XCTAssertEqual(fixture.content.appearance.preferences.colorPalette, .preset(.sky))

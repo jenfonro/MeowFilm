@@ -10,6 +10,25 @@ import UIKit
 
 @MainActor
 final class FilmPlayerControlTests: XCTestCase {
+    func testSameOrUnconsumedPreferencesDoNotCancelTheActiveHold() async throws {
+        let store = makeStore()
+        let (model, media, _) = try await open(store: store)
+        let token = try XCTUnwrap(model.beginTemporaryRate())
+        let commands = media.temporaryCommands.count
+        await store.reload()
+        storageTestTrue(await store.set(\.holdRate, store.preferences.holdRate))
+        storageTestTrue(await store.set(\.showsControlCenter, false))
+        storageTestTrue(await store.set(\.defaultRate, 1.25))
+        XCTAssertEqual(media.temporaryCommands.count, commands)
+        XCTAssertEqual(model.mediaState.rate, 2)
+        storageTestTrue(await store.set(\.holdRate, 3))
+        XCTAssertNil(media.temporaryCommands.last?.rate)
+        let after = media.temporaryCommands.count
+        model.endTemporaryRate(token)
+        XCTAssertEqual(media.temporaryCommands.count, after)
+        await model.close()
+    }
+
     func testTemporaryRateDoesNotReplaceManualBaseOrResumePausedOutput() async throws {
         let (model, media, _) = try await open()
         model.setRate(1.5)

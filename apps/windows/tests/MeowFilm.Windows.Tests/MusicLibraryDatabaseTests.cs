@@ -20,6 +20,7 @@ public static class MusicLibraryDatabaseTests
     {
         yield return new("Music SQLite explicit memory store reads empty controls and indexed records", MemoryRecords);
         yield return new("Music SQLite typed records in the App database reopen durably", Reopen);
+        yield return new("Music SQLite records beyond sixteen MiB and two hundred fifty thousand JSON nodes reopen completely", LargeRecords);
         yield return new("Music SQLite native coordinator creates a fresh current root", MissingRoot);
         yield return new("Music SQLite exact generations and receipts reject stale commits", Generations);
         yield return new("Music SQLite source conflict atomically rolls back songs controls and receipt", AtomicSourceConflict);
@@ -143,6 +144,26 @@ public static class MusicLibraryDatabaseTests
         Check(snapshot.Revision == revision && JsonNode.DeepEquals(reopened.ReadSong(Id(song)), song));
         snapshot.Areas["playback-settings"]!["mode"] = 3;
         Check(LJ.I((await reopened.ReadAsync(Scope)).Areas["playback-settings"]!["mode"]) == 2);
+    }
+
+    private static async Task LargeRecords()
+    {
+        using var folder = new Folder();
+        string text = new('x', 16 * 1024 * 1024 + 1);
+        var song = Song("wy", "large");
+        song["extra"] = text;
+        song["extensionNodes"] = JsonSerializer.SerializeToNode(Enumerable.Range(0, 250001).ToArray());
+        var control = new JsonObject { ["schema"] = 1, ["mode"] = 2 };
+        var revision = Next(MusicLibraryRevision.Empty);
+        await using (var database = new MusicLibraryDatabase(folder.Storage))
+        {
+            await database.ReadAsync(Scope);
+            await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes([song], control));
+        }
+        await using var reopened = new MusicLibraryDatabase(folder.Storage);
+        var saved = await reopened.ReadAsync(Scope);
+        Check(saved.Revision == revision && JsonNode.DeepEquals(saved.Areas["playback-settings"], control));
+        Check(JsonNode.DeepEquals(reopened.ReadSong(Id(song)), song));
     }
 
     private static async Task Generations()

@@ -35,6 +35,10 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
     public bool IsLoggedIn => Account.State is "saved" or "verified";
     public bool ShowPlatformLogo => Account.State == "none";
     public bool ShowLogin => Account.State is "none" or "revoked";
+    public bool CanLogin => ShowLogin && owner.CanEdit && !owner.AccountBusy;
+    public bool CanEditFeedback => IsLoggedIn && owner.CanEditFeedback;
+    public bool CanEditSync => IsLoggedIn && owner.LibrarySync.CanEdit;
+    public bool ShowActionDash => !IsLoggedIn && !ShowLogin;
     public string DisplayName => !IsLoggedIn ? Account.StateText :
         details.DisplayName is { Length: > 0 } detailName ? detailName :
         Account.DisplayName.Length > 0 ? Account.DisplayName : Name;
@@ -56,7 +60,8 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
         details.SelectAccount(owner.AccountDetailsSelection(Platform));
         foreach (var property in new[]
         {
-            nameof(IsLoggedIn), nameof(ShowPlatformLogo), nameof(ShowLogin), nameof(DisplayName), nameof(Membership), nameof(Subtitle),
+            nameof(IsLoggedIn), nameof(ShowPlatformLogo), nameof(ShowLogin), nameof(CanLogin), nameof(CanEditFeedback),
+            nameof(CanEditSync), nameof(ShowActionDash), nameof(DisplayName), nameof(Membership), nameof(Subtitle),
             nameof(Avatar), nameof(CanRefresh), nameof(CanLogout), nameof(RefreshText), nameof(DetailsStatus),
             nameof(FeedbackEnabled), nameof(FavoritesSyncEnabled),
             nameof(PlaylistsSyncEnabled)
@@ -122,7 +127,6 @@ public sealed partial class MusicCapability
 
     private void AccountDetailsInvalidated(string platform)
     {
-        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
         _ = Presentation.Dispatcher.InvokeAsync(() =>
         {
             if (!stopping && !disposed)

@@ -157,13 +157,15 @@ final class MusicNativePublicBrowseTests: XCTestCase {
         let cleared = await service.publicQueueSources.count; XCTAssertEqual(cleared, 0)
         await source.close(); await reopened.close(); await service.close()
     }
-    func testKGCanonicalGlobalIDIsConsumedAndMissingRequiredLocatorFails() async throws {
+    func testKGCanonicalGlobalIDAndMissingLocatorBothRetainCollectionDisplay() async throws {
         let peer = NativeMusicResultFixture([.object(["items": .array([.object(["id": .string("synthetic-global-id"), "name": .string("Synthetic")])]), "total": .number(1)]),
             .object(["items": .array([.object(["name": .string("No locator")])]), "total": .number(1)])])
         let service = try await NativeMusicFixture.service(platform: peer)
         let page = try await service.publicPlaylists(platform: .kugou, query: "test", cursor: nil)
         XCTAssertEqual(page.items[0].nativeID, "synthetic-global-id")
-        await assertMusicFailure(.upstreamInvalid) { _ = try await service.publicPlaylists(platform: .kugou, query: "test", cursor: nil) }
+        let partial = try await service.publicPlaylists(platform: .kugou, query: "test", cursor: nil)
+        XCTAssertEqual(partial.items.map(\.title), ["No locator"])
+        XCTAssertEqual(partial.items[0].nativeID, "")
         await service.close()
     }
     func testAlbumConsumesActualCanonicalIDAndFullMembers() async throws {

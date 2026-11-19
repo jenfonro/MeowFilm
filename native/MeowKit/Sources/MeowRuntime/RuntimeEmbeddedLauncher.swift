@@ -13,13 +13,13 @@ public struct RuntimePayload: Sendable, Equatable {
     public init(root: URL) throws {
         struct Manifest: Decodable {
             let schemaVersion: Int, status: String, product: String, entry: String, assemblyProfile: String
-            let platform: String, transport: String, modules: [String]
+            let platform: String, transport: String
         }
         guard let data = try? Data(contentsOf: root.appendingPathComponent("runtime-manifest.json")),
               let manifest = try? JSONDecoder().decode(Manifest.self, from: data),
               manifest.schemaVersion == 1, manifest.status == "complete", manifest.product == "aggregate",
               manifest.platform == "ios", manifest.transport == "runtime.http.v1",
-              manifest.assemblyProfile == "common-native", manifest.modules == RuntimeModule.allCases.map(\.rawValue),
+              manifest.assemblyProfile == "common-native",
               Self.safe(manifest.entry) else {
             throw RuntimeLaunchError.payloadUnavailable
         }
@@ -205,7 +205,6 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
 /// The sole reader retains its descriptor until EOF. Shutdown never closes a
 /// descriptor under a blocked read or admits further native settings requests.
 private final class RuntimeBootstrapChannel: @unchecked Sendable {
-    private static let maximumFrameBytes = 8 * 1024 * 1024
     private let lock = NSLock()
     private var descriptor: Int32
     private var finished = false
@@ -229,6 +228,7 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
                     line.append(10)
                     try write(line, descriptor: descriptor)
                     var received = Data(), bytes = [UInt8](repeating: 0, count: 4096)
+                    var searched = 0
                     while true {
                         let count = Darwin.read(descriptor, &bytes, bytes.count)
                         if count < 0, errno == EINTR { continue }
@@ -239,12 +239,12 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
                             return
                         }
                         received.append(contentsOf: bytes.prefix(count))
-                        while let newline = received.firstIndex(of: 10) {
-                            guard received.distance(from: received.startIndex, to: newline) <= Self.maximumFrameBytes,
-                                  case .object(let reply) = try RuntimeJSON.decode(received.prefix(upTo: newline)) else {
+                        while let newline = received.dropFirst(searched).firstIndex(of: 10) {
+                            guard case .object(let reply) = try RuntimeJSON.decode(received.prefix(upTo: newline)) else {
                                 throw RuntimeHTTPError.invalidResponse
                             }
                             received.removeSubrange(...newline)
+                            searched = 0
                             if case .string(let address)? = reply["baseUrl"],
                                !ready, let url = URL(string: address) {
                                 ready = true
@@ -253,7 +253,7 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
                                 try respond(reply, descriptor: descriptor)
                             }
                         }
-                        guard received.count <= Self.maximumFrameBytes else { throw RuntimeHTTPError.invalidResponse }
+                        searched = received.count
                     }
                 } catch {
                     requestClose()
@@ -334,7 +334,6 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
             reply["code"] = .string(error == .conflict ? "STORAGE_CONFLICT" : "STORAGE_ERROR")
         }
         let bytes = try RuntimeJSON.encode(.object(reply))
-        guard bytes.count <= Self.maximumFrameBytes else { throw RuntimeHTTPError.invalidResponse }
         try write(bytes + Data([10]), descriptor: descriptor)
     }
 

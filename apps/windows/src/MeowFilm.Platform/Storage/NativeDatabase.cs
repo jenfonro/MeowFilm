@@ -29,7 +29,8 @@ public sealed class NativeDatabase : IStorageDatabase
     private readonly string? productRoot;
     private SqliteConnection? connection;
     private DatabaseDirectory? directory;
-    private int pendingBytes, commits;
+    private long pendingBytes;
+    private int commits;
     private bool closing;
     private Exception? openError;
     public Task Ready => ready.Task;
@@ -137,14 +138,14 @@ public sealed class NativeDatabase : IStorageDatabase
     private Task<T> Enqueue<T>(Func<DatabaseSession, T> action, CancellationToken token, int bytes, bool exclusive = false)
     {
         token.ThrowIfCancellationRequested();
-        if (bytes is < 0 or > MaximumPendingBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (bytes < 0) throw new DocumentStoreException(DocumentStoreError.Limit);
         var operation = new Operation<T>(action, bytes, exclusive);
         lock (admission)
         {
             token.ThrowIfCancellationRequested();
             if (openError is not null) return Task.FromException<T>(openError);
             if (closing) throw new DocumentStoreException(DocumentStoreError.Closed);
-            if (pendingBytes > MaximumPendingBytes - bytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+            if (pendingBytes != 0 && pendingBytes > MaximumPendingBytes - (long)bytes) throw new DocumentStoreException(DocumentStoreError.Limit);
             pendingBytes += bytes;
             if (!operations.Writer.TryWrite(operation))
             {
@@ -386,10 +387,7 @@ public sealed class DatabaseSession
 
     public SqliteCommand Command(string sql, params (string Name, object? Value)[] parameters)
     {
-        if (sql.Contains('\0') || parameters.Any(parameter => parameter.Value is string text &&
-                Encoding.UTF8.GetByteCount(text) > 16 * 1024 * 1024 ||
-                parameter.Value is byte[] bytes && bytes.Length > 16 * 1024 * 1024))
-            throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (sql.Contains('\0')) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         var command = Connection.CreateCommand();
         command.CommandText = sql;
         command.Transaction = transaction;
@@ -409,19 +407,8 @@ public sealed class DatabaseSession
         using var command = Command(sql, parameters);
         using var reader = command.ExecuteReader();
         var result = new List<T>();
-        long retained = 0;
         while (reader.Read())
         {
-            retained += 64;
-            for (int field = 0; field < reader.FieldCount; field++)
-                retained += reader.GetValue(field) switch
-                {
-                    string text => Encoding.UTF8.GetByteCount(text) + 32,
-                    byte[] bytes => bytes.Length + 32,
-                    _ => 16
-                };
-            if (result.Count >= 100_000 || retained > 32 * 1024 * 1024)
-                throw new DocumentStoreException(DocumentStoreError.Limit);
             result.Add(read(reader));
         }
         return result;

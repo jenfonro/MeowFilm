@@ -8,17 +8,16 @@ namespace MeowFilm.Platform.Runtime;
 /// <summary>A settings-only capability on the PID-verified private lifetime pipe. No arbitrary namespaces or files.</summary>
 internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? store)
 {
-    private const int MaximumFrameBytes = 8 * 1024 * 1024;
     private readonly byte[] buffer = new byte[4096];
     private int offset, count;
 
-    internal async Task<string> ReadyAsync(CancellationToken token)
+    internal async Task<Uri> ReadyAsync(CancellationToken token)
     {
         try
         {
             for (;;)
             {
-                var line = await ReadAsync(token, store is null ? 64 * 1024 : MaximumFrameBytes).ConfigureAwait(false)
+                var line = await ReadAsync(token, store is null ? 64 * 1024 : null).ConfigureAwait(false)
                     ?? throw new BridgeException("CLOSED");
                 try
                 {
@@ -30,8 +29,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
                             BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
                             throw new BridgeException("INVALID_RESPONSE");
                         string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;
-                        _ = RuntimeHttpProtocol.ValidateEndpoint(endpoint);
-                        return endpoint;
+                        return RuntimeHttpProtocol.ValidateEndpoint(endpoint);
                     }
                     await RespondAsync(value, token).ConfigureAwait(false);
                 }
@@ -48,7 +46,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         try
         {
             if (store is null)
-                return await stream.ReadAsync(buffer.AsMemory(0, 1), CancellationToken.None).ConfigureAwait(false) == 0
+                return offset == count && await stream.ReadAsync(buffer.AsMemory(0, 1), CancellationToken.None).ConfigureAwait(false) == 0
                     ? "CLOSED" : "INVALID_RESPONSE";
             for (;;)
             {
@@ -67,6 +65,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         catch (InvalidOperationException) { return "INVALID_RESPONSE"; }
         catch (FormatException) { return "INVALID_RESPONSE"; }
         catch (IOException) { return "CLOSED"; }
+        finally { CryptographicOperations.ZeroMemory(buffer); }
     }
 
     private async Task RespondAsync(JsonElement request, CancellationToken token)
@@ -106,7 +105,6 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         byte[] response = BridgeCodec.EncodeJSONValue(reply);
         try
         {
-            if (response.Length > MaximumFrameBytes) throw new BridgeException("INVALID_RESPONSE");
             await stream.WriteAsync(response, token).ConfigureAwait(false);
             await stream.WriteAsync("\n"u8.ToArray(), token).ConfigureAwait(false);
             await stream.FlushAsync(token).ConfigureAwait(false);
@@ -114,7 +112,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         finally { CryptographicOperations.ZeroMemory(response); }
     }
 
-    private async Task<byte[]?> ReadAsync(CancellationToken token, int maximum = MaximumFrameBytes)
+    private async Task<byte[]?> ReadAsync(CancellationToken token, int? maximum = null)
     {
         using var line = new MemoryStream();
         try
@@ -133,7 +131,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
                 }
                 int newline = Array.IndexOf(buffer, (byte)'\n', offset, count - offset);
                 int length = (newline < 0 ? count : newline) - offset;
-                if (line.Length + length > maximum) throw new BridgeException("INVALID_RESPONSE");
+                if (maximum is { } limit && line.Length + length > limit) throw new BridgeException("INVALID_RESPONSE");
                 line.Write(buffer, offset, length);
                 CryptographicOperations.ZeroMemory(buffer.AsSpan(offset, length));
                 offset += length;

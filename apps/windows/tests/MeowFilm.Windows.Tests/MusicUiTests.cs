@@ -5,15 +5,17 @@ using System.Reflection;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows;
-using System.Windows.Automation;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Foundation;
+using Windows.System;
+using Windows.UI.ViewManagement;
 using MeowFilm.Core.Runtime;
 using MeowFilm.AppHost;
 using MeowFilm.Desktop;
@@ -32,39 +34,25 @@ namespace MeowFilm.Windows.Tests;
 // separate evidence; no production storage fallback exists.
 public static partial class MusicUiTests
 {
-    private static ContextMenuEventArgs RaiseSongMenu(FrameworkElement target)
+    private static async Task AssertOpenedSongMenuStyles(MenuFlyout menu, FrameworkElement host)
     {
-        var request = (ContextMenuEventArgs)typeof(ContextMenuEventArgs)
-            .GetConstructor(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null,
-                [typeof(object), typeof(bool), typeof(double), typeof(double)], null)!
-            .Invoke([target, true, -1d, -1d]);
-        target.RaiseEvent(request);
-        return request;
-    }
-
-    private static async Task AssertOpenedSongMenuStyles(ContextMenu menu, FrameworkElement host)
-    {
-        await Drain(); menu.ApplyTemplate(); menu.UpdateLayout();
-        var expected = new ContextMenu { Style = (Style)host.FindResource("MeowFilm.ContextMenu") };
-        True(menu.IsOpen && ReferenceEquals(menu.Style, expected.Style) && menu.Template is not null &&
-            ReferenceEquals(menu.Template, expected.Template), "open menu uses the actual shared style and template");
-        True(Visuals(menu).OfType<Border>().Any(border => ReferenceEquals(border.Background,
-            host.FindResource("MeowFilm.Brush.FloatingSurface"))), "opened panel resolves the actual host floating brush");
-        var expectedItem = new MenuItem { Style = (Style)host.FindResource("MeowFilm.MenuItem") };
-        foreach (var item in menu.Items.OfType<MenuItem>())
+        await Drain();
+        True(menu.IsOpen && ReferenceEquals(menu.XamlRoot, host.XamlRoot), "song menu is in the host's native XAML root");
+        foreach (var item in menu.Items.Where(item => item is not MenuFlyoutSeparator))
         {
             item.ApplyTemplate();
-            True(ReferenceEquals(item.Style, expectedItem.Style) && item.Template is not null &&
-                ReferenceEquals(item.Template, expectedItem.Template), "menu item uses the shared template");
-            if (item.Items.Count == 0) continue;
-            item.IsSubmenuOpen = true; await Drain();
-            foreach (var child in item.Items.OfType<MenuItem>())
+            True(item.Template is not null && item.FontWeight.Weight == 400, "menu item uses a native template and regular body text");
+            if (item is not MenuFlyoutSubItem submenu) continue;
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(submenu)!;
+            var expansion = (IExpandCollapseProvider)peer.GetPattern(PatternInterface.ExpandCollapse);
+            expansion.Expand(); await Drain();
+            foreach (var child in submenu.Items)
             {
                 child.ApplyTemplate();
-                True(ReferenceEquals(child.Style, expectedItem.Style) && ReferenceEquals(child.Template, expectedItem.Template),
-                    "dynamic playlist submenu uses the shared template");
+                True(child.Template is not null && child.FontWeight.Weight == 400,
+                    "dynamic playlist submenu retains its native template and regular text");
             }
-            item.IsSubmenuOpen = false;
+            expansion.Collapse();
         }
     }
 
@@ -77,7 +65,7 @@ public static partial class MusicUiTests
         yield return Case("music settings expose current native groups and lyrics use the same playback", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
-            Render(f.Module.SettingsView, 1080, 680);
+            await RenderAsync(f.Module.SettingsView, 1080, 680);
             var navigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
             var anchors = navigation.Children.OfType<RadioButton>().ToArray();
             Equal(5, anchors.Length);
@@ -104,7 +92,7 @@ public static partial class MusicUiTests
             Equal(opens, f.Playback.Opens.Count);
             True(f.Module.IsLyrics, "detail is the existing lyric route");
             var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            Render(detail, 1080, 680);
+            await RenderAsync(detail, 1080, 680);
             var record = (MusicRecordView)detail.FindName("DetailRecord");
             Equal(f.Module.CurrentArtwork, record.Address); Equal(f.Module.IsPlaying, record.Playing);
             True(record.ActualWidth > 0, "native disc mounted");
@@ -116,14 +104,10 @@ public static partial class MusicUiTests
             await f.Module.PlaySelectionAsync();
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
             var view = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            var window = new Window
-            {
-                Content = view, Width = 1080, Height = 720, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-            };
+            var window = MusicTestUi.Window(view, 1080, 720);
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
+                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 var record = (MusicRecordView)view.FindName("DetailRecord");
                 await Until(() => record.SwipeEnabled);
                 var nextBefore = f.Calls.Count("music.queue.next");
@@ -174,16 +158,12 @@ public static partial class MusicUiTests
                     SwipeIdentity = "attempt:1", SwipeEnabled = true
                 };
                 ArtworkScope.SetLoader(record, new PlayerArtworkFixture());
-                using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("record-posture-fixture")
-                {
-                    WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                    PositionX = -32000, PositionY = -32000, Width = size, Height = size
-                });
-                source.RootVisual = record; Render(record, size, size); await Drain();
-                var rotation = (RotateTransform)record.FindName("Rotation");
+                using var host = new DesktopTestUi.Host(record, size + 40, size + 40);
+                await RenderAsync(record, size, size); await Drain();
+                var rotation = (RotateTransform)record.FindName("DiscRotation");
                 Equal(0d, rotation.Angle);
                 rotation.Angle = 63;
-                record.Visibility = Visibility.Hidden; await Drain();
+                record.Visibility = Visibility.Collapsed; await Drain();
                 record.Visibility = Visibility.Visible; await Drain();
                 record.Address = "fixture://updated-cover"; await Drain();
                 Equal(63d, rotation.Angle);
@@ -194,29 +174,29 @@ public static partial class MusicUiTests
                 record.Playing = true; await Task.Delay(200); await Drain();
                 record.Playing = false; await Task.Delay(40); await Drain();
                 var paused = rotation.Angle;
-                if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+                if (MusicVisuals.CanAnimate(record))
                     True(paused > 63 && paused < 75, "playing continues from the existing posture");
                 await Task.Delay(160); await Drain();
                 True(Math.Abs(rotation.Angle - paused) < .01, "pause freezes the disc");
                 record.Address = "fixture://same-cover";
-                record.SetValue(MusicRecordView.PaletteBrushProperty, Brushes.Teal);
+                record.SetValue(MusicRecordView.PaletteBrushProperty, new SolidColorBrush(Microsoft.UI.Colors.Teal));
                 await Drain();
                 True(Math.Abs(rotation.Angle - paused) < .01, "same-track cover and theme retain the paused angle");
-                record.Visibility = Visibility.Hidden; await Drain();
+                record.Visibility = Visibility.Collapsed; await Drain();
                 record.Visibility = Visibility.Visible; await Drain();
                 True(Math.Abs(rotation.Angle - paused) < .01, "hide and show retain the paused posture");
-                source.RootVisual = null; await Drain();
-                source.RootVisual = record; Render(record, size, size); await Drain();
+                host.Window.Content = null; await Drain();
+                host.Window.Content = record; await RenderAsync(record, size, size); await Drain();
                 True(Math.Abs(rotation.Angle - paused) < .01, "unload and reload retain the same track posture");
                 record.BeginSwipe(size / 2); record.UpdateSwipe(0); record.EndSwipe(commit: false);
                 await Until(() => Math.Abs(record.SwipeOffset) < .5);
                 True(Math.Abs(rotation.Angle - paused) < .01, "canceling a swipe does not reset the disc");
                 record.Playing = true; await Task.Delay(200); await Drain();
                 record.Playing = false; await Task.Delay(40); await Drain();
-                if (SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast)
+                if (MusicVisuals.CanAnimate(record))
                     True(rotation.Angle > paused && rotation.Angle < paused + 12, "resume continues from the retained posture");
                 record.Playing = true; await Task.Delay(160); await Drain();
-                record.Visibility = Visibility.Hidden; await Drain();
+                record.Visibility = Visibility.Collapsed; await Drain();
                 var hidden = rotation.Angle;
                 await Task.Delay(160); await Drain();
                 True(Math.Abs(rotation.Angle - hidden) < .01, "hidden discs retain their last visible posture");
@@ -246,14 +226,14 @@ public static partial class MusicUiTests
                 rotation.Angle = 17;
                 record.TrackIdentity = "song:4"; Equal(0d, rotation.Angle);
                 record.TrackIdentity = "song:1"; Equal(0d, rotation.Angle);
-                source.RootVisual = null;
+                host.Window.Content = null;
             }
         });
         yield return Case("footer and detail records follow the same track identity independently of media attempts", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            Render(f.Module.PlayerView, 860, 92); Render(detail, 860, 600); await Drain();
+            await RenderAsync(f.Module.PlayerView, 860, 92); await RenderAsync(detail, 860, 600); await Drain();
             var footer = Visuals(f.Module.PlayerView).OfType<MusicRecordView>().Single();
             var full = (MusicRecordView)detail.FindName("DetailRecord");
             await Drain();
@@ -261,7 +241,7 @@ public static partial class MusicUiTests
             Equal(footer.TrackIdentity, full.TrackIdentity);
             var identity = footer.TrackIdentity;
             var attempt = f.Module.PlaybackPresentationKey;
-            var rotations = new[] { footer, full }.Select(record => (RotateTransform)record.FindName("Rotation")).ToArray();
+            var rotations = new[] { footer, full }.Select(record => (RotateTransform)record.FindName("DiscRotation")).ToArray();
             foreach (var rotation in rotations) rotation.Angle = 63;
             await f.Playback.StopAsync();
             await f.Module.TogglePlaybackAsync(); await Drain();
@@ -280,11 +260,7 @@ public static partial class MusicUiTests
             {
                 Width = 300, Height = 300, SwipeEnabled = true, SwipeIdentity = "song:1"
             };
-            var window = new Window
-            {
-                Content = record, Width = 340, Height = 340, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-            };
+            var window = MusicTestUi.Window(record, 340, 340);
             var commits = 0;
             var directions = new List<int>();
             record.SwipeCommitted += (_, e) =>
@@ -295,7 +271,7 @@ public static partial class MusicUiTests
             };
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
+                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 record.BeginSwipe(150); record.UpdateSwipe(170); record.EndSwipe(commit: true);
                 record.BeginSwipe(150); record.EndSwipe(commit: true);
                 await Until(() => Math.Abs(record.SwipeOffset) < .5);
@@ -315,17 +291,15 @@ public static partial class MusicUiTests
                 record.Visibility = Visibility.Visible; await Drain();
 
                 record.BeginSwipe(150); record.UpdateSwipe(0);
-                record.Width = 320; window.UpdateLayout();
+                record.Width = 320; DesktopTestUi.WindowRoot(window).UpdateLayout();
                 record.EndSwipe(commit: true);
                 await Until(() => Math.Abs(record.SwipeOffset) < .5);
                 Equal(0, commits);
 
-                var right = RaiseKey(record, Key.Right);
-                True(right.Handled, "right key owns one next preview");
+                True(record.Navigate(VirtualKey.Right), "right-key command owns one next preview");
                 await Until(() => commits == 1 && Math.Abs(record.SwipeOffset) < .5);
                 Equal(1, directions[0]);
-                var left = RaiseKey(record, Key.Left);
-                True(left.Handled, "left key owns one previous preview");
+                True(record.Navigate(VirtualKey.Left), "left-key command owns one previous preview");
                 await Until(() => commits == 2 && Math.Abs(record.SwipeOffset) < .5);
                 Equal(-1, directions[1]);
             }
@@ -342,18 +316,18 @@ public static partial class MusicUiTests
             await f.Module.AddCurrentToPlaylistAsync("favorites");
             await f.Module.NavigateAsync("favorites", default);
             Equal(1, f.Module.Songs.Count); Equal(playing.Id, f.Module.Songs[0].Id);
-            Render(f.Module.PlayerView, 860, 92);
+            await RenderAsync(f.Module.PlayerView, 860, 92);
             foreach (int width in new[] { 1110, 2560 })
             {
                 var footer = f.Module.PlayerView;
-                Render(footer, width, 80);
+                await RenderAsync(footer, width, 80);
                 var play = (Button)footer.FindName("PlayButton");
                 var favorite = (Button)footer.FindName("FavoriteButton");
-                var center = play.TranslatePoint(new Point(play.ActualWidth / 2, 0), footer).X;
-                var heart = favorite.TranslatePoint(new Point(favorite.ActualWidth / 2, 0), footer).X;
+                var center = play.TransformToVisual(footer).TransformPoint(new Point(play.ActualWidth / 2, 0)).X;
+                var heart = favorite.TransformToVisual(footer).TransformPoint(new Point(favorite.ActualWidth / 2, 0)).X;
                 True(Math.Abs(center - width / 2d) < 1, "transport center is the window center");
                 var text = (StackPanel)footer.FindName("MetadataText");
-                var textEnd = text.TranslatePoint(new Point(text.ActualWidth, 0), footer).X;
+                var textEnd = text.TransformToVisual(footer).TransformPoint(new Point(text.ActualWidth, 0)).X;
                 True(Math.Abs(heart - textEnd - text.Margin.Right - favorite.ActualWidth / 2) < 1, "favorite follows intrinsic metadata width");
                 AssertPlayerBounds(footer, width);
             }
@@ -387,31 +361,31 @@ public static partial class MusicUiTests
             True(!Visuals(view).OfType<ComboBox>().Any(box =>
                 AutomationProperties.GetName(box) == "指定歌曲录音"), "collection page does not expose recording identity");
 
-            action!.Execute(null);
-            var overlay = (Grid)view.FindName("PlaylistDialogOverlay");
-            var panel = (Border)view.FindName("PlaylistDialogPanel");
-            var input = (TextBox)view.FindName("PlaylistNameInput");
-            var create = (Button)view.FindName("CreatePlaylistButton");
-            Equal(Visibility.Visible, overlay.Visibility);
-            True(!((FrameworkElement)view.FindName("PageContent")).IsHitTestVisible,
-                "modal blocks the underlying page");
+            using var host = new DesktopTestUi.Host(view, 900, 650); await Drain();
+            action!.Execute(null); await Drain();
+            var dialog = (ContentDialog)typeof(MusicView).GetField("playlistDialog", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(view)!;
+            var input = Visuals(dialog).OfType<TextBox>().Single();
+            var create = Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "创建"));
+            True(MusicTestUi.IsDialogOpen(dialog) && ReferenceEquals(dialog.XamlRoot, view.XamlRoot),
+                "playlist modal is composed in the existing page root");
+            True(DesktopVisual.ContainsFocus(dialog), "modal owns focus instead of the underlying page");
             True(!create.IsEnabled && input.MaxLength == 200, "empty local name is not submitted");
             input.Text = "恢复失败后创建";
-            Equal("7 / 200", ((TextBlock)view.FindName("PlaylistNameCount")).Text);
+            Equal("7 / 200", Visuals(dialog.Content as DependencyObject ?? dialog).OfType<TextBlock>().Single().Text);
             True(create.IsEnabled, "valid local name enables creation");
-            Render(view, 900, 650);
-            Equal(420d, panel.ActualWidth);
-            True(Math.Abs(panel.TranslatePoint(new Point(panel.ActualWidth / 2, panel.ActualHeight / 2), view).X -
-                view.ActualWidth / 2) < 1, "dialog is centered inside the existing view");
+            var panel = (FrameworkElement)dialog.Content;
+            True(panel.ActualWidth > 0 && DesktopTestUi.Bounds(dialog, view).Width <= view.ActualWidth,
+                "dialog fits inside the current page");
+            True(Math.Abs(panel.TransformToVisual(view).TransformPoint(new Point(panel.ActualWidth / 2, 0)).X - view.ActualWidth / 2) < 1,
+                "dialog content is centered inside the existing view");
 
             f.Calls.FailNext("music.library.create", "STORAGE_UNAVAILABLE");
             Click(create);
-            await Until(() => overlay.Visibility == Visibility.Visible && !f.Module.Busy && create.IsEnabled);
+            await Until(() => MusicTestUi.IsDialogOpen(dialog) && !f.Module.Busy && create.IsEnabled);
             Equal(1, f.Module.Playlists.Count);
             Equal("操作失败，请重试", f.Module.Status);
-
             Click(create);
-            await Until(() => overlay.Visibility == Visibility.Collapsed && !f.Module.Busy &&
+            await Until(() => !view.IsPlaylistDialogOpen && !f.Module.Busy &&
                 f.Module.Playlists.Any(item => item.Name == "恢复失败后创建"));
             Equal("恢复失败后创建", f.Module.Heading);
             header = ((IDesktopHeaderSource)view).Header;
@@ -422,20 +396,21 @@ public static partial class MusicUiTests
             True(playAll.BorderBrush is not null && playAll.Background is SolidColorBrush { Color.A: 0 },
                 "play-all uses the theme-aware outlined treatment");
 
-            favorite.GroupAction!.Execute(null);
-            input.Text = "取消创建";
-            var escape = RaiseKey(overlay, Key.Escape);
-            True(escape.Handled && overlay.Visibility == Visibility.Collapsed, "escape closes the in-view modal");
-            True(!f.Module.Playlists.Any(item => item.Name == "取消创建"), "cancellation does not create");
+            favorite.GroupAction!.Execute(null); await Drain();
+            dialog = (ContentDialog)typeof(MusicView).GetField("playlistDialog", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(view)!;
+            Visuals(dialog).OfType<TextBox>().Single().Text = "取消创建";
+            Click(Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "取消")));
+            await Until(() => !view.IsPlaylistDialogOpen);
+            True(!f.Module.Playlists.Any(item => item.Name == "取消创建"), "native modal cancellation does not create");
 
             await f.PlayableCollection();
             True(playAll.IsEnabled, "play-all enables for a populated local playlist");
-            Equal(((SolidColorBrush)view.FindResource("MeowFilm.Brush.Accent")).Color,
+            Equal(((SolidColorBrush)DesktopVisual.Resource(view, "MeowFilm.Brush.Accent")).Color,
                 ((SolidColorBrush)playAll.BorderBrush!).Color);
             DesktopTheme.SetIsHighContrast(view, true);
             view.UpdateLayout();
-            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)playAll.BorderBrush!).Color);
-            Equal(SystemColors.WindowTextColor, ((SolidColorBrush)playAll.Foreground).Color);
+            Equal(new UISettings().UIElementColor(UIElementType.WindowText), ((SolidColorBrush)playAll.BorderBrush!).Color);
+            Equal(new UISettings().UIElementColor(UIElementType.WindowText), ((SolidColorBrush)playAll.Foreground).Color);
             DesktopTheme.SetIsHighContrast(view, false);
         });
         yield return Case("real library CRUD, file grant isolation and cancellation", async () =>
@@ -499,24 +474,20 @@ public static partial class MusicUiTests
         yield return Case("player mode failure reverts and retired queue surface reads cannot overwrite current rows", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
-            using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("player-mode-failure-fixture")
-            {
-                WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                PositionX = -32000, PositionY = -32000, Width = 860, Height = 92
-            });
-            source.RootVisual = f.Module.PlayerView; Render(f.Module.PlayerView, 860, 92); await Drain();
+            using var host = new DesktopTestUi.Host(f.Module.PlayerView, 860, 140);
+            await RenderAsync(f.Module.PlayerView, 860, 92); await Drain();
             var button = FindButton(f.Module.PlayerView, f.Module.ModeText);
-            var menu = (ContextMenu)((MusicPlayerView)f.Module.PlayerView).FindName("ModeMenu");
+            var menu = (MenuFlyout)((MusicPlayerView)f.Module.PlayerView).FindName("ModeMenu");
             f.Calls.FailNext("music.queue.mode", "STORAGE_UNAVAILABLE");
             Click(button); await Drain();
             Equal(0, f.Calls.Count("music.queue.mode"));
-            menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            MusicTestUi.Invoke(menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.Text == "随机播放"));
             await Until(() => f.Calls.Count("music.queue.mode") == 1 && !f.Module.Busy);
             Equal(1, f.Module.Mode); Equal("列表循环", AutomationProperties.GetName(button));
             Equal(1, f.Calls.Count("music.queue.mode"));
             Click(button); await Drain();
-            True(menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 1)).IsChecked, "failed change keeps the saved selection");
-            menu.Items.OfType<MenuItem>().Single(item => Equals(item.Tag, 2)).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
+            True(menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.Text == "列表循环").IsChecked, "failed change keeps the saved selection");
+            MusicTestUi.Invoke(menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.Text == "随机播放"));
             await Until(() => f.Calls.Count("music.queue.mode") == 2 && !f.Module.Busy);
             Equal(2, f.Module.Mode); Equal("随机播放", AutomationProperties.GetName(button));
             await Task.WhenAll(f.Module.ChangeModeAsync(2), f.Module.ChangeModeAsync(1)); Equal(1, f.Module.Mode);
@@ -590,74 +561,42 @@ public static partial class MusicUiTests
             });
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
             var view = (MusicQueueView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
-            var unrelatedThumb = new Thumb
-            {
-                Width = 8, Height = 8,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                VerticalAlignment = VerticalAlignment.Top
-            };
-            var root = new Grid();
-            root.Children.Add(view);
-            root.Children.Add(unrelatedThumb);
-            var window = new Window
-            {
-                Content = root, Width = 430, Height = 520, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-            };
+            var unrelatedScroll = new ScrollViewer { Height = 20, Width = 20, Content = new Border { Height = 100 }, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top };
+            var root = new Grid(); root.Children.Add(view); root.Children.Add(unrelatedScroll);
+            using var host = new DesktopTestUi.Host(root, 430, 520); await Drain();
             try
             {
-                window.Show(); window.UpdateLayout(); await Drain();
-                var list = (ListBox)view.FindName("QueueList");
+                var list = (ListView)view.FindName("QueueList");
                 var scroll = Visuals(list).OfType<ScrollViewer>().Single();
-                int Reads(int offset) => f.Calls.Log.Count(call => call.Method == "music.queue.get" &&
-                    call.Parameters.GetProperty("offset").GetInt32() == offset);
-
-                scroll.ScrollToEnd(); await Drain();
+                int Reads(int offset) => f.Calls.Log.Count(call => call.Method == "music.queue.get" && call.Parameters.GetProperty("offset").GetInt32() == offset);
+                scroll.ChangeView(null, scroll.ScrollableHeight, null, true); await Drain();
                 Equal(0, Reads(100)); // Layout and programmatic scrolling are not request entrances.
-                scroll.ScrollToTop(); await Drain();
-                var captured = Mouse.Captured;
-                unrelatedThumb.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, 0)
-                    { RoutedEvent = Mouse.GotMouseCaptureEvent });
-                scroll.ScrollToEnd(); await Drain();
-                Equal(0, Reads(100)); // An unrelated capture notification does not grant scroll intent.
-                True(ReferenceEquals(captured, Mouse.Captured), "the routed test leaves OS capture unchanged");
+                scroll.ChangeView(null, 0, null, true); await Drain();
+                var captures = list.PointerCaptures.Count;
+                var peer = FrameworkElementAutomationPeer.CreatePeerForElement(unrelatedScroll)!;
+                ((IScrollProvider)peer.GetPattern(PatternInterface.Scroll)).Scroll(ScrollAmount.NoAmount, ScrollAmount.SmallIncrement);
+                scroll.ChangeView(null, scroll.ScrollableHeight, null, true); await Drain();
+                Equal(0, Reads(100)); // Unrelated control scrolling does not grant queue scroll intent.
+                Equal(captures, list.PointerCaptures.Count);
                 f.Calls.FailNext("music.queue.get", "STORAGE_UNAVAILABLE");
-                RaiseKey(list, Key.End);
+                view.BrowseQueue(VirtualKey.End);
                 await Until(() => f.Module.QueueSurfaceStatus == "操作失败，请重试");
                 Equal(1, Reads(100));
                 True(f.Module.CanLoadMoreQueueSurface, "failed page leaves one explicit retry available");
-
-                RaiseKey(list, Key.End);
+                view.BrowseQueue(VirtualKey.End);
                 await Until(() => f.Module.QueueSurfaceRows.Count == 200);
                 Equal(2, Reads(100));
-                window.UpdateLayout(); scroll.ScrollToTop(); await Drain();
-                var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
-                bar.RaiseEvent(new ScrollEventArgs(ScrollEventType.ThumbTrack, scroll.ScrollableHeight)
-                    { RoutedEvent = ScrollBar.ScrollEvent });
-                try
-                {
-                    scroll.ScrollToEnd();
-                    await Until(() => f.Module.QueueSurfaceRows.Count == 210);
-                }
-                finally
-                {
-                    bar.RaiseEvent(new ScrollEventArgs(ScrollEventType.EndScroll, scroll.ScrollableHeight)
-                        { RoutedEvent = ScrollBar.ScrollEvent });
-                }
+                scroll.ChangeView(null, 0, null, true); await Drain();
+                view.BrowseQueue(VirtualKey.End);
+                scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
+                await Until(() => f.Module.QueueSurfaceRows.Count == 210);
                 Equal(1, Reads(200));
-                window.UpdateLayout(); scroll.ScrollToEnd(); await Drain();
-                list.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, -120)
-                    { RoutedEvent = Mouse.PreviewMouseWheelEvent });
-                await Drain();
+                scroll.ChangeView(null, scroll.ScrollableHeight, null, true); await Drain();
+                view.BrowseQueue(VirtualKey.End); await Drain();
                 Equal(1, Reads(200));
                 True(!f.Module.CanLoadMoreQueueSurface, "final page terminates queue pagination");
             }
-            finally
-            {
-                f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
-                window.Content = null;
-                window.Close();
-            }
+            finally { f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue); }
         });
         yield return Case("shutdown drains a retired noncooperative queue surface read", async () =>
         {
@@ -698,27 +637,16 @@ public static partial class MusicUiTests
             Equal(100, f.Module.Songs.Count); Equal("210", f.Module.DetailCountText);
             await f.Module.LoadMoreCollectionAsync(); Equal(200, f.Module.Songs.Count);
             f.Module.SelectedSong = f.Module.Songs[12]; var selected = f.Module.SelectedSong.Id;
-            var view = f.Module.View;
-            var window = new Window
-            {
-                Content = view, Width = 640, Height = 420, Left = -10000, Top = -10000,
-                ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None
-            };
-            try
-            {
-                window.Show(); window.UpdateLayout();
-                await Until(() => view.IsLoaded && view.IsVisible);
-                await Drain(); // Let the loaded page's initial restore complete first.
-                var scroll = Visuals((DataGrid)view.FindName("SongsGrid")).OfType<ScrollViewer>().First();
-                scroll.ScrollToVerticalOffset(10); await Drain(); var offset = scroll.VerticalOffset; True(offset > 0, "real grid scroll");
-                await f.Module.NavigateAsync("favorites", default); await f.Module.NavigateAsync(route, default); await Drain();
-                Equal(100, f.Module.Songs.Count); Equal("210", f.Module.DetailCountText);
-                Equal(selected, f.Module.SelectedSong?.Id); Equal(offset, scroll.VerticalOffset);
-                await f.Module.SearchAsync("曲目", default); await f.Module.PageAsync(1); f.Module.SelectedSong = f.Module.Songs[4]; selected = f.Module.SelectedSong.Id;
-                await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("曲目", default);
-                Equal("101–200 / 210", f.Module.PageText); Equal(selected, f.Module.SelectedSong?.Id);
-            }
-            finally { window.Content = null; window.Close(); }
+            await RenderAsync(f.Module.View, 640, 420);
+            await Drain(); // Let the successful navigation's initial restore complete first.
+            var scroll = Visuals((ListView)f.Module.View.FindName("SongsGrid")).OfType<ScrollViewer>().First();
+            scroll.ChangeView(null, 10, null, true); await Drain(); var offset = scroll.VerticalOffset; True(offset > 0, "real grid scroll");
+            await f.Module.NavigateAsync("favorites", default); await f.Module.NavigateAsync(route, default); await Drain();
+            Equal(100, f.Module.Songs.Count); Equal("210", f.Module.DetailCountText);
+            Equal(selected, f.Module.SelectedSong?.Id); Equal(offset, scroll.VerticalOffset);
+            await f.Module.SearchAsync("曲目", default); await f.Module.PageAsync(1); f.Module.SelectedSong = f.Module.Songs[4]; selected = f.Module.SelectedSong.Id;
+            await f.Module.NavigateAsync("favorites", default); await f.Module.SearchAsync("曲目", default);
+            Equal("101–200 / 210", f.Module.PageText); Equal(selected, f.Module.SelectedSong?.Id);
         });
         yield return Case("retired library refresh cannot erase new cards; internal navigation uses shell contract", async () =>
         {
@@ -781,71 +709,60 @@ public static partial class MusicUiTests
         yield return Case("song row menu captures right clicked target and rejects blank and retired actions", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
-            using var source = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("song-target-fixture")
-                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                    Width = 900, Height = 700, PositionX = -32000, PositionY = -32000 });
-            source.RootVisual = f.Module.View; Render(f.Module.View, 900, 700);
-            var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
+            using var host = new DesktopTestUi.Host(f.Module.View, 900, 700); await Drain();
+            var page = (MusicView)f.Module.View;
+            var grid = (ListView)page.FindName("SongsGrid");
             f.Module.SelectedSong = f.Module.Songs[0];
             var second = f.Module.Songs[1];
-            var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(1);
-            row.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Right)
-                { RoutedEvent = Mouse.PreviewMouseDownEvent });
-            True(ReferenceEquals(second, f.Module.SelectedSong), "right click selects its actual row");
-            RaiseSongMenu(grid);
-            var favorite = (MenuItem)grid.ContextMenu.Items[2];
+            var row = Visuals((ListViewItem)grid.ContainerFromIndex(1)).OfType<Grid>().First(panel => panel.DataContext is SongRow);
+            var menu = page.OpenSongMenu(row)!; await Drain();
+            True(ReferenceEquals(second, f.Module.SelectedSong), "row menu selects its actual target");
+            var favorite = menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "收藏");
+            var invoke = (IInvokeProvider)FrameworkElementAutomationPeer.CreatePeerForElement(favorite)!.GetPattern(PatternInterface.Invoke);
             f.Module.SelectedSong = f.Module.Songs[0];
-            favorite.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
+            invoke.Invoke(); await Until(() => !f.Module.Busy);
             await f.Module.NavigateAsync("favorites", default);
             Equal(second.Id, f.Module.Songs.Single().Id);
             int writes = f.Calls.Count("music.library.addSongs");
-            favorite.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Drain();
+            invoke.Invoke(); await Drain();
             Equal(writes, f.Calls.Count("music.library.addSongs"));
-            grid.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Right)
-                { RoutedEvent = Mouse.PreviewMouseDownEvent });
-            True(f.Module.SelectedSong is null && RaiseSongMenu(grid).Handled,
+            True(page.OpenSongMenu(grid) is null && f.Module.SelectedSong is null,
                 "empty area cannot reopen the previous target menu");
         });
         yield return Case("row actions, transport, seek, volume and global queue confirmations", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection();
-            var grid = (DataGrid)f.Module.View.FindName("SongsGrid");
-            using var menuSource = new System.Windows.Interop.HwndSource(new System.Windows.Interop.HwndSourceParameters("song-menu-fixture")
-                { WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x08000080,
-                    Width = 900, Height = 700, PositionX = -32000, PositionY = -32000 });
-            menuSource.RootVisual = f.Module.View;
-            Render(f.Module.View, 640, 480);
-            Render(f.Module.PlayerView, 860, 92);
-            grid.ContextMenu.PlacementTarget = grid; grid.ContextMenu.GetBindingExpression(FrameworkElement.DataContextProperty)!.UpdateTarget();
-            Equal(f.Module, grid.ContextMenu.DataContext); True(!grid.CanUserSortColumns, "presentation columns retain core order");
-            f.Module.SelectedSong = f.Module.Songs[1];
-            RaiseSongMenu(grid);
-            True(grid.ContextMenu.Items.OfType<MenuItem>().Take(3).Select(item => item.Header).SequenceEqual(
-                new object[] { "播放", "下一首播放", "收藏" }), "song menu exposes the primary row actions");
-            f.Module.SelectedSong = f.Module.Songs[1];
-            ((MenuItem)grid.ContextMenu.Items[2]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
+            var page = (MusicView)f.Module.View;
+            var grid = (ListView)page.FindName("SongsGrid");
+            using var host = new DesktopTestUi.Host(page, 900, 700); await Drain();
+            await RenderAsync(f.Module.PlayerView, 860, 92);
+            var second = (ListViewItem)grid.ContainerFromIndex(1);
+            var secondBody = Visuals(second).OfType<Grid>().First(panel => panel.DataContext is SongRow);
+            var menu = page.OpenSongMenu(secondBody)!; await Drain();
+            True(menu.Items.OfType<MenuFlyoutItem>().Take(3).Select(item => item.Text).SequenceEqual(
+                new[] { "播放", "下一首播放", "收藏" }), "song menu exposes the primary row actions");
+            True(grid.Items.Cast<SongRow>().SequenceEqual(f.Module.Songs), "presentation retains owner row order");
+            MusicTestUi.Invoke(menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "收藏")); await Until(() => !f.Module.Busy);
             Equal(1, f.Module.Playlists.Single(p => p.Id == "favorites").Count);
-            f.Module.SelectedSong = f.Module.Songs[1]; RaiseSongMenu(grid);
-            ((MenuItem)grid.ContextMenu.Items[1]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); await Until(() => !f.Module.Busy);
+            menu = page.OpenSongMenu(secondBody)!; await Drain();
+            MusicTestUi.Invoke(menu.Items.OfType<MenuFlyoutItem>().Single(item => item.Text == "下一首播放")); await Until(() => !f.Module.Busy);
             Equal(1, f.Calls.Count("music.queue.append"));
-            var row = (DataGridRow)grid.ItemContainerGenerator.ContainerFromIndex(0);
+            var row = (ListViewItem)grid.ContainerFromIndex(0);
             var rowButtons = Visuals(row).OfType<Button>().ToDictionary(AutomationProperties.GetName);
             Equal(Visibility.Visible, rowButtons["收藏"].Visibility);
-            Equal(Visibility.Collapsed, rowButtons["下一首播放"].Visibility);
-            Equal(Visibility.Collapsed, rowButtons["更多"].Visibility);
-            SimulateFocus(row, UIElement.IsKeyboardFocusWithinProperty, true); row.UpdateLayout();
-            Equal(Visibility.Visible, rowButtons["下一首播放"].Visibility);
-            Equal(Visibility.Visible, rowButtons["更多"].Visibility);
+            True(rowButtons["下一首播放"].Opacity == 0 && rowButtons["更多"].Opacity == 0,
+                "secondary row actions stay visually quiet without hover or focus");
+            rowButtons["下一首播放"].Focus(FocusState.Keyboard); await Task.Delay(200); await Drain();
+            True(rowButtons["下一首播放"].Opacity > .99 && rowButtons["更多"].Opacity > .99,
+                "real row keyboard focus reveals secondary actions");
             Click(rowButtons["下一首播放"]); await Until(() => !f.Module.Busy);
             True(ReferenceEquals(f.Module.Songs[0], f.Module.SelectedSong), "inline action selects its own song");
             Equal(2, f.Calls.Count("music.queue.append"));
-            Click(rowButtons["更多"]);
-            True(grid.ContextMenu.IsOpen && ReferenceEquals(rowButtons["更多"], grid.ContextMenu.PlacementTarget),
-                "more action opens the shared row context menu");
-            await AssertOpenedSongMenuStyles(grid.ContextMenu, rowButtons["更多"]);
-            grid.ContextMenu.IsOpen = false;
+            menu = page.OpenSongMenu(rowButtons["更多"])!; await Drain();
+            True(menu.IsOpen && ReferenceEquals(menu.XamlRoot, rowButtons["更多"].XamlRoot), "more action opens the row context menu in the shared root");
+            await AssertOpenedSongMenuStyles(menu, rowButtons["更多"]); menu.Hide();
             f.Module.SelectedSong = f.Module.Songs[0];
-            var enter = RaiseKey(grid, Key.Enter); True(enter.Handled, "Enter plays selected row"); await Until(() => !f.Module.Busy);
+            True(await page.ExecuteSongKeyAsync(VirtualKey.Enter), "Enter command plays selected row"); await Until(() => !f.Module.Busy);
             Equal(1, f.Playback.Opens.Count); f.Playback.Start();
             Click(FindButton(f.Module.PlayerView, "播放或暂停")); await Until(() => !f.Module.Busy); Equal(1, f.Playback.Pauses);
             Click(FindButton(f.Module.PlayerView, "播放或暂停")); await Until(() => !f.Module.Busy); Equal(1, f.Playback.Resumes);
@@ -1037,76 +954,55 @@ public static partial class MusicUiTests
             await second.Module.NavigateAsync("playlist/" + id, default); Equal(3, second.Module.Songs.Count);
             await second.Module.TogglePlaybackAsync(); Equal(1, second.Playback.Opens.Count);
         });
-        yield return Case("offscreen shell 860/1260, public theme and simulated high-contrast/focus", async () =>
+        yield return Case("native shell 860/1260 public theme and keyboard focus", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             await f.Module.NavigateAsync("favorites", default);
-            Render(f.Module.View, 640, 480);
-            Render(f.Module.SettingsView, 640, 480);
-            Render(f.Module.PlayerView, 860, 92);
-            AssertPlayerBounds(f.Module.PlayerView, 860);
-            var closeCount = 0;
+            int closeCount = 0;
             var shell = new ShellWindow([f.Module], async () => { closeCount++; await f.Module.DisposeAsync(); });
             var closed = new TaskCompletionSource(); shell.Closed += (_, _) => closed.TrySetResult();
             try
             {
-                var before = f.Calls.Log.Count; shell.PrepareForRender(); shell.PrepareForRender(); await Drain();
+                int before = f.Calls.Log.Count; shell.PrepareForRender(); shell.PrepareForRender(); shell.Activate(); await Drain();
                 Equal(before, f.Calls.Log.Count);
-                var root = (FrameworkElement)shell.Content;
-                shell.Content = null; root.Resources.MergedDictionaries.Add(shell.Resources); root.DataContext = shell.DataContext;
-                TextElement.SetForeground(root, shell.Foreground); TextElement.SetFontFamily(root, shell.FontFamily); TextElement.SetFontSize(root, shell.FontSize);
+                var root = DesktopTestUi.WindowRoot(shell);
                 foreach (var size in new[] { new Size(860, 600), new Size(1260, 790) })
                 {
-                    Render(root, (int)size.Width, (int)size.Height);
+                    shell.Resize(size.Width, size.Height); await Drain(); root.UpdateLayout();
                     AssertPlayerBounds(f.Module.PlayerView, f.Module.PlayerView.ActualWidth);
                     True(f.Module.View.ActualWidth > 500, "minimum main content usable");
                 }
-                var textbox = (TextBox)shell.FindName("SearchBox");
-                True(ReferenceEquals(textbox.Style.BasedOn, textbox.FindResource("MeowFilm.TextBox")),
+                var textbox = (TextBox)root.FindName("SearchBox");
+                True(ReferenceEquals(textbox.Style, DesktopVisual.Resource(textbox, "MeowFilm.TextBox")),
                     "the one App search box consumes the shared TextBox style");
-                var mainHost = (ContentControl)LogicalTreeHelper.GetParent(f.Module.View);
-                var surface = (Grid)mainHost.Parent;
-                var settingsHost = surface.Children.OfType<ContentControl>().Single(host => !ReferenceEquals(host, mainHost));
-                // Only switch retained presentation hosts for a render. Clicking
-                // shell settings on an uninitialized session would start business work.
-                mainHost.Content = null; settingsHost.Content = f.Module.SettingsView;
+                var mainHost = Visuals(root).OfType<ContentControl>().Single(host => ReferenceEquals(host.Content, f.Module.View));
+                var surface = (Panel)VisualTreeHelper.GetParent(mainHost);
+                var settingsHost = surface.Children.OfType<ContentControl>().Single(host => ReferenceEquals(host.Content, f.Module.SettingsView));
                 mainHost.Visibility = Visibility.Collapsed; settingsHost.Visibility = Visibility.Visible;
                 foreach (var size in new[] { new Size(860, 600), new Size(1260, 790) })
                 {
-                    Render(root, (int)size.Width, (int)size.Height);
+                    shell.Resize(size.Width, size.Height); await Drain(); root.UpdateLayout();
                     AssertPlayerBounds(f.Module.PlayerView, f.Module.PlayerView.ActualWidth);
                 }
                 DesktopTheme.SetIsHighContrast(root, true);
-                var settingsNavigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
-                settingsNavigation.Children.OfType<RadioButton>().ElementAt(2).IsChecked = true;
-                await Drain();
-                Render(root, 860, 600);
-                var picker = Visuals(f.Module.SettingsView).OfType<ComboBox>()
-                    .Single(c => AutomationProperties.GetName(c) == "起播目标音质");
-                SimulateFocus(picker, UIElement.IsKeyboardFocusWithinProperty, true);
-                Render(root, 860, 600);
-                Equal(SystemColors.HighlightColor, ((SolidColorBrush)picker.BorderBrush).Color);
-                SimulateFocus(picker, UIElement.IsKeyboardFocusWithinProperty, false);
-                settingsHost.Content = null; mainHost.Content = f.Module.View;
-                settingsHost.Visibility = Visibility.Collapsed; mainHost.Visibility = Visibility.Visible;
-                Render(root, 860, 600);
+                var navigation = (Panel)f.Module.SettingsView.FindName("SettingsNavigation");
+                navigation.Children.OfType<RadioButton>().ElementAt(2).IsChecked = true; await Drain();
+                var picker = Visuals(f.Module.SettingsView).OfType<ComboBox>().Single(c => AutomationProperties.GetName(c) == "起播目标音质");
+                True(picker.Focus(FocusState.Keyboard) && DesktopVisual.ContainsFocus(picker), "native keyboard focus enters the settings picker");
+                True(picker.UseSystemFocusVisuals, "picker supplies the system high-contrast focus visual");
+                settingsHost.Visibility = Visibility.Collapsed; mainHost.Visibility = Visibility.Visible; await Drain();
                 var mode = FindButton(f.Module.PlayerView, f.Module.ModeText);
-                Equal(SystemColors.WindowTextColor, ((SolidColorBrush)mode.Foreground).Color);
+                True(mode.Focus(FocusState.Keyboard) && mode.UseSystemFocusVisuals, "shared keyboard focus visual supplied");
                 var playerView = (UserControl)f.Module.PlayerView;
                 True(playerView.Background is null && ((Grid)playerView.Content).Background is SolidColorBrush { Color.A: 0 },
                     "high-contrast footer shows the window backdrop instead of painting its own");
-                SimulateFocus(mode, UIElement.IsKeyboardFocusedProperty, true); await Drain();
-                True(mode.FocusVisualStyle is not null, "shared keyboard focus visual supplied");
-                var progress = (Slider)f.Module.PlayerView.FindName("Progress");
-                SimulateFocus(progress, UIElement.IsKeyboardFocusWithinProperty, true); await Drain();
-                True(progress is SeekBar && DesktopTheme.GetIsHighContrast(progress),
-                    "native continuous seek rail consumes inherited high-contrast state without an extra rectangular focus border");
-                f.Playback.Start(); await Drain(); // Exercise the pause path, not a font glyph.
-                Render(f.Module.PlayerView, 860, 92);
-                SimulateFocus(progress, UIElement.IsKeyboardFocusWithinProperty, false); SimulateFocus(mode, UIElement.IsKeyboardFocusedProperty, false);
-                True(Visuals(root).OfType<Button>().Where(b => b.IsVisible).All(b => b.FocusVisualStyle is not null),
-                    "visible shell and page actions retain focus visual");
-                Equal(before + 1, f.Calls.Log.Count); // The single explicit Started records history.
+                var progress = (SeekBar)f.Module.PlayerView.FindName("Progress");
+                True(progress.Focus(FocusState.Keyboard) && !MusicVisuals.CanAnimate(progress),
+                    "continuous seek rail honors the common root high-contrast state");
+                f.Playback.Start(); await Drain();
+                True(Visuals(root).OfType<Button>().Where(DesktopVisual.IsVisible).All(button => button.UseSystemFocusVisuals),
+                    "visible shell and page actions retain system focus visuals");
+                Equal(before + 1, f.Calls.Log.Count);
             }
             finally { shell.Close(); await shell.ShutdownCompletion; await closed.Task.WaitAsync(TimeSpan.FromSeconds(5)); await Drain(); }
             Equal(1, closeCount); True(shell.ShutdownSucceeded, "successful once-only shell shutdown");
@@ -1148,11 +1044,11 @@ public static partial class MusicUiTests
         while (!predicate())
         {
             if (watch.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException("UI condition did not settle");
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); if (!predicate()) await Task.Delay(1);
+            await MusicTestUi.Drain(); if (!predicate()) await Task.Delay(1);
         }
         await Drain();
     }
-    private static async Task Drain() { for (var i = 0; i < 3; i++) await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); }
+    private static Task Drain() => MusicTestUi.Drain();
     private static IEnumerable<DependencyObject> Visuals(DependencyObject root)
     {
         yield return root;
@@ -1161,34 +1057,11 @@ public static partial class MusicUiTests
     }
     private static Button FindButton(FrameworkElement view, string label) => Visuals(view).OfType<Button>()
         .Single(b => AutomationProperties.GetName(b) == label || b.Content is string text && text == label);
-    private static void Click(Button button) { True(button.IsEnabled, "clickable action enabled"); button.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent)); }
-    private sealed class KeyboardProbe : KeyboardDevice
-    {
-        public KeyboardProbe() : base(InputManager.Current) { }
-        protected override KeyStates GetKeyStatesFromSystem(Key key) => KeyStates.None;
-    }
-    private sealed class PresentationProbe : PresentationSource
-    {
-        public override Visual RootVisual { get; set; } = new DrawingVisual();
-        public override bool IsDisposed => false;
-        protected override CompositionTarget GetCompositionTargetCore() => null!;
-    }
-    private static KeyEventArgs RaiseKey(UIElement target, Key key)
-    {
-        var args = new KeyEventArgs(new KeyboardProbe(), new PresentationProbe(), 0, key) { RoutedEvent = Keyboard.PreviewKeyDownEvent };
-        target.RaiseEvent(args); return args;
-    }
-    private static void SimulateFocus(UIElement element, DependencyProperty property, bool value)
-    {
-        // Offscreen style-state test, not OS keyboard focus on an invisible HWND.
-        var field = typeof(UIElement).GetField(property.Name + "PropertyKey", BindingFlags.Static | BindingFlags.NonPublic)
-            ?? throw new InvalidOperationException("Focus-state test seam unavailable");
-        element.SetValue((DependencyPropertyKey)field.GetValue(null)!, value);
-    }
+    private static void Click(Button button) { True(button.IsEnabled, "clickable action enabled"); DesktopTestUi.Invoke(button); }
     private static void AssertPlayerBounds(FrameworkElement view, double width)
     {
         var panels = new[] { "MetadataPanel", "TransportPanel", "OptionsPanel" }.Select(name => (FrameworkElement)view.FindName(name)).ToArray();
-        var bounds = panels.Select(panel => new Rect(panel.TranslatePoint(new Point(), view), panel.RenderSize)).ToArray();
+        var bounds = panels.Select(panel => DesktopTestUi.Bounds(panel, view)).ToArray();
         True(width >= 820, "player spans shell width");
         for (var i = 0; i < bounds.Length; i++)
         {
@@ -1197,19 +1070,31 @@ public static partial class MusicUiTests
         }
         foreach (var control in Visuals(view).OfType<Control>().Where(c => c is Button or Slider))
         {
-            var rect = new Rect(control.TranslatePoint(new Point(), view), control.RenderSize);
-            True(rect.Left >= 0 && rect.Right <= width + 0.5 && rect.Top >= 0 && rect.Bottom <= view.ActualHeight + 0.5, "player control not clipped: " + AutomationProperties.GetName(control) + " " + rect);
+            var rect = DesktopTestUi.Bounds(control, view);
+            double upperEnvelope = control is SeekBar { RailAtTop: true } ? 43 : 0;
+            True(rect.Left >= 0 && rect.Right <= width + 0.5 && rect.Top >= -upperEnvelope &&
+                rect.Bottom <= view.ActualHeight + 0.5, "player control not clipped: " + AutomationProperties.GetName(control) + " " + rect);
         }
     }
+    private static readonly AsyncLocal<List<DesktopWindow>?> renderWindows = new();
     private static void Render(FrameworkElement view, int width, int height)
     {
+        if (view.XamlRoot is null)
+        {
+            var windows = renderWindows.Value ?? throw new InvalidOperationException("Render must run inside a UI case");
+            var window = MusicTestUi.Window(view, width, height);
+            if (window.AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+                presenter.SetBorderAndTitleBar(false, false);
+            windows.Add(window); window.Activate();
+        }
+        else if (DesktopWindow.GetWindow(view) is { } window && ReferenceEquals(window.Content, view)) window.Resize(width, height);
         view.Measure(new Size(width, height)); view.Arrange(new Rect(0, 0, width, height)); view.UpdateLayout();
-        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32); bitmap.Render(view);
-        var pixels = new byte[width * height * 4]; bitmap.CopyPixels(pixels, width * 4, 0);
-        // Standalone settings has a transparent background; assert actual painted
-        // controls/text, not an arbitrary percentage of a shell-owned background.
-        True(pixels.Where((_, index) => index % 4 == 3).Count(alpha => alpha > 0) > 1000, "nonempty offscreen controls/text");
-
+    }
+    private static async Task RenderAsync(FrameworkElement view, int width, int height)
+    {
+        Render(view, width, height); await Drain();
+        var pixels = await DesktopTestUi.Pixels(view, width, height);
+        True(pixels.Where((_, index) => index % 4 == 3).Count(alpha => alpha > 0) > 1000, "nonempty native controls/text");
     }
     private sealed class FailedApplication : MusicApplicationTestDouble
     {
@@ -1407,29 +1292,14 @@ public static partial class MusicUiTests
     }
     private sealed class DocumentProbe : NativeTestDatabase {
     }
-    private static async Task OnSta(Func<Task> body)
+    private static Task OnSta(Func<Task> body) => TestUiHost.InvokeAsync(async () =>
     {
-        var completed = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); Dispatcher? owner = null;
-        var thread = new Thread(() =>
+        var windows = new List<DesktopWindow>(); renderWindows.Value = windows;
+        try { await body(); }
+        finally
         {
-            var dispatcher = Dispatcher.CurrentDispatcher; Volatile.Write(ref owner, dispatcher);
-            SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
-            var errors = new List<Exception>(); dispatcher.UnhandledException += (_, e) => { errors.Add(e.Exception); e.Handled = true; };
-            dispatcher.BeginInvoke(async () =>
-            {
-                Exception? failure = null;
-                try { await body(); await Drain(); if (errors.Count > 0) throw new AggregateException("Unhandled UI event", errors); }
-                catch (Exception error) { failure = error; }
-                finally { completed.TrySetResult(failure); dispatcher.BeginInvokeShutdown(DispatcherPriority.Background); }
-            });
-            try { Dispatcher.Run(); } finally { stopped.TrySetResult(); }
-        }) { IsBackground = true, Name = "music-ui-code-test" };
-        thread.SetApartmentState(ApartmentState.STA); thread.Start();
-        Exception? result;
-        try { result = await completed.Task.WaitAsync(TimeSpan.FromSeconds(90)); }
-        catch { Volatile.Read(ref owner)?.BeginInvokeShutdown(DispatcherPriority.Send); throw; }
-        await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        if (result is not null) ExceptionDispatchInfo.Capture(result).Throw();
-    }
+            foreach (var window in windows) { window.Content = null; window.Close(); }
+            renderWindows.Value = null; await Drain();
+        }
+    });
 }
