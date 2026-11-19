@@ -1,7 +1,6 @@
 using System.Runtime.CompilerServices;
-using System.Diagnostics;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -12,6 +11,13 @@ public sealed class CardMotion : DependencyObject
     public static readonly DependencyProperty EnabledProperty = DependencyProperty.RegisterAttached("Enabled", typeof(bool), typeof(CardMotion),
         new PropertyMetadata(false, EnabledChanged));
     public static readonly DependencyProperty ProgressProperty = DependencyProperty.RegisterAttached("Progress", typeof(double), typeof(CardMotion), new PropertyMetadata(0d));
+    public static readonly DependencyProperty AnimationProgressProperty = DependencyProperty.Register(nameof(AnimationProgress), typeof(double), typeof(CardMotion),
+        new PropertyMetadata(0d, (owner, args) => ((CardMotion)owner).target?.SetValue(ProgressProperty, args.NewValue)));
+    private readonly FrameworkElement? target;
+    public double AnimationProgress { get => (double)GetValue(AnimationProgressProperty); set => SetValue(AnimationProgressProperty, value); }
+    public CardMotion() { }
+    private CardMotion(FrameworkElement target) => this.target = target;
+
     public static bool GetEnabled(DependencyObject owner) => (bool)owner.GetValue(EnabledProperty);
     public static void SetEnabled(DependencyObject owner, bool value) => owner.SetValue(EnabledProperty, value);
     public static double GetProgress(DependencyObject owner) => (double)owner.GetValue(ProgressProperty);
@@ -19,8 +25,10 @@ public sealed class CardMotion : DependencyObject
     private sealed class Motion
     {
         internal bool Pointer, Focus;
-        internal EventHandler<object>? Rendering;
+        internal Storyboard? Storyboard;
         internal IDisposable? Visibility;
+        internal readonly CardMotion AnimationTarget;
+        internal Motion(FrameworkElement target) => AnimationTarget = new(target);
     }
     private static readonly ConditionalWeakTable<FrameworkElement, Motion> Motions = new();
     private static void EnabledChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
@@ -32,7 +40,7 @@ public sealed class CardMotion : DependencyObject
             return;
         }
         if (args.NewValue is not true) return;
-        var state = Motions.GetValue(element, _ => new());
+        var state = Motions.GetValue(element, _ => new Motion(element));
         element.PointerEntered += (_, _) => SetPointerActive(element, true);
         element.PointerExited += (_, _) => SetPointerActive(element, false);
         element.GotFocus += (_, _) => { state.Focus = true; Refresh(element, state); };
@@ -69,7 +77,7 @@ public sealed class CardMotion : DependencyObject
     internal static bool IsPointerActive(FrameworkElement element) =>
         Motions.TryGetValue(element, out var motion) && motion.Pointer;
     internal static bool HasActiveAnimation(FrameworkElement element) =>
-        Motions.TryGetValue(element, out var motion) && motion.Rendering is not null;
+        Motions.TryGetValue(element, out var motion) && motion.Storyboard?.GetCurrentState() == ClockState.Active;
     internal static void SetPointerActive(FrameworkElement element, bool active)
     {
         if (!Motions.TryGetValue(element, out var motion)) return;
@@ -84,31 +92,26 @@ public sealed class CardMotion : DependencyObject
             return;
         }
         double from = GetProgress(element), to = motion.Pointer || motion.Focus ? 1 : 0;
-        Stop(motion);
+        motion.AnimationTarget.AnimationProgress = from;
+        motion.Storyboard?.Stop(); motion.Storyboard = null;
+        SetProgress(element, from);
         if (MusicVisuals.CanAnimate(element) && Math.Abs(from - to) > .001)
         {
-            long started = Stopwatch.GetTimestamp();
-            double duration = to > 0 ? .22 : .16;
-            // Progress drives several layout and brush properties on the UI thread.
-            // Use the render clock so no custom attached-property animation path is required.
-            motion.Rendering = (_, _) =>
-            {
-                double time = Math.Min(1, Stopwatch.GetElapsedTime(started).TotalSeconds / duration);
-                SetProgress(element, from + (to - from) * (1 - Math.Pow(1 - time, 3)));
-                if (time >= 1) Stop(motion);
-            };
-            CompositionTarget.Rendering += motion.Rendering;
+            Storyboard? animation = null;
+            animation = MusicVisuals.AnimateDouble(motion.AnimationTarget, nameof(AnimationProgress), from, to,
+                TimeSpan.FromMilliseconds(to > 0 ? 220 : 160), () =>
+                {
+                    if (!ReferenceEquals(motion.Storyboard, animation)) return;
+                    motion.AnimationTarget.AnimationProgress = to;
+                    motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
+                });
+            motion.Storyboard = animation;
         }
         else SetProgress(element, to);
     }
-    private static void Stop(Motion motion)
-    {
-        if (motion.Rendering is null) return;
-        CompositionTarget.Rendering -= motion.Rendering;
-        motion.Rendering = null;
-    }
     private static void Reset(FrameworkElement element, Motion motion)
     {
-        Stop(motion); SetProgress(element, 0);
+        motion.AnimationTarget.AnimationProgress = 0;
+        motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, 0);
     }
 }

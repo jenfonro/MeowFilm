@@ -8,7 +8,13 @@ public sealed partial class ShellWindow
     private sealed class PageSession(IDesktopPage page)
     {
         public IDesktopPage Page { get; } = page;
-        public ContentControl Host { get; } = new() { Visibility = Visibility.Collapsed };
+        public ContentControl Host { get; } = new()
+        {
+            Visibility = Visibility.Collapsed,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Stretch,
+            IsTabStop = false
+        };
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public string? SearchDraft { get; set; }
     }

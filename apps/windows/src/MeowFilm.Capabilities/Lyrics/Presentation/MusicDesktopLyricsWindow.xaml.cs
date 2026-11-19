@@ -39,9 +39,9 @@ sealed partial class MusicDesktopLyricsWindow : Window
     internal MusicDesktopLyricsWindow(MusicCapability module, Window anchor, MusicDesktopLyricsGeometry? geometry = null)
     {
         this.module = module; InitializeComponent(); LyricsFrame.DataContext = LineSurface.DataContext = module;
+        LyricPresenter.SizeChanged += (_, args) => LineSurface.Height = args.NewSize.Height;
         handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
         inputRegion = new(handle, LyricsFrame, () => HoverSurface.Visibility == Visibility.Visible || sizing);
-        ExtendsContentIntoTitleBar = true;
         SystemBackdrop = new LyricsTransparentBackdrop();
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         { presenter.SetBorderAndTitleBar(false, false); presenter.IsAlwaysOnTop = true; presenter.IsMaximizable = false; presenter.IsMinimizable = false; }
@@ -50,7 +50,6 @@ sealed partial class MusicDesktopLyricsWindow : Window
         hook = WindowMessage;
         if (!MusicDesktopLyricsNative.SetWindowSubclass(handle, hook, 1, 0)) throw new Win32Exception();
         MusicDesktopLyricsNative.SetResizableStyle(handle);
-        LyricPresenter.SizeChanged += (_, _) => LineSurface.Height = LyricPresenter.ActualHeight;
         pointerObserver = DispatcherQueue.CreateTimer(); pointerObserver.Interval = TimeSpan.FromMilliseconds(100);
         pointerObserver.Tick += (_, _) => ObservePointer();
         module.PropertyChanged += ModuleChanged;

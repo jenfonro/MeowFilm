@@ -106,7 +106,7 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
           signal, dispatched: options.dispatched, json: !options.vip });
         assertCurrent();
         if (options.vip) reply.value = encryptedWyResponse(reply.value);
-        if (!options.raw) try { wySuccess(reply.value); }
+        if (!options.raw) try { wySuccess(reply.value, options); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
         if (!entry.committed) await clients.acceptWy(reply.cookies, c.account, new URL(recipe.url).hostname);
         return options.response ? reply : reply.value;
@@ -177,7 +177,7 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
           ...options, keyState: entry.candidate ? {} : keyState,
           dispatched: options.dispatched ? () => { c.dispatched(); options.dispatched(); } : undefined });
         assertCurrent();
-        try { return wySuccess(value); }
+        try { return wySuccess(value, options); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
       },
       async registerKg(device) { const client = await clients.registerKg(device); assertCurrent(); return client; },

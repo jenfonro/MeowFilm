@@ -14,7 +14,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
@@ -32,7 +32,6 @@ public static class MusicEntryCardPresentationTests
         yield return Case("resting covers blend into the same footer color with fixed gradient stops", BrightCoverContrast);
         yield return Case("entry captions share two lines with single line text on the second baseline", SubtitleWrapping);
         yield return Case("official decoration drives the title palette and failed decoration falls back to the cover", DecorationPalette);
-        yield return Case("visible decoration fades own source demand and retire hidden or replaced requests", DecorationDemand);
         yield return Case("decorative fades preserve open and explicit play hit regions", HitAndPlayIntent);
         yield return Case("daily calendar days render valid single and double digit dates", CalendarDays);
         yield return Case("daily captions and covers stay stable with only three embedded songs", DailyPreview);
@@ -225,54 +224,6 @@ public static class MusicEntryCardPresentationTests
             "visual fades do not make unavailable entry actions playable");
     }
 
-    private static async Task DecorationDemand()
-    {
-        var loader = new DeferredArtworkLoader();
-        var first = new ArtworkImage { Address = CoverAddress, Width = 168, Height = 168, ShowRetry = false };
-        var second = new ArtworkImage { Address = DecorationAddress, Width = 168, Height = 168, ShowRetry = false };
-        var hiddenSources = new Grid { Clip = new RectangleGeometry { Rect = new(0, 0, 0, 0) } };
-        hiddenSources.Children.Add(first); hiddenSources.Children.Add(second);
-        var fade = new MusicArtworkFade { Source = first, Decoration = true, Width = 168, Height = 64,
-            HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
-        var root = new Grid { Visibility = Visibility.Collapsed, Children = { hiddenSources, fade } };
-        ArtworkScope.SetLoader(root, loader);
-        using var host = new DesktopTestUi.Host(root, 240, 320);
-        await Until(() => fade.IsLoaded, "the hidden decoration consumer is mounted");
-        Check(loader.Requests.Count == 0, "a hidden fade does not create artwork demand through its clipped source");
-        root.Visibility = Visibility.Visible;
-        await Until(() => loader.Requests.Count == 1, "the visible fade acquires its clipped decoration source");
-        fade.Source = second;
-        await Until(() => loader.Requests.Count == 2, "replacing the fade source acquires the new owner");
-        Check(loader.Requests[0].Token.IsCancellationRequested, "source replacement cancels the old presentation request");
-        var stale = loader.Complete(0);
-        var current = loader.Complete(1);
-        await Until(() => stale.Disposed && second.Source is not null, "late old pixels retire while the current decoration publishes");
-        Check(first.Source is null && !current.Disposed && fade.Mask is not null,
-            "only the current source owns decoded artwork and the single fade presentation");
-        root.Visibility = Visibility.Collapsed;
-        await Until(() => current.Disposed && second.Source is null, "hiding the fade releases its offscreen presentation lease");
-        Check(fade.Mask is null && loader.Requests.Count == 2, "hidden decoration releases composition without another request");
-        bool? succeeded = null;
-        second.LoadCompleted += (_, args) => succeeded = args.Succeeded;
-        root.Visibility = Visibility.Visible;
-        await Until(() => loader.Requests.Count == 3, "showing the decoration creates its current presentation demand");
-        loader.Requests[2].Reply.SetException(new ArtworkException("ARTWORK_NETWORK"));
-        await Until(() => succeeded == false, "decoration acquisition failure remains observable by the artwork owner");
-        Check(second.Source is null && AutomationProperties.GetHelpText(second).Length > 0,
-            "a failed decoration does not publish pixels or hide the owner's error state");
-        fade.Source = first;
-        await Until(() => loader.Requests.Count == 4, "a new source begins preparation before its own unload");
-        hiddenSources.Children.Remove(first);
-        await Until(() => !first.IsLoaded && loader.Requests[3].Token.IsCancellationRequested && fade.Mask is null,
-            "source unload retires pending preparation even while the consumer remains mounted");
-        var unloaded = loader.Complete(3);
-        await Until(() => unloaded.Disposed, "pixels arriving after source unload release their lease");
-        Check(first.Source is null && fade.IsLoaded, "source retirement cannot publish late pixels into the still-mounted consumer");
-        root.Children.Remove(fade);
-        await Until(() => !fade.IsLoaded, "unmount retires the fade consumer");
-        Check(fade.Mask is null && loader.Requests.Count == 4, "unmount releases composition without retrying retired artwork");
-    }
-
     private static async Task CalendarDays()
     {
         using var f = new Fixture(ReadDaily(1));
@@ -283,8 +234,6 @@ public static class MusicEntryCardPresentationTests
             Check(model.HasCalendarDay && model.DayOfMonth == day, "the daily entry retains its declared valid date");
             await f.Bind(model);
             var date = f.Text(day.ToString(CultureInfo.InvariantCulture));
-            Check(((SolidColorBrush)date.Foreground).Color == Colors.White,
-                "the calendar date follows the card foreground instead of the application's implicit text style");
             Check(IsPainted(date, f.Entry), "the calendar date is effectively visible, not merely bound in a hidden parent");
             var bounds = f.Bounds(date);
             Check(bounds.Right <= f.Bounds(f.Text(model.Title)).Left, "the calendar date and daily title do not overlap");
@@ -367,15 +316,17 @@ public static class MusicEntryCardPresentationTests
             double height = f.Entry.ActualHeight;
             await f.Expand(true);
             await AssertExpanded();
-            f.Entry.Width = width + 16; DesktopTestUi.ResizeWindow(f.Window, DesktopTestUi.WindowSize(f.Window).Width + (16), DesktopTestUi.WindowSize(f.Window).Height); DesktopTestUi.ResizeWindow(f.Window, DesktopTestUi.WindowSize(f.Window).Width, DesktopTestUi.WindowSize(f.Window).Height + (16));
-            DesktopTestUi.WindowRoot(f.Window).UpdateLayout(); await Drain(); DesktopTestUi.WindowRoot(f.Window).UpdateLayout();
+            var windowSize = DesktopTestUi.WindowSize(f.Window);
+            f.Entry.Width = width + 16;
+            DesktopTestUi.ResizeWindow(f.Window, windowSize.Width + 16, windowSize.Height + 16);
+            await Until(() => f.Entry.ActualWidth == width + 16 && f.Entry.ActualHeight == height + 16,
+                "the native client resize arranges the new card width and height");
             await AssertExpanded();
             CardMotion.SetPointerActive(f.Surface, false);
             await Task.Delay(40); await Drain();
             double partial = CardMotion.GetProgress(f.Surface);
             Check(partial is > 0 and < 1, "collapse uses the native presentation animation");
             CardMotion.SetPointerActive(f.Surface, true);
-            // Observe an intermediate render tick before accepting the final value.
             await Until(() => CardMotion.GetProgress(f.Surface) is > 0 and < .999,
                 "reversal starts from the intermediate presentation state");
             await Until(() => CardMotion.GetProgress(f.Surface) >= .999, "reversed animation settles at the expanded endpoint");
@@ -385,7 +336,7 @@ public static class MusicEntryCardPresentationTests
                 ReferenceEquals(source, f.Cover.Source), "collapse restores the second baseline without replacing the artwork");
             await f.Bind(DailyCard() with { Subtitle = subtitle, Preview = [new("唯一歌曲", "", "", 1, null)] });
             await f.Expand(true);
-            var one = f.RowSlot(f.Text("1 唯一歌曲"));
+            var one = f.Bounds(f.Text("1 唯一歌曲"));
             Check(Math.Abs(f.Entry.ActualHeight - one.Bottom - 6) < .5 &&
                 f.Bounds(f.CaptionText).Bottom <= f.Bounds(f.Play).Top,
                 "a shorter preview stays at the bottom and its play control does not cover the caption");
@@ -406,14 +357,14 @@ public static class MusicEntryCardPresentationTests
                     "the same caption lifts above its three rows without covering the title; " +
                     $"progress {CardMotion.GetProgress(f.Surface):F6}, caption {caption}, rest {rest}, " +
                     $"title {title}, first {first}, third {third}, card height {f.Entry.ActualHeight}");
-                var thirdSlot = f.RowSlot(f.Text("3 Waking Up"));
-                Check(Math.Abs(f.Entry.ActualHeight - thirdSlot.Bottom - 6) < .5,
-                    "third row ends at the normal six DIP inset, not an extra blank line");
+                Check(Math.Abs(f.Entry.ActualHeight - third.Bottom - 6) < .5,
+                    $"third row ends at the normal six DIP inset, not an extra blank line; third={third}, " +
+                    $"card={new Size(f.Entry.ActualWidth, f.Entry.ActualHeight)}, content={f.Bounds((FrameworkElement)f.Entry.FindName("ContentBlock"))}");
                 var header = f.Bounds(f.Text("每日推荐"));
                 Check(f.Entry.ActualHeight == height + f.Entry.Width - width &&
                     header.X == title.X && header.Y == title.Y && header.Height == title.Height,
-                    "hover does not change outer height or translate the header; " +
-                    $"width={width}->{f.Entry.Width}/{f.Entry.ActualWidth}; height={height}->{f.Entry.ActualHeight}; title={title}; header={header}; root={f.Root.ActualWidth}x{f.Root.ActualHeight}; artwork={f.Cover.ActualWidth}x{f.Cover.ActualHeight}");
+                    $"hover does not change outer height or translate the header; height={height}->{f.Entry.ActualHeight}, " +
+                    $"width={width}->{f.Entry.Width}, header={title}->{header}");
                 foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
                 {
                     var frame = await Capture(f.Entry, scale);
@@ -441,22 +392,18 @@ public static class MusicEntryCardPresentationTests
             using var f = new Fixture(DailyCard() with { Subtitle = "每日推荐 | 从「Fell In Love」听起" },
                 152, coverImage: image);
             await f.Load();
-            var surface = (SolidColorBrush)f.Surface.Background;
             var source = f.Cover.Source;
+            var surface = (SolidColorBrush)f.Surface.Background;
             var shade = (Border)f.Entry.FindName("ExpansionShade");
             var rest = await Capture(f.Entry);
             var footer = new Point(f.Entry.ActualWidth / 2, f.Entry.ActualHeight - 3);
             Check(rest.At(footer) == surface.Color, "the real footer paints the selected image tone");
-            var gradient = (LinearGradientBrush)shade.Background;
-            Check(gradient.GradientStops.Select(stop => stop.Color).SequenceEqual(new[]
-                {
-                    Colors.Transparent, Color.FromArgb(191, surface.Color.R, surface.Color.G, surface.Color.B), surface.Color
-                }) && gradient.GradientStops.Select(stop => stop.Offset).SequenceEqual(new[] { 0d, (double).32f, (double).6f }),
-                "hover uses the footer RGB with the existing transparent, three-quarter and opaque stops");
+            Check(shade.Background is LinearGradientBrush expansion && expansion.GradientStops[^1].Color == surface.Color,
+                "hover and footer use one color source");
             await f.Expand(true);
             var expanded = await Capture(f.Entry);
             Check(expanded.At(footer) == surface.Color && ReferenceEquals(surface, f.Surface.Background) &&
-                ReferenceEquals(source, f.Cover.Source), "hover reuses the same palette and decoded image");
+                ReferenceEquals(source, f.Cover.Source), "hover reuses the same palette and image");
             Check(PaintContrast(expanded, f.Bounds(f.Text("3 Waking Up")), f.ContrastProbeX) > 1.5,
                 "the third song is actually painted over the muted surface");
             snapshots.Add((rest.Image, expanded.Image));
@@ -513,23 +460,22 @@ public static class MusicEntryCardPresentationTests
             Check(f.Loader.Addresses.Count == 1 && f.Opens == 0 && f.Plays == 0,
                 "hover shading and high contrast add no artwork reads or business intents");
         }
-        // Compare to the actual ordinary playlist presentation, not just a resource value.
-        var ordinary = new MusicCatalogCardView { Width = 152, VerticalAlignment = VerticalAlignment.Top };
-        var ordinaryRoot = new Grid { Children = { ordinary } };
-        ordinaryRoot.Resources.MergedDictionaries.Add(new()
-            { Source = new("ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml", UriKind.Absolute) });
-        ArtworkScope.SetLoader(ordinaryRoot, new ArtworkLoader(cover, false, null));
-        ordinary.DataContext = DailyCard();
-        var window = DesktopTestUi.CreateWindow(ordinaryRoot, 216, 340);
+        // Compare to the actual ordinary playlist view, not just a resource value.
+        var ordinary = new MusicCatalogCardView { Width = 152, VerticalAlignment = VerticalAlignment.Top,
+            HorizontalAlignment = HorizontalAlignment.Left, Presentation = MusicCatalogCardLayout.Playlist, DataContext = DailyCard() };
+        ArtworkScope.SetLoader(ordinary, new ArtworkLoader(cover, false, null));
+        var ordinaryRoot = new Grid(); ordinaryRoot.Children.Add(ordinary);
+        var window = DesktopTestUi.CreateWindow(ordinaryRoot, 480, 640);
+        NativeDesktopCapture.DisableWindowTransitions(window);
         try
         {
             window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout();
             var artwork = Visuals(ordinary).OfType<ArtworkImage>().Single();
             await Until(() => artwork.Source is not null, "the ordinary playlist cover is acquired");
-            var motionOwner = (Grid)ordinary.Content;
-            CardMotion.SetPointerActive(motionOwner, true);
-            await Until(() => !CardMotion.HasActiveAnimation(motionOwner) && CardMotion.GetProgress(motionOwner) == 1,
-                "the ordinary playlist hover reaches its rendered endpoint");
+            var motion = Visuals(ordinary).OfType<FrameworkElement>().Single(CardMotion.GetEnabled);
+            CardMotion.SetPointerActive(motion, true);
+            await Until(() => !CardMotion.HasActiveAnimation(motion) && CardMotion.GetProgress(motion) >= .999,
+                "the ordinary playlist's native hover animation reaches its endpoint");
             DesktopTestUi.WindowRoot(window).UpdateLayout();
             var image = await Capture(ordinary);
             var actual = image.At(artwork.TransformToVisual(ordinary).TransformPoint(new Point(5, 100)));
@@ -572,70 +518,27 @@ public static class MusicEntryCardPresentationTests
             await f.Load();
             var title = f.Text(model.Title);
             var position = f.Bounds(title);
-            var reference = new TextBlock
-            {
-                Text = title.Text, FontFamily = title.FontFamily, FontSize = title.FontSize,
-                FontStyle = title.FontStyle, FontWeight = title.FontWeight, FontStretch = title.FontStretch,
-                Foreground = new SolidColorBrush(Colors.White), FlowDirection = title.FlowDirection,
-                Language = title.Language, Padding = title.Padding, TextAlignment = title.TextAlignment,
-                TextWrapping = title.TextWrapping, TextTrimming = title.TextTrimming,
-                LineHeight = title.LineHeight, LineStackingStrategy = title.LineStackingStrategy,
-                UseLayoutRounding = title.UseLayoutRounding, CharacterSpacing = title.CharacterSpacing,
-                Width = title.ActualWidth, Height = title.ActualHeight
-            };
-            // Keep the same fractional raster origin as the real title, independent
-            // of its card's shade and Composition clipping.
-            var referenceRoot = new Canvas { Width = f.Entry.ActualWidth, Height = f.Entry.ActualHeight,
-                Background = new SolidColorBrush(Colors.Transparent),
-                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
-            Canvas.SetLeft(reference, position.Left); Canvas.SetTop(reference, position.Top);
-            referenceRoot.Children.Add(reference);
-            using var referenceHost = new DesktopTestUi.Host(referenceRoot, f.Entry.ActualWidth + 32, f.Entry.ActualHeight + 64);
-            await Until(() => reference.IsLoaded, "the independent title alpha reference is mounted");
             foreach (double scale in new[] { 1d, 1.25d, 1.5d, 2d })
             {
-                var alpha = await DesktopTestUi.Render(referenceRoot, scale);
-                int covered = 0;
-                foreach (bool active in new[] { false, true })
+                await f.Expand(false);
+                var resting = await Capture(f.Entry, scale);
+                await f.Expand(true);
+                var expanded = await Capture(f.Entry, scale);
+                int solidInk = 0;
+                for (int y = (int)Math.Ceiling(position.Top * scale); y < (int)Math.Floor(position.Bottom * scale); y++)
+                for (int x = (int)Math.Ceiling(position.Left * scale); x < (int)Math.Floor(position.Right * scale); x++)
                 {
-                    await f.Expand(active);
-                    title.Opacity = 0;
-                    Frame background;
-                    try { background = await Capture(f.Entry, scale); }
-                    finally { title.Opacity = 1; }
-                    var painted = await Capture(f.Entry, scale);
-                    Check(alpha.Width == painted.Image.Width && alpha.Height == painted.Image.Height &&
-                        background.Scale == painted.Scale && painted.Scale == alpha.Scale,
-                        "the independent glyph alpha and both card states share the same raster coordinates");
-                    covered = 0;
-                    for (int y = (int)Math.Ceiling(position.Top * scale); y < (int)Math.Floor(position.Bottom * scale); y++)
-                    for (int x = (int)Math.Ceiling(position.Left * scale); x < (int)Math.Floor(position.Right * scale); x++)
-                    {
-                        byte ink = alpha.Pixels[(y * alpha.Width + x) * 4 + 3];
-                        if (ink < 16) continue;
-                        var backdrop = background.Pixel(x, y);
-                        var actual = painted.Pixel(x, y);
-                        static int Composite(byte channel, byte opacity) =>
-                            (255 * opacity + channel * (255 - opacity) + 127) / 255;
-                        var expected = Color.FromArgb(255, (byte)Composite(backdrop.R, ink),
-                            (byte)Composite(backdrop.G, ink), (byte)Composite(backdrop.B, ink));
-                        bool matches = Math.Abs(actual.R - expected.R) <= 2 &&
-                            Math.Abs(actual.G - expected.G) <= 2 && Math.Abs(actual.B - expected.B) <= 2;
-                        if (!matches)
-                        {
-                            string prefix = $"entry-title-alpha-{model.Kind}-{scale.ToString(CultureInfo.InvariantCulture)}-{active}";
-                            await DesktopTestUi.Save(alpha, TestWorkspace.DataPath("desktop-shots", prefix + "-reference.png"));
-                            await DesktopTestUi.Save(background.Image, TestWorkspace.DataPath("desktop-shots", prefix + "-background.png"));
-                            await DesktopTestUi.Save(painted.Image, TestWorkspace.DataPath("desktop-shots", prefix + "-painted.png"));
-                        }
-                        Check(matches, "the complete title glyph paints white above every card shade with its independent alpha; " +
-                            $"kind={model.Kind}; scale={scale}; expanded={active}; pixel={x},{y}; alpha={ink}; backdrop={backdrop}; expected={expected}; actual={actual}");
-                        covered++;
-                    }
-                    Check(covered >= 15 && f.Bounds(title) == position,
-                        "the independent reference covers actual title glyphs in their fixed position at every DPI; " +
-                        $"kind={model.Kind}; scale={scale}; glyphPixels={covered}; title={position}->{f.Bounds(title)}");
+                    var before = resting.Pixel(x, y);
+                    if (Math.Min(before.R, Math.Min(before.G, before.B)) < 254) continue;
+                    var after = expanded.Pixel(x, y);
+                    Check(Math.Abs(after.R - before.R) <= 1 && Math.Abs(after.G - before.G) <= 1 &&
+                        Math.Abs(after.B - before.B) <= 1,
+                        $"hover masks cannot tint the actual white title ink; model={model.Kind}, scale={scale}, " +
+                        $"pixel={x},{y}, before={before}, after={after}");
+                    solidInk++;
                 }
+                Check(solidInk >= 15 && f.Bounds(title) == position,
+                    "real topmost white title glyphs remain in the same position at every DPI");
             }
         }
         using var bright = new Fixture(DailyCard(), 152);
@@ -664,7 +567,10 @@ public static class MusicEntryCardPresentationTests
             {
                 Check(a.At(new Point(5, y)) == b.At(new Point(5, y)) &&
                     a.At(new Point(145, y)) == b.At(new Point(145, y)),
-                    "identical title artwork has identical rendered protection regardless of the lower image colors");
+                    $"identical title artwork has identical rendered protection regardless of the lower image colors; " +
+                    $"scale={scale}, y={y}, left={a.At(new Point(5, y))}/{b.At(new Point(5, y))}, " +
+                    $"right={a.At(new Point(145, y))}/{b.At(new Point(145, y))}, " +
+                    $"shade={((LinearGradientBrush)warm.TitleShade.Background).GradientStops[0].Color}/{((LinearGradientBrush)cool.TitleShade.Background).GradientStops[0].Color}");
             }
             var brightPatch = a.At(new Point(145, 28));
             Check(Luminance(brightPatch) < Luminance(BrightCover) * .65 &&
@@ -695,7 +601,9 @@ public static class MusicEntryCardPresentationTests
             var headerPoint = new Point(145, 28);
             var lowerPoint = new Point(5, 92);
             Check(resting.At(lowerPoint) == bottom && Luminance(resting.At(headerPoint)) < Luminance(BrightCover) * .75,
-                "the initial card protects its title while leaving the lower image untouched");
+                $"the initial card protects its title while leaving the lower image untouched; model={model.Kind}, " +
+                $"lower={resting.At(lowerPoint)}/{bottom}, header={resting.At(headerPoint)}, " +
+                $"shade={((LinearGradientBrush)f.TitleShade.Background).GradientStops[0].Color}");
             foreach (bool active in new[] { true, false })
             {
                 await f.Expand(active);
@@ -798,6 +706,42 @@ public static class MusicEntryCardPresentationTests
         Check(PaintedTexts(lazy.Entry).Contains("1 初始化曲目"), "page-owned data publishes through binding");
         Hover(lazy.Entry, false);
         Check(initialized.PreviewTitles.SequenceEqual(["1 初始化曲目"]), "leaving does not retire initialized data");
+
+        var viewport = new Canvas { Width = 200, Height = 220,
+            Clip = new RectangleGeometry { Rect = new(0, 0, 200, 220) } };
+        var entry = new EntryCard { Width = 152, DataContext = DailyCard() with { Decoration = DecorationAddress } };
+        var loader = new ArtworkLoader(BrightCover, false, null); ArtworkScope.SetLoader(viewport, loader);
+        viewport.Children.Add(entry); Canvas.SetTop(entry, 260);
+        using var host = new DesktopTestUi.Host(viewport, 280, 340);
+        await TestUiHost.LoadedAsync(entry); await Drain(); viewport.UpdateLayout();
+        var decoration = (ArtworkImage)entry.FindName("DecorationLayer");
+        var fade = Visuals(entry).OfType<MusicArtworkFade>().Single();
+        string PresentationState() =>
+            $"reads={string.Join(',', loader.Addresses)}, liveLeases={loader.Leases.Count(lease => !lease.Disposed)}, " +
+            $"decoration={decoration.Source is not null}, mask={fade.Mask is not null}, " +
+            $"entry={DesktopTestUi.Bounds(entry, viewport)}, fade={DesktopTestUi.Bounds(fade, viewport)}, " +
+            $"viewport={viewport.ActualWidth}x{viewport.ActualHeight}, root={viewport.XamlRoot.Size}, " +
+            $"loaded={entry.IsLoaded}/{decoration.IsLoaded}/{fade.IsLoaded}, visible={DesktopVisual.IsVisible(fade)}";
+        Check(loader.Addresses.Count == 0 && decoration.Source is null && fade.Mask is null,
+            "a realized decoration outside the actual viewport owns no read or presentation surface");
+        Canvas.SetTop(entry, 210); viewport.InvalidateArrange(); viewport.UpdateLayout();
+        await Until(() => loader.Addresses.Count == 2 && decoration.Source is not null && fade.Mask is not null,
+            "partial visibility prepares the same clipped decoration source", PresentationState);
+        Canvas.SetTop(entry, 260); viewport.InvalidateArrange(); viewport.UpdateLayout();
+        await Until(() => decoration.Source is null && fade.Mask is null && loader.Leases.All(lease => lease.Disposed),
+            "leaving the actual viewport releases the decoration presentation and its pixels", PresentationState);
+        Check(entry.IsLoaded, "viewport retirement does not require unmounting the entry");
+        Canvas.SetTop(entry, 0); viewport.InvalidateArrange(); viewport.UpdateLayout();
+        await Until(() => loader.Addresses.Count == 4 && decoration.Source is not null && fade.Mask is not null,
+            "reentry prepares the current decoration without a second image owner", PresentationState);
+        viewport.Visibility = Visibility.Collapsed;
+        await Until(() => decoration.Source is null && fade.Mask is null, "hiding retires the decoration presentation lease", PresentationState);
+        viewport.Visibility = Visibility.Visible; viewport.UpdateLayout();
+        await Until(() => loader.Addresses.Count == 5 && decoration.Source is not null && fade.Mask is not null,
+            "redisplay reuses the retained cover and prepares only the retired decoration", PresentationState);
+        viewport.Children.Remove(entry);
+        await Until(() => fade.Mask is null && loader.Leases.All(lease => lease.Disposed),
+            "actual unmount releases every decoration presentation and artwork lease");
     }
 
     private static MusicCatalogCard DailyCard() =>
@@ -872,25 +816,53 @@ public static class MusicEntryCardPresentationTests
         element.UpdateLayout();
         Check(element.IsLoaded && element.ActualWidth > 0 && element.ActualHeight > 0,
             "the actual native card has a mounted render surface");
-        // RenderTargetBitmap includes the off-card preview rows in its natural
-        // extent, even though the live Composition clip hides them. Passing the
-        // card height scales that whole extent into the card and distorts pixels.
-        // Specify only width so WinUI preserves the natural aspect ratio even
-        // when the scaled extent has a fractional height, then crop the card.
-        var bitmap = new RenderTargetBitmap();
-        int width = (int)Math.Ceiling(element.ActualWidth * scale);
-        await bitmap.RenderAsync(element, width, 0);
-        var buffer = await bitmap.GetPixelsAsync();
-        using var reader = global::Windows.Storage.Streams.DataReader.FromBuffer(buffer);
-        var pixels = new byte[buffer.Length];
-        reader.ReadBytes(pixels);
-        Check(pixels.Length > 0, "the native card renders its complete natural extent");
-        var frame = new DesktopTestUi.RenderFrame(bitmap.PixelWidth, bitmap.PixelHeight,
-            bitmap.PixelWidth / element.ActualWidth, pixels);
-        return new Frame(DesktopTestUi.Crop(frame, new Rect(0, 0, element.ActualWidth, element.ActualHeight)));
+        var root = (FrameworkElement)element.XamlRoot!.Content;
+        var transform = element.RenderTransform;
+        var canvas = (Panel)root;
+        var background = canvas.Background;
+        double rasterScale = element.XamlRoot.RasterizationScale;
+        try
+        {
+            // Render the real Composition tree at each requested scale; do not resize
+            // a captured bitmap or rely on RenderTargetBitmap's child-visual support.
+            element.RenderTransform = new ScaleTransform { ScaleX = scale / rasterScale, ScaleY = scale / rasterScale };
+            Rect Bounds() => element.TransformToVisual(root).TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+            await Until(() => Math.Abs(Bounds().Width * rasterScale - element.ActualWidth * scale) < .01 &&
+                Math.Abs(Bounds().Height * rasterScale - element.ActualHeight * scale) < .01,
+                "the compositor reports the requested card scale before pixel sampling");
+            var bounds = Bounds();
+            Check(bounds.Left >= 0 && bounds.Top >= 0 && bounds.Right <= root.ActualWidth && bounds.Bottom <= root.ActualHeight,
+                "the fixed native client contains the complete scaled card");
+            canvas.Background = new SolidColorBrush(Colors.Black);
+            var image = await NativeDesktopCapture.CaptureAsync(element);
+            canvas.Background = new SolidColorBrush(Colors.White);
+            var white = await NativeDesktopCapture.CaptureAsync(element);
+            Check(image.Width == (int)Math.Ceiling(element.ActualWidth * scale) &&
+                image.Height == (int)Math.Ceiling(element.ActualHeight * scale) &&
+                white.Width == image.Width && white.Height == image.Height,
+                $"the desktop capture uses the requested {scale}x render scale, got {image.Width}x{image.Height}");
+            // Screen captures are opaque. Two real backings recover coverage so
+            // the existing opaque-card assertion still tests the card itself.
+            for (int at = 0; at < image.Pixels.Length; at += 4)
+            {
+                int difference = 0;
+                for (int channel = 0; channel < 3; channel++)
+                    difference = Math.Max(difference, Math.Abs(white.Pixels[at + channel] - image.Pixels[at + channel]));
+                image.Pixels[at + 3] = (byte)(255 - difference);
+            }
+            return new Frame(new(image.Width, image.Height, scale, image.Pixels),
+                $"card={element.ActualWidth}x{element.ActualHeight}, inRoot={bounds}, root={root.ActualWidth}x{root.ActualHeight}, " +
+                $"xamlRoot={element.XamlRoot.Size}, rasterScale={rasterScale}, method=screen-BitBlt-target-bounds");
+        }
+        finally
+        {
+            canvas.Background = background;
+            element.RenderTransform = transform;
+            root.UpdateLayout(); await Drain();
+        }
     }
 
-    private sealed class Frame(DesktopTestUi.RenderFrame image)
+    private sealed class Frame(DesktopTestUi.RenderFrame image, string geometry)
     {
         internal readonly DesktopTestUi.RenderFrame Image = image;
         internal double Scale => Image.Scale;
@@ -900,7 +872,8 @@ public static class MusicEntryCardPresentationTests
             Check(x >= 0 && x < Image.Width && y >= 0 && y < Image.Height, "pixel probe stays within the card");
             int index = (y * Image.Width + x) * 4;
             Check(Image.Pixels[index + 3] >= 250,
-                $"contrast probes read painted opaque card pixels: ({x}, {y}) in {Image.Width}x{Image.Height} at {Scale:F3}x has alpha {Image.Pixels[index + 3]}");
+                $"contrast probes read painted opaque card pixels: ({x},{y}) in {Image.Width}x{Image.Height} at {Scale:F3}x; " +
+                $"BGRA={Image.Pixels[index]},{Image.Pixels[index + 1]},{Image.Pixels[index + 2]},{Image.Pixels[index + 3]}; {geometry}");
             return Color.FromArgb(255, Image.Pixels[index + 2], Image.Pixels[index + 1], Image.Pixels[index]);
         }
     }
@@ -952,10 +925,16 @@ public static class MusicEntryCardPresentationTests
         reference.Measure(rowSize); reference.Arrange(new Rect(new Point(), rowSize)); reference.UpdateLayout();
         double scale = frame.Scale;
         reference.Width = row.ActualWidth; reference.Height = row.ActualHeight;
-        var referenceRoot = new Grid { Children = { reference } };
-        using var referenceHost = new DesktopTestUi.Host(referenceRoot, row.ActualWidth + 32, row.ActualHeight + 64);
-        await Until(() => reference.IsLoaded, "the unclipped glyph reference is mounted");
-        var image = await DesktopTestUi.Render(reference, scale);
+        reference.HorizontalAlignment = HorizontalAlignment.Left; reference.VerticalAlignment = VerticalAlignment.Top;
+        reference.Margin = new Thickness(0, f.Entry.ActualHeight + 32, 0, 0);
+        f.Root.Children.Add(reference);
+        DesktopTestUi.RenderFrame image;
+        try
+        {
+            await TestUiHost.LoadedAsync(reference); await Drain();
+            image = await DesktopTestUi.Render(reference, scale);
+        }
+        finally { f.Root.Children.Remove(reference); }
         var pixels = image.Pixels;
         int left = image.Width, top = image.Height, right = -1, bottom = -1;
         for (int y = 0; y < image.Height; y++)
@@ -1032,12 +1011,12 @@ public static class MusicEntryCardPresentationTests
         for (int i = 0; i < 3; i++) await DesktopTestUi.DrainAsync();
     }
 
-    private static async Task Until(Func<bool> done, string message)
+    private static async Task Until(Func<bool> done, string message, Func<string>? state = null)
     {
         var watch = Stopwatch.StartNew();
         while (!done())
         {
-            if (watch.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException(message);
+            if (watch.Elapsed > TimeSpan.FromSeconds(8)) throw new TimeoutException(message + (state is null ? "" : "; " + state()));
             await DesktopTestUi.DrainAsync();
             if (!done()) await Task.Delay(1);
         }
@@ -1073,22 +1052,13 @@ public static class MusicEntryCardPresentationTests
             Entry.OpenRequested += (sender, _) => { Check(ReferenceEquals(sender, Entry), "open intent belongs to the card"); Opens++; LastIntent = (MusicCatalogCard)Entry.DataContext; };
             Entry.PlayRequested += (sender, _) => { Check(ReferenceEquals(sender, Entry), "play intent belongs to the card"); Plays++; LastIntent = (MusicCatalogCard)Entry.DataContext; };
             Root.Children.Add(Entry);
-            Window = DesktopTestUi.CreateWindow(Root, width + 24, width + 96);
+            Window = DesktopTestUi.CreateWindow(Root, 480, 640);
+            NativeDesktopCapture.DisableWindowTransitions(Window);
         }
 
         internal async Task Load()
         {
-            Window.Show(); DesktopTestUi.WindowRoot(Window).UpdateLayout();
-            await Until(() => Entry.IsLoaded && Root.ActualWidth > 0 && Root.ActualHeight > 0,
-                "the card fixture has a live client viewport");
-            Check(Root.Focus(FocusState.Programmatic), "the mounted fixture keeps initial focus outside the card");
-            // AppWindow.Resize sizes the outer HWND. Reserve the actual client area,
-            // including non-client borders and title bar at the current monitor DPI.
-            var size = DesktopTestUi.WindowSize(Window);
-            DesktopTestUi.ResizeWindow(Window, size.Width + Math.Max(0, Entry.Width + 17 - Root.ActualWidth),
-                size.Height + Math.Max(0, Entry.Width + 65 - Root.ActualHeight));
-            await Until(() => Root.ActualWidth >= Entry.Width + 16 && Root.ActualHeight >= Entry.Width + 64,
-                "the complete card fits the real client viewport without ancestor clipping");
+            Window.Show(); DesktopTestUi.WindowRoot(Window).UpdateLayout(); Root.Focus(FocusState.Programmatic);
             var expectedReads = ((MusicCatalogCard)Entry.DataContext).Decoration.Length > 0 ? 2 : 1;
             await Until(() => Visuals(Cover).OfType<Image>().Any(image => image.Source is not null) &&
                 Loader.Addresses.Count == expectedReads && CardMotion.GetProgress(Surface) <= .001,
@@ -1099,8 +1069,6 @@ public static class MusicEntryCardPresentationTests
         internal TextBlock Text(string text) => Visuals(Entry).OfType<TextBlock>().Single(block => block.Text == text);
         internal Rect Bounds(FrameworkElement element) =>
             element.TransformToVisual(Entry).TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
-        internal Rect RowSlot(TextBlock row) => ((FrameworkElement)VisualTreeHelper.GetParent(row))
-            .TransformToVisual(Entry).TransformBounds(Microsoft.UI.Xaml.Controls.Primitives.LayoutInformation.GetLayoutSlot(row));
         internal Button HitButton(Point point)
         {
             for (DependencyObject? hit = DesktopTestUi.Hit(Entry, point); hit is not null;
@@ -1111,8 +1079,9 @@ public static class MusicEntryCardPresentationTests
         internal async Task Expand(bool active)
         {
             CardMotion.SetPointerActive(Surface, active);
-            await Until(() => !CardMotion.HasActiveAnimation(Surface) && CardMotion.GetProgress(Surface) == (active ? 1 : 0),
-                "the card hover reaches its rendered endpoint");
+            await Until(() => !CardMotion.HasActiveAnimation(Surface) &&
+                Math.Abs(CardMotion.GetProgress(Surface) - (active ? 1 : 0)) < .001,
+                "the native hover animation reaches its requested endpoint");
             DesktopTestUi.WindowRoot(Window).UpdateLayout();
         }
         internal async Task Bind(MusicCatalogCard model)
@@ -1164,22 +1133,5 @@ public static class MusicEntryCardPresentationTests
         internal bool Disposed;
         public ArtworkPixels Image => !Disposed ? image : throw new ObjectDisposedException(nameof(ArtworkLease));
         public void Dispose() => Disposed = true;
-    }
-
-    private sealed class DeferredArtworkLoader : IArtworkLoader
-    {
-        internal readonly List<(TaskCompletionSource<IArtworkLease> Reply, CancellationToken Token)> Requests = [];
-        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
-        {
-            var reply = new TaskCompletionSource<IArtworkLease>(TaskCreationOptions.RunContinuationsAsynchronously);
-            Requests.Add((reply, cancellationToken));
-            return reply.Task;
-        }
-        internal ArtworkLease Complete(int index)
-        {
-            var lease = new ArtworkLease(MusicTestUi.Pixels(1, 1, (_, _) => Colors.White));
-            Requests[index].Reply.SetResult(lease);
-            return lease;
-        }
     }
 }

@@ -980,15 +980,14 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
             var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-            using var source = new DesktopTestUi.Host(new Grid(), 860, 600);
+            f.Module.Lyrics.Clear();
+            for (var i = 0; i < 80; i++)
+                f.Module.Lyrics.Add(new(i * 2, "连续进度与长行排版 " + i,
+                    i == 40 ? "A translated line that wraps with the lyric viewport width." : ""));
+            using var source = new DesktopTestUi.Host(detail, 860, 600);
             try
             {
-                source.Mount(detail);
-                f.Module.Lyrics.Clear();
-                for (var i = 0; i < 80; i++)
-                    f.Module.Lyrics.Add(new(i * 2, "连续进度与长行排版 " + i,
-                        i == 40 ? "A translated line that wraps with the lyric viewport width." : ""));
-                detail.Measure(new(860, 600)); detail.Arrange(new(0, 0, 860, 600)); detail.UpdateLayout();
+                await TestUiHost.LoadedAsync(detail);
                 await Drain();
                 var list = (MusicLyricList)detail.FindName("LyricList");
                 var scroll = Visuals(list).OfType<ScrollViewer>().First();
@@ -1025,14 +1024,17 @@ public static partial class MusicUiTests
 
                 var hold = System.Diagnostics.Stopwatch.StartNew();
                 True(detail.BrowseLyric(VirtualKey.PageDown), "lyric key owner accepts page navigation");
-                await Task.Delay(250); await Drain();
+                await Until(() => f.Module.HasLyricPreview && !MusicLyricScroll.IsMoving(scroll) &&
+                    Error(f.Module.LyricDisplayIndex) < 2);
                 var previewIndex = f.Module.LyricDisplayIndex;
                 True(f.Module.HasLyricPreview, "keyboard scrolling chooses a middle-line preview");
                 var held = scroll.VerticalOffset;
                 await f.Playback.SeekAsync(20); await Task.Delay(650); await Drain();
                 True(f.Module.HasLyricPreview && f.Module.LyricDisplayIndex == previewIndex, "keyboard preview survives real ticks");
                 True(Math.Abs(scroll.VerticalOffset - held) < 2, "preview and focus do not restart automatic centering");
-                await Task.Delay(2450); await Drain();
+                var remainingHold = TimeSpan.FromSeconds(3.4) - hold.Elapsed;
+                if (remainingHold > TimeSpan.Zero) await Task.Delay(remainingHold);
+                await Drain();
                 True(f.Module.HasLyricPreview, "the manual hold lasts four seconds");
                 await Until(() => !f.Module.HasLyricPreview && Error(10) < 2);
                 True(hold.Elapsed >= TimeSpan.FromSeconds(4) && hold.Elapsed < TimeSpan.FromSeconds(6),
@@ -1040,6 +1042,7 @@ public static partial class MusicUiTests
                 True(Error(10) < 2, "four-second recovery follows the actual line without another media tick");
 
                 await f.Module.StepAsync(true);
+                await f.Module.RestoreLyricsAsync();
                 await Drain();
                 Equal(f.Module.PlaybackPresentationKey, list.PresentationKey);
                 f.Module.Lyrics.Clear();

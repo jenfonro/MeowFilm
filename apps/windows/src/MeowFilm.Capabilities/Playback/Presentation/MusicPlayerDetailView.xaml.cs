@@ -9,7 +9,6 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Dispatching;
-using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
@@ -26,7 +25,7 @@ public partial class MusicPlayerDetailView : UserControl
     private long centerEpoch;
     private Storyboard? needleMotion;
     private bool IsVisible => DesktopVisual.IsVisible(this);
-    private DesktopWindow? window;
+    private IDisposable? visibility;
     private FrameworkElement? centeredRow;
     private bool? needlePlaying;
     private double lyricViewportHeight;
@@ -45,9 +44,20 @@ public partial class MusicPlayerDetailView : UserControl
         ArtworkScope.SetLoader(DetailRecord, module.ArtworkLoader);
         DetailRecord.SetBinding(MusicRecordView.ArtworkIdentityProperty, new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(MusicCapability.CurrentArtworkIdentity)) });
         var footer = new MusicPlayerView(module, showArtwork: false);
-        footer.SetBinding(ForegroundProperty, new Microsoft.UI.Xaml.Data.Binding
-            { Source = this, Path = new PropertyPath(nameof(Foreground)) });
+        foreach (var resource in (ResourceDictionary)Resources["Player.FooterPalette"])
+            footer.Resources[resource.Key] = resource.Value;
         DetailPlayerHost.Content = footer;
+        DesktopTheme.Observe(this, RefreshDetailPalette);
+        foreach (var tab in new[] { LyricsTab, SimilarTab })
+        {
+            bool pointer = false;
+            void Refresh() => RefreshDetailTab(tab, pointer);
+            tab.PointerEntered += (_, _) => { pointer = true; Refresh(); };
+            tab.PointerExited += (_, _) => { pointer = false; Refresh(); };
+            tab.Unloaded += (_, _) => pointer = false;
+            tab.RegisterPropertyChangedCallback(ToggleButton.IsCheckedProperty, (_, _) => Refresh());
+            DesktopTheme.Observe(tab, Refresh);
+        }
         DetailRecord.PaletteUpdated += (_, _) => module.RefreshPlayerAppearance(DetailRecord.PaletteBrush, animate: IsVisible);
         lyricResumeTimer.Tick += (_, _) =>
         {
@@ -72,26 +82,23 @@ public partial class MusicPlayerDetailView : UserControl
             if (e.NewSize.Width != e.PreviousSize.Width) InvalidateLyricCenter();
             UpdateLyricViewport();
         };
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        {
-            if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
-            else { playbackSpacePressed = false; centeredLyric = centeringLyric = -1; StopLyricMotion(); needleMotion?.Stop(); needlePlaying = null; }
-        });
         Loaded += (_, _) =>
         {
             module.PropertyChanged -= OnModuleChanged; module.PropertyChanged += OnModuleChanged;
             module.Lyrics.CollectionChanged -= OnLyricRowsChanged; module.Lyrics.CollectionChanged += OnLyricRowsChanged;
-            window = DesktopWindow.GetWindow(this);
-            if (window is not null) window.VisibilityChanged += WindowVisibilityChanged;
             if (Descendant<ScrollViewer>(LyricList) is { } scroll)
             { scroll.ViewChanged -= OnLyricViewChanged; scroll.ViewChanged += OnLyricViewChanged; }
-            if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
+            visibility?.Dispose();
+            visibility = DesktopVisual.ObserveVisibility(this, visible =>
+            {
+                if (visible) { QueueCenterLyric(); SyncNeedle(); }
+                else { StopLyricMotion(); playbackSpacePressed = false; needleMotion?.Stop(); needlePlaying = null; }
+            });
         };
         Unloaded += (_, _) =>
         {
             module.PropertyChanged -= OnModuleChanged; module.Lyrics.CollectionChanged -= OnLyricRowsChanged;
-            if (window is not null) window.VisibilityChanged -= WindowVisibilityChanged;
-            window = null;
+            visibility?.Dispose(); visibility = null;
             playbackSpacePressed = false;
             StopLyricMotion();
             needleMotion?.Stop(); needleMotion = null;
@@ -102,19 +109,47 @@ public partial class MusicPlayerDetailView : UserControl
         RefreshTranslation();
     }
 
-    private void WindowVisibilityChanged(object? sender, EventArgs e)
+    private void RefreshDetailPalette()
     {
-        if (IsVisible) { QueueCenterLyric(); SyncNeedle(); }
-        else { StopLyricMotion(); playbackSpacePressed = false; needleMotion?.Stop(); needlePlaying = null; }
+        bool contrast = DesktopTheme.GetIsHighContrast(this);
+        var settings = new global::Windows.UI.ViewManagement.UISettings();
+        ((SolidColorBrush)Resources["Player.DetailText"]).Color = contrast ? settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
+            global::Windows.UI.Color.FromArgb(255, 235, 234, 237);
+        Foreground = (Brush)Resources["Player.DetailText"];
+        DetailMetadata.Opacity = contrast ? 1 : .68;
+        if (contrast) PageBackdrop.Background = new SolidColorBrush(settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window));
+        else MusicVisuals.Bind(PageBackdrop, Border.BackgroundProperty, nameof(MusicCapability.PlayerBackground), module);
     }
+    private static void RefreshDetailTab(RadioButton tab, bool pointer)
+    {
+        bool selected = tab.IsChecked == true;
+        if (DesktopTheme.GetIsHighContrast(tab))
+        {
+            var settings = new global::Windows.UI.ViewManagement.UISettings();
+            tab.Foreground = new SolidColorBrush(settings.UIElementColor(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText));
+            tab.Background = new SolidColorBrush(settings.UIElementColor(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window));
+        }
+        else
+        {
+            tab.Foreground = MusicVisuals.Brush(selected ? "#F3F1F4" : "#9B969B");
+            tab.Background = MusicVisuals.Brush(pointer ? "#10FFFFFF" : selected ? "#18FFFFFF" : "#00000000");
+        }
+    }
+
     internal bool BrowseLyric(VirtualKey key)
     {
         if (!IsVisible || Descendant<ScrollViewer>(LyricList) is not { } scroll) return false;
+        if (key is VirtualKey.Home or VirtualKey.End)
+        {
+            if (module.Lyrics.Count == 0) return false;
+            BrowseLyrics(scroll, 0, key == VirtualKey.Home ? 0 : module.Lyrics.Count - 1);
+            return true;
+        }
         double? distance = key switch
         {
             VirtualKey.Up => -48, VirtualKey.Down => 48,
             VirtualKey.PageUp => -scroll.ViewportHeight, VirtualKey.PageDown => scroll.ViewportHeight,
-            VirtualKey.Home => -scroll.ScrollableHeight, VirtualKey.End => scroll.ScrollableHeight, _ => null
+            _ => null
         };
         if (distance is null) return false;
         BrowseLyrics(scroll, distance.Value); return true;
@@ -305,7 +340,7 @@ public partial class MusicPlayerDetailView : UserControl
             needleMotion = MusicVisuals.AnimateDouble(NeedleRotation, "Angle", from, NeedleRotation.Angle, TimeSpan.FromMilliseconds(450));
     }
 
-    private void BrowseLyrics(ScrollViewer scroll, double distance)
+    private void BrowseLyrics(ScrollViewer scroll, double distance, int? index = null)
     {
         // Accumulate wheel input against the unfinished manual destination.
         var target = MusicLyricScroll.ManualTarget(scroll) + distance;
@@ -315,6 +350,14 @@ public partial class MusicPlayerDetailView : UserControl
         centeredLyric = centeringLyric = -1;
         lyricResumeTimer.Stop();
         lyricResumeTimer.Start();
+        if (index is { } rowIndex)
+        {
+            MusicLyricScroll.Stop(scroll);
+            snappingLyric = true;
+            module.PreviewLyric(module.Lyrics[rowIndex]);
+            SnapLyricPreview(scroll, rowIndex);
+            return;
+        }
         var epoch = lyricMotionEpoch;
         MusicLyricScroll.MoveManual(scroll, target, () =>
         {
@@ -332,8 +375,8 @@ public partial class MusicPlayerDetailView : UserControl
         var middle = scroll.ViewportHeight / 2;
         foreach (FrameworkElement item in panel.Children)
         {
-            if (item.DataContext is not MusicLyricRow row ||
-                LyricList.IndexFromContainer(item) < 0) continue;
+            int index = LyricList.IndexFromContainer(item);
+            if (index < 0 || LyricList.Items[index] is not MusicLyricRow row) continue;
             var bounds = item.TransformToVisual(scroll).TransformPoint(new Point());
             var gap = Math.Abs(bounds.Y + item.ActualHeight / 2 - middle);
             if (gap >= distance) continue;
@@ -361,21 +404,22 @@ public partial class MusicPlayerDetailView : UserControl
             if (epoch != centerEpoch) return;
             centerRequest = false;
             if (IsLoaded && IsVisible && module.HasLyricPreview &&
-                Descendant<ScrollViewer>(LyricList) is { } scroll) SnapLyricPreview(scroll);
+                Descendant<ScrollViewer>(LyricList) is { } scroll && !MusicLyricScroll.IsMoving(scroll))
+                SnapLyricPreview(scroll);
         });
     }
 
-    private void SnapLyricPreview(ScrollViewer scroll)
+    private void SnapLyricPreview(ScrollViewer scroll, int? requestedIndex = null)
     {
         if (!module.HasLyricPreview) return;
-        UpdateLyricPreview(scroll);
-        var index = module.LyricDisplayIndex;
-        if (LyricList.ContainerFromIndex(index) is not FrameworkElement row) return;
+        if (requestedIndex is null) UpdateLyricPreview(scroll);
+        var index = requestedIndex ?? module.LyricDisplayIndex;
+        snappingLyric = true;
+        if (RealizeLyric(index) is not { } row) { snappingLyric = false; return; }
         UpdatePreviewFrame();
         var correction = row.TransformToVisual(scroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y -
             scroll.ViewportHeight * .5;
         var epoch = ++lyricMotionEpoch;
-        snappingLyric = true;
         MusicLyricScroll.MoveManual(scroll, scroll.VerticalOffset + correction, () =>
         {
             if (epoch != lyricMotionEpoch || !module.HasLyricPreview) return;

@@ -20,7 +20,7 @@ export function createMutations() {
     async 'vip.banner'(c) {
       if (c.platform !== 'wy') fail('UNSUPPORTED');
       c.accountRequired();
-      const raw = await c.wy('/api/vipnewcenter/app/resource/common/list', { positionType: 16 }, false, { vip: true });
+      const raw = await c.wy('/api/vipnewcenter/app/resource/common/list', { positionType: 16 }, false, { vip: true, dataStatus: true });
       for (const value of rows(raw.data?.contentList ?? [])) {
         let row;
         try { row = typeof value === 'string' ? decodeJSON(Buffer.from(value)) : value; }
@@ -34,7 +34,7 @@ export function createMutations() {
       if (c.platform !== 'wy') fail('UNSUPPORTED');
       c.accountRequired();
       return settleWrite(c, async callbacks => {
-        const raw = await c.wy('/api/vip-center-bff/task/sign', {}, true, callbacks);
+        const raw = await c.wy('/api/vip-center-bff/task/sign', {}, true, { ...callbacks, dataStatus: true });
         if (!raw.data) fail('INVALID_RESPONSE');
         return {};
       });

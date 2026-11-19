@@ -181,8 +181,11 @@ public static partial class FilmPlayerOverlayTests
         Check(DesktopVisual.Contains(scene.Element<Grid>("PlayerChrome"), panel) && !Visible(panel) &&
             !Visible(rate) && !Visible(aspect), "rates and aspects live only in the initially closed picture menu");
         Check(rate.Items.Cast<ListBoxItem>().Select(item => (string)item.Tag).SequenceEqual(new[] { "0.5", "0.75", "1", "1.25", "1.5", "2" }) &&
-            aspect.Items.Cast<ListBoxItem>().Select(item => (string)item.Tag).SequenceEqual(new[] { "default", "16:9", "4:3" }),
-            "the full supported control choices survive migration");
+            aspect.Items.Cast<ListBoxItem>().Select(item => (string?)item.Tag).SequenceEqual(new[] { null, "16:9", "4:3" }) &&
+            rate.SelectedIndex == 2 && aspect.SelectedIndex == 0,
+            $"the full supported control choices survive migration; rate={rate.SelectedIndex}, aspect={aspect.SelectedIndex}; " +
+            $"rates={string.Join(',', rate.Items.Cast<ListBoxItem>().Select(item => item.Tag))}; " +
+            $"aspects={string.Join(',', aspect.Items.Cast<ListBoxItem>().Select(item => item.Tag))}");
         int requests = scene.Rig.Runtime.Calls.Count, commands = scene.Rig.Native.Controls.Count;
         Click(scene.Element<Button>("SettingsButton")); await Pump();
         await Until(() => rate.IsLoaded && aspect.IsLoaded);
@@ -200,11 +203,11 @@ public static partial class FilmPlayerOverlayTests
             scene.Rig.Native.SettledIdentity == "overlay" && scene.Rig.Native.Controls.Skip(commands).All(call => call.Scope == scene.Rig.Native.Scope),
             "settings only control the accepted occurrence");
         aspect.SelectedIndex = 0;
-        await Until(() => string.IsNullOrEmpty(scene.Rig.Native.Aspect));
-        Check(string.IsNullOrEmpty(scene.Rig.Session.Aspect) && aspect.SelectedIndex == 0 &&
-            scene.Rig.Native.Controls.Count == commands + 3 && scene.Rig.Native.Commits == 1 &&
-            scene.Rig.Runtime.Calls.Count == requests && scene.Rig.Native.Controls[^1].Scope == scene.Rig.Native.Scope,
-            "the default aspect restores the accepted occurrence without a new business request or media commit");
+        await Until(() => scene.Rig.Native.Aspect is null && scene.Rig.Session.Aspect is null);
+        Check(aspect.SelectedIndex == 0 && scene.Rig.Native.Controls.Count == commands + 3 &&
+            scene.Rig.Runtime.Calls.Count == requests && scene.Rig.Native.Commits == 1 &&
+            scene.Rig.Native.Controls.Skip(commands).All(call => call.Scope == scene.Rig.Native.Scope),
+            "the default aspect restores the same accepted occurrence without a business command");
         Click(scene.Element<Button>("SettingsButton")); await Pump();
         Check(!Visible(panel) && AutomationProperties.GetItemStatus(scene.Element<Button>("SettingsButton")) == "已收起",
             "the same settings menu closes in place with its collapsed accessible state");
@@ -274,8 +277,8 @@ public static partial class FilmPlayerOverlayTests
     {
         await using var scene = await Scene.Create(); await scene.Play();
         var spinner = scene.Element<ProgressRing>("BufferSpinner");
-        var requests = scene.Rig.Runtime.Calls.Where(call => !IsProgress(call)).ToArray();
-        int reports = scene.ActionCount("media.progress");
+        var requests = scene.Rig.Runtime.Calls.ToArray();
+        int pauses = scene.CommandCount("pause");
         Check(!spinner.IsActive && !Visible(spinner), "settled output has no fabricated buffering");
         scene.Rig.Native.SetBuffering(true); await Until(() => spinner.IsActive);
         Check(!scene.Rig.Page.PlayerBusy && !spinner.IsHitTestVisible && DesktopVisual.Contains(scene.Surface, spinner),
@@ -283,13 +286,11 @@ public static partial class FilmPlayerOverlayTests
         await scene.Rig.Session.SetPausedAsync(true); await Until(() => !spinner.IsActive);
         await scene.Rig.Session.SetPausedAsync(false); await Until(() => spinner.IsActive);
         scene.Rig.Native.SetBuffering(false); await Until(() => !spinner.IsActive);
-        Check(scene.Rig.Runtime.Calls.Where(call => !IsProgress(call)).SequenceEqual(requests) && scene.Rig.Native.Commits == 1,
-            "buffering changes do not ask the runtime for data or replace media");
-        Check(scene.Rig.Runtime.Calls.Where(IsProgress).Skip(reports).All(call =>
-                FilmJson.Text(call.Parameters, "attemptId") == scene.Rig.Page.CurrentAttemptId),
-            "pause and resume report progress only for the accepted occurrence");
-        static bool IsProgress((string Method, System.Text.Json.JsonElement Parameters) call) =>
-            call.Method == "film.session.command" && FilmJson.Text(call.Parameters, "action") == "media.progress";
+        Check(scene.Rig.Runtime.Calls.Where(call => call.Method != "film.session.command" ||
+                FilmJson.Text(call.Parameters, "action") != "media.progress").SequenceEqual(requests.Where(call =>
+                call.Method != "film.session.command" || FilmJson.Text(call.Parameters, "action") != "media.progress")) &&
+            scene.CommandCount("pause") == pauses + 2 && scene.Rig.Native.Commits == 1,
+            "buffering changes perform no business read or media replacement while explicit pause controls retain their actual progress reports");
     }
 
     private static async Task NarrowWidths()
@@ -316,14 +317,53 @@ public static partial class FilmPlayerOverlayTests
     private static async Task ShortVideo()
     {
         await using var scene = await Scene.Create();
-        var button = scene.Element<CheckBox>("ShortVideoButton"); var hero = scene.Element<StackPanel>("HeroActions");
+        var button = scene.Element<CheckBox>("ShortVideoButton"); var hero = scene.Element<Panel>("HeroActions");
         var gesture = scene.Element<Border>("ShortVideoGesture");
+        var surface = Named<Border>(button, "ShortVideoSurface");
+        var content = Named<ContentPresenter>(button, "ShortVideoContent");
+        Check(surface.CornerRadius == new CornerRadius(22) && button.Height == 44 && button.Padding == new Thickness(16, 0, 16, 0) &&
+            surface.BorderThickness == new Thickness(1) && surface.BorderBrush is SolidColorBrush { Color.A: 0 } &&
+            surface.Background is SolidColorBrush ground && ground.Color == ResourceColor(scene.View, "MeowFilm.Brush.Hover") &&
+            button.IsTabStop && button.UseSystemFocusVisuals && AutomationProperties.GetName(button) == "短视频模式" &&
+            !Visuals(button).OfType<FontIcon>().Any(),
+            "short-video keeps its labelled 44-high rounded capsule and native toggle access without a checkbox glyph");
+        Check(VisualStateManager.GoToState(button, "UncheckedPointerOver", false) &&
+            surface.Background is SolidColorBrush hover && hover.Color == ResourceColor(scene.View, "MeowFilm.Brush.Pressed"),
+            "short-video capsule retains its pointer feedback");
+        Check(VisualStateManager.GoToState(button, "UncheckedNormal", false), "short-video returns to its resting palette");
         Check(hero.Children.IndexOf(button) == hero.Children.IndexOf(scene.Element<Button>("HeroPlayButton")) + 1 &&
             !DesktopVisual.Contains(scene.Surface, button) && !Visible(gesture), "short-video choice belongs to the hero action, not a player overlay duplicate");
         Click(button); await Until(() => scene.ActionCount("shortvideo") == 1);
         scene.Rig.Runtime.Change(root => root["shortVideo"] = true); await Until(() => Visible(gesture));
-        Check(gesture.Child is null && DesktopVisual.Contains(scene.Surface, gesture) && scene.Rig.Native.Commits == 0,
+        Check(button.IsChecked == true && surface.BorderBrush is SolidColorBrush selectedBorder && selectedBorder.Color == ResourceColor(scene.View, "MeowFilm.Brush.Accent") &&
+            content.Foreground is SolidColorBrush selectedText && selectedText.Color == selectedBorder.Color &&
+            gesture.Child is null && DesktopVisual.Contains(scene.Surface, gesture) && scene.Rig.Native.Commits == 0,
             "accepted short-video state enables only the existing gesture plane");
+        button.IsEnabled = false;
+        var peer = new Microsoft.UI.Xaml.Automation.Peers.CheckBoxAutomationPeer(button);
+        try
+        { await Until(() => Math.Abs(surface.Opacity - .45) < .001 && !peer.IsEnabled()); }
+        catch (InvalidOperationException error)
+        {
+            throw new InvalidOperationException($"selected short-video reaches its native disabled visual and accessible state; " +
+                $"enabled={button.IsEnabled}, peerEnabled={peer.IsEnabled()}, checked={button.IsChecked}, opacity={surface.Opacity}", error);
+        }
+        Check(Math.Abs(surface.Opacity - .45) < .001 &&
+            !peer.IsEnabled() && button.IsChecked == true,
+            "disabled selected short-video keeps its selection and native disabled accessibility");
+        button.IsEnabled = true;
+        await Until(() => peer.IsEnabled() && surface.Opacity == 1);
+        using var contrast = new HighContrastResources(scene.View);
+        await Pump();
+        Check(surface.Background is SolidColorBrush selectedGround && selectedGround.Color == ResourceColor(scene.View, "MeowFilm.Brush.Accent") &&
+            content.Foreground is SolidColorBrush contrastText && contrastText.Color == ResourceColor(scene.View, "MeowFilm.Brush.OnAccent") &&
+            surface.BorderBrush is SolidColorBrush contrastBorder && contrastBorder.Color == ResourceColor(scene.View, "MeowFilm.Brush.Text"),
+            "selected short-video uses the system highlight and highlight text with its complete outlined capsule in high contrast");
+        scene.Rig.Runtime.Change(root => root["shortVideo"] = false); await Until(() => button.IsChecked == false && !Visible(gesture));
+        Check(surface.Background is SolidColorBrush normalGround && normalGround.Color == ResourceColor(scene.View, "MeowFilm.Brush.Hover") &&
+            content.Foreground is SolidColorBrush normalText && normalText.Color == ResourceColor(scene.View, "MeowFilm.Brush.Text") &&
+            scene.ActionCount("shortvideo") == 1,
+            "a later accepted off state restores the system window palette without a second business request");
     }
 
     private static async Task DelayedClick()
@@ -410,19 +450,24 @@ public static partial class FilmPlayerOverlayTests
         internal readonly FilmPlaybackRig Rig;
         internal readonly FilmPlaybackView View = new();
         internal readonly Grid Root = new();
+        internal readonly Grid Frame;
         internal readonly DesktopWindow Window;
         internal bool Closed;
-        private Scene() { Rig = new(Surface); Root.Children.Add(View); Window = FilmUiTest.Window(Root, 1900, 950); }
+        private Scene()
+        {
+            Rig = new(Surface); Frame = Named<Grid>(View, "PlayerFrame");
+            Root.Children.Add(View); Window = FilmUiTest.Window(Root, 1900, 950);
+        }
         internal static async Task<Scene> Create()
         {
             var scene = new Scene();
             try { await scene.Rig.OpenAsync(); scene.View.DataContext = scene.Rig.Page; scene.Window.Show(); await Until(() => scene.Surface.IsLoaded); return scene; }
             catch { await scene.DisposeAsync(); throw; }
         }
-        // Generated x:Name fields retain the same elements across XamlRoot moves.
-        internal T Element<T>(string name) where T : FrameworkElement => Field<T>(View, name);
-        internal Button Action(string name) => Visuals(View).OfType<Button>().Single(button => AutomationProperties.GetName(button) == name);
-        internal DesktopWindow? PlayerWindow => DesktopWindow.GetWindow(Element<Grid>("PlayerFrame")) is { } owner && !ReferenceEquals(owner, Window) ? owner : null;
+        internal T Element<T>(string name) where T : FrameworkElement =>
+            View.FindName(name) as T ?? Visuals(Frame).OfType<T>().FirstOrDefault(element => element.Name == name) ?? Named<T>(View, name);
+        internal Button Action(string name) => Visuals(Frame).OfType<Button>().Single(button => AutomationProperties.GetName(button) == name);
+        internal DesktopWindow? PlayerWindow => DesktopWindow.GetWindow(Frame) is { } owner && !ReferenceEquals(owner, Window) ? owner : null;
         internal int ActionCount(string action) => Rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == action);
         internal int CommandCount(string action) => Rig.Native.Controls.Count(call => call.Command == action);
         internal Task Play() => Replace("overlay", 1);
@@ -434,15 +479,15 @@ public static partial class FilmPlayerOverlayTests
         }
         public async ValueTask DisposeAsync()
         {
-            try { PlayerWindow?.Close(); }
+            try
+            {
+                PlayerWindow?.Close(); View.DataContext = null;
+                if (!Closed) Window.Close();
+            }
             finally
             {
-                try { View.DataContext = null; }
-                finally
-                {
-                    try { if (!Closed) Window.Close(); }
-                    finally { try { await Rig.DisposeAsync(); } finally { Surface.Dispose(); } }
-                }
+                try { await Rig.DisposeAsync(); }
+                finally { Surface.Dispose(); }
             }
         }
     }

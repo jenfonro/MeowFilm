@@ -17,51 +17,44 @@ public sealed partial class NovelView
     private const string StackIcon = "M3,7 L12,3 21,7 12,11 Z M3,12 L12,16 21,12 M3,17 L12,21 21,17";
     private long shownDiscoveryFailure;
     private bool showingDiscoveryFailure, changingDiscoveryShelf;
-    private (string Id, DependencyObject? Previous)? discoveryFocus;
+    private (string Id, DependencyObject? DisplacedFocus)? discoveryFocus;
     private NovelDiscoveryChannelBar? discoveryChannelBar;
 
     private void AddDiscoveryTheme() => Resources.MergedDictionaries.Add(new()
         { Source = new Uri(DiscoveryThemeUri) });
 
-    private void RememberDiscoveryFocus()
+    private string? CaptureDiscoveryFocus()
     {
         var focused = DesktopVisual.Focused(this);
-        for (var node = focused as DependencyObject; node is not null;
-            node = VisualTreeHelper.GetParent(node))
+        if (discoveryFocus is { } pending && ReferenceEquals(focused, pending.DisplacedFocus)) return pending.Id;
+        for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
         {
             Control? control = node is ComboBox or RadioButton ? (Control)node :
                 node is ComboBoxItem item ? ItemsControl.ItemsControlFromItemContainer(item) as ComboBox : null;
             if (control is null || !DesktopVisual.Contains(body, control)) continue;
             string id = AutomationProperties.GetAutomationId(control);
             if (!id.StartsWith("novel.discovery.", StringComparison.Ordinal)) continue;
-            discoveryFocus = (id, focused); return;
+            return id.EndsWith(".expanded", StringComparison.Ordinal) ? id[..^".expanded".Length] : id;
         }
-        if (discoveryFocus is { } remembered && !CanRestoreDiscoveryFocus(remembered.Previous)) ClearDiscoveryFocus();
+        return null;
     }
-    private void ClearDiscoveryFocus()
+    private void RestoreDiscoveryFocus(ScrollViewer replacement, string id)
     {
-        discoveryFocus = null; body.IsTabStop = false;
-    }
-    private void ParkDiscoveryFocus()
-    {
-        if (discoveryFocus is null || !DesktopVisual.ContainsFocus(body)) return;
-        // Preserve focus on the stable owner while WinUI unloads the old
-        // selection controls instead of advancing it to an unrelated button.
-        body.IsTabStop = true; body.Focus(FocusState.Programmatic);
-    }
-    private bool CanRestoreDiscoveryFocus(DependencyObject? previous)
-    {
-        var focused = DesktopVisual.Focused(this);
-        return focused is null || ReferenceEquals(focused, previous) || ReferenceEquals(focused, this) ||
-            ReferenceEquals(focused, body) || ReferenceEquals(focused, body.Content) || ReferenceEquals(focused, DesktopWindow.GetWindow(this));
-    }
-    private void RestoreDiscoveryFocus()
-    {
-        if (discoveryFocus is not { } remembered) return;
-        if (!DesktopVisual.IsVisible(this) || !CanRestoreDiscoveryFocus(remembered.Previous)) { ClearDiscoveryFocus(); return; }
-        if (!IsLoaded || body.Content is not FrameworkElement { IsLoaded: true }) return;
-        var target = FindDiscoveryFocus(body, remembered.Id);
-        if (target is { IsLoaded: true } && target.Focus(FocusState.Programmatic)) ClearDiscoveryFocus();
+        var displaced = DesktopVisual.Focused(this);
+        discoveryFocus = (id, displaced);
+        replacement.Loaded += Mounted;
+        void Mounted(object sender, RoutedEventArgs e)
+        {
+            replacement.Loaded -= Mounted;
+            replacement.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+            {
+                if (!ReferenceEquals(body.Content, replacement) || discoveryFocus is not { } pending) return;
+                discoveryFocus = null;
+                if (!DesktopVisual.IsVisible(replacement) ||
+                    DesktopVisual.Focused(this) is { } focused && !ReferenceEquals(focused, pending.DisplacedFocus)) return;
+                FindDiscoveryFocus(replacement, pending.Id)?.Focus(FocusState.Programmatic);
+            });
+        }
     }
     private static Control? FindDiscoveryFocus(DependencyObject parent, string id)
     {
@@ -162,7 +155,6 @@ public sealed partial class NovelView
             Width = 154, MaxDropDownHeight = 300, Margin = new(0, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center };
         sources.UseResource(StyleProperty, "Novel.Discovery.Source");
         AutomationProperties.SetName(sources, "发现书源"); AutomationProperties.SetAutomationId(sources, "novel.discovery.source");
-        sources.Loaded += (_, _) => RestoreDiscoveryFocus();
         sources.SelectionChanged += (_, _) =>
         {
             if (sources.SelectedItem is NovelSource source && source != module.ExploreSource && NovelCapability.CanExplore(source))
@@ -195,11 +187,17 @@ public sealed partial class NovelView
         var tab = new RadioButton { Content = title, IsChecked = selected, GroupName = "novel.discovery.channels" };
         tab.UseResource(StyleProperty, "Novel.Discovery.Tab");
         AutomationProperties.SetName(tab, title); AutomationProperties.SetAutomationId(tab, id);
-        tab.Loaded += (_, _) => RestoreDiscoveryFocus();
+        var route = module.Route;
+        var source = module.ExploreSource;
         tab.Checked += (_, _) =>
         {
-            if (kind.Url != module.ExploreKind?.Url)
-                module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
+            // Finish the checked/overflow gesture before publishing a replacement page.
+            tab.DispatcherQueue.TryEnqueue(() =>
+            {
+                if (module.Route == route && module.ExploreSource == source && DesktopVisual.Contains(body, tab) &&
+                    tab.IsChecked == true && kind.Url != module.ExploreKind?.Url)
+                    module.RunUi(ct => module.LoadDiscoveryAsync(source, kind, false, ct));
+            });
         };
         return tab;
     }
@@ -311,7 +309,6 @@ public sealed partial class NovelView
             choice.UseResource(StyleProperty, "Novel.Discovery.Choice");
             AutomationProperties.SetName(choice, kind.Title);
             AutomationProperties.SetAutomationId(choice, "novel.discovery.kind:" + kind.Url);
-            choice.Loaded += (_, _) => RestoreDiscoveryFocus();
             choice.Checked += (_, _) =>
             {
                 if (kind.Url != module.ExploreKind?.Url)

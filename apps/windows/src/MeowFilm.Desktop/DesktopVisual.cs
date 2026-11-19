@@ -19,6 +19,7 @@ public static class DesktopVisual
     }
     public static bool IsVisible(UIElement element)
     {
+        if (element is FrameworkElement { IsLoaded: false }) return false;
         for (DependencyObject? node = element; node is not null; node = VisualTreeHelper.GetParent(node))
             if (node is UIElement { Visibility: Visibility.Collapsed }) return false;
         return element.XamlRoot?.IsHostVisible == true;

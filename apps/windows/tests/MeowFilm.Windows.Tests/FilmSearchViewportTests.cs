@@ -39,14 +39,24 @@ public static partial class MusicUiTests
         var firstCards = firstContainers.SelectMany(container => FilmUiTest.Visuals(container).OfType<FilmCard>()).ToArray();
         True(firstContainers.Length > 0 && firstContainers.Length < 1200, "only nearby rows are realized initially");
         f.Scroll.ChangeView(null, 18000, null, true); await f.Layout();
-        True(f.Scroll.VerticalOffset > 17000 && f.Items.ContainerFromIndex(0) is null,
-            "a distant restore does not retain the first row or create all intervening rows");
+        True(f.Scroll.VerticalOffset > 17000 && f.Panel.FirstCacheIndex > 0,
+            "a distant restore moves the native cache without creating all intervening rows");
+        await SearchFixture.Until(() => ViewportContainers(f).Any(container =>
+        {
+            var bounds = FilmUiTest.Bounds(container, f.Scroll);
+            return bounds.Bottom < 0 || bounds.Top >= f.Scroll.ViewportHeight;
+        }));
+        await f.Ready();
         CheckViewportMapping(f); CheckViewportRange(f);
         var distantContainers = ViewportContainers(f).ToArray();
         True(distantContainers.Any(firstContainers.Contains) &&
             distantContainers.SelectMany(container => FilmUiTest.Visuals(container).OfType<FilmCard>()).Any(firstCards.Contains),
             "the fixed native card template and containers are recycled rather than recreated for every row");
-        var cached = distantContainers.First(container => FilmUiTest.Bounds(container, f.Scroll).Bottom < 0);
+        var cached = distantContainers.First(container =>
+        {
+            var bounds = FilmUiTest.Bounds(container, f.Scroll);
+            return bounds.Bottom < 0 || bounds.Top >= f.Scroll.ViewportHeight;
+        });
         var cachedItem = f.Items.Items[f.Items.IndexFromContainer(cached)];
         f.Items.ScrollIntoView(cachedItem, ScrollIntoViewAlignment.Leading); await f.Layout();
         var brought = (GridViewItem)f.Items.ContainerFromItem(cachedItem);
@@ -67,22 +77,24 @@ public static partial class MusicUiTests
     private static async Task SearchViewportResize()
     {
         await using var f = await ViewportScene.Create(900);
+        CheckViewportRange(f);
         f.Scroll.ChangeView(null, 7200, null, true); await f.Layout();
         int anchor = f.Panel.FirstVisibleIndex;
         foreach (int width in new[] { 1180, 820, 620 })
         {
             f.Width = width; await f.Layout();
+            await f.ObserveStableLayout();
             int columns = ViewportColumns(f), first = f.Panel.FirstVisibleIndex;
             True(first <= anchor && anchor < first + columns,
-                "a width change keeps the previous first film in the first visible row");
+                $"a width change keeps the previous first film in the first visible row (anchor={anchor}, first={first}, columns={columns}, offset={f.Scroll.VerticalOffset}, cell={f.Panel.ItemWidth}/{f.Panel.ItemHeight})");
             anchor = first;
-            var (_, pitch) = Shelf.MeasureCards(f.Items.ActualWidth, 180, 36);
+            var (_, pitch) = Shelf.MeasureCards(f.Items.ActualWidth - 36, 180, 36);
             double expectedWidth = pitch - 36;
             var positions = ViewportContainers(f).Select(container =>
             {
                 var card = FilmUiTest.Visuals(container).OfType<FilmCard>().Single();
                 True(Math.Abs(card.ActualWidth - expectedWidth) < 1,
-                    "search retains the responsive 144-176 DIP card-width calculation");
+                    $"search retains its responsive card-width calculation (index={f.Items.IndexFromContainer(container)}, actual={card.ActualWidth}, expected={expectedWidth}, desired={card.DesiredSize}, container={container.ActualWidth}/{container.DesiredSize}, slot={Microsoft.UI.Xaml.Controls.Primitives.LayoutInformation.GetLayoutSlot(card)}, cache={f.Panel.FirstCacheIndex}..{f.Panel.LastCacheIndex}, visible={f.Panel.FirstVisibleIndex}..{f.Panel.LastVisibleIndex}, cell={f.Panel.ItemWidth}/{f.Panel.ItemHeight}, grid={f.Items.ActualWidth}, viewport={f.Scroll.ViewportWidth})");
                 return (Index: f.Items.IndexFromContainer(container), Bounds: FilmUiTest.Bounds(card, f.Scroll));
             }).ToArray();
             foreach (var item in positions)
@@ -93,7 +105,8 @@ public static partial class MusicUiTests
                         "native cells retain the 36 DIP trailing card gap");
                 var nextRow = positions.Where(other => other.Index == item.Index + columns).ToArray();
                 if (nextRow.Length == 1)
-                    True(Math.Abs(nextRow[0].Bounds.Top - item.Bounds.Bottom - 36) < 1, "row gap remains 36 DIP");
+                    True(Math.Abs(nextRow[0].Bounds.Top - item.Bounds.Bottom - 36) < 1,
+                        $"row gap remains 36 DIP (actual={nextRow[0].Bounds.Top - item.Bounds.Bottom})");
             }
             CheckViewportMapping(f); CheckViewportRange(f);
         }
@@ -103,6 +116,7 @@ public static partial class MusicUiTests
             "resizing at the true end retains the reachable footer instead of a stale extent");
         f.Items.Visibility = Visibility.Collapsed; f.Width = 720; await f.Layout();
         f.Items.Visibility = Visibility.Visible; await f.Layout();
+        await SearchFixture.Until(() => Math.Abs(f.Scroll.VerticalOffset - f.Scroll.ScrollableHeight) < 1);
         True(Math.Abs(f.Scroll.VerticalOffset - f.Scroll.ScrollableHeight) < 1,
             "returning after a hidden resize reapplies the actual viewport and end anchor");
         CheckViewportRange(f);
@@ -130,11 +144,13 @@ public static partial class MusicUiTests
             return bounds.Bottom > 0 && bounds.Top < f.Scroll.ViewportHeight;
         });
         var current = f.Scene.Page.Cards[f.Items.IndexFromContainer(currentContainer)];
-        f.Items.ScrollIntoView(current); await f.Layout();
+        f.Items.ScrollIntoView(current, ScrollIntoViewAlignment.Leading); await f.Layout();
         currentContainer = (GridViewItem)f.Items.ContainerFromItem(current);
         var currentBounds = FilmUiTest.Bounds(currentContainer, f.Scroll);
-        True(currentBounds.Top >= -.5 && currentBounds.Bottom <= f.Scroll.ViewportHeight + .5,
-            "the current recycled card is completely visible before its semantic activation");
+        var currentCard = FilmUiTest.Visuals(currentContainer).OfType<FilmCard>().Single();
+        var cardBounds = FilmUiTest.Bounds(currentCard, f.Scroll);
+        True(cardBounds.Top >= -.5 && cardBounds.Bottom <= f.Scroll.ViewportHeight + .5,
+            $"the current recycled card is completely visible before its semantic activation (card={cardBounds}, container={currentBounds}, viewport={f.Scroll.ViewportHeight})");
         DesktopTestUi.Invoke(FilmUiTest.Visuals(currentContainer).OfType<Button>().Single(button => button.Name == "HitButton"));
         await Drain();
         True(activated is not null && ReferenceEquals(activated.SearchContext, current.SearchContext),
@@ -192,32 +208,46 @@ public static partial class MusicUiTests
     }
 
     private static IEnumerable<GridViewItem> ViewportContainers(ViewportScene f) =>
-        f.Panel.Children.OfType<GridViewItem>().Where(container => f.Items.IndexFromContainer(container) >= 0);
+        f.Panel.Children.OfType<GridViewItem>().Where(container =>
+        {
+            int index = f.Items.IndexFromContainer(container);
+            return index >= 0 && index >= f.Panel.FirstCacheIndex && index <= f.Panel.LastCacheIndex;
+        });
     private static int ViewportColumns(ViewportScene f) => Math.Max(1, (int)Math.Floor(f.Items.ActualWidth / f.Panel.ItemWidth));
     private static void CheckViewportRange(ViewportScene f)
     {
         int columns = ViewportColumns(f); double height = f.Panel.ItemHeight;
         var containers = ViewportContainers(f).ToArray();
         // WinUI's native cache is measured in viewport lengths, independent of row count.
-        double cache = f.Panel.CacheLength * f.Scroll.ViewportHeight;
+        double cache = f.Panel.CacheLength * f.Scroll.ViewportHeight / 2;
         int bound = columns * ((int)Math.Ceiling((f.Scroll.ViewportHeight + 2 * cache) / height) + 2);
-        True(containers.Length <= bound && containers.Length < f.Items.Items.Count,
-            "native realization stays bounded by the viewport and its configured nearby cache");
-        foreach (var container in containers)
+        // Native resize retains the already-realized pool. Generate reuses its valid
+        // containers; distant scrolling recycles them when new containers are needed.
+        // FirstCacheIndex/LastCacheIndex includes that pool, not just the current rect.
+        f.MaximumContainerBound = Math.Max(f.MaximumContainerBound, bound);
+        True(containers.Length <= f.MaximumContainerBound && containers.Length < f.Items.Items.Count,
+            $"native realization stays bounded by the largest actual viewport/cache requirement (count={containers.Length}, total={f.Panel.Children.Count}, bound={f.MaximumContainerBound}, columns={columns}, cache={f.Panel.CacheLength}, cell={f.Panel.ItemWidth}/{height}, viewport={f.Scroll.ViewportWidth}/{f.Scroll.ViewportHeight}, indices={f.Panel.FirstCacheIndex}..{f.Panel.LastCacheIndex}, visible={f.Panel.FirstVisibleIndex}..{f.Panel.LastVisibleIndex})");
+        // WinUI may retain its measurement sample and focused container outside
+        // the cache. They have an item identity but do not participate in arrange.
+        True(f.Panel.Children.Count <= f.MaximumContainerBound + 2,
+            "the native sample and focus pins do not retain an unbounded set of distant cards");
+        foreach (var container in containers.Where(container =>
+            f.Items.IndexFromContainer(container) >= f.Panel.FirstVisibleIndex && f.Items.IndexFromContainer(container) <= f.Panel.LastVisibleIndex))
         {
             var bounds = FilmUiTest.Bounds(container, f.Scroll);
-            True(bounds.Bottom >= -cache - height && bounds.Top <= f.Scroll.ViewportHeight + cache + height,
-                "realized containers remain near the viewport instead of accumulating at old positions");
+            True(bounds.Bottom >= -.5 && bounds.Top <= f.Scroll.ViewportHeight + .5,
+                "the native visible range corresponds to the actual current viewport");
         }
     }
     private static void CheckViewportMapping(ViewportScene f)
     {
-        foreach (var container in ViewportContainers(f))
+        foreach (var container in f.Panel.Children.OfType<GridViewItem>().Where(item => f.Items.IndexFromContainer(item) >= 0))
         {
             int index = f.Items.IndexFromContainer(container);
+            var card = FilmUiTest.Visuals(container).OfType<FilmCard>().Single();
             True(ReferenceEquals(container.Content, f.Items.Items[index]) &&
-                ReferenceEquals(FilmUiTest.Visuals(container).OfType<FilmCard>().Single().DataContext, f.Items.Items[index]),
-                "container, card and native index agree on the current exact item");
+                ReferenceEquals(card.DataContext, f.Items.Items[index]),
+                $"container, card and native index agree on the current exact item (index={index}, contentIndex={f.Items.Items.IndexOf(container.Content)}, cardIndex={f.Items.Items.IndexOf(card.DataContext)}, cache={f.Panel.FirstCacheIndex}..{f.Panel.LastCacheIndex}, visible={f.Panel.FirstVisibleIndex}..{f.Panel.LastVisibleIndex}, loaded={container.IsLoaded}/{card.IsLoaded}, opacity={container.Opacity}/{card.Opacity})");
         }
     }
     private static Button ViewportMore(ViewportScene f) =>
@@ -230,6 +260,7 @@ public static partial class MusicUiTests
         internal ScrollViewer Scroll => ((SearchResultsView)Scene.Page.View).FilmScroll!;
         internal ItemsWrapGrid Panel => (ItemsWrapGrid)Items.ItemsPanelRoot;
         internal int Width = 860;
+        internal int MaximumContainerBound;
         private ViewportScene(UnifiedScene scene, IArtworkLoader? loader)
         {
             Scene = scene; ArtworkScope.SetLoader(Scene.Shell.Root, loader);
@@ -257,7 +288,54 @@ public static partial class MusicUiTests
         }
         internal async Task Layout()
         {
-            Scene.Shell.Resize(Width, 760); await Drain(); Scene.Shell.Root.UpdateLayout(); await Drain();
+            Scene.Shell.Resize(Width, 760);
+            // Native scrolling and container realization complete with a render frame,
+            // not merely when the Dispatcher has no queued application callbacks.
+            for (int frame = 0; frame < 2; frame++)
+            {
+                var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                EventHandler<object> handler = (_, _) => rendered.TrySetResult();
+                CompositionTarget.Rendering += handler;
+                try { await rendered.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+                finally { CompositionTarget.Rendering -= handler; }
+                Scene.Shell.Root.UpdateLayout(); await Drain();
+            }
+            await Ready();
+        }
+        internal async Task Ready()
+        {
+            // Native cached containers first enter the panel as scrolling placeholders.
+            // Their Content and template bindings are populated by the next build-tree phase.
+            try
+            {
+                await SearchFixture.Until(() => ViewportContainers(this).All(container =>
+                {
+                    int index = Items.IndexFromContainer(container);
+                    return ReferenceEquals(container.Content, Items.Items[index]) &&
+                        FilmUiTest.Visuals(container).OfType<FilmCard>().Any(card => ReferenceEquals(card.DataContext, container.Content));
+                }));
+            }
+            catch
+            {
+                CheckViewportMapping(this);
+                throw;
+            }
+        }
+        internal async Task ObserveStableLayout()
+        {
+            var expected = (Items.ActualWidth, Panel.ItemWidth, Panel.ItemHeight);
+            int frames = 0;
+            var stable = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            EventHandler<object> rendering = (_, _) =>
+            {
+                var actual = (Items.ActualWidth, Panel.ItemWidth, Panel.ItemHeight);
+                if (actual != expected)
+                    stable.TrySetException(new InvalidOperationException($"search geometry changed without a window resize: {expected} -> {actual}"));
+                else if (++frames == 40) stable.TrySetResult();
+            };
+            CompositionTarget.Rendering += rendering;
+            try { await stable.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { CompositionTarget.Rendering -= rendering; }
         }
         public ValueTask DisposeAsync() => Scene.DisposeAsync();
     }

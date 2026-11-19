@@ -55,9 +55,9 @@
    <ScrollViewer x:Name="AccountTableScroll" Style="{StaticResource MeowFilm.SettingsScrollViewer}" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"
                  IsTabStop="False" SizeChanged="AccountTableScroll_SizeChanged"
                  AutomationProperties.Name="平台账号表">
-    <Grid x:Name="AccountTable" MinWidth="640" Width="{Binding ActualWidth,ElementName=AccountTableScroll}">
+    <Grid x:Name="AccountTable" MinWidth="640">
      <Grid.RowDefinitions><RowDefinition Height="30"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-     <Grid x:Name="AccountTableHeader" Margin="7,0,0,0" Width="{Binding ActualWidth,ElementName=PlatformSettingsList}" HorizontalAlignment="Left">
+     <Grid x:Name="AccountTableHeader" Margin="7,0">
       <Grid.ColumnDefinitions>
        <ColumnDefinition Width="196"/><ColumnDefinition Width="8"/>
        <ColumnDefinition Width="*"/><ColumnDefinition Width="8"/>

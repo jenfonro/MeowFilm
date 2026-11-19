@@ -10,7 +10,51 @@ public sealed partial class MusicLibraryOwner
     private readonly object repositoryGate = new();
     private readonly Dictionary<string, HashSet<string>> failedArtwork = new(StringComparer.Ordinal);
     private readonly Dictionary<(string SongId, string Platform), long> songObservations = new();
-    private long songObservation;
+    private long songObservation, songPublication;
+    private readonly object snapshotGate = new();
+    private int snapshotPending;
+    private bool snapshotSealed;
+    private TaskCompletionSource snapshotDrained = CompletedSnapshots();
+    internal sealed record SongSnapshotBatch(long Publication, IReadOnlyDictionary<string, JsonElement?> Songs);
+    private static TaskCompletionSource CompletedSnapshots()
+    {
+        var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        completed.SetResult(); return completed;
+    }
+
+    internal async Task<SongSnapshotBatch> SongSnapshotsAsync(IEnumerable<string> ids, CancellationToken token = default)
+    {
+        string[] requested;
+        lock (snapshotGate)
+        {
+            LJ.Require(!snapshotSealed, "CLOSED");
+            requested = ids.Distinct(StringComparer.Ordinal).ToArray();
+            if (snapshotPending++ == 0) snapshotDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+        try
+        {
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+            token.ThrowIfCancellationRequested();
+            lock (repositoryGate)
+            {
+                LJ.Require(!closed && !preparing, "CLOSED");
+                var songs = new Dictionary<string, JsonElement?>(StringComparer.Ordinal);
+                foreach (string id in requested)
+                {
+                    token.ThrowIfCancellationRequested();
+                    songs[id] = visibleSongs?.Read(id) is { } song ? LJ.Element(song) : null;
+                }
+                return new(songPublication, songs);
+            }
+        }
+        finally { lock (snapshotGate) if (--snapshotPending == 0) snapshotDrained.TrySetResult(); }
+    }
+
+    private Task SealSongSnapshots()
+    {
+        lock (snapshotGate) { snapshotSealed = true; return snapshotDrained.Task; }
+    }
+
     internal event Action<IReadOnlySet<string>>? SongMetadataChanged;
     internal long BeginSongObservation() => Interlocked.Increment(ref songObservation);
 
@@ -55,7 +99,7 @@ public sealed partial class MusicLibraryOwner
             }
             var candidate = document.Candidate(true);
             var policy = MetadataPolicy(candidate);
-            var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
+            var platforms = MetadataOrder(policy);
             var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
             bool changed = false;
             foreach (string id in ids)
@@ -103,7 +147,7 @@ public sealed partial class MusicLibraryOwner
         long observation = 0, Dictionary<(string SongId, string Platform), long>? accepted = null)
     {
         var policy = MetadataPolicy(doc);
-        var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
+        var platforms = MetadataOrder(policy);
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
         var ids = new List<string>();
         foreach (var song in input)
@@ -128,7 +172,7 @@ public sealed partial class MusicLibraryOwner
     {
         if (!HasValue(doc, "library")) return;
         var policy = MetadataPolicy(doc);
-        var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
+        var platforms = MetadataOrder(policy);
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
         foreach (string id in doc.Songs.Ids())
         {

@@ -10,7 +10,8 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed record FilmDirectoryRow(string Name, string Path, bool IsDirectory, string? CandidateId, bool IsCurrent)
+internal sealed record FilmDirectoryRow(string Name, string Path, bool IsDirectory, string? CandidateId,
+    JsonElement? PlaybackTarget, bool IsCurrent)
 {
     public string Label => IsDirectory ? "目录 · " + Name : IsCurrent ? "当前 · " + Name : Name;
 }
@@ -43,15 +44,17 @@ internal sealed class FilmDirectory
                     folder.Children.Add(segment, child = new(folder.Path + "/" + segment, folder));
                 folder = child;
             }
-            string candidate = FilmJson.Text(file, "candidateId");
+            var target = FilmJson.Member(file, "playbackTarget");
+            var exact = FilmJson.FileTarget(target);
+            string candidate = FilmJson.RequiredText(exact.Source!.Value, "candidateId");
             folder.Files.Add(new(name.Length > 0 ? name : segments.LastOrDefault() ?? "", path, false,
-                candidate.Length > 0 ? candidate : null, false));
+                candidate, target.Clone(), false));
         }
     }
     internal string Path => current.Path.Length == 0 ? "/" : current.Path;
     internal bool CanBack => current.Parent is not null;
     internal IReadOnlyList<FilmDirectoryRow> Rows => current.Children.Select(pair =>
-        new FilmDirectoryRow(pair.Key, pair.Value.Path, true, null, false)).Concat(current.Files.Select(row =>
+        new FilmDirectoryRow(pair.Key, pair.Value.Path, true, null, null, false)).Concat(current.Files.Select(row =>
             row with { IsCurrent = row.CandidateId == currentCandidate })).ToArray();
     internal bool UpdateCurrent(string candidateId)
     {
@@ -88,13 +91,14 @@ internal sealed class FilmDirectoryDialog : ContentDialog
         body.Children.Add(back); body.Children.Add(path); body.Children.Add(list);
         body.Children.Add(play); body.Children.Add(notices); Content = body;
         back.Click += (_, _) => { directory.Back(); Populate(); };
-        list.SelectionChanged += (_, _) => play.IsEnabled = list.SelectedItem is FilmDirectoryRow { IsDirectory: false, CandidateId: not null };
+        list.SelectionChanged += (_, _) => play.IsEnabled = list.SelectedItem is FilmDirectoryRow
+            { IsDirectory: false, PlaybackTarget: not null, CandidateId: not null };
         list.DoubleTapped += (_, _) => Enter();
         list.KeyDown += (_, e) => { if (e.Key == VirtualKey.Enter && list.SelectedItem is FilmDirectoryRow { IsDirectory: true }) { Enter(); e.Handled = true; } };
         play.Click += async (_, _) =>
         {
-            if (list.SelectedItem is not FilmDirectoryRow { IsDirectory: false, CandidateId: { } id } || !IsCurrent(page)) return;
-            try { await page.SelectOriginalCandidateAsync(id); }
+            if (list.SelectedItem is not FilmDirectoryRow { IsDirectory: false, PlaybackTarget: { } target, CandidateId: not null } || !IsCurrent(page)) return;
+            try { await page.SelectOriginalTargetAsync(target); }
             catch (OperationCanceledException) { }
             catch (Exception error) { notices.Message = FilmPlaybackError.Message(error, "文件播放失败"); }
         };
@@ -104,7 +108,7 @@ internal sealed class FilmDirectoryDialog : ContentDialog
         JsonElement.DeepEquals(FilmJson.Member(browsing, "sourceId"), FilmJson.Member(value.RawBrowsing, "sourceId")) &&
         JsonElement.DeepEquals(FilmJson.Member(browsing, "lineId"), FilmJson.Member(value.RawBrowsing, "lineId")) &&
         JsonElement.DeepEquals(FilmJson.Member(browsing, "originalEpisodes"), FilmJson.Member(value.RawBrowsing, "originalEpisodes")) &&
-        (!value.ListLoading || FilmJson.Bool(value.RawBrowsing, "refreshing")) && value.ListError.Length == 0;
+        value.CanBrowseRaw;
     internal void RefreshCurrent()
     {
         if (!directory.UpdateCurrent(page.CurrentCandidateId)) return;

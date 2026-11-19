@@ -744,18 +744,22 @@ public static partial class MusicCatalogPersonalTests
         await using var f = await Fixture.Create();
         foreach (string route in new[] { "catalog-home", "catalog-channels", "catalog-personal", "catalog-daily", "catalog-fm" })
             Check(f.Module.Navigation.Any(n => n.Route == route), "navigation " + route);
-        await f.Module.NavigateAsync("catalog-daily", default); Layout(f.Module.View);
+        await f.Module.NavigateAsync("catalog-daily", default);
+        using var host = new DesktopTestUi.Host(f.Module.View, 860, 720);
+        await Until(() => f.Module.View.IsLoaded);
+        f.Module.View.UpdateLayout();
         Equal(1, f.Store.LibraryWrites); Equal(0, f.Output.Opens);
         var buttons = Visuals<Button>(f.Module.View).ToArray();
         var more = buttons.Single(b => AutomationProperties.GetName(b) == "每日推荐更多操作");
         Check(more.IsEnabled, "daily batch actions live in the compact more menu");
         Check(buttons.Any(b => Equals(b.Content, "风格推荐") && Equals(b.Tag, "style")), "daily detail exposes the style destination");
         Check(f.Module.IsCatalogDetailPage && f.Module.ShowsSongTable, "daily uses the shared song table");
+        Check(more.IsLoaded && more.XamlRoot is not null, "daily actions are mounted in the actual native window");
         DesktopTestUi.Invoke(more);
-        await Drain();
-        var menu = VisualTreeHelper.GetOpenPopupsForXamlRoot(more.XamlRoot)
-            .SelectMany(popup => Visuals<MenuFlyoutPresenter>(popup.Child)).Single();
-        var save = Visuals<MenuFlyoutItem>(menu).Single(item => item.Text == "保存到本地歌单");
+        MenuFlyoutPresenter? menu = null;
+        await Until(() => (menu = VisualTreeHelper.GetOpenPopupsForXamlRoot(more.XamlRoot)
+            .SelectMany(popup => Visuals<MenuFlyoutPresenter>(popup.Child)).SingleOrDefault())?.IsLoaded == true);
+        var save = Visuals<MenuFlyoutItem>(menu!).Single(item => item.Text == "保存到本地歌单");
         Check(save.IsEnabled, "batch save control");
         MusicTestUi.Invoke(save);
         await Until(() => f.Module.Status == "已保存到本地歌单");
@@ -787,8 +791,8 @@ public static partial class MusicCatalogPersonalTests
     {
         await using var f = await Fixture.Create(); f.Select("tx");
         await f.Module.NavigateAsync("catalog-personal", default);
-        f.Module.CatalogPersonalKind = "subscribed"; f.Platform.EmptyDirectoryFirst = true;
-        await f.Module.CatalogOptionsChangedAsync();
+        f.Platform.EmptyDirectoryFirst = true;
+        await f.Module.ChangeCatalogPersonalKindAsync(f.Module.CatalogPersonalKinds.Single(choice => choice.Key == "subscribed"));
         Equal(MusicPersonalListKind.Subscribed, f.Platform.Last<MusicPersonalPlaylistsRequest>().Kind);
         Check(f.Module.CanCatalogNext, "empty intermediate page with advancing provider cursor");
         await f.Module.CatalogPageAsync(1);
@@ -798,9 +802,9 @@ public static partial class MusicCatalogPersonalTests
         Equal("第 2 页", f.Module.CatalogPageText); Check(before.SequenceEqual(f.Module.CatalogSections));
         var p = f.App.Last("music.catalog.personalPlaylists");
         Check(p.GetProperty("refresh").GetBoolean() && !p.TryGetProperty("continuation", out _), "refresh from first page");
-        Equal(3, f.Module.CatalogPersonalKinds.Length);
-        f.Select("kg"); await f.Module.ChangeCatalogPlatformAsync();
-        Equal("all", f.Module.CatalogPersonalKind); Equal(1, f.Module.CatalogPersonalKinds.Length);
+        Equal(3, f.Module.CatalogPersonalKinds.Count);
+        await f.Module.ChangeCatalogPlatformAsync(f.Module.CatalogPlatformChoices.Single(platform => platform.Key == "kg"));
+        Equal("all", f.Module.CatalogPersonalKind); Equal(1, f.Module.CatalogPersonalKinds.Count);
         Equal(MusicPersonalListKind.All, f.Platform.Last<MusicPersonalPlaylistsRequest>().Kind);
     }
     private static async Task KgMembers()
@@ -943,6 +947,13 @@ public static partial class MusicCatalogPersonalTests
         public ArtworkPixels Image { get; } = image;
         public void Dispose() { }
     }
+    private static Task DailyStylePopupClosed(Flyout popup) => Until(() => !popup.IsOpen && !((FrameworkElement)popup.Content).IsLoaded);
+    private static async Task OpenDailyStylePopup(Fixture fixture, Flyout popup)
+    {
+        await DailyStylePopupClosed(popup);
+        await fixture.Module.OpenDailyStyleEditorAsync();
+        await Until(() => popup.IsOpen && ((FrameworkElement)popup.Content).IsLoaded && ((FrameworkElement)popup.Content).ActualWidth > 0);
+    }
     private static async Task DailyStyleDetail()
     {
         await using var f = await Fixture.Create();
@@ -953,7 +964,7 @@ public static partial class MusicCatalogPersonalTests
         var window = DesktopTestUi.CreateWindow(f.Module.View, 1180, 840);
         try
         {
-            window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+            window.Show(); await Until(() => f.Module.View.IsLoaded); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
             await SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-daily.png");
             await f.Module.SwitchDailyBranchAsync("style");
             Equal("流行", f.Module.DailyStyleSelectionText);
@@ -963,9 +974,11 @@ public static partial class MusicCatalogPersonalTests
             var branchButton = Visuals<Button>(f.Module.View).Single(button => button.Tag is string branch && branch == f.Module.DailyOtherBranch);
             Check(branchButton.TransformToVisual(f.Module.View).TransformPoint(new Point(branchButton.ActualWidth, 0)).X <= f.Module.View.ActualWidth,
                 "daily actions fit the minimum width");
-            await f.Module.OpenDailyStyleEditorAsync();
-            DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
             var popup = (Flyout)f.Module.View.FindName("DailyStylePopup");
+            int opened = 0, closed = 0;
+            popup.Opened += (_, _) => opened++; popup.Closed += (_, _) => closed++;
+            await OpenDailyStylePopup(f, popup);
+            DesktopTestUi.WindowRoot(window).UpdateLayout();
             Check(popup.IsOpen && grid.TransformToVisual(f.Module.View).TransformPoint(new Point()) == tablePosition,
                 "style editor floats without moving the song table");
             var scene = f.Module.DailyStyleGroups.Last().Items.First();
@@ -973,10 +986,12 @@ public static partial class MusicCatalogPersonalTests
             Check(f.Module.DailyStyleGroups.SelectMany(g => g.Items).Where(t => t.Selected).All(t => t.Group == "2"), "changing category clears the prior category draft");
             Equal("流行", f.Module.DailyStyleSelectionText);
             DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+            Check(opened == 1 && closed == 0, "draft changes update the open native flyout without closing or reopening it");
             await SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-style-editor.png");
             DesktopTheme.SetIsHighContrast(f.Module.View, true);
-            f.Module.SelectedSong = f.Module.Songs.First(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-            DesktopTestUi.Select(grid, f.Module.Songs.First()); await Drain();
+            grid.ScrollIntoView(f.Module.Songs.First()); grid.UpdateLayout(); grid.SelectedItem = f.Module.Songs.First();
+            await Until(() => ReferenceEquals(f.Module.CatalogSelectedSong, grid.SelectedItem) && grid.ContainerFromIndex(0) is ListViewItem { IsSelected: true });
+            await Drain();
             var row = (ListViewItem)grid.ContainerFromIndex(0);
             Check(row.Background is SolidColorBrush background && background.Color == new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Highlight), "selected high contrast row uses system background");
             var title = Visuals<TextBlock>(row).First(t => t.Text == f.Module.Songs.First().Title);
@@ -1004,20 +1019,19 @@ public static partial class MusicCatalogPersonalTests
             Check(selectedTag.UseSystemFocusVisuals, "selected high contrast tag retains native keyboard focus visuals");
             DesktopTheme.SetIsHighContrast(popup.Content, false);
             DesktopTheme.SetIsHighContrast(f.Module.View, false);
-            popup.Hide(); await Drain();
+            popup.Hide(); await DailyStylePopupClosed(popup);
             Check(!f.Module.IsDailyStyleEditorOpen, "outside dismissal retires draft without saving"); Equal(0, f.Platform.StyleWrites);
-            await f.Module.OpenDailyStyleEditorAsync(); await Drain();
-            var panel = (FrameworkElement)popup.Content;
-            f.Module.CancelDailyStyleEditor(); await Drain();
+            await OpenDailyStylePopup(f, popup);
+            f.Module.CancelDailyStyleEditor(); await DailyStylePopupClosed(popup);
             Check(!popup.IsOpen, "the actual style editor closes when its owner retires the draft");
             Check(!f.Module.IsDailyStyleEditorOpen, "Escape retires draft without saving"); Equal(0, f.Platform.StyleWrites);
-            await f.Module.OpenDailyStyleEditorAsync();
+            await OpenDailyStylePopup(f, popup);
             f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.First().Items.Last());
             await f.Module.ConfirmDailyStyleAsync();
             Equal(1, f.Platform.StyleWrites); Equal("流行 · 爵士", f.Module.DailyStyleSelectionText);
             Check(!f.Module.IsDailyStyleEditorOpen, "matching readback closes the completed editor");
             Equal(0, f.Output.Opens); Equal(0L, N(await f.Queue(), "total"));
-            await f.Module.OpenDailyStyleEditorAsync(); f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Unknown;
+            await OpenDailyStylePopup(f, popup); f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Unknown;
             f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.Last().Items.First());
             await f.Module.ConfirmDailyStyleAsync();
             Equal(2, f.Platform.StyleWrites); Equal("流行 · 爵士", f.Module.DailyStyleSelectionText);
@@ -1035,7 +1049,7 @@ public static partial class MusicCatalogPersonalTests
             await f.Module.NavigateAsync("catalog-daily/wy/style", default);
             Equal(styleReads, f.Platform.Requests.OfType<MusicDailyRequest>().Count(r => r.Branch == MusicDailyBranch.Style));
             Equal(styleText, f.Module.DailyStyleSelectionText);
-            await f.Module.OpenDailyStyleEditorAsync();
+            await OpenDailyStylePopup(f, popup);
             f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.Confirmed; f.Platform.StyleReadbackMissing = true;
             await f.Module.ConfirmDailyStyleAsync(); Equal(3, f.Platform.StyleWrites);
             Check(!f.Module.CanCatalogAction && !f.Module.CanConfirmDailyStyle && f.Module.Songs.Count == 0,
@@ -1044,7 +1058,7 @@ public static partial class MusicCatalogPersonalTests
             Equal(0, f.Output.Opens); Equal(0L, N(await f.Queue(), "total"));
             f.Platform.StyleReadbackMissing = false;
             await f.Module.RefreshCatalogAsync(); Check(f.Module.CanCatalogAction, "read reconciles a confirmed write with missing receipt");
-            await f.Module.OpenDailyStyleEditorAsync();
+            await OpenDailyStylePopup(f, popup);
             f.Platform.StyleWriteStatus = MusicDailyStyleWriteStatus.NotSent; f.Platform.StyleReadbackMissing = true;
             await f.Module.ConfirmDailyStyleAsync(); Equal(4, f.Platform.StyleWrites);
             Check(f.Module.CanConfirmDailyStyle && f.Module.CanCatalogAction, "not-sent failure retains a retry and the unmodified batch");
@@ -1061,7 +1075,7 @@ public static partial class MusicCatalogPersonalTests
             DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
             await SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-playlist.png");
             await f.Module.NavigateAsync("catalog-daily/wy/style", default);
-            await f.Module.OpenDailyStyleEditorAsync(); f.App.RevokeAccount("wy");
+            await OpenDailyStylePopup(f, popup); f.App.RevokeAccount("wy");
             await f.Module.ConfirmDailyStyleAsync(); Equal(4, f.Platform.StyleWrites);
             Check(!f.Module.IsDailyStyleEditorOpen, "account invalidation retires the draft");
         }
@@ -1075,30 +1089,31 @@ public static partial class MusicCatalogPersonalTests
         var window = DesktopTestUi.CreateWindow(f.Module.View, 860, 840);
         try
         {
-            window.Show(); await Drain();
+            window.Show(); await Until(() => f.Module.View.IsLoaded);
             var popup = (Flyout)f.Module.View.FindName("DailyStylePopup");
-            await f.Module.OpenDailyStyleEditorAsync(); await Drain();
+            await OpenDailyStylePopup(f, popup);
             f.Module.ToggleDailyStyleTag(f.Module.DailyStyleGroups.Last().Items.First());
             var hold = f.Platform.StyleSaveHold = new Held();
             var save = f.Module.ConfirmDailyStyleAsync();
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(!f.Module.CanCatalogAction && !f.Module.CanConfirmDailyStyle, "admission immediately retires old batch authority");
-            popup.Hide(); await Drain();
+            popup.Hide();
             Check(!f.Module.IsDailyStyleEditorOpen, "outside dismissal closes an admitted editor without claiming rollback");
+            await DailyStylePopupClosed(popup);
             hold.Release(); await save;
             Equal(1, f.Platform.StyleWrites); Equal("专注", f.Module.DailyStyleSelectionText);
             Check(f.Module.CanCatalogAction && f.Module.Songs.Count > 0, "confirmed readback publishes after only the editor closes");
             foreach (var writeStatus in new[] { MusicDailyStyleWriteStatus.Confirmed, MusicDailyStyleWriteStatus.Unknown })
             {
                 f.Platform.StyleWriteStatus = writeStatus; f.Platform.StyleReadbackMissing = true;
-                await f.Module.OpenDailyStyleEditorAsync(); await Drain();
+                await OpenDailyStylePopup(f, popup);
                 hold = f.Platform.StyleSaveHold = new Held();
                 save = f.Module.ConfirmDailyStyleAsync();
                 await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                popup.Hide(); await Drain();
+                popup.Hide(); await DailyStylePopupClosed(popup);
                 hold.Release(); await save;
                 int writes = f.Platform.StyleWrites;
-                await f.Module.OpenDailyStyleEditorAsync(); await Drain();
+                await OpenDailyStylePopup(f, popup);
                 Check(!f.Module.CanConfirmDailyStyle && !f.Module.CanCatalogAction, "closing and reopening cannot bypass required readback");
                 await f.Module.ConfirmDailyStyleAsync(); Equal(writes, f.Platform.StyleWrites);
                 f.Platform.StyleReadbackMissing = false;
@@ -1514,17 +1529,26 @@ public static partial class MusicCatalogPersonalTests
         await Drain();
         var selected = menu.Items.OfType<ToggleMenuFlyoutItem>().Single(item => item.IsChecked);
         Equal("心动模式", selected.Text);
-        foreach (var item in menu.Items.OfType<ToggleMenuFlyoutItem>())
+        foreach (var focusTarget in new[] { selected, SessionAction(menu, "列表循环") })
         {
-            var text = Visuals<TextBlock>(item).Single(label => label.Text == item.Text);
-            Check(text.Foreground is SolidColorBrush { Color.A: > 0 }, "native mode text remains readable");
-            Equal(Microsoft.UI.Text.FontWeights.Normal, text.FontWeight);
-            Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(item.IsChecked ?
-                global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText),
-                ((SolidColorBrush)text.Foreground).Color);
-            Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(item.IsChecked ?
-                global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window),
-                ((SolidColorBrush)item.Background).Color);
+            Check(focusTarget.Focus(FocusState.Programmatic), "the open native menu accepts focus");
+            await Until(() => focusTarget.FocusState != FocusState.Unfocused); await Drain();
+            foreach (var item in menu.Items.OfType<ToggleMenuFlyoutItem>())
+            {
+                var text = Visuals<TextBlock>(item).Single(label => label.Text == item.Text);
+                Check(text.Foreground is SolidColorBrush { Color.A: > 0 }, "native mode text remains readable");
+                Check(ReferenceEquals(item.Foreground, Visuals<MusicPlaybackIcon>(item).Single().Foreground), "mode icon uses the same native foreground as its label");
+                Equal(Microsoft.UI.Text.FontWeights.Normal, text.FontWeight);
+                var states = VisualStateManager.GetVisualStateGroups((FrameworkElement)VisualTreeHelper.GetChild(item, 0));
+                string? state = states.Single(group => group.Name == "CommonStates").CurrentState?.Name;
+                bool highlighted = item.IsChecked || item.FocusState != FocusState.Unfocused || state is "PointerOver" or "Pressed";
+                Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(highlighted ?
+                    global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText),
+                    ((SolidColorBrush)text.Foreground).Color);
+                Equal(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(highlighted ?
+                    global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window),
+                    ((SolidColorBrush)item.Background).Color);
+            }
         }
         await SaveRecommendationFrame(menu, "heartbeat-global-loop-menu-high-contrast.png");
         foreach (var item in menu.Items.OfType<ToggleMenuFlyoutItem>()) MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(item, false);
@@ -2013,7 +2037,7 @@ public static partial class MusicCatalogPersonalTests
         var mode = (Button)footer.FindName("ModeButton");
         var menu = (MenuFlyout)footer.FindName("ModeMenu");
         var popup = PlayerDialogHost.Find(footer)!;
-        var panel = (Border)footer.FindName("FmPanel");
+        var panel = footer.FmPanel;
         await OpenSessionMenu(footer);
         Equal(1, f.Module.Mode); Check(menu.IsOpen && !popup.IsOpen, "ordinary playback opens choices without a write");
         var ordinary = SessionAction(menu, "随机播放");
@@ -2033,11 +2057,24 @@ public static partial class MusicCatalogPersonalTests
             .SequenceEqual(new[] { "私人漫游", "列表循环", "单曲循环", "随机播放", "切换频道" }));
         await OpenSessionFm(footer);
         Check(popup.IsOpen, "live WY FM opens mode selection");
-        var modes = (StackPanel)footer.FindName("FmModeChoices");
-        var scenes = (Grid)footer.FindName("FmSceneChoices");
+        var modes = (StackPanel)footer.FmPanel.FindName("FmModeChoices");
+        var scenes = (Grid)footer.FmPanel.FindName("FmSceneChoices");
         Equal(4, modes.Children.Count); Equal(43, scenes.Children.Count); Equal(4, scenes.ColumnDefinitions.Count);
+        Equal(368d, panel.Width); Equal(new Thickness(14), panel.Padding); Equal(new CornerRadius(14), panel.CornerRadius);
+        Equal(f.Module.PlaybackFmTitle, ((TextBlock)panel.FindName("FmTitle")).Text);
         Check(ReferenceEquals(panel.XamlRoot, surface.Root.XamlRoot) && DesktopVisual.Contains(popup, panel),
             "channel previews retain the real HWND root and theme resources");
+        foreach (var button in modes.Children.OfType<Button>().Concat(scenes.Children.OfType<Button>()))
+        {
+            var text = ((StackPanel)button.Content).Children.OfType<TextBlock>().Single();
+            bool current = AutomationProperties.GetItemStatus(button) == "已选中";
+            Equal(MusicVisuals.Brush(scenes.Children.Contains(button) && !current ? "#C5C3C8" : "#EBEAED").Color,
+                ((SolidColorBrush)button.Foreground).Color);
+            Check(ReferenceEquals(button.Foreground, text.Foreground), "FM text uses its channel button's actual foreground");
+            Equal(Microsoft.UI.Text.FontWeights.Normal, text.FontWeight);
+            foreach (var icon in Visuals<MusicPlaybackIcon>(button))
+                Check(ReferenceEquals(button.Foreground, icon.Foreground), "FM scene art uses the same channel foreground");
+        }
         await SaveRecommendationFrame(surface.Root, "fm-popup-default.png");
         await GeneralAppearanceTests.SavePreview(surface.Root, "fm-channel-root-default", 1260, 760);
         Check(scenes.Children.OfType<Button>().All(button => Visuals<MusicPlaybackIcon>(button).Count() == 1),
@@ -2052,18 +2089,36 @@ public static partial class MusicCatalogPersonalTests
         await SaveRecommendationFrame(surface.Root, "fm-popup-hot-song.png");
         await GeneralAppearanceTests.SavePreview(surface.Root, "fm-channel-root-hot-song", 1260, 760);
         MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(panel, true); await Drain();
+        var contrastSettings = new global::Windows.UI.ViewManagement.UISettings();
+        Equal(contrastSettings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window), ((SolidColorBrush)panel.Background).Color);
+        Equal(contrastSettings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText), ((SolidColorBrush)((TextBlock)panel.FindName("FmTitle")).Foreground).Color);
         var selected = scenes.Children.OfType<Button>().Single(button => AutomationProperties.GetItemStatus(button) == "已选中");
         Equal(new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText)).Color, ((SolidColorBrush)selected.Foreground).Color);
         Equal(new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Highlight)).Color, ((SolidColorBrush)selected.Background).Color);
         Equal(new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText)).Color,
             ((SolidColorBrush)((StackPanel)selected.Content).Children.OfType<TextBlock>().Single().Foreground).Color);
+        foreach (var choice in modes.Children.OfType<Button>().Concat(scenes.Children.OfType<Button>()))
+        {
+            bool current = AutomationProperties.GetItemStatus(choice) == "已选中";
+            Equal(contrastSettings.UIElementColor(current ? global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText),
+                ((SolidColorBrush)choice.Foreground).Color);
+            Equal(contrastSettings.UIElementColor(current ? global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window),
+                ((SolidColorBrush)choice.Background).Color);
+            Check(ReferenceEquals(choice.Foreground, ((StackPanel)choice.Content).Children.OfType<TextBlock>().Single().Foreground));
+            foreach (var icon in Visuals<MusicPlaybackIcon>(choice)) Check(ReferenceEquals(choice.Foreground, icon.Foreground));
+        }
+        selected.IsEnabled = false; await Drain();
+        Equal(contrastSettings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.GrayText), ((SolidColorBrush)selected.Foreground).Color);
+        Equal(contrastSettings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window), ((SolidColorBrush)selected.Background).Color);
+        selected.IsEnabled = true; await Drain();
         await SaveRecommendationFrame(surface.Root, "fm-popup-high-contrast.png");
         await GeneralAppearanceTests.SavePreview(surface.Root, "fm-channel-root-high-contrast", 1260, 760);
         MeowFilm.Desktop.DesktopTheme.SetIsHighContrast(panel, false); await Drain();
+        Check(ReferenceEquals(panel.Background, f.Module.PlayerBackground), "leaving high contrast restores the live player palette binding");
         int requests = f.Platform.Requests.Count;
         DesktopTestUi.Invoke(old); await Drain();
         Equal(requests, f.Platform.Requests.Count);
-        var retired = ((StackPanel)footer.FindName("FmModeChoices")).Children.OfType<Button>().First();
+        var retired = ((StackPanel)footer.FmPanel.FindName("FmModeChoices")).Children.OfType<Button>().First();
         await f.Module.CancelRecommendationAsync(); await Drain();
         Check(!popup.IsOpen && !f.Module.HasPlaybackFm, "session exit closes the popup");
         DesktopTestUi.Invoke(retired); await Drain();
@@ -2319,15 +2374,19 @@ public static partial class MusicCatalogPersonalTests
         Equal("第 2 页", f.Module.CatalogPageText);
         var hold = f.App.HoldNext("music.catalog.home");
         var refresh = f.Module.RefreshCatalogAsync();
-        await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await f.Module.NavigateAsync("catalog-home", default);
-        Equal("第 2 页", f.Module.CatalogPageText);
-        Check(!f.Module.CanCatalogPrevious && !f.Module.CanCatalogNext, "home is one accumulated surface, not manual pages");
-        Check(!f.Module.CanCancelCatalog, "retired noncooperative request must be detached from current UI state");
-        Check(!refresh.IsCompleted, "fixture request must remain physically blocked");
-        hold.Release();
-        await refresh;
-        Equal("第 2 页", f.Module.CatalogPageText);
+        try
+        {
+            await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await f.Module.NavigateAsync("catalog-home", default);
+            Equal("第 2 页", f.Module.CatalogPageText);
+            Check(!f.Module.CanCatalogPrevious && !f.Module.CanCatalogNext, "home is one accumulated surface, not manual pages");
+            Check(!f.Module.CanCancelCatalog, "retired noncooperative request must be detached from current UI state");
+            Check(!refresh.IsCompleted, "fixture request must remain physically blocked");
+            hold.Release();
+            await refresh;
+            Equal("第 2 页", f.Module.CatalogPageText);
+        }
+        finally { hold.Release(); }
     }
     private static async Task LegacyPaging()
     {

@@ -18,6 +18,7 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
     {
         try
         {
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             return Decode(await store.ReadAsync(token).ConfigureAwait(false), song, token);
         }
         catch (Exception error) when (IsCacheFailure(error)) { return null; }

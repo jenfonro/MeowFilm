@@ -38,6 +38,7 @@ public partial class SettingsPriorityList : UserControl
         typeof(bool), typeof(SettingsPriorityList), new PropertyMetadata(false, AuthorityChanged));
     private readonly SettingsReorderDrag drag;
     private INotifyCollectionChanged? subscribed;
+    private IDisposable? visibility;
     private sealed record KeyboardMove(object Row);
     private KeyboardMove? keyboardMove;
     private bool Ready => IsLoaded && DesktopVisual.IsVisible(this) && IsEnabled && CanEdit;
@@ -46,12 +47,21 @@ public partial class SettingsPriorityList : UserControl
     {
         InitializeComponent();
         drag = new(PriorityItems, DragOverlay);
-        Loaded += (_, _) => ObserveCollection();
-        Unloaded += (_, _) => { drag.Cancel(); keyboardMove = null; Unsubscribe(); };
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => { if (!DesktopVisual.IsVisible(this)) { drag.Cancel(); keyboardMove = null; } });
+        Loaded += (_, _) =>
+        {
+            ObserveCollection();
+            visibility = DesktopVisual.ObserveVisibility(this, visible =>
+            {
+                if (!visible) { drag.Cancel(); keyboardMove = null; }
+            });
+        };
+        Unloaded += (_, _) =>
+        {
+            visibility?.Dispose(); visibility = null;
+            drag.Cancel(); keyboardMove = null; Unsubscribe();
+        };
         IsEnabledChanged += (_, _) => { if (!IsEnabled) { drag.Cancel(); keyboardMove = null; } };
         SizeChanged += (_, _) => { drag.Cancel(); };
-        LayoutUpdated += (_, _) => { if (!DesktopVisual.IsVisible(this)) { drag.Cancel(); keyboardMove = null; } };
         DataContextChanged += (_, _) => { drag.Cancel(); keyboardMove = null; };
     }
 

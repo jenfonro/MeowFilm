@@ -30,6 +30,7 @@ public sealed class MusicMetadataPlatformRow(string platform, bool enabled) : IN
 public sealed partial class MusicCapability
 {
     private long metadataRevision, metadataGeneration;
+    private string[] metadataOrder = [], metadataEnabled = [];
     private bool metadataLoaded, metadataBusy;
     private Task metadataWork = Task.CompletedTask;
     public ObservableCollection<MusicMetadataPlatformRow> MetadataPlatforms { get; } = [];
@@ -42,6 +43,17 @@ public sealed partial class MusicCapability
             .GetProperty("settings");
         if (generation != metadataGeneration || stopping || disposed) return;
         PublishMetadataSettings(settings);
+        await RefreshMetadataArtworkAsync(generation, token);
+    }
+    private async Task RefreshMetadataArtworkAsync(long generation, CancellationToken token)
+    {
+        if (generation != metadataGeneration || stopping || disposed || current is not { } song ||
+            application is not MusicNativeApplication owner) return;
+        var snapshot = await owner.SongSnapshotsAsync([song.Id], token);
+        token.ThrowIfCancellationRequested();
+        if (generation != metadataGeneration || stopping || disposed || current?.Id != song.Id) return;
+        current.ApplyRepository(snapshot.Songs.GetValueOrDefault(song.Id), snapshot.Publication);
+        RefreshCurrentArtwork();
     }
     private void RetireMetadataSettings()
     {
@@ -57,6 +69,9 @@ public sealed partial class MusicCapability
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var platforms = settings.GetProperty("platforms").EnumerateArray()
             .Select(value => value.GetString()!).ToArray();
+        metadataOrder = platforms;
+        metadataEnabled = settings.GetProperty("enabled").EnumerateArray().Select(value => value.GetString()!).ToArray();
+        platforms = platforms.Concat(Library.MusicLibraryOwner.MetadataPlatforms.Except(platforms)).ToArray();
         var existing = MetadataPlatforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
         for (var index = 0; index < platforms.Length; index++)
         {
@@ -78,18 +93,19 @@ public sealed partial class MusicCapability
     }
 
     private bool MetadataSettingsMatch(string[] platforms, string[] enabled) =>
-        MetadataPlatforms.Select(row => row.Platform).SequenceEqual(platforms) &&
-        MetadataPlatforms.Where(row => row.Enabled).Select(row => row.Platform).SequenceEqual(enabled);
+        metadataOrder.SequenceEqual(platforms) && metadataEnabled.SequenceEqual(enabled);
 
     public Task SetMetadataEnabledAsync(MusicMetadataPlatformRow row, bool enabled)
     {
         if (!CanEditMetadata || !MetadataPlatforms.Contains(row) || row.Enabled == enabled)
             return Task.CompletedTask;
-        var order = MetadataPlatforms.Select(value => value.Platform).ToArray();
+        var order = enabled && !metadataOrder.Contains(row.Platform) ? metadataOrder.Append(row.Platform).ToArray() : metadataOrder;
         var active = MetadataPlatforms.Where(value => value.Enabled)
             .Select(value => value.Platform).ToHashSet(StringComparer.Ordinal);
         if (enabled) active.Add(row.Platform); else active.Remove(row.Platform);
-        return SaveMetadataSettingsAsync(order, order.Where(active.Contains).ToArray());
+        var selected = metadataEnabled.Where(active.Contains).ToList();
+        if (enabled && !selected.Contains(row.Platform)) selected.Add(row.Platform);
+        return SaveMetadataSettingsAsync(order, selected.ToArray());
     }
 
     public Task MoveMetadataPlatformAsync(MusicMetadataPlatformRow source, MusicMetadataPlatformRow target)
@@ -123,6 +139,7 @@ public sealed partial class MusicCapability
                     new { ifRevision = revision, platforms, enabled }, lifetime.Token);
                 if (generation != metadataGeneration || stopping || disposed) return;
                 PublishMetadataSettings(result.GetProperty("settings"));
+                await RefreshMetadataArtworkAsync(generation, lifetime.Token);
             }
             catch
             {

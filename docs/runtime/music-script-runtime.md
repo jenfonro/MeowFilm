@@ -2,7 +2,7 @@
 
 ## 工厂与身份
 
-`apps/runtime/modules/music-script.mjs` 导出 `createMusicScriptModule({dataRoot, hostFactory, network, download, clock, setTimer, clearTimer})`，身份为 `music@0.8.0` / `music.script.v3`。通用 `apps/runtime` 入口提供本地 HTTP；构造与启动不读取安装目录、不执行脚本、不检测，管理首次使用才打开 `<dataRoot>/music`。
+`apps/runtime/modules/music-script.mjs` 导出 `createMusicScriptModule({dataRoot, hostFactory, network, download, clock, setTimer, clearTimer})`，身份为 `music@0.8.0` / `music.script.v3`。通用 `apps/runtime` 入口提供本地 HTTP；构造时取得共享数据库租约并恢复安装关系，不执行脚本或检测；源码按需从 `<dataRoot>/music/sources` 读取。
 
 成功响应为 `{ok:true,contract:"music.script.v3",value}`，失败为 `{ok:false,contract:"music.script.v3",code}`。错误只含固定分类，不泄漏源码、凭据或异常正文。音乐无需反向 callback 端点。iOS 薄适配与生命周期见[音源管理](../ios/music.md#音源管理)，Windows 的完整源码与原生消费者见[平台接入](../windows/music-script-runtime.md)；公共测试不代替平台 App 验证。
 
@@ -34,29 +34,29 @@ Content-Type: application/octet-stream
 | `invoke` | `{installationId,siteId,operation,payload}`；返回原始业务值 |
 | `close` | `{}` → `{closed:true,cleanupComplete:true}`；停止接收并清理本模块 |
 
-`invoke` 的 HTTP `value` 就是脚本结果，包括普通 `blob`、`token`、`value` 字段；不再包一层安装身份。调用选择当前启用内容，执行前捕获 generation，返回前核对未退休。客户端不传外部 CAS、grant、config 或 permissions；旧 load/unload/status 与手工分片接口不提供兼容路径。
+`invoke` 的 HTTP `value` 就是脚本结果，包括普通 `blob`、`token`、`value` 字段；不再包一层安装身份。调用选择当前启用内容，执行前捕获 generation，返回前核对未退休。命令按实际成员取值，普通额外字段不拒绝，也不授予外部 CAS、grant、config 或 permissions 能力；请求中的 generation 不选择退休内容。旧 load/unload/status 与手工分片接口不提供兼容路径。
 
 `resolve` 的 `value` 包含 installationId、generation、contentHash、platform、quality、url、headers、expiresAt、duration。URL 必须为 HTTP(S)，拒绝凭据 URL、试听/加密标志、禁止请求头、过期时间及相反目标身份。脚本提供的正有限时长以秒返回；候选与已知录音时长均为正数时，绝对差不超过10秒通过时长校验，超过10秒返回 `RECORDING_MISMATCH`。未提供、null 或 0 返回 `duration:null`，任一时长未知时不判录音不匹配；非数字或负时长返回 `INVALID_MEDIA_CANDIDATE`。非有限数值先由原生 `RuntimeValue` 边界拒绝，不转换为未知时长。
 
 时长独立于音质，无法确认实测音质时仍保留已知时长供原生媒体准入检查。`quality` 只回显请求档位，不代表已实测音质。不补搜、不换源、不降级；元数据融合的百分比容差不适用于媒体回执。
 
-公开请求与业务结果遵守64层 JSON 契约，65层拒绝；控制信封和内部 KV 文档包装不占用业务值深度。完整 JSON 不设独立总字节上限，不使用应用层 stage/control/blob、Base64 分片或 TTL 暂存。
+公开请求与业务结果遵守64层 JSON 契约，65层拒绝；控制信封和 KV 关系不占用业务值深度。完整 JSON 不设独立总字节上限，不使用应用层 stage/control/blob、Base64 分片或 TTL 暂存。
 
 ## 安装事实与私有 KV
 
-音乐模块是 `<dataRoot>/music` 的唯一 writer。`PrivateDocuments` 使用 App 提供的存储根及内部文档命名契约，允许系统与 App 管理的目录别名，原子替换完整文件；它不是脚本文件系统，不对运行器自有文档做链接或祖先目录隔离检查。脚本的存储能力边界由脚本宿主管理。
+音乐模块按[共享 SQLite 存储契约](../common/settings-storage.md)持有脚本安装关系与私有 KV；源码文件由 `PrivateSources` 管理，脚本的文件 capability 仍由脚本宿主管理。
 
-- `catalog.json`：schema、revision、UUID、名称、origin、enabled、current/previous、完整声明与检测快照。
-- `sources/<sha256>.js`：内容寻址源码；current、previous 和正在试运行的候选保留，完成管理后回收无引用文件。
-- `data/<installationId>.json`：按 site 隔离的 guest KV，删除安装时先删除私有数据。
+- `music_script_installations` 及声明、检测子关系保存 revision、UUID、名称、origin、enabled、current/previous 与平台快照。
+- `<dataRoot>/music/sources/<contentHash>.js` 保存按 SHA-256 定位的不可变源码文件。
+- `music_script_kv_entries`／`music_script_kv_nodes` 按 installation、site、key 保存 typed value-tree；删除安装与 KV 的事务一并提交。
 - 文件/网络来源由导入操作决定，不由脚本头推断。网络地址持久保存，列表只显示 host，详情返回完整 URL。
 - 客户端可保存常用列表和检测结果等读取快照；运行器仍是安装事实所有者。不读、不迁移、不双写、不删除旧原生数据，不保存脚本执行内存快照。
-- 损坏目录/文档明确报错，格式损坏为 `CORRUPT_STORAGE`，I/O 写失败为 `STORAGE_ERROR`，不静默重置目录或发布未落盘状态。
+- 按实际选中的安装、版本、site 和 key 解码；不预检未消费的兄弟材料，局部写回保留未变关系与第三方声明扩展。实际消费的损坏材料报 `CORRUPT_STORAGE`，I/O 写失败为 `STORAGE_ERROR`，不静默重置目录或发布未落盘状态。
 - 源码严格 UTF-8、非空，不设人为字节上限；允许前导 BOM，文件名为平面 `.js` basename。脚本头只提供名称、版本、作者、描述和主页元数据，版本完整保留，不按字符数量截断。
 
 脚本 `meow.config` 固定为空对象；处理器第二参数的 `context.storage` 提供私有 get/set/delete。请求内读写固定启用，每次操作检查 scope 当前性、installation、generation、声明 site 和取消信号。startup/background 无存储权限，旧 context 不能借用后续请求的权限。
 
-KV 不设单值、site 或安装的字节/键数配额，也不设键字符串长度配额；逐值独立验证 JSON，不把 site/安装文档包装层计入64层业务限制。读写仍检查请求有效性、generation、声明的 site 与非空字符串键，保持安装隔离和原子持久化。
+KV 不设单值、site 或安装的字节/键数配额，也不设键字符串长度配额；逐值独立验证 JSON，不把 site/安装关系计入64层业务限制。读写仍检查请求有效性、generation、声明的 site 与非空字符串键，保持安装隔离和原子持久化。
 
 ## 声明、检测与生命周期
 

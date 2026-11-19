@@ -7,6 +7,8 @@ using Windows.Foundation;
 using Windows.UI;
 using Windows.System;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -521,15 +523,40 @@ public static partial class DesktopTests
         {
             var a = new ProbeModule("dynamic-probe"); await using var f = new Fixture([a]); await f.LoadAsync();
             a.Navigation.Add(new("added", "test-added", "", "test-group"));
-            await DrainAsync(); await f.NavigateAsync(a, "added"); var before = a.Calls.Count;
+            await DrainAsync();
+            var list = f.Element<ListView>("CollectionNavigationList");
+            var added = list.Items.OfType<ShellNavigationEntry>().Single(entry => ReferenceEquals(entry.Owner.Module, a) && entry.Route == "added");
+            list.ScrollIntoView(added);
+            await UntilAsync(() => list.ContainerFromItem(added) is ListViewItem { IsLoaded: true, IsEnabled: true } container &&
+                DesktopVisual.IsVisible(container) && container.ActualWidth > 0, "dynamic navigation row loaded");
+            var navigation = FrameworkElementAutomationPeer.CreatePeerForElement(list) ?? new ListViewAutomationPeer(list);
+            var row = Peers(navigation).OfType<ListViewItemDataAutomationPeer>().Single(peer => ReferenceEquals(peer.Item, added));
+            var selection = row.GetPattern(PatternInterface.SelectionItem) as ISelectionItemProvider ??
+                throw new InvalidOperationException("The mounted dynamic navigation row has no selection automation pattern.");
+            selection.Select();
+            await UntilAsync(() => f.SelectedOwner == a && f.SelectedRoute == "added" && f.Status == "", "dynamic navigation selected");
+            var before = a.Calls.Count;
             a.ReplaceNavigation(new(a.Navigation.Select(item => item with { Title = item.Title + "-updated" })));
             await DrainAsync();
             Equal("added", f.SelectedRoute, "new item instance restores by exact route");
-            Same(a.Navigation[^1], ((ShellNavigationEntry)f.Element<ListView>("CollectionNavigationList").SelectedItem).Item, "selection refers to new collection item");
+            var selected = (ShellNavigationEntry)list.SelectedItem;
+            Same(a.Navigation[^1], selected.Item, "selection refers to new collection item");
+            await UntilAsync(() => list.ContainerFromItem(selected) is ListViewItem { IsLoaded: true } container &&
+                AutomationProperties.GetName(container) == selected.Title &&
+                DesktopTestUi.Visuals(container).OfType<TextBlock>().Any(text => text.Text == selected.Title),
+                "recycled navigation rows bind the replacement label and automation name");
             Equal(before, a.Calls.Count, "replacement is not navigation intent");
             a.Navigation.RemoveAt(a.Navigation.Count - 1); await DrainAsync();
             True(f.SelectedRoute is null, "removed item no longer selected");
             Equal(before, a.Calls.Count, "removal must not choose another route");
+
+            static IEnumerable<AutomationPeer> Peers(AutomationPeer peer)
+            {
+                yield return peer;
+                if (peer.GetChildren() is not { } children) yield break;
+                foreach (var child in children)
+                    foreach (var descendant in Peers(child)) yield return descendant;
+            }
         });
         yield return Case("internal navigation captures subscribed source and enters same history", async () =>
         {
@@ -996,6 +1023,7 @@ public static partial class DesktopTests
 
     private sealed class Fixture : IAsyncDisposable
     {
+        private readonly FrameworkElement root;
         public ProbeModule[] Probes { get; }
         public ManualClock Clock { get; } = new();
         public ShellWindow Shell { get; }
@@ -1026,6 +1054,7 @@ public static partial class DesktopTests
                 else await DisposeProbesAsync();
             }, () => { ForceCalls++; return force?.Invoke(this) ?? Task.CompletedTask; },
                 cancel is null ? null : () => cancel(this), Clock);
+            root = Shell.Root;
             Shell.Closed += (_, _) => { ClosedCount++; Closed.TrySetResult(); };
         }
         public T Element<T>(string name) where T : FrameworkElement => DesktopTestUi.WindowRoot(Shell).FindName(name) as T
@@ -1100,6 +1129,10 @@ public static partial class DesktopTests
                     Click(Element<Button>("ForceExitButton")); // Cleanup guard, not a passing assertion.
             }
             await WaitClosedAsync();
+            // ListView clears recycled template bindings in its deferred build-tree work, after Closed.
+            await UntilAsync(() => !root.IsLoaded && Probes.All(probe => probe.PropertySubscribers == 0 &&
+                (probe is not NavigationProbe source || source.NavigationSubscribers == 0)),
+                "closed WinUI root unload and module template subscription release");
             foreach (var probe in Probes)
             {
                 Equal(0, probe.PropertySubscribers, "fixture released the Shell-owned property subscription");

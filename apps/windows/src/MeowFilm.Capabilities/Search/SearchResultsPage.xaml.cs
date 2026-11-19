@@ -1,6 +1,9 @@
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Media;
+using System.ComponentModel;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -8,13 +11,35 @@ namespace MeowFilm.Capabilities;
 public partial class SearchResultsView : UserControl, IDesktopHeaderSource
 {
     private readonly SearchResultsPage page;
+    private bool cardSizeUpdateQueued;
+    private int filmColumns = 1;
+    private IDisposable? filmVisibility;
+    private FilmGeometryAnchor? hiddenAnchor;
     internal ScrollViewer? FilmScroll => MusicVisuals.Descendant<ScrollViewer>(FilmItems);
     internal SearchResultsView(SearchResultsPage page)
     {
         this.page = page;
         InitializeComponent();
         DataContext = page;
-        Loaded += (_, _) => SizeFilmCards();
+        Loaded += (_, _) =>
+        {
+            filmVisibility = DesktopVisual.ObserveVisibility(FilmItems, FilmVisibilityChanged);
+            SizeFilmCards();
+        };
+        Unloaded += (_, _) => { filmVisibility?.Dispose(); filmVisibility = null; hiddenAnchor = null; };
+    }
+    private void FilmVisibilityChanged(bool visible)
+    {
+        if (visible) { SizeFilmCards(); return; }
+        if (FilmItems.ItemsPanelRoot is not ItemsWrapGrid panel || FilmScroll is not { } scroll ||
+            FilmItems.ItemsSource is not { } source || !double.IsFinite(panel.ItemHeight) || panel.ItemHeight <= 0) return;
+        hiddenAnchor = new(source, filmColumns, scroll.VerticalOffset / panel.ItemHeight,
+            scroll.VerticalOffset > 0 && Math.Abs(scroll.ScrollableHeight - scroll.VerticalOffset) < .5);
+    }
+    internal void RestoreFilmScroll(double offset)
+    {
+        hiddenAnchor = null;
+        FilmScroll?.ChangeView(null, offset, null, true);
     }
     private void Film_SizeChanged(object sender, SizeChangedEventArgs e) => SizeFilmCards();
     private void Film_ContainerChanging(ListViewBase sender, ContainerContentChangingEventArgs e)
@@ -23,19 +48,52 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
     }
     private void SizeFilmCards()
     {
+        if (cardSizeUpdateQueued) return;
+        cardSizeUpdateQueued = DispatcherQueue.TryEnqueue(UpdateFilmCardSize);
+    }
+    private void UpdateFilmCardSize()
+    {
+        cardSizeUpdateQueued = false;
+        if (!IsLoaded || !DesktopVisual.IsVisible(FilmItems)) return;
+        if (hiddenAnchor is not null) FilmItems.UpdateLayout();
         if (FilmItems.ItemsPanelRoot is not ItemsWrapGrid panel || FilmItems.ActualWidth <= 0) return;
-        var (_, pitch) = Shelf.MeasureCards(FilmItems.ActualWidth, 180, 36);
+        // The native cell owns the trailing gap; the grid margin returns the last gap
+        // to the page. Its columns must fit the viewport, not grow it by another gap.
+        var (columns, pitch) = Shelf.MeasureCards(Math.Max(0, FilmItems.ActualWidth - 36), 180, 36);
         double width = Math.Max(0, pitch - 36);
-        panel.ItemWidth = pitch;
-        // Measure realized native cards; do not create a second image/visual tree for sizing.
-        double height = 0;
-        for (int i = 0; i < panel.Children.Count; i++)
+        double height = panel.ItemWidth == pitch && double.IsFinite(panel.ItemHeight) ? panel.ItemHeight : 0;
+        // Measure outside the layout callback, using the real card's typography and
+        // optional subtitle. A fixed estimate changes both the row gap and extent.
+        foreach (var child in panel.Children)
         {
-            if (MusicVisuals.Descendant<FilmCard>(panel.Children[i]) is not { } card) continue;
+            int index = FilmItems.IndexFromContainer(child);
+            if (index < 0 || index < panel.FirstCacheIndex || index > panel.LastCacheIndex) continue;
+            if (MusicVisuals.Descendant<FilmCard>(child) is not { } card) continue;
             card.Measure(new Size(width, double.PositiveInfinity));
             height = Math.Max(height, card.DesiredSize.Height + 36);
         }
-        if (height > 0 && panel.ItemHeight != height) panel.ItemHeight = height;
+        if (height == 0)
+        {
+            if (panel.ItemWidth != pitch) panel.ItemWidth = pitch;
+            return;
+        }
+        var hidden = hiddenAnchor;
+        hiddenAnchor = null;
+        if (panel.ItemWidth == pitch && panel.ItemHeight == height && filmColumns == columns) return;
+        var scroll = FilmScroll!;
+        double row = double.IsFinite(panel.ItemHeight) && panel.ItemHeight > 0 ? scroll.VerticalOffset / panel.ItemHeight : 0;
+        int anchor = (int)Math.Floor(row) * filmColumns;
+        bool atEnd = scroll.VerticalOffset > 0 && Math.Abs(scroll.ScrollableHeight - scroll.VerticalOffset) < .5;
+        if (hidden is not null && ReferenceEquals(hidden.Source, FilmItems.ItemsSource))
+        {
+            row = hidden.Row; anchor = (int)Math.Floor(row) * hidden.Columns; atEnd = hidden.AtEnd;
+        }
+        if (panel.ItemWidth != pitch) panel.ItemWidth = pitch;
+        if (panel.ItemHeight != height) panel.ItemHeight = height;
+        filmColumns = columns;
+        FilmItems.UpdateLayout();
+        double offset = atEnd ? scroll.ScrollableHeight : (anchor / columns + row - Math.Floor(row)) * height;
+        scroll.ChangeView(null, offset, null, true);
     }
     public DesktopHeaderContribution Header => new("") { SearchTargetId = page.SelectedTarget, SearchContextId = page.SelectedTab };
     public event EventHandler? HeaderChanged;
@@ -93,6 +151,36 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         MusicHost.Content = null;
         page.Music.Presentation.Page.ProjectSearchResults(false);
     }
+    private void Tab_Loaded(object sender, RoutedEventArgs e)
+    {
+        var button = (Button)sender;
+        var tab = (SearchResultTab)button.DataContext;
+        button.ApplyTemplate();
+        var indicator = (Border)((FrameworkElement)VisualTreeHelper.GetChild(button, 0)).FindName("SelectionIndicator");
+        AutomationProperties.SetName(button, tab.Label + "搜索结果");
+        void Refresh()
+        {
+            bool contrast = DesktopTheme.GetIsHighContrast(button);
+            button.Foreground = contrast
+                ? new SolidColorBrush(new Windows.UI.ViewManagement.UISettings().UIElementColor(button.IsEnabled
+                    ? Windows.UI.ViewManagement.UIElementType.WindowText : Windows.UI.ViewManagement.UIElementType.GrayText))
+                : (Brush)DesktopVisual.Resource(button, !button.IsEnabled ? "MeowFilm.Brush.Disabled"
+                    : tab.Selected ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Muted");
+            indicator.Background = contrast ? button.Foreground : (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.Accent");
+        }
+        void Changed(object? owner, PropertyChangedEventArgs args) => Refresh();
+        tab.PropertyChanged += Changed;
+        long enabled = button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => Refresh());
+        var theme = DesktopTheme.Observe(button, Refresh);
+        void Unloaded(object owner, RoutedEventArgs args)
+        {
+            tab.PropertyChanged -= Changed;
+            button.UnregisterPropertyChangedCallback(IsEnabledProperty, enabled);
+            theme.Dispose(); button.Unloaded -= Unloaded;
+        }
+        button.Unloaded += Unloaded;
+    }
+    private sealed record FilmGeometryAnchor(object Source, int Columns, double Row, bool AtEnd);
     private async void Tab_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button { Tag: string tab }) await page.OpenTabAsync(tab);

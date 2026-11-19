@@ -306,7 +306,7 @@ public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChang
         view.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             if (active && tab == "film" && operation == submission)
-                view.FilmScroll?.ChangeView(null, raw ? rawScroll : aggregateScroll, null, true);
+                view.RestoreFilmScroll(raw ? rawScroll : aggregateScroll);
             if (active && tab == "novel" && operation == submission)
                 view.NovelScroll.ChangeView(null, novelScroll, null, true);
         });

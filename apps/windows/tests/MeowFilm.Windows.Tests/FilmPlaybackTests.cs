@@ -114,12 +114,17 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var cards = EpisodeItems(view);
         var list = Named<ItemsControl>(view, "EpisodeList");
-        var rail = Named<Shelf>(view, "EpisodeShelf").ScrollHost!;
+        var shelf = Named<Shelf>(view, "EpisodeShelf");
+        var rail = shelf.ScrollHost!;
+        var directory = page.EpisodeDirectory ?? throw new InvalidOperationException("The episode page has no directory.");
+        var presentation = directory.Presentation;
+        int shelfUnloads = 0;
+        shelf.Unloaded += (_, _) => shelfUnloads++;
         Check(page.Episodes.Count > 1 && page.IsHorizontalLayout && !page.IsListLayout &&
             FilmUiTest.Visible(rail) && !FilmUiTest.Visible(list), "the explicit TMDB snapshot starts with horizontal episode cards");
         await CheckEpisodeContent(cards, page);
         var chosen = page.Episodes[1];
-        Click(EpisodeButton(cards, chosen));
+        Click(await EpisodeButton(cards, chosen));
         await Drain();
         CheckSelection(scene, chosen);
 
@@ -130,7 +135,7 @@ public static class FilmPlaybackTests
         CheckSelection(scene, chosen);
         await CheckEpisodeContent(list, page);
         var last = page.Episodes[^1];
-        Click(EpisodeButton(list, last));
+        Click(await EpisodeButton(list, last));
         await Drain();
         CheckSelection(scene, last);
 
@@ -148,22 +153,42 @@ public static class FilmPlaybackTests
         Check(page.IsHorizontalLayout && FilmUiTest.Visible(rail), "the mouse action returns to horizontal cards");
         CheckSelection(scene, last);
 
-        Named<Shelf>(view, "EpisodeShelf").ScrollToIndex(0);
-        await Drain();
-        var previous = Named<Button>(Named<Shelf>(view, "EpisodeShelf"), "Previous");
-        var next = Named<Button>(Named<Shelf>(view, "EpisodeShelf"), "Next");
-        Check(rail.ScrollableWidth > 0 && !previous.IsEnabled && next.IsEnabled,
+        Check(ReferenceEquals(directory, page.EpisodeDirectory) && ReferenceEquals(presentation, directory.Presentation) &&
+            ReferenceEquals(shelf, Named<Shelf>(view, "EpisodeShelf")) && ReferenceEquals(rail, shelf.ScrollHost) &&
+            shelf.IsLoaded && shelfUnloads == 0,
+            $"layout choices retain the mounted directory shelf and native scroll host; " +
+            $"loaded={shelf.IsLoaded}, unloads={shelfUnloads}, sameRail={ReferenceEquals(rail, shelf.ScrollHost)}, " +
+            $"descendantRail={Visuals(shelf).OfType<ScrollViewer>().Any(candidate => ReferenceEquals(rail, candidate))}");
+        var currentRail = shelf.ScrollHost!;
+        shelf.ScrollToIndex(0);
+        await FilmPlaybackFixture.Until(() => currentRail.HorizontalOffset < .5 && shelf.IsSettled && shelf.HorizontalOffset < .5);
+        var previous = Named<Button>(shelf, "Previous");
+        var next = Named<Button>(shelf, "Next");
+        Check(currentRail.ScrollableWidth > 0 && !previous.IsEnabled && next.IsEnabled,
             "only the forward action is available at the start of the episode rail");
+        double pageOffset = Math.Min(shelf.MaximumOffset, FilmUiTest.Field<int>(shelf, "visibleCards") * shelf.CardWidth);
         Click(next);
-        await Drain();
-        await FilmPlaybackFixture.Until(() => rail.HorizontalOffset > 0 && Named<Shelf>(view, "EpisodeShelf").IsSettled);
-        Check(previous.IsEnabled, "next pages the actual episode viewport");
+        try
+        {
+            await FilmPlaybackFixture.Until(() => Math.Abs(currentRail.HorizontalOffset - pageOffset) < .5 && shelf.IsSettled &&
+                Math.Abs(shelf.HorizontalOffset - pageOffset) < .5);
+        }
+        catch (InvalidOperationException error)
+        { throw new InvalidOperationException("next pages the actual episode viewport; " + PagingState(), error); }
+        Check(previous.IsEnabled, "next pages the actual episode viewport; " + PagingState());
         Click(previous);
-        await Drain();
-        await FilmPlaybackFixture.Until(() => rail.HorizontalOffset < .5 && Named<Shelf>(view, "EpisodeShelf").IsSettled);
-        Check(!previous.IsEnabled, "previous returns to the rail boundary");
+        await FilmPlaybackFixture.Until(() => currentRail.HorizontalOffset < .5 && shelf.IsSettled && shelf.HorizontalOffset < .5);
+        Check(!previous.IsEnabled, "previous returns to the rail boundary; " + PagingState());
         CheckSelection(scene, last);
         Check(scene.Source.Calls == 0, "episode and layout interactions remain entirely local");
+
+        string PagingState() => $"sameRail={ReferenceEquals(rail, currentRail)}, currentHost={ReferenceEquals(currentRail, shelf.ScrollHost)}, " +
+            $"oldOffset={rail.HorizontalOffset}, offset={currentRail.HorizontalOffset}, saved={shelf.HorizontalOffset}, " +
+            $"page={pageOffset}, range={currentRail.ScrollableWidth}, viewport={currentRail.ViewportWidth}, " +
+            $"loaded={shelf.IsLoaded}, enabled={shelf.IsEnabled}, visible={FilmUiTest.Visible(shelf)}, settled={shelf.IsSettled}, " +
+            $"cardWidth={shelf.CardWidth}, maximum={shelf.MaximumOffset}, " +
+            $"target={FilmUiTest.Field<double?>(shelf, "targetOffset")}, previousTarget={FilmUiTest.Call(shelf, "PageTarget", -1)}, " +
+            $"previousEnabled={previous.IsEnabled}, previousVisibility={previous.Visibility}";
     }
 
     private static async Task ResponsivePlayer()
@@ -214,9 +239,16 @@ public static class FilmPlaybackTests
                 double pageOffset = scroll.VerticalOffset;
                 Check(details.ScrollableHeight > 0, "wide metadata has its own vertical scroll range");
                 details.ChangeView(null, details.ScrollableHeight, null, true);
-                await FilmPlaybackFixture.Until(() => details.VerticalOffset > 0);
+                try { await FilmPlaybackFixture.Until(() => details.VerticalOffset > 0); }
+                catch (InvalidOperationException error)
+                {
+                    throw new InvalidOperationException($"metadata scrolling reaches its real content; offset={details.VerticalOffset}, " +
+                        $"range={details.ScrollableHeight}, extent={details.ExtentHeight}, viewport={details.ViewportHeight}, " +
+                        $"pageBefore={pageOffset}, pageAfter={scroll.VerticalOffset}", error);
+                }
                 Check(details.VerticalOffset > 0 && Math.Abs(scroll.VerticalOffset - pageOffset) < .5,
-                    $"scrolling metadata leaves the page viewport in place; metadata={details.VerticalOffset}/{details.ScrollableHeight}; page={pageOffset}->{scroll.VerticalOffset}");
+                    $"scrolling metadata leaves the page viewport in place; offset={details.VerticalOffset}, " +
+                    $"range={details.ScrollableHeight}, pageBefore={pageOffset}, pageAfter={scroll.VerticalOffset}");
                 await CheckSharedCanvas(view);
                 Click(Named<Button>(view, "OverviewToggle"));
                 await Drain();
@@ -228,14 +260,66 @@ public static class FilmPlaybackTests
             CheckInsideViewport(scroll, hero);
             CheckInsideViewport(scroll, metadata);
         }
+        DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
         Check(scroll.ScrollableHeight > 0, "narrow content scrolls vertically");
         scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
-        await FilmPlaybackFixture.Until(() => scroll.VerticalOffset > 0);
+        try { await FilmPlaybackFixture.Until(() => scroll.VerticalOffset > 0); }
+        catch (InvalidOperationException error)
+        {
+            throw new InvalidOperationException($"the page scroll reaches content below the player; offset={scroll.VerticalOffset}, " +
+                $"range={scroll.ScrollableHeight}, extent={scroll.ExtentHeight}, viewport={scroll.ViewportHeight}", error);
+        }
         Check(scroll.VerticalOffset > 0, "the page scroll reaches content below the player");
         Click(Named<ToggleButton>(view, "ListLayout"));
         await Drain();
-        CheckInsideViewport(scroll, Named<ItemsControl>(view, "EpisodeList"));
+        var list = Named<ItemsControl>(view, "EpisodeList");
+        CheckInsideViewport(scroll, list);
         CheckInsideViewport(scroll, Named<Grid>(view, "MetadataPanel"));
+        var directory = scene.Page.EpisodeDirectory;
+        int requests = scene.Runtime.Calls.Count;
+        foreach (double height in new[] { 650d, 950d })
+        {
+            double previousHeight = scroll.ActualHeight;
+            scene.Window.Resize(700, height);
+            await FilmPlaybackFixture.Until(() => Math.Abs(scroll.ActualHeight - previousHeight) > 40);
+            DesktopTestUi.WindowRoot(scene.Window).UpdateLayout();
+            await Drain();
+            var listScroll = Visuals(list).OfType<ScrollViewer>().Single();
+            Check(Math.Abs(list.MaxHeight - scroll.ActualHeight) < .5 && list.ActualHeight <= scroll.ActualHeight + .5 &&
+                listScroll.ViewportHeight > 0 && listScroll.ScrollableHeight > 0,
+                $"the retained episode list follows the real page viewport after resize; max={list.MaxHeight}, " +
+                $"list={list.ActualHeight}, page={scroll.ActualHeight}, innerRange={listScroll.ScrollableHeight}");
+            listScroll.ChangeView(null, 0, null, true);
+            await FilmPlaybackFixture.Until(() => listScroll.VerticalOffset == 0);
+            double pageOffset = scroll.VerticalOffset;
+            var last = await EpisodeButton(list, scene.Page.Episodes[^1]);
+            await FilmPlaybackFixture.Until(() =>
+            {
+                list.UpdateLayout();
+                return last.ActualWidth > 0 && last.ActualHeight > 0;
+            });
+            listScroll.ChangeView(null, listScroll.ScrollableHeight, null, true);
+            try
+            {
+                await FilmPlaybackFixture.Until(() => listScroll.VerticalOffset > 0 &&
+                    Math.Abs(listScroll.VerticalOffset - listScroll.ScrollableHeight) < 1 &&
+                    Bounds(last, listScroll).Bottom <= listScroll.ViewportHeight + 1);
+            }
+            catch (InvalidOperationException error)
+            {
+                var container = ((ListView)list).ContainerFromItem(scene.Page.Episodes[^1]) as FrameworkElement;
+                throw new InvalidOperationException($"the resized list reaches its real last row; height={height}, " +
+                    $"offset={listScroll.VerticalOffset}, range={listScroll.ScrollableHeight}, extent={listScroll.ExtentHeight}, " +
+                    $"viewport={listScroll.ViewportHeight}, last={Bounds(last, listScroll)}, lastMargin={last.Margin}, " +
+                    $"container={(container is null ? -1 : ((ListView)list).IndexFromContainer(container))}, " +
+                    $"containerBounds={(container is null ? default : Bounds(container, listScroll))}, " +
+                    $"items={list.Items.Count}, padding={((ListView)list).Padding}", error);
+            }
+            Check(Math.Abs(scroll.VerticalOffset - pageOffset) < .5 &&
+                ReferenceEquals(list, Named<ItemsControl>(view, "EpisodeList")) &&
+                ReferenceEquals(directory, scene.Page.EpisodeDirectory) && scene.Runtime.Calls.Count == requests,
+                "resized list scrolling retains its directory and leaves the page position and business reads unchanged");
+        }
         Check(!play.IsEnabled && !Named<Button>(view, "HeroPlayButton").IsEnabled &&
             !scene.Page.HasOutput && scene.Native.Commits == 0 && scene.Source.Calls == 0,
             "resizing and scrolling do not manufacture an output or resolve a source");
@@ -251,8 +335,8 @@ public static class FilmPlaybackTests
         await Drain();
         var original = scene.Page;
         var chosen = original.Episodes[^1];
-        Click(EpisodeButton(EpisodeItems(scene.Playback), chosen));
-        Click(Named<Button>(scene.Playback, "ListLayout"));
+        Click(await EpisodeButton(EpisodeItems(scene.Playback), chosen));
+        Click(Named<ToggleButton>(scene.Playback, "ListLayout"));
         await Drain();
         string location = module.CaptureNavigationLocation();
         int calls = scene.Source.Calls;
@@ -338,15 +422,17 @@ public static class FilmPlaybackTests
         var view = scene.Playback;
         var page = scene.Page;
         var metadata = Named<Grid>(view, "MetadataPanel");
+        var actions = Visuals(metadata).OfType<ButtonBase>().ToArray();
         Check(!Visuals(metadata).OfType<Border>().Any(border => FilmUiTest.Visible(border) &&
                 !Visuals(border).OfType<ButtonBase>().Any() &&
+                !actions.Any(action => DesktopVisual.Contains(action, border)) &&
                 ((border.BorderThickness != default && border.BorderBrush is SolidColorBrush { Color.A: > 0 }) ||
                 (border.ActualWidth > metadata.ActualWidth / 2 && border.Background is SolidColorBrush { Color.A: > 0 }))),
             "metadata sits directly on the page without a surface or outlined card");
         CheckFlat(view, page, outline: false);
         CheckCurrentStatus(view, page);
         var chosen = page.Episodes[2];
-        Click(EpisodeButton(EpisodeItems(view), chosen));
+        Click(await EpisodeButton(EpisodeItems(view), chosen));
         await Drain();
         CheckSelection(scene, chosen);
         CheckCurrentStatus(view, page);
@@ -516,9 +602,41 @@ public static class FilmPlaybackTests
         var details = Named<ScrollViewer>(view, "MetadataScroll");
         var title = Named<TextBlock>(view, "FilmTitle");
         var metadata = Named<TextBlock>(view, "FilmMetadata");
-        var actions = Named<StackPanel>(view, "HeroActions");
+        var actions = Named<Panel>(view, "HeroActions");
         var favorite = Named<ToggleButton>(view, "FavoriteButton");
         var play = Named<Button>(view, "HeroPlayButton");
+        var favoriteSurface = Named<Border>(favorite, "FavoriteSurface");
+        var favoriteContent = Named<ContentPresenter>(favorite, "FavoriteContent");
+        var favoriteText = new[] { Named<TextBlock>(view, "FavoriteLabel"), Named<TextBlock>(view, "FavoriteIcon") };
+        Check(favoriteSurface.CornerRadius == new CornerRadius(12) && favoriteSurface.Background is SolidColorBrush { Color.A: 0 } &&
+            favoriteSurface.BorderThickness == default && favorite.Padding == default &&
+            favorite.Width == 64 && favorite.Height == 44 && favorite.UseSystemFocusVisuals,
+            "favorite keeps its transparent rounded 64 by 44 native toggle without a default button frame");
+        foreach (string state in new[] { "PointerOver", "Pressed", "CheckedPointerOver", "CheckedPressed" })
+        {
+            Check(VisualStateManager.GoToState(favorite, state, false), "favorite retains its native " + state + " feedback");
+            Check(favoriteSurface.Background is SolidColorBrush fill && fill.Color == FilmUiTest.ResourceColor(view,
+                state.EndsWith("Pressed", StringComparison.Ordinal) ? "MeowFilm.Brush.Pressed" : "MeowFilm.Brush.Hover"),
+                "favorite renders the existing hover or pressed palette");
+            Check(favoriteText.All(text => text.Foreground is SolidColorBrush textBrush &&
+                textBrush.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Text")),
+                "favorite hover and pressed colors apply to its complete label and icon");
+        }
+        Check(VisualStateManager.GoToState(favorite, "Normal", false), "favorite returns to transparent resting chrome");
+        favorite.IsEnabled = false;
+        var favoritePeer = new ToggleButtonAutomationPeer(favorite);
+        try
+        { await FilmPlaybackFixture.Until(() => Math.Abs(favoriteSurface.Opacity - .45) < .001 && !favoritePeer.IsEnabled()); }
+        catch (InvalidOperationException error)
+        {
+            throw new InvalidOperationException($"favorite reaches its native disabled visual and accessible state; " +
+                $"enabled={favorite.IsEnabled}, peerEnabled={favoritePeer.IsEnabled()}, checked={favorite.IsChecked}, " +
+                $"opacity={favoriteSurface.Opacity}", error);
+        }
+        Check(Math.Abs(favoriteSurface.Opacity - .45) < .001 &&
+            !favoritePeer.IsEnabled(), "disabled favorite keeps its native accessible disabled state");
+        favorite.SetBinding(Control.IsEnabledProperty, new Binding { Path = new PropertyPath(nameof(FilmPlaybackPage.CanFavorite)), Mode = BindingMode.OneWay });
+        await FilmPlaybackFixture.Until(() => favoritePeer.IsEnabled() && favoriteSurface.Opacity == 1);
         Check(title.TextAlignment == TextAlignment.Center && metadata.TextAlignment == TextAlignment.Center &&
             content.VerticalAlignment == VerticalAlignment.Top &&
             DesktopVisual.Contains(details, content) && DesktopVisual.Contains(Named<Grid>(view, "MetadataPanel"), details),
@@ -531,13 +649,31 @@ public static class FilmPlaybackTests
             await Drain();
             foreach (var element in new FrameworkElement[] { title, metadata, Named<WrapPanel>(view, "FilmFacts"), actions })
             {
-                var bounds = Bounds(element, content);
+                var bounds = element is TextBlock ? LayoutInformation.GetLayoutSlot(element) : Bounds(element, content);
                 Check(Math.Abs(bounds.Left + bounds.Width / 2 - content.ActualWidth / 2) <= 1,
-                    "identity facts and the action group share the metadata center");
+                    $"identity facts and the action group share the metadata center; width={width}, " +
+                    $"element={element.Name}, bounds={bounds}, content={content.ActualWidth}x{content.ActualHeight}");
             }
             Check(Bounds(title, details).Top >= 0 && Bounds(actions, details).Bottom <= details.ViewportHeight + 1 &&
                 Bounds(Named<Button>(view, "OverviewToggle"), details).Bottom <= details.ViewportHeight + 1,
-                "the short title playback favorite and overview action fit the desktop metadata viewport");
+                $"the short title playback favorite and overview action fit the desktop metadata viewport; width={width}, " +
+                $"title={Bounds(title, details)}, actions={Bounds(actions, details)}, " +
+                $"overview={Bounds(Named<Button>(view, "OverviewToggle"), details)}, " +
+                $"viewport={details.ViewportWidth}x{details.ViewportHeight}, offset={details.VerticalOffset}, " +
+                $"metadata={Named<Grid>(view, "MetadataPanel").ActualWidth}x{Named<Grid>(view, "MetadataPanel").ActualHeight}, " +
+                $"player={Named<Grid>(view, "PlayerFrame").ActualWidth}x{Named<Grid>(view, "PlayerFrame").ActualHeight}");
+            foreach (var action in actions.Children.OfType<FrameworkElement>())
+            {
+                var bounds = Bounds(action, content);
+                Check(bounds.Left >= -.5 && bounds.Right <= content.ActualWidth + .5 &&
+                    action.ActualWidth > 0 && FilmUiTest.Visible(action),
+                    $"play short-video and favorite remain fully inside the available metadata width; width={width}, " +
+                    $"action={action.Name}, bounds={bounds}, content={content.ActualWidth}x{content.ActualHeight}");
+            }
+            var favoriteLabel = Named<TextBlock>(view, "FavoriteLabel");
+            var labelBounds = Bounds(favoriteLabel, favorite);
+            Check(labelBounds.Top >= 0 && labelBounds.Bottom <= favorite.ActualHeight + .5,
+                $"the full favorite label fits its actual control; label={labelBounds}, height={favorite.ActualHeight}");
             await CheckSharedCanvas(view);
         }
         Check(play.IsEnabled && AutomationProperties.GetName(play) == "播放当前选择" &&
@@ -562,6 +698,7 @@ public static class FilmPlaybackTests
             AutomationProperties.GetName(favorite) == "取消收藏 " + page.Title && scene.Store.Writes == 2,
             "the UIA toggle updates the model, visible favorite label and accessible action");
         string location = module.CaptureNavigationLocation();
+        module.RetainNavigationLocations(new HashSet<string>(StringComparer.Ordinal) { location });
         await module.OpenRecommendationAsync(page.Recommendations[0]);
         await Drain();
         Check(!scene.Page.IsFavorite && favorite.IsChecked == false,
@@ -596,12 +733,27 @@ public static class FilmPlaybackTests
         await module.RestoreNavigationAsync(location, default);
         await Drain();
         page = scene.Page;
-        Check(!page.OverviewExpanded && !FilmUiTest.Visible(overview), "new presentation does not reuse an old expanded overview");
+        Check(page.OverviewExpanded && FilmUiTest.Visible(overview), "returning to the retained page preserves its own expanded overview");
+        InvokeAction(overviewToggle);
+        await Drain();
+        Check(!page.OverviewExpanded && !FilmUiTest.Visible(overview), "Automation collapses the restored page's overview");
         InvokeAction(overviewToggle);
         await Drain();
         Check(page.OverviewExpanded && FilmUiTest.Visible(overview), "Automation expands the actual current presentation");
         InvokeAction(overviewToggle);
-        await Drain();
+        try
+        {
+            await FilmPlaybackFixture.Until(() => !page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
+                Math.Abs(content.ActualHeight - collapsedHeight) < 1 &&
+                AutomationProperties.GetItemStatus(overviewToggle) == "已收起");
+        }
+        catch (InvalidOperationException error)
+        {
+            throw new InvalidOperationException($"Automation collapses the overview and reclaims its layout space; " +
+                $"expanded={page.OverviewExpanded}, visibility={overview.Visibility}, desired={overview.DesiredSize}, " +
+                $"height={content.ActualHeight}, collapsedHeight={collapsedHeight}, delta={content.ActualHeight - collapsedHeight}, " +
+                $"itemStatus={AutomationProperties.GetItemStatus(overviewToggle)}", error);
+        }
         Check(!page.OverviewExpanded && overview.Visibility == Visibility.Collapsed &&
             Math.Abs(content.ActualHeight - collapsedHeight) < 1 &&
             AutomationProperties.GetItemStatus(overviewToggle) == "已收起",
@@ -614,6 +766,24 @@ public static class FilmPlaybackTests
             favorite.Foreground is SolidColorBrush ink && ink.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Text") &&
             play.Foreground is SolidColorBrush actionInk && actionInk.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.OnAccent"),
             "high-contrast resources keep the metadata layout and system canvas and action colors");
+        Check(favoriteSurface.Background is SolidColorBrush favoriteGround && favoriteGround.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Hover") &&
+            favoriteSurface.BorderThickness == new Thickness(1) && favoriteSurface.BorderBrush is SolidColorBrush outline &&
+            outline.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Text"),
+            "high-contrast favorite pairs the system window background with a visible system text outline");
+        Check(VisualStateManager.GoToState(favorite, "PointerOver", false) &&
+            favoriteSurface.Background is SolidColorBrush highlight && highlight.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Accent") &&
+            favoriteContent.Foreground is SolidColorBrush selectedInk && selectedInk.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.OnAccent") &&
+            favoriteText.All(text => text.Foreground is SolidColorBrush textBrush && textBrush.Color == selectedInk.Color),
+            $"high-contrast favorite hover changes the complete label and icon foreground together; " +
+            $"background={(favoriteSurface.Background as SolidColorBrush)?.Color}, " +
+            $"content={(favoriteContent.Foreground as SolidColorBrush)?.Color}, " +
+            $"label={(favoriteText[0].Foreground as SolidColorBrush)?.Color}, icon={(favoriteText[1].Foreground as SolidColorBrush)?.Color}, " +
+            $"expectedBackground={FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Accent")}, " +
+            $"expectedText={FilmUiTest.ResourceColor(view, "MeowFilm.Brush.OnAccent")}");
+        Check(VisualStateManager.GoToState(favorite, "Normal", false), "favorite restores the high-contrast resting state");
+        Check(favoriteText.All(text => text.Foreground is SolidColorBrush textBrush &&
+            textBrush.Color == FilmUiTest.ResourceColor(view, "MeowFilm.Brush.Text")),
+            "high-contrast favorite restores the system resting foreground for its complete label and icon");
         Check(scene.Source.Calls == 0, "hero and favorite interactions issue no source requests");
     }
 
@@ -805,13 +975,7 @@ public static class FilmPlaybackTests
         Check(host.Items.Count == page.Episodes.Count, "the episode presentation binds the complete season");
         foreach (var episode in page.Episodes)
         {
-            if (host is ListView list)
-            {
-                list.ScrollIntoView(episode);
-                list.UpdateLayout();
-                await Drain();
-            }
-            var button = EpisodeButton(host, episode);
+            var button = await EpisodeButton(host, episode);
             var texts = Visuals(button).OfType<TextBlock>().Select(text => text.Text).ToArray();
             Check(texts.Contains(episode.Label) && texts.Contains(episode.Duration) && texts.Contains(episode.Overview) &&
                 Visuals(button).OfType<Image>().Any(image => image.Source is not null),
@@ -831,7 +995,25 @@ public static class FilmPlaybackTests
         var selectedButton = Visuals(host).OfType<Button>().SingleOrDefault(button => ReferenceEquals(button.Tag, selected));
         Check(selectedButton is null ? badges.Length == 0 :
             badges.Length == 1 && Visuals(selectedButton).Contains(badges[0]),
-            "only the realized selected episode owns the current-target badge");
+            $"only the realized selected episode owns the current-target badge; layout={scene.Page.IsListLayout}, " +
+            $"selected={selected?.Number}, button={(selectedButton is null ? "none" : Describe(selectedButton))}, " +
+            $"badges={badges.Length}[{string.Join("; ", badges.Select(Describe))}], " +
+            $"rows=[{string.Join("; ", Visuals(host).OfType<Button>().Where(button => button.Tag is FilmEpisodeItem).Select(Describe))}]");
+
+        string Describe(FrameworkElement element)
+        {
+            Button? button = null;
+            ListViewItem? container = null;
+            for (DependencyObject? node = element; node is not null && !ReferenceEquals(node, host); node = VisualTreeHelper.GetParent(node))
+            {
+                if (node is Button owner) button = owner;
+                if (node is ListViewItem row) container = row;
+            }
+            var item = button?.Tag as FilmEpisodeItem;
+            return $"episode={item?.Number}, selected={item?.IsSelected}, loaded={element.IsLoaded}, " +
+                $"visible={FilmUiTest.Visible(element)}, bounds={Bounds(element, host)}, " +
+                $"container={(host is ListView list && container is not null ? list.IndexFromContainer(container) : -1)}";
+        }
     }
 
     private static void CheckInsideViewport(ScrollViewer scroll, FrameworkElement element)
@@ -846,14 +1028,33 @@ public static class FilmPlaybackTests
     private static ItemsControl EpisodeItems(FilmPlaybackView view) =>
         Named<ItemsControl>(Named<Shelf>(view, "EpisodeShelf"), "ItemsHost");
 
-    private static Button EpisodeButton(ItemsControl host, FilmEpisodeItem episode)
+    private static async Task<Button> EpisodeButton(ItemsControl host, FilmEpisodeItem episode)
     {
+        Button? button = null;
         if (host is ListView list)
         {
-            list.ScrollIntoView(episode);
-            list.UpdateLayout();
+            if (ParentOfShelf(host) is { } shelf)
+            {
+                shelf.ScrollToIndex(list.Items.IndexOf(episode));
+                await FilmPlaybackFixture.Until(() => shelf.IsSettled);
+            }
+            else list.ScrollIntoView(episode, ScrollIntoViewAlignment.Leading);
+            await FilmPlaybackFixture.Until(() =>
+            {
+                list.UpdateLayout();
+                if (list.ContainerFromItem(episode) is not FrameworkElement container) return false;
+                button = Visuals(container).OfType<Button>().SingleOrDefault(candidate => ReferenceEquals(candidate.Tag, episode));
+                return button is { IsLoaded: true };
+            });
         }
-        return Visuals(host).OfType<Button>().Single(button => ReferenceEquals(button.Tag, episode));
+        return button ?? Visuals(host).OfType<Button>().Single(candidate => ReferenceEquals(candidate.Tag, episode));
+
+        static Shelf? ParentOfShelf(DependencyObject node)
+        {
+            for (var parent = VisualTreeHelper.GetParent(node); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+                if (parent is Shelf shelf) return shelf;
+            return null;
+        }
     }
 
     private static T Named<T>(FrameworkElement root, string name) where T : FrameworkElement =>

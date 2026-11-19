@@ -1,7 +1,7 @@
 import { musicPlatformCodes } from '@meowfilm/music-platform';
 
 const metadataCodes = () => new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'NETWORK_ERROR',
-  'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'WEB_INTERACTION_REQUIRED', 'STORAGE_ERROR', 'CORRUPT_STORAGE', 'PERMISSION_DENIED']);
+  'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'NOT_CONFIGURED', 'AUTH_FAILED', 'WEB_INTERACTION_REQUIRED', 'STORAGE_ERROR', 'CORRUPT_STORAGE', 'PERMISSION_DENIED']);
 
 export const contracts = Object.freeze({
   'music-platform': { contract: 'music.platform.v1', version: '0.1.0', prefix: 'music.platform.',

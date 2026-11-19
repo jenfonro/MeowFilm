@@ -391,18 +391,26 @@ test('script control remains available while many invocations are in flight', as
   for (const reply of await Promise.all(requests)) okay(reply);
 });
 
-test('file identities and management reject external configuration, grants and execution selectors', async t => {
-  const { rpc, host } = setup(t);
+test('file identities and management never grant external configuration or execution selectors', async t => {
+  const wrapped = wrappedHost({ afterInstall({ spec }) {
+    assert.equal(spec.protocol, 'lx');
+    assert.deepEqual(spec.config, {});
+    assert.deepEqual(spec.permissions, { storage: ['read', 'write'] });
+    assert.equal(spec.contentHash, hash(spec.source));
+  } });
+  const { rpc } = setup(t, { hostFactory: wrapped.factory });
   denied(await rpc.upload('not-a-uuid', 1, Buffer.from('x'), { basename: 'x.js' }), 'INVALID_REQUEST');
-  const sourceRevision = await upload(rpc, `throw Error('synthetic-private-startup');`);
-  for (const extra of [{ activate: false }, { protocol: 'cat-cjs-http-v1' }, { trustedExecution: true },
+  for (const [index, extra] of [{ activate: true }, { protocol: 'cat-cjs-http-v1' }, { trustedExecution: true },
     { document: 'music.sources.v1' }, { contentHash: '0'.repeat(64) }, { config: {} },
-    { permissions: { storage: [] } }, { grant: randomUUID() }, { expectedRevision: 0 }])
-    denied(await rpc('sources.add', { installationId: idOf('one'), sourceRevision, ...extra }), 'INVALID_REQUEST');
-  const item = okay(await rpc('sources.add', { installationId: idOf('one'), sourceRevision })).item;
-  assert.equal(host().stats().liveSessions, 0);
-  denied(await rpc('sources.enable', { installationId: item.installationId }), 'SCRIPT_FAILURE');
-  assert.equal(host().stats().installations, 0);
+    { permissions: { storage: [] } }, { grant: randomUUID() }, { expectedRevision: 0 }].entries()) {
+    const installationId = idOf(`extra-${index}`);
+    const sourceRevision = await upload(rpc, fixture(), installationId);
+    const item = okay(await rpc('sources.add', { installationId, sourceRevision, ...extra })).item;
+    assert.equal(item.enabled, false);
+    assert.equal(item.generation, 0);
+    okay(await rpc('sources.enable', { installationId }));
+  }
+  assert.equal(wrapped.state.raw.stats().liveSessions, 9);
 });
 
 test('two identical LX sources stay directed and enabled content is selected without caller CAS', async t => {
@@ -415,7 +423,7 @@ test('two identical LX sources stay directed and enabled content is selected wit
   assert.ok(next.generation > a.generation);
   assert.equal(await value(rpc, a), 'changed');
   for (const extra of [{ revision: 1 }, { generation: a.generation }])
-    denied(await rpc('invoke', { ...request(a), ...extra }), 'INVALID_REQUEST');
+    assert.equal(okay(await rpc('invoke', { ...request(a), ...extra })), 'changed');
   assert.equal((await value(rpc, b)).count, 2);
   const text = '[00:01.00]原始歌词';
   const lyric = await load(rpc, options('lyric'), fixture({ handler: `async () => ${JSON.stringify(text)}` }));
@@ -493,7 +501,7 @@ test('private KV accepts an independent 64-level value, rejects 65 levels and su
   assert.deepEqual(await value(reopened.rpc, item), expected);
 });
 
-test('private KV corrupt typed values and write failures are explicit and never reset stored data', async t => {
+test('private KV reports corrupt reads, replaces corrupt values and preserves data on write failure', async t => {
   const { rpc, dataRoot } = setup(t);
   const item = await load(rpc, options(), storageFixture);
   await value(rpc, item, 'kw', { op: 'set', value: 'safe' });
@@ -501,13 +509,13 @@ test('private KV corrupt typed values and write failures are explicit and never 
     await db.execute("UPDATE music_script_kv_nodes SET kind='integer',text_value=NULL WHERE installation_id=?", [item.installationId]);
     const corrupt = await storedNodes(dataRoot, item.installationId, 'key');
     denied(await rpc('invoke', request(item)), 'CORRUPT_STORAGE');
-    denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'CORRUPT_STORAGE');
     assert.deepEqual(await storedNodes(dataRoot, item.installationId, 'key'), corrupt);
-    await db.execute("UPDATE music_script_kv_nodes SET kind='text',text_value='safe' WHERE installation_id=?", [item.installationId]);
+    assert.equal(await value(rpc, item, 'kw', { op: 'set', value: 'replace' }), null);
+    assert.equal(await storedValue(dataRoot, item.installationId, 'key'), 'replace');
     await db.query('PRAGMA query_only=ON');
     try {
-      denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'replace' })), 'STORAGE_ERROR');
-      assert.equal(await storedValue(dataRoot, item.installationId, 'key'), 'safe');
+      denied(await rpc('invoke', request(item, 'kw', { op: 'set', value: 'blocked' })), 'STORAGE_ERROR');
+      assert.equal(await storedValue(dataRoot, item.installationId, 'key'), 'replace');
     } finally { await db.query('PRAGMA query_only=OFF'); }
   });
 });
@@ -587,11 +595,11 @@ for (const [phase, operation] of [['install', 'sources.update'], ['update', 'sou
       const nextRevision = await upload(rpc);
       denied(await rpc('sources.update', { installationId: idOf('one'), sourceRevision: 'bad' }), 'INVALID_REQUEST');
       denied(await rpc('sources.update', { installationId: idOf('one'), sourceRevision: nextRevision + 1 }), 'SOURCE_NOT_FOUND');
-      denied(await rpc('sources.disable', { installationId: idOf('one'), generation: 99 }), 'INVALID_REQUEST');
+      denied(await rpc('sources.disable', { installationId: 'not-a-uuid', generation: 99 }), 'INVALID_REQUEST');
       assert.equal(network.signal.aborted, false);
       assert.equal((await value(rpc, b)).count, 1);
       const managing = rpc(operation, { installationId: idOf('one'),
-        ...(operation === 'sources.update' ? { sourceRevision: nextRevision } : {}) });
+        generation: 99, ...(operation === 'sources.update' ? { sourceRevision: nextRevision } : {}) });
       await until(() => network.signal.aborted);
       assert.equal(controller.signal.aborted, false);
       denied(await trial, 'STALE_SOURCE');

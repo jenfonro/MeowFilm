@@ -67,10 +67,11 @@ public sealed partial class MusicCapability
     {
         if (savedQualityPolicy is null) return;
         PlaybackQualityRequest = LJ.S(savedQualityPolicy["request"]);
-        void Rows(ObservableCollection<MusicQualityRow> destination, string order, string enabled)
+        void Rows(ObservableCollection<MusicQualityRow> destination, string order, string enabled, string[] options)
         {
             var active = MusicQualityPolicy.Strings(savedQualityPolicy[enabled]);
             var keys = MusicQualityPolicy.Strings(savedQualityPolicy[order]);
+            keys = keys.Concat(options.Except(keys)).ToArray();
             var existing = destination.ToDictionary(row => row.Key, StringComparer.Ordinal);
             for (var index = 0; index < keys.Length; index++)
             {
@@ -85,18 +86,18 @@ public sealed partial class MusicCapability
             }
             while (destination.Count > keys.Length) destination.RemoveAt(destination.Count - 1);
         }
-        Rows(QualityCategories, "qualityOrder", "qualityEnabled");
-        Rows(SpatialQualities, "spatialOrder", "spatialEnabled");
+        Rows(QualityCategories, "qualityOrder", "qualityEnabled", MusicQualityPolicy.Categories);
+        Rows(SpatialQualities, "spatialOrder", "spatialEnabled", MusicQualityPolicy.Spatial);
     }
     private JsonObject QualityRequest(string? request = null)
     {
         MusicDto.Require(savedQualityPolicy is not null);
         return LJ.Obj(("ifRevision", savedQualityPolicy!["revision"]),
             ("request", request ?? PlaybackQualityRequest),
-            ("qualityOrder", QualityCategories.Select(r => r.Key).ToArray()),
-            ("qualityEnabled", QualityCategories.Where(r => r.Enabled).Select(r => r.Key).ToArray()),
-            ("spatialOrder", SpatialQualities.Select(r => r.Key).ToArray()),
-            ("spatialEnabled", SpatialQualities.Where(r => r.Enabled).Select(r => r.Key).ToArray()));
+            ("qualityOrder", savedQualityPolicy["qualityOrder"]),
+            ("qualityEnabled", savedQualityPolicy["qualityEnabled"]),
+            ("spatialOrder", savedQualityPolicy["spatialOrder"]),
+            ("spatialEnabled", savedQualityPolicy["spatialEnabled"]));
     }
     public Task SetPlaybackQualityRequestAsync(string request)
     {
@@ -117,6 +118,9 @@ public sealed partial class MusicCapability
         if (enabled) active.Add(row.Key); else active.Remove(row.Key);
         request[field] = new JsonArray(rows.Where(value => active.Contains(value.Key))
             .Select(value => JsonValue.Create(value.Key)).ToArray());
+        string orderField = spatial ? "spatialOrder" : "qualityOrder";
+        if (enabled && !MusicQualityPolicy.Strings(request[orderField]).Contains(row.Key))
+            request[orderField] = LJ.Arr(MusicQualityPolicy.Strings(request[orderField]).Append(row.Key));
         return SaveQualitySettings(request);
     }
 

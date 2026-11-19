@@ -293,6 +293,7 @@ test('metadata upstream JSON retains exact numeric material through image rewrit
 test('metadata exact parsing still rejects malformed bodies and scalar roots without masking upstream refusals', async t => {
   let status = 200, body;
   const owner = await runtime(t, area(t), { request: async () => ({ status, headers: {}, body }) });
+  value(await owner.client.call('tmdb.data.settings.update', { accessToken: 'fixture-token' }));
   for (const [source, path] of [['tmdb', '/3/movie/42'], ['douban', '/rexxar/api/v2/movie/42']]) {
     for (const bytes of [Buffer.from('{"id":'), Buffer.from('1e400'),
       Buffer.from('9007199254740993'), Buffer.from('null'),
@@ -492,7 +493,7 @@ test('configuration stays local and HTTP redirects preserve the explicitly confi
   assert.equal(received.length, 1);
   assert.equal(received[0].authorization, 'Bearer sensitive-test-token');
   assert.deepEqual(await owner.client.call('tmdb.data.request', { path: '/3/movie/2' }), {
-    ok: false, contract: 'tmdb.data.v1', code: 'UPSTREAM_HTTP',
+    ok: false, contract: 'tmdb.data.v1', code: 'AUTH_FAILED',
   });
 });
 

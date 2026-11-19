@@ -51,6 +51,15 @@ public static class MusicQualityPolicyTests
         Check(MusicQualityPolicy.Tiers(p).SelectMany(tier => tier.Levels)
             .SequenceEqual(["master", "sky", "jyeffect", "flac24bit", "flac", "320k", "192k", "128k"]));
         Check(MusicQualityPolicy.Category("madeup") == "");
+        p["qualityOrder"] = new JsonArray("lossless", "spatial");
+        p["spatialOrder"] = new JsonArray("sky");
+        MusicQualityPolicy.Validate(p);
+        Check(MusicQualityPolicy.Priority("flac", p) < MusicQualityPolicy.Priority("master", p));
+        p["spatialEnabled"] = new JsonArray("sky", "dolby");
+        Check(MusicQualityPolicy.Priority("sky", p) < MusicQualityPolicy.Priority("dolby", p));
+        Check(MusicQualityPolicy.Tiers(p).Select(tier => tier.Category)
+            .SequenceEqual(["lossless", "spatial", "master", "enhanced", "hires", "high", "standard"]));
+        Check(MusicQualityPolicy.Levels("spatial", p).SequenceEqual(["sky", "dolby"]));
         return Task.CompletedTask;
     }
     private static async Task Defaults()
@@ -319,7 +328,7 @@ public static class MusicQualityPolicyTests
             native: new JsonObject { ["artistNames"] = new JsonArray("合成艺人"), ["qualityKnown"] = true,
                 ["types"] = new JsonArray(new JsonObject { ["type"] = "128k" }) });
         var records = MusicTestStores.For(store);
-        await using (var seed = new MusicLibraryOwner(records))
+        await using (var seed = new MusicLibraryOwner(records, database: records.Storage))
             await MusicSongFixture.AdoptAsync(seed, prior);
         var document = records.Root;
         var stored = document["songs"]!.AsObject().Single().Value!.AsObject();

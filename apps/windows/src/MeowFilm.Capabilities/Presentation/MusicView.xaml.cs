@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
+using Windows.UI.ViewManagement;
 
 namespace MeowFilm.Capabilities;
 
@@ -21,6 +22,9 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private ContentDialog? playlistDialog;
     private MenuFlyout? songMenu;
     private bool playlistDialogSubmitting;
+    private Task dailyStyleRetired = Task.CompletedTask;
+    private Flyout? dailyStyleOpen;
+    private long dailyStyleRequest;
     private SongRow? draggingSong;
     private ListViewItem? insertionRow;
     private bool insertAfter;
@@ -71,7 +75,11 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         if (!module.CanReorderPlaylist) EndDrag();
         if (playlistDialog is not null && !playlistDialogSubmitting && e.PropertyName is nameof(MusicCapability.Heading) or nameof(MusicCapability.IsCollectionPage)) playlistDialog.Hide();
         if (e.PropertyName == nameof(MusicCapability.IsDailyStyleEditorOpen))
-        { if (module.IsDailyStyleEditorOpen) DailyStylePopup.ShowAt(DailyStyleButton); else DailyStylePopup.Hide(); }
+        {
+            long request = ++dailyStyleRequest;
+            if (module.IsDailyStyleEditorOpen) _ = ShowDailyStylePopupAsync(request);
+            else if (dailyStyleOpen is not null) DailyStylePopup.Hide();
+        }
         Refresh();
         var state = HeaderState(); if (state != publishedHeaderState) { publishedHeaderState = state; HeaderChanged?.Invoke(this, EventArgs.Empty); }
         if (e.PropertyName == nameof(MusicCapability.CurrentSongId))
@@ -137,12 +145,60 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         var refresh = new MenuFlyoutItem { Text = "重新读取", IsEnabled = module.CanCatalogBrowse }; refresh.Click += async (_, _) => await module.RefreshCatalogAsync();
         menu.Items.Add(save); menu.Items.Add(refresh); menu.ShowAt((FrameworkElement)sender);
     }
-    private void DailyStylePopup_Closed(object? sender, object e) => module.CancelDailyStyleEditor();
+    private async Task ShowDailyStylePopupAsync(long request)
+    {
+        await dailyStyleRetired;
+        if (request != dailyStyleRequest || !module.IsDailyStyleEditorOpen || !DesktopVisual.IsVisible(DailyStyleButton)) return;
+        var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Closed(object? sender, object args) { DailyStylePopup.Closed -= Closed; retired.TrySetResult(); }
+        DailyStylePopup.Closed += Closed; dailyStyleRetired = retired.Task; dailyStyleOpen = DailyStylePopup;
+        DailyStylePopup.ShowAt(DailyStyleButton);
+    }
+    private void DailyStylePopup_Closing(FlyoutBase sender, FlyoutBaseClosingEventArgs args)
+    {
+        if (dailyStyleOpen is null) return;
+        dailyStyleOpen = null;
+        if (module.IsDailyStyleEditorOpen) module.CancelDailyStyleEditor();
+    }
     private async void DailyBranch_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string branch }) await module.SwitchDailyBranchAsync(branch); }
     private async void DailyStyleOpen_Click(object sender, RoutedEventArgs e) => await module.OpenDailyStyleEditorAsync();
     private void DailyStyleTag_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: MusicCatalogTag tag }) module.ToggleDailyStyleTag(tag); }
     private void DailyTag_Loaded(object sender, RoutedEventArgs e)
-    { if (sender is Button { Tag: MusicCatalogTag tag } button) { button.BorderBrush = (Brush)Application.Current.Resources[tag.Selected ? "AccentFillColorDefaultBrush" : "ControlStrokeColorDefaultBrush"]; AutomationProperties.SetItemStatus(button, tag.Selected ? "已选中" : ""); } }
+    {
+        if (sender is not Button { Tag: MusicCatalogTag tag } button) return;
+        bool pointer = false;
+        void Refresh()
+        {
+            var settings = new UISettings();
+            Brush SystemBrush(UIElementType type) => new SolidColorBrush(settings.UIElementColor(type));
+            Brush Resource(string name) => (Brush)DesktopVisual.Resource(button, name);
+            if (DesktopTheme.GetIsHighContrast(button))
+            {
+                button.Background = SystemBrush(tag.Selected ? UIElementType.Highlight : UIElementType.ButtonFace);
+                button.Foreground = button.BorderBrush = SystemBrush(!button.IsEnabled ? UIElementType.GrayText : tag.Selected ? UIElementType.HighlightText : UIElementType.ButtonText);
+            }
+            else
+            {
+                button.Background = Resource(button.IsPressed ? "MeowFilm.Brush.Pressed" : pointer ? "MeowFilm.Brush.Hover" : "MeowFilm.Brush.InputSurface");
+                button.Foreground = Resource(!button.IsEnabled ? "MeowFilm.Brush.Disabled" : tag.Selected ? "MeowFilm.Brush.Accent" : "MeowFilm.Brush.Text");
+                button.BorderBrush = Resource(tag.Selected ? "MeowFilm.Brush.Accent" : "MeowFilm.Brush.Border");
+            }
+            AutomationProperties.SetItemStatus(button, tag.Selected ? "已选中" : "");
+        }
+        void Entered(object owner, PointerRoutedEventArgs args) { pointer = true; Refresh(); }
+        void Exited(object owner, PointerRoutedEventArgs args) { pointer = false; Refresh(); }
+        button.PointerEntered += Entered; button.PointerExited += Exited;
+        var pressed = button.RegisterPropertyChangedCallback(ButtonBase.IsPressedProperty, (_, _) => Refresh());
+        var enabled = button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => Refresh());
+        var theme = DesktopTheme.Observe(button, Refresh);
+        void Unloaded(object owner, RoutedEventArgs args)
+        {
+            button.PointerEntered -= Entered; button.PointerExited -= Exited; button.Unloaded -= Unloaded;
+            button.UnregisterPropertyChangedCallback(ButtonBase.IsPressedProperty, pressed);
+            button.UnregisterPropertyChangedCallback(IsEnabledProperty, enabled); theme.Dispose();
+        }
+        button.Unloaded += Unloaded; Refresh();
+    }
     private void DailyStyleCancel_Click(object sender, RoutedEventArgs e) => module.CancelDailyStyleEditor();
     private async void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => await module.ConfirmDailyStyleAsync();
     private async void PlayContentDetail_Click(object sender, RoutedEventArgs e) => await module.PlayContentDetailAsync();
@@ -152,12 +208,58 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private async void DeleteArchive_Click(object sender, RoutedEventArgs e) { if (module.CanEdit && sender is Button { Tag: string id }) await module.DeleteArchiveAsync(id); }
     private void SongRow_Loaded(object sender, RoutedEventArgs e)
     { if (sender is FrameworkElement element && FindRow(element) is { } row) RefreshSongRow(row); }
+    private void SongContainer_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement template || FindRow(template) is not { } row) return;
+        var commonStates = VisualStateManager.GetVisualStateGroups(template).Single(group => group.Name == "CommonStates");
+        void StateChanged(object sender, VisualStateChangedEventArgs args) => RefreshSongRow(row);
+        void GotFocus(object owner, RoutedEventArgs args) => RefreshSongRow(row);
+        void LostFocus(object owner, RoutedEventArgs args) => DispatcherQueue.TryEnqueue(() => { if (row.IsLoaded) RefreshSongRow(row); });
+        var selected = row.RegisterPropertyChangedCallback(SelectorItem.IsSelectedProperty, (_, _) => RefreshSongRow(row));
+        commonStates.CurrentStateChanged += StateChanged; row.GotFocus += GotFocus; row.LostFocus += LostFocus;
+        var theme = DesktopTheme.Observe(row, () => RefreshSongRow(row));
+        void Unloaded(object owner, RoutedEventArgs args)
+        {
+            template.Unloaded -= Unloaded; commonStates.CurrentStateChanged -= StateChanged;
+            row.UnregisterPropertyChangedCallback(SelectorItem.IsSelectedProperty, selected);
+            row.GotFocus -= GotFocus; row.LostFocus -= LostFocus; theme.Dispose();
+        }
+        template.Unloaded += Unloaded; RefreshSongRow(row);
+    }
     private void RefreshSongRow(SelectorItem container)
     {
         if (container.Content is not SongRow song) return;
-        var title = MusicVisuals.Descendant<Grid>(container)?.FindName("SongTitle") as TextBlock;
-        if (title is not null) title.Foreground = (Brush)Application.Current.Resources[song.Id == module.CurrentSongId ? "AccentTextFillColorPrimaryBrush" : "TextFillColorPrimaryBrush"];
+        bool contrast = DesktopTheme.GetIsHighContrast(container);
+        bool focused = container.XamlRoot is { } root && FocusManager.GetFocusedElement(root) is DependencyObject focus && DesktopVisual.Contains(container, focus);
+        var state = VisualTreeHelper.GetChildrenCount(container) > 0
+            ? VisualStateManager.GetVisualStateGroups((FrameworkElement)VisualTreeHelper.GetChild(container, 0))
+                .FirstOrDefault(group => group.Name == "CommonStates")?.CurrentState?.Name : null;
+        bool hovered = state is "PointerOver" or "PointerOverSelected" or "Pressed" or "PressedSelected";
+        var settings = new UISettings();
+        Brush SystemBrush(UIElementType type) => new SolidColorBrush(settings.UIElementColor(type));
+        Brush Resource(string name) => (Brush)DesktopVisual.Resource(container, name);
+        Brush foreground = contrast ? SystemBrush(container.IsSelected ? UIElementType.HighlightText : UIElementType.WindowText) : Resource("MeowFilm.Brush.Text");
+        container.Foreground = foreground;
+        container.Background = contrast ? SystemBrush(container.IsSelected ? UIElementType.Highlight : UIElementType.Window) :
+            container.IsSelected ? MusicVisuals.Brush("#E9F0F6") : hovered ? MusicVisuals.Brush("#FFFFFF") : MusicVisuals.Brush("#00000000");
+        if (!ReferenceEquals(container, insertionRow))
+        {
+            container.BorderBrush = contrast ? foreground : focused ? Resource("MeowFilm.Brush.Text") : MusicVisuals.Brush("#9AAEBF");
+            container.BorderThickness = new Thickness(container.IsSelected || focused ? 1 : 0);
+        }
+        foreach (var text in SongDescendants(container).OfType<TextBlock>())
+            text.Foreground = !contrast && text.Name == "SongTitle" && song.Id == module.CurrentSongId ? Resource("MeowFilm.Brush.Accent") :
+                !contrast && text.Name == "SongArtist" ? Resource("MeowFilm.Brush.Muted") : foreground;
+        foreach (var button in SongDescendants(container).OfType<Button>()) button.Foreground = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
         AutomationProperties.SetItemStatus(container, song.Id == module.CurrentSongId ? "正在播放" : "");
+    }
+    private static IEnumerable<DependencyObject> SongDescendants(DependencyObject parent)
+    {
+        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index); yield return child;
+            foreach (var descendant in SongDescendants(child)) yield return descendant;
+        }
     }
     private async void Song_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     { if (module.CanEdit && sender is FrameworkElement { DataContext: SongRow song }) { module.SelectedSong = song; e.Handled = true; await module.PlayContentSelectionAsync(); } }
@@ -236,6 +338,6 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         e.AcceptedOperation = accepted ? DataPackageOperation.Move : DataPackageOperation.None; e.Handled = true; EndDrag();
         if (accepted) await module.ReorderPlaylistSongAsync(source!, target!, after);
     }
-    private void ClearInsertion() { insertionRow?.ClearValue(Control.BorderBrushProperty); insertionRow?.ClearValue(Control.BorderThicknessProperty); insertionRow = null; }
+    private void ClearInsertion() { var row = insertionRow; insertionRow = null; if (row is not null) RefreshSongRow(row); }
     private void EndDrag() { ClearInsertion(); draggingSong = null; }
 }

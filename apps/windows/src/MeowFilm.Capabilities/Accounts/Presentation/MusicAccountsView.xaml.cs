@@ -23,10 +23,10 @@ public partial class MusicAccountsView : UserControl
     private readonly MusicAccountTableRow[] publicCatalogs = [new("kw", "酷我音乐"), new("mg", "咪咕音乐")];
     private ObservableCollection<MusicPlatformSettingsRow>? tableSource;
     private MusicCapability? observed;
-    private bool loginShowing, logoutShowing, surfaceVisible;
+    private bool loginShowing, logoutShowing;
     private Button? logoutAnchor;
     private DesktopWindow? window;
-    private Microsoft.UI.Windowing.AppWindow? observedWindow;
+    private IDisposable? visibility;
     private CancellationTokenSource? pollingCancellation;
     private Task? polling;
     private DispatcherTimer? smsCountdown;
@@ -45,8 +45,6 @@ public partial class MusicAccountsView : UserControl
         InitializeComponent();
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) => Detach();
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => VisibilityChanged());
-        LayoutUpdated += (_, _) => { if (surfaceVisible != SurfaceVisible) VisibilityChanged(); };
         DataContextChanged += (_, _) =>
         {
             Detach();
@@ -67,7 +65,7 @@ public partial class MusicAccountsView : UserControl
     {
         if (logoutShowing) return;
         logoutShowing = true;
-        try { await DialogPlacement.ShowAsync(this, LogoutPopup); }
+        try { await DialogPlacement.ShowAsync(this, LogoutPopup, () => logoutConfirmation is not null); }
         finally { logoutShowing = false; }
     }
 
@@ -103,6 +101,7 @@ public partial class MusicAccountsView : UserControl
 
     private void AccountTableScroll_SizeChanged(object sender, SizeChangedEventArgs e)
     {
+        AccountTable.Width = e.NewSize.Width;
         SetIsCompactTable(this, e.NewSize.Width < 850);
         UpdateColumns(AccountTableHeader);
         UpdateRows(PlatformSettingsList);
@@ -167,14 +166,18 @@ public partial class MusicAccountsView : UserControl
         if (observed is not null) observed.PropertyChanged += OwnerChanged;
         ObserveTableRows();
         window = DesktopWindow.GetWindow(this);
-        observedWindow = window?.AppWindow;
-        if (observedWindow is not null) observedWindow.Changed += WindowChanged;
+        if (window is not null)
+        {
+            window.WindowStateChanged += WindowChanged;
+            window.VisibilityChanged += WindowChanged;
+        }
         ClearSmsInputs();
-        VisibilityChanged();
+        visibility = DesktopVisual.ObserveVisibility(this, _ => VisibilityChanged());
     }
 
     private void Detach()
     {
+        visibility?.Dispose(); visibility = null;
         var old = observed;
         var retiringLogin = loginOwner;
         observed = null;
@@ -183,8 +186,11 @@ public partial class MusicAccountsView : UserControl
             tableSource.CollectionChanged -= PlatformSettingsChanged;
         tableSource = null;
         tableRows.Clear();
-        if (observedWindow is not null) observedWindow.Changed -= WindowChanged;
-        observedWindow = null;
+        if (window is not null)
+        {
+            window.WindowStateChanged -= WindowChanged;
+            window.VisibilityChanged -= WindowChanged;
+        }
         window = null;
         CloseTransientPopups();
         if (old is not null && !ReferenceEquals(old, retiringLogin)) _ = Leave(old);
@@ -200,7 +206,7 @@ public partial class MusicAccountsView : UserControl
         catch { }
     }
 
-    private void WindowChanged(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs e) => VisibilityChanged();
+    private void WindowChanged(object? sender, EventArgs e) => VisibilityChanged();
 
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -348,7 +354,6 @@ public partial class MusicAccountsView : UserControl
 
     private void VisibilityChanged()
     {
-        surfaceVisible = SurfaceVisible;
         if (!SurfaceVisible)
         {
             CloseTransientPopups();

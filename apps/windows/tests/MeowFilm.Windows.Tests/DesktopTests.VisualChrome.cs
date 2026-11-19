@@ -108,6 +108,10 @@ public static partial class DesktopTests
             True(search.IsTabStop && picker.IsTabStop, "search and category are keyboard accessible");
             Equal("搜索", AutomationProperties.GetName(search), "search accessible name");
             Equal(FontWeights.Normal, search.FontWeight, "search stays regular");
+            var notification = f.Element<Button>("NotificationButton");
+            True(notification.Content is Microsoft.UI.Xaml.Shapes.Path { Width: 14, Height: 16, StrokeThickness: 1.5 } bell &&
+                ReferenceEquals(bell.Stroke, notification.Foreground), "notification keeps its complete foreground-bound bell outline");
+            Equal(17d, f.Element<Button>("SettingsButton").FontSize, "settings keeps its full-size caption glyph");
             var labels = ChromeVisuals(navigation).OfType<TextBlock>().ToArray();
             True(labels.Length > 0 && labels.All(text => text.FontWeight == FontWeights.Normal), "realized navigation labels stay regular");
             var bounds = DesktopTestUi.Bounds(picker, search);

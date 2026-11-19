@@ -152,10 +152,13 @@ internal static class DesktopTestUi
         try
         {
             await DrainAsync(); picker.UpdateLayout();
-            var container = picker.ContainerFromItem(item) as ComboBoxItem
-                ?? throw new InvalidOperationException("Category selection container not realized.");
-            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(container)!;
-            ((ISelectionItemProvider)peer.GetPattern(PatternInterface.SelectionItem)).Select();
+            var peer = FrameworkElementAutomationPeer.CreatePeerForElement(picker) ?? new ComboBoxAutomationPeer(picker);
+            var row = peer.GetChildren().OfType<ComboBoxItemDataAutomationPeer>().Single(row => Equals(row.Item, item));
+            var selection = row.GetPattern(PatternInterface.SelectionItem) as ISelectionItemProvider ??
+                throw new InvalidOperationException("The mounted category item has no selection automation pattern.");
+            selection.Select();
+            if (!selection.IsSelected || !Equals(picker.SelectedItem, item))
+                throw new InvalidOperationException("The native category selection did not select its exact item.");
         }
         finally { expansion.Collapse(); }
     }

@@ -516,14 +516,15 @@ public static partial class MusicCatalogPersonalTests
         var view = Visuals<MusicCatalogView>(f.Module.View).Single();
         var overlay = (Image)view.FindName("HomeRefreshOverlay");
         var scroll = (ScrollViewer)view.FindName("HomeScroll");
+        await Until(() => scroll.IsLoaded && scroll.ActualWidth > 0 && scroll.ActualHeight > 0);
         Check(overlay.Source is null && scroll.Opacity == 1,
             "initial presentation and a pending background read do not fade or clear existing content");
         bool observedPublication = false;
         f.Module.HomeSections.CollectionChanged += (_, _) =>
         {
             observedPublication = true;
-            bool animate = cached && new global::Windows.UI.ViewManagement.UISettings().AnimationsEnabled && !new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
-            Check((overlay.Source is BitmapSource) == animate,
+            bool animate = cached && MusicVisuals.CanAnimate(view);
+            Check((overlay.Source is RenderTargetBitmap) == animate,
                 "successful replacement retains the previous visible frame only when animation is appropriate");
             Check(!overlay.IsHitTestVisible, "the transition does not intercept the newly published cards");
         };

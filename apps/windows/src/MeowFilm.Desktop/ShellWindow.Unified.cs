@@ -75,7 +75,13 @@ public sealed partial class ShellWindow
     private void OnNavigationContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
         args.ItemContainer.ClearValue(AutomationProperties.NameProperty);
-        if (args.InRecycleQueue) return;
+        if (args.InRecycleQueue)
+        {
+            if (args.ItemContainer.ContentTemplateRoot is FrameworkElement template) template.DataContext = null;
+            args.ItemContainer.Content = null;
+            return;
+        }
+        if (args.ItemContainer.ContentTemplateRoot is FrameworkElement content) content.ClearValue(FrameworkElement.DataContextProperty);
         args.ItemContainer.SetBinding(AutomationProperties.NameProperty, new Binding
         {
             Source = args.Item,

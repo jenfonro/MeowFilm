@@ -8,10 +8,10 @@ namespace MeowFilm.Capabilities;
 public sealed record MusicQueueSurfaceRow(SongRow Song, bool IsCurrent) : System.ComponentModel.INotifyPropertyChanged
 {
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
-    internal void RefreshSong(JsonElement? value)
+    internal void RefreshSong(JsonElement? value, long publication = -1)
     {
         if (value is null) return;
-        Song.ApplyRepository(value);
+        Song.ApplyRepository(value, publication);
         foreach (var name in new[] { nameof(Title), nameof(Artist), nameof(Cover), nameof(Duration) })
             PropertyChanged?.Invoke(this, new(name));
     }

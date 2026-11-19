@@ -1014,8 +1014,9 @@ public sealed partial class ShellWindow : DesktopWindow
     private void ApplyAccessibilityPresentation()
     {
         DesktopTheme.SetIsHighContrast(Root, _accessibility.HighContrast);
-        ApplicationBackground.Background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
+        var background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
             _accessibility.HighContrast ? "MeowFilm.Brush.Window" : "MeowFilm.Brush.AppBackground");
+        WindowFrame.Background = ApplicationBackground.Background = background;
         SidebarMaterial.Visibility = SidebarTint.Visibility = _accessibility.HighContrast ? Visibility.Collapsed : Visibility.Visible;
         SidebarEdge.Visibility = _accessibility.HighContrast || SidebarBackground.Visibility == Visibility.Collapsed
             ? Visibility.Collapsed : Visibility.Visible;

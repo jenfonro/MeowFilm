@@ -2,12 +2,25 @@
  <UserControl.Resources>
   <local:FilmVisibilityConverter x:Key="Film.Visible" />
   <local:FilmScaleConverter x:Key="Film.Scale" />
+  <Style x:Key="Film.CardButton" TargetType="Button">
+   <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Padding" Value="0"/><Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="0"/>
+   <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Top"/>
+   <Setter Property="UseSystemFocusVisuals" Value="True"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+     <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+      Foreground="{TemplateBinding Foreground}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+      VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+    </Border>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
  </UserControl.Resources>
- <Button x:Name="HitButton" Click="Activate_Click" Padding="0" BorderThickness="0" Background="Transparent" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Top" AutomationProperties.Name="{Binding Title}" local:CardMotion.Enabled="True">
+ <Button x:Name="HitButton" Style="{StaticResource Film.CardButton}" Click="Activate_Click" AutomationProperties.Name="{Binding Title}" local:CardMotion.Enabled="True">
   <StackPanel>
    <local:AspectRatioDecorator AspectRatio="176,264">
     <Grid>
-    <Grid x:Name="PosterFrame" local:CardClip.Radius="14" RenderTransformOrigin=".5,.5">
+    <Grid x:Name="PosterFrame" local:CardClip.Radius="14" RenderTransformOrigin=".5,0">
      <Grid.RenderTransform><ScaleTransform ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=.03}" ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=.03}" /></Grid.RenderTransform>
      <local:FilmPlaybackPoster x:Name="Poster" Address="{Binding Poster}" RenderTransformOrigin=".5,.5">
       <local:FilmPlaybackPoster.RenderTransform><ScaleTransform ScaleX="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=.05}" ScaleY="{Binding Path=(local:CardMotion.Progress),ElementName=HitButton,Converter={StaticResource Film.Scale},ConverterParameter=.05}" /></local:FilmPlaybackPoster.RenderTransform>
@@ -25,8 +38,8 @@
     </Grid>
    </local:AspectRatioDecorator>
    <TextBlock Text="{Binding Title}" Margin="0,9,0,0" Height="21" FontSize="15" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
-   <Border x:Name="SiteLabel" Margin="0,3,0,0" Padding="8,2" CornerRadius="8" BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" HorizontalAlignment="Center" MaxWidth="{Binding ActualWidth,ElementName=Card}" Visibility="{Binding HasSubtitle,Converter={StaticResource Film.Visible}}">
-    <TextBlock x:Name="Subtitle" Text="{Binding Subtitle}" FontSize="10" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
+   <Border x:Name="SiteLabel" Margin="0,3,0,0" Padding="8,2" CornerRadius="8" BorderThickness="1" HorizontalAlignment="Center" Visibility="{Binding HasSubtitle,Converter={StaticResource Film.Visible}}">
+    <TextBlock x:Name="Subtitle" Text="{Binding Subtitle}" Foreground="{ThemeResource MeowFilm.Brush.Muted}" FontSize="10" LineHeight="15" LineStackingStrategy="BlockLineHeight" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
    </Border>
   </StackPanel>
  </Button>

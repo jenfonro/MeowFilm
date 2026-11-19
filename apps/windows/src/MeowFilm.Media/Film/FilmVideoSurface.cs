@@ -22,8 +22,8 @@ public class FilmVideoSurface : Grid, IDisposable
         Background = new SolidColorBrush(Colors.Black);
         AutomationProperties.SetName(this, "视频画面");
         Children.Add(picture);
-        Loaded += LoadedSurface;
-        Unloaded += UnloadedSurface;
+        Loaded += SurfaceLoadedChanged;
+        Unloaded += SurfaceLoadedChanged;
         SizeChanged += SizeChangedSurface;
         picture.CompositionScaleChanged += ScaleChangedSurface;
     }
@@ -42,7 +42,7 @@ public class FilmVideoSurface : Grid, IDisposable
     }
 
     internal event EventHandler? TargetChanged;
-    internal virtual nint DisplayWindow => !closed && XamlRoot is { } current
+    internal virtual nint DisplayWindow => !closed && IsLoaded && XamlRoot is { } current
         ? Win32Interop.GetWindowFromWindowId(current.ContentIslandEnvironment.AppWindowId) : 0;
 
     internal virtual FilmKernelNative.Surface Describe() => new()
@@ -96,17 +96,13 @@ public class FilmVideoSurface : Grid, IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetSwapchainCallback(nint panel, nint swapchain);
 
-    private void LoadedSurface(object sender, RoutedEventArgs args) => Changed();
-    private void UnloadedSurface(object sender, RoutedEventArgs args) => Changed();
-
+    private void SurfaceLoadedChanged(object sender, RoutedEventArgs args) => Changed();
     private void SizeChangedSurface(object sender, SizeChangedEventArgs args) => Changed();
     private void ScaleChangedSurface(SwapChainPanel sender, object args) => Changed();
     private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => Changed();
     private void Changed()
     {
         if (closed) return;
-        // Cross-window reparenting can deliver the old root's Unloaded after
-        // the surface is mounted again. The current tree owns the target.
         var current = IsLoaded ? XamlRoot : null;
         if (!ReferenceEquals(root, current))
         {
@@ -131,8 +127,8 @@ public class FilmVideoSurface : Grid, IDisposable
         if (closed) return;
         BindSwapchain(0);
         closed = true;
-        Loaded -= LoadedSurface;
-        Unloaded -= UnloadedSurface;
+        Loaded -= SurfaceLoadedChanged;
+        Unloaded -= SurfaceLoadedChanged;
         SizeChanged -= SizeChangedSurface;
         picture.CompositionScaleChanged -= ScaleChangedSurface;
         if (root is not null) root.Changed -= RootChanged;

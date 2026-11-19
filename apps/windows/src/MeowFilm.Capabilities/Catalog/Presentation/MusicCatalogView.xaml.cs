@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.System;
 using Windows.Foundation;
 using MeowFilm.Desktop;
@@ -22,6 +23,8 @@ public partial class MusicCatalogView : UserControl
     private double searchPlaylistOffset;
     private long restoreEpoch;
     private Storyboard? homeTransition;
+    private long homeCaptureEpoch;
+    private readonly global::Windows.UI.ViewManagement.UISettings animationSettings = new();
     private IDisposable? visibility;
     private bool observingLayout;
     internal MusicCapability? Owner => DataContext as MusicCapability;
@@ -33,22 +36,24 @@ public partial class MusicCatalogView : UserControl
         Loaded += (_, _) =>
         {
             scrollIntent.Attach(CatalogScroll); Observe(); Refresh(); RestoreSearchOffset();
+            animationSettings.AnimationsEnabledChanged += HomeAnimationSettingsChanged;
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
                 if (observingLayout == visible) return;
                 observingLayout = visible;
                 if (visible) { LayoutUpdated += ReportVisibleCatalogCards; ReportVisibleCatalogCards(null, null!); }
-                else { LayoutUpdated -= ReportVisibleCatalogCards; observed?.UpdateCatalogVisibleCards([]); ChannelMorePopup.Hide(); scrollIntent.Clear(); }
+                else { LayoutUpdated -= ReportVisibleCatalogCards; observed?.UpdateCatalogVisibleCards([]); ChannelMorePopup.Hide(); scrollIntent.Clear(); ClearHomeTransition(); }
             });
         };
         DataContextChanged += (_, _) => { observed?.UpdateCatalogVisibleCards([]); if (IsLoaded) Observe(); Refresh(); };
         Unloaded += (_, _) =>
         {
             visibility?.Dispose(); visibility = null;
+            animationSettings.AnimationsEnabledChanged -= HomeAnimationSettingsChanged;
             LayoutUpdated -= ReportVisibleCatalogCards; observingLayout = false;
             observed?.UpdateCatalogVisibleCards([]);
-            RememberSearchOffset(); restoreEpoch++; scrollIntent.Clear(); ChannelMorePopup.Hide(); homeTransition?.Stop();
-            if (observed is not null) { observed.PropertyChanged -= Changed; observed.HomeContentReplacing -= ReplacingHome; }
+            RememberSearchOffset(); restoreEpoch++; scrollIntent.Clear(); ChannelMorePopup.Hide(); ClearHomeTransition();
+            if (observed is not null) { observed.PropertyChanged -= Changed; if (observed.PrepareHomeReplacement == CaptureHomeReplacementAsync) observed.PrepareHomeReplacement = null; }
             observed = null;
         };
         SearchPlaylistList.SizeChanged += (_, _) => SizeSearchCards();
@@ -60,7 +65,9 @@ public partial class MusicCatalogView : UserControl
             scrollIntent.Attach(scroll); SizeSearchCards(); RestoreSearchOffset();
         };
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        { if (Visibility != Visibility.Visible) { RememberSearchOffset(); ChannelMorePopup.Hide(); scrollIntent.Clear(); } else { Refresh(); RestoreSearchOffset(); } });
+        { if (Visibility != Visibility.Visible) { RememberSearchOffset(); ChannelMorePopup.Hide(); scrollIntent.Clear(); ClearHomeTransition(); } else { Refresh(); RestoreSearchOffset(); } });
+        DesktopTheme.Observe(this, () => { if (!MusicVisuals.CanAnimate(this)) ClearHomeTransition(); });
+        HomeScroll.SizeChanged += (_, _) => ClearHomeTransition();
     }
     private void ReportVisibleCatalogCards(object? sender, object e)
     {
@@ -100,21 +107,52 @@ public partial class MusicCatalogView : UserControl
     }
     private void Observe()
     {
-        if (observed is not null) { observed.PropertyChanged -= Changed; observed.HomeContentReplacing -= ReplacingHome; }
+        ClearHomeTransition();
+        if (observed is not null) { observed.PropertyChanged -= Changed; if (observed.PrepareHomeReplacement == CaptureHomeReplacementAsync) observed.PrepareHomeReplacement = null; }
         observed = Owner;
-        if (observed is not null) { observed.PropertyChanged += Changed; observed.HomeContentReplacing += ReplacingHome; }
+        if (observed is not null) { observed.PropertyChanged += Changed; observed.PrepareHomeReplacement = CaptureHomeReplacementAsync; }
     }
     private void Changed(object? sender, PropertyChangedEventArgs e)
     { Refresh(); }
-    private void ReplacingHome(object? sender, EventArgs e)
+    private async Task<Action?> CaptureHomeReplacementAsync()
     {
-        homeTransition?.Stop();
-        if (HomeScroll.Visibility == Visibility.Visible && MusicVisuals.CanAnimate(this))
-            homeTransition = MusicVisuals.AnimateDouble(HomeScroll, "Opacity", .4, 1, TimeSpan.FromMilliseconds(220));
+        ClearHomeTransition();
+        if (!DesktopVisual.IsVisible(HomeScroll) || HomeScroll.ActualWidth <= 0 || HomeScroll.ActualHeight <= 0 || !MusicVisuals.CanAnimate(this)) return null;
+        long epoch = homeCaptureEpoch;
+        var owner = Owner;
+        var image = new RenderTargetBitmap();
+        try { await image.RenderAsync(HomeScroll); }
+        catch (System.Runtime.InteropServices.COMException error) when (error.HResult == unchecked((int)0x80004004) &&
+            (epoch != homeCaptureEpoch || !DesktopVisual.IsVisible(HomeScroll))) { return null; }
+        if (epoch != homeCaptureEpoch || image.PixelWidth <= 0 || image.PixelHeight <= 0) return null;
+        return () =>
+        {
+            if (epoch != homeCaptureEpoch || !ReferenceEquals(Owner, owner) || Owner?.IsCatalogHome != true ||
+                !DesktopVisual.IsVisible(HomeScroll) || !MusicVisuals.CanAnimate(this)) return;
+            HomeRefreshOverlay.Source = image; HomeRefreshOverlay.Visibility = Visibility.Visible;
+            var transition = new Storyboard();
+            foreach (var (target, from, to) in new (DependencyObject, double, double)[] { (HomeScroll, 0, 1), (HomeRefreshOverlay, 1, 0) })
+            {
+                var fade = new DoubleAnimation { From = from, To = to, Duration = TimeSpan.FromMilliseconds(220), EnableDependentAnimation = true };
+                Storyboard.SetTarget(fade, target); Storyboard.SetTargetProperty(fade, "Opacity"); transition.Children.Add(fade);
+            }
+            transition.Completed += (_, _) => { if (ReferenceEquals(homeTransition, transition)) ClearHomeTransition(); };
+            homeTransition = transition; transition.Begin();
+        };
+    }
+    private void HomeAnimationSettingsChanged(global::Windows.UI.ViewManagement.UISettings sender, object args) =>
+        DispatcherQueue.TryEnqueue(() => { if (!MusicVisuals.CanAnimate(this)) ClearHomeTransition(); });
+    private void ClearHomeTransition()
+    {
+        homeCaptureEpoch++;
+        homeTransition?.Stop(); homeTransition = null;
+        HomeScroll.Opacity = HomeRefreshOverlay.Opacity = 1;
+        HomeRefreshOverlay.Source = null; HomeRefreshOverlay.Visibility = Visibility.Collapsed;
     }
     private void Refresh()
     {
         if (Owner is not { } owner) return;
+        if (!owner.IsCatalogHome) ClearHomeTransition();
         CatalogScroll.Visibility = owner.IsChannelLanding && !owner.IsChannelDirectory ? Visibility.Visible : Visibility.Collapsed;
         Skeleton.Visibility = owner.ShowCatalogSkeleton || owner.ShowSearchSkeleton && owner.IsSearchPlaylists ? Visibility.Visible : Visibility.Collapsed;
         if (!owner.HasSearchSession) ResetSearchPlaylistProjection();
@@ -202,12 +240,31 @@ public partial class MusicCatalogView : UserControl
     private async void PlayAll_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner) await owner.PlayCatalogPlaylistAsync(); }
     private async void Save_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner) await owner.SaveCatalogPlaylistAsync(); }
     private async void Account_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner) await owner.ReadCatalogAccountAsync(); }
-    private async void Options_Changed(object sender, SelectionChangedEventArgs e) { if (IsLoaded && Owner is { } owner) await owner.CatalogOptionsChangedAsync(); }
+    private async void Options_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox { IsLoaded: true, SelectedItem: MusicCatalogChoice choice } picker &&
+            DesktopVisual.IsVisible(picker) && Owner is { } owner)
+            await owner.ChangeCatalogPersonalKindAsync(choice);
+    }
     private async void VipSign_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner) await owner.SignVipPageAsync(); }
     private async void VipBanner_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner) await owner.OpenVipBannerAsync(); }
     private async void QueueRecommendations_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner) await owner.CatalogQueueRecommendationsAsync(); }
-    private async void Platform_Changed(object sender, SelectionChangedEventArgs e) { if (IsLoaded && Owner is { } owner) await owner.ChangeCatalogPlatformAsync(); }
-    private async void Kind_Changed(object sender, SelectionChangedEventArgs e) { if (IsLoaded && Owner is { IsSearchPage: false } owner) await owner.CatalogSearchKindAsync(); }
+    private async void Platform_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox { IsLoaded: true, SelectedItem: MusicCatalogPlatform platform } picker &&
+            DesktopVisual.IsVisible(picker) && Owner is { } owner)
+            await owner.ChangeCatalogPlatformAsync(platform);
+    }
+    private async void Kind_Changed(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is ComboBox { IsLoaded: true, SelectedItem: string kind } picker &&
+            DesktopVisual.IsVisible(picker) && Owner is { IsSearchPage: false, CanCatalogBrowse: true } owner &&
+            kind != owner.CatalogSearchKind)
+        {
+            owner.CatalogSearchKind = kind;
+            await owner.CatalogSearchKindAsync();
+        }
+    }
     private async void Page_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner && sender is Button { Tag: string direction }) await owner.CatalogPageAsync(int.Parse(direction, CultureInfo.InvariantCulture)); }
     private async void Card_Click(object sender, RoutedEventArgs e) { if (Owner is { } owner && sender is Button { Tag: MusicCatalogCard card }) { ChannelMorePopup.Hide(); await owner.OpenCatalogCardAsync(card); } }
 }

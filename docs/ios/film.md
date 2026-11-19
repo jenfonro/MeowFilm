@@ -43,6 +43,8 @@ iOS 请求继续携带 `platform: ios`，正常新进入的自动准备由运行
 已有展示的重开由 `FilmPlaybackRequest.restoreOnly` 和 `restoreBrowsing` 传递原 snapshot 的
 来源结果、typed 线路、元数据来源、季度及真实来源指针，协议见[读取恢复](../runtime/film-playback.md#读取恢复)。
 仍有同一执行 snapshot 时 `open()` 只恢复观察，不再额外提交恢复刷新。
+
+地址重试控件仅在运行器提供 `retryMediaAttemptId` 时可用，并提交该准确身份；不按通用失败状态猜测媒体候选。`initializationError` 阻止新播放，资料初始化失败沿现有刷新入口执行 `browse.refresh`，不改用地址重试。
 收到 `prepareOnly` 也不启动原生媒体或写入观看事实，进入详情不自动实播或呈现全屏播放器。
 
 `FilmPlaybackModel.snapshot` 持有实时执行数据，`presentation` 独立保留已加载展示；

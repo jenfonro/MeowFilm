@@ -151,6 +151,7 @@ public static partial class MusicUiTests
     private static async Task UnifiedTargets()
     {
         await using var f = await UnifiedScene.Create();
+        int homeRequests = f.Music.Http.HomeRequests;
         var media = (ListView)f.Shell.Root.FindName("ModuleNavigationList");
         True(media.Items.OfType<ModuleSession>().Select(item => item.Module)
             .SequenceEqual(new IDesktopModule[] { f.Music.Module, f.Film, f.Novel }),
@@ -168,7 +169,7 @@ public static partial class MusicUiTests
         Equal(calls, f.Runtime.SearchOpens);
         f.Click("BackButton");
         await SearchFixture.Until(() => f.Music.Module.CaptureNavigationLocation() == "favorites" && f.Status == "");
-        Equal(0, f.Music.Http.HomeRequests);
+        Equal(homeRequests, f.Music.Http.HomeRequests);
         Equal("music", f.Picker.SelectedValue as string);
         await f.Submit("原词", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         Equal("film", f.Page.SelectedTab); Equal("film", f.Picker.SelectedValue as string);
@@ -218,7 +219,8 @@ public static partial class MusicUiTests
         string[] originalCards = session.Items.Select(item => item.GetRawText()).ToArray();
         f.Runtime.Respond = (method, input, _) =>
         {
-            if (method == "film.session.command")
+            if (method == "film.session.command" && FilmJson.Text(input, "action") == "search.update" &&
+                FilmJson.Integer(input, "revision") == 4)
                 return Task.FromResult(FilmSearchConsumerRuntime.Success(FilmPlaybackFixture.Snapshot(f.Runtime.LastSessionId,
                     input.GetProperty("revision").GetInt64() + 2, new("tmdb:tv:7", "tv", "可靠关联", "tmdb", "7"),
                     FilmJson.Encode(new { name = "可靠关联", overview = "迟到完整详情" }))));
@@ -605,11 +607,11 @@ public static partial class MusicUiTests
             var f = new UnifiedScene(music, new SearchFixture(sources, runtime), metadata, novelRuntime);
             try
             {
-                // Mount without a default request, then use the actual native library route.
+                // Complete normal shell activation before selecting the actual native library route.
                 f.Shell.PrepareForRender();
-                await f.Navigate(music.Module, "favorites");
                 f.Shell.Show();
-                await SearchFixture.Until(() => music.Module.CaptureNavigationLocation() == "favorites" && f.Status == "");
+                await SearchFixture.Until(() => music.Module.IsCatalogHome && f.Music.Http.HomeRequests > 0 && f.Status == "");
+                await f.Navigate(music.Module, "favorites");
                 await Drain(); return f;
             }
             catch { await f.DisposeAsync(); throw; }
@@ -632,7 +634,8 @@ public static partial class MusicUiTests
             var list = lists
                 .Single(list => list.Items.OfType<ShellNavigationEntry>().Any(item => ReferenceEquals(item.Owner.Module, module) && item.Route == route));
             list.SelectedItem = list.Items.OfType<ShellNavigationEntry>().Single(item => ReferenceEquals(item.Owner.Module, module) && item.Route == route);
-            await SearchFixture.Until(() => Status == "" && list.SelectedItem is ShellNavigationEntry selected && selected.Route == route);
+            await SearchFixture.Until(() => Status == "" && list.SelectedItem is ShellNavigationEntry selected &&
+                selected.Route == route && module.CaptureNavigationLocation() == route);
             await Drain();
         }
         internal async Task Submit(string word, string target)

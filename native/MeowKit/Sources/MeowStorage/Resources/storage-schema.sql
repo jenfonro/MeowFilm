@@ -3021,19 +3021,34 @@ CREATE TABLE "music_windows_search" (
     PRIMARY KEY("scope_key")
 ) STRICT;
 
-CREATE TABLE "music_windows_search_platforms" (
+CREATE TABLE "music_windows_search_songs" (
     "scope_key" TEXT NOT NULL,
-    "platforms_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 31),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "pages" INTEGER,
+    "concurrency" INTEGER,
+    "cacheMinutes" INTEGER,
+    CHECK(("pages" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("concurrency" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("cacheMinutes" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    PRIMARY KEY("scope_key"),
+    FOREIGN KEY("scope_key") REFERENCES "music_windows_search"("scope_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_windows_search_songs_order" (
+    "scope_key" TEXT NOT NULL,
+    "order_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
     shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 1),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "value" TEXT,
     CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
-    PRIMARY KEY("scope_key","platforms_key"),
-    FOREIGN KEY("scope_key") REFERENCES "music_windows_search"("scope_key") ON DELETE CASCADE
+    PRIMARY KEY("scope_key","order_key"),
+    FOREIGN KEY("scope_key") REFERENCES "music_windows_search_songs"("scope_key") ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE "music_windows_search_enabled" (
+CREATE TABLE "music_windows_search_songs_enabled" (
     "scope_key" TEXT NOT NULL,
     "enabled_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
@@ -3042,16 +3057,57 @@ CREATE TABLE "music_windows_search_enabled" (
     "value" TEXT,
     CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     PRIMARY KEY("scope_key","enabled_key"),
+    FOREIGN KEY("scope_key") REFERENCES "music_windows_search_songs"("scope_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_windows_search_playlists" (
+    "scope_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 31),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "pages" INTEGER,
+    "concurrency" INTEGER,
+    "cacheMinutes" INTEGER,
+    CHECK(("pages" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("concurrency" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("cacheMinutes" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    PRIMARY KEY("scope_key"),
     FOREIGN KEY("scope_key") REFERENCES "music_windows_search"("scope_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_windows_search_playlists_order" (
+    "scope_key" TEXT NOT NULL,
+    "order_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 1),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "value" TEXT,
+    CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    PRIMARY KEY("scope_key","order_key"),
+    FOREIGN KEY("scope_key") REFERENCES "music_windows_search_playlists"("scope_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_windows_search_playlists_enabled" (
+    "scope_key" TEXT NOT NULL,
+    "enabled_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 1),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "value" TEXT,
+    CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    PRIMARY KEY("scope_key","enabled_key"),
+    FOREIGN KEY("scope_key") REFERENCES "music_windows_search_playlists"("scope_key") ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE "music_windows_search_history" (
     "scope_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 3),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "schema" INTEGER,
+    "revision" INTEGER,
     CHECK(("schema" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("revision" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
     PRIMARY KEY("scope_key")
 ) STRICT;
 
@@ -3059,10 +3115,12 @@ CREATE TABLE "music_windows_search_history_items" (
     "scope_key" TEXT NOT NULL,
     "items_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 1),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 3),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
-    "value" TEXT,
-    CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    "text" TEXT,
+    "kind" TEXT,
+    CHECK(("text" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("kind" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
     PRIMARY KEY("scope_key","items_key"),
     FOREIGN KEY("scope_key") REFERENCES "music_windows_search_history"("scope_key") ON DELETE CASCADE
 ) STRICT;

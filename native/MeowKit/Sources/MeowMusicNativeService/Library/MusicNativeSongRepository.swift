@@ -222,8 +222,10 @@ extension NativeMusicService {
     func selectSongArtwork(_ song: inout MJ, playback: MJ, freshSources: [MJ] = [], force: Bool = false,
                            failedURLs: Set<String> = []) {
         let defaults = MusicPublicBrowsePlatform.allCases.map(\.rawValue)
-        let order = playback["metadataPlatforms"].isArray ? playback["metadataPlatforms"].strings : defaults
-        let enabled = Set(playback["metadataEnabled"].isArray ? playback["metadataEnabled"].strings : defaults)
+        let savedOrder = playback["metadataPlatforms"].isArray ? playback["metadataPlatforms"].strings : defaults
+        let savedEnabled = playback["metadataEnabled"].isArray ? playback["metadataEnabled"].strings : defaults
+        let order = savedOrder + savedEnabled.filter { !savedOrder.contains($0) }
+        let enabled = Set(savedEnabled)
         let rows = song["sources"].array.filter {
             enabled.contains($0["source"].string) && platformEnabled($0["source"].string) &&
                 !failedURLs.contains($0["musicInfo"]["img"].string)

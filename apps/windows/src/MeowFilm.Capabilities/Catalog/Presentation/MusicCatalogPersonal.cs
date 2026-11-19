@@ -21,9 +21,11 @@ public sealed partial class MusicCapability
     private string catalogAccountStamp = "";
     private long? catalogExpiresAt;
 
-    public MusicCatalogChoice[] CatalogPersonalKinds => SelectedCatalogPlatform.Key == "tx"
-        ? [new("all", "全部歌单"), new("created", "创建的歌单"), new("subscribed", "收藏的歌单")]
-        : [new("all", "全部歌单")];
+    private static readonly IReadOnlyList<MusicCatalogChoice> PersonalKinds = Array.AsReadOnly<MusicCatalogChoice>(
+        [new("all", "全部歌单")]);
+    private static readonly IReadOnlyList<MusicCatalogChoice> QqPersonalKinds = Array.AsReadOnly<MusicCatalogChoice>(
+        [.. PersonalKinds, new("created", "创建的歌单"), new("subscribed", "收藏的歌单")]);
+    public IReadOnlyList<MusicCatalogChoice> CatalogPersonalKinds => SelectedCatalogPlatform.Key == "tx" ? QqPersonalKinds : PersonalKinds;
     public MusicCatalogChoice[] CatalogFmModes { get; } =
         [new("default", "私人 FM"), new("familiar", "熟悉"), new("explore", "探索"), new("puzzle", "拼图"), new("scene", "场景")];
     public MusicCatalogChoice[] CatalogFmScenes { get; } =
@@ -38,7 +40,7 @@ public sealed partial class MusicCapability
          new("JAPANESE", "日语"), new("GLOBAL", "全球"), new("FRANCH", "法语"), new("BLUE", "蓝调"),
          new("DANCE", "舞蹈"), new("LATIN", "拉丁"), new("PUNK", "放克"), new("COUNTRY", "乡村乐"),
          new("MUSICAL", "音乐剧"), new("YINGSHI", "影视"), new("HOT_SONG", "热歌")];
-    public string CatalogPersonalKind { get; set; } = "all";
+    public string CatalogPersonalKind { get; private set; } = "all";
     public string CatalogDailyBranch { get; set; } = "default";
     public string CatalogFmMode { get; set; } = "default";
     public string CatalogFmScene { get; set; } = "FOCUS";
@@ -89,7 +91,7 @@ public sealed partial class MusicCapability
     {
         foreach (string name in new[] { nameof(IsCatalogPersonal), nameof(IsCatalogDaily), nameof(IsCatalogFm),
             nameof(IsCatalogFmScene), nameof(IsCatalogBatch), nameof(IsCatalogCollection), nameof(CanCatalogWy),
-            nameof(CanCatalogBatchRefresh), nameof(CatalogAccountText), nameof(CatalogPersonalKind), nameof(CatalogPersonalKinds),
+            nameof(CanCatalogBatchRefresh), nameof(CatalogAccountText), nameof(CatalogPersonalKinds), nameof(CatalogPersonalKind),
             nameof(CatalogDailyBranch), nameof(CatalogFmMode), nameof(CatalogFmScene),
             nameof(IsCatalogSalesChart), nameof(CatalogChartHasPeriods), nameof(CatalogChartIsYearly),
             nameof(CatalogChartKind), nameof(CatalogChartPeriod), nameof(CatalogChartYear) }) Changed(name);
@@ -143,6 +145,13 @@ public sealed partial class MusicCapability
             CatalogRouteTarget("catalog-fm", SelectedCatalogPlatform.Key) is { } activeFm)
             return StartRecommendation(activeFm);
         return route is null ? Task.CompletedTask : LoadCatalogAsync(route, "", 1, null, lifetime.Token);
+    }
+    internal Task ChangeCatalogPersonalKindAsync(MusicCatalogChoice choice)
+    {
+        if (publishing || !CanCatalogBrowse || !IsCatalogPersonal || choice.Key == CatalogPersonalKind ||
+            !CatalogPersonalKinds.Contains(choice)) return Task.CompletedTask;
+        CatalogPersonalKind = choice.Key;
+        return CatalogOptionsChangedAsync();
     }
     private static bool IsCatalogRoute(string route) =>
         route is "catalog-home" or "catalog-channels" or "catalog-personal" or "catalog-daily" or "catalog-fm" or "catalog-search" ||

@@ -549,14 +549,49 @@ public static partial class MusicUiTests
                 window.Show(); await Drain();
                 var logout = AccountCardButton(view, "网易云音乐退出账号");
                 var popup = (ContentDialog)view.FindName("LogoutPopup");
-                FilmUiTest.Click(logout); await Drain();
-                True(MusicTestUi.IsDialogOpen(popup), "current logout confirmation is open");
+                bool IsPopupOpen(ContentDialog dialog) => VisualTreeHelper.GetOpenPopupsForXamlRoot(view.XamlRoot)
+                    .Any(native => Visuals(native.Child).Contains((DependencyObject)dialog.Content));
+                var opened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnOpened(ContentDialog sender, ContentDialogOpenedEventArgs args) => opened.TrySetResult();
+                popup.Opened += OnOpened;
+                try
+                {
+                    FilmUiTest.Click(logout);
+                    await opened.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                    await Until(() => IsPopupOpen(popup));
+                }
+                finally { popup.Opened -= OnOpened; }
+                True(IsPopupOpen(popup), "current logout confirmation is open");
                 var confirm = AccountCardButton((DependencyObject)popup.Content, "确定退出账号");
-                scroll.ChangeView(null, 160, null, true); await Drain();
+                await Until(() => scroll.ViewportHeight > 0 && scroll.ScrollableHeight >= 160);
+                var scrolled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnViewChanged(object? sender, ScrollViewerViewChangedEventArgs args)
+                { if (!args.IsIntermediate && scroll.VerticalOffset > 0) scrolled.TrySetResult(); }
+                scroll.ViewChanged += OnViewChanged;
+                try
+                {
+                    bool accepted = scroll.ChangeView(null, 160, null, true);
+                    True(accepted, $"settings scroll accepted its native view change (extent={scroll.ExtentHeight}, viewport={scroll.ViewportHeight}, scrollable={scroll.ScrollableHeight}, offset={scroll.VerticalOffset})");
+                    try { await scrolled.Task.WaitAsync(TimeSpan.FromSeconds(8)); }
+                    catch (TimeoutException error)
+                    {
+                        throw new InvalidOperationException($"settings scroll did not complete its native view change (extent={scroll.ExtentHeight}, viewport={scroll.ViewportHeight}, scrollable={scroll.ScrollableHeight}, offset={scroll.VerticalOffset})", error);
+                    }
+                }
+                finally { scroll.ViewChanged -= OnViewChanged; }
                 double offset = scroll.VerticalOffset;
                 True(offset > 0, "settings host was scrolled before navigation retirement");
-                view.CloseTransientPopups(); await Drain();
-                True(!MusicTestUi.IsDialogOpen(popup) && FilmUiTest.Field<Button?>(view, "logoutAnchor") is null && !MusicTestUi.IsDialogOpen((ContentDialog)view.FindName("LoginPopup")),
+                var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void OnClosed(ContentDialog sender, ContentDialogClosedEventArgs args) => closed.TrySetResult();
+                popup.Closed += OnClosed;
+                try
+                {
+                    view.CloseTransientPopups();
+                    await closed.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                    await Until(() => !IsPopupOpen(popup));
+                }
+                finally { popup.Closed -= OnClosed; }
+                True(!IsPopupOpen(popup) && FilmUiTest.Field<Button?>(view, "logoutAnchor") is null && !IsPopupOpen((ContentDialog)view.FindName("LoginPopup")),
                     "retirement closes all account transient surfaces");
                 Equal(offset, scroll.VerticalOffset);
                 FilmUiTest.Click(confirm); await Drain();

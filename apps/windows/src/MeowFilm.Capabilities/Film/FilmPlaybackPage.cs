@@ -33,7 +33,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         nameof(ShowEpisodeCards), nameof(ShowEpisodeList), nameof(ShowMovieCandidates), nameof(CanBrowseRaw),
         nameof(EntryResolution), nameof(RequiresSourceSearch), nameof(CanStartSourceSearch), nameof(CanSearchMore),
         nameof(ListLoading), nameof(ListError), nameof(ShowListStatus), nameof(ListStatus), nameof(ListMessage),
-        nameof(ShowListMessage), nameof(CanPlay), nameof(CanSelectDirectory), nameof(CanRetryMedia), nameof(PreviewEpisodes),
+        nameof(ShowListMessage), nameof(CanPlay), nameof(CanSelectDirectory), nameof(CanRetryMedia), nameof(CanRetryLoading), nameof(PreviewEpisodes),
         nameof(ConnectionFailed), nameof(ExecutionFailed), nameof(NeedsRecovery), nameof(MetadataAssociationFailed),
         nameof(MetadataAssociationErrorMessage)
     ];
@@ -277,7 +277,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         Sources.FirstOrDefault(value => value.Provider == aggregateProvider && value.MetadataSourceId is not null);
     public bool CanBrowseSources => HasExecution && Sources.Count > 0;
     public bool ShowLinePicker => SourceId is not null;
-    public bool CanBrowseLines => HasExecution && Lines.Count > 0;
+    public bool CanBrowseLines => HasExecution && Lines.Count > 0 && (!ListLoading || preservingRefresh);
     public string SourcePlaceholder => ListLoading ? "加载中…" : ListError.Length > 0 ? "加载失败" : "无可用视频源";
     public string LinePlaceholder => SourcePlaceholder;
     public FilmSelection? SelectedLine => Lines.FirstOrDefault(value => value.WireId is { } id &&
@@ -302,7 +302,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public bool ShowMovieCandidates => !ShowListStatus && DisplayKind == "movie";
     public bool CanBrowseRaw => SourceId is not null &&
         FilmJson.Array(RawBrowsing, "originalEpisodes").Length > 0 &&
-        !ListLoading &&
+        ListError.Length == 0 && (!ListLoading || preservingRefresh) &&
         FilmJson.Text(RawBrowsing, "error").Length == 0;
     public string EntryResolution => FilmJson.Text(snapshot?.Raw ?? default, "entryResolution");
     public bool RequiresSourceSearch => IsUnmatchedDoubanEntry &&
@@ -315,18 +315,20 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         FilmJson.Text(snapshot.Raw, "error") != "SOURCE_NOT_FOUND" && !FilmJson.Bool(snapshot.Raw, "searchComplete");
     public bool ListLoading => browsingLoading;
     public string ListError => browsingError.Length == 0 ? "" : FilmPlaybackError.Message(browsingError, "加载失败");
-    public bool ShowListStatus => ListError.Length > 0 || ListLoading || EpisodeDirectory is null ||
+    public bool ShowListStatus => ListError.Length > 0 || ListLoading && !preservingRefresh || EpisodeDirectory is null ||
         Episodes.Count == 0 && Candidates.Count == 0;
     public string ListStatus => ListError.Length > 0 ? ListError : ListLoading ? "加载中…" : "无可用视频源";
     public string ListMessage => ListStatus;
-    public bool ShowListMessage => ShowListStatus && !RequiresSourceSearch;
+    public bool ShowListMessage => ShowListStatus && ListError.Length == 0 && !RequiresSourceSearch;
     public bool CanPlay => HasExecution && !ExecutionFailed && snapshot is not null && !RequiresSourceSearch &&
+        FilmJson.Text(snapshot.Raw, "initializationError").Length == 0 &&
         PlayerStage != "unavailable";
     public bool CanSelectDirectory => HasExecution && !ExecutionFailed && !ShowListStatus &&
         (Episodes.Any(item => item.CanSelect) || Candidates.Any(item => item.PlaybackTarget is not null));
-    public bool CanRetryMedia => CanPlay && session?.SnapshotFor(this) is { } executing &&
-        (executing.AttemptId.Length > 0 || executing.CurrentId.Length > 0 ||
-            FilmJson.Text(executing.Raw, "stage") is "error" or "unavailable");
+    public bool CanRetryMedia => HasExecution && !ExecutionFailed && session?.SnapshotFor(this) is { } executing &&
+        FilmJson.Text(executing.Raw, "retryMediaAttemptId").Length > 0;
+    public bool CanRetryLoading => HasExecution && !ExecutionFailed && !ListLoading &&
+        FilmJson.Text(snapshot?.Raw ?? default, "initializationError").Length > 0;
     internal FilmMetadataCache? MetadataCache => display?.Cache;
     public bool HasOutput => session?.IsCurrentPage(this) == true && session.HasOutput;
     public bool NoOutput => !HasOutput;
@@ -429,7 +431,8 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                     FilmJson.Text(value.Raw, "metadataError").Length > 0 || FilmJson.Bool(value.Browsing, "loading") ||
                     FilmJson.Text(value.Browsing, "error").Length > 0);
             if (!retainingWork) workInfo = value.WorkInfo;
-            if (updateBrowsing) UpdateBrowsing(value);
+            if (updateBrowsing) UpdateBrowsing(value, previous is null ||
+                !FilmJson.Equal(FilmJson.Member(previous.Raw, "sources"), FilmJson.Member(value.Raw, "sources")));
             if (previousIdentity != FavoriteTarget.Id) favorite = false;
             bool metadataChanged = previous is null || (previousWork is { } work
                 ? !work.SameContent(workInfo) : workInfo is not null);
@@ -604,9 +607,10 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     internal Task RetryMediaAsync()
     {
         var executing = session?.SnapshotFor(this);
-        string attemptId = executing?.AttemptId is { Length: > 0 } pending ? pending : executing?.CurrentId ?? "";
-        return CommandAsync("media.retry", attemptId.Length > 0 ? new { attemptId } : null);
+        string attemptId = FilmJson.Text(executing?.Raw ?? default, "retryMediaAttemptId");
+        return CanRetryMedia ? CommandAsync("media.retry", new { attemptId }) : Task.CompletedTask;
     }
+    internal Task RetryLoadingAsync() => CanRetryLoading ? CommandAsync("browse.refresh") : Task.CompletedTask;
     internal Task SeekAsync(double value) => RequireSession().SeekAsync(value);
     internal Task RateAsync(double value) => RequireSession().RateAsync(value);
     internal Task AspectAsync(string? value) => RequireSession().AspectAsync(value);
@@ -619,19 +623,31 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     internal Task EndRetainedOwnerAsync() => session?.EndRetainedOwnerAsync(this) ?? Task.CompletedTask;
     internal Task SelectEpisodeAsync(FilmEpisodeItem item)
     {
-        if (!Episodes.Contains(item) || !item.CanSelect) throw new FilmPlaybackException("INVALID_REQUEST");
+        if (!CanSelectDirectory || !Episodes.Contains(item) || !item.CanSelect)
+            throw new FilmPlaybackException("INVALID_REQUEST");
         return SelectTargetAsync(item.PlaybackTarget ?? throw new FilmPlaybackException("INVALID_RESPONSE"));
     }
     internal Task SelectCandidateAsync(string id)
     {
+        if (!CanSelectDirectory) throw new FilmPlaybackException("INVALID_REQUEST");
         var item = Candidates.FirstOrDefault(item => item.Id == id) ?? throw new FilmPlaybackException("INVALID_REQUEST");
         return SelectTargetAsync(item.PlaybackTarget ?? throw new FilmPlaybackException("INVALID_RESPONSE"));
     }
     internal Task SelectOriginalCandidateAsync(string id)
     {
-        var row = FilmJson.Array(RawBrowsing, "originalEpisodes").FirstOrDefault(row => FilmJson.Text(row, "candidateId") == id);
-        if (!CanBrowseRaw || row.ValueKind != JsonValueKind.Object) throw new FilmPlaybackException("INVALID_REQUEST");
-        return SelectTargetAsync(FilmJson.Target(row.GetProperty("playbackTarget")));
+        var row = FilmJson.Array(RawBrowsing, "originalEpisodes").FirstOrDefault(row =>
+            FilmJson.Text(FilmJson.Member(FilmJson.Member(row, "playbackTarget"), "source"), "candidateId") == id);
+        return row.ValueKind == JsonValueKind.Object
+            ? SelectOriginalTargetAsync(FilmJson.Member(row, "playbackTarget"))
+            : throw new FilmPlaybackException("INVALID_REQUEST");
+    }
+    internal Task SelectOriginalTargetAsync(JsonElement playbackTarget)
+    {
+        var row = FilmJson.Array(RawBrowsing, "originalEpisodes").FirstOrDefault(row =>
+            FilmJson.Equal(FilmJson.Member(row, "playbackTarget"), playbackTarget));
+        if (!CanBrowseRaw || row.ValueKind != JsonValueKind.Object)
+            throw new FilmPlaybackException("INVALID_REQUEST");
+        return SelectTargetAsync(FilmJson.FileTarget(playbackTarget));
     }
     private Task SelectTargetAsync(FilmPlaybackTarget target)
     {

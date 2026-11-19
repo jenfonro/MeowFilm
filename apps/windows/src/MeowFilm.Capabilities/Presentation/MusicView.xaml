@@ -1,13 +1,14 @@
 <UserControl x:Class="MeowFilm.Capabilities.MusicView" x:Name="Root"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Capabilities" xmlns:desktop="using:MeowFilm.Desktop" xmlns:art="using:MeowFilm.Desktop.Artwork">
- <UserControl.Resources>
+ <UserControl.Resources><ResourceDictionary>
+  <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <local:MusicVisibilityConverter x:Key="Visible"/><local:MusicMotionHitTestConverter x:Key="HitTest"/>
   <Style TargetType="Button"><Setter Property="FontWeight" Value="Normal"/><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="CornerRadius" Value="8"/></Style>
   <DataTemplate x:Key="SongRowTemplate">
    <Grid x:Name="SongRow" local:CardMotion.Enabled="True" Height="50" Loaded="SongRow_Loaded" DoubleTapped="Song_DoubleTapped" RightTapped="Song_RightTapped"><Grid.ColumnDefinitions><ColumnDefinition Width="3*" MinWidth="200"/><ColumnDefinition Width="2*" MinWidth="100"/><ColumnDefinition Width="68"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
     <Grid Margin="8,0"><Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
      <Grid Width="34" Height="34" CornerRadius="4" local:CardClip.Radius="4"><art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Id}" Stretch="UniformToFill"/></Grid>
-     <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="SongTitle" Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/><TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,2,0,0"/></StackPanel>
+     <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="SongTitle" Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/><TextBlock x:Name="SongArtist" Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,2,0,0"/></StackPanel>
     </Grid>
     <TextBlock Grid.Column="1" Text="{Binding Album}" TextTrimming="CharacterEllipsis" Margin="8,0" VerticalAlignment="Center"/>
     <TextBlock Grid.Column="2" Text="{Binding Duration}" FontSize="12" VerticalAlignment="Center"/>
@@ -19,14 +20,22 @@
    </Grid>
   </DataTemplate>
   <DataTemplate x:Key="SongHeaderTemplate"><Grid Height="34" Margin="0,0,12,0"><Grid.ColumnDefinitions><ColumnDefinition Width="3*" MinWidth="200"/><ColumnDefinition Width="2*" MinWidth="100"/><ColumnDefinition Width="68"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions><TextBlock Text="歌曲 / 歌手" Margin="8,0" VerticalAlignment="Center"/><TextBlock Text="专辑" Grid.Column="1" Margin="8,0" VerticalAlignment="Center"/><TextBlock Text="时长" Grid.Column="2" VerticalAlignment="Center"/><TextBlock Text="操作" Grid.Column="3" VerticalAlignment="Center"/></Grid></DataTemplate>
-  <Style x:Key="SongContainer" TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,1"/></Style>
-  <Flyout x:Name="DailyStylePopup" Placement="Bottom" Closed="DailyStylePopup_Closed"><StackPanel Width="510" Spacing="12">
+  <Style x:Key="SongContainer" TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,1"/><Setter Property="UseSystemFocusVisuals" Value="True"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListViewItem"><Grid Loaded="SongContainer_Loaded">
+    <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Selected"/><VisualState x:Name="PointerOverSelected"/><VisualState x:Name="PressedSelected"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups>
+    <Border x:Name="ContentContainer" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8"><ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalContentAlignment="Stretch"/></Border>
+   </Grid></ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="DailyStyleTag" TargetType="Button" BasedOn="{StaticResource Music.FilterTag}">
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}"><TextBlock Text="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border></ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Flyout x:Name="DailyStylePopup" Placement="Bottom" Closing="DailyStylePopup_Closing"><StackPanel Width="508" Spacing="12">
    <ScrollViewer MaxHeight="230"><ItemsControl ItemsSource="{Binding DailyStyleGroups}"><ItemsControl.ItemTemplate><DataTemplate>
-    <StackPanel Margin="0,0,0,12"><TextBlock Text="{Binding Id}" Margin="0,0,0,8"/><ItemsControl ItemsSource="{Binding Items}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><local:MusicWrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><Button Content="{Binding Name}" Tag="{Binding}" Click="DailyStyleTag_Click" Loaded="DailyTag_Loaded" Margin="0,0,8,8"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel>
+    <StackPanel Margin="0,0,0,12"><TextBlock Text="{Binding Id}" Margin="0,0,0,8"/><ItemsControl ItemsSource="{Binding Items}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><local:MusicWrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><Button Style="{StaticResource DailyStyleTag}" Content="{Binding Name}" Tag="{Binding}" Click="DailyStyleTag_Click" Loaded="DailyTag_Loaded"/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel>
    </DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="取消" Click="DailyStyleCancel_Click" IsEnabled="{Binding CanEditDailyStyle}"/><Button Content="确认" Click="DailyStyleConfirm_Click" IsEnabled="{Binding CanConfirmDailyStyle}"/></StackPanel>
   </StackPanel></Flyout>
- </UserControl.Resources>
+ </ResourceDictionary></UserControl.Resources>
  <Grid x:Name="PageContent" Margin="40,16,24,20" MaxWidth="1490"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <StackPanel>
    <StackPanel x:Name="SearchHeading" Visibility="{Binding IsSearchPage,Converter={StaticResource Visible}}" Margin="0,4,0,24"><TextBlock Text="{Binding Heading}" FontSize="23" TextTrimming="CharacterEllipsis"/>
@@ -45,7 +54,7 @@
    <StackPanel Visibility="{Binding IsHistory,Converter={StaticResource Visible}}" Margin="0,0,0,12"><ComboBox x:Name="HistoryPicker" ItemsSource="{Binding HistoryDates}" SelectionChanged="HistoryDate_Changed" IsEnabled="{Binding CanEdit}" MinWidth="160" AutomationProperties.Name="播放日期"/></StackPanel>
   </StackPanel>
   <StackPanel Grid.Row="1">
-   <Button x:Name="DailyStyleButton" Content="{Binding DailyStyleSelectionText}" Click="DailyStyleOpen_Click" HorizontalAlignment="Left" IsEnabled="{Binding CanEditDailyStyle}" Visibility="{Binding IsDailyStyle,Converter={StaticResource Visible}}" Margin="0,0,0,16"/>
+   <Button x:Name="DailyStyleButton" Content="{Binding DailyStyleSelectionText}" Click="DailyStyleOpen_Click" HorizontalAlignment="Left" IsEnabled="{Binding CanEditDailyStyle}" Visibility="{Binding IsDailyStyle,Converter={StaticResource Visible}}" Width="Auto" MaxWidth="500" Padding="14,2" Style="{StaticResource Music.FilterTag}" Margin="0,0,0,16"/>
    <StackPanel Visibility="{Binding ShowDetailSkeleton,Converter={StaticResource Visible}}" IsHitTestVisible="False"><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/></StackPanel>
    <StackPanel Orientation="Horizontal" Margin="0,0,0,10" Visibility="{Binding IsContentDetailPage,Converter={StaticResource Visible}}"><TextBlock Text="{Binding DetailSectionTitle}" FontSize="20"/><TextBlock Text="{Binding DetailCountText}" FontSize="11" Margin="3,1,0,0"/></StackPanel>
    <desktop:NoticeOutlet Message="{Binding Status}"/><desktop:NoticeOutlet Message="{Binding SearchStatus}"/>

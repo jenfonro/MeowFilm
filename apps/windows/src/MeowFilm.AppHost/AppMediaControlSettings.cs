@@ -191,6 +191,5 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         }
     }
     private static bool Fields(JsonElement value, params string[] fields) =>
-        value.ValueKind == JsonValueKind.Object && value.EnumerateObject().Count() == fields.Length &&
-        fields.All(field => value.TryGetProperty(field, out _));
+        value.ValueKind == JsonValueKind.Object && fields.All(field => value.TryGetProperty(field, out _));
 }
