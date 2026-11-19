@@ -32,19 +32,14 @@ public partial class GeneralSettingsView : UserControl
             Unloaded += (_, _) => closePreferences.PropertyChanged -= ClosePreferenceChanged;
             Loaded += (_, _) => { closePreferences.PropertyChanged -= ClosePreferenceChanged; closePreferences.PropertyChanged += ClosePreferenceChanged; ClosePreferenceChanged(null, new(null)); };
         }
-        if (closePreferences is null)
-        {
-            Areas.Children.Remove(WindowArea);
-            ((Panel)WindowBehaviorPage.Parent).Children.Remove(WindowBehaviorPage);
-        }
-        else WindowArea.Visibility = Visibility.Visible;
+        if (closePreferences is not null) WindowArea.Visibility = Visibility.Visible;
         DataContext = appearance;
         if (mediaControls is not null)
         {
             ShortcutsPage.Content = new MediaControlSettingsView(mediaControls);
             ShortcutsArea.Visibility = Visibility.Visible;
         }
-        else Areas.Children.Remove(ShortcutsArea);
+        else ShortcutsArea.Visibility = Visibility.Collapsed;
         foreach (var source in sources)
         {
             if (source.AppearanceSettingsView is { } appearanceView) AppearanceContributions.Children.Add(appearanceView);

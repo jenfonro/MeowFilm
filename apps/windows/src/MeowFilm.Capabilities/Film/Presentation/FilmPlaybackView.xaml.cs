@@ -25,7 +25,7 @@ public partial class FilmPlaybackView : UserControl
     private bool restoringDirectory, restoringPage, shownList;
     private FilmDirectoryDialog? directory;
     private DesktopWindow? playerWindow;
-    private bool pip, selectingControl;
+    private bool pip, selectingControl, projectingSources;
     private int rateIndex = 2, aspectIndex;
     private FilmVideoSurface? mediaSurface;
     private Point? swipeStart;
@@ -47,10 +47,15 @@ public partial class FilmPlaybackView : UserControl
             if (boundPage is not null) boundPage.PropertyChanged -= PageChanged;
             directory?.Hide(); directory = null;
             playerWindow?.Close();
-            DetachControls();
-            VideoHost.Content = null;
-            boundPage = DataContext as FilmPlaybackPage;
+            var nextPage = DataContext as FilmPlaybackPage;
+            if (!ReferenceEquals(VideoHost.Content, nextPage?.MediaView))
+            {
+                DetachControls();
+                VideoHost.Content = null;
+            }
+            boundPage = nextPage;
             if (boundPage is not null) boundPage.PropertyChanged += PageChanged;
+            UpdateSourceSelections();
             seekingPage = null;
             rateGeneration++; aspectGeneration++;
             controlsIdentity = null;
@@ -60,7 +65,7 @@ public partial class FilmPlaybackView : UserControl
             UpdateMedia();
             ShowPlayerControls();
         };
-        Loaded += (_, _) => { UpdateLayoutMode(); UpdateMedia();  };
+        Loaded += (_, _) => { UpdateSourceSelections(); UpdateLayoutMode(); UpdateMedia();  };
         Unloaded += (_, _) =>
         {
             RememberPagePosition();
@@ -71,6 +76,8 @@ public partial class FilmPlaybackView : UserControl
             if (Visibility != Visibility.Visible) RememberPagePosition();
             else { RestorePagePosition(); UpdateMedia(); }
         });
+        PageScroll.SizeChanged += (_, _) => UpdateDirectoryHeight();
+        HeroActions.SizeChanged += (_, _) => UpdateMetadataHeight();
         PageScroll.ViewChanged += (_, _) =>
         {
             if (!restoringPage && MeowFilm.Desktop.DesktopVisual.IsVisible(this) && boundPage is { } page)
@@ -125,11 +132,21 @@ public partial class FilmPlaybackView : UserControl
         HeroRowGutter.Height = new(stacked ? 20 : 0);
         Grid.SetColumn(MetadataPanel, stacked ? 0 : 2);
         Grid.SetRow(MetadataPanel, stacked ? 2 : 0);
+        UpdatePictureHeight();
         UpdateMetadataHeight();
         UpdateRailButtons();
     }
 
-    private void Player_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateMetadataHeight();
+    private void Player_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        UpdatePictureHeight();
+        UpdateMetadataHeight();
+    }
+
+    private void UpdatePictureHeight()
+    {
+        if (playerWindow is null) VideoPicture.Height = PlayerFrame.ActualWidth * 9 / 16;
+    }
 
     private void UpdateMetadataHeight()
     {
@@ -137,6 +154,9 @@ public partial class FilmPlaybackView : UserControl
         {
             MetadataPanel.Height = ActualWidth < 840 ? double.NaN : PlayerFrame.ActualHeight;
             MetadataOverlay.MinHeight = ActualWidth < 840 ? 300 : PlayerFrame.ActualHeight;
+            bool wrapped = ActualWidth >= 840 && HeroActions.ActualHeight > 44;
+            MetadataContent.Margin = new(20, wrapped ? 12 : 22, 20, wrapped ? 12 : 22);
+            HeroActions.Margin = new(0, wrapped ? 8 : 14, 0, wrapped ? 8 : 16);
         }
     }
 
@@ -164,7 +184,18 @@ public partial class FilmPlaybackView : UserControl
             return;
         }
         if (e.PropertyName is nameof(FilmPlaybackPage.PlaybackRate) or nameof(FilmPlaybackPage.PlaybackAspect)) UpdateControlSelections();
-        if (e.PropertyName == nameof(FilmPlaybackPage.CurrentCandidateId)) directory?.RefreshCurrent();
+        if (e.PropertyName is nameof(FilmPlaybackPage.Sources) or nameof(FilmPlaybackPage.Lines) or
+            nameof(FilmPlaybackPage.SelectedSource) or nameof(FilmPlaybackPage.SelectedLine) || string.IsNullOrEmpty(e.PropertyName))
+            UpdateSourceSelections();
+        if (e.PropertyName is nameof(FilmPlaybackPage.CurrentCandidateId) or nameof(FilmPlaybackPage.CanBrowseRaw) or
+            nameof(FilmPlaybackPage.EpisodeDirectory) || string.IsNullOrEmpty(e.PropertyName))
+        {
+            if (directory is { } dialog && boundPage is { } page)
+            {
+                if (dialog.IsCurrent(page)) dialog.RefreshCurrent();
+                else { dialog.Hide(); directory = null; }
+            }
+        }
         if (e.PropertyName is nameof(FilmPlaybackPage.EpisodeDirectory) or nameof(FilmPlaybackPage.Episodes) or
             nameof(FilmPlaybackPage.ShowEpisodeList) || string.IsNullOrEmpty(e.PropertyName))
             RestoreDirectory();
@@ -185,29 +216,34 @@ public partial class FilmPlaybackView : UserControl
         bool showingList = boundPage?.ShowEpisodeList == true;
         bool changedLayout = showingList && !shownList;
         shownList = showingList;
-        if (!changedLayout && ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory)) return;
-        shownDirectory = boundPage?.EpisodeDirectory;
-        DirectoryHost.Children.Clear();
-        episodeList = null;
-        if (shownDirectory is { } selected)
+        bool changedDirectory = !ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory);
+        if (!changedLayout && !changedDirectory) return;
+        if (changedDirectory)
         {
-            if (selected.Presentation is null)
+            shownDirectory = boundPage?.EpisodeDirectory;
+            DirectoryHost.Children.Clear();
+            episodeList = null;
+            if (shownDirectory is { } selected)
             {
-                var root = (FrameworkElement)((DataTemplate)Resources["Film.DirectoryPresentation"]).LoadContent();
-                var shelf = (Shelf)root.FindName("EpisodeShelf");
-                var list = (ItemsControl)root.FindName("EpisodeList");
-                var movies = (ItemsControl)root.FindName("MovieCandidates");
-                shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Episodes)), Source = selected });
-                shelf.SetBinding(Shelf.HorizontalOffsetProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.HorizontalOffset)), Source = selected, Mode = BindingMode.TwoWay });
-                list.SetBinding(ItemsControl.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Episodes)), Source = selected });
-                movies.SetBinding(ItemsControl.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Candidates)), Source = selected });
-                selected.Presentation = root;
+                if (selected.Presentation is null)
+                {
+                    var root = (FrameworkElement)((DataTemplate)Resources["Film.DirectoryPresentation"]).LoadContent();
+                    var shelf = (Shelf)root.FindName("EpisodeShelf");
+                    var list = (ItemsControl)root.FindName("EpisodeList");
+                    var movies = (ItemsControl)root.FindName("MovieCandidates");
+                    shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Episodes)), Source = selected });
+                    shelf.SetBinding(Shelf.HorizontalOffsetProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.HorizontalOffset)), Source = selected, Mode = BindingMode.TwoWay });
+                    list.SetBinding(ItemsControl.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Episodes)), Source = selected });
+                    movies.SetBinding(ItemsControl.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Candidates)), Source = selected });
+                    selected.Presentation = root;
+                }
+                var presentation = selected.Presentation;
+                presentation.DataContext = boundPage;
+                DirectoryHost.Children.Add(presentation);
+                episodeList = (ItemsControl)presentation.FindName("EpisodeList");
             }
-            var presentation = selected.Presentation;
-            presentation.DataContext = boundPage;
-            DirectoryHost.Children.Add(presentation);
-            episodeList = (ItemsControl)presentation.FindName("EpisodeList");
         }
+        UpdateDirectoryHeight();
         restoringDirectory = true;
         var directory = shownDirectory;
         DispatcherQueue.TryEnqueue(() =>
@@ -222,6 +258,11 @@ public partial class FilmPlaybackView : UserControl
             }
             restoringDirectory = false;
         });
+    }
+
+    private void UpdateDirectoryHeight()
+    {
+        if (episodeList is { } list) list.MaxHeight = PageScroll.ActualHeight;
     }
 
     private void EpisodeList_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
@@ -279,11 +320,6 @@ public partial class FilmPlaybackView : UserControl
             SeekSlider.Maximum = Math.Max(0, page.Duration);
             SeekSlider.Value = page.Position;
         }
-        if (directory is { } dialog)
-        {
-            if (dialog.IsCurrent(page)) dialog.RefreshCurrent();
-            else { dialog.Hide(); directory = null; }
-        }
     }
     private void UpdateControlSelections()
     {
@@ -294,7 +330,7 @@ public partial class FilmPlaybackView : UserControl
             rateIndex = RateBox.Items.Cast<ListBoxItem>().ToList().FindIndex(item =>
                 item.Tag is string value && double.Parse(value, CultureInfo.InvariantCulture) == rate);
             aspectIndex = AspectBox.Items.Cast<ListBoxItem>().ToList().FindIndex(item =>
-                Equals(item.Tag, boundPage?.PlaybackAspect ?? ""));
+                Equals(item.Tag, boundPage?.PlaybackAspect));
             RateBox.SelectedIndex = rateIndex;
             AspectBox.SelectedIndex = aspectIndex;
         }
@@ -423,15 +459,27 @@ public partial class FilmPlaybackView : UserControl
         finally { box.SetBinding(ToggleButton.IsCheckedProperty, new Binding
             { Path = new PropertyPath(nameof(FilmPlaybackPage.ShortVideo)), Mode = BindingMode.OneWay }); }
     }
+    private void UpdateSourceSelections()
+    {
+        projectingSources = true;
+        try
+        {
+            if (!ReferenceEquals(SourcePicker.ItemsSource, boundPage?.Sources)) SourcePicker.ItemsSource = boundPage?.Sources;
+            if (!ReferenceEquals(LinePicker.ItemsSource, boundPage?.Lines)) LinePicker.ItemsSource = boundPage?.Lines;
+            SourcePicker.SelectedItem = boundPage?.SelectedSource;
+            LinePicker.SelectedItem = boundPage?.SelectedLine;
+        }
+        finally { projectingSources = false; }
+    }
     private async void Source_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (DataContext is FilmPlaybackPage { Applying: false } page &&
+        if (!projectingSources && DataContext is FilmPlaybackPage { Applying: false } page &&
             SourcePicker.SelectedItem is FilmSelection value && value != page.SelectedSource)
             await ExecuteAsync(page, () => page.BrowseSourceAsync(value), "来源加载失败");
     }
     private async void Line_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (DataContext is FilmPlaybackPage { Applying: false } page &&
+        if (!projectingSources && DataContext is FilmPlaybackPage { Applying: false } page &&
             LinePicker.SelectedItem is FilmSelection value && value != page.SelectedLine)
             await ExecuteAsync(page, () => page.BrowseLineAsync(value), "线路加载失败");
     }
@@ -534,12 +582,12 @@ public partial class FilmPlaybackView : UserControl
     private async void Aspect_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (selectingControl || DataContext is not FilmPlaybackPage { HasOutput: true } page ||
-            sender is not ListBox box || box.SelectedItem is not ListBoxItem { Tag: string text }) return;
+            sender is not ListBox box || box.SelectedItem is not ListBoxItem item) return;
         int previous = aspectIndex, selected = box.SelectedIndex;
         long ticket = ++aspectGeneration; string? identity = page.MediaIdentity;
         try
         {
-            await page.AspectAsync(text.Length == 0 ? null : text);
+            await page.AspectAsync((string?)item.Tag);
             if (ticket == aspectGeneration && ReferenceEquals(page, boundPage) && identity == page.MediaIdentity)
                 aspectIndex = selected;
         }
@@ -580,11 +628,6 @@ public partial class FilmPlaybackView : UserControl
             if (restored) return;
             restored = true; ClosePlayerMenus(); CancelPlayerInput();
             host.Children.Remove(PlayerFrame); PlayerFrame.VerticalAlignment = VerticalAlignment.Top;
-            VideoPicture.SetBinding(HeightProperty, new Binding
-            {
-                Path = new PropertyPath("ActualWidth"), Source = VideoPicture,
-                Converter = new FilmPlayerHeightConverter()
-            });
             HeroGrid.Children.Insert(0, PlayerFrame); page.RetainOwner(null);
             if (ReferenceEquals(playerWindow, dialog)) { playerWindow = null; pip = false; }
             UpdatePlayerWindowState(); UpdateLayoutMode(); UpdateMedia(); ShowPlayerControls();

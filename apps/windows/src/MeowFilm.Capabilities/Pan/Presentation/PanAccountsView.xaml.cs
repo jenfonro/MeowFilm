@@ -16,6 +16,7 @@ public partial class PanAccountsView : UserControl
     private bool loginShowing, logoutShowing, active;
     private Button? logoutAnchor;
     private DesktopWindow? window;
+    private IDisposable? visibility;
     private DispatcherTimer? polling;
     private PanAccountRow? formRow;
     private bool formQr;
@@ -29,8 +30,6 @@ public partial class PanAccountsView : UserControl
         InitializeComponent();
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) => Detach();
-        RegisterPropertyChangedCallback(VisibilityProperty, async (_, _) => await VisibilityChanged());
-        LayoutUpdated += async (_, _) => { if (active != Active) await VisibilityChanged(); };
         SizeChanged += (_, _) => SizePopup();
         DataContextChanged += (_, _) => { Detach(); if (IsLoaded) Attach(); };
     }
@@ -40,16 +39,25 @@ public partial class PanAccountsView : UserControl
         observed = Owner;
         if (observed is not null) observed.PropertyChanged += OwnerChanged;
         window = DesktopWindow.GetWindow(this);
-        if (window is not null) window.AppWindow.Changed += WindowChanged;
-        _ = VisibilityChanged();
+        if (window is not null)
+        {
+            window.WindowStateChanged += WindowChanged;
+            window.VisibilityChanged += WindowChanged;
+        }
+        visibility = DesktopVisual.ObserveVisibility(this, visible => { _ = VisibilityChanged(); });
     }
     private void Detach()
     {
+        visibility?.Dispose(); visibility = null;
         var old = observed;
         observed = null;
         active = false;
         if (old is not null) old.PropertyChanged -= OwnerChanged;
-        if (window is not null) window.AppWindow.Changed -= WindowChanged;
+        if (window is not null)
+        {
+            window.WindowStateChanged -= WindowChanged;
+            window.VisibilityChanged -= WindowChanged;
+        }
         window = null;
         StopPolling();
         ClearInputs();
@@ -58,7 +66,7 @@ public partial class PanAccountsView : UserControl
         logoutAnchor = null;
         if (old is not null) _ = old.DeactivateAsync();
     }
-    private async void WindowChanged(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs e) => await VisibilityChanged();
+    private async void WindowChanged(object? sender, EventArgs e) => await VisibilityChanged();
     private async Task VisibilityChanged()
     {
         bool next = Active;

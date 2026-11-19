@@ -18,24 +18,23 @@ public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
 
     internal void Apply(string poster, string overview, JsonElement nextRows, JsonElement nextSeasons,
-        JsonElement nextCandidates, long revision, bool raw, bool movie, bool refreshCandidates)
+        JsonElement nextCandidates, long revision, bool raw, bool movie, string sourceName, string lineProvider,
+        bool refreshCandidates)
     {
         bool rowsChanged = !FilmJson.Equal(rows, nextRows), metadataChanged = metadataRevision != revision;
         bool candidatesChanged = false;
         if (rowsChanged || metadataChanged || refreshCandidates)
         {
-            var visible = raw ? FilmJson.Array(nextRows).Select(row => FilmJson.Text(row, "candidateId"))
-                .ToHashSet(StringComparer.Ordinal) : null;
             var duplicates = new Dictionary<string, int>(StringComparer.Ordinal);
-            var nextChoices = FilmJson.Array(nextCandidates).Where(row => visible is null || visible.Contains(FilmJson.Text(row, "id")))
-                .Select(row =>
-                {
-                    var candidate = FilmCandidateItem.Read(row) with { Image = poster, Overview = overview };
-                    if (!movie) return candidate;
-                    int count = duplicates.GetValueOrDefault(candidate.DisplayLabel) + 1;
-                    duplicates[candidate.DisplayLabel] = count;
-                    return count == 1 ? candidate : candidate with { DisplayLabel = $"{candidate.DisplayLabel} ({count})" };
-                }).ToArray();
+            var nextChoices = FilmJson.Array(nextCandidates).Select(row =>
+            {
+                var candidate = (raw ? FilmCandidateItem.ReadBrowsing(row, sourceName, lineProvider) : FilmCandidateItem.Read(row)) with
+                { Image = poster, Overview = overview };
+                if (!movie) return candidate;
+                int count = duplicates.GetValueOrDefault(candidate.DisplayLabel) + 1;
+                duplicates[candidate.DisplayLabel] = count;
+                return count == 1 ? candidate : candidate with { DisplayLabel = $"{candidate.DisplayLabel} ({count})" };
+            }).ToArray();
             var previousChoices = Candidates.ToDictionary(item => item.Id, StringComparer.Ordinal);
             for (int index = 0; index < nextChoices.Length; index++)
                 if (previousChoices.TryGetValue(nextChoices[index].Id, out var existing) && existing.SameDisplay(nextChoices[index]))
@@ -117,7 +116,8 @@ public sealed class FilmEpisodeItem : INotifyPropertyChanged
 
     internal void Apply(JsonElement row, JsonElement detail, string seasonPoster, string poster, string overview)
     {
-        PlaybackTarget = FilmJson.Target(row.GetProperty("playbackTarget"));
+        PlaybackTarget = raw ? FilmJson.FileTarget(FilmJson.Member(row, "playbackTarget")) :
+            FilmJson.Target(FilmJson.Member(row, "playbackTarget"));
         PlaybackTarget.Validate();
         int? season = FilmJson.Integer(row, "season") ?? FilmJson.Integer(row, "season_number");
         int? episode = FilmJson.Integer(row, "episode") ?? FilmJson.Integer(row, "episode_number");
@@ -125,10 +125,12 @@ public sealed class FilmEpisodeItem : INotifyPropertyChanged
         if (!raw && (season is null or < 0 || episode is null or < 0 ||
             (season == 0 || episode == 0) && global is not null))
             throw new FilmPlaybackException("INVALID_RESPONSE");
+        string? candidateId = raw && FilmJson.Text(PlaybackTarget.Source ?? default, "candidateId") is { Length: > 0 } id
+            ? id : null;
         string still = FilmJson.Text(detail, "still_path");
         if (still.Length == 0) still = FilmJson.Text(row, "still_path");
         var next = new Display(season, episode, global,
-            raw && FilmJson.Text(row, "candidateId") is { Length: > 0 } candidateId ? candidateId : null,
+            candidateId,
             FilmJson.Text(row, "name"), FilmJson.Text(detail, "name"),
             FilmJson.Text(detail, "overview") is { Length: > 0 } summary ? summary :
                 FilmJson.Text(row, "overview") is { Length: > 0 } original ? original : overview,

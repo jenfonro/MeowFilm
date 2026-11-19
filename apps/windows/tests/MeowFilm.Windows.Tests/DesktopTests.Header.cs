@@ -31,12 +31,29 @@ public static partial class DesktopTests
             var entry = f.Element<Grid>("SearchInput");
             True(!ChromeVisuals(entry).OfType<Button>().Any(button => AutomationProperties.GetName(button) == "搜索"),
                 "magnifier is not a second search action");
-            True(ChromeVisuals(entry).OfType<FontIcon>().Single().IsHitTestVisible == false,
+            True(entry.Children.OfType<FontIcon>().Single().IsHitTestVisible == false,
                 "magnifier defers hit testing to the complete combo entry");
             var expansion = DesktopTestUi.Expansion(picker);
             foreach (double width in new[] { 92d, 118d })
             {
                 picker.Width = width; f.Shell.Root.UpdateLayout();
+                foreach (var target in page.Targets.Take(2))
+                {
+                    await DesktopTestUi.SelectAsync(picker, target);
+                    f.Shell.Root.UpdateLayout();
+                    var template = (Grid)VisualTreeHelper.GetChild(picker, 0);
+                    var selected = template.Children.OfType<ContentPresenter>()
+                        .Single(presenter => presenter.Name == "ContentPresenter");
+                    var label = ChromeVisuals(selected).OfType<TextBlock>().Single();
+                    Equal(target.Label, label.Text, "closed entry shows the exact selected category");
+                    var glyph = template.Children.OfType<FontIcon>().Single(icon => icon.Name == "DropDownGlyph");
+                    var labelBounds = DesktopTestUi.Bounds(label, picker);
+                    var glyphBounds = DesktopTestUi.Bounds(glyph, picker);
+                    True(!label.IsTextTrimmed && labelBounds.Left >= 28 && labelBounds.Right <= glyphBounds.Left &&
+                        labelBounds.Bottom <= picker.ActualHeight && glyphBounds.Right <= picker.ActualWidth,
+                        $"the full selected category fits between magnifier and native arrow; width={width}, " +
+                        $"label={target.Label}, trimmed={label.IsTextTrimmed}, text={labelBounds}, arrow={glyphBounds}");
+                }
                 expansion.Expand(); await UntilAsync(() => picker.IsDropDownOpen, "native category opens");
                 var menu = VisualTreeHelper.GetOpenPopupsForXamlRoot(picker.XamlRoot).Single().Child as FrameworkElement;
                 True(menu is not null, "native popup is realized"); menu!.UpdateLayout();

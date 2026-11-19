@@ -27,6 +27,7 @@ internal static class MusicLyricScroll
         };
         return state;
     });
+    internal static bool IsMoving(ScrollViewer viewer) => State(viewer).Moving;
     internal static double ManualTarget(ScrollViewer viewer) => State(viewer).Target ?? viewer.VerticalOffset;
     internal static void Stop(ScrollViewer viewer)
     {

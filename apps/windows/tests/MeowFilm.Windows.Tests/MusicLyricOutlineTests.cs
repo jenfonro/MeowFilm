@@ -198,15 +198,20 @@ public static class MusicLyricOutlineTests
         internal MusicLyricOutline Outline => Control is MusicDesktopLyricTextView plain ? plain.Outline : ((MusicLyricWordView)Control).Outline;
         private readonly Canvas referenceCanvas = new() { Width = Width, Height = Height };
         private readonly TextBlock reference = new();
+        private readonly Grid root;
         private readonly DesktopWindow window;
         private Viewbox? box, referenceBox;
         internal Fixture(Control control)
         {
             Control = control; control.Foreground = new SolidColorBrush(Colors.White); control.FontFamily = new FontFamily("Segoe UI");
             Canvas.SetLeft(control, 20); Canvas.SetTop(control, 12); Surface.Children.Add(control); referenceCanvas.Children.Add(reference);
-            window = new DesktopWindow { Content = new Grid { Children = { referenceCanvas, Surface } } };
-            window.AttachRoot(); window.Resize(Width, Height);
+            root = new Grid { Width = Width, Height = Height, HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(16), Children = { referenceCanvas, Surface } }; referenceCanvas.Opacity = 0;
+            window = new DesktopWindow { Content = new Grid { Children = { root } } };
+            window.AttachRoot();
+            NativeDesktopCapture.DisableWindowTransitions(window);
             ((Microsoft.UI.Windowing.OverlappedPresenter)window.AppWindow.Presenter).SetBorderAndTitleBar(false, false);
+            window.AppWindow.ResizeClient(new(Width + 32, Height + 32));
             window.Activate();
         }
         internal void PlaceIn(Viewbox viewbox)
@@ -231,8 +236,36 @@ public static class MusicLyricOutlineTests
             await DesktopTestUi.DrainAsync(); await Outline.RenderWork; await DesktopTestUi.DrainAsync();
             DesktopTestUi.WindowRoot(window).UpdateLayout();
         }
-        internal Task<byte[]> Capture() => DesktopTestUi.Pixels(Surface, Width, Height);
-        internal Task<byte[]> ReferenceFrame() => DesktopTestUi.Pixels(referenceCanvas, Width, Height);
+        internal Task<byte[]> Capture() => CaptureCanvas(false);
+        internal Task<byte[]> ReferenceFrame() => CaptureCanvas(true);
+        private async Task<byte[]> CaptureCanvas(bool referenceOnly)
+        {
+            var background = root.Background;
+            double surfaceOpacity = Surface.Opacity, referenceOpacity = referenceCanvas.Opacity;
+            try
+            {
+                Surface.Opacity = referenceOnly ? 0 : 1; referenceCanvas.Opacity = referenceOnly ? 1 : 0;
+                root.Background = new SolidColorBrush(Colors.Black);
+                var black = await NativeDesktopCapture.CaptureAsync(root);
+                root.Background = new SolidColorBrush(Colors.White);
+                var white = await NativeDesktopCapture.CaptureAsync(root);
+                Check(black.Width == Width && black.Height == Height && white.Width == Width && white.Height == Height,
+                    $"the reference and actual native lyric use the same complete device viewport; " +
+                    $"black={black.Width}x{black.Height}, white={white.Width}x{white.Height}, root={root.ActualWidth}x{root.ActualHeight}");
+                for (int at = 0; at < black.Pixels.Length; at += 4)
+                {
+                    int difference = 0;
+                    for (int channel = 0; channel < 3; channel++)
+                        difference = Math.Max(difference, Math.Abs(white.Pixels[at + channel] - black.Pixels[at + channel]));
+                    black.Pixels[at + 3] = (byte)(255 - difference);
+                }
+                return black.Pixels;
+            }
+            finally
+            {
+                root.Background = background; Surface.Opacity = surfaceOpacity; referenceCanvas.Opacity = referenceOpacity;
+            }
+        }
         internal async Task<byte[]> FillFrame()
         {
             var images = DesktopTestUi.Visuals(Control).OfType<Image>().ToArray();

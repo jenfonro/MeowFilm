@@ -613,6 +613,8 @@ public static class FilmPlaybackContractTests
             var directory = rig.Page.EpisodeDirectory;
             var episodes = rig.Page.Episodes;
             var candidates = rig.Page.Candidates;
+            var notices = new List<string>();
+            rig.Session.OperationFailed += (_, code) => notices.Add(code);
             Check(!rig.Page.PrefetchStatus.Contains("缓存", StringComparison.Ordinal), "URL preparation is not media-cache coverage");
             rig.Runtime.Change(root =>
             {
@@ -620,20 +622,23 @@ public static class FilmPlaybackContractTests
                 root["stage"] = "error"; root["error"] = "UPSTREAM_FORMAT";
                 root["browsing"]!["error"] = "TIMEOUT";
             });
-            await Until(() => rig.Page.ListError.Length > 0);
+            await Until(() => notices.Contains("TIMEOUT") && rig.Page.PrefetchStatus == "下一集媒体已缓存");
             Check(ReferenceEquals(rig.Page.EpisodeDirectory, directory) && ReferenceEquals(rig.Page.Episodes, episodes) &&
-                ReferenceEquals(rig.Page.Candidates, candidates) && !rig.Page.CanBrowseRaw &&
-                rig.Page.ShowListStatus && rig.Page.ListStatus == "请求超时，请重试" && rig.Page.StatusText == "上游数据格式错误" &&
-                rig.Page.Sources.Count > 0 && rig.Page.PrefetchStatus == "下一集媒体已缓存",
-                "third-row failure is explicit without destroying successful display or the actual buffered state");
+                ReferenceEquals(rig.Page.Candidates, candidates) && rig.Page.CanBrowseRaw && rig.Page.CanSelectDirectory &&
+                !rig.Page.ShowListStatus && rig.Page.ListError == "" && rig.Page.StatusText == "上游数据格式错误" &&
+                rig.Page.Sources.Count > 0 && notices.SequenceEqual(["TIMEOUT"]),
+                "an unchanged failed refresh retains its successful directory and actual buffered state while notifying the exact operation error");
             rig.Runtime.Change(root => { root["browsing"] = Node(SourceBrowsing()); root["stage"] = "unavailable"; root["error"] = null; });
-            await Until(() => rig.Page.ListError.Length == 0);
+            await Until(() => rig.Page.ListError.Length == 0 && rig.Page.StatusText == "无可用视频源");
             Check(rig.Page.Episodes.Count == 1 && rig.Page.StatusText == "无可用视频源", "a valid source recovers separately from playback unavailability");
         });
         yield return Test("known failures keep their safe classification in list playback and connection presentation", async () =>
         {
             await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync();
+            var directory = rig.Page.EpisodeDirectory;
+            var episodes = rig.Page.Episodes;
+            var candidates = rig.Page.Candidates;
             (string Code, string Message)[] failures =
             [
                 ("TIMEOUT", "请求超时，请重试"),
@@ -663,13 +668,16 @@ public static class FilmPlaybackContractTests
                     root["stage"] = "error"; root["error"] = failure.Code;
                     root["browsing"] = Node(SourceBrowsing());
                     root["browsing"]!["error"] = failure.Code;
+                    root["browsing"]!["episodes"] = new JsonArray();
+                    root["browsing"]!["originalEpisodes"] = new JsonArray();
                     root["candidates"] = Node(FilmJson.Encode(new[] { Candidate("one") }));
                 });
                 await Until(() => !rig.Page.ConnectionFailed && rig.Page.ListStatus == failure.Message &&
                     rig.Page.StatusText == failure.Message);
-                Check(rig.Page.ListError == failure.Message && rig.Page.ShowListStatus &&
-                    rig.Page.EpisodeDirectory is null && !rig.Page.ShowEpisodeCards && !rig.Page.ShowEpisodeList &&
-                    !rig.Page.ShowMovieCandidates && !rig.Page.CanBrowseRaw &&
+                Check(rig.Page.ListError == failure.Message && rig.Page.ShowListStatus && !rig.Page.ShowListMessage &&
+                    ReferenceEquals(rig.Page.EpisodeDirectory, directory) && ReferenceEquals(rig.Page.Episodes, episodes) &&
+                    ReferenceEquals(rig.Page.Candidates, candidates) && !rig.Page.ShowEpisodeCards && !rig.Page.ShowEpisodeList &&
+                    !rig.Page.ShowMovieCandidates && !rig.Page.CanBrowseRaw && !rig.Page.CanSelectDirectory &&
                     rig.Page.Sources.Count > 0, "each classified failure hides unrelated successful display and permits source recovery: " + failure.Code);
                 rig.Page.SetConnectionError(failure.Code);
                 Check(rig.Page.ConnectionFailed && rig.Page.StatusText == failure.Message,

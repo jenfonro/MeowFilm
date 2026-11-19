@@ -460,20 +460,61 @@ public static partial class MusicUiTests
                 await f.Module.SetDesktopLyricLayoutAsync("single"); await Drain();
                 Equal(240d, DesktopTestUi.WindowRoot(window).ActualHeight);
 
-                double oldWidth = DesktopTestUi.WindowRoot(window).ActualWidth, oldHeight = DesktopTestUi.WindowRoot(window).ActualHeight;
+                var root = DesktopTestUi.WindowRoot(window);
+                double oldWidth = root.ActualWidth, oldHeight = root.ActualHeight;
                 True(MusicDesktopLyricsNative.GetWindowRect(handle, out var resizeBounds),
                     "current native bounds reflect the content minimum before the next resize");
+                int requestedWidth = resizeBounds.Right - resizeBounds.Left + 120;
+                int requestedHeight = resizeBounds.Bottom - resizeBounds.Top + 60;
                 DesktopInteractionNative.SendMessage(handle, 0x0231, 0, 0);
                 True(DesktopInteractionNative.SetWindowPos(handle, 0, resizeBounds.Left, resizeBounds.Top,
-                    resizeBounds.Right - resizeBounds.Left + 120, resizeBounds.Bottom - resizeBounds.Top + 60, 0x10),
+                    requestedWidth, requestedHeight, 0x10),
                     "the owned window accepts a native width and height change");
-                await Drain();
+                try
+                {
+                    await Until(() =>
+                    {
+                        root.UpdateLayout();
+                        double scale = root.XamlRoot.RasterizationScale;
+                        return root.ActualWidth > oldWidth + 50 && root.ActualHeight > oldHeight + 25 &&
+                            Math.Abs(root.ActualWidth * scale - window.AppWindow.ClientSize.Width) < 1 &&
+                            Math.Abs(root.ActualHeight * scale - window.AppWindow.ClientSize.Height) < 1;
+                    });
+                }
+                catch (TimeoutException error)
+                {
+                    MusicDesktopLyricsNative.GetWindowRect(handle, out var actualBounds);
+                    throw new InvalidOperationException($"native lyric resize layout did not settle; requested={requestedWidth}x{requestedHeight}, " +
+                        $"bounds={actualBounds.Left},{actualBounds.Top},{actualBounds.Right},{actualBounds.Bottom}, " +
+                        $"old={oldWidth}x{oldHeight}, root={root.ActualWidth}x{root.ActualHeight}, xamlRoot={root.XamlRoot.Size}, " +
+                        $"scale={root.XamlRoot.RasterizationScale}, client={window.AppWindow.ClientSize}, window={window.AppWindow.Size}", error);
+                }
                 DesktopInteractionNative.SendMessage(handle, 0x0232, 0, 0);
+                await f.Module.EnsureDesktopLyricSettingsAsync();
                 True(DesktopTestUi.WindowRoot(window).ActualWidth > oldWidth + 50 && DesktopTestUi.WindowRoot(window).ActualHeight > oldHeight + 25,
                     "the native size change reaches the actual WinUI root in both dimensions");
+                var lyricPresenter = (MusicLyricList)DesktopTestUi.WindowRoot(window).FindName("LyricPresenter");
+                var lineSurface = (Grid)DesktopTestUi.WindowRoot(window).FindName("LineSurface");
+                var topLine = (MusicDesktopLyricLineView)DesktopTestUi.WindowRoot(window).FindName("TopLine");
+                var bottomLine = (MusicDesktopLyricLineView)DesktopTestUi.WindowRoot(window).FindName("BottomLine");
+                Equal(lyricPresenter.ActualHeight, lineSurface.ActualHeight);
+                var topBounds = DesktopTestUi.Bounds(topLine, lineSurface);
+                True(topBounds.Top == 0 && topBounds.Bottom == lineSurface.ActualHeight && !DesktopVisual.IsVisible(bottomLine),
+                    "the single lyric track occupies the resized native presenter instead of its original height");
                 double resizedHeight = DesktopTestUi.WindowRoot(window).ActualHeight;
                 await f.Module.SetDesktopLyricLayoutAsync("double"); await Drain();
+                root.UpdateLayout();
                 Equal(resizedHeight, DesktopTestUi.WindowRoot(window).ActualHeight);
+                Equal(lyricPresenter.ActualHeight, lineSurface.ActualHeight);
+                topBounds = DesktopTestUi.Bounds(topLine, lineSurface);
+                var bottomBounds = DesktopTestUi.Bounds(bottomLine, lineSurface);
+                True(DesktopVisual.IsVisible(bottomLine) && topBounds.Top == 0 &&
+                    topBounds.Bottom <= bottomBounds.Top && bottomBounds.Bottom == lineSurface.ActualHeight,
+                    $"both fixed tracks use the resized presenter and retain the bottom track at its actual lower edge; " +
+                    $"top={topBounds}, bottom={bottomBounds}, surface={lineSurface.ActualWidth}x{lineSurface.ActualHeight}, " +
+                    $"presenter={lyricPresenter.ActualWidth}x{lyricPresenter.ActualHeight}, bottomVisible={DesktopVisual.IsVisible(bottomLine)}, " +
+                    $"topSlot={LayoutInformation.GetLayoutSlot(topLine)}, bottomSlot={LayoutInformation.GetLayoutSlot(bottomLine)}, " +
+                    $"root={root.ActualWidth}x{root.ActualHeight}, client={window.AppWindow.ClientSize}");
                 window.SetLocked(true); await Drain();
                 True((DesktopInteractionNative.GetWindowLongPtr(handle, -20) & 0x20) != 0,
                     "resizing does not weaken locked click-through");

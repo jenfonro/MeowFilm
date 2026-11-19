@@ -176,7 +176,11 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         }, default);
         Guid id = Traffic.Opened(targetId);
         await Until(async () => FilmJson.Text(await SnapshotAsync(id), "stage") != "loading", "real session initialization");
-        return new(session, page, id, targetId);
+        var entry = FilmJson.Member(await SnapshotAsync(id), "entryTarget");
+        string resolvedId = FilmJson.RequiredText(entry, "id");
+        Check(resolvedId == "tmdb:movie:1" && FilmJson.Text(entry, "metadataProvider") == "tmdb" &&
+            FilmJson.Text(entry, "metadataId") == "1", "the real Node catalog owns the canonical metadata identity");
+        return new(session, page, id, resolvedId);
     }
 
     internal Task<JsonElement> SnapshotAsync(Guid id) =>
@@ -194,9 +198,52 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
 
     internal async Task<string> OutputAsync(PageOwner owner, bool pauseAfterOutput = true)
     {
-        await Until(() => owner.Session.HasOutput &&
-            Native.Output is { SubmittedPictures: > 0, Scope.OwnerId: "film" } output &&
-            output.Scope.Identity == owner.Session.MediaIdentity, "actual matching D3D11 render/Present counter");
+        try
+        {
+            await Until(() => owner.Session.HasOutput &&
+                Native.Output is { SubmittedPictures: > 0, Scope.OwnerId: "film" } output &&
+                output.Scope.Identity == owner.Session.MediaIdentity, "actual matching D3D11 render/Present counter");
+        }
+        catch (TimeoutException)
+        {
+            var target = Native.VideoView.Describe();
+            Observe("output-timeout", new
+            {
+                requestedSession = owner.Id, mediaIdentity = owner.Session.MediaIdentity,
+                sessionHasOutput = owner.Session.HasOutput, nativeScope = Native.Scope,
+                nativeHasOutput = Native.HasOutput, submittedPictures = Native.Output?.SubmittedPictures ?? 0,
+                pendingNative = NativeMediaFixtures.Field(Native, "pending") is not null,
+                currentNative = CurrentSession is not null,
+                nativeCommandsAvailable = ((SemaphoreSlim)NativeMediaFixtures.Field(Native, "commands")!).CurrentCount,
+                nativeSurfaceOwner = NativeMediaFixtures.Field(Native, "surfaceOwner") is not null,
+                surface = new
+                {
+                    loaded = Native.VideoView.IsLoaded, displayWindow = target.DisplayWindow != 0,
+                    target.Width, target.Height, target.Visible,
+                    actualWidth = Native.VideoView.ActualWidth, actualHeight = Native.VideoView.ActualHeight
+                },
+                view = new { View.IsLoaded, View.ActualWidth, View.ActualHeight, matchesPage = ReferenceEquals(View.DataContext, owner.Page),
+                    mountedSurface = ReferenceEquals(((Microsoft.UI.Xaml.Controls.ContentControl)View.FindName("VideoHost")).Content, Native.VideoView) },
+                consumers = owners.Select(session =>
+                {
+                    var state = NativeMediaFixtures.Field(session, "snapshot") as FilmPlaybackSnapshot;
+                    return new
+                    {
+                        sessionId = state?.SessionId, attemptId = state?.AttemptId, currentId = state?.CurrentId,
+                        stage = state is null ? "" : FilmJson.Text(state.Raw, "stage"),
+                        closing = (NativeMediaFixtures.Field(session, "closing") as Task)?.Status.ToString(),
+                        observing = (NativeMediaFixtures.Field(session, "observing") as Task)?.Status.ToString(),
+                        processingId = NativeMediaFixtures.Field(session, "processingId"),
+                        nativeWorkAvailable = ((SemaphoreSlim)NativeMediaFixtures.Field(session, "nativeWork")!).CurrentCount,
+                        controlAvailable = ((SemaphoreSlim)NativeMediaFixtures.Field(session, "control")!).CurrentCount,
+                        pendingInput = NativeMediaFixtures.Field(session, "pending") is not null,
+                        currentInput = NativeMediaFixtures.Field(session, "current") is not null,
+                        executionError = session.ExecutionError, hasOutput = session.HasOutput
+                    };
+                }).ToArray()
+            });
+            throw;
+        }
         string attempt = owner.Session.MediaIdentity!;
         // Do not race a short ordinary.mp4 to its end while reading history and diagnostics.
         if (pauseAfterOutput) await owner.Session.SetPausedAsync(true);

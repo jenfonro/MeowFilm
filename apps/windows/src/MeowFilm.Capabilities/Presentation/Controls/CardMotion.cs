@@ -11,6 +11,13 @@ public sealed class CardMotion : DependencyObject
     public static readonly DependencyProperty EnabledProperty = DependencyProperty.RegisterAttached("Enabled", typeof(bool), typeof(CardMotion),
         new PropertyMetadata(false, EnabledChanged));
     public static readonly DependencyProperty ProgressProperty = DependencyProperty.RegisterAttached("Progress", typeof(double), typeof(CardMotion), new PropertyMetadata(0d));
+    public static readonly DependencyProperty AnimationProgressProperty = DependencyProperty.Register(nameof(AnimationProgress), typeof(double), typeof(CardMotion),
+        new PropertyMetadata(0d, (owner, args) => ((CardMotion)owner).target?.SetValue(ProgressProperty, args.NewValue)));
+    private readonly FrameworkElement? target;
+    public double AnimationProgress { get => (double)GetValue(AnimationProgressProperty); set => SetValue(AnimationProgressProperty, value); }
+    public CardMotion() { }
+    private CardMotion(FrameworkElement target) => this.target = target;
+
     public static bool GetEnabled(DependencyObject owner) => (bool)owner.GetValue(EnabledProperty);
     public static void SetEnabled(DependencyObject owner, bool value) => owner.SetValue(EnabledProperty, value);
     public static double GetProgress(DependencyObject owner) => (double)owner.GetValue(ProgressProperty);
@@ -20,6 +27,8 @@ public sealed class CardMotion : DependencyObject
         internal bool Pointer, Focus;
         internal Storyboard? Storyboard;
         internal IDisposable? Visibility;
+        internal readonly CardMotion AnimationTarget;
+        internal Motion(FrameworkElement target) => AnimationTarget = new(target);
     }
     private static readonly ConditionalWeakTable<FrameworkElement, Motion> Motions = new();
     private static void EnabledChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
@@ -31,7 +40,7 @@ public sealed class CardMotion : DependencyObject
             return;
         }
         if (args.NewValue is not true) return;
-        var state = Motions.GetValue(element, _ => new());
+        var state = Motions.GetValue(element, _ => new Motion(element));
         element.PointerEntered += (_, _) => SetPointerActive(element, true);
         element.PointerExited += (_, _) => SetPointerActive(element, false);
         element.GotFocus += (_, _) => { state.Focus = true; Refresh(element, state); };
@@ -83,21 +92,26 @@ public sealed class CardMotion : DependencyObject
             return;
         }
         double from = GetProgress(element), to = motion.Pointer || motion.Focus ? 1 : 0;
-        motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
+        motion.AnimationTarget.AnimationProgress = from;
+        motion.Storyboard?.Stop(); motion.Storyboard = null;
+        SetProgress(element, from);
         if (MusicVisuals.CanAnimate(element) && Math.Abs(from - to) > .001)
         {
             Storyboard? animation = null;
-            animation = MusicVisuals.AnimateDouble(element, "(MeowFilm.Capabilities.CardMotion.Progress)", from, to,
+            animation = MusicVisuals.AnimateDouble(motion.AnimationTarget, nameof(AnimationProgress), from, to,
                 TimeSpan.FromMilliseconds(to > 0 ? 220 : 160), () =>
                 {
                     if (!ReferenceEquals(motion.Storyboard, animation)) return;
+                    motion.AnimationTarget.AnimationProgress = to;
                     motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
                 });
             motion.Storyboard = animation;
         }
+        else SetProgress(element, to);
     }
     private static void Reset(FrameworkElement element, Motion motion)
     {
+        motion.AnimationTarget.AnimationProgress = 0;
         motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, 0);
     }
 }

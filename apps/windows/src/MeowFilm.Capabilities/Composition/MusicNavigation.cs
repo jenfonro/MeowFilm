@@ -30,15 +30,15 @@ public sealed partial class MusicCapability
     {
         if (stopping) return;
         RetireOperationStatus();
-        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        loadDrains.Add(drained.Task);
         using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
         loadCancellation?.Cancel();
+        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        loadDrains.Add(drained.Task);
         loadCancellation = request;
         var token = request.Token;
-        RefreshBindings();
         try
         {
+            RefreshBindings();
             // Restore App state without navigating or publishing a content page.
             await PrepareStartupAsync(token);
             await RefreshPlaylists(token);
@@ -225,10 +225,10 @@ public sealed partial class MusicCapability
         using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
         loadCancellation = request;
         var token = request.Token;
-        if (publishStatus) status = "";
-        RefreshBindings();
         try
         {
+            if (publishStatus) status = "";
+            RefreshBindings();
             var rows = Array.Empty<SongRow>();
             var dates = Array.Empty<string>();
             var archives = Array.Empty<ArchivedPlaylist>();

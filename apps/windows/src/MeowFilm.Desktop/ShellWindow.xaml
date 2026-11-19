@@ -73,7 +73,7 @@
       <local:DesktopPageHeader.Center>
        <Grid x:Name="SearchInput" MaxWidth="430" Height="34" VerticalAlignment="Center">
         <TextBox x:Name="SearchBox" MinWidth="0" Height="34" MinHeight="34" Padding="36,4,52,4" FontSize="12" Style="{StaticResource MeowFilm.TextBox}" TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" TextCompositionStarted="OnSearchCompositionStarted" TextCompositionEnded="OnSearchCompositionEnded" AutomationProperties.Name="搜索" AutomationProperties.AcceleratorKey="Ctrl+K"/>
-        <local:EqualWidthComboBox x:Name="SearchTargetPicker" Width="92" Height="28" MinHeight="0" Padding="28,0,20,0" FontSize="12" Margin="2,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" SelectedValuePath="Id" Visibility="Collapsed" Background="Transparent" BorderThickness="0" AutomationProperties.Name="搜索目标">
+        <local:EqualWidthComboBox x:Name="SearchTargetPicker" Width="92" Height="28" MinHeight="0" Padding="28,0,0,0" FontSize="12" Margin="2,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" SelectedValuePath="Id" Visibility="Collapsed" Background="Transparent" BorderThickness="0" AutomationProperties.Name="搜索目标">
          <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" FontSize="12"/></DataTemplate></ComboBox.ItemTemplate>
         </local:EqualWidthComboBox>
         <FontIcon Glyph="&#xE721;" FontSize="15" Width="28" Margin="2,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False"/>
@@ -83,8 +83,10 @@
       </local:DesktopPageHeader.Center>
      </local:DesktopPageHeader>
      <StackPanel x:Name="CaptionBar" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-      <Button x:Name="NotificationButton" Style="{StaticResource MeowFilm.CaptionButton}" Content="&#xE7F4;" IsEnabled="{Binding IsInteractive}" AutomationProperties.Name="通知"/>
-      <Button x:Name="SettingsButton" Style="{StaticResource MeowFilm.CaptionButton}" Content="&#xE713;" IsEnabled="{Binding IsInteractive}" Click="OnSettingsClick" AutomationProperties.Name="设置"/>
+      <Button x:Name="NotificationButton" Style="{StaticResource MeowFilm.CaptionButton}" IsEnabled="{Binding IsInteractive}" AutomationProperties.Name="通知">
+       <Path Data="M5,17 L19,17 17,14 17,9 A5,5 0 0 0 7,9 L7,14 Z M10,20 L14,20" Width="14" Height="16" Stretch="Uniform" StrokeThickness="1.5" StrokeLineJoin="Round" Stroke="{Binding Foreground,ElementName=NotificationButton}"/>
+      </Button>
+      <Button x:Name="SettingsButton" Style="{StaticResource MeowFilm.CaptionButton}" FontSize="17" Content="&#xE713;" IsEnabled="{Binding IsInteractive}" Click="OnSettingsClick" AutomationProperties.Name="设置"/>
      </StackPanel>
     </Grid>
     <Grid x:Name="ContentRegion" Grid.Row="1" Grid.Column="1"><ContentControl IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsEnabled="{Binding IsInteractive}"><Grid x:Name="ContentDeck"/></ContentControl></Grid>

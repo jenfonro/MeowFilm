@@ -33,7 +33,6 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private string renderedRoute = "";
     private NovelBookSession? renderedSession;
     private DesktopWindow? attachedWindow;
-    private DesktopWindowState attachedState;
     private object? presentationStamp;
     private readonly Dictionary<string, double> scrollPositions = [];
     private readonly Button purchase;
@@ -57,11 +56,11 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         visibility = new(this, visible =>
         {
             if (disposed) return;
-            if (!visible) { discoveryChannelBar?.Close(); module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
+            if (!visible) { discoveryFocus = null; discoveryChannelBar?.Close(); module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
             else if (module.Route == NovelCapability.ReaderRoute)
                 module.RefreshReaderSettings();
         });
-        Loaded += (_, _) => { AttachWindow(); Present(); RestoreDiscoveryFocus(); }; Unloaded += (_, _) => { PauseReading(); DetachWindow(); };
+        Loaded += (_, _) => { AttachWindow(); Present(); }; Unloaded += (_, _) => { PauseReading(); DetachWindow(); };
     }
     public DesktopHeaderContribution Header => new(module.Route == NovelCapability.HomeRoute ? "小说" : module.Route == NovelCapability.CategoriesRoute ? "分类" : "",
         SearchVisible: module.Route != NovelCapability.ReaderRoute) { SearchTargetId = "novel", SearchContextId = module.Route };
@@ -74,6 +73,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         bool reading = module.Route == NovelCapability.ReaderRoute && module.Session is not null;
         if (reading)
         {
+            discoveryFocus = null;
             discoveryChannelBar?.Close();
             body.Margin = new(0); body.Content = reader;
             purchase.Visibility = module.Session is { Chapter: { IsVip: true, IsPay: false } } session &&
@@ -96,8 +96,10 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             };
             if (!Equals(stamp, presentationStamp) || ReferenceEquals(body.Content, reader))
             {
-                if (module.Route is NovelCapability.HomeRoute or NovelCapability.CategoriesRoute) RememberDiscoveryFocus();
-                else discoveryFocus = null;
+                string? focus = renderedRoute == module.Route &&
+                    (module.Route is NovelCapability.HomeRoute or NovelCapability.CategoriesRoute)
+                    ? CaptureDiscoveryFocus() : null;
+                discoveryFocus = null;
                 discoveryChannelBar?.Close(); discoveryChannelBar = null;
                 if (body.Content is ScrollViewer old) scrollPositions[renderedRoute] = old.VerticalOffset;
                 body.Content = module.Route switch
@@ -109,7 +111,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
                 {
                     if (scrollPositions.TryGetValue(module.Route, out double position))
                         scroll.Loaded += (_, _) => scroll.ChangeView(null, position, null, true);
-                    scroll.Loaded += (_, _) => RestoreDiscoveryFocus();
+                    if (focus is not null) RestoreDiscoveryFocus(scroll, focus);
                 }
             }
         }
@@ -316,17 +318,19 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private void AttachWindow()
     {
         DetachWindow(); attachedWindow = DesktopWindow.GetWindow(this);
-        if (attachedWindow is not null) { attachedState = attachedWindow.WindowState; attachedWindow.Deactivated += WindowDeactivated; attachedWindow.AppWindow.Changed += WindowChanged; }
-    }
-    private void WindowChanged(Microsoft.UI.Windowing.AppWindow sender, Microsoft.UI.Windowing.AppWindowChangedEventArgs args)
-    {
-        if (attachedWindow is null || attachedState == attachedWindow.WindowState) return;
-        attachedState = attachedWindow.WindowState; WindowDeactivated(sender, EventArgs.Empty);
+        if (attachedWindow is not null)
+        {
+            attachedWindow.Deactivated += WindowDeactivated;
+            attachedWindow.WindowStateChanged += WindowDeactivated;
+        }
     }
     private void WindowDeactivated(object? sender, EventArgs e) { PauseReading(); module.RunUi(_ => SavePositionAsync()); }
     private void DetachWindow()
     {
-        if (attachedWindow is not null) { attachedWindow.Deactivated -= WindowDeactivated; attachedWindow.AppWindow.Changed -= WindowChanged; attachedWindow = null; }
+        if (attachedWindow is null) return;
+        attachedWindow.Deactivated -= WindowDeactivated;
+        attachedWindow.WindowStateChanged -= WindowDeactivated;
+        attachedWindow = null;
     }
     private sealed record SourceCandidate(NovelBook Book, string Label) { public override string ToString() => Label; }
     internal async Task DrainSavesAsync() { await automaticOperation; await saves.PauseAsync(); }

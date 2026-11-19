@@ -27,6 +27,7 @@ public static class FilmCacheConsumerTests
         yield return Test("ordinary presentation restore asks owner without forced refresh or another address read", RestorePresentation);
         yield return Test("refresh acknowledgement updates stale display and never schedules its returned pending stage", RefreshDoesNotPlay);
         yield return Test("same-directory refresh retains exact items while loading and reports failure only through session error", RefreshDirectory);
+        yield return Test("failed refresh cannot restore files removed by the new authoritative directory", InvalidatedRefreshDirectory);
         yield return Test("cold and replacement directory failures never expose a previous identity or its original files", FailedDirectory);
         yield return Test("rejected address retry preserves the exact accepted output", RetryCurrent);
         yield return Test("accepted address retry reacquires the exact candidate and preserves output until replacement", RetryAccepted);
@@ -326,6 +327,8 @@ public static class FilmCacheConsumerTests
             root["browsing"] = DirectoryBrowsing("site-choice", content: true);
         });
         await Until(() => rig.Page.SourceId == "site-choice" && rig.Page.Episodes.Count == 1);
+        var episode = rig.Page.Episodes.Single();
+        var candidate = rig.Page.Candidates.Single();
         var directory = new FilmDirectoryDialog(rig.Page);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var finish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -358,7 +361,8 @@ public static class FilmCacheConsumerTests
             await Until(() => rig.Page.ListLoading);
             Check(rig.Page.Episodes.Single().CandidateId == "cache-current" &&
                 rig.Page.Candidates.Single().Id == "cache-current" && rig.Page.CanBrowseRaw &&
-                directory.IsCurrent(rig.Page) && rig.Page.ListError == "" && rig.Page.ListStatus == "加载中…",
+                directory.IsCurrent(rig.Page) && rig.Page.ListError == "" && rig.Page.ListStatus == "加载中…" &&
+                !rig.Page.ShowListStatus && rig.Page.ShowEpisodeCards && !rig.Page.ShowListMessage,
                 "the owner's refreshing flag retains the exact current source and directory while its request is pending");
             finish.TrySetResult();
             await refresh;
@@ -369,11 +373,57 @@ public static class FilmCacheConsumerTests
                 rig.Native.Commits == 1 && rig.Native.Stops == 0 && rig.Session.HasOutput &&
                 rig.Runtime.Calls.Count(call => call.Method == "film.session.attempt") == reads,
                 "session.error reports a failed same-identity refresh without clearing its exact list, closing the directory or touching media");
+            rig.Runtime.Change(root => root["browsing"]!["error"] = "UPSTREAM_ERROR");
+            await Until(() => rig.Session.SnapshotFor(rig.Page)?.Sequence == FilmJson.Integer(rig.Runtime.Value, "sequence"));
+            Check(rig.Page.ListError == "" && !rig.Page.ShowListStatus && rig.Page.CanBrowseRaw &&
+                directory.IsCurrent(rig.Page) && ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
+                ReferenceEquals(rig.Page.Candidates.Single(), candidate) && notices.Count == 1,
+                "the failed refresh snapshot and its repeated acknowledgement retain one usable successful slice without duplicate notices");
+            rig.Runtime.Change(root => root["browsing"]!.AsObject().Remove("error"));
+            await Until(() => FilmJson.Text(rig.Session.SnapshotFor(rig.Page)!.Browsing, "error").Length == 0);
             rig.Runtime.Change(root => root["browsing"]!["originalEpisodes"]![0]!["path"] = "/准确目录/更新.mp4");
             await Until(() => FilmJson.Text(FilmJson.Array(rig.Page.RawBrowsing, "originalEpisodes").Single(), "path") == "/准确目录/更新.mp4");
             Check(!directory.IsCurrent(rig.Page), "a genuinely changed original file list retires the old directory even under the same source and line");
         }
         finally { finish.TrySetResult(); directory.Hide(); }
+    }
+
+    private static async Task InvalidatedRefreshDirectory()
+    {
+        await using var rig = new FilmPlaybackRig();
+        await rig.OpenAsync();
+        rig.Runtime.Change(root => root["browsing"] = DirectoryBrowsing("site-choice", content: true));
+        await Until(() => rig.Page.CanBrowseRaw && rig.Page.Episodes.Count == 1);
+        var episode = rig.Page.Episodes.Single();
+        var directory = new FilmDirectoryDialog(rig.Page);
+        try
+        {
+            rig.Runtime.Change(root =>
+            {
+                root["browsing"]!["loading"] = true;
+                root["browsing"]!["refreshing"] = true;
+            });
+            await Until(() => rig.Page.ListLoading);
+            Check(directory.IsCurrent(rig.Page) && !rig.Page.ShowListStatus,
+                "the old success stays usable while the same directory is being checked");
+            rig.Runtime.Change(root =>
+            {
+                root["browsing"]!["loading"] = false;
+                root["browsing"]!["refreshing"] = false;
+                root["browsing"]!["error"] = "UPSTREAM_ERROR";
+                root["browsing"]!["lines"] = new JsonArray();
+                root["browsing"]!["episodes"] = new JsonArray();
+                root["browsing"]!["originalEpisodes"] = new JsonArray();
+            });
+            await Until(() => rig.Page.ListError.Length > 0);
+            await Error("INVALID_REQUEST", () => rig.Page.SelectEpisodeAsync(episode));
+            await Error("INVALID_REQUEST", () => rig.Page.SelectOriginalCandidateAsync("cache-current"));
+            Check(!rig.Page.ShowListMessage && rig.Page.ShowListStatus && !rig.Page.ShowEpisodeCards && !rig.Page.ShowEpisodeList &&
+                !rig.Page.ShowMovieCandidates && !rig.Page.CanSelectDirectory && !rig.Page.CanBrowseRaw &&
+                !directory.IsCurrent(rig.Page) && !rig.Runtime.Calls.Any(row => FilmJson.Text(row.Parameters, "action") == "select.target"),
+                "a real directory change followed by expansion failure fences removed files instead of reviving a previous successful action");
+        }
+        finally { directory.Hide(); }
     }
 
     private static async Task FailedDirectory()
@@ -415,14 +465,20 @@ public static class FilmCacheConsumerTests
         var directory = new FilmDirectoryDialog(rig.Page);
         try
         {
-            rig.Runtime.Change(root => root["browsing"]!["error"] = "TIMEOUT");
+            rig.Runtime.Change(root =>
+            {
+                root["browsing"]!["error"] = "TIMEOUT";
+                root["browsing"]!["episodes"] = new JsonArray();
+                root["browsing"]!["originalEpisodes"] = new JsonArray();
+            });
             await Until(() => notices.SequenceEqual(["TIMEOUT", "TIMEOUT"]));
             Check(rig.Page.SourceId == "cold" && ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
                 ReferenceEquals(rig.Page.Candidates.Single(), candidate) &&
                 JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing) && rig.Page.ActiveTarget == target &&
-                rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page) && rig.Page.ListStatus == "请求超时，请重试",
+                !rig.Page.CanBrowseRaw && !rig.Page.CanSelectDirectory && !directory.IsCurrent(rig.Page) &&
+                !rig.Page.ShowListMessage && rig.Page.ShowListStatus && !rig.Page.ShowEpisodeCards && rig.Page.ListStatus == "请求超时，请重试",
                 "browsing.error preserves the exact successful source and files while fencing the failed execution's directory action");
-            rig.Runtime.Change(root => root["browsing"]!.AsObject().Remove("error"));
+            rig.Runtime.Change(root => root["browsing"] = DirectoryBrowsing("cold", content: true));
             await Until(() => directory.IsCurrent(rig.Page));
             Check(ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
                 ReferenceEquals(rig.Page.Candidates.Single(), candidate) && JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing),
@@ -436,7 +492,8 @@ public static class FilmCacheConsumerTests
             Check(rig.Page.SourceId == "cold" && ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
                 ReferenceEquals(rig.Page.Candidates.Single(), candidate) && JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing) &&
                 FilmJson.Text(rig.Session.SnapshotFor(rig.Page)!.Browsing, "sourceId") == "other" &&
-                rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page),
+                !rig.Page.CanBrowseRaw && !rig.Page.CanSelectDirectory && !directory.IsCurrent(rig.Page) &&
+                rig.Page.ShowListMessage && !rig.Page.ShowEpisodeCards,
                 "replacement loading keeps the exact successful cold-source display separate from the other execution and disables its old directory action");
             rig.Runtime.Change(root =>
             {
@@ -446,7 +503,7 @@ public static class FilmCacheConsumerTests
             await Until(() => notices.SequenceEqual(["TIMEOUT", "TIMEOUT", "UPSTREAM_FORMAT"]));
             Check(rig.Page.SourceId == "cold" && ReferenceEquals(rig.Page.Episodes.Single(), episode) &&
                 ReferenceEquals(rig.Page.Candidates.Single(), candidate) && JsonElement.DeepEquals(rig.Page.RawBrowsing, browsing) &&
-                rig.Page.ActiveTarget == target && rig.Page.CanBrowseRaw && !directory.IsCurrent(rig.Page) &&
+                rig.Page.ActiveTarget == target && !rig.Page.CanBrowseRaw && !rig.Page.CanSelectDirectory && !directory.IsCurrent(rig.Page) &&
                 FilmJson.Text(rig.Session.SnapshotFor(rig.Page)!.Browsing, "sourceId") == "other" &&
                 rig.Page.ListStatus == "上游数据格式错误",
                 "a failed replacement reports the exact other-source error without relabeling or discarding the successful cold-source files");
@@ -573,6 +630,8 @@ public static class FilmCacheConsumerTests
         try
         {
             window.Show(); window.Root.UpdateLayout();
+            await Until(() => view.IsLoaded && FilmUiTest.Visible((Button)view.FindName("SettingsButton")));
+            await FilmUiTest.Pump();
             int refreshes = rig.Runtime.Calls.Count(call => FilmJson.Text(call.Parameters, "action") == "browse.refresh");
             rig.Runtime.Intercept = (method, input, _) => Task.FromResult(
                 method == "film.session.command" && FilmJson.Text(input, "action") == "media.retry"

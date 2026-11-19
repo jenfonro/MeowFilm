@@ -28,7 +28,7 @@
     </StackPanel>
     <local:MusicLyricList x:Name="LyricPresenter" Grid.Row="1" Margin="22,0,22,12" Position="{Binding LyricPositionSeconds}" IsPlaying="{Binding IsPlaying}" PlaybackRate="{Binding AcceptedPlaybackRate}" PresentationKey="{Binding PlaybackPresentationKey}" Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False" IsHitTestVisible="False" HorizontalContentAlignment="Stretch" ScrollViewer.VerticalScrollMode="Disabled" ScrollViewer.VerticalScrollBarVisibility="Disabled">
      <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="IsTabStop" Value="False"/></Style></ListView.ItemContainerStyle>
-     <Grid x:Name="LineSurface" Height="{Binding ActualHeight,ElementName=LyricPresenter}">
+     <Grid x:Name="LineSurface">
       <Grid><Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition x:Name="BottomTrack" Height="0"/></Grid.RowDefinitions>
        <local:MusicDesktopLyricLineView x:Name="TopLine" Row="{Binding DesktopLyricTopRow}" ShowTranslation="{Binding ShowLyricTranslation}"/>
        <local:MusicDesktopLyricLineView x:Name="BottomLine" Grid.Row="1" Row="{Binding DesktopLyricBottomRow}" Margin="0,8,0,0" HorizontalContentAlignment="Right" ShowTranslation="{Binding ShowLyricTranslation}"/>

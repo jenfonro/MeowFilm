@@ -38,8 +38,8 @@ sealed partial class MusicDesktopLyricsWindow : Window
     internal MusicDesktopLyricsWindow(MusicCapability module, Window anchor, MusicDesktopLyricsGeometry? geometry = null)
     {
         this.module = module; InitializeComponent(); LyricsFrame.DataContext = LineSurface.DataContext = module;
+        LyricPresenter.SizeChanged += (_, args) => LineSurface.Height = args.NewSize.Height;
         handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
-        ExtendsContentIntoTitleBar = true;
         SystemBackdrop = new LyricsTransparentBackdrop();
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         { presenter.SetBorderAndTitleBar(false, false); presenter.IsAlwaysOnTop = true; presenter.IsMaximizable = false; presenter.IsMinimizable = false; }
@@ -105,6 +105,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
     private nint WindowMessage(nint hwnd, uint message, nint wParam, nint lParam, nuint id, nuint data)
     {
         if (message == 0x0021) return 3;
+        if (message == 0x0083 && wParam != 0) return 0;
         if (message == 0x0024 && lParam != 0)
         {
             var bounds = Marshal.PtrToStructure<MinMaxInfo>(lParam);

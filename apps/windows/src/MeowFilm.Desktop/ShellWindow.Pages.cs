@@ -8,7 +8,13 @@ public sealed partial class ShellWindow
     private sealed class PageSession(IDesktopPage page)
     {
         public IDesktopPage Page { get; } = page;
-        public ContentControl Host { get; } = new() { Visibility = Visibility.Collapsed };
+        public ContentControl Host { get; } = new()
+        {
+            Visibility = Visibility.Collapsed,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Stretch,
+            IsTabStop = false
+        };
         public SemaphoreSlim Gate { get; } = new(1, 1);
         public string? SearchDraft { get; set; }
     }
@@ -30,7 +36,7 @@ public sealed partial class ShellWindow
 
     private void OnPublicPageSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSelection || _isClosing || !ReferenceEquals(e.OriginalSource, PublicNavigationList)) return;
+        if (_suppressSelection || _isClosing || !ReferenceEquals(sender, PublicNavigationList)) return;
         if (PublicNavigationList.SelectedItem is IDesktopPage page)
             RunUiAction(() => ActivatePageAsync(_pages.Single(item => ReferenceEquals(item.Page, page))));
     }

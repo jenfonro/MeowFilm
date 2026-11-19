@@ -446,7 +446,7 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void OnNavigationSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_suppressSelection || _isClosing || (!ReferenceEquals(e.OriginalSource, NavigationList) && !ReferenceEquals(e.OriginalSource, CollectionNavigationList)) || _current is not { } current) return;
+        if (_suppressSelection || _isClosing || (!ReferenceEquals(sender, NavigationList) && !ReferenceEquals(sender, CollectionNavigationList)) || _current is not { } current) return;
         if (sender is not ListView { SelectedItem: ShellNavigationEntry item }) return;
         RunUiAction(() => NavigateFromUiAsync(item.Owner, item.Route));
     }
@@ -1012,8 +1012,9 @@ public sealed partial class ShellWindow : DesktopWindow
     private void ApplyAccessibilityPresentation()
     {
         DesktopTheme.SetIsHighContrast(Root, _accessibility.HighContrast);
-        ApplicationBackground.Background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
+        var background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
             _accessibility.HighContrast ? "MeowFilm.Brush.Window" : "MeowFilm.Brush.AppBackground");
+        WindowFrame.Background = ApplicationBackground.Background = background;
         SidebarMaterial.Visibility = SidebarTint.Visibility = _accessibility.HighContrast ? Visibility.Collapsed : Visibility.Visible;
         SidebarEdge.Visibility = _accessibility.HighContrast || SidebarBackground.Visibility == Visibility.Collapsed
             ? Visibility.Collapsed : Visibility.Visible;

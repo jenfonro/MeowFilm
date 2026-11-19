@@ -86,6 +86,8 @@ public sealed partial class ShellWindow
             };
             _settingsTabs.Children.Add(tab);
         }
+        if (_settingsTabs.Children.LastOrDefault() is FrameworkElement last)
+            last.Margin = new(0, 0, 24, 0);
     }
 
     private void SelectSettingsTab(ModuleSession current)

@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Windows.Threading;
 
@@ -7,18 +6,25 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
-    public MusicCatalogPlatform[] CatalogPlatforms { get; } =
-        [new("wy", "网易云音乐"), new("tx", "QQ 音乐"), new("kg", "酷狗音乐"),
-         new("kw", "酷我音乐"), new("mg", "咪咕音乐")];
-    public MusicCatalogPlatform[] CatalogPlatformChoices => CatalogPlatforms
-        .Where(p => p.Key is "wy" or "tx" or "kg" || p.Key == catalogLoadedPlatform).ToArray();
-    private MusicCatalogPlatform selectedCatalogPlatform = new("wy", "网易云音乐");
-    [AllowNull]
-    public MusicCatalogPlatform SelectedCatalogPlatform
+    private static readonly MusicCatalogPlatform NeteasePlatform = new("wy", "网易云音乐");
+    private static readonly MusicCatalogPlatform KuwoPlatform = new("kw", "酷我音乐");
+    private static readonly MusicCatalogPlatform MiguPlatform = new("mg", "咪咕音乐");
+    private static readonly IReadOnlyList<MusicCatalogPlatform> StandardCatalogChoices = Array.AsReadOnly<MusicCatalogPlatform>(
+        [NeteasePlatform, new("tx", "QQ 音乐"), new("kg", "酷狗音乐")]);
+    private static readonly IReadOnlyList<MusicCatalogPlatform> KuwoPlatformChoices =
+        Array.AsReadOnly<MusicCatalogPlatform>([.. StandardCatalogChoices, KuwoPlatform]);
+    private static readonly IReadOnlyList<MusicCatalogPlatform> MiguPlatformChoices =
+        Array.AsReadOnly<MusicCatalogPlatform>([.. StandardCatalogChoices, MiguPlatform]);
+
+    public IReadOnlyList<MusicCatalogPlatform> CatalogPlatforms { get; } =
+        Array.AsReadOnly<MusicCatalogPlatform>([.. StandardCatalogChoices, KuwoPlatform, MiguPlatform]);
+    public IReadOnlyList<MusicCatalogPlatform> CatalogPlatformChoices => catalogLoadedPlatform switch
     {
-        get => selectedCatalogPlatform;
-        set { if (value is not null) selectedCatalogPlatform = value; }
-    }
+        "kw" => KuwoPlatformChoices,
+        "mg" => MiguPlatformChoices,
+        _ => StandardCatalogChoices
+    };
+    public MusicCatalogPlatform SelectedCatalogPlatform { get; internal set; } = NeteasePlatform;
     public string[] CatalogSearchKinds { get; } = ["歌曲", "歌单"];
     public string CatalogSearchKind { get; set; } = "歌曲";
     private readonly ObservableCollection<MusicCatalogSection> homeSections = [], channelSections = [], utilitySections = [];
@@ -27,7 +33,7 @@ public sealed partial class MusicCapability
     public ObservableCollection<MusicCatalogSection> CatalogSections => IsSearchPage ? searchSections[searchView] :
         IsCatalogHome ? homeSections : IsChannelLanding ? channelSections : utilitySections;
     public ObservableCollection<MusicCatalogSection> HomeSections => homeDisplaySections;
-    internal event EventHandler? HomeContentReplacing;
+    internal Func<Task<Action?>>? PrepareHomeReplacement { get; set; }
     public ObservableCollection<MusicCatalogSection> ChannelSections => channelSections;
     public ObservableCollection<MusicCatalogSection> SearchOverviewSections => searchSections[SearchOverview];
     public ObservableCollection<MusicCatalogSection> UtilitySections => utilitySections;
@@ -124,7 +130,7 @@ public sealed partial class MusicCapability
         foreach (var name in new[] { nameof(CatalogSections), nameof(Songs), nameof(IsUtilityCatalogSurface), nameof(ShowCatalogSkeleton), nameof(DisplayCatalogSections), nameof(IsCatalogHome), nameof(IsCatalogPage), nameof(IsChannelDirectory), nameof(IsVipChannel), nameof(CurrentChannelKey), nameof(VisibleChannelTabs), nameof(MoreChannelTabs), nameof(HasMoreChannelTabs), nameof(IsCatalogLanding), nameof(IsCatalogUtilityPage), nameof(IsChannelLanding), nameof(HasChannelTabs), nameof(IsLocalLibraryPage), nameof(IsCatalogPlaylist), nameof(IsCatalogArtist), nameof(IsCatalogDetailPage),
             nameof(CanCatalogNext), nameof(CanCatalogPrevious), nameof(CanCatalogBrowse), nameof(HasCatalogTags), nameof(CatalogTagGroups),
             nameof(CanCatalogAction), nameof(CanPlayCatalogPlaylist), nameof(CanCancelCatalog), nameof(CatalogPageText), nameof(SelectedCatalogTag),
-            nameof(SelectedCatalogPlatform), nameof(CatalogSearchKind), nameof(CatalogPlatformChoices),
+            nameof(CatalogPlatformChoices), nameof(SelectedCatalogPlatform), nameof(CatalogSearchKind),
             nameof(IsContentDetailPage), nameof(ShowsSongTable), nameof(DetailArtwork), nameof(DetailCountText),
             nameof(ShowDetailSkeleton), nameof(DetailSubtitle), nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail),
             nameof(CanLoadMoreCatalogPlaylist) }) Changed(name);
@@ -156,12 +162,13 @@ public sealed partial class MusicCapability
             catalogLocations.Remove(retired.Key);
         }
     }
-    public Task ChangeCatalogPlatformAsync()
+    internal Task ChangeCatalogPlatformAsync(MusicCatalogPlatform platform)
     {
-        if (publishing || !CanCatalogBrowse || !IsCatalogPage ||
-            SelectedCatalogPlatform.Key == catalogLoadedPlatform && loadCancellation is null) return Task.CompletedTask;
+        if (publishing || !CanCatalogBrowse || !IsCatalogPage || platform == SelectedCatalogPlatform ||
+            !CatalogPlatformChoices.Contains(platform)) return Task.CompletedTask;
         RememberCatalogLocation();
-        if (SelectedCatalogPlatform.Key != "tx") CatalogPersonalKind = "all";
+        SelectedCatalogPlatform = platform;
+        if (platform.Key != "tx") CatalogPersonalKind = "all";
         return LoadCatalogAsync(IsCatalogPersonal ? "catalog-personal" : "catalog-home", "", 1, null, lifetime.Token);
     }
     public Task CatalogSearchKindAsync() => IsSearchPage ? SwitchSearchKindAsync() :
@@ -657,7 +664,7 @@ public sealed partial class MusicCapability
                 }
                 else if (operation == "home" && continuation is not null) parameters["continuation"] = continuation.Value;
             }
-            var reply = await Call("music.catalog." + operation, parameters, token);
+            var reply = await CallSettled("music.catalog." + operation, parameters, token);
             token.ThrowIfCancellationRequested();
             if (stopping || generation != loadGeneration || key.AccountObservation != CatalogAccountObservation(platform)) return;
             if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
@@ -708,10 +715,19 @@ public sealed partial class MusicCapability
                 }
             }
             if (operation == "channels") state = state with { Sections = [], Total = 0 };
+            Action? startReplacement = null;
+            if (operation == "home" && number == 1 && homeDisplaySections.Count > 0 && PrepareHomeReplacement is { } prepare)
+            {
+                startReplacement = await prepare();
+                token.ThrowIfCancellationRequested();
+                if (stopping || generation != loadGeneration || key.AccountObservation != CatalogAccountObservation(platform)) return;
+                if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
+            }
             if (number == 1) { catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null); }
             else if (operation is "playlist" or "home") catalogPages.Clear();
             while (catalogCursors.Count <= number) catalogCursors.Add(null);
             catalogCursors[number] = next; catalogPages[number] = state;
+            startReplacement?.Invoke();
             PublishCatalog(route, query, platform, kind, number, state, append: operation == "home" && number > 1);
             if (operation == "home") SaveHomeContent(platform, number, reply);
             flight.Published = true;
@@ -832,8 +848,6 @@ public sealed partial class MusicCapability
             SelectedCatalogPlatform = CatalogPlatforms.Single(p => p.Key == platform);
             if (!CatalogSections.SequenceEqual(state.Sections, ReferenceEqualityComparer.Instance))
             {
-                if (IsCatalogHome && !append && homeDisplaySections.Count > 0)
-                    HomeContentReplacing?.Invoke(this, EventArgs.Empty);
                 ReconcileSections(CatalogSections, state.Sections);
             }
             if (IsCatalogHome)

@@ -17,8 +17,9 @@ internal sealed class MusicLyricOutline
     private TextBlock? source;
     private SolidColorBrush? stroke;
     private double thickness;
-    private long epoch;
     private bool queued;
+    private CancellationTokenSource? rendering;
+    private IDisposable? visibility;
     private RasterKey? key;
     private byte[]? coverage;
     private int width, height;
@@ -32,8 +33,12 @@ internal sealed class MusicLyricOutline
     internal MusicLyricOutline(Grid host)
     {
         layer.Children.Add(image); host.Children.Add(layer);
-        layer.Loaded += (_, _) => Queue();
-        layer.Unloaded += (_, _) => Clear();
+        layer.Loaded += (_, _) => visibility = MeowFilm.Desktop.DesktopVisual.ObserveVisibility(layer, visible =>
+        {
+            if (visible) Queue();
+            else Clear();
+        });
+        layer.Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; Clear(); };
     }
 
     internal void Update(TextBlock text, Brush? brush, double strokeThickness)
@@ -58,7 +63,7 @@ internal sealed class MusicLyricOutline
     private RasterKey? CurrentKey()
     {
         if (source is not { IsLoaded: true, ActualWidth: > 0, ActualHeight: > 0, XamlRoot: { } root } text ||
-            !root.IsHostVisible || stroke is null || thickness <= 0) return null;
+            !MeowFilm.Desktop.DesktopVisual.IsVisible(layer) || stroke is null || thickness <= 0) return null;
         var transform = text.TransformToVisual(root.Content);
         var origin = transform.TransformPoint(new Point());
         var x = transform.TransformPoint(new Point(1, 0));
@@ -71,9 +76,8 @@ internal sealed class MusicLyricOutline
     }
     private void Queue()
     {
-        if (queued || !layer.IsLoaded || stroke is null || thickness <= 0) return;
-        queued = true;
-        layer.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, async () =>
+        if (queued || rendering is not null || !layer.IsLoaded || stroke is null || thickness <= 0) return;
+        queued = layer.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, async () =>
         {
             queued = false;
             RenderWork = RasterizeAsync();
@@ -84,13 +88,27 @@ internal sealed class MusicLyricOutline
     {
         if (CurrentKey() is not { } next || source is not { } text) return;
         if (key == next) { Paint(); return; }
-        long request = ++epoch;
+        using var request = new CancellationTokenSource();
+        rendering = request;
         var bitmap = new RenderTargetBitmap();
         int w = Math.Max(1, (int)Math.Ceiling(next.Width * next.ScaleX));
         int h = Math.Max(1, (int)Math.Ceiling(next.Height * next.ScaleY));
-        await bitmap.RenderAsync(text, w, h);
-        var buffer = await bitmap.GetPixelsAsync();
-        if (request != epoch || !layer.IsLoaded || next != CurrentKey()) { Queue(); return; }
+        IBuffer buffer;
+        try
+        {
+            await bitmap.RenderAsync(text, w, h).AsTask(request.Token);
+            if (request.IsCancellationRequested || next != CurrentKey()) return;
+            buffer = await bitmap.GetPixelsAsync().AsTask(request.Token);
+        }
+        catch (OperationCanceledException) when (request.IsCancellationRequested) { return; }
+        catch (System.Runtime.InteropServices.COMException error) when (error.HResult == unchecked((int)0x80004004) &&
+            (request.IsCancellationRequested || CurrentKey() is null)) { return; }
+        finally
+        {
+            rendering = null;
+            if (CurrentKey() is { } current && (request.IsCancellationRequested || current != next)) Queue();
+        }
+        if (request.IsCancellationRequested || next != CurrentKey()) return;
         byte[] pixels = new byte[buffer.Length];
         using (var reader = DataReader.FromBuffer(buffer)) reader.ReadBytes(pixels);
         if (bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0) return;
@@ -153,6 +171,6 @@ internal sealed class MusicLyricOutline
     }
     internal void Clear()
     {
-        epoch++; queued = false; key = null; coverage = null; image.Source = null;
+        rendering?.Cancel(); key = null; coverage = null; image.Source = null;
     }
 }

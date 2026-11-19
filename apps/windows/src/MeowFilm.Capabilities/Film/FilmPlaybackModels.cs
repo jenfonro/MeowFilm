@@ -238,6 +238,20 @@ internal static class FilmJson
             source.ValueKind == JsonValueKind.Object ? source : null,
             Member(value, "members").ValueKind == JsonValueKind.Array ? Member(value, "members") : null);
     }
+
+    internal static FilmPlaybackTarget FileTarget(JsonElement value)
+    {
+        var target = Target(value);
+        var source = Member(value, "source");
+        if (target.Kind != "source" || source.ValueKind != JsonValueKind.Object)
+            throw new FilmPlaybackException("INVALID_RESPONSE");
+        _ = RequiredText(source, "key");
+        _ = Identity(source, "detailId", required: true);
+        _ = Identity(source, "lineId", required: true);
+        _ = RequiredText(source, "candidateId");
+        target.Validate();
+        return target;
+    }
 }
 
 internal sealed class FilmPlaybackSnapshot
@@ -382,6 +396,24 @@ public sealed record FilmCandidateItem(string Id, string Name, string Path, stri
             BusinessId = FilmJson.RequiredText(value, "businessId"),
             PlaybackTarget = target,
             DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + FilmJson.Text(source, "name"),
+            Resolution = FilmJson.Copy(FilmJson.Member(value, "resolution")),
+            Fps = FilmJson.Copy(FilmJson.Member(value, "fps")),
+            Codec = FilmJson.Text(value, "codec")
+        };
+    }
+    internal static FilmCandidateItem ReadBrowsing(JsonElement value, string sourceName, string lineProvider)
+    {
+        var target = FilmJson.FileTarget(FilmJson.Member(value, "playbackTarget"));
+        var source = target.Source ?? throw new FilmPlaybackException("INVALID_RESPONSE");
+        return new(FilmJson.RequiredText(source, "candidateId"), FilmJson.Text(value, "name"), FilmJson.Text(value, "path"),
+            FilmJson.Text(value, "quality"), lineProvider.Length > 0 ? lineProvider : null,
+            FilmJson.RequiredText(source, "key"), FilmJson.Identity(source, "detailId", required: true),
+            FilmJson.Identity(source, "lineId", required: true), FilmJson.Integer(value, "season"),
+            FilmJson.Integer(value, "episode"), FilmJson.Integer(value, "globalEpisode"))
+        {
+            BusinessId = FilmJson.RequiredText(value, "businessId"),
+            PlaybackTarget = target,
+            DisplayLabel = QualityLabel(FilmJson.Text(value, "quality")) + " · " + sourceName,
             Resolution = FilmJson.Copy(FilmJson.Member(value, "resolution")),
             Fps = FilmJson.Copy(FilmJson.Member(value, "fps")),
             Codec = FilmJson.Text(value, "codec")

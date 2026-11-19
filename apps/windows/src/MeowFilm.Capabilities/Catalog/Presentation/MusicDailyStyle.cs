@@ -23,12 +23,14 @@ public sealed partial class MusicCapability
             category.Id, category.Id == dailyStyleCategory && dailyStyleDraft.Contains(tag.Id))).ToArray())).ToArray() ?? [];
     private void DailyStyleBindings()
     {
-        foreach (var name in new[] { nameof(IsDailyStyle), nameof(IsDailyStyleEditorOpen), nameof(CanEditDailyStyle),
+        foreach (var name in new[] { nameof(IsDailyStyle), nameof(CanEditDailyStyle),
             nameof(DailyOtherBranch), nameof(DailyOtherBranchTitle), nameof(CanConfirmDailyStyle), nameof(DailyStyleSelectionText), nameof(DailyStyleGroups) }) Changed(name);
     }
     private void RetireDailyStyleEditor()
     {
+        bool wasOpen = IsDailyStyleEditorOpen;
         ++dailyStyleRevision; dailyStyleEditor = null; dailyStyleDraft.Clear(); dailyStyleAccount = "";
+        if (wasOpen) Changed(nameof(IsDailyStyleEditorOpen));
         DailyStyleBindings();
     }
     private static JsonElement DailySelectionSnapshot(JsonElement reply) => JsonSerializer.SerializeToElement(new {
@@ -60,8 +62,10 @@ public sealed partial class MusicCapability
         {
             var editor = await preferences.OpenDailyStyleEditorAsync(lifetime.Token);
             if (revision != dailyStyleRevision || !IsDailyStyle || account != CatalogAccountKey("wy")) return;
+            bool wasOpen = IsDailyStyleEditorOpen;
             dailyStyleEditor = editor; dailyStyleAccount = account; dailyStyleCategory = dailyStyleSelectedCategory;
             dailyStyleDraft.Clear(); foreach (var tag in dailyStyleSelected) dailyStyleDraft.Add(tag.Id);
+            if (!wasOpen) Changed(nameof(IsDailyStyleEditorOpen));
         }
         catch (Exception error) { if (revision == dailyStyleRevision) { status = DailyStyleError(error); Changed(nameof(Status)); } }
         finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); dailyStyleBusy = false; DailyStyleBindings(); }

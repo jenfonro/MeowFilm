@@ -33,8 +33,13 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create();
             var footer = (MusicPlayerView)f.Module.PlayerView;
-            var detailFooter = new MusicPlayerView(f.Module, showArtwork: false);
-            using var surface = new DesktopTestUi.Host(new Grid(), 1260, 100);
+            var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            var detailHost = (ContentControl)detail.FindName("DetailPlayerHost");
+            var detailFooter = (MusicPlayerView)detailHost.Content;
+            detailHost.Content = null;
+            var root = new Grid();
+            using var surface = new DesktopTestUi.Host(root, 1260, 100);
+            ((Microsoft.UI.Windowing.OverlappedPresenter)surface.Window.AppWindow.Presenter).SetBorderAndTitleBar(false, false);
             try
             {
                 foreach (bool ordinary in new[] { false, true })
@@ -42,35 +47,60 @@ public static partial class MusicUiTests
                     if (ordinary) { await f.PlayableCollection(); await f.Module.PlaySelectionAsync(); }
                     foreach (var view in new[] { footer, detailFooter })
                     {
-                        surface.Mount(view); await Drain();
+                        root.Children.Clear();
+                        root.Children.Add(view);
+                        await Until(() => view.IsLoaded && view.XamlRoot is not null);
                         var button = (Button)view.FindName("ModeButton");
                         var icon = (MusicPlaybackIcon)button.Content;
-                        var transport = (StackPanel)view.FindName("TransportPanel");
+                        var transport = (StackPanel)button.Parent;
                         True(transport.Children.OfType<Button>().Select(child => AutomationProperties.GetName(child))
                             .Take(5).SequenceEqual(new[] { f.Module.PlaybackModeText, "上一首", "播放或暂停", "下一首", "播放队列" }),
                             "one mode entry precedes the transport and queue controls");
                         True(DesktopVisual.IsVisible(button) && button.IsEnabled && button.IsTabStop,
                             "empty and ordinary queues keep an accessible mode entry");
                         Equal("repeat", icon.Key);
-                        Equal(new FontFamily("XamlAutoFontFamily").Source, view.FontFamily.Source);
+                        var metadata = ((StackPanel)view.FindName("MetadataText")).Children.OfType<TextBlock>().ToArray();
+                        Equal(metadata[0].FontFamily.Source, view.FontFamily.Source);
+                        Equal(Microsoft.UI.Text.FontWeights.Normal.Weight, view.FontWeight.Weight);
                         foreach (int width in new[] { 860, 1260 })
                         foreach (bool contrast in new[] { false, true })
                         {
                             DesktopTheme.SetIsHighContrast(view, contrast);
-                            Render(view, width, 100); await Drain();
+                            double scale = view.XamlRoot.RasterizationScale;
+                            surface.Window.AppWindow.ResizeClient(new((int)Math.Round(width * scale), (int)Math.Round(100 * scale)));
+                            try
+                            {
+                                await Until(() => Math.Abs(root.ActualWidth - width) < .5 && Math.Abs(view.ActualWidth - width) < .5);
+                            }
+                            catch (TimeoutException error)
+                            {
+                                throw new InvalidOperationException($"footer native client did not settle (ordinary={ordinary}, detail={ReferenceEquals(view, detailFooter)}, contrast={contrast}, width={width}, root={root.ActualWidth}x{root.ActualHeight}, view={view.ActualWidth}x{view.ActualHeight}, desired={view.DesiredSize}, slot={Microsoft.UI.Xaml.Controls.Primitives.LayoutInformation.GetLayoutSlot(view)}, xamlRoot={view.XamlRoot.Size}, scale={view.XamlRoot.RasterizationScale}, client={surface.Window.AppWindow.ClientSize}, window={surface.Window.AppWindow.Size})", error);
+                            }
+                            root.UpdateLayout();
                             AssertPlayerBounds(view, width);
                             True(ReferenceEquals(button.Foreground, icon.Foreground),
                                 "native vector consumes its button theme foreground");
                             if (contrast)
                                 Equal(new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText)).Color, ((SolidColorBrush)icon.Foreground).Color);
+                            else
+                            {
+                                True(ReferenceEquals(DesktopVisual.Resource(view, "Capability.Player.Foreground"), button.Foreground), "mode uses the footer owner's palette");
+                                True(ReferenceEquals(DesktopVisual.Resource(view, "Capability.Player.Text"), metadata[0].Foreground), "title uses the footer owner's palette");
+                                True(ReferenceEquals(DesktopVisual.Resource(view, "Capability.Player.Muted"), metadata[1].Foreground), "artist uses the footer owner's palette");
+                            }
                         }
                         DesktopTheme.SetIsHighContrast(view, false);
                         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
-                        await Drain();
                         var menu = (MenuFlyout)view.FindName("ModeMenu");
+                        await Until(() => menu.IsOpen && menu.Items.All(item => item.IsLoaded));
                         True(menu.IsOpen && !menu.Items.OfType<MenuFlyoutSubItem>().Any(),
                             "native left-click path opens one flat menu");
-                        True(ReferenceEquals(menu.MenuFlyoutPresenterStyle, DesktopVisual.Resource(view, "MeowFilm.ContextMenu")), "shared native menu chrome");
+                        var presenter = VisualTreeHelper.GetOpenPopupsForXamlRoot(view.XamlRoot)
+                            .SelectMany(popup => Visuals(popup.Child)).OfType<MenuFlyoutPresenter>()
+                            .Single(panel => menu.Items.All(item => DesktopVisual.Contains(panel, item)));
+                        var menuStyle = menu.MenuFlyoutPresenterStyle ?? presenter.Style;
+                        True(ReferenceEquals(menuStyle, DesktopVisual.Resource(view, "MeowFilm.ContextMenu")) ||
+                            ReferenceEquals(menuStyle?.BasedOn, DesktopVisual.Resource(view, "MeowFilm.ContextMenu")), "shared native menu chrome");
                         True(menu.Items.OfType<ToggleMenuFlyoutItem>().All(item => item.Template is not null && item.FontWeight.Weight == 400),
                             "mode items retain their native template and regular typography");
                         var reopened = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -89,7 +119,8 @@ public static partial class MusicUiTests
                                 "a repeated context-show retains the open actions without toggling or rebuilding");
                         }
                         finally { menu.Opened -= OnReopened; }
-                        Equal("列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<ToggleMenuFlyoutItem>().Select(AutomationProperties.GetName)));
+                        Equal("列表循环,单曲循环,随机播放", string.Join(',', menu.Items.OfType<ToggleMenuFlyoutItem>()
+                            .Select(item => FrameworkElementAutomationPeer.CreatePeerForElement(item)!.GetName())));
                         True(menu.Items.OfType<ToggleMenuFlyoutItem>().All(item => item.IsEnabled), "ordinary modes do not require a native source identity");
                         await GeneralAppearanceTests.SavePreview(view, ordinary ? "playback-footer-ordinary" : "playback-footer-empty", 1260, 100);
                         menu.Hide();
@@ -98,7 +129,8 @@ public static partial class MusicUiTests
             }
             finally
             {
-                footer.Deactivate(); detailFooter.Deactivate(); surface.Window.Content = null;
+                footer.Deactivate(); detailFooter.Deactivate(); root.Children.Clear();
+                detailHost.Content = detailFooter;
             }
         });
         yield return Case("playback glyphs render rounded loop infinity and recommendation across DPI", async () =>

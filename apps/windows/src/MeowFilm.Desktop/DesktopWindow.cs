@@ -14,11 +14,12 @@ public class DesktopWindow : Window
     public ResourceDictionary Resources => Root.Resources;
     public nint Handle { get; }
     public bool IsActive { get; private set; }
-    public bool IsVisible => AppWindow.IsVisible;
+    public bool IsVisible => !closed && AppWindow.IsVisible;
     public double MinWidth { get; set; }
     public double MinHeight { get; set; }
     public event EventHandler? Deactivated;
     public new event EventHandler? VisibilityChanged;
+    public event EventHandler? WindowStateChanged;
     public event EventHandler? SessionEnding;
     public event EventHandler<CancelEventArgs>? Closing;
     internal event DesktopWindowMessageHandler? NativeMessage;
@@ -113,7 +114,7 @@ public class DesktopWindow : Window
     }
     protected virtual void OnClosing(CancelEventArgs args) { }
     protected virtual void OnClosed(EventArgs args) { }
-    protected virtual void OnStateChanged(EventArgs args) { }
+    protected virtual void OnStateChanged(EventArgs args) => WindowStateChanged?.Invoke(this, args);
     private nint ProcessMessage(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data)
     {
         // WM_QUERYENDSESSION is accepted by normal window processing. Only the confirmed

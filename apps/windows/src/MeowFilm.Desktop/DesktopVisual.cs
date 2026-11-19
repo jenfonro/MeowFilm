@@ -19,6 +19,7 @@ public static class DesktopVisual
     }
     public static bool IsVisible(UIElement element)
     {
+        if (element is FrameworkElement { IsLoaded: false }) return false;
         for (DependencyObject? node = element; node is not null; node = VisualTreeHelper.GetParent(node))
             if (node is UIElement { Visibility: Visibility.Collapsed }) return false;
         return element.XamlRoot?.IsHostVisible == true;
@@ -96,13 +97,15 @@ public static class DesktopVisual
         }
     }
     private static bool Down(VirtualKey key) => (InputKeyboardSource.GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates.Down) != 0;
-    public static object Resource(FrameworkElement view, string key)
+    public static object Resource(FrameworkElement view, string key) =>
+        FindResource(view, key) ?? throw new KeyNotFoundException(key);
+    private static object? FindResource(FrameworkElement view, string key)
     {
         bool contrast = new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
         for (DependencyObject? node = view; node is not null; node = VisualTreeHelper.GetParent(node))
             if (node is FrameworkElement element && Find(element.Resources, key, contrast) is { } value) return value;
         if (view.XamlRoot?.Content is FrameworkElement root && Find(root.Resources, key, contrast) is { } rooted) return rooted;
-        return Find(Application.Current.Resources, key, contrast) ?? throw new KeyNotFoundException(key);
+        return Find(Application.Current.Resources, key, contrast);
     }
     private static object? Find(ResourceDictionary resources, string key, bool contrast)
     {
@@ -116,7 +119,9 @@ public static class DesktopVisual
     }
     public static void UseResource(this FrameworkElement view, DependencyProperty property, string key)
     {
-        view.SetValue(property, Resource(view, key));
+        // A code-created child acquires its page's resource scope when it is mounted.
+        if (view.IsLoaded) view.SetValue(property, Resource(view, key));
+        else if (FindResource(view, key) is { } value) view.SetValue(property, value);
         view.Loaded += (_, _) => view.SetValue(property, Resource(view, key));
         view.ActualThemeChanged += (_, _) => view.SetValue(property, Resource(view, key));
     }

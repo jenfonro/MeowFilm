@@ -14,7 +14,7 @@ public class FilmVideoSurface : Grid, IDisposable
     private UIElement? controls;
     private XamlRoot? root;
     private nint swapchain;
-    private bool loaded, closed;
+    private bool closed;
     private TaskCompletionSource mounted = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public FilmVideoSurface()
@@ -22,8 +22,8 @@ public class FilmVideoSurface : Grid, IDisposable
         Background = new SolidColorBrush(Colors.Black);
         AutomationProperties.SetName(this, "视频画面");
         Children.Add(picture);
-        Loaded += LoadedSurface;
-        Unloaded += UnloadedSurface;
+        Loaded += SurfaceLoadedChanged;
+        Unloaded += SurfaceLoadedChanged;
         SizeChanged += SizeChangedSurface;
         picture.CompositionScaleChanged += ScaleChangedSurface;
     }
@@ -42,7 +42,7 @@ public class FilmVideoSurface : Grid, IDisposable
     }
 
     internal event EventHandler? TargetChanged;
-    internal virtual nint DisplayWindow => root is { } current
+    internal virtual nint DisplayWindow => IsLoaded && XamlRoot is { } current
         ? Win32Interop.GetWindowFromWindowId(current.ContentIslandEnvironment.AppWindowId) : 0;
 
     internal virtual FilmKernelNative.Surface Describe() => new()
@@ -52,7 +52,7 @@ public class FilmVideoSurface : Grid, IDisposable
         Width = Math.Max(1, (int)Math.Ceiling(ActualWidth * picture.CompositionScaleX)),
         Height = Math.Max(1, (int)Math.Ceiling(ActualHeight * picture.CompositionScaleY)),
         ScaleX = picture.CompositionScaleX, ScaleY = picture.CompositionScaleY,
-        Visible = loaded && root?.IsHostVisible == true && ActualWidth > 0 && ActualHeight > 0 ? 1 : 0
+        Visible = IsLoaded && XamlRoot?.IsHostVisible == true && ActualWidth > 0 && ActualHeight > 0 ? 1 : 0
     };
 
     internal virtual async Task WaitForTargetAsync(CancellationToken token)
@@ -96,32 +96,20 @@ public class FilmVideoSurface : Grid, IDisposable
     [UnmanagedFunctionPointer(CallingConvention.StdCall)]
     private delegate int SetSwapchainCallback(nint panel, nint swapchain);
 
-    private void LoadedSurface(object sender, RoutedEventArgs args)
-    {
-        loaded = true;
-        if (!ReferenceEquals(root, XamlRoot))
-        {
-            if (root is not null) root.Changed -= RootChanged;
-            root = XamlRoot;
-            if (root is not null) root.Changed += RootChanged;
-        }
-        Changed();
-    }
-
-    private void UnloadedSurface(object sender, RoutedEventArgs args)
-    {
-        loaded = false;
-        if (root is not null) root.Changed -= RootChanged;
-        root = null;
-        Changed();
-    }
-
+    private void SurfaceLoadedChanged(object sender, RoutedEventArgs args) => Changed();
     private void SizeChangedSurface(object sender, SizeChangedEventArgs args) => Changed();
     private void ScaleChangedSurface(SwapChainPanel sender, object args) => Changed();
     private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => Changed();
     private void Changed()
     {
         if (closed) return;
+        var current = IsLoaded ? XamlRoot : null;
+        if (!ReferenceEquals(root, current))
+        {
+            if (root is not null) root.Changed -= RootChanged;
+            root = current;
+            if (root is not null) root.Changed += RootChanged;
+        }
         var previous = mounted;
         mounted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         previous.TrySetResult();
@@ -139,8 +127,8 @@ public class FilmVideoSurface : Grid, IDisposable
         if (closed) return;
         BindSwapchain(0);
         closed = true;
-        Loaded -= LoadedSurface;
-        Unloaded -= UnloadedSurface;
+        Loaded -= SurfaceLoadedChanged;
+        Unloaded -= SurfaceLoadedChanged;
         SizeChanged -= SizeChangedSurface;
         picture.CompositionScaleChanged -= ScaleChangedSurface;
         if (root is not null) root.Changed -= RootChanged;

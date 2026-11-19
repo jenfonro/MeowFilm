@@ -59,22 +59,24 @@ public static partial class MusicUiTests
         True(f.Page.Cards.Count == 6 && f.Page.Cards.Select(card => card.Subtitle).Take(4).SequenceEqual(["来源甲", "聚合", "剧集", "电影"]),
             "the actual search projection retains site, aggregate, television and movie label semantics");
         var root = f.Shell.Root;
-        f.Shell.PrepareForRender(); f.Shell.Activate(); await TestUiHost.LoadedAsync(root);
         ArtworkScope.SetLoader(root, new FilmPlaybackFixture.BundledArtworkLoader());
         var columnCounts = new HashSet<int>();
         var posterWidths = new HashSet<double>();
         int requests = f.Runtime.SearchOpens;
         foreach (int width in new[] { 1110, 1450, 860 })
         {
-            SearchLayout(root, width, 800); await Drain(); SearchLayout(root, width, 800);
+            await SearchLayout(f, width, 800);
+            await SearchFixture.Until(() => Visuals(f.Page.View).OfType<FilmCard>().Count(card => card.ActualWidth > 0) == 6);
             var cards = Visuals(f.Page.View).OfType<FilmCard>().ToArray();
             Equal(6, cards.Length);
             var panel = Visuals(f.Page.View).OfType<ItemsWrapGrid>().Single();
             var items = (GridView)f.Page.View.FindName("FilmItems");
             double viewport = ((SearchResultsView)f.Page.View).FilmScroll!.ViewportWidth;
-            int columns = Math.Max(1, (int)Math.Floor((viewport + 36) / 216));
-            double expectedWidth = (viewport - (columns - 1) * 36) / columns;
+            double contentWidth = items.ActualWidth - 36;
+            int columns = Math.Max(1, (int)Math.Floor((contentWidth + 36) / 216));
+            double expectedWidth = (contentWidth - (columns - 1) * 36) / columns;
             columnCounts.Add(cards.Count(card => card.TransformToVisual(panel).TransformPoint(new Point()).Y < 1));
+            await SearchFixture.Until(() => Visuals(cards[0]).OfType<Image>().Any(image => image.Source is not null));
             True(Visuals(cards[0]).OfType<Image>().Any(image => image.Source is not null),
                 "search visual evidence includes decoded bundled artwork beneath the text badge");
             foreach (var card in cards)
@@ -165,13 +167,21 @@ public static partial class MusicUiTests
         var homeItem = new FilmCardItem("home", "原首页影片", "", "9.4") { TextBadge = "2023" };
         var home = new FilmCard { DataContext = homeItem };
         FilmCardItem? activated = null; home.Activated += (_, e) => activated = e.Item;
-        SearchLayout(home, 176, 294);
-        Equal(294d, home.ActualHeight);
-        Equal(Visibility.Visible, ((Border)home.FindName("ScoreBadge")).Visibility);
-        Equal(Visibility.Collapsed, ((Border)home.FindName("TextBadge")).Visibility);
-        Equal(Visibility.Collapsed, ((Border)home.FindName("SiteLabel")).Visibility);
-        Click((Button)home.FindName("HitButton"));
-        True(ReferenceEquals(homeItem, activated), "existing home card activation and score remain intact");
+        home.Width = 176;
+        var homeRoot = new Grid { Children = { home } };
+        homeRoot.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("ms-appx:///MeowFilm.Desktop/Theme.xaml") });
+        var homeWindow = FilmUiTest.Window(homeRoot, 240, 380);
+        try
+        {
+            homeWindow.Activate(); await TestUiHost.LoadedAsync(home);
+            await SearchFixture.Until(() => home.ActualHeight == 294);
+            Equal(Visibility.Visible, ((Border)home.FindName("ScoreBadge")).Visibility);
+            Equal(Visibility.Collapsed, ((Border)home.FindName("TextBadge")).Visibility);
+            Equal(Visibility.Collapsed, ((Border)home.FindName("SiteLabel")).Visibility);
+            Click((Button)home.FindName("HitButton"));
+            True(ReferenceEquals(homeItem, activated), "existing home card activation and score remain intact");
+        }
+        finally { homeWindow.Close(); await Drain(); }
     }
     private static JsonElement CardWithLabels(JsonElement card, string label, string badge)
     {
@@ -185,8 +195,7 @@ public static partial class MusicUiTests
         await using var f = await UnifiedScene.Create();
         await f.Submit("仙逆", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         var root = f.Shell.Root;
-        f.Shell.PrepareForRender(); f.Shell.Activate(); await TestUiHost.LoadedAsync(root);
-        SearchLayout(root, 860, 800); await Drain();
+        await SearchLayout(f, 860, 800);
         var tabs = Visuals((ScrollViewer)((SearchResultsView)f.Page.View).FindName("TabScroll")).OfType<Button>().ToArray();
         Equal(5, tabs.Length);
         void VerifySelection()
@@ -209,7 +218,7 @@ public static partial class MusicUiTests
         VerifySelection();
         var songs = tabs.Single(button => (string)button.Tag == "songs");
         Click(songs);
-        await SearchFixture.Until(() => f.Page.SelectedTab == "songs"); await Drain(); SearchLayout(root, 860, 800);
+        await SearchFixture.Until(() => f.Page.SelectedTab == "songs"); await SearchLayout(f, 860, 800);
         VerifySelection();
         True(tabs.Single(button => (string)button.Tag == "film").FontWeight == FontWeights.Normal, "previous tab loses its active emphasis");
         songs.IsEnabled = false; await Drain();
@@ -235,8 +244,7 @@ public static partial class MusicUiTests
             : previous;
         await f.Submit("影片", "film"); await SearchFixture.Settle(f.Film.Search.Current!);
         var root = f.Shell.Root;
-        f.Shell.PrepareForRender(); f.Shell.Activate(); await TestUiHost.LoadedAsync(root);
-        SearchLayout(root, 860, 800); await Drain();
+        await SearchLayout(f, 860, 800);
         var view = (SearchResultsView)f.Page.View;
         var tools = (FrameworkElement)view.FindName("FilmTools");
         var tabs = (ScrollViewer)view.FindName("TabScroll");
@@ -248,27 +256,41 @@ public static partial class MusicUiTests
             "TMDB status and the raw switch share the tabs row at its right edge without overlapping tabs");
         True(Visuals(tools).OfType<TextBlock>().First().Text == f.Page.MetadataStatus,
             "metadata status is immediately before the original-list control");
-        var scroll = (ScrollViewer)view.FindName("FilmScroll");
-        scroll.ChangeView(null, 400, null, true); await Drain();
+        var scroll = view.FilmScroll!;
+        scroll.ChangeView(null, 400, null, true);
+        await SearchFixture.Until(() => Math.Abs(scroll.VerticalOffset - 400) < 1);
         double offset = scroll.VerticalOffset;
         True(offset > 0, "real search scroll has a restorable position");
         var first = f.Page.Cards.Select(card => card.SearchContext!.DisplayKey).ToArray();
-        FilmUiTest.Click(toggle); await Drain(); SearchLayout(root, 860, 800);
+        FilmUiTest.Click(toggle); await SearchLayout(f, 860, 800);
         True(f.Page.RawListMode, "the actual switch changes the existing presentation");
         var rawKeys = f.Page.Cards.Select(card => card.SearchContext!.DisplayKey).ToArray();
         True(rawKeys.All(key => key.StartsWith("site:", StringComparison.Ordinal)), "raw mode retains exact source identities");
-        await f.Page.LoadMoreAsync(); await Drain(); SearchLayout(root, 860, 800);
+        await f.Page.LoadMoreAsync(); await SearchLayout(f, 860, 800);
         True(rawKeys.SequenceEqual(f.Page.Cards.Take(rawKeys.Length).Select(card => card.SearchContext!.DisplayKey)), "raw older round remains in place");
-        FilmUiTest.Click(toggle); await Drain();
+        FilmUiTest.Click(toggle); await SearchLayout(f, 860, 800);
+        await SearchFixture.Until(() => Math.Abs(scroll.VerticalOffset - offset) < 1);
         True(first.SequenceEqual(f.Page.Cards.Take(first.Length).Select(card => card.SearchContext!.DisplayKey)) &&
             Math.Abs(scroll.VerticalOffset - offset) < 1, "aggregate order and independent scroll return unchanged");
         FilmUiTest.Click(toggle); await Drain();
         Equal(1, f.Runtime.SearchOpens); Equal(1, f.Runtime.Calls.Count(call => call.Method == "film.search.command" && FilmJson.Text(call.Input, "action") == "more")); Equal(48, f.Page.Cards.Count);
     }
-    private static void SearchLayout(FrameworkElement root, int width, int height)
+    private static async Task SearchLayout(UnifiedScene scene, int width, int height)
     {
-        if (DesktopWindow.GetWindow(root) is { } window && ReferenceEquals(window.Content, root)) window.Resize(width, height);
-        else Render(root, width, height);
-        root.UpdateLayout();
+        var root = scene.Shell.Root;
+        double scale = root.XamlRoot.RasterizationScale;
+        scene.Shell.Resize(width, height);
+        await SearchFixture.Until(() => scene.Shell.AppWindow.Size.Width == (int)Math.Round(width * scale) &&
+            scene.Shell.AppWindow.Size.Height == (int)Math.Round(height * scale) &&
+            scene.Page.View.IsLoaded && DesktopVisual.IsVisible(scene.Page.View));
+        for (int frame = 0; frame < 2; frame++)
+        {
+            var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            EventHandler<object> handler = (_, _) => rendered.TrySetResult();
+            CompositionTarget.Rendering += handler;
+            try { await rendered.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { CompositionTarget.Rendering -= handler; }
+            root.UpdateLayout(); await Drain();
+        }
     }
 }
