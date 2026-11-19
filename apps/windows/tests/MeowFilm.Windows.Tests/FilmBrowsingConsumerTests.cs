@@ -169,6 +169,88 @@ public static class FilmBrowsingConsumerTests
                 !page.ShowEpisodeList && !page.ShowMovieCandidates, "initial loading is an actual mutually exclusive state");
             return Task.CompletedTask;
         });
+        yield return Test("source files use their exact browsing projection and selected line provider independently from formal candidates", async () =>
+        {
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync(Card("movie"));
+            var target = rig.Page.ActiveTarget;
+            var file = BrowsingFile("browsed-file", "0");
+            var original = BrowsingFile("other-season-file", "0");
+            rig.Runtime.Change(root =>
+            {
+                root["sources"] = Node(FilmJson.Encode(new[] { Source("selected-site") }));
+                root["candidates"] = Node(FilmJson.Encode(new[] { Candidate("formal-file", episode: null) }));
+                root["browsing"] = Node(FilmJson.Encode(new
+                {
+                    sourceId = "selected-site", lineId = "0", loading = false,
+                    lines = new object[] { new { id = (object)0, provider = "quark" }, new { id = (object)"0", provider = "uc" } },
+                    episodes = new[] { file }, originalEpisodes = new[] { file, original }
+                }));
+            });
+            await Until(() => rig.Page.SourceId == "selected-site");
+            var candidate = rig.Page.Candidates.Single();
+            var episode = rig.Page.Episodes.Single();
+            Check(candidate is { Id: "browsed-file", BusinessId: "fixture:file:browsed-file", Provider: "uc",
+                    SourceKey: "cat:fixture:site:1", Name: "准确浏览文件", Quality: "4k_fps", Codec: "hevc" } &&
+                candidate.DetailId.ValueKind == JsonValueKind.Number && candidate.DetailId.GetInt32() == 0 &&
+                candidate.LineId.ValueKind == JsonValueKind.String && candidate.LineId.GetString() == "0" &&
+                candidate.Resolution.GetString() == "3840x2160" && candidate.Fps.GetDouble() == 60 &&
+                candidate.DisplayLabel == "4K 60帧 · selected-site" &&
+                episode is { CandidateId: "browsed-file", Provider: "uc", Quality: "4k_fps", CanSelect: true } &&
+                rig.Page.ActiveTarget == target && rig.Native.Commits == 0 && rig.Native.Stops == 0,
+                "typed line identity supplies the provider while the file target supplies exact identity and the formal candidate stays unrelated");
+            int calls = BrowseCalls(rig);
+            await rig.Page.SelectCandidateAsync(candidate.Id);
+            var command = rig.Runtime.Calls.Last(row => FilmJson.Text(row.Parameters, "action") == "select.target").Parameters;
+            Check(FilmJson.Equal(command.GetProperty("target"), FilmJson.Member(file, "playbackTarget")) &&
+                FilmJson.Text(command, "metadataSourceId") == rig.Page.MetadataSourceId && BrowseCalls(rig) == calls,
+                "movie selection submits the complete runtime file target without synchronizing its browser cursor");
+            await rig.Page.SelectOriginalTargetAsync(FilmJson.Member(original, "playbackTarget"));
+            command = rig.Runtime.Calls.Last(row => FilmJson.Text(row.Parameters, "action") == "select.target").Parameters;
+            Check(FilmJson.Equal(command.GetProperty("target"), FilmJson.Member(original, "playbackTarget")) &&
+                BrowseCalls(rig) == calls && rig.Page.Candidates.Single().Id == "browsed-file",
+                "an original file outside the visible rows keeps its own complete target and does not rewrite the selected directory");
+        });
+        yield return Test("incomplete source file identities fail at both directory consumers without issuing selection", async () =>
+        {
+            foreach (string field in new[] { "key", "detailId", "lineId", "candidateId" })
+            {
+                var file = Node(BrowsingFile("incomplete", 0));
+                file["playbackTarget"]!["source"]!.AsObject().Remove(field);
+                var browsing = FilmJson.Encode(new { sourceId = "invalid", lineId = 0, season = 1, loading = false,
+                    lines = Array.Empty<object>(), episodes = new[] { file }, originalEpisodes = new[] { file } });
+                var card = Card();
+                var page = new FilmPlaybackPage(card, card.PlaybackContext!, null, null);
+                await Error("INVALID_RESPONSE", () =>
+                {
+                    page.Apply(new(Snapshot(Guid.NewGuid(), 1, card.PlaybackContext!.Target,
+                        card.PlaybackContext.Metadata!.Value, browsing: browsing,
+                        candidates: FilmJson.Encode(new[] { Candidate("incomplete") }))));
+                    return Task.CompletedTask;
+                });
+                Check(page.EpisodeDirectory is null && !page.CanSelectDirectory,
+                    "an incomplete file target cannot borrow identity from the formal candidates or become a usable episode");
+                await Error("INVALID_RESPONSE", () =>
+                {
+                    _ = new FilmDirectory(browsing, "");
+                    return Task.CompletedTask;
+                });
+            }
+            await using var rig = new FilmPlaybackRig();
+            await rig.OpenAsync();
+            var incomplete = Node(BrowsingFile("incomplete", 0));
+            incomplete["playbackTarget"]!["source"]!.AsObject().Remove("candidateId");
+            rig.Runtime.Change(root => root["browsing"] = Node(FilmJson.Encode(new
+            {
+                sourceId = "original-only", lineId = 0, loading = false, lines = Array.Empty<object>(),
+                episodes = Array.Empty<object>(), originalEpisodes = new[] { incomplete }
+            })));
+            await Until(() => rig.Page.SourceId == "original-only");
+            await Error("INVALID_RESPONSE", () => rig.Page.SelectOriginalTargetAsync(
+                FilmJson.Member(JsonSerializer.SerializeToElement(incomplete), "playbackTarget")));
+            Check(!rig.Runtime.Calls.Any(row => FilmJson.Text(row.Parameters, "action") == "select.target"),
+                "the direct original-file action also rejects a partial target before its RPC can select another file");
+        });
         yield return Test("source and typed line returns reuse directories controls and positions without browse RPC", async () =>
         {
             await using var rig = new FilmPlaybackRig();
@@ -315,7 +397,7 @@ public static class FilmBrowsingConsumerTests
                 };
                 try { await rig.Page.BrowseSourceAsync(rig.Page.Sources.Single(row => row.Id == "empty")); }
                 catch (FilmPlaybackException error) when (fails && error.Code == "UPSTREAM_ERROR") { }
-                Check(!rig.Page.ListLoading && rig.Page.ShowListMessage && !rig.Page.CanBrowseLines &&
+                Check(!rig.Page.ListLoading && rig.Page.ShowListMessage == !fails && rig.Page.ShowListStatus && !rig.Page.CanBrowseLines &&
                     !rig.Page.CanBrowseRaw && rig.Page.Episodes.Count == 0 && rig.Page.ActiveTarget == target &&
                     rig.Page.ListStatus == (fails ? "上游服务请求失败" : "无可用视频源"),
                     "failure and successful empty remain distinct from playback and usable files");
@@ -471,6 +553,12 @@ public static class FilmBrowsingConsumerTests
     }
 
     private static JsonNode Node(JsonElement value) => JsonNode.Parse(value.GetRawText())!;
+    private static JsonElement BrowsingFile(string id, object line) => FilmJson.Encode(new
+    {
+        businessId = "fixture:file:" + id,
+        playbackTarget = Candidate(id, episode: null, detail: 0, line: line).GetProperty("playbackTarget"),
+        name = "准确浏览文件", path = "/准确目录/文件.mp4", quality = "4k_fps", resolution = "3840x2160", fps = 60, codec = "hevc"
+    });
     private static object Source(string id) => new { id, title = id, source = new { key = "cat:fixture:site:1", detailId = 0, name = id } };
     private static int BrowseCalls(FilmPlaybackRig rig) => rig.Runtime.Calls.Count(row =>
         FilmJson.Text(row.Parameters, "action").StartsWith("browse", StringComparison.Ordinal));

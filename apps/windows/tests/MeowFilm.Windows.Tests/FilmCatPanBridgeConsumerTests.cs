@@ -29,7 +29,7 @@ public static class FilmCatPanBridgeConsumerTests
         yield return Test("real HTTP metadata entry auto plays first episode and source menu preserves its identity", MetadataEntry);
         yield return Test("real HTTP descriptor preserves DASH CENC receipt without reading media", () => Descriptor(direct: false));
         yield return Test("real HTTP headerless descriptor selects direct native input without a lease", () => Descriptor(direct: true));
-        yield return Test("real HTTP list failure notifies and presentation resume rebuilds the same directory", ListFailure);
+        yield return Test("real HTTP list failure notifies and explicit source retry rebuilds the same directory", ListFailure);
         yield return Test("close drains an admitted HTTP attempt and releases it without native publication", LateReceipt);
     }
 
@@ -42,14 +42,21 @@ public static class FilmCatPanBridgeConsumerTests
             scene.Traffic.EventSnapshots.Any(snapshot =>
                 FilmJson.Text(FilmJson.Member(snapshot, "current"), "attemptId") == scene.Page.CurrentAttemptId));
         var page = scene.Page;
+        var opening = scene.Traffic.Calls.Single(row => row.Method == "film.session.open");
+        var canonical = FilmJson.Target(opening.Reply!.Value.GetProperty("value").GetProperty("entryTarget"));
         Check(page.EntrySurface == "search" && page.ActiveTarget.Kind == "source" &&
-            page.EntryTarget.Id == scene.Target.Id && page.EntryTarget.Source is { } original &&
-            JsonElement.DeepEquals(original, scene.Target.Source!.Value), "the real Windows source entry keeps its exact Cat identity");
+            page.EntryTarget.Id == canonical.Id && canonical.Id.StartsWith("source:", StringComparison.Ordinal) &&
+            JsonElement.DeepEquals(FilmJson.Encode(page.EntryTarget.Wire()), FilmJson.Encode(canonical.Wire())) &&
+            page.EntryTarget.Source is { } original && new[] { "key", "detailId" }.All(name =>
+                JsonElement.DeepEquals(FilmJson.Member(original, name), FilmJson.Member(scene.Target.Source!.Value, name))) &&
+            new[] { "engine", "installationId", "siteId" }.All(name =>
+                FilmJson.Text(original, name) == FilmJson.RequiredText(scene.Source, name)),
+            "the real Windows source entry uses the Node catalog identity and preserves its exact typed Cat source");
         var source = page.Sources.Single(row => row.MetadataSourceId is null);
         Check(source.Label == "Bridge site" && page.PlayerPanLabel == "夸克" &&
             page.PlayerQualityLabel == "4K·60帧" && !page.RequiresSourceSearch,
             "Windows automatically plays the real high quality file without a seed search");
-        var opened = scene.Traffic.Calls.Single(row => row.Method == "film.session.open").Input;
+        var opened = opening.Input;
         Check(FilmJson.Text(opened, "platform") == "windows" && FilmJson.Text(opened, "entrySurface") == "search" &&
             JsonElement.DeepEquals(opened.GetProperty("target"), FilmJson.Encode(scene.Target.Wire())) &&
             FilmJson.Array(opened, "sources").Length == 1 &&
@@ -61,11 +68,19 @@ public static class FilmCatPanBridgeConsumerTests
             page.Episodes.Select(row => row.Quality).SequenceEqual(new[] { "4k_fps", "1080p", "1080p" }) &&
             page.Episodes.Select(row => row.Number).SequenceEqual(new int?[] { 1, 1, 2 }),
             "the real site menu and separate pan menu display the provider-normalized directory");
-        var refresh = scene.Traffic.Commands("browse.refresh").Single();
-        Check(FilmJson.Text(refresh.Input, "sessionId") == scene.SessionId.ToString() &&
-            FilmJson.Member(refresh.Input, "refresh").ValueKind == JsonValueKind.False &&
-            !scene.Traffic.Commands("browse").Any(),
-            "entering the direct source refreshes its actual directory without a second source-selection action");
+        Check(!scene.Traffic.Commands("browse.refresh").Any() && !scene.Traffic.Commands("browse").Any(),
+            "the direct source's automatic Node initialization supplies its directory without a second native read");
+        var directory = page.EpisodeDirectory;
+        var episodes = page.Episodes;
+        var candidates = page.Candidates;
+        string current = page.CurrentCandidateId;
+        int beforeResume = scene.Traffic.Calls.Length;
+        await scene.Session.ResumePresentationAsync();
+        Check(ReferenceEquals(scene.Page, page) && ReferenceEquals(page.EpisodeDirectory, directory) &&
+            ReferenceEquals(page.Episodes, episodes) && ReferenceEquals(page.Candidates, candidates) &&
+            page.CurrentCandidateId == current && !scene.Traffic.Calls.Skip(beforeResume).Any(call =>
+                call.Method != "film.session.command" || FilmJson.Text(call.Input, "action") != "media.progress"),
+            "an active real SSE presentation retains its exact page directory and files without a duplicate read");
         var high = page.Candidates.Single(row => row.Quality == "4k_fps");
         Check(high.Provider == "quark" && high.SourceKey == FilmJson.Text(scene.Source, "key") &&
             high.DetailId.ValueKind == JsonValueKind.String && high.DetailId.GetString() == "bridge-detail" &&
@@ -186,12 +201,14 @@ public static class FilmCatPanBridgeConsumerTests
             "Windows metadata entry automatically starts the real first episode and retains Node's display metadata");
         CheckReceipt(scene, input.Receipt, candidate);
         var source = page.Sources.Single(row => row.MetadataSourceId is null);
-        await DesktopTestUi.SelectAsync(scene.Element<ComboBox>("SourcePicker"), source);
+        var picker = scene.Element<ComboBox>("SourcePicker");
+        await DesktopTestUi.SelectAsync(picker, source);
         await scene.Ready(() => page.SourceId == source.Id && !page.ListLoading && page.Episodes.Count == 3);
         var browse = scene.Traffic.Commands("browse").Single();
         Check(FilmJson.Text(browse.Input, "sourceId") == source.Id &&
             FilmJson.Text(browse.Input, "sessionId") == scene.SessionId.ToString() &&
-            page.SelectedSource?.Label == "Bridge site" && page.SelectedLine is { Label: "夸克", Provider: "quark" } &&
+            page.SelectedSource?.Label == "Bridge site" && Equals(picker.SelectedItem, page.SelectedSource) &&
+            page.SelectedLine is { Label: "夸克", Provider: "quark" } &&
             page.ActiveTarget.MetadataProvider == "tmdb" && page.ActiveTarget.Episode == 1 &&
             page.Episodes.First().Title == "Episode 1" && scene.Native.Inputs.Count == 1,
             "the real source control browses that site without changing the metadata target or restarting native playback");
@@ -258,24 +275,52 @@ public static class FilmCatPanBridgeConsumerTests
         await scene.Ready(() => scene.Page.ListError == "上游服务请求失败" && !scene.Page.ListLoading &&
             scene.Notices.Contains("上游服务请求失败"));
         Check(scene.Page.Episodes.Count == 0 && scene.Page.Candidates.Count == 0 && !scene.Page.CanBrowseRaw &&
-            !scene.Page.ShowListMessage && scene.Native.Inputs.Count == 0 &&
-            scene.Traffic.Snapshots.Any(snapshot =>
+            !scene.Page.CanSelectDirectory && scene.Page.ShowListStatus && !scene.Page.ShowEpisodeCards &&
+            !scene.Page.ShowEpisodeList && !scene.Page.ShowMovieCandidates && !scene.Page.ShowListMessage && scene.Native.Inputs.Count == 0,
+            $"a failed cold list exposes no stale file or operation; episodes={scene.Page.Episodes.Count}, candidates={scene.Page.Candidates.Count}, " +
+            $"raw={scene.Page.CanBrowseRaw}, select={scene.Page.CanSelectDirectory}, status={scene.Page.ShowListStatus}, " +
+            $"cards={scene.Page.ShowEpisodeCards}, list={scene.Page.ShowEpisodeList}, movies={scene.Page.ShowMovieCandidates}, " +
+            $"inline={scene.Page.ShowListMessage}, native={scene.Native.Inputs.Count}");
+        Check(scene.Traffic.Snapshots.Any(snapshot =>
                 FilmJson.Text(FilmJson.Member(snapshot, "browsing"), "error") == "UPSTREAM_HTTP") &&
-            scene.Element<ComboBox>("SourcePicker").IsEnabled &&
-            !Visuals(scene.View).OfType<TextBlock>().Any(row => FilmUiTest.Visible(row) && row.Text == scene.Page.ListError),
-            "the classified provider error uses the floating notice and exposes no stale playable file");
+            scene.Element<ComboBox>("SourcePicker").IsEnabled,
+            "the actual provider classification retains its enabled source recovery control");
+        var playerStatus = scene.Element<TextBlock>("PlayerStatus");
+        Check(!Visuals(scene.View).OfType<TextBlock>().Any(row => !ReferenceEquals(row, playerStatus) &&
+            FilmUiTest.Visible(row) && row.Text == scene.Page.ListError),
+            "the directory operation error uses its floating notice while the player retains its independent execution status");
         await scene.Control("scenario", new { scenario = "success" });
+        int browses = scene.Traffic.Commands("browse").Count();
         int refreshes = scene.Traffic.Commands("browse.refresh").Count();
+        int lists = scene.Records(await scene.Evidence()).Count(row =>
+            FilmJson.Text(row, "layer") == "pan-service" && FilmJson.Text(row, "phase") == "list");
+        var page = scene.Page;
+        var directory = page.EpisodeDirectory;
+        int beforeResume = scene.Traffic.Calls.Length;
         await scene.Session.ResumePresentationAsync();
+        Check(ReferenceEquals(scene.Page, page) && ReferenceEquals(page.EpisodeDirectory, directory) &&
+            page.ListError == "上游服务请求失败" && !scene.Traffic.Calls.Skip(beforeResume).Any(call =>
+                call.Method != "film.session.command" || FilmJson.Text(call.Input, "action") != "media.progress"),
+            "resuming an active real SSE observation does not silently retry the failed directory");
+        await scene.Page.BrowseSourceAsync(source);
         await scene.Ready(() => !scene.Page.ListLoading && scene.Page.ListError.Length == 0 && scene.Page.Episodes.Count == 3);
         Check(scene.Page.SourceId == source.Id && scene.Page.SelectedSource?.Label == "Bridge site" &&
-            scene.Page.SelectedLine is { Label: "夸克", Provider: "quark" } && scene.Native.Inputs.Count == 0 &&
-            scene.Traffic.Commands("browse.refresh").Count() == refreshes + 1 &&
-            FilmJson.Member(scene.Traffic.Commands("browse.refresh").Last().Input, "refresh").ValueKind == JsonValueKind.False &&
-            scene.Traffic.Commands("media.started").Count() == 0,
-            "presentation resume revalidates the failed directory without forcing refresh or silently restarting media");
+            scene.Page.SelectedLine is { Label: "夸克", Provider: "quark" },
+            $"explicit retry keeps its source and typed pan selection; source={scene.Page.SourceId}, " +
+            $"selectedSource={scene.Page.SelectedSource?.Label}, line={scene.Page.SelectedLine?.Label}, provider={scene.Page.SelectedLine?.Provider}");
+        Check(scene.Traffic.Commands("browse.refresh").Count() == refreshes &&
+            scene.Traffic.Commands("browse").Count() == browses + 1,
+            $"an explicit source retry reads the failed directory exactly once; before={browses}, " +
+            $"refreshes={scene.Traffic.Commands("browse.refresh").Count()}, browses={scene.Traffic.Commands("browse").Count()}");
+        Check(FilmJson.Text(scene.Traffic.Commands("browse").Last().Input, "sourceId") == source.Id,
+            "an explicit retry reads the selected source identity");
+        Check(scene.Native.Inputs.Count == 0 && scene.Traffic.Commands("media.started").Count() == 0,
+            $"an explicit directory retry cannot silently restart media; native={scene.Native.Inputs.Count}, " +
+            $"started={scene.Traffic.Commands("media.started").Count()}");
         var evidence = await scene.Evidence();
-        Check(scene.Records(evidence).Any(row => FilmJson.Text(row, "layer") == "provider" && FilmJson.Text(row, "phase") == "list") &&
+        Check(scene.Records(evidence).Count(row => FilmJson.Text(row, "layer") == "pan-service" &&
+                FilmJson.Text(row, "phase") == "list") == lists + 1 &&
+            scene.Records(evidence).Any(row => FilmJson.Text(row, "layer") == "provider" && FilmJson.Text(row, "phase") == "list") &&
             !scene.Records(evidence).Any(row => FilmJson.Text(row, "layer") == "pan-service" &&
                 FilmJson.Text(row, "phase") is "prepare" or "play"), "failure and recovery cannot bypass provider list");
         await scene.Close(); scene.CheckNoMedia(await scene.Evidence());

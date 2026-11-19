@@ -22,8 +22,7 @@ internal static class MusicVisuals
     internal static SolidColorBrush Brush(byte r, byte g, byte b, byte a = 255) => new(Color.FromArgb(a, r, g, b));
     internal static SolidColorBrush Brush(string value) => (SolidColorBrush)XamlReader.Load(
         $"<SolidColorBrush xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Color='{value}'/>");
-    internal static Geometry Geometry(string value) => ((Microsoft.UI.Xaml.Shapes.Path)XamlReader.Load(
-        $"<Path xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Data='{value}'/>")).Data;
+    internal static Geometry Geometry(string value) => (Geometry)XamlBindingHelper.ConvertValue(typeof(Geometry), value);
     internal static void Bind(FrameworkElement target, DependencyProperty property, string path, object? source = null,
         BindingMode mode = BindingMode.OneWay) => target.SetBinding(property,
             new Binding { Path = new PropertyPath(path), Source = source, Mode = mode });

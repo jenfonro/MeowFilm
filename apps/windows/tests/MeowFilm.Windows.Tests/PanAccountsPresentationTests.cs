@@ -175,7 +175,12 @@ public static class PanAccountsPresentationTests
                 scene.View.DataContext = scene.Model;
                 await replacement.DisposeAsync();
             }
-            await Until(() => scene.Model.Rows[0].CanLogin);
+            try { await Until(() => scene.Model.Rows[0].CanLogin); }
+            catch (InvalidOperationException error)
+            {
+                var row = scene.Model.Rows[0];
+                throw new InvalidOperationException($"login restoration after action {action}: loaded={scene.View.IsLoaded}, visible={DesktopVisual.IsVisible(scene.View)}, state={scene.Window.WindowState}, active={row.Active}, status={row.Status}, busy={row.IsBusy}, editing={row.Editing}, loading={scene.Model.IsLoading}, hasSnapshot={row.HasSnapshot}", error);
+            }
         }
         Check(scene.BindingErrors.ToString().Length == 0, "owner replacement never leaves stale popup bindings");
     }

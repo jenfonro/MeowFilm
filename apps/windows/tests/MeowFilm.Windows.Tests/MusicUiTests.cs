@@ -1132,12 +1132,15 @@ public static partial class MusicUiTests
     private static void Click(Button button) { True(button.IsEnabled, "clickable action enabled"); DesktopTestUi.Invoke(button); }
     private static void AssertPlayerBounds(FrameworkElement view, double width)
     {
-        var panels = new[] { "MetadataPanel", "TransportPanel", "OptionsPanel" }.Select(name => (FrameworkElement)view.FindName(name)).ToArray();
+        var panels = new[] { (FrameworkElement)view.FindName("MetadataPanel"),
+            (FrameworkElement)((Button)view.FindName("ModeButton")).Parent,
+            (FrameworkElement)((Button)view.FindName("QualityButton")).Parent };
         var bounds = panels.Select(panel => DesktopTestUi.Bounds(panel, view)).ToArray();
         True(width >= 820, "player spans shell width");
         for (var i = 0; i < bounds.Length; i++)
         {
-            True(bounds[i].Left >= 0 && bounds[i].Right <= width + 0.5, "player panel within minimum window");
+            True(bounds[i].Left >= 0 && bounds[i].Right <= width + 0.5,
+                $"player panel within minimum window (panel={i}, bounds={bounds[i]}, width={width}, actual={view.ActualWidth})");
             if (i > 0) True(bounds[i - 1].Right <= bounds[i].Left + 0.5, "player columns do not overlap");
         }
         foreach (var control in Visuals(view).OfType<Control>().Where(c => c is Button or Slider))

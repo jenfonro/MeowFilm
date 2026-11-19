@@ -27,6 +27,10 @@ public partial class MusicPlayerView : UserControl
     private Task qualityRetired = Task.CompletedTask;
     private Task flyoutRetired = Task.CompletedTask;
     private PlayerDialogHost? fmHost;
+    internal Border FmPanel { get; }
+    private ScrollViewer FmScroll { get; }
+    private StackPanel FmModeChoices { get; }
+    private Grid FmSceneChoices { get; }
     private PlayerMenuInput? menuInput;
     private readonly List<IDisposable> menuRegistrations = [];
     private readonly Geometry playGeometry = MusicVisuals.Geometry("M15.5,11 L29,20 L15.5,29 Z");
@@ -37,6 +41,10 @@ public partial class MusicPlayerView : UserControl
     {
         this.module = module; InitializeComponent(); DataContext = module;
         DesktopTheme.Observe(SourcePanel, RefreshSourcePalette);
+        DesktopTheme.Observe(this, RefreshFooterPalette);
+        foreach (var button in new Button[] { FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
+            QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton, PlayButton })
+            button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => RefreshFooterPalette());
         FavoriteBadge.RegisterPropertyChangedCallback(TextBlock.TextProperty, (_, _) =>
             FavoriteBadge.Visibility = FavoriteBadge.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible);
         if (showArtwork)
@@ -56,8 +64,20 @@ public partial class MusicPlayerView : UserControl
         {
             (PlaylistPopup, PlaylistButton), (VolumePopup, VolumeButton), (RatePopup, MoreButton),
             (MoreMenu, MoreButton), (QualityMenu, QualityButton), (SourcePopup, QualityButton), (ModeMenu, ModeButton)
-        }) flyout.Closed += (_, _) => FlyoutClosed(flyout, anchor);
+        })
+        {
+            flyout.Closing += (_, _) => FlyoutClosing(flyout, anchor);
+            flyout.Closed += (_, _) => surfaceInput?.LayerClosed();
+        }
+        // The dialog host owns attachment. A live panel in Resources would enter the
+        // resource dictionary itself and reenter implicit style lookup while it is locked.
+        FmPanel = (Border)((DataTemplate)Resources["FmPanelTemplate"]).LoadContent();
+        FmScroll = (ScrollViewer)FmPanel.FindName("FmScroll");
+        FmModeChoices = (StackPanel)FmPanel.FindName("FmModeChoices");
+        FmSceneChoices = (Grid)FmPanel.FindName("FmSceneChoices");
         FmPanel.DataContext = module;
+        DesktopTheme.Observe(FmPanel, RefreshFmPalette);
+        ObserveFmButton((Button)FmPanel.FindName("CloseFmButton"), false, false, close: true);
         FmPanel.Loaded += (_, _) => RevealFmSelection();
         Progress.ScrubStarted += (_, _) => BeginProgress();
         Progress.ScrubCancelled += (_, _) => RestoreProgress();
@@ -124,6 +144,9 @@ public partial class MusicPlayerView : UserControl
         CloseFlyout();
         await flyoutRetired;
         if (!DesktopVisual.IsVisible(this) || !menuInput.IsCurrent(anchor, generation)) return;
+        var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        void Closed(object? sender, object args) { flyout.Closed -= Closed; retired.TrySetResult(); }
+        flyout.Closed += Closed; flyoutRetired = retired.Task;
         activeFlyout = flyout;
         if (ReferenceEquals(flyout, RatePopup)) rateKey = module.PlaybackPresentationKey;
         flyout.ShowAt(anchor);
@@ -132,10 +155,7 @@ public partial class MusicPlayerView : UserControl
     {
         var closing = activeFlyout; activeFlyout = null;
         if (closing is not { IsOpen: true }) return;
-        var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        void Closed(object? sender, object args) { closing.Closed -= Closed; retired.TrySetResult(); }
-        closing.Closed += Closed; closing.Hide();
-        flyoutRetired = Task.WhenAll(flyoutRetired, retired.Task);
+        closing.Hide();
     }
     private void CloseQuality()
     {
@@ -147,9 +167,8 @@ public partial class MusicPlayerView : UserControl
         if (!openingFm) { modeActionKey = ""; modeGeneration++; }
         CloseFlyout();
     }
-    private void FlyoutClosed(FlyoutBase flyout, Button anchor)
+    private void FlyoutClosing(FlyoutBase flyout, Button anchor)
     {
-        surfaceInput?.LayerClosed();
         if (!ReferenceEquals(activeFlyout, flyout)) return;
         activeFlyout = null;
         if (ReferenceEquals(anchor, QualityButton)) CloseQuality();
@@ -339,13 +358,14 @@ public partial class MusicPlayerView : UserControl
         if (host?.IsOpen == true) { host.Close(); return; }
         fmGeneration++; fmActionKey = "";
         FmModeChoices.Children.Clear(); FmSceneChoices.Children.Clear(); FmSceneChoices.RowDefinitions.Clear();
+        surfaceInput?.LayerClosed();
         if (DesktopVisual.IsVisible(this)) ModeButton.Focus(FocusState.Programmatic);
     }
     private void RevealFmSelection()
     {
         if (fmHost?.IsOpen != true || !FmPanel.IsLoaded) return;
-        var selected = FmSceneChoices.Children.OfType<Button>().Concat(FmModeChoices.Children.OfType<Button>())
-            .FirstOrDefault(button => AutomationProperties.GetItemStatus(button) == "已选中");
+        var choices = FmModeChoices.Children.OfType<Button>().Concat(FmSceneChoices.Children.OfType<Button>());
+        var selected = choices.FirstOrDefault(button => AutomationProperties.GetItemStatus(button) == "已选中") ?? choices.FirstOrDefault();
         if (selected is null) return;
         selected.Focus(FocusState.Programmatic);
         var point = selected.TransformToVisual(FmScroll).TransformPoint(new global::Windows.Foundation.Point());
@@ -357,15 +377,27 @@ public partial class MusicPlayerView : UserControl
         bool selected = module.PlaybackFmRuleId.Length == 0 && module.PlaybackFmTabTagId.Length == 0 &&
             (scene ? module.PlaybackFmMode == "scene" && module.PlaybackFmScene == choice.Key : module.PlaybackFmMode == choice.Key);
         string key = fmActionKey;
-        var content = new StackPanel { Spacing = 8 };
-        if (scene) content.Children.Add(new MusicPlaybackIcon { Key = choice.Key, Width = 25, Height = 25, HorizontalAlignment = HorizontalAlignment.Center });
-        content.Children.Add(new TextBlock { Text = choice.Name, TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap });
-        var button = new Button { Content = content, Tag = choice, MinHeight = scene ? 84 : 64, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Center,
-            BorderThickness = new Thickness(selected ? 2 : 1), Padding = new Thickness(8), FontWeight = Microsoft.UI.Text.FontWeights.Normal };
+        var button = new Button { Tag = choice, Template = (ControlTemplate)FmPanel.Resources["Player.FmButtonTemplate"],
+            MinHeight = scene ? 84 : 64, HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center,
+            Margin = scene ? new Thickness(2) : new Thickness(0, 0, 0, 10), CornerRadius = new CornerRadius(9),
+            BorderThickness = new Thickness(1), Padding = scene ? new Thickness(2, 10, 2, 10) : new Thickness(12),
+            FontSize = scene ? 12 : 16, FontWeight = Microsoft.UI.Text.FontWeights.Normal, UseSystemFocusVisuals = true };
+        var content = new StackPanel { Spacing = 10 };
+        if (scene)
+        {
+            var icon = new MusicPlaybackIcon { Key = choice.Key, Width = 25, Height = 25, HorizontalAlignment = HorizontalAlignment.Center };
+            MusicVisuals.Bind(icon, ForegroundProperty, nameof(Foreground), button); content.Children.Add(icon);
+        }
+        var text = new TextBlock { Text = choice.Name, FontSize = button.FontSize, FontWeight = Microsoft.UI.Text.FontWeights.Normal,
+            TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap };
+        MusicVisuals.Bind(text, TextBlock.ForegroundProperty, nameof(Foreground), button); content.Children.Add(text);
+        button.Content = content;
         AutomationProperties.SetName(button, choice.Name); AutomationProperties.SetItemStatus(button, selected ? "已选中" : "");
+        ObserveFmButton(button, selected, scene);
         button.Click += async (_, _) =>
         {
-            if (fmHost?.IsOpen != true || !CanOpenFmChoices || generation != fmGeneration || key != module.PlaybackFmActionKey) return;
+            if (!button.IsEnabled || fmHost?.IsOpen != true || !DesktopVisual.IsVisible(this) || !CanOpenFmChoices || generation != fmGeneration || key != module.PlaybackFmActionKey) return;
             fmHost.Close(); await module.ChangePlaybackFmAsync(scene ? "scene" : choice.Key, scene ? choice.Key : "", key);
         };
         return button;
@@ -381,11 +413,11 @@ public partial class MusicPlayerView : UserControl
     private async void RateReset_Click(object sender, RoutedEventArgs e) => await module.ChangePlaybackRateAsync(1);
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!module.HasSourceChoices) SourcePopup.Hide();
-        if (!module.HasQualityButton) QualityMenu.Hide();
-        if (modeActionKey != module.PlaybackModeActionKey || !module.CanChangePlaybackMode) ModeMenu.Hide();
+        if (!module.HasSourceChoices && ReferenceEquals(activeFlyout, SourcePopup)) SourcePopup.Hide();
+        if (!module.HasQualityButton && ReferenceEquals(activeFlyout, QualityMenu)) QualityMenu.Hide();
+        if ((modeActionKey != module.PlaybackModeActionKey || !module.CanChangePlaybackMode) && ReferenceEquals(activeFlyout, ModeMenu)) ModeMenu.Hide();
         if (fmActionKey != module.PlaybackFmActionKey || !CanOpenFmChoices) fmHost?.Close();
-        if (rateKey != module.PlaybackPresentationKey || !module.CanChangePlaybackRate) RatePopup.Hide();
+        if ((rateKey != module.PlaybackPresentationKey || !module.CanChangePlaybackRate) && ReferenceEquals(activeFlyout, RatePopup)) RatePopup.Hide();
         if (scrubKey is not null && (scrubKey != module.PlaybackPresentationKey || !module.CanSeek)) { Progress.CancelScrub(); RestoreProgress(); }
         Refresh();
     }
@@ -394,6 +426,23 @@ public partial class MusicPlayerView : UserControl
         PlayGlyph.Data = module.IsPlaying ? pauseGeometry : playGeometry;
         FavoriteGlyph.Fill = module.IsCurrentFavorite ? favoriteFill : emptyFavoriteFill;
         FavoriteGlyph.Stroke = module.IsCurrentFavorite ? FavoriteGlyph.Fill : FavoriteButton.Foreground;
+    }
+    private void RefreshFooterPalette()
+    {
+        bool contrast = DesktopTheme.GetIsHighContrast(this);
+        var settings = new global::Windows.UI.ViewManagement.UISettings();
+        Brush SystemBrush(global::Windows.UI.ViewManagement.UIElementType type) => new SolidColorBrush(settings.UIElementColor(type));
+        Brush Resource(string name) => (Brush)DesktopVisual.Resource(this, "Capability.Player." + name);
+        foreach (var button in new Button[] { FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
+            QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton })
+            button.Foreground = contrast ? SystemBrush(button.IsEnabled ? global::Windows.UI.ViewManagement.UIElementType.WindowText :
+                global::Windows.UI.ViewManagement.UIElementType.GrayText) : Resource("Foreground");
+        ((TextBlock)MetadataText.Children[0]).Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Text");
+        ((TextBlock)MetadataText.Children[1]).Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Muted");
+        PlayButton.Background = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.Highlight) : (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Accent");
+        PlayButton.Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) : MusicVisuals.Brush("#FFFFFF");
+        Progress.RailBrush = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Rail");
+        Refresh();
     }
     private void BeginProgress()
     {

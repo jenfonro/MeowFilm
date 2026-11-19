@@ -155,16 +155,26 @@ public static partial class MusicLyricDisplayTests
             f.Module.Lyrics.Add(new(i * 2, $"第 {i} 句 · You spread your wings and rise from the ashes",
                 "你展开双翼 从灰烬中重生 · Translation remains fully visible"));
         var view = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+        var list = (MusicLyricList)view.FindName("LyricList");
+        // Native item entrance uses an independent layout-transition visual. Keep
+        // its glyph motion out of the fade comparison; manual scrolling stays enabled.
+        list.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+        var resumeTimer = (DispatcherTimer)typeof(MusicPlayerDetailView).GetField("lyricResumeTimer",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(view)!;
         var window = LyricWindow(view);
+        ScrollViewer? observedScroll = null;
+        bool intermediate = false;
+        void ScrollChanged(object? sender, ScrollViewerViewChangedEventArgs args) => intermediate = args.IsIntermediate;
         try
         {
             window.Activate(); await MusicTestUi.Drain();
-            var list = (MusicLyricList)view.FindName("LyricList");
             var viewport = (FrameworkElement)view.FindName("LyricViewport");
             var fade = (Grid)view.FindName("LyricFadeViewport");
             var edge = (MusicArtworkFade)view.FindName("LyricEdgeFade");
             var backdrop = (Border)view.FindName("PageBackdrop");
+            var preview = (FrameworkElement)view.FindName("LyricPreviewFrame");
             var scroll = LyricVisuals(list).OfType<ScrollViewer>().First();
+            observedScroll = scroll; scroll.ViewChanged += ScrollChanged;
             Check(ReferenceEquals(list.Parent, fade) && !ReferenceEquals(edge.Source, list),
                 "lyric text stays directly in XAML, outside the sampled background surface");
             var text = LyricVisuals(list).OfType<TextBlock>().ToArray();
@@ -184,55 +194,104 @@ public static partial class MusicLyricDisplayTests
                 window.Resize(size.Width, size.Height); view.Width = size.Width; view.Height = size.Height; DesktopTestUi.WindowRoot(window).UpdateLayout();
                 Equal(size.Width, view.ActualWidth); Equal(size.Height, view.ActualHeight);
                 await MusicTestUi.Drain();
-                await WaitForLyric(() => CenterGap(list, scroll, Math.Max(0, f.Module.LyricDisplayIndex)) < 1);
+                await WaitForLyric(() => !intermediate && !MusicLyricScroll.IsMoving(scroll) &&
+                    CenterGap(list, scroll, Math.Max(0, f.Module.LyricDisplayIndex)) < 1);
                 int previous = f.Module.LyricDisplayIndex;
                 Check(view.BrowseLyric(key), "browse command");
-                await WaitForLyric(() => f.Module.HasLyricPreview && (key switch
-                {
-                    VirtualKey.Home => f.Module.LyricDisplayIndex == 0,
-                    VirtualKey.End => f.Module.LyricDisplayIndex == f.Module.Lyrics.Count - 1,
-                    _ => f.Module.LyricDisplayIndex >= 0 && f.Module.LyricDisplayIndex < previous
-                }) && CenterGap(list, scroll, f.Module.LyricDisplayIndex) < 1);
-                await MusicTestUi.Drain();
-                Console.WriteLine($"LYRIC {size} {key}: row={f.Module.LyricDisplayIndex}, centerGap={CenterGap(list, scroll, f.Module.LyricDisplayIndex):F2}");
-                var visible = await NativeDesktopCapture.CaptureAsync(fade);
-                var edgeOpacity = edge.Opacity;
-                NativeDesktopCapture.Capture clear;
-                try { edge.Opacity = 0; clear = await NativeDesktopCapture.CaptureAsync(fade); }
-                finally { edge.Opacity = edgeOpacity; }
-                long difference = 0, content = 0;
-                for (int y = (int)(visible.Height * .15); y < visible.Height * .85; y++)
-                for (int x = 0; x < visible.Width; x++)
-                for (int c = 0; c < 3; c++)
-                {
-                    int at = (y * visible.Width + x) * 4 + c;
-                    difference += Math.Abs(visible.Pixels[at] - clear.Pixels[at]); content += clear.Pixels[at];
-                }
-                Check(content > 1000 && difference <= content * .005,
-                    "the native edge backdrop leaves central lyric pixels unchanged");
-                var row = list.ContainerFromIndex(f.Module.LyricDisplayIndex) as ListViewItem;
-                Check(row is not null && row.Opacity == 1, "active lyric rows do not use whole-row fading");
-                var originalBackdrop = backdrop.Background;
-                var originalBackground = fade.Background;
-                double originalLyrics = list.Opacity;
                 try
                 {
-                    // An opaque white source over black lets desktop RGB measure the actual
-                    // compositor mask, without relying on RenderTargetBitmap's child-visual support.
-                    backdrop.Background = new SolidColorBrush(Colors.White);
-                    fade.Background = new SolidColorBrush(Colors.Black); list.Opacity = 0;
-                    var edgeFrame = await NativeDesktopCapture.CaptureAsync(fade);
-                    byte Coverage(double y) => edgeFrame.Pixels[((int)(edgeFrame.Height * y) * edgeFrame.Width + edgeFrame.Width / 2) * 4];
-                    Check(Coverage(.05) is > 90 and < 170 && Coverage(.95) is > 90 and < 170,
-                        "the upper and lower compositor fades have half coverage at five percent");
-                    foreach (double y in new[] { .15, .3, .5, .7, .85 }) Check(Coverage(y) <= 2, "central mask stays transparent");
+                    await WaitForLyric(() => !intermediate && !MusicLyricScroll.IsMoving(scroll) && f.Module.HasLyricPreview && (key switch
+                    {
+                        VirtualKey.Home => f.Module.LyricDisplayIndex == 0,
+                        VirtualKey.End => f.Module.LyricDisplayIndex == f.Module.Lyrics.Count - 1,
+                        _ => f.Module.LyricDisplayIndex >= 0 && f.Module.LyricDisplayIndex < previous
+                    }) && CenterGap(list, scroll, f.Module.LyricDisplayIndex) < 1);
                 }
-                finally { backdrop.Background = originalBackdrop; fade.Background = originalBackground; list.Opacity = originalLyrics; }
-                Equal(0, f.Playback.Seeks);
-                if (size.Width == 1298) await SaveLyricFrame(view, $"player-lyrics-{key}.png");
+                catch (InvalidOperationException error)
+                {
+                    string rows = list.ItemsPanelRoot is { } panel ? string.Join(';', panel.Children.OfType<FrameworkElement>()
+                        .Select(row => $"{list.IndexFromContainer(row)}:{DesktopTestUi.Bounds(row, scroll)}:context={row.DataContext?.GetType().Name}")) : "none";
+                    throw new InvalidOperationException($"{error.Message}; key={key}, size={size}, preview={f.Module.HasLyricPreview}, " +
+                        $"index={previous}->{f.Module.LyricDisplayIndex}, gap={CenterGap(list, scroll, f.Module.LyricDisplayIndex)}, " +
+                        $"offset={scroll.VerticalOffset}, moving={MusicLyricScroll.IsMoving(scroll)}, intermediate={intermediate}, scrollable={scroll.ScrollableHeight}, viewport={scroll.ViewportHeight}, " +
+                        $"extent={scroll.ExtentHeight}, list={list.ActualWidth}x{list.ActualHeight}, rows={rows}", error);
+                }
+                // Pixel capture must observe one preview, independently of its idle timeout.
+                bool resumeEnabled = resumeTimer.IsEnabled;
+                resumeTimer.Stop();
+                try
+                {
+                    await MusicTestUi.Drain();
+                    Console.WriteLine($"LYRIC {size} {key}: row={f.Module.LyricDisplayIndex}, centerGap={CenterGap(list, scroll, f.Module.LyricDisplayIndex):F2}");
+                    string PixelState() => $"offset={scroll.VerticalOffset:F6}, moving={MusicLyricScroll.IsMoving(scroll)}, intermediate={intermediate}, row={f.Module.LyricDisplayIndex}, " +
+                        $"gap={CenterGap(list, scroll, f.Module.LyricDisplayIndex):F6}, preview={f.Module.HasLyricPreview}, " +
+                        $"edge={DesktopTestUi.Bounds(edge, fade)}, opacity={edge.Opacity}, " +
+                        $"backdrop={string.Join(';', (backdrop.Background as RadialGradientBrush)?.GradientStops.Select(stop => $"{stop.Offset}:{stop.Color}") ?? [])}";
+                    string beforePixels = PixelState();
+                    var visible = await NativeDesktopCapture.CaptureAsync(fade);
+                    var edgeOpacity = edge.Opacity;
+                    NativeDesktopCapture.Capture clear;
+                    try { edge.Opacity = 0; clear = await NativeDesktopCapture.CaptureAsync(fade); }
+                    finally { edge.Opacity = edgeOpacity; }
+                    long difference = 0, content = 0;
+                    for (int y = (int)(visible.Height * .15); y < visible.Height * .85; y++)
+                    for (int x = 0; x < visible.Width; x++)
+                    for (int c = 0; c < 3; c++)
+                    {
+                        int at = (y * visible.Width + x) * 4 + c;
+                        difference += Math.Abs(visible.Pixels[at] - clear.Pixels[at]); content += clear.Pixels[at];
+                    }
+                    if (difference > content * .005)
+                    {
+                        await NativeDesktopCapture.SaveAsync(visible, "lyric-edge-visible");
+                        await NativeDesktopCapture.SaveAsync(clear, "lyric-edge-clear");
+                    }
+                    Check(content > 1000 && difference <= content * .005,
+                        $"the native edge backdrop leaves central lyric pixels unchanged; difference={difference}, content={content}, " +
+                        $"ratio={(double)difference / Math.Max(1, content):F6}, viewport={visible.Width}x{visible.Height}, " +
+                        $"before=[{beforePixels}], after=[{PixelState()}]");
+                    var row = list.ContainerFromIndex(f.Module.LyricDisplayIndex) as ListViewItem;
+                    Check(row is not null && row.Opacity == 1, "active lyric rows do not use whole-row fading");
+                    var originalBackdrop = backdrop.Background;
+                    var originalBackground = fade.Background;
+                    double originalLyrics = list.Opacity, originalPreview = preview.Opacity;
+                    try
+                    {
+                        // An opaque white source over black lets desktop RGB measure the actual
+                        // compositor mask, without relying on RenderTargetBitmap's child-visual support.
+                        backdrop.Background = new SolidColorBrush(Colors.White);
+                        fade.Background = new SolidColorBrush(Colors.Black); list.Opacity = preview.Opacity = 0;
+                        var edgeFrame = await NativeDesktopCapture.CaptureAsync(fade);
+                        byte Coverage(double y) => edgeFrame.Pixels[((int)(edgeFrame.Height * y) * edgeFrame.Width + edgeFrame.Width / 2) * 4];
+                        string samples = string.Join(';', new[] { .05, .15, .3, .5, .7, .85, .95 }
+                            .Select(y => $"({edgeFrame.Width / 2},{(int)(edgeFrame.Height * y)})={Coverage(y)}"));
+                        if (Coverage(.05) is not (> 90 and < 170) || Coverage(.95) is not (> 90 and < 170) ||
+                            new[] { .15, .3, .5, .7, .85 }.Any(y => Coverage(y) > 2))
+                            await NativeDesktopCapture.SaveAsync(edgeFrame, "lyric-edge-mask");
+                        Check(Coverage(.05) is > 90 and < 170 && Coverage(.95) is > 90 and < 170,
+                            $"the upper and lower compositor fades have half coverage at five percent; pixels={samples}");
+                        foreach (double y in new[] { .15, .3, .5, .7, .85 })
+                            Check(Coverage(y) <= 2, $"central mask stays transparent; pixels={samples}, {PixelState()}");
+                    }
+                    finally
+                    {
+                        backdrop.Background = originalBackdrop; fade.Background = originalBackground;
+                        list.Opacity = originalLyrics; preview.Opacity = originalPreview;
+                    }
+                    Equal(0, f.Playback.Seeks);
+                    if (size.Width == 1298) await SaveLyricFrame(view, $"player-lyrics-{key}.png");
+                }
+                finally
+                {
+                    if (resumeEnabled) resumeTimer.Start();
+                }
             }
         }
-        finally { window.Close(); f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail); }
+        finally
+        {
+            if (observedScroll is not null) observedScroll.ViewChanged -= ScrollChanged;
+            window.Close(); f.Module.DeactivateGlobalSurface(MeowFilm.Desktop.DesktopGlobalSurface.PlayerDetail);
+        }
     }
 
     private static async Task VerifyLyricRendering()
@@ -341,6 +400,7 @@ public static partial class MusicLyricDisplayTests
         view.Width = 1298; view.Height = 848;
         var host = new Canvas(); host.Children.Add(view);
         var window = DesktopTestUi.CreateWindow(host, 1440, 800); window.AttachRoot();
+        NativeDesktopCapture.DisableWindowTransitions(window);
         ((OverlappedPresenter)window.AppWindow.Presenter).SetBorderAndTitleBar(false, false);
         window.Resize(1298, 848); return window;
     }

@@ -3,6 +3,8 @@ using System.IO;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
+using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
@@ -122,12 +124,18 @@ public static partial class FilmPlayerOverlayTests
             {
                 var current = scene.Session.SnapshotFor(page)!;
                 Check(ReferenceEquals(scene.Film.Playback, page) && ReferenceEquals(page.EpisodeDirectory, directory) &&
-                    ReferenceEquals(directory?.Presentation, presentation) && Math.Abs(scroll.VerticalOffset - offset) < 1 &&
-                    ReferenceEquals(scene.Surface.Content, overlay) && ReferenceEquals(overlay.XamlRoot, scene.Shell.Root.XamlRoot) &&
-                    scene.Fixture.Native.Scope == scope && ReferenceEquals(NativeMediaFixtures.Field(scene.Fixture.Native, "pending"), pending) &&
-                    current.SessionId == snapshot.SessionId && current.AttemptId == snapshot.AttemptId && current.CurrentId == snapshot.CurrentId &&
-                    scene.Session.HasOutput == output && scene.Fixture.Traffic.BusinessCalls == calls,
-                    operation + " restores the same page directory position and occurrence without another Film RPC");
+                    ReferenceEquals(directory?.Presentation, presentation), operation + " retains the same page directory and presentation");
+                Check(Math.Abs(scroll.VerticalOffset - offset) < 1,
+                    operation + $" retains the page position: before={offset}; after={scroll.VerticalOffset}");
+                Check(ReferenceEquals(scene.Surface.Content, overlay) && ReferenceEquals(overlay.XamlRoot, scene.Shell.Root.XamlRoot),
+                    operation + " retains the mounted picture and controls in the same Shell composition root");
+                Check(scene.Fixture.Native.Scope == scope && ReferenceEquals(NativeMediaFixtures.Field(scene.Fixture.Native, "pending"), pending),
+                    operation + $" retains the committed and pending native owners: scopeBefore={scope}; scopeAfter={scene.Fixture.Native.Scope}; pendingBefore={pending is not null}; pendingAfter={NativeMediaFixtures.Field(scene.Fixture.Native, "pending") is not null}");
+                Check(current.SessionId == snapshot.SessionId && current.AttemptId == snapshot.AttemptId && current.CurrentId == snapshot.CurrentId,
+                    operation + $" retains the exact business occurrence: session={current.SessionId == snapshot.SessionId}; attempt={current.AttemptId == snapshot.AttemptId}; current={current.CurrentId == snapshot.CurrentId}");
+                Check(scene.Session.HasOutput == output, operation + $" preserves actual native output: expected={output}; actual={scene.Session.HasOutput}");
+                Check(scene.Fixture.Traffic.BusinessCalls == calls,
+                    operation + $" performs no Film RPC: before={calls}; after={scene.Fixture.Traffic.BusinessCalls}; progress={scene.Fixture.Traffic.Commands("media.progress").Length}");
             }
         }
     }
@@ -186,6 +194,10 @@ public static partial class FilmPlayerOverlayTests
                     "resized full screen/PiP presents pixels, not just a terminal owner state");
                 window.Close();
                 await Until(() => scene.PlayerWindow is null && ReferenceEquals(overlay.XamlRoot, scene.Shell.Root.XamlRoot));
+                DesktopTestUi.WindowRoot(scene.Shell).UpdateLayout();
+                await Until(() => !Field<bool>(scene.Fixture.Native, "updatingSurface") &&
+                    NativeMediaFixtures.Field(scene.Fixture.Native, "presentedSurface") is FilmKernelNative.Surface presented &&
+                    presented.Equals(scene.Surface.Describe()));
                 AssertPicture(await scene.Frame(action + "-returned-" + round), scene, output: true);
                 Check(scene.Fixture.CurrentAllocation().Matches(allocation) && scene.Fixture.Native.Scope == scope &&
                     ReferenceEquals(scene.Page.EpisodeDirectory, directory) && !scene.Session.CanRetainMedia &&
@@ -227,7 +239,17 @@ public static partial class FilmPlayerOverlayTests
         var patch = PicturePatch(scene.PictureBounds);
         if (popup is { } menu) Check(Intersect(patch, menu).Width == 0 || Intersect(patch, menu).Height == 0,
             "the retained-picture sample must be outside the source popup");
-        if (output) AssertVideoPixels(image, scene.PictureBounds, "the actual Shell still displays the accepted decoded picture");
+        if (output)
+        {
+            var actual = scene.Surface.Describe();
+            var presented = NativeMediaFixtures.Field(scene.Fixture.Native, "presentedSurface") as FilmKernelNative.Surface?;
+            AssertVideoPixels(image, scene.PictureBounds, "the actual Shell still displays the accepted decoded picture; " +
+                $"actual={actual.Width}x{actual.Height}/{actual.Visible}, " +
+                $"presented={presented?.Width}x{presented?.Height}/{presented?.Visible}, " +
+                $"sameWindow={actual.DisplayWindow == presented?.DisplayWindow}, " +
+                $"updating={Field<bool>(scene.Fixture.Native, "updatingSurface")}, " +
+                $"pictures={scene.Fixture.Native.Output?.SubmittedPictures}, picture={scene.PictureBounds}");
+        }
         else Check(Fraction(image, patch, (red, green, blue) => red < 12 && green < 12 && blue < 12) > .95,
             "idle and silent preparation keep the actual black picture canvas without grey/white clearing");
     }
@@ -254,14 +276,15 @@ public static partial class FilmPlayerOverlayTests
         private readonly MusicNativeApplication musicApplication;
         private readonly AppClosePreferences closePreferences;
         private ShellWindow? shell;
-        private Task? preparing;
+        private Grid? frame;
+        private Guid sessionId;
         internal ShellWindow Shell => shell!;
         internal FilmPlaybackPage Page => Film.Playback!;
         internal FilmPlaybackView View => Visuals(Film.View).OfType<FilmPlaybackView>().Single();
         internal FilmVideoSurface Surface => (FilmVideoSurface)Fixture.Native.VideoView;
         internal Rect PictureBounds => Intersect(Bounds(Element<Grid>("VideoPicture"), DesktopTestUi.WindowRoot(Shell)),
             Bounds(Element<ScrollViewer>("PageScroll"), DesktopTestUi.WindowRoot(Shell)));
-        internal DesktopWindow? PlayerWindow => DesktopWindow.GetWindow(Element<Grid>("PlayerFrame")) is { } window &&
+        internal DesktopWindow? PlayerWindow => frame is not null && DesktopWindow.GetWindow(frame) is { } window &&
             !ReferenceEquals(window, Shell) ? window : null;
         internal int ReadCommands => new[] { "browse", "browse.metadata", "browse.season", "browse.refresh", "prepare" }
             .Sum(action => Fixture.Traffic.Commands(action).Length);
@@ -299,8 +322,18 @@ public static partial class FilmPlayerOverlayTests
                 scene.Shell.Resize(1120, 820); DesktopTestUi.MoveWindow(scene.Shell, 40, 40); scene.Shell.Show();
                 await Until(() => scene.Music.PlayerView.IsLoaded && scene.Shell.Root.IsLoaded);
                 var modules = scene.ShellElement<ListView>("ModuleNavigationList");
-                DesktopTestUi.Select(modules, modules.Items.OfType<ModuleSession>().Single(item => item.Module == scene.Film));
+                var filmModule = modules.Items.OfType<ModuleSession>().Single(item => item.Module == scene.Film);
+                modules.ScrollIntoView(filmModule);
+                await Until(() => modules.ContainerFromItem(filmModule) is ListViewItem { IsLoaded: true, IsEnabled: true } item &&
+                    Visible(item) && item.ActualWidth > 0);
+                var navigation = FrameworkElementAutomationPeer.CreatePeerForElement(modules) ?? new ListViewAutomationPeer(modules);
+                var row = navigation.GetChildren().Single(peer => peer.GetName() == scene.Film.Title);
+                var selection = row.GetPattern(PatternInterface.SelectionItem) as ISelectionItemProvider ??
+                    throw new InvalidOperationException("The mounted Film navigation row has no selection automation pattern.");
+                selection.Select();
                 await Until(() => scene.Film.View.IsLoaded && scene.Film.IsHome);
+                Check(ReferenceEquals(modules.SelectedItem, filmModule) && Visible(scene.Film.View),
+                    "the actual Film navigation selection activates its visible home route");
                 Check(scene.Music.PlayerView.IsLoaded, "entering Film retains the music player that owns the global surfaces");
                 var reply = await fixture.Runtime.CallAsync("cat.script.status", new { });
                 Check(FilmJson.Bool(reply, "ok"), "read source declarations from the actual installed Cat owner");
@@ -319,25 +352,33 @@ public static partial class FilmPlayerOverlayTests
                     MetadataProvider: "tmdb", MetadataId: "1");
                 var request = new FilmPlaybackRequest(target, sources);
                 await scene.Film.OpenPlaybackAsync(new(target.Id, target.Title, "", "") { PlaybackContext = request }, request);
+                scene.sessionId = fixture.Traffic.Opened(target.Id);
                 await Until(() => scene.Film.IsPlayback && scene.View.IsLoaded && scene.Surface.IsLoaded &&
                     !scene.Page.ListLoading && scene.Page.Sources.Count > 0);
+                var admitted = await scene.Media.Admitted.Task.WaitAsync(TimeSpan.FromSeconds(20));
+                var snapshot = scene.Session.SnapshotFor(scene.Page)!;
+                Check(scene.Page.CanPlay && snapshot.AttemptId == admitted.Identity &&
+                    !FilmJson.Bool(snapshot.Attempt, "prepareOnly") && !scene.Session.HasOutput &&
+                    NativeMediaFixtures.Field(fixture.Native, "pending") is null,
+                    "the real Windows automatic attempt is admitted before the idle scene, without starting native preparation");
+                scene.frame = Named<Grid>(scene.View, "PlayerFrame");
                 return scene;
             }
             catch { await scene.DisposeAsync(); throw; }
         }
-        internal T Element<T>(string name) where T : FrameworkElement => Named<T>(View, name);
+        internal T Element<T>(string name) where T : FrameworkElement => View.FindName(name) as T ??
+            (frame is null ? null : Visuals(frame).OfType<T>().FirstOrDefault(element => element.Name == name)) ?? Named<T>(View, name);
         internal T ShellElement<T>(string name) where T : FrameworkElement => Named<T>(DesktopTestUi.WindowRoot(Shell), name);
         internal async Task Prepare()
         {
-            preparing = Session.CommandAsync("prepare");
+            Media.BeginPreparation();
             await Media.Prepared.Task.WaitAsync(TimeSpan.FromSeconds(20));
         }
         internal async Task Play(bool paused = true)
         {
             Media.Release();
-            if (preparing is not null) await preparing;
             var owner = new FilmPlaybackNativeFixture.PageOwner(Session, Page,
-                Fixture.Traffic.Opened(Page.EntryTarget.Id), Page.EntryTarget.Id);
+                sessionId, Page.EntryTarget.Id);
             await Fixture.OutputAsync(owner, pauseAfterOutput: paused);
         }
         internal async Task<NativeDesktopCapture.Capture> Frame(string name, FrameworkElement? target = null)
@@ -384,13 +425,16 @@ public static partial class FilmPlayerOverlayTests
         }
     }
 
-    // Only a scheduling gate after the production native prepare has completed.
+    // Scheduling gates before and after the production native prepare.
     // All decoding, first-frame work, output, controls, cancellation and retirement stay real.
     private sealed class PreparedFilmMedia(IFilmNativeMedia inner) : IFilmNativeMedia
     {
+        internal readonly TaskCompletionSource<RuntimeMediaPlaybackIntent> Admitted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<RuntimeMediaPlaybackIntent> Prepared = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource prepare = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal void Release() => release.TrySetResult();
+        internal void BeginPreparation() => prepare.TrySetResult();
+        internal void Release() { prepare.TrySetResult(); release.TrySetResult(); }
         public FrameworkElement? View => inner.View;
         public NativePlaybackScope? Scope => inner.Scope;
         public string? Identity => inner.Identity;
@@ -406,6 +450,7 @@ public static partial class FilmPlayerOverlayTests
         public event EventHandler? Ended { add => inner.Ended += value; remove => inner.Ended -= value; }
         public async Task PrepareAsync(RuntimeMediaPlaybackIntent intent, FilmMediaReceipt receipt, INativeMediaResourceLease? lease, CancellationToken token)
         {
+            Admitted.TrySetResult(intent); await prepare.Task.WaitAsync(token);
             await inner.PrepareAsync(intent, receipt, lease, token);
             Prepared.TrySetResult(intent); await release.Task.WaitAsync(token);
         }

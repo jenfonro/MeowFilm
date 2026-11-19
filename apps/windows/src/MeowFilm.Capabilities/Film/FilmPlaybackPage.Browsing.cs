@@ -14,7 +14,7 @@ public sealed partial class FilmPlaybackPage
     private DirectoryKey? selection;
     private string? aggregateProvider;
     private long metadataChoiceGeneration;
-    private bool selectionLocked, explicitRead, preservingRead, browsingLoading = true;
+    private bool selectionLocked, explicitRead, preservingRead, preservingRefresh, browsingLoading = true;
     private string browsingError = "";
     private long browseRevision;
     private CancellationTokenSource? browseRead;
@@ -36,48 +36,81 @@ public sealed partial class FilmPlaybackPage
     private static JsonElement OwnProjection(JsonElement value, JsonElement previous) =>
         FilmJson.Equal(value, previous) ? previous : FilmJson.Copy(value);
 
-    private void UpdateBrowsing(FilmPlaybackSnapshot value)
+    private void UpdateBrowsing(FilmPlaybackSnapshot value, bool sourcesChanged)
     {
         var key = Key(value);
         bool loading = FilmJson.Bool(value.Browsing, "loading");
         string error = FilmJson.Text(value.Browsing, "error");
+        bool refreshing = FilmJson.Bool(value.Browsing, "refreshing");
         directories.TryGetValue(key, out var previous);
-        if (error.Length > 0 || FilmJson.Bool(value.Browsing, "refreshing")) unreadDirectories.Add(key);
+        if (error.Length > 0 || refreshing) unreadDirectories.Add(key);
+        if (loading || error.Length > 0)
+        {
+            if (!Matches(key)) return;
+            bool sameFiles = key.Source is null || previous is not null &&
+                new[] { "lines", "episodes", "originalEpisodes" }.All(name =>
+                    FilmJson.Equal(FilmJson.Member(previous.Browsing, name), FilmJson.Member(value.Browsing, name)));
+            if (error.Length > 0 && previous is not null && key == selection && EpisodeDirectory is not null && sameFiles)
+            {
+                // A failed refresh is a failed operation, not a replacement for the last successful display.
+                browsingLoading = explicitRead = false;
+                browsingError = "";
+                return;
+            }
+            // A disconnected execution and a failed refresh do not own the last successful display.
+            if (preservingRead && !explicitRead && EpisodeDirectory is not null && !refreshing)
+            {
+                if (!loading) preservingRead = false;
+                return;
+            }
+            browsingLoading = loading;
+            browsingError = error;
+            preservingRefresh = loading && refreshing && key == selection && EpisodeDirectory is not null;
+            if (EpisodeDirectory is null)
+            {
+                selection = key;
+                display = new(value.Metadata, value.SelectedMetadataSource, value.ContentKind,
+                    value.MetadataCache, value.Browsing, default, Overview, null, metadataRevision);
+            }
+            return;
+        }
+
+        var rows = FilmJson.Member(key.Source is null ? value.Raw : value.Browsing, "episodes");
+        var candidates = key.Source is null ? FilmJson.Member(value.Raw, "candidates") : rows;
         var slice = new BrowsingSlice(OwnProjection(value.Metadata, previous?.Metadata ?? default),
             OwnProjection(value.SelectedMetadataSource, previous?.Source ?? default), value.ContentKind,
             value.MetadataCache, OwnProjection(value.Browsing, previous?.Browsing ?? default),
-            OwnProjection(FilmJson.Member(value.Raw, "candidates"), previous?.CandidateRows ?? default),
-            value.WorkInfo?.Summary ?? "", previous?.Directory,
+            OwnProjection(candidates, previous?.CandidateRows ?? default), Overview, previous?.Directory,
             previous is null || !FilmJson.Equal(previous.Metadata, value.Metadata) ||
-                previous.Summary != (value.WorkInfo?.Summary ?? "") ? ++metadataRevision : previous.Revision);
-        if (!loading && error.Length == 0)
+                previous.Summary != Overview ? ++metadataRevision : previous.Revision);
+        var directory = slice.Directory ?? new FilmEpisodeDirectory();
+        var seasons = FilmJson.Member(slice.Metadata, "doubanSeasons");
+        if (seasons.ValueKind != JsonValueKind.Array) seasons = FilmJson.Member(slice.Metadata, "seasons");
+        string poster = FilmJson.Text(slice.Metadata, "poster_path");
+        if (poster.Length == 0) poster = FilmJson.Text(FilmJson.Member(slice.Metadata, "pic"), "normal");
+        string sourceName = "", provider = "";
+        if (key.Source is { } sourceId)
         {
-            var directory = slice.Directory ?? new FilmEpisodeDirectory();
-            var seasons = FilmJson.Member(slice.Metadata, "doubanSeasons");
-            if (seasons.ValueKind != JsonValueKind.Array) seasons = FilmJson.Member(slice.Metadata, "seasons");
-            string poster = FilmJson.Text(slice.Metadata, "poster_path");
-            if (poster.Length == 0) poster = FilmJson.Text(FilmJson.Member(slice.Metadata, "pic"), "normal");
-            directory.Apply(poster.Length > 0 ? poster : Item.Poster, value.WorkInfo?.Summary ?? "",
-                FilmJson.Member(key.Source is null ? value.Raw : slice.Browsing, "episodes"), seasons,
-                slice.CandidateRows, slice.Revision, key.Source is not null,
-                slice.Kind == "movie", previous is null || !FilmJson.Equal(previous.CandidateRows, slice.CandidateRows));
-            slice = slice with { Directory = directory };
-            directories[key] = slice;
-            unreadDirectories.Remove(key);
-            rememberedSelections[(key.Source, key.Metadata)] = key;
+            var source = FilmJson.Array(value.Raw, "sources").FirstOrDefault(row => FilmJson.Text(row, "id") == sourceId);
+            sourceName = FilmJson.Text(FilmJson.Member(source, "source"), "name");
+            if (sourceName.Length == 0) sourceName = FilmJson.Text(source, "title");
+            var line = FilmJson.Array(slice.Browsing, "lines").FirstOrDefault(row =>
+                FilmJson.Equal(FilmJson.Member(row, "id"), FilmJson.Member(slice.Browsing, "lineId")));
+            provider = FilmJson.Text(line, "provider");
         }
+        directory.Apply(poster.Length > 0 ? poster : Item.Poster, Overview, rows, seasons,
+            slice.CandidateRows, slice.Revision, key.Source is not null, slice.Kind == "movie", sourceName, provider,
+            previous is null || !FilmJson.Equal(previous.CandidateRows, slice.CandidateRows) ||
+                !FilmJson.Equal(FilmJson.Member(previous.Browsing, "lines"), FilmJson.Member(slice.Browsing, "lines")) ||
+                key.Source is not null && sourcesChanged);
+        slice = slice with { Directory = directory };
+        directories[key] = slice;
+        unreadDirectories.Remove(key);
+        rememberedSelections[(key.Source, key.Metadata)] = key;
         if (!Matches(key)) return;
-        // A read-only execution rebind is not a new display selection or a refresh.
-        if (previous is not null && preservingRead && !explicitRead && (loading || error.Length > 0) &&
-            !FilmJson.Bool(value.Browsing, "refreshing"))
-        {
-            if (!loading) preservingRead = false;
-            return;
-        }
-        selection = key; display = slice;
-        EpisodeDirectory = loading || error.Length > 0 ? null : slice.Directory;
-        browsingLoading = loading; browsingError = error;
-        if (!loading) { explicitRead = false; preservingRead = false; }
+        selection = key; display = slice; EpisodeDirectory = slice.Directory;
+        browsingError = "";
+        browsingLoading = preservingRefresh = explicitRead = preservingRead = false;
     }
 
     private async Task BrowseAsync(DirectoryKey key, bool metadataSelection = false)
@@ -90,7 +123,8 @@ public sealed partial class FilmPlaybackPage
         Applying = true;
         try
         {
-            selectionLocked = true; preservingRead = false; selection = key; browsingError = "";
+            bool reuseDisplay = key == selection && EpisodeDirectory is not null;
+            selectionLocked = true; preservingRead = preservingRefresh = false; selection = key; browsingError = "";
             if (!unreadDirectories.Contains(key) && directories.TryGetValue(key, out var loaded))
             {
                 display = loaded; EpisodeDirectory = loaded.Directory;
@@ -99,15 +133,18 @@ public sealed partial class FilmPlaybackPage
                 return;
             }
             browsingLoading = true; explicitRead = true;
-            // Keep the metadata/line menu for an unparsed line, but not another site's menu.
-            var lines = display is not null && FilmJson.Text(display.Browsing, "sourceId") == (key.Source ?? "")
-                ? FilmJson.Array(display.Browsing, "lines") : [];
-            var browsing = FilmJson.Encode(new { sourceId = key.Source, lineId = key.Line.Length > 0
-                ? JsonSerializer.Deserialize<JsonElement>(key.Line) : (JsonElement?)null, lines,
-                season = key.Season, loading = true });
-            display = new(DisplayMetadata, DisplaySource, DisplayKind, display?.Cache, browsing,
-                default, Overview, null, metadataRevision);
-            EpisodeDirectory = null;
+            if (!reuseDisplay)
+            {
+                // Keep the same site's line menu while reading an unparsed line.
+                var lines = display is not null && FilmJson.Text(display.Browsing, "sourceId") == (key.Source ?? "")
+                    ? FilmJson.Array(display.Browsing, "lines") : [];
+                var browsing = FilmJson.Encode(new { sourceId = key.Source, lineId = key.Line.Length > 0
+                    ? JsonSerializer.Deserialize<JsonElement>(key.Line) : (JsonElement?)null, lines,
+                    season = key.Season, loading = true });
+                display = new(DisplayMetadata, DisplaySource, DisplayKind, display?.Cache, browsing,
+                    default, Overview, null, metadataRevision);
+                EpisodeDirectory = null;
+            }
             ProjectBrowsing();
         }
         finally { Applying = false; }
@@ -120,10 +157,12 @@ public sealed partial class FilmPlaybackPage
         catch (Exception error)
         {
             if (revision != browseRevision) throw new OperationCanceledException();
-            browsingLoading = false; explicitRead = false;
-            browsingError = error is FilmPlaybackException film ? film.Code :
-                error is MeowFilm.Core.Runtime.BridgeException bridge ? bridge.Code :
-                error is OperationCanceledException ? "CANCELLED" : "SOURCE_FAILURE";
+            bool retained = !explicitRead && EpisodeDirectory is not null && browsingError.Length == 0;
+            browsingLoading = preservingRefresh = explicitRead = false;
+            if (!retained)
+                browsingError = error is FilmPlaybackException film ? film.Code :
+                    error is MeowFilm.Core.Runtime.BridgeException bridge ? bridge.Code :
+                    error is OperationCanceledException ? "CANCELLED" : "SOURCE_FAILURE";
             ProjectBrowsing();
             throw;
         }

@@ -1,7 +1,8 @@
 <UserControl x:Class="MeowFilm.Capabilities.MusicPlayerView"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- xmlns:local="using:MeowFilm.Capabilities" x:Name="Root">
- <UserControl.Resources>
+ xmlns:local="using:MeowFilm.Capabilities" xmlns:desktop="using:MeowFilm.Desktop" x:Name="Root">
+ <UserControl.Resources><ResourceDictionary>
+  <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml"/></ResourceDictionary.MergedDictionaries>
   <local:MusicVisibilityConverter x:Key="Visible"/>
   <Style TargetType="Button"><Setter Property="FontWeight" Value="Normal"/><Setter Property="MinWidth" Value="36"/><Setter Property="MinHeight" Value="36"/><Setter Property="Margin" Value="4,0"/><Setter Property="Padding" Value="6"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="CornerRadius" Value="8"/></Style>
   <Style x:Key="Player.MenuChoice" TargetType="local:MusicPlayerMenuChoice">
@@ -15,17 +16,20 @@
     </Grid>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
-  <MenuFlyout x:Name="ModeMenu"/>
-  <MenuFlyout x:Name="QualityMenu"/>
-  <MenuFlyout x:Name="MoreMenu"/>
-  <Border x:Name="FmPanel" Width="592" Padding="24" CornerRadius="20" Background="{Binding PlayerBackground}" RequestedTheme="Dark">
-   <Grid RowSpacing="16"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-    <Grid><TextBlock Text="切换频道" FontSize="20"/><Button x:Name="CloseFmButton" HorizontalAlignment="Right" Content="&#xE711;" FontFamily="Segoe Fluent Icons" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/></Grid>
-    <ScrollViewer x:Name="FmScroll" Grid.Row="1" MaxHeight="520" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-     <StackPanel Spacing="16"><StackPanel x:Name="FmModeChoices" Spacing="8"/><Grid x:Name="FmSceneChoices" ColumnSpacing="4" RowSpacing="4"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions></Grid></StackPanel>
-    </ScrollViewer>
-   </Grid>
-  </Border>
+  <MenuFlyout x:Name="ModeMenu" MenuFlyoutPresenterStyle="{StaticResource MeowFilm.ContextMenu}"/>
+  <MenuFlyout x:Name="QualityMenu" MenuFlyoutPresenterStyle="{StaticResource MeowFilm.ContextMenu}"/>
+  <MenuFlyout x:Name="MoreMenu" MenuFlyoutPresenterStyle="{StaticResource MeowFilm.ContextMenu}"/>
+  <DataTemplate x:Key="FmPanelTemplate">
+   <Border Width="368" Padding="14" CornerRadius="14" BorderThickness="1" BorderBrush="#60FFFFFF" Background="{Binding PlayerBackground}" RequestedTheme="Dark" TabFocusNavigation="Cycle">
+    <Border.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries><ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Playback/Presentation/MusicPlayerView.FmButton.xaml"/></ResourceDictionary.MergedDictionaries></ResourceDictionary></Border.Resources>
+    <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+     <Grid Margin="0,0,0,12"><TextBlock x:Name="FmTitle" Text="{Binding PlaybackFmTitle}" FontSize="14" Foreground="#C5C3C8" VerticalAlignment="Center" TextAlignment="Center"/><Button x:Name="CloseFmButton" Template="{StaticResource Player.FmButtonTemplate}" Width="28" Height="28" MinWidth="28" MinHeight="28" Padding="0" Margin="0" BorderThickness="0" BorderBrush="Transparent" Background="Transparent" Foreground="#EBEAED" HorizontalAlignment="Right" Content="&#xE711;" FontFamily="Segoe Fluent Icons" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/></Grid>
+     <ScrollViewer x:Name="FmScroll" Grid.Row="1" desktop:OverlayScrollChrome.Enabled="True" MaxHeight="520" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <StackPanel><StackPanel x:Name="FmModeChoices"/><TextBlock x:Name="FmSceneCaption" Text="场景模式" FontSize="13" Foreground="#C5C3C8" Margin="0,12,0,12"/><Border x:Name="FmSceneSurface" CornerRadius="12" Padding="6" Background="#12FFFFFF"><Grid x:Name="FmSceneChoices"><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions></Grid></Border></StackPanel>
+     </ScrollViewer>
+    </Grid>
+   </Border>
+  </DataTemplate>
   <Flyout x:Name="PlaylistPopup" Placement="Top">
    <ScrollViewer MaxHeight="300" MinWidth="180"><ItemsControl ItemsSource="{Binding Playlists}"><ItemsControl.ItemTemplate><DataTemplate>
     <Button Tag="{Binding Id}" Content="{Binding Name}" Click="AddCurrent_Click" HorizontalAlignment="Stretch"/>
@@ -69,7 +73,7 @@
     </Grid>
    </Grid></Border>
   </Flyout>
- </UserControl.Resources>
+ </ResourceDictionary></UserControl.Resources>
  <Grid Background="Transparent" PointerPressed="Surface_PointerPressed" PointerReleased="Surface_PointerReleased">
   <Grid.RowDefinitions><RowDefinition Height="8"/><RowDefinition Height="72"/></Grid.RowDefinitions>
   <Grid Grid.Row="1"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="232"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -84,14 +88,14 @@
     </Button>
    </Grid>
    <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-    <Button x:Name="ModeButton" Click="Mode_Click" IsEnabled="{Binding CanChangePlaybackMode}" AutomationProperties.Name="{Binding PlaybackModeText}"><local:MusicPlaybackIcon Key="{Binding PlaybackModeIcon}"/></Button>
+    <Button x:Name="ModeButton" Click="Mode_Click" IsEnabled="{Binding CanChangePlaybackMode}" AutomationProperties.Name="{Binding PlaybackModeText}"><local:MusicPlaybackIcon Key="{Binding PlaybackModeIcon}" Foreground="{Binding Foreground,ElementName=ModeButton}"/></Button>
     <local:SkipButton x:Name="PreviousButton" Next="False" Click="Previous_Click" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="上一首"/>
     <Button x:Name="PlayButton" Click="Play_Click" IsEnabled="{Binding CanTogglePlayback}" Width="40" Height="40" Padding="0" Margin="8,0" CornerRadius="20" Background="{ThemeResource MeowFilm.Brush.Accent}" Foreground="White" AutomationProperties.Name="播放或暂停"><Path x:Name="PlayGlyph" Width="40" Height="40" Stretch="None" Fill="{Binding Foreground,ElementName=PlayButton}" Data="M15.5,11 L29,20 L15.5,29 Z"/></Button>
     <local:SkipButton x:Name="NextButton" Click="Next_Click" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="下一首"/>
     <Button x:Name="QueueButton" Click="Queue_Click" AutomationProperties.Name="播放队列"><FontIcon Glyph="&#xE90B;" FontSize="20"/></Button>
    </StackPanel>
    <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,22,0">
-    <Button x:Name="QualityButton" Width="80" Click="Quality_Click" Visibility="{Binding HasQualityButton,Converter={StaticResource Visible}}" AutomationProperties.Name="{Binding CurrentQualityLabel}"><Border Width="72" BorderThickness="1" CornerRadius="3" Padding="6,2" BorderBrush="{ThemeResource TextFillColorSecondaryBrush}"><TextBlock Text="{Binding CurrentQualityLabel}" FontSize="10" TextAlignment="Center"/></Border></Button>
+    <Button x:Name="QualityButton" Width="80" Click="Quality_Click" Visibility="{Binding HasQualityButton,Converter={StaticResource Visible}}" AutomationProperties.Name="{Binding CurrentQualityLabel}"><Border Width="72" BorderThickness="1" CornerRadius="3" Padding="6,2" BorderBrush="{Binding Foreground,ElementName=QualityButton}"><TextBlock Text="{Binding CurrentQualityLabel}" Foreground="{Binding Foreground,ElementName=QualityButton}" FontSize="10" TextAlignment="Center"/></Border></Button>
     <Button x:Name="PlaylistButton" Click="PlaylistMenu_Click" IsEnabled="{Binding CanPlay}" AutomationProperties.Name="收藏到歌单"><FontIcon Glyph="&#xE710;" FontSize="20"/></Button>
     <Button x:Name="DesktopLyricsButton" Click="DesktopLyrics_Click" IsEnabled="{Binding CanToggleDesktopLyrics}" AutomationProperties.Name="{Binding DesktopLyricsLabel}" ToolTipService.ToolTip="{Binding DesktopLyricsLabel}"><TextBlock Text="桌" FontSize="15" Foreground="{Binding Foreground,ElementName=DesktopLyricsButton}"/></Button>
     <Button x:Name="VolumeButton" Click="Volume_Click" AutomationProperties.Name="音量"><FontIcon Glyph="&#xE767;" FontSize="20"/></Button>

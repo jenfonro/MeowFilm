@@ -244,9 +244,13 @@ public static class NovelDiscoveryTests
             choices = NovelTests.Find<RadioButton>(expansion).ToArray();
             Select(choices[^1]);
             await Until(() => module.ExploreKind == kinds[^1] && !module.LoadingDiscovery); await Render(window);
-            Check(!DesktopVisual.IsVisible(expansion) && DesktopVisual.IsVisible(Channels(module).Single(tab => tab.IsChecked == true)) &&
-                DesktopVisual.ContainsFocus(Channels(module).Single(tab => tab.IsChecked == true)),
-                "An overflow selection did not close and return to the visible first row.");
+            bar = NovelTests.Find<NovelDiscoveryChannelBar>(module.View).Single();
+            expansion = NovelTests.Find<Border>(bar).Single(border =>
+                AutomationProperties.GetAutomationId(border) == "novel.discovery.channels.expanded");
+            var restored = Channels(module).Single(tab => tab.IsChecked == true);
+            Check(!DesktopVisual.IsVisible(expansion) && DesktopVisual.IsVisible(restored) && DesktopVisual.ContainsFocus(restored),
+                $"Overflow restore: closed={!DesktopVisual.IsVisible(expansion)}, selected={restored.Content}, visible={DesktopVisual.IsVisible(restored)}, " +
+                $"focused={DesktopVisual.ContainsFocus(restored)}, actualFocus={DesktopVisual.Focused(module.View)}, id={AutomationProperties.GetAutomationId(restored)}.");
             bar = NovelTests.Find<NovelDiscoveryChannelBar>(module.View).Single();
             more = NovelTests.Find<Button>(bar).Single(button => AutomationProperties.GetAutomationId(button) == "novel.discovery.channels.expand");
             Invoke(more); await Render(window);
@@ -260,8 +264,9 @@ public static class NovelDiscoveryTests
             Invoke(more); await Render(window);
             Check(DesktopVisual.IsVisible(expansion));
             await module.NavigateAsync(NovelCapability.CategoriesRoute, default); await Render(window);
-            Check(!DesktopVisual.IsVisible(expansion) && DesktopVisual.IsVisible(Channels(module).Single(tab => tab.IsChecked == true)),
-                "Leaving home kept an old floating row or hid the current category.");
+            var category = Channels(module).Single(tab => tab.IsChecked == true);
+            Check(!DesktopVisual.IsVisible(expansion) && DesktopVisual.IsVisible(category),
+                $"Leaving home kept an old floating row or hid the current category (route={module.Route}, oldExpansion={DesktopVisual.IsVisible(expansion)}, category={category.Content}, categoryVisible={DesktopVisual.IsVisible(category)}, overlay={NovelTests.Find<Canvas>(module.View).Count(canvas => canvas.Visibility == Visibility.Visible)}).");
             bar = NovelTests.Find<NovelDiscoveryChannelBar>(module.View).Single();
             more = NovelTests.Find<Button>(bar).Single(button => AutomationProperties.GetAutomationId(button) == "novel.discovery.channels.expand");
             Invoke(more); await Render(window);

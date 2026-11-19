@@ -86,7 +86,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 - `IsRecording` 和 `GlobalErrors` 仅为运行时状态，不持久化。设置 UI 不探测、不推测占用；运行时附件以 `SetGlobalErrors` 发布真实注册结果，行内保留“热键被占用”或其他具体错误。重新检测只通过 `RequestRegistrationRefresh` 事件请求附件，设置未恢复、全局关闭或正在录制时不发出请求。
 - 媒体设置位于 `AppShutdown.sharedParticipants` 首位，其后依次为外观和关闭偏好。真正退出准备先同步令 `IsAvailable=false`，撤销编辑、输入及录制准入，封住全部系统媒体请求（包括 Pause／Stop）和自定义快捷键，再等待已接受保存实际结算；外观或关闭偏好保存未结算不能延后封口。取消准备按逆序恢复，媒体最后按权威开关重新开放；永久 Abort／Dispose 或已关闭的会话不再恢复。关闭询问及隐藏到托盘不进入真正退出准备，继续遵守各自开关。启动失败同样由生命周期所有者排空设置后才释放存储。
 
-`DialogPlacement.ShowAsync(owner, ContentDialog)` 使用 owner 已有的 `XamlRoot`，所属控件卸载或隐藏时关闭，完成后恢复仍可见的原焦点；窗口移动由正常呈现树处理，不再为表单注册窗口移动追位。播放器内的 `PlayerDialogHost` 是同一根内的模态 Grid，拥有外部点击／Esc 关闭准入及 owner 退场清理。`ColorSelection`、设置下拉框和栏目间距资源由 Desktop 共用，业务设置页只负责提供选项和提交至各自 owner。
+`DialogPlacement.ShowAsync(owner, ContentDialog)` 使用 owner 已有的 `XamlRoot`，所属控件卸载或隐藏时关闭；原生 `ContentDialog` 拥有正常关闭时的焦点恢复，公共机制只在关闭交接期间拒绝已隐藏或被业务 `canRestoreFocus` 判据退休的原焦点，不重复恢复或改写滚动位置。窗口移动由正常呈现树处理，不再为表单注册窗口移动追位。播放器内的 `PlayerDialogHost` 是同一根内的模态 Grid，拥有外部点击／Esc 关闭准入及 owner 退场清理。`ColorSelection`、设置下拉框和栏目间距资源由 Desktop 共用，业务设置页只负责提供选项和提交至各自 owner。
 
 ## 系统托盘与关闭选择
 

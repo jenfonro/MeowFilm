@@ -1,5 +1,4 @@
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Desktop;
 
@@ -8,17 +7,35 @@ namespace MeowFilm.Capabilities;
 // Only prepares placeholders for the visible card layout; never creates artwork or reads data.
 public sealed class FilmLoadingCards : AdaptiveCardPanel
 {
-    public bool IsGrid { get; set; }
+    public static readonly DependencyProperty IsGridProperty = DependencyProperty.Register(nameof(IsGrid),
+        typeof(bool), typeof(FilmLoadingCards), new PropertyMetadata(false, (owner, _) => ((FilmLoadingCards)owner).QueuePlaceholders()));
+    public bool IsGrid { get => (bool)GetValue(IsGridProperty); set => SetValue(IsGridProperty, value); }
+    private bool placeholdersQueued;
 
     public FilmLoadingCards()
     {
         IsHitTestVisible = false;
+        Loaded += (_, _) => QueuePlaceholders();
+        SizeChanged += (_, _) => QueuePlaceholders();
+        RegisterPropertyChangedCallback(MinimumCardWidthProperty, (_, _) => QueuePlaceholders());
+        RegisterPropertyChangedCallback(CardGapProperty, (_, _) => QueuePlaceholders());
+        RegisterPropertyChangedCallback(MaximumColumnsProperty, (_, _) => QueuePlaceholders());
     }
 
-    protected override Size MeasureOverride(Size constraint)
+    private void QueuePlaceholders()
     {
-        double width = double.IsInfinity(constraint.Width) ? MaximumCardWidth : constraint.Width;
-        int columns = Shelf.MeasureCards(width, MinimumCardWidth, CardGap).Count;
+        if (placeholdersQueued) return;
+        placeholdersQueued = DispatcherQueue.TryEnqueue(() =>
+        {
+            placeholdersQueued = false;
+            UpdatePlaceholders();
+        });
+    }
+
+    private void UpdatePlaceholders()
+    {
+        if (!IsLoaded || ActualWidth <= 0) return;
+        int columns = Math.Min(MaximumColumns, Shelf.MeasureCards(ActualWidth, MinimumCardWidth, CardGap).Count);
         int count = columns * (IsGrid ? 2 : 1);
         while (Children.Count > count) Children.RemoveAt(Children.Count - 1);
         while (Children.Count < count)
@@ -35,6 +52,5 @@ public sealed class FilmLoadingCards : AdaptiveCardPanel
             });
             Children.Add(card);
         }
-        return base.MeasureOverride(constraint);
     }
 }

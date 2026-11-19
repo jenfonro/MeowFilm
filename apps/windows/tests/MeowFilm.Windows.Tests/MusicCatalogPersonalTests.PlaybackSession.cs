@@ -48,17 +48,19 @@ public static partial class MusicCatalogPersonalTests
         internal Grid Root { get; } = new();
         internal PlayerDialogHost Dialog { get; } = new();
         internal DesktopWindow Window { get; }
+        private bool closed;
         internal SessionHost(MusicPlayerView footer)
         {
             Root.RowDefinitions.Add(new()); Root.RowDefinitions.Add(new() { Height = new GridLength(80) });
             Root.UseResource(Grid.BackgroundProperty, "MeowFilm.Brush.AppBackground");
             Root.Children.Add(footer); Grid.SetRow(footer, 1);
             Root.Children.Add(Dialog); Grid.SetRowSpan(Dialog, 2);
-            Window = MusicTestUi.Window(Root, 1260, 760); Dialog.Attach(Window); Window.Activate();
+            Window = MusicTestUi.Window(Root, 1260, 760); Window.Closed += (_, _) => closed = true;
+            Dialog.Attach(Window); Window.Activate();
         }
         internal void Mount() { Window.Content = Root; Window.AttachRoot(); Layout(Root, 1260, 760); }
         internal void Unmount() { Window.Content = null; }
-        public void Dispose() { Dialog.Close(); Window.Content = null; Window.Close(); }
+        public void Dispose() { if (closed) return; Dialog.Close(); Window.Content = null; Window.Close(); }
     }
     private static SessionHost SessionSurface(MusicPlayerView footer, string name) => new(footer);
     private static async Task SessionLoaded(MusicPlayerView footer)
@@ -69,7 +71,7 @@ public static partial class MusicCatalogPersonalTests
         PlayerMenuInput.For(footer).CloseCurrent();
         await Until(() => !menu.IsOpen); await Drain();
         DesktopTestUi.Invoke((Button)footer.FindName("ModeButton"));
-        await Until(() => menu.IsOpen); await Drain();
+        await Until(() => menu.IsOpen && menu.Items.All(item => item.IsLoaded)); await Drain();
         Check(menu.IsOpen && ReferenceEquals(menu.XamlRoot, footer.XamlRoot), "mode menu is in the real native root");
         Check(menu.Items.All(item => item is ToggleMenuFlyoutItem), "source actions are flat native choices");
         return menu;
@@ -82,7 +84,7 @@ public static partial class MusicCatalogPersonalTests
     {
         var menu = await OpenSessionMenu(footer);
         InvokeSessionAction(SessionAction(menu, "切换频道"));
-        await Until(() => !menu.IsOpen && PlayerDialogHost.Find(footer)?.IsOpen == true); await Drain();
+        await Until(() => !menu.IsOpen && PlayerDialogHost.Find(footer)?.IsOpen == true && footer.FmPanel.IsLoaded); await Drain();
     }
     private static async Task OrdinarySessionSong(Fixture f)
     {
@@ -340,12 +342,12 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.NavigateAsync("catalog-home", default);
         var footer = (MusicPlayerView)f.Module.PlayerView;
         using var surface = SessionSurface(footer, "fm-window"); await SessionLoaded(footer);
-        var panel = (Border)footer.FindName("FmPanel");
-        var scroll = (ScrollViewer)footer.FindName("FmScroll");
-        var modes = (StackPanel)footer.FindName("FmModeChoices");
-        var scenes = (Grid)footer.FindName("FmSceneChoices");
+        var panel = footer.FmPanel;
+        var scroll = (ScrollViewer)footer.FmPanel.FindName("FmScroll");
+        var modes = (StackPanel)footer.FmPanel.FindName("FmModeChoices");
+        var scenes = (Grid)footer.FmPanel.FindName("FmSceneChoices");
         var button = (Button)footer.FindName("ModeButton");
-        var close = (Button)footer.FindName("CloseFmButton");
+        var close = (Button)footer.FmPanel.FindName("CloseFmButton");
         void Centered()
         {
             var center = panel.TransformToVisual(surface.Root).TransformPoint(new Point(panel.ActualWidth / 2, panel.ActualHeight / 2));
@@ -404,7 +406,7 @@ public static partial class MusicCatalogPersonalTests
         var footer = (MusicPlayerView)f.Module.PlayerView;
         using var surface = SessionSurface(footer, "playback-fm-authority");
         await Drain(); await OpenSessionFm(footer);
-        var choices = (StackPanel)footer.FindName("FmModeChoices");
+        var choices = (StackPanel)footer.FmPanel.FindName("FmModeChoices");
         var retained = choices.Children.OfType<Button>().Single(choice => ((MusicCatalogChoice)choice.Tag).Key == "explore");
         string key = f.Module.PlaybackFmActionKey;
         if (retirement == "catalog-action") f.Module.InvalidateCatalogAction();
@@ -417,7 +419,7 @@ public static partial class MusicCatalogPersonalTests
         {
             // InvalidateCatalogAction changes authority synchronously but does not publish a view notification.
             // Dismiss the still-mounted channel through its own control before requesting a lower mode menu.
-            ((IInvokeProvider)new ButtonAutomationPeer((Button)footer.FindName("CloseFmButton"))
+            ((IInvokeProvider)new ButtonAutomationPeer((Button)footer.FmPanel.FindName("CloseFmButton"))
                 .GetPattern(PatternInterface.Invoke)).Invoke();
             await Drain();
         }
@@ -446,13 +448,13 @@ public static partial class MusicCatalogPersonalTests
         using (var other = new DesktopTestUi.Host(new Grid(), 100, 100))
         { await Until(() => !surface.Window.IsActive); Check(surface.Dialog.IsOpen, "deactivation cancels a press but does not dismiss the channel"); }
         surface.Window.Activate(); await Until(() => surface.Window.IsActive);
-        Check(surface.Dialog.IsOpen && ReferenceEquals(((Border)footer.FindName("FmPanel")).Background, f.Module.PlayerBackground),
+        Check(surface.Dialog.IsOpen && ReferenceEquals(footer.FmPanel.Background, f.Module.PlayerBackground),
             "channel consumes the actual player palette and survives activation changes");
         await GeneralAppearanceTests.SavePreview(surface.Root, "playback-channel-root", 1260, 760);
         Check(surface.Dialog.HandleEscape(VirtualKey.Escape)); await Drain();
         Equal(requests, f.Platform.Requests.Count); Equal(opens, f.Output.Opens);
         await OpenSessionFm(footer);
-        var retained = ((StackPanel)footer.FindName("FmModeChoices")).Children.OfType<Button>().First();
+        var retained = ((StackPanel)footer.FmPanel.FindName("FmModeChoices")).Children.OfType<Button>().First();
         surface.Root.Visibility = Visibility.Collapsed; await Drain(); Check(!surface.Dialog.IsOpen);
         int starts = f.App.Log.Count(call => call.Method == "music.recommendations.start");
         DesktopTestUi.Invoke(retained); await Drain(); Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));

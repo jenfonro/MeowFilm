@@ -9,11 +9,43 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicCatalogSkeleton : Panel
 {
     public static readonly DependencyProperty IsHomeProperty = DependencyProperty.Register(nameof(IsHome),
-        typeof(bool), typeof(MusicCatalogSkeleton), new PropertyMetadata(false, (owner, _) => ((UIElement)owner).InvalidateMeasure()));
+        typeof(bool), typeof(MusicCatalogSkeleton), new PropertyMetadata(false, (owner, _) =>
+        {
+            var skeleton = (MusicCatalogSkeleton)owner;
+            skeleton.QueuePlaceholders();
+            skeleton.InvalidateMeasure();
+        }));
     public bool IsHome { get => (bool)GetValue(IsHomeProperty); set => SetValue(IsHomeProperty, value); }
     private readonly List<Rect> bounds = [];
+    private bool placeholdersQueued;
 
-    public MusicCatalogSkeleton() { IsHitTestVisible = false; }
+    public MusicCatalogSkeleton()
+    {
+        IsHitTestVisible = false;
+        Loaded += (_, _) => QueuePlaceholders();
+        SizeChanged += (_, _) => QueuePlaceholders();
+    }
+
+    private void QueuePlaceholders()
+    {
+        if (placeholdersQueued) return;
+        placeholdersQueued = DispatcherQueue.TryEnqueue(() =>
+        {
+            placeholdersQueued = false;
+            UpdatePlaceholders();
+        });
+    }
+
+    private void UpdatePlaceholders()
+    {
+        if (!IsLoaded || ActualWidth <= 0) return;
+        var (covers, _) = Shelf.MeasureCards(ActualWidth, 124, 16);
+        int lead = IsHome ? Shelf.MeasureCards(ActualWidth, 150, 16).Count : 2;
+        int count = lead + 1 + 3 * covers;
+        // WinUI locks the child collection during measure and arrange.
+        while (Children.Count > count) Children.RemoveAt(Children.Count - 1);
+        while (Children.Count < count) Children.Add(new LoadingSkeleton { CornerRadius = new(8) });
+    }
 
     protected override Size MeasureOverride(Size available)
     {
@@ -33,9 +65,8 @@ public sealed class MusicCatalogSkeleton : Panel
         bounds.Add(new(0, y, Math.Min(132, width), 20));
         y += 42;
         y = Cards(width, y, 124, footer: false);
-        while (Children.Count > bounds.Count) Children.RemoveAt(Children.Count - 1);
-        while (Children.Count < bounds.Count) Children.Add(new LoadingSkeleton { CornerRadius = new(8) });
-        for (int i = 0; i < bounds.Count; i++) Children[i].Measure(new(bounds[i].Width, bounds[i].Height));
+        for (int i = 0; i < Children.Count; i++)
+            Children[i].Measure(i < bounds.Count ? new(bounds[i].Width, bounds[i].Height) : new Size());
         return new(width, y);
     }
 
@@ -57,7 +88,8 @@ public sealed class MusicCatalogSkeleton : Panel
 
     protected override Size ArrangeOverride(Size finalSize)
     {
-        for (int i = 0; i < bounds.Count; i++) Children[i].Arrange(bounds[i]);
+        for (int i = 0; i < Children.Count; i++)
+            Children[i].Arrange(i < bounds.Count ? bounds[i] : new Rect());
         return finalSize;
     }
 }

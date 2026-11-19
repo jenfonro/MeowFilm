@@ -195,6 +195,10 @@ public static class FilmPlaybackNativeIntegrationTests
         var nativeAllocation = f.CurrentAllocation();
         await Until(async () => (await f.HistoryAsync()).Any(row => FilmJson.Text(row, "targetId") == owner.TargetId &&
             FilmJson.Text(row, "sourceKey") == SourceKey("alpha")), "actual Windows history after output");
+        var actualHistory = (await f.HistoryAsync()).Single(row => FilmJson.Text(row, "targetId") == owner.TargetId);
+        Check(owner.TargetId == "tmdb:movie:1" &&
+            FilmJson.Text(FilmJson.Member(actualHistory, "playbackTarget"), "id") == owner.TargetId,
+            "the real history and exact file target retain the Node catalog's canonical work identity");
         var after = await f.WorkerStateAsync();
         Check(FilmJson.Array(after, "reads") is { Length: > 0 } reads &&
             reads.All(row => FilmJson.Bool(row, "headerAccepted") && FilmJson.Text(row, "site") == "alpha"),
@@ -365,8 +369,17 @@ public static class FilmPlaybackNativeIntegrationTests
         var closing = old.Session.CloseSessionAsync();
         Check(!closing.IsCompleted, "old close waits for its actually admitted native consumer receipt");
         // Independent stable Film owner, but still the App's SAME FilmPlayback.
+        var surface = f.Native.VideoView;
+        var root = surface.XamlRoot;
+        int unmounts = 0;
+        RoutedEventHandler unloaded = (_, _) => unmounts++;
+        surface.Unloaded += unloaded;
         var next = await f.OpenAsync(targetId: "film:native-successor");
         string nextAttempt = await f.OutputAsync(next);
+        surface.Unloaded -= unloaded;
+        Check(unmounts == 0 && ReferenceEquals(surface.XamlRoot, root) &&
+            surface.Describe() is { DisplayWindow: not 0, Visible: 1 },
+            "switching page owners of the same native surface preserves its actual mounted target");
         var nextAllocation = f.CurrentAllocation();
         Check(nextAttempt != oldAttempt && nextAttempt != late.AttemptId, "successor is a distinct actual occurrence");
         gate.Release();
@@ -517,6 +530,7 @@ public static class FilmPlaybackNativeIntegrationTests
         Check(allocation.PhysicallyReleased && !f.Native.HasOutput, "actual first-process media and private inputs drain before cold restart");
 
         string root = Path.GetDirectoryName(f.DataRoot)!;
+        Directory.CreateDirectory(Path.Combine(root, "documents"));
         await using var store = new LocalDocumentStore(Path.Combine(root, "documents"), AppIdentity.NativeNamespaces,
             AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
         var settings = new FilmPlaybackSettings(f.Runtime, store);

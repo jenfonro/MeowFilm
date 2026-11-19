@@ -136,7 +136,7 @@ internal sealed class NovelDiscoveryChannelBar : Grid
             AutomationProperties.SetName(choice, AutomationProperties.GetName(tab));
             AutomationProperties.SetAutomationId(choice, AutomationProperties.GetAutomationId(tab) + ".expanded");
             choice.Checked += (_, _) => { if (overlay.Visibility == Visibility.Visible) Select(tab); };
-            choice.Click += (_, _) => { if (overlay.Visibility == Visibility.Visible) Select(tab); };
+            choice.Click += (_, _) => { if (overlay.Visibility == Visibility.Visible && tab.IsChecked == true) Select(tab); };
             choice.KeyDown += (_, e) => Navigate(tab, e);
             expandedChoices.Children.Add(choice);
         }
@@ -168,7 +168,10 @@ internal sealed class NovelDiscoveryChannelBar : Grid
 
     private void Select(RadioButton tab)
     {
-        Close(); tab.Visibility = Visibility.Visible; tab.Focus(FocusState.Programmatic); tab.IsChecked = true; ArrangeChannels();
+        tab.IsChecked = true;
+        ArrangeChannels();
+        tab.Focus(FocusState.Programmatic);
+        Close();
     }
     private void ChannelKeyDown(object sender, KeyRoutedEventArgs e) => Navigate((RadioButton)sender, e);
     private void Navigate(RadioButton tab, KeyRoutedEventArgs e)

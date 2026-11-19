@@ -3,12 +3,34 @@
   <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml"/>
   <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Settings/SettingsTheme.xaml"/>
  </ResourceDictionary.MergedDictionaries><local:MusicVisibilityConverter x:Key="Visible"/>
+  <Style x:Key="Search.Tab" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+   <Setter Property="Margin" Value="0,0,24,0"/><Setter Property="Padding" Value="0,4,0,8"/>
+   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Grid>
+     <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+      <VisualState x:Name="Normal"/>
+      <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="TabSurface.Background" Value="{ThemeResource MeowFilm.Brush.Hover}"/></VisualState.Setters></VisualState>
+      <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="TabSurface.Background" Value="{ThemeResource MeowFilm.Brush.Pressed}"/></VisualState.Setters></VisualState>
+      <VisualState x:Name="Disabled"/>
+     </VisualStateGroup></VisualStateManager.VisualStateGroups>
+     <Border x:Name="TabSurface" Background="{TemplateBinding Background}" CornerRadius="4">
+      <ContentPresenter Content="{TemplateBinding Content}" Margin="{TemplateBinding Padding}"
+       Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"
+       HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+     </Border>
+     <Border x:Name="SelectionIndicator" Width="20" Height="3" CornerRadius="1.5"
+      HorizontalAlignment="Center" VerticalAlignment="Bottom" IsHitTestVisible="False"
+      Background="{ThemeResource MeowFilm.Brush.Accent}" Visibility="{Binding Selected,Converter={StaticResource Visible}}"/>
+    </Grid>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
  </ResourceDictionary></UserControl.Resources>
  <Grid Margin="40,20,24,20" MaxWidth="1490"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <StackPanel Margin="0,0,0,24"><TextBlock Text="{Binding Query}" FontSize="23" TextTrimming="CharacterEllipsis"/>
    <Grid Margin="0,14,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
     <ScrollViewer x:Name="TabScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"><ItemsControl ItemsSource="{Binding Tabs}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate>
-     <Button Tag="{Binding Id}" Click="Tab_Click" Background="Transparent" BorderThickness="0" Padding="0,4,0,8" Margin="0,0,24,0" AutomationProperties.Name="{Binding Label}"><Grid><TextBlock Text="{Binding Label}" Margin="0,0,0,6"/><Border Width="20" Height="3" CornerRadius="1.5" HorizontalAlignment="Center" VerticalAlignment="Bottom" Background="{ThemeResource MeowFilm.Brush.Accent}" Visibility="{Binding Selected,Converter={StaticResource Visible}}"/></Grid></Button>
+     <Button Content="{Binding Label}" Tag="{Binding Id}" Style="{StaticResource Search.Tab}" Loaded="Tab_Loaded" Click="Tab_Click"/>
     </DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
     <StackPanel x:Name="FilmTools" Grid.Column="1" Orientation="Horizontal" Visibility="Collapsed" Margin="16,0,0,0"><TextBlock Text="{Binding MetadataStatus}" Margin="0,0,16,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/><TextBlock Text="原始列表" VerticalAlignment="Center" Margin="0,0,8,0"/><CheckBox x:Name="RawListToggle" IsChecked="{Binding RawListMode,Mode=TwoWay}" Style="{StaticResource Settings.Switch}" VerticalAlignment="Center" AutomationProperties.Name="原始列表"/></StackPanel>
    </Grid><desktop:NoticeOutlet Message="{Binding Error}"/>
@@ -16,7 +38,7 @@
   <ContentControl x:Name="MusicHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
   <ScrollViewer x:Name="NovelScroll" x:FieldModifier="internal" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" AutomationProperties.Name="小说搜索结果"/>
   <Grid x:Name="FilmBody" Grid.Row="1" Visibility="Collapsed">
-   <GridView x:Name="FilmItems" ItemsSource="{Binding Cards}" SelectionMode="None" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="影视搜索结果" SizeChanged="Film_SizeChanged" ContainerContentChanging="Film_ContainerChanging">
+   <GridView x:Name="FilmItems" Margin="0,0,-36,0" ItemsSource="{Binding Cards}" SelectionMode="None" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="影视搜索结果" SizeChanged="Film_SizeChanged" ContainerContentChanging="Film_ContainerChanging">
     <GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="Padding" Value="0,0,36,36"/><Setter Property="Margin" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Top"/></Style></GridView.ItemContainerStyle>
     <GridView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal"/></ItemsPanelTemplate></GridView.ItemsPanel>
     <GridView.ItemTemplate><DataTemplate><local:FilmCard Activated="Card_Activated"/></DataTemplate></GridView.ItemTemplate>

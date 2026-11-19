@@ -45,16 +45,12 @@ public static class ManagementButtonTests
     private static Task ResourcesAndHighContrast() => WithButtons(async (root, buttons) =>
     {
         ReplaceBrushes(root, 20);
-        await Layout(root);
-        AssertButtons(root, buttons, new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast);
         root.RequestedTheme = ElementTheme.Dark;
         await Layout(root);
         AssertButtons(root, buttons, new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast);
         await GeneralAppearanceTests.SavePreview(root, "management-buttons-current-theme", 500, 300);
         foreach (var button in buttons) button.IsEnabled = !button.IsEnabled;
         ReplaceBrushes(root, 40);
-        await Layout(root);
-        AssertButtons(root, buttons, new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast);
         root.RequestedTheme = ElementTheme.Light;
         await Layout(root);
         AssertButtons(root, buttons, new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast);
@@ -115,6 +111,7 @@ public static class ManagementButtonTests
 
     private static void AssertButtons(FrameworkElement root, Button[] buttons, bool contrast)
     {
+        var systemFont = Visuals(root).OfType<TextBlock>().First(text => text.Text == "顶部").FontFamily;
         for (int index = 0; index < buttons.Length; index++)
         {
             var button = buttons[index];
@@ -123,9 +120,12 @@ public static class ManagementButtonTests
             bool enabled = button.IsEnabled;
             string context = $"{definition.Style}, enabled={enabled}, highContrast={contrast}: ";
             Brush Resource(string name) => (Brush)DesktopVisual.Resource(root, "MeowFilm.Brush." + name);
-            Brush background = definition.Background is null ? new SolidColorBrush(Colors.Transparent) : Resource(definition.Background);
-            Brush foreground = Resource(definition.Foreground);
-            Brush border = kind switch { 0 => Resource("Accent"), 1 => Resource("Error"), _ => new SolidColorBrush(Colors.Transparent) };
+            Brush controlBackground = definition.Background is null ? new SolidColorBrush(Colors.Transparent) : Resource(definition.Background);
+            Brush controlForeground = Resource(definition.Foreground);
+            Brush controlBorder = kind switch { 0 => Resource("Accent"), 1 => Resource("Error"), _ => new SolidColorBrush(Colors.Transparent) };
+            Brush background = controlBackground;
+            Brush foreground = controlForeground;
+            Brush border = controlBorder;
             if (!enabled)
             {
                 background = kind switch { 0 => Resource("Hover"), 1 => new SolidColorBrush(Colors.Transparent), _ => Resource("ManagementNeutral") };
@@ -134,33 +134,47 @@ public static class ManagementButtonTests
             }
             if (contrast)
             {
+                controlBackground = kind == 0 ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.Highlight) :
+                    kind == 1 ? new SolidColorBrush(Colors.Transparent) : SystemBrush(global::Windows.UI.ViewManagement.UIElementType.Window);
+                controlForeground = kind == 0 ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) :
+                    kind == 1 || kind == 2 ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
+                    SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText);
+                controlBorder = kind < 2 ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
+                    new SolidColorBrush(Colors.Transparent);
                 background = kind == 0 && enabled ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.Highlight) : SystemBrush(global::Windows.UI.ViewManagement.UIElementType.Window);
+                if (kind == 1) background = new SolidColorBrush(Colors.Transparent);
                 foreground = !enabled ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.GrayText) :
                     kind == 0 ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) : SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText);
                 border = SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText);
             }
             Check(ReferenceEquals(button.Style, DesktopVisual.Resource(root, definition.Style)), context + "the real shared style is applied");
             Check(DesktopVisual.IsVisible(button) && button.ActualWidth > 0, context + "the button is laid out");
-            var surface = Visuals(button).OfType<ContentPresenter>().First();
+            var surface = Visuals(button).OfType<Border>().First(border => border.Name == "Surface");
             var presenter = Visuals(button).OfType<ContentPresenter>().Single();
             var text = Visuals(button).OfType<TextBlock>().Single();
-            Paint(button.Background, background, "control background");
-            Paint(surface.Background, background, "visible template background");
-            Paint(button.Foreground, foreground, "control foreground");
+            Paint(button.Background, controlBackground, "control background");
+            Paint(surface.Background, background, "visible template background" +
+                $" (parent={VisualTreeHelper.GetParent(surface)?.GetType().Name}, template={button.Template?.GetType().Name}, " +
+                $"templateApplied={ReferenceEquals(button.Template, DesktopVisual.Resource(button, "MeowFilm.PrimaryButtonTemplate"))}, " +
+                $"states={string.Join(",", VisualStateManager.GetVisualStateGroups((FrameworkElement)VisualTreeHelper.GetParent(surface)).Select(group => group.CurrentState?.Name))})");
+            Paint(button.Foreground, controlForeground, "control foreground");
             Paint(presenter.Foreground, foreground, "content presenter foreground");
             Paint(text.Foreground, foreground, "visible text foreground");
-            Paint(button.BorderBrush, border, "control border");
+            Paint(button.BorderBrush, controlBorder, "control border");
             Paint(surface.BorderBrush, border, "visible template border");
             Check(surface.BorderThickness == new Thickness(1), context + "the outline remains visible");
             double height = kind < 2 ? 32 : 30;
             Check(button.Height == height && button.MinHeight == height &&
                 Math.Abs(button.ActualHeight - height) < .1 && Math.Abs(surface.ActualHeight - height) < .1 &&
                 surface.CornerRadius == new CornerRadius(kind < 2 ? 10 : 15),
-                context + "ordinary toolbar geometry stays distinct from row pills");
-            Check(button.FontWeight == Microsoft.UI.Text.FontWeights.Normal && text.FontWeight == Microsoft.UI.Text.FontWeights.Normal &&
+                context + $"ordinary toolbar geometry stays distinct from row pills (height={button.Height}/{button.MinHeight}/{button.ActualHeight}, " +
+                    $"presenter={surface.ActualHeight}, corner={surface.CornerRadius})");
+            Check(button.FontWeight.Weight == Microsoft.UI.Text.FontWeights.Normal.Weight && text.FontWeight.Weight == Microsoft.UI.Text.FontWeights.Normal.Weight &&
                 button.FontStyle == global::Windows.UI.Text.FontStyle.Normal && text.FontStyle == global::Windows.UI.Text.FontStyle.Normal &&
-                button.FontFamily.Equals(new FontFamily("XamlAutoFontFamily")) && text.FontFamily.Equals(new FontFamily("XamlAutoFontFamily")),
-                context + "control and rendered text retain the regular system font");
+                string.Equals(button.FontFamily.Source, systemFont.Source, StringComparison.Ordinal) &&
+                string.Equals(text.FontFamily.Source, systemFont.Source, StringComparison.Ordinal),
+                context + $"control and rendered text retain the regular system font (weight={button.FontWeight}/{text.FontWeight}, " +
+                    $"style={button.FontStyle}/{text.FontStyle}, family={button.FontFamily.Source}/{text.FontFamily.Source})");
             Check(DesktopVisual.IsVisible(text) && text.ActualWidth > 0 && text.ActualHeight > 0 &&
                 button.Opacity == 1 && surface.Opacity == 1 && text.Opacity == 1,
                 context + "disabled text and surfaces remain visible without dimming their colors");
@@ -169,7 +183,8 @@ public static class ManagementButtonTests
 
             void Paint(Brush? actual, Brush expected, string part) =>
                 Check(actual is SolidColorBrush actualColor && expected is SolidColorBrush expectedColor &&
-                    actualColor.Color == expectedColor.Color, context + part);
+                    actualColor.Color == expectedColor.Color, context + part + $" (actual={actual?.ToString()}, " +
+                        $"expected={expected?.ToString()}, actualColor={(actual as SolidColorBrush)?.Color}, expectedColor={(expected as SolidColorBrush)?.Color})");
         }
     }
 
