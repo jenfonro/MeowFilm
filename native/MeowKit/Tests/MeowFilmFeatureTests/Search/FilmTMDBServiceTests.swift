@@ -145,7 +145,7 @@ final class FilmTMDBServiceTests: XCTestCase {
         XCTAssertEqual(wire.count, 1)
     }
 
-    func testMetadataImageReferencesRemainRelativeForBothProviders() throws {
+    func testMetadataImageReferencesRemainRelativeForBothProviders() async throws {
         let service = FilmTMDBService(settingsDocument: try document(.tmdb), connection: { throw FilmSearchError.unavailable })
         for path in ["/v1/tmdb/images/original/poster.jpg", "/v1/douban/images/movie/p1.webp"] {
             let url = try XCTUnwrap(service.imageURL(path: path))
@@ -167,7 +167,7 @@ final class FilmTMDBServiceTests: XCTestCase {
         let first = try await tmdb.settings(), second = try await douban.settings()
         XCTAssertEqual(first, try FilmTMDBSettings(FilmTMDBSettings.defaultValue))
         XCTAssertEqual(second, try FilmDoubanSettings(FilmDoubanSettings.defaultValue))
-        XCTAssertNil(try tmdbStore.document.read()); XCTAssertNil(try doubanStore.document.read())
+        XCTAssertNil(try tmdbStore.document.readForTest()); XCTAssertNil(try doubanStore.document.readForTest())
         XCTAssertTrue(tmdbStore.notifications.isEmpty); XCTAssertTrue(doubanStore.notifications.isEmpty)
     }
 
@@ -190,7 +190,7 @@ final class FilmTMDBServiceTests: XCTestCase {
         XCTAssertEqual(restored, saved)
         _ = try await reopened.updateSettings([:])
         XCTAssertEqual(store.notifications, ["tmdb"], "An identical document is not another commit")
-        let document = try XCTUnwrap(store.document.read())
+        let document = try XCTUnwrap(store.document.readForTest())
         XCTAssertEqual(document.filmObject?["version"], .number(1))
         XCTAssertEqual(document.filmObject?["settings"]?.filmObject?["apiKey"], .string("synthetic-key"))
     }
@@ -218,20 +218,21 @@ final class FilmTMDBServiceTests: XCTestCase {
         XCTAssertEqual(restored, saved)
     }
 
-    func testMetadataPatchIgnoresExtraAndPreservesExactSavedExtensions() async throws {
-        let opaque = try RuntimeJSON.decode(Data(#"{"n":0.123456789012345678901,"é":1,"e\u0301":2}"#.utf8))
+    func testMetadataPatchDoesNotStoreUnknownFieldsOrAcceptOpaqueExtensions() async throws {
+        let opaque: RuntimeValue = .object(["nested": .bool(true)])
         for block in [FilmSettingsBlock.tmdb, .douban] {
             let store = try FilmNativeSettingsStore(self, block: block)
             let defaults = block == .tmdb ? FilmTMDBSettings.defaultValue : FilmDoubanSettings.defaultValue
-            var settings = try defaults.filmRequiredObject()
-            settings["extra"] = opaque
-            try store.seed(.object(["version": .number(1), "settings": .object(settings), "rootExtra": opaque]))
-            let saved = try FilmMetadataSettingsDocument.update(store.document, defaults: defaults,
+            try await store.seed(.object(["version": .number(1), "settings": defaults]))
+            let saved = try await FilmMetadataSettingsDocument.update(store.document, defaults: defaults,
                 patch: ["unknown": opaque, "apiBase": .string("https://example.invalid/api")])
             XCTAssertNil(saved.filmObject?["unknown"])
-            XCTAssertEqual(saved.filmObject?["extra"], opaque)
-            XCTAssertEqual(try store.document.read()?.filmObject?["rootExtra"], opaque)
             XCTAssertEqual(saved.filmObject?["apiBase"], .string("https://example.invalid/api"))
+            var settings = try saved.filmRequiredObject(); settings["extra"] = opaque
+            let before = try store.document.readForTest()
+            do { try await store.seed(.object(["version": .number(1), "settings": .object(settings)])); XCTFail("opaque extension admitted") }
+            catch { XCTAssertEqual(error as? FilmSettingsStorageError, .invalidDocument) }
+            XCTAssertEqual(try store.document.readForTest(), before)
         }
     }
 
@@ -239,7 +240,7 @@ final class FilmTMDBServiceTests: XCTestCase {
         let tmdbStore = try FilmNativeSettingsStore(self, block: .tmdb)
         let tmdb = FilmTMDBService(settingsDocument: tmdbStore.document, connection: { throw FilmSearchError.unavailable })
         _ = try await tmdb.updateSettings(["apiKey": .string("synthetic")])
-        let before = try tmdbStore.document.read()
+        let before = try tmdbStore.document.readForTest()
         for patch: RuntimeObject in [
             ["apiKey": .number(1)], ["includeAdult": .string("true")],
             ["apiKey": .string("invalid\nvalue")], ["apiBase": .string(" https://example.invalid")],
@@ -247,7 +248,7 @@ final class FilmTMDBServiceTests: XCTestCase {
             ["apiBase": .string("https://example.invalid/#fragment")], ["apiBase": .string("https://example.invalid/\\path")],
         ] {
             await filmRuleFailure(RuntimeHTTPError.remote("INVALID_REQUEST")) { try await tmdb.updateSettings(patch) }
-            XCTAssertEqual(try tmdbStore.document.read(), before)
+            XCTAssertEqual(try tmdbStore.document.readForTest(), before)
         }
         XCTAssertEqual(tmdbStore.notifications, ["tmdb"])
         let doubanStore = try FilmNativeSettingsStore(self, block: .douban)
@@ -261,21 +262,23 @@ final class FilmTMDBServiceTests: XCTestCase {
         await filmRuleFailure(RuntimeHTTPError.remote("INVALID_REQUEST")) {
             try await douban.updateSettings(["apiBase": .string("")])
         }
-        XCTAssertNil(try doubanStore.document.read()); XCTAssertTrue(doubanStore.notifications.isEmpty)
+        XCTAssertNil(try doubanStore.document.readForTest()); XCTAssertTrue(doubanStore.notifications.isEmpty)
     }
 
     func testMetadataInvalidStorageFailureAndCASConflictNeverFallbackToRPC() async throws {
-        let store = try FilmNativeSettingsStore(self, block: .tmdb, maximumBytes: 1024)
+        let store = try FilmNativeSettingsStore(self, block: .tmdb)
         let service = FilmTMDBService(settingsDocument: store.document, connection: {
             XCTFail("Native storage errors must never fall back to runtime settings")
             throw FilmSearchError.unavailable
         })
         _ = try await service.updateSettings(["apiKey": .string("original")])
-        let before = try store.document.read()
+        let before = try store.document.readForTest()
+        try store.readOnly(true)
         await filmRuleFailure(FilmSettingsStorageError.storageFailure) {
-            try await service.updateSettings(["apiKey": .string(String(repeating: "x", count: 2000))])
+            try await service.updateSettings(["apiKey": .string("pending")])
         }
-        XCTAssertEqual(try store.document.read(), before); XCTAssertEqual(store.notifications, ["tmdb"])
+        try store.readOnly(false)
+        XCTAssertEqual(try store.document.readForTest(), before); XCTAssertEqual(store.notifications, ["tmdb"])
         var external = try XCTUnwrap(before?.filmObject)
         var settings = try XCTUnwrap(external["settings"]?.filmObject)
         settings["apiKey"] = .string("external"); external["settings"] = .object(settings)
@@ -286,17 +289,18 @@ final class FilmTMDBServiceTests: XCTestCase {
         var candidate = external; candidate["settings"] = .object(settings)
         XCTAssertNotEqual(RuntimeValue.object(candidate), before)
         XCTAssertNotEqual(RuntimeValue.object(candidate), replacement)
-        XCTAssertThrowsError(try store.document.update { _ in
-            try store.seed(replacement)
-            return .object(candidate)
-        }) { XCTAssertEqual($0 as? FilmSettingsStorageError, .conflict) }
+        let expected = try await store.document.snapshot().revision
+        try await store.seed(replacement)
+        do { _ = try await store.document.updateSnapshot(expectedRevision: expected) { _ in .object(candidate) }; XCTFail("stale metadata draft committed") }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .conflict) }
         let latest = try await service.settings()
         XCTAssertEqual(latest.apiKey, "external"); XCTAssertEqual(store.notifications, ["tmdb"])
         for malformed: RuntimeValue in [.object([:]), .object(["version": .number(2), "settings": FilmTMDBSettings.defaultValue]),
             .object(["version": .number(1), "settings": .object(["apiKey": .string("partial")])])] {
-            try store.seed(malformed)
-            await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await service.settings() }
-            await filmRuleFailure(FilmSettingsStorageError.invalidDocument) { try await service.updateSettings([:]) }
+            do { try await store.seed(malformed); XCTFail("malformed current metadata admitted") }
+            catch { XCTAssertEqual(error as? FilmSettingsStorageError, .invalidDocument) }
+            let retained = try await service.settings()
+            XCTAssertEqual(retained.apiKey, "external")
         }
         XCTAssertEqual(store.notifications, ["tmdb"])
     }
@@ -309,7 +313,7 @@ final class FilmTMDBServiceTests: XCTestCase {
         let save = Task { await gate.wait(); return try await service.updateSettings(["apiKey": .string("cancelled")]) }
         save.cancel(); await gate.release()
         await filmRuleCancelled { try await save.value }
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         let saved = try await service.updateSettings(["apiKey": .string("recovered")])
         XCTAssertEqual(saved.apiKey, "recovered"); XCTAssertEqual(store.notifications, ["tmdb"])
         do { _ = try await service.search(query: "offline"); XCTFail("An upstream read must still use the closed runtime") }

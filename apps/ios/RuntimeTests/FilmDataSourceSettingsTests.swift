@@ -15,7 +15,8 @@ final class FilmDataSourceSettingsTests: XCTestCase {
             settingsDocument: storage.documents[.douban])) { saved += 1 }
         try await model.load()
         XCTAssertEqual(model.dataRoute, .direct); XCTAssertEqual(model.imageRoute, .direct)
-        XCTAssertNil(try storage.documents[.douban].read(), "Loading settings must not write defaults")
+        let initialDouban = try await storage.documents[.douban].read()
+        XCTAssertNil(initialDouban, "Loading settings must not write defaults")
         let expectedData: [(FilmDoubanDataRoute, String, String)] = [
             (.direct, "https://m.douban.com", ""),
             (.cors, "https://m.douban.com", "https://ciao-cors.is-an.org/"),
@@ -137,7 +138,7 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         XCTAssertEqual(try storage.values(.douban)["cookie"], .string(""))
         XCTAssertEqual(model.saved?.cookie, ""); XCTAssertEqual(model.cookie, "")
         XCTAssertEqual(notifications, 3)
-        let reopened = try FilmRuntimeTestSettings(root: storage.root)
+        let reopened = FilmRuntimeTestSettings(database: storage.database)
         let restored = FilmDoubanSettingsModel(service: FilmDoubanSettingsService(
             settingsDocument: reopened[.douban])) { notifications += 1 }
         try await restored.load()
@@ -192,7 +193,7 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         XCTAssertEqual(try storage.values(.tmdb)["accessToken"], .string(""))
         XCTAssertEqual(model.saved?.apiToken, "")
         XCTAssertEqual(notifications, 3)
-        let reopened = try FilmRuntimeTestSettings(root: storage.root)
+        let reopened = FilmRuntimeTestSettings(database: storage.database)
         let restored = FilmTMDBSettingsModel(service: FilmTMDBService(
             settingsDocument: reopened[.tmdb], connection: {
                 XCTFail("Reopening native settings must not request a runtime connection")
@@ -305,7 +306,8 @@ final class FilmDataSourceSettingsTests: XCTestCase {
         XCTAssertEqual(try field(form, "film.douban.cookie").text, "synthetic_cookie=draft")
         XCTAssertEqual(douban.dataRoute, .custom); XCTAssertEqual(douban.imageRoute, .custom)
         XCTAssertEqual(try storage.bytes(.tmdb), before)
-        XCTAssertNil(try storage.documents[.douban].read())
+        let savedDouban = try await storage.documents[.douban].read()
+        XCTAssertNil(savedDouban)
 
         let foreground = expectation(for: NSPredicate { _, _ in
             MainActor.assumeIsolated { UIApplication.shared.connectedScenes.contains { $0.activationState == .foregroundActive } }
@@ -398,41 +400,30 @@ private let tmdbInitialSettings: RuntimeObject = [
     "language": .string("zh-CN"), "region": .string("CN"), "includeAdult": .bool(false),
 ]
 
-private struct DataSourceSettingsStorage {
+@MainActor private struct DataSourceSettingsStorage {
     let root: URL
+    let database: SQLiteDatabase
     let documents: FilmRuntimeTestSettings
 
     init(_ test: XCTestCase) throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("film-data-source-settings-" + UUID().uuidString.lowercased(), isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-        test.addTeardownBlock { try FileManager.default.removeItem(at: root) }
-        self.root = root
-        documents = try FilmRuntimeTestSettings(root: root)
+        database = try test.appStorageTestDatabase()
+        root = database.dataRoot
+        documents = FilmRuntimeTestSettings(database: database)
     }
     func seed(_ settings: RuntimeObject, for block: FilmSettingsBlock) throws {
-        _ = try documents[block].update { _ in
+        _ = try appStorageTestWait { try await documents[block].update { _ in
             .object(["version": .number(1), "settings": .object(settings)])
-        }
+        } }
     }
     func values(_ block: FilmSettingsBlock) throws -> RuntimeObject {
-        let envelope = try XCTUnwrap(try documents[block].read()?.filmObject)
+        let envelope = try XCTUnwrap(try documents[block].appStorageTestRead()?.filmObject)
         XCTAssertEqual(envelope["version"], .number(1))
         return try XCTUnwrap(envelope["settings"]?.filmObject)
     }
     func bytes(_ block: FilmSettingsBlock) throws -> Data? {
-        try DocumentStore(baseURL: root, namespace: block.namespace).read(key: FilmSettingsDocument.key)
+        try documents[block].appStorageTestBytes()
     }
     func setSaveFailure(_ failing: Bool, for block: FilmSettingsBlock) throws {
-        let file = root.appendingPathComponent(block.namespace).appendingPathComponent(FilmSettingsDocument.key + ".json")
-        let saved = file.appendingPathExtension("saved")
-        if failing {
-            try FileManager.default.moveItem(at: file, to: saved)
-            do { try FileManager.default.createSymbolicLink(at: file, withDestinationURL: saved) }
-            catch { try FileManager.default.moveItem(at: saved, to: file); throw error }
-        } else {
-            try FileManager.default.removeItem(at: file)
-            try FileManager.default.moveItem(at: saved, to: file)
-        }
+        try appStorageTestReadOnly(database, failing)
     }
 }

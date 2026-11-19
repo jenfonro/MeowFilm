@@ -1,5 +1,6 @@
 import XCTest
 import MeowMusicFeature
+import MeowRuntime
 @testable import MeowMusicNativeService
 
 final class MusicNativeFilteredRemoteQueueTests: XCTestCase {
@@ -43,7 +44,7 @@ final class MusicNativeFilteredRemoteQueueTests: XCTestCase {
         XCTAssertEqual(Set(references.map(\.songID)).count, 1)
         XCTAssertEqual(references.map(\.sourcePosition), tracks.map(\.sourcePosition))
         var counts = store.counts()
-        XCTAssertEqual(counts.songReads, 2); XCTAssertEqual(counts.sourceReads, 2)
+        XCTAssertEqual(counts.songReads, 1); XCTAssertEqual(counts.sourceReads, 1)
         XCTAssertEqual(counts.saved, 1); XCTAssertEqual(counts.candidates, 1); XCTAssertEqual(counts.enumerations, 0)
 
         store.reset()
@@ -61,7 +62,7 @@ final class MusicNativeFilteredRemoteQueueTests: XCTestCase {
         store.reset()
         _ = try await service.adoptQueueTracks(tracks, epoch: own, authorization: authorization, intent: .init())
         counts = store.counts()
-        XCTAssertEqual(counts.songReads, 2); XCTAssertEqual(counts.sourceReads, 2)
+        XCTAssertEqual(counts.songReads, 1); XCTAssertEqual(counts.sourceReads, 1)
         XCTAssertEqual(counts.saved, 0); XCTAssertEqual(counts.candidates, 0); XCTAssertEqual(counts.enumerations, 0)
         var latest = try MJ.parse(row.data)
         latest["albumName"] = .string("Fresh album"); latest["img"] = .string("https://fixture.invalid/fresh.jpg")
@@ -352,6 +353,6 @@ private final class MusicFilteredQueueMeasuredStore: MusicNativeLibraryStoring, 
         func querySongIDs(query: String) throws -> [String] { try base.querySongIDs(query: query) }
         func allSongIDs() throws -> [String] { store.count(\.enumerations); return try base.allSongIDs() }
         func saveSong(_ data: Data) throws { try base.saveSong(data); store.count(\.saved) }
-        func saveArea(_ area: String, data: Data) throws { try base.saveArea(area, data: data) }
+        func saveArea(_ area: String, value: RuntimeValue) throws { try base.saveArea(area, value: value) }
     }
 }

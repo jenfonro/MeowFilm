@@ -535,9 +535,9 @@ public static partial class MusicOfficialPlaybackScopeTests
         {
             Files = new(bytes);
             Files.Clock.Now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            App = new(new MusicNativeApplication(Files.Store, MusicTestStores.For(Files.Store), Runtime, Files.CacheStore), Files);
+            App = new(new MusicNativeApplication(Files.Store, MusicTestStores.For(Files.Store), Runtime), Files);
             Runtime.OnRequest = App.ReadPlatform;
-            Module = new(App, Files.Store, playback ?? Output, files ? Files.Cache : null, new Dialogs(), cacheStore: Files.CacheStore);
+            Module = new(App, Files.Store, playback ?? Output, files ? Files.Cache : null, new Dialogs());
         }
         internal static async Task<Scene> Create(bool files = false, IMusicPlayback? playback = null, byte[]? bytes = null)
         {

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using System.Windows.Threading;
 
@@ -11,7 +12,13 @@ public sealed partial class MusicCapability
          new("kw", "酷我音乐"), new("mg", "咪咕音乐")];
     public MusicCatalogPlatform[] CatalogPlatformChoices => CatalogPlatforms
         .Where(p => p.Key is "wy" or "tx" or "kg" || p.Key == catalogLoadedPlatform).ToArray();
-    public MusicCatalogPlatform SelectedCatalogPlatform { get; set; } = new("wy", "网易云音乐");
+    private MusicCatalogPlatform selectedCatalogPlatform = new("wy", "网易云音乐");
+    [AllowNull]
+    public MusicCatalogPlatform SelectedCatalogPlatform
+    {
+        get => selectedCatalogPlatform;
+        set { if (value is not null) selectedCatalogPlatform = value; }
+    }
     public string[] CatalogSearchKinds { get; } = ["歌曲", "歌单"];
     public string CatalogSearchKind { get; set; } = "歌曲";
     private readonly ObservableCollection<MusicCatalogSection> homeSections = [], channelSections = [], utilitySections = [];

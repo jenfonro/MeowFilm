@@ -22,9 +22,9 @@ public static class MusicSourceExclusionTests
     }
     private static async Task Persist()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         string songA;
-        await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store)))
+        await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
         {
             Check((await Ok(owner, "music.sourceExclusions.list")).GetProperty("items").GetArrayLength() == 0 && MusicTestStores.For(store).Writes == 0);
             await Ok(owner, "music.queue.replace", new { songs = new[] {
@@ -43,7 +43,7 @@ public static class MusicSourceExclusionTests
             Check((await Ok(owner, "music.sourceExclusions.list", new { songId = songA })).GetProperty("items").GetArrayLength() == 4);
             await Ok(owner, "music.settings.save", new { ifRevision = 0, lyrics = false });
         }
-        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         Check((await Ok(reopened, "music.sourceExclusions.list")).GetProperty("items").GetArrayLength() == 5);
         await Ok(reopened, "music.sourceExclusions.remove", new { songId = songA, provider = A, platform = "wy" });
         var rows = (await Ok(reopened, "music.sourceExclusions.list")).GetProperty("items");
@@ -51,8 +51,8 @@ public static class MusicSourceExclusionTests
     }
     private static async Task Failure()
     {
-        var store = new QualityFixture.DocumentStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new QualityFixture.Database();
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] {
             MusicSongFixture.Online("wy", "failure", "Track failure", "Fixture", duration: 180) }, index = 0 });
         string id = (await Ok(owner, "music.queue.get")).GetProperty("current").GetProperty("song").GetProperty("songId").GetString()!;

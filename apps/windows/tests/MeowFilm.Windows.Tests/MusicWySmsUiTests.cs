@@ -267,7 +267,7 @@ public static class MusicWySmsUiTests
         {
             string root = TestWorkspace.DataPath("wy-sms-ui", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
-            Store = new(new LocalDocumentStore(root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces));
+            Store = new(new NativeDatabase(root));
             Runtime.Platform.OnRequest = Transport.Read;
             Calls = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime));
             Module = new(Calls, Store, new Output(), new Dialogs());

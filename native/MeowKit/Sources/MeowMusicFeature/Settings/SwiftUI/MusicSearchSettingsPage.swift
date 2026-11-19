@@ -28,31 +28,31 @@ final class MusicSearchSettingsState: ObservableObject {
     }
 
     @discardableResult
-    func setPlatforms(_ platforms: [MusicPublicBrowsePlatform], kind: MusicSearchSettingsKind) -> Bool {
+    func setPlatforms(_ platforms: [MusicPublicBrowsePlatform], kind: MusicSearchSettingsKind) async -> Bool {
         var value = store.preferences
         if kind == .songs { value.songs.platforms = platforms }
         else { value.playlists.platforms = platforms }
-        return store.update(value)
+        return await store.update(value)
     }
 
     @discardableResult
-    func setSearchPlaylists(_ enabled: Bool) -> Bool {
+    func setSearchPlaylists(_ enabled: Bool) async -> Bool {
         var value = store.preferences
         value.searchPlaylists = enabled
-        return store.update(value)
+        return await store.update(value)
     }
 
     @discardableResult
     func setAdvanced(_ kind: MusicSearchSettingsKind,
-                     field: WritableKeyPath<MusicSearchPreferences.Kind, Int>, to number: Int) -> Bool {
+                     field: WritableKeyPath<MusicSearchPreferences.Kind, Int>, to number: Int) async -> Bool {
         var value = store.preferences
         if kind == .songs { value.songs[keyPath: field] = number }
         else { value.playlists[keyPath: field] = number }
-        return store.update(value)
+        return await store.update(value)
     }
 
-    func reload() {
-        store.reload()
+    func reload() async {
+        await store.reload()
         value = store.preferences
     }
 }
@@ -104,7 +104,7 @@ struct MusicSearchSettingsContent: View {
             Section {
                 Toggle("搜索歌曲同时搜索歌单", isOn: Binding(
                     get: { state.value.searchPlaylists },
-                    set: { if !state.setSearchPlaylists($0) { state.reload() } }
+                    set: { value in Task { if !(await state.setSearchPlaylists(value)) { await state.reload() } } }
                 ))
                 .accessibilityIdentifier("music.search.searchPlaylists")
                 .modifier(MusicSettingsRowStyle(theme: theme, first: true, last: true))
@@ -142,7 +142,7 @@ struct MusicSearchSettingsContent: View {
                            maximum: Int = Int.max, first: Bool = false, last: Bool = false) -> some View {
         MusicSearchSettingsNumberRow(title: title, value: Binding(
             get: { state.settings(kind)[keyPath: field] },
-            set: { if !state.setAdvanced(kind, field: field, to: $0) { state.reload() } }
+            set: { value in Task { if !(await state.setAdvanced(kind, field: field, to: value)) { await state.reload() } } }
         ), maximum: maximum, identifier: "music.search.\(kind.rawValue).\(name)", theme: theme)
         .modifier(MusicSettingsRowStyle(theme: theme, first: first, last: last))
     }

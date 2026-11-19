@@ -39,7 +39,7 @@ public static class GeneralCloseSettingsTests
 
     private static async Task WithoutOwner()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var appearance = new AppAppearance(store);
         var source = new SettingsSource();
         var view = new GeneralSettingsView(appearance, [source]);
@@ -68,7 +68,7 @@ public static class GeneralCloseSettingsTests
 
     private static async Task ChoicesAndSynchronization()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var appearance = new AppAppearance(store);
         await using var preferences = new AppClosePreferences(store);
         var source = new SettingsSource();
@@ -117,7 +117,7 @@ public static class GeneralCloseSettingsTests
 
     private static async Task FailedSelection()
     {
-        var store = new DocumentStore { FaultNamespace = AppClosePreferences.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { };
         await using var appearance = new AppAppearance(store);
         await using var preferences = new AppClosePreferences(store);
         var view = new GeneralSettingsView(appearance, [], preferences);
@@ -137,7 +137,7 @@ public static class GeneralCloseSettingsTests
             choices.SelectedIndex = 2; await Drain();
             Check(preferences.Behavior == WindowCloseBehavior.Ask && Equals(choices.SelectedValue, WindowCloseBehavior.Ask.ToString()) &&
                 choices.IsEnabled && preferences.Status.Length > 0 && DesktopVisual.IsVisible(reload) &&
-                !store.Data.ContainsKey(AppClosePreferences.DocumentNamespace),
+                store.WindowData is null,
                 "a rejected selection neither changes the saved behavior nor remains selected");
             Check(outlet.Message == preferences.Status && notices.Contains(preferences.Status),
                 "save failure reaches the window through NoticeOutlet");
@@ -167,8 +167,8 @@ public static class GeneralCloseSettingsTests
 
     private static async Task UnreadableConfiguration()
     {
-        var store = new DocumentStore();
-        store.Data[AppClosePreferences.DocumentNamespace] = "[]"u8.ToArray();
+        var store = new AppSettingsTestDatabase();
+        store.WindowData = "{\"schema\":99,\"closeBehavior\":\"ask\"}"u8.ToArray();
         await using var appearance = new AppAppearance(store);
         await using var preferences = new AppClosePreferences(store);
         var view = new GeneralSettingsView(appearance, [], preferences);
@@ -183,7 +183,7 @@ public static class GeneralCloseSettingsTests
                 "an unreadable document cannot appear as an editable default");
             await preferences.PrepareShutdownAsync(); await preferences.CancelShutdownPreparationAsync(); await Drain();
             Check(!choices.IsEnabled && store.Writes == 0);
-            store.Data.Remove(AppClosePreferences.DocumentNamespace);
+            store.WindowData = null;
             Click(reload); await Drain();
             Check(preferences.CanEdit && choices.IsEnabled && preferences.Status == "" && !DesktopVisual.IsVisible(reload) &&
                 Equals(choices.SelectedValue, WindowCloseBehavior.Ask.ToString()) && store.Writes == 0,
@@ -196,7 +196,7 @@ public static class GeneralCloseSettingsTests
 
     private static async Task PendingSave()
     {
-        var store = new DocumentStore { HoldNamespace = AppClosePreferences.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { HoldWrites = true};
         await using var appearance = new AppAppearance(store);
         await using var preferences = new AppClosePreferences(store);
         var view = new GeneralSettingsView(appearance, [], preferences);
@@ -231,7 +231,7 @@ public static class GeneralCloseSettingsTests
 
     private static async Task LayoutAndPreviews()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var appearance = new AppAppearance(store);
         await using var preferences = new AppClosePreferences(store);
         var view = new GeneralSettingsView(appearance, [], preferences);

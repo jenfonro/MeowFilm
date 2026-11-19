@@ -176,11 +176,11 @@ async function observation(c, { expectedUserId } = {}, authenticate = true, incl
       next = cookieFields(c.account.cookie);
       if (['MUSIC_U', 'MUSIC_A', '__csrf', 'JSESSIONID'].some(key => authorized[key] !== next[key])) fail('VERIFICATION_REQUIRED');
     }
-    c.acceptWyAccount(client, used, next);
+    await c.acceptWyAccount(client, used, next);
     c.account.cookie = cookieHeader(Object.fromEntries(wyCredentialKeys.filter(key => next[key] != null)
       .map(key => [key, next[key]])));
   }
-  if (kgPrepared) c.acceptKgAccount(kgPrepared.client, kgPrepared.device);
+  if (kgPrepared) await c.acceptKgAccount(kgPrepared.client, kgPrepared.device);
   return { profile: result, profileFetchedAt: c.clock(),
     entitlements: includeRights ? await rights(c) : unknownRights(c.clock(), null, c.platform),
     userId: result.userId, cookie: c.account.cookie };

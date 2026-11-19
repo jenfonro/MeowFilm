@@ -1,13 +1,13 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>The sole native film-favorite owner. Node owns history/manual/blocks/preferences, not this document.</summary>
-public sealed class FilmLibrary(IDocumentStore store) : IAsyncDisposable
+/// <summary>Native favorite rows. The runtime owns history, manual matches and blocks.</summary>
+public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
 {
     public const string DocumentNamespace = "film.library.v1";
-    private static readonly JsonSerializerOptions StoredJson = new(FilmJson.Options) { PropertyNameCaseInsensitive = false };
     private readonly SemaphoreSlim gate = new(1, 1);
     private bool closed;
     public event EventHandler? Changed;
@@ -15,7 +15,18 @@ public sealed class FilmLibrary(IDocumentStore store) : IAsyncDisposable
     public async Task<IReadOnlyList<FilmCardItem>> ReadAsync(CancellationToken token = default)
     {
         await gate.WaitAsync(token).ConfigureAwait(false);
-        try { return (await ReadCoreAsync(token).ConfigureAwait(false)).Items; }
+        try
+        {
+            Check();
+            return await database.ReadAsync(db =>
+            {
+                CheckRoot(db);
+                return (IReadOnlyList<FilmCardItem>)FilmStorageRecords.Favorite
+                    .ReadMany(db, ["device"]).Select(Decode).ToArray();
+            }, token).ConfigureAwait(false);
+        }
+        catch (JsonException) { throw Corrupt(); }
+        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Corrupt) { throw Corrupt(); }
         finally { gate.Release(); }
     }
 
@@ -24,38 +35,55 @@ public sealed class FilmLibrary(IDocumentStore store) : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(item);
         if (item.PlaybackContext is not { } context) throw new FilmPlaybackException("INVALID_REQUEST");
         context.Target.Validate();
+        var value = favorite ? Row(item) : null;
         await gate.WaitAsync(token).ConfigureAwait(false);
+        bool changed;
         try
         {
-            var before = await ReadCoreAsync(token).ConfigureAwait(false);
-            var matching = before.Records.Where(row => row.Candidates.Contains(context.Target.Id, StringComparer.Ordinal)).ToArray();
-            var previous = before.Items.FirstOrDefault(value => value.PlaybackContext!.Target.Id == context.Target.Id);
-            if (matching.Length > 1 || matching.Length == 1 && previous is null)
-                throw new FilmPlaybackException("CORRUPT_STORAGE");
-            var records = before.Records.Where(row => !row.Candidates.Contains(context.Target.Id, StringComparer.Ordinal))
-                .Select(row => row.Value).ToList();
-            if (favorite)
+            Check(); token.ThrowIfCancellationRequested();
+            changed = await database.WriteAsync(db =>
             {
-                // Favorites retain the content identity, not search pages, credentials or a short-lived play address.
-                var saved = FilmJson.Encode(ForStorage(item));
-                records.Add(previous is null ? saved : FilmDocument.Merge(matching[0].Value, FilmJson.Encode(ForStorage(previous)), saved));
-            }
-            var root = FilmDocument.Set(before.Root, "favorites", FilmJson.Encode(records));
-            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-            token.ThrowIfCancellationRequested();
-            // Accepted CAS writes settle even if the initiating view leaves. Publish only a real receipt.
-            var receipt = await store.WriteAsync(DocumentNamespace, bytes, before.Fingerprint, CancellationToken.None).ConfigureAwait(false);
-            if (receipt != DocumentFingerprint.FromBytes(bytes)) throw new FilmPlaybackException("COMMIT_UNKNOWN");
+                CheckRoot(db);
+                var key = new object?[] { "device", context.Target.Id };
+                var previous = FilmStorageRecords.Favorite.Read(db, key);
+                if (previous is not null) _ = Decode(previous);
+                if (JsonNode.DeepEquals(value, previous)) return false;
+                if (previous is null && value is null) return false;
+                if (db.Scalar<long>("SELECT count(*) FROM windows_film_library WHERE scope_key='device'") == 0)
+                    FilmStorageRecords.Favorites.Save(db, new JsonObject { ["version"] = 1, ["favorites"] = new JsonArray() }, null, ["device"]);
+                int ordinal = checked((int)(previous is null
+                    ? db.Scalar<long>("SELECT coalesce(max(ordinal),-1)+1 FROM windows_film_library_favorites WHERE scope_key='device'")
+                    : db.Scalar<long>("SELECT ordinal FROM windows_film_library_favorites WHERE scope_key='device' AND favorites_key=$id", ("$id", context.Target.Id))));
+                FilmStorageRecords.Favorite.Save(db, value, previous, key, ordinal, ordinal);
+                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                return true;
+            }, CancellationToken.None, value?.ToJsonString().Length * 2 ?? 0).ConfigureAwait(false);
         }
+        catch (JsonException) { throw Corrupt(); }
+        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Corrupt) { throw Corrupt(); }
         finally { gate.Release(); }
-        Changed?.Invoke(this, EventArgs.Empty);
+        if (changed) Changed?.Invoke(this, EventArgs.Empty);
     }
 
-    private sealed record StoredFavorite(JsonElement Value, JsonElement Target, string? Id, string[] Candidates);
-    private sealed record LibraryDocument(JsonElement Root, StoredFavorite[] Records,
-        IReadOnlyList<FilmCardItem> Items, DocumentFingerprint Fingerprint);
+    private static void CheckRoot(DatabaseSession db)
+    {
+        if (db.Query("SELECT version,shape_mask,null_mask FROM windows_film_library WHERE scope_key='device'",
+                row => !row.IsDBNull(0) && row.GetInt64(0) == 1 && row.GetInt64(1) == 3 && row.GetInt64(2) == 0)
+            .Any(valid => !valid)) throw Corrupt();
+    }
 
-    private static FilmCardItem ForStorage(FilmCardItem item)
+    private static FilmCardItem Decode(JsonObject row)
+    {
+        var item = row.Deserialize<FilmCardItem>(FilmJson.Options) ?? throw Corrupt();
+        if (string.IsNullOrWhiteSpace(item.Id) || string.IsNullOrWhiteSpace(item.Title) ||
+            item.PlaybackContext is not { } request || row["favoriteId"]?.GetValue<string>() != request.Target.Id)
+            throw Corrupt();
+        try { request.Target.Validate(); }
+        catch (FilmPlaybackException) { throw Corrupt(); }
+        return item;
+    }
+
+    private static JsonObject Row(FilmCardItem item)
     {
         var target = item.PlaybackContext!.Target;
         if (target.Kind is "source" or "group" && target.Source is { ValueKind: JsonValueKind.Object } source)
@@ -72,74 +100,14 @@ public sealed class FilmLibrary(IDocumentStore store) : IAsyncDisposable
                 sourceKey = FilmJson.Member(member, "sourceKey"), detailId = FilmJson.Member(member, "detailId")
             }).ToArray()) };
         else target = target with { Members = null };
-        return item with { PlaybackContext = new(target), SearchContext = null };
-    }
-
-    private static JsonElement[] IdentityFields(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object
-        ? value.EnumerateObject().Where(property => property.NameEquals(name)).Select(property => property.Value).ToArray() : [];
-
-    private static StoredFavorite ReadRecord(JsonElement row)
-    {
-        var contexts = IdentityFields(row, "playbackContext");
-        var targets = contexts.SelectMany(context => IdentityFields(context, "target")).ToArray();
-        var ids = targets.SelectMany(target => IdentityFields(target, "id")).ToArray();
-        string? id = contexts.Length == 1 && targets.Length == 1 && ids.Length == 1 &&
-            ids[0].ValueKind == JsonValueKind.String ? ids[0].GetString() : null;
-        // Every recognizable identity is fenced, including earlier duplicate members.
-        return new(row, targets.Length == 1 ? targets[0] : default, id,
-            ids.Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString()!)
-                .Where(value => value.Length > 0).Distinct(StringComparer.Ordinal).ToArray());
-    }
-
-    private async Task<LibraryDocument> ReadCoreAsync(CancellationToken token)
-    {
-        if (closed) throw new FilmPlaybackException("CLOSED");
-        var snapshot = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
-        if (snapshot.Data is null)
+        return JsonSerializer.SerializeToNode(new
         {
-            if (snapshot.Fingerprint != DocumentFingerprint.Missing) throw new FilmPlaybackException("CORRUPT_STORAGE");
-            return new(FilmJson.Encode(new { version = 1, favorites = System.Array.Empty<object>() }),
-                [], [], snapshot.Fingerprint);
-        }
-        try
-        {
-            using var document = JsonDocument.Parse(snapshot.Data);
-            var root = document.RootElement.Clone();
-            if (root.ValueKind != JsonValueKind.Object ||
-                root.EnumerateObject().Count(property => property.NameEquals("version")) != 1 ||
-                root.EnumerateObject().Count(property => property.NameEquals("favorites")) != 1 ||
-                FilmJson.Integer(root, "version") != 1 ||
-                FilmJson.Member(root, "favorites").ValueKind != JsonValueKind.Array)
-                throw new FilmPlaybackException("CORRUPT_STORAGE");
-            var records = root.GetProperty("favorites").EnumerateArray().Select(ReadRecord).ToArray();
-            var counts = records.SelectMany(row => row.Candidates).GroupBy(id => id, StringComparer.Ordinal)
-                .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
-            var items = new List<FilmCardItem>();
-            foreach (var row in records)
-            {
-                if (row.Id is not { Length: > 0 } id || counts[id] != 1) continue;
-                try
-                {
-                    var target = JsonSerializer.Deserialize<FilmPlaybackTarget>(row.Target, StoredJson);
-                    if (target is null) continue;
-                    target.Validate();
-                    var item = new FilmCardItem(FilmJson.RequiredText(row.Value, "id"), FilmJson.RequiredText(row.Value, "title"),
-                        FilmJson.Text(row.Value, "poster"), FilmJson.Text(row.Value, "score"))
-                    {
-                        TextBadge = FilmJson.Text(row.Value, "textBadge"), Subtitle = FilmJson.Text(row.Value, "subtitle"),
-                        PlaybackContext = new(target)
-                    };
-                    if (string.IsNullOrWhiteSpace(item.Id) || string.IsNullOrWhiteSpace(item.Title)) continue;
-                    items.Add(item);
-                }
-                catch (Exception error) when (error is JsonException or ArgumentException or FilmPlaybackException) { }
-            }
-            return new(root, records, items, snapshot.Fingerprint);
-        }
-        catch (Exception error) when (error is JsonException or ArgumentException or FilmPlaybackException)
-        { throw new FilmPlaybackException("CORRUPT_STORAGE"); }
+            favoriteId = target.Id, id = item.Id, title = item.Title, poster = item.Poster, score = item.Score,
+            textBadge = item.TextBadge, subtitle = item.Subtitle, playbackContext = new { target = target.Wire() }
+        })!.AsObject();
     }
-
+    private void Check() { if (closed) throw new FilmPlaybackException("CLOSED"); }
+    private static FilmPlaybackException Corrupt() => new("CORRUPT_STORAGE");
     public async ValueTask DisposeAsync()
     {
         await gate.WaitAsync().ConfigureAwait(false);

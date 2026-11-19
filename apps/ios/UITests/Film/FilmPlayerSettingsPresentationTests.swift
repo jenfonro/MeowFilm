@@ -3,6 +3,7 @@ import UIKit
 import XCTest
 import MeowContracts
 import MeowUI
+import MeowStorage
 @testable import MeowFilmFeature
 
 @MainActor
@@ -15,16 +16,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
         ("hapticVolume", \.hapticVolume), ("hapticSeek", \.hapticSeek),
     ]
 
-    private func defaults() -> UserDefaults {
-        let suite = "meowfilm.tests.film-player-ui." + UUID().uuidString
-        let defaults = UserDefaults(suiteName: suite)!
-        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
-        return defaults
-    }
-
-    private func store() -> FilmPlayerPreferencesStore {
-        FilmPlayerPreferencesStore(defaults: defaults())
-    }
+    private func store() throws -> FilmPlayerPreferencesStore { try appStorageTestPlayerPreferences() }
 
     private func page(_ owner: FilmPlayerPreferencesStore,
                       area: FilmPlayerSettingsController.Area = .controls) -> FilmPlayerSettingsController {
@@ -68,7 +60,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
     }
 
     func testPlayerSettingsSeparatesDefaultEngineAndPlaybackControls() throws {
-        let owner = store(), page = page(owner, area: .settings)
+        let owner = try store(), page = page(owner, area: .settings)
         XCTAssertEqual(rows(page).map(\.title), ["播放核心", "播放控制"])
         XCTAssertEqual(rows(page).first?.detail, "KSPlayer")
         let navigation = UINavigationController(rootViewController: page)
@@ -76,6 +68,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
         XCTAssertEqual(engines.map(\.title), ["KSPlayer", "AetherEngine"])
         XCTAssertEqual(engines.map(\.state), [.on, .off])
         invoke(engines[1])
+        appStorageTestEventually { owner.preferences.engine == .aether }
         XCTAssertEqual(owner.preferences.engine.rawValue, "aether")
         XCTAssertEqual(rows(page).first?.detail, "AetherEngine")
         XCTAssertEqual(try actions(choice("engine", from: page)).map(\.state), [.off, .on])
@@ -89,7 +82,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
     }
 
     func testControlGroupsAndEverySwitchUseTheSharedPreferenceOwner() throws {
-        let defaults = defaults(), owner = FilmPlayerPreferencesStore(defaults: defaults), page = page(owner)
+        let database = try appStorageTestDatabase(), owner = try appStorageTestPlayerPreferences(database), page = page(owner)
         XCTAssertEqual(page.sections.map(\.title), ["播放控制", "单击手势", "双击手势", "滑动手势", "震动反馈"])
         XCTAssertEqual(page.sections.map { $0.rows.count }, [5, 2, 2, 4, 4])
         for (id, keyPath) in switchFields {
@@ -101,15 +94,16 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
             assertRegular(label.font)
             control.isOn = false
             control.sendActions(for: .valueChanged)
+            appStorageTestEventually { !owner.preferences[keyPath: keyPath] }
             XCTAssertFalse(owner.preferences[keyPath: keyPath])
             XCTAssertFalse(try toggle(XCTUnwrap(rows(page).first { $0.id == "film.player." + id })).control.isOn)
         }
-        XCTAssertEqual(FilmPlayerPreferencesStore(defaults: defaults).preferences, owner.preferences)
+        XCTAssertEqual(try appStorageTestPlayerPreferences(database).preferences, owner.preferences)
         XCTAssertNil(owner.persistenceError)
     }
 
     func testTapMenusExcludeUnsupportedActionsAndPersistSelections() throws {
-        let owner = store(), page = page(owner)
+        let database = try appStorageTestDatabase(), owner = try appStorageTestPlayerPreferences(database), page = page(owner)
         let navigation = UINavigationController(rootViewController: page)
         let expected: [(String, [String])] = [
             ("singleTapCenter", ["无操作", "显示/隐藏播放栏", "播放/暂停"]),
@@ -122,6 +116,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
             XCTAssertEqual(options.map(\.title), titles)
             XCTAssertEqual(options.filter { $0.state == .on }.count, 1)
             invoke(try XCTUnwrap(options.first))
+            appStorageTestEventually { self.rows(page).first { $0.id == "film.player." + id }?.detail == "无操作" }
             XCTAssertEqual(rows(page).first { $0.id == "film.player." + id }?.detail, "无操作")
             XCTAssertEqual(try actions(choice(id, from: page)).filter { $0.state == .on }.map(\.title), ["无操作"])
             XCTAssertTrue(navigation.topViewController === page)
@@ -135,15 +130,15 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
     }
 
     func testRateMenusRefreshByPreferredEngineAndShowTheSavedCorrection() throws {
-        let owner = store(), page = page(owner)
+        let database = try appStorageTestDatabase(), owner = try appStorageTestPlayerPreferences(database), page = page(owner)
         let navigation = UINavigationController(rootViewController: page)
-        XCTAssertTrue(owner.set(\.defaultRate, 3))
-        XCTAssertTrue(owner.set(\.holdRate, 8))
+        XCTAssertTrue(try appStorageTestWait { await owner.set(\.defaultRate, 3) })
+        XCTAssertTrue(try appStorageTestWait { await owner.set(\.holdRate, 8) })
         page.pageDidFinishAppearing()
         let defaults = try actions(choice("defaultRate", from: page))
         XCTAssertEqual(defaults.count, 5)
         XCTAssertEqual(defaults.last?.title, "3X")
-        XCTAssertTrue(owner.set(\.engine, .aether))
+        XCTAssertTrue(try appStorageTestWait { await owner.set(\.engine, .aether) })
         page.pageDidFinishAppearing()
         let corrected = try actions(choice("defaultRate", from: page))
         XCTAssertEqual(corrected.count, 4)
@@ -151,7 +146,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
         XCTAssertEqual(rows(page).first { $0.id == "film.player.defaultRate" }?.detail, "2X")
         XCTAssertEqual(rows(page).first { $0.id == "film.player.holdRate" }?.detail, "2X")
         XCTAssertEqual(try actions(choice("holdRate", from: page)).map(\.title), ["2X"])
-        XCTAssertTrue(owner.set(\.engine, .ksPlayer))
+        XCTAssertTrue(try appStorageTestWait { await owner.set(\.engine, .ksPlayer) })
         page.pageDidFinishAppearing()
         let holds = try actions(choice("holdRate", from: page))
         XCTAssertEqual(holds.map(\.title), ["2X", "3X", "4X", "6X", "8X"])
@@ -159,6 +154,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
         let steps = try actions(choice("seekStep", from: page))
         XCTAssertEqual(steps.map(\.title), ["5 秒", "10 秒", "15 秒", "20 秒", "30 秒", "60 秒"])
         invoke(try XCTUnwrap(steps.last))
+        appStorageTestEventually { owner.preferences.seekStep == 60 }
         XCTAssertEqual(owner.preferences.seekStep, 60)
         XCTAssertEqual(rows(page).first { $0.id == "film.player.seekStep" }?.detail, "60 秒")
         XCTAssertTrue(navigation.topViewController === page)
@@ -182,8 +178,8 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
              ("hapticVolume", "滑动调节音量"), ("hapticSeek", "滑动调节进度")],
         ]
         for engine in [PlaybackVideoEngine.ksPlayer, .aether] {
-            let owner = store()
-            XCTAssertTrue(owner.set(\.engine, engine))
+            let database = try appStorageTestDatabase(), owner = try appStorageTestPlayerPreferences(database)
+            XCTAssertTrue(try appStorageTestWait { await owner.set(\.engine, engine) })
             let settings = page(owner, area: .settings)
             try await withForegroundPage(settings) { navigation in
                 let engineCell = try visibleCell(IndexPath(row: 0, section: 0), on: settings)
@@ -245,8 +241,8 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
 
     func testForegroundNativeMenusAndSwitchesPersistWithoutPushingChoicePages() async throws {
         for engine in [PlaybackVideoEngine.ksPlayer, .aether] {
-            let defaults = defaults(), owner = FilmPlayerPreferencesStore(defaults: defaults)
-            XCTAssertTrue(owner.set(\.engine, engine))
+            let database = try appStorageTestDatabase(), owner = try appStorageTestPlayerPreferences(database)
+            XCTAssertTrue(try appStorageTestWait { await owner.set(\.engine, engine) })
             let settings = page(owner, area: .settings)
             try await withForegroundPage(settings) { navigation in
                 try await selectMenu("engine", on: settings, titles: ["KSPlayer", "AetherEngine"], value: engine.title,
@@ -301,17 +297,17 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
                     }
                 }
                 XCTAssertNil(owner.persistenceError)
-                XCTAssertEqual(FilmPlayerPreferencesStore(defaults: defaults).preferences, owner.preferences)
+                XCTAssertEqual(try appStorageTestPlayerPreferences(database).preferences, owner.preferences)
             }
         }
     }
 
     func testNativeMenuAndSwitchFailuresPreservePreferencesAndUseRetryFeedback() async throws {
         for menuSelection in [true, false] {
-            let defaults = defaults(), owner = FilmPlayerPreferencesStore(defaults: defaults)
-            XCTAssertTrue(owner.set(\.seekStep, 30))
+            let database = try appStorageTestDatabase(), owner = try appStorageTestPlayerPreferences(database)
+            XCTAssertTrue(try appStorageTestWait { await owner.set(\.seekStep, 30) })
             let before = owner.preferences
-            let bytes = try XCTUnwrap(defaults.data(forKey: FilmPlayerPreferencesStore.preferencesKey))
+            let bytes = try await database.snapshot { try $0.query("SELECT seekStep FROM ios_film_player_preferences").first!.integer("seekStep") }
             let controls = page(owner)
             try await withForegroundPage(controls) { navigation in
                 let id = menuSelection ? "defaultRate" : "showsControlCenter"
@@ -322,7 +318,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
                     try await runnerAction { $0.buttons["film.player.defaultRate.menu"].tap() }
                     try await runnerAction { XCTAssertTrue($0.buttons["3X"].isHittable) }
                 }
-                defaults.set("invalid preferences", forKey: FilmPlayerPreferencesStore.preferencesKey)
+                try await database.transaction { try $0.execute("UPDATE ios_film_player_preferences SET seekStep=999 WHERE singleton=1") }
                 try await runnerAction { runner in
                     if menuSelection { runner.buttons["3X"].tap() }
                     else { runner.switches["film.player.showsControlCenter.switch"].tap() }
@@ -335,7 +331,7 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
                 XCTAssertEqual(alert.message, owner.persistenceError)
                 XCTAssertEqual(alert.actions.map(\.title), ["取消", "重试"])
                 XCTAssertEqual(owner.preferences, before)
-                XCTAssertEqual(defaults.string(forKey: FilmPlayerPreferencesStore.preferencesKey), "invalid preferences")
+                let damaged = try await database.read { try $0.query("SELECT seekStep FROM ios_film_player_preferences").first!.integer("seekStep") }; XCTAssertEqual(damaged, 999)
                 XCTAssertTrue(rows(controls).allSatisfy { !$0.enabled })
                 for row in rows(controls) {
                     if let button = row.content as? UIButton {
@@ -347,14 +343,14 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
                 }
                 XCTAssertTrue(navigation.topViewController === controls)
                 XCTAssertEqual(navigation.viewControllers.count, 1)
-                defaults.set(bytes, forKey: FilmPlayerPreferencesStore.preferencesKey)
+                try await database.transaction { try $0.execute("UPDATE ios_film_player_preferences SET seekStep=? WHERE singleton=1", [.integer(bytes)]) }
                 try await runnerAction { $0.alerts.buttons["重试"].tap() }
                 try await waitFor("Retry follows the real dismissal completion and reloads the owner") {
                     controls.presentedViewController == nil && controls.canPresentPageAlert &&
                         owner.persistenceError == nil && self.rows(controls).allSatisfy(\.enabled)
                 }
                 XCTAssertEqual(owner.preferences, before)
-                XCTAssertEqual(defaults.data(forKey: FilmPlayerPreferencesStore.preferencesKey), bytes)
+                let restored = try await database.read { try $0.query("SELECT seekStep FROM ios_film_player_preferences").first!.integer("seekStep") }; XCTAssertEqual(restored, bytes)
                 XCTAssertTrue(try toggle(XCTUnwrap(rows(controls).first {
                     $0.id == "film.player.showsControlCenter"
                 })).control.isOn)
@@ -364,8 +360,8 @@ final class FilmPlayerSettingsPresentationTests: XCTestCase {
 
     func testNarrowAndAccessibleRowsKeepCompleteTextAndSharedRightEdges() async throws {
         for area in [FilmPlayerSettingsController.Area.settings, .controls] {
-            let owner = store()
-            XCTAssertTrue(owner.set(\.engine, .aether))
+            let database = try appStorageTestDatabase(), owner = try appStorageTestPlayerPreferences(database)
+            XCTAssertTrue(try appStorageTestWait { await owner.set(\.engine, .aether) })
             let page = page(owner, area: area)
             try await withForegroundPage(page) { navigation in
                 let window = try XCTUnwrap(navigation.view.window)

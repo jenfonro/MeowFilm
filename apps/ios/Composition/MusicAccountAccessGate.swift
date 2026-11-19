@@ -12,16 +12,12 @@ actor MusicAccountAccessGate {
 
     init(service: NativeMusicAccountService) { self.service = service }
 
-    /// Credentials stay readable after first unlock, so locked playback can still
-    /// renew an account URL. They remain encrypted, device-only and unsynchronized.
-    init(bundleIdentifier: String, urlCacheStore: DocumentStore?,
-         feedbackOutboxStoreFactory: @escaping @Sendable () throws -> DocumentStore,
+    /// The same App database holds typed account credentials and cache/outbox
+    /// rows. Local access/consent fences remain independent of persistence.
+    init(database: SQLiteDatabase,
          audioCache: (any MusicAudioFileCaching)?,
          platformClient: MusicPlatformClient) throws {
-        let store = try KeychainCredentialStore(
-            service: bundleIdentifier + ".music.platform.accounts.v1",
-            accessibility: .afterFirstUnlockThisDeviceOnly
-        )
+        let store = MusicSQLiteCredentialStore(database: database)
         let coordinator = AccountSessionCoordinator(store: store)
         let installation = UUID(uuidString: "62e4342a-73e2-4f6b-a965-e227f5724000")!
         let slots: [(MusicAccountPlatform, String)] = [
@@ -37,7 +33,7 @@ actor MusicAccountAccessGate {
             )
         }
         service = NativeMusicAccountService(accounts: coordinator, scopes: scopes, platformClient: platformClient,
-            urlCacheStore: urlCacheStore, feedbackOutboxStoreFactory: feedbackOutboxStoreFactory, cacheLifecycle: { event in
+            database: database, cacheLifecycle: { event in
                 switch event {
                 case .accountChanged:
                     await audioCache?.clearOfficial()

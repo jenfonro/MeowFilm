@@ -1,4 +1,6 @@
 import XCTest
+import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicFeature
 
 private actor MusicChannelReadGate {
@@ -47,60 +49,67 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
 }
 
 @MainActor final class MusicReferenceHomeStateTests: XCTestCase {
+    private func selection(_ database: SQLiteDatabase) async throws -> MusicChannelSelection {
+        let selection = MusicChannelSelection()
+        try await selection.bind(database: database)
+        addTeardownBlock { await selection.close() }
+        return selection
+    }
+    private func remember(_ channel: MusicPublicBrowseChannel, _ database: SQLiteDatabase) async throws {
+        let owner = try await selection(database)
+        owner.selectChannel(channel)
+        await owner.close()
+    }
+    private func stored(_ database: SQLiteDatabase) async throws -> String? {
+        try await database.snapshot { try $0.query("SELECT channel_key FROM ios_music_channel_selection WHERE singleton=1").first?.text("channel_key") }
+    }
     private let chart = MusicPublicBrowseChannel(id: "chart", title: "排行榜", kind: .rankings)
 
-    func testFirstVisitStartsOnDirectoryFirstItemAndLaterVisitsRestoreHistory() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testFirstVisitStartsOnDirectoryFirstItemAndLaterVisitsRestoreHistory() async throws {
+        let database = try storageTestDatabase(self)
         let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
         let catalogue = [playlists, chart]
-        let first = MusicChannelSelection(defaults: defaults)
+        let first = try await selection(database)
         first.restoreChannel(from: catalogue, catalogueLoaded: true)
         XCTAssertEqual(first.channel, playlists)
         first.selectChannel(chart)
-        let restored = MusicChannelSelection(defaults: defaults)
+        await first.close()
+        let restored = try await self.selection(database)
         restored.restoreChannel(from: [chart, playlists], catalogueLoaded: true)
         XCTAssertEqual(restored.channel, chart)
     }
 
-    func testFirstVisitWaitsForLoadedCatalogueBeforeSelectingFirstItem() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testFirstVisitWaitsForLoadedCatalogueBeforeSelectingFirstItem() async throws {
+        let database = try storageTestDatabase(self)
         let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
-        let selection = MusicChannelSelection(defaults: defaults)
+        let selection = try await selection(database)
         selection.restoreChannel(from: [playlists, chart], catalogueLoaded: false)
         XCTAssertNil(selection.channel)
         selection.restoreChannel(from: [playlists, chart], catalogueLoaded: true)
         XCTAssertEqual(selection.channel, playlists)
     }
 
-    func testFirstVisitUsesTheFirstDynamicChannelWithoutRanking() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testFirstVisitUsesTheFirstDynamicChannelWithoutRanking() async throws {
+        let database = try storageTestDatabase(self)
         let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
         let cube = MusicPublicBrowseChannel(id: "cube", title: "欧美", kind: .cube)
-        let selection = MusicChannelSelection(defaults: defaults)
+        let selection = try await selection(database)
         selection.restoreChannel(from: [playlists, cube], catalogueLoaded: true)
         XCTAssertEqual(selection.channel, playlists)
     }
 
-    func testUnknownHistoryFallsBackToFirstItemOnlyAfterCatalogueLoads() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testUnknownHistoryFallsBackToFirstItemOnlyAfterCatalogueLoads() async throws {
+        let database = try storageTestDatabase(self)
         let missing = MusicPublicBrowseChannel(id: "missing", title: "已下架", kind: .playlists)
-        MusicChannelSelection(defaults: defaults).selectChannel(missing)
+        try await remember(missing, database)
         let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists)
-        let restored = MusicChannelSelection(defaults: defaults)
+        let restored = try await self.selection(database)
         restored.restoreChannel(from: [playlists, chart], catalogueLoaded: false)
         XCTAssertNil(restored.channel)
         restored.restoreChannel(from: [playlists, chart], catalogueLoaded: true)
         XCTAssertEqual(restored.channel, playlists)
-        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), missing.identity)
-        let reloaded = MusicChannelSelection(defaults: defaults)
+        storageTestEqual(try await stored(database), missing.identity)
+        let reloaded = try await selection(database)
         reloaded.restoreChannel(from: [chart, playlists], catalogueLoaded: true)
         XCTAssertEqual(reloaded.channel, chart)
         reloaded.selectChannel(MusicPublicBrowseChannel(id: "playlist", title: "歌单", kind: .playlists))
@@ -108,49 +117,44 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         XCTAssertEqual(reloaded.channel?.id, "playlist")
     }
 
-    func testSelectedChannelUpdatesPersistedIdentityWhenStablePageCodeGetsANewID() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testSelectedChannelUpdatesPersistedIdentityWhenStablePageCodeGetsANewID() async throws {
+        let database = try storageTestDatabase(self)
         let previous = MusicPublicBrowseChannel(id: "old", title: "电音", kind: .cube, pageCode: "electronic")
         let current = MusicPublicBrowseChannel(id: "new", title: "电音", kind: .cube, pageCode: "electronic")
-        let selection = MusicChannelSelection(defaults: defaults)
+        let selection = try await selection(database)
         selection.selectChannel(previous)
         selection.restoreChannel(from: [current], catalogueLoaded: true)
         XCTAssertEqual(selection.channel, current)
-        let restored = MusicChannelSelection(defaults: defaults)
+        await selection.close()
+        let restored = try await self.selection(database)
         restored.restoreChannel(from: [current], catalogueLoaded: true)
         XCTAssertEqual(restored.channel, current)
     }
 
-    func testChannelRestorationRequiresFullIdentityAndDoesNotRewriteUnmatchedValues() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testChannelRestorationRequiresFullIdentityAndDoesNotRewriteUnmatchedValues() async throws {
+        let database = try storageTestDatabase(self)
         let channel = MusicPublicBrowseChannel(id: "electronic", title: "电音", kind: .cube,
             pageCode: "electronic_page", platform: .netease)
-        for stored in [channel.id, channel.pageCode] {
-            defaults.set(stored, forKey: "music.ui.lastChannel")
-            let selection = MusicChannelSelection(defaults: defaults)
+        for value in [channel.id, channel.pageCode] {
+            _ = try await database.transaction { try $0.upsert("ios_music_channel_selection", columns: ["singleton", "channel_key"], values: [.integer(1), .text(value)], key: ["singleton"]) }
+            let selection = try await selection(database)
             selection.restoreChannel(from: [chart, channel], catalogueLoaded: false)
             XCTAssertNil(selection.channel)
             selection.restoreChannel(from: [chart, channel], catalogueLoaded: true)
             XCTAssertEqual(selection.channel, chart)
-            XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), stored)
+            storageTestEqual(try await stored(database), value)
         }
-        defaults.set(channel.identity, forKey: "music.ui.lastChannel")
-        let selection = MusicChannelSelection(defaults: defaults)
+        _ = try await database.transaction { try $0.upsert("ios_music_channel_selection", columns: ["singleton", "channel_key"], values: [.integer(1), .text(channel.identity)], key: ["singleton"]) }
+        let selection = try await selection(database)
         selection.restoreChannel(from: [chart, channel], catalogueLoaded: false)
         XCTAssertEqual(selection.channel, channel)
-        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), channel.identity)
+        storageTestEqual(try await stored(database), channel.identity)
     }
 
     func testRememberedChannelGetsItsOwnFirstPageAfterCatalogueRestoration() async throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        MusicChannelSelection(defaults: defaults).selectChannel(chart)
-        let navigation = MusicChannelSelection(defaults: defaults)
+        let database = try storageTestDatabase(self)
+        try await remember(chart, database)
+        let navigation = try await selection(database)
         let service = MusicReferenceHomeService()
         let access = UUID()
         navigation.restoreChannel(from: [chart], catalogueLoaded: true)
@@ -165,31 +169,28 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         XCTAssertEqual(reads, 1)
     }
 
-    func testChannelRestorationSeparatesEqualProviderCodesAndPageCodes() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
+    func testChannelRestorationSeparatesEqualProviderCodesAndPageCodes() async throws {
+        let database = try storageTestDatabase(self)
         let original = MusicPublicBrowseChannel(id: "shared", title: "当前来源", kind: .cube,
             pageCode: "shared_page", platform: .netease)
         let foreign = MusicPublicBrowseChannel(id: "shared", title: "其他来源", kind: .cube,
             pageCode: "shared_page", platform: .qq)
-        let selection = MusicChannelSelection(defaults: defaults)
+        let selection = try await selection(database)
         selection.selectChannel(original)
         selection.restoreChannel(from: [foreign], catalogueLoaded: true)
         XCTAssertEqual(selection.channel, foreign)
-        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), original.identity)
-        let restored = MusicChannelSelection(defaults: defaults)
+        await selection.close()
+        storageTestEqual(try await stored(database), original.identity)
+        let restored = try await self.selection(database)
         restored.restoreChannel(from: [foreign], catalogueLoaded: false); XCTAssertNil(restored.channel)
         restored.restoreChannel(from: [foreign, original], catalogueLoaded: false)
         XCTAssertEqual(restored.channel, original)
         XCTAssertNotEqual(original.identity, foreign.identity)
     }
 
-    func testSourceSwitchRetiresMemorySelectionWithoutRewritingRememberedChannel() throws {
-        let suite = "MusicReferenceHomeStateTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let selection = MusicChannelSelection(defaults: defaults)
+    func testSourceSwitchRetiresMemorySelectionWithoutRewritingRememberedChannel() async throws {
+        let database = try storageTestDatabase(self)
+        let selection = try await selection(database)
         let feature = MusicPublicBrowseChannel(id: "feature", title: "精选", kind: .featured, platform: .kugou)
         let playlists = MusicPublicBrowseChannel(id: "playlist", title: "歌单广场", kind: .playlists, platform: .kugou)
         selection.selectChannel(chart)
@@ -197,9 +198,10 @@ private actor MusicReferenceHomeService: MusicPublicBrowsing {
         XCTAssertNil(selection.channel)
         selection.restoreChannel(from: [feature, playlists], catalogueLoaded: true)
         XCTAssertEqual(selection.channel, feature)
-        XCTAssertEqual(defaults.string(forKey: "music.ui.lastChannel"), chart.identity)
         selection.restoreChannel(from: [.init(id: "playlist", title: "歌单", kind: .playlists), chart], catalogueLoaded: true)
         XCTAssertEqual(selection.channel, chart)
+        await selection.close()
+        storageTestEqual(try await stored(database), chart.identity)
     }
 
     func testPublicHomeErrorContextIsSourceNeutralButConcreteRequestsKeepTheirPlatform() {

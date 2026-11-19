@@ -5,6 +5,7 @@ import Network
 import CryptoKit
 import Darwin
 import MeowRuntime
+import MeowStorage
 @testable import MeowFilmFeature
 @testable import Meowfilm
 
@@ -328,7 +329,8 @@ final class MeowfilmFilmColdStartPrepareTests: XCTestCase {
                 parameters: .object(["action": .string("save"), "item": item]))
         }
         let favorite = try FilmLifecycleHost.favorite(checkpoint)
-        XCTAssertTrue(try assembly.filmLibrary.toggle(favorite))
+        let added = try await assembly.filmLibrary.toggle(favorite)
+        XCTAssertTrue(added)
         let library = try await FilmLifecycleHost.library(client)
         let own = try FilmLifecycleHost.owned(library, checkpoint: checkpoint)
         XCTAssertEqual(own["history"], .array(history))
@@ -339,14 +341,17 @@ final class MeowfilmFilmColdStartPrepareTests: XCTestCase {
         checkpoint["expected"] = .object(own)
         checkpoint["expectedPreferences"] = changed
         try FilmLifecycleHost.write(checkpoint, kind: "cold")
-        XCTAssertTrue(UserDefaults.standard.synchronize())
+        try await resources.database.flush()
         preserveForRestore = true
         try await finishFixture(fixture, assembly: assembly, client: client, preservingLibrary: true)
         XCTAssertTrue(client.isClosed)
+        let savedDatabase = try appStorageTestOpen(resources.database.dataRoot)
+        addTeardownBlock { try await savedDatabase.close() }
         checkpoint["executorExitConfirmed"] = .bool(true)
-        checkpoint["document"] = .object(try FilmLifecycleHost.documentIdentity())
+        checkpoint["document"] = .object(try await FilmLifecycleHost.documentIdentity(savedDatabase))
+        try await FilmLifecycleHost.assertNoTransportInDocuments(checkpoint, database: savedDatabase)
+        try await savedDatabase.close()
         try FilmLifecycleHost.write(checkpoint, kind: "cold")
-        try FilmLifecycleHost.assertNoTransportInDocuments(checkpoint)
     }
 }
 
@@ -369,7 +374,7 @@ final class MeowfilmFilmColdStartRestoreTests: XCTestCase {
             if let failure { throw failure }
         }
         XCTAssertEqual(checkpoint["executorExitConfirmed"], .bool(true), "The prepare phase must have confirmed its real executor exit")
-        let beforeDisk = try FilmLifecycleHost.documentIdentity()
+        let beforeDisk = try await FilmLifecycleHost.documentIdentity(resources.database)
         XCTAssertEqual(.object(beforeDisk), checkpoint["document"], "App startup must not rewrite the saved document")
         // These reads and native load precede every restore-process business write.
         let library = try await FilmLifecycleHost.library(client)
@@ -379,15 +384,18 @@ final class MeowfilmFilmColdStartRestoreTests: XCTestCase {
         let favorite = try FilmLifecycleHost.favorite(checkpoint)
         XCTAssertTrue(assembly.filmLibrary.contains(favorite))
         let reloaded = FilmLibrary()
+        try await reloaded.bind(database: resources.database)
+        addTeardownBlock { await reloaded.close() }
         XCTAssertNil(reloaded.loadError)
         XCTAssertTrue(reloaded.contains(favorite))
         XCTAssertNil(assembly.playback.currentAttempt)
         XCTAssertFalse(assembly.playback.wantsPlayback)
         try FilmLifecycleHost.assertPreserved(library, checkpoint: checkpoint, library: reloaded)
-        try FilmLifecycleHost.assertNoTransportInDocuments(checkpoint)
+        try await FilmLifecycleHost.assertNoTransportInDocuments(checkpoint, database: resources.database)
         let again = try await FilmLifecycleHost.library(client)
         XCTAssertEqual(again, library, "Reading restored documents is not a progress update or writeback")
-        XCTAssertEqual(try FilmLifecycleHost.documentIdentity(), beforeDisk, "Bytes, modification time and inode stay unchanged")
+        let afterDisk = try await FilmLifecycleHost.documentIdentity(resources.database)
+        XCTAssertEqual(afterDisk, beforeDisk, "Reading rows must not update their revisions or values")
         try await FilmLifecycleHost.cleanup(checkpoint, client: client, assembly: assembly)
         let after = try await FilmLifecycleHost.library(client)
         XCTAssertEqual(after["preferences"], checkpoint["originalSettings"])
@@ -402,10 +410,6 @@ final class MeowfilmFilmColdStartRestoreTests: XCTestCase {
 
 @MainActor
 private enum FilmLifecycleHost {
-    static var libraryURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("meowfilm/script-runtime/film-playback/library.json")
-    }
     private static func checkpointURL(_ kind: String) -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("FilmPlaybackHostTests/\(kind).json")
@@ -499,16 +503,29 @@ private enum FilmLifecycleHost {
         let bytes = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         return .string(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
     }
-    static func documentIdentity() throws -> RuntimeObject {
-        let bytes = try Data(contentsOf: libraryURL)
-        let attributes = try FileManager.default.attributesOfItem(atPath: libraryURL.path)
-        let modified = try XCTUnwrap(attributes[.modificationDate] as? Date)
-        let inode = try XCTUnwrap(attributes[.systemFileNumber] as? NSNumber)
-        return [
-            "sha256": .string(SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()),
-            "modifiedAt": .number(modified.timeIntervalSince1970),
-            "inode": .string(inode.stringValue),
-        ]
+    static func documentIdentity(_ database: SQLiteDatabase) async throws -> RuntimeObject {
+        let statements = ["film_history", "film_history_target_members", "film_manual_matches", "film_blocked_sources", "film_preview_targets"]
+        let projections = try await database.snapshot { db in
+            try statements.map { table in
+                try db.query("SELECT * FROM \(table)").map { row in
+                    RuntimeValue.object(RuntimeObject(uniqueKeysWithValues: try row.values.map { name, value in
+                        let field: RuntimeValue
+                        switch value {
+                        case .null: field = .null
+                        case .text(let value): field = .string(value)
+                        case .integer(let value): field = .number(Double(value))
+                        case .real(let value): field = .number(value)
+                        case .blob: throw SQLiteStorageError.corrupt
+                        }
+                        return (name, field)
+                    }))
+                }
+            }
+        }
+        return try RuntimeObject(uniqueKeysWithValues: zip(statements, projections).map { table, rows in
+            let sorted = try rows.map { try RuntimeJSON.encode($0) }.sorted { $0.lexicographicallyPrecedes($1) }
+            return (table, try digest(.array(sorted.map { try RuntimeJSON.decode($0) })))
+        })
     }
     private static func preserved(_ document: RuntimeObject, checkpoint: RuntimeObject,
                                   library: FilmLibrary) throws -> RuntimeObject {
@@ -557,7 +574,9 @@ private enum FilmLifecycleHost {
         }
         do {
             let favorite = try favorite(checkpoint)
-            if assembly.filmLibrary.contains(favorite) { XCTAssertFalse(try assembly.filmLibrary.toggle(favorite)) }
+            if assembly.filmLibrary.contains(favorite) {
+                let retained = try await assembly.filmLibrary.toggle(favorite); XCTAssertFalse(retained)
+            }
         } catch { failure = failure ?? error }
         do {
             try await NativeFilmFixture.removeCat(installationID, resources: XCTUnwrap(assembly.resources))
@@ -570,13 +589,18 @@ private enum FilmLifecycleHost {
             try await NativeFilmFixture.preferences(checkpoint.filmValue("originalSettings"),
                 resources: XCTUnwrap(assembly.resources))
         } catch { failure = failure ?? error }
-        XCTAssertTrue(UserDefaults.standard.synchronize())
+        try await XCTUnwrap(assembly.resources).database.flush()
         if let failure { throw failure }
     }
-    static func assertNoTransportInDocuments(_ checkpoint: RuntimeObject) throws {
-        let bytes = try Data(contentsOf: libraryURL)
-        let document = try RuntimeJSON.decode(bytes).filmRequiredObject()
-        let own = try owned(document, checkpoint: checkpoint)
+    static func assertNoTransportInDocuments(_ checkpoint: RuntimeObject, database: SQLiteDatabase) async throws {
+        let rows = try await database.snapshot { db in
+            try ["film_history", "film_manual_matches", "film_blocked_sources"].flatMap { try db.query("SELECT * FROM \($0)") }
+        }
+        let text = rows.flatMap { $0.values.values }.compactMap { value -> String? in
+            if case .text(let value) = value { return value }; return nil
+        }.joined(separator: "\n")
+        let bytes = Data(text.utf8)
+        let own = try XCTUnwrap(checkpoint["expected"]?.filmObject)
         func inspect(_ value: RuntimeValue, share: Bool = false) {
             switch value {
             case .object(let fields):

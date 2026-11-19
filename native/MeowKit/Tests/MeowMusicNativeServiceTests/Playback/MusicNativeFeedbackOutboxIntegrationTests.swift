@@ -6,6 +6,7 @@ import MeowMusicFeature
 import MeowMusicTestSupport
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicNativeService
 @testable import MeowMusicPlatform
 
@@ -15,15 +16,12 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         let owner: NativeMusicAccountService
         let native: NativeMusicService
         let settingsDocument: NativeMusicTestLibrary
-        let outbox: DocumentStore
+        let outbox: SQLiteDatabase
         let peer: NativeFeedbackOfflinePeer
         let clock: NativeMusicFixtureClock
     }
     private func fixture(heldUpload: (gate: NativeMusicGate, started: XCTestExpectation)? = nil) async throws -> Fixture {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        let outbox = try DocumentStore(baseURL: root, namespace: "native-feedback")
+        let outbox = try storageTestDatabase(self)
         let identity = AccountIdentity(source: try SourceAddress(installationID: UUID(), siteKey: "wy"), accountID: UUID())
         let bytes = Data(#"{"platform":"wy","userId":"42","cookie":"MUSIC_U=synthetic-account; __csrf=synthetic-csrf"}"#.utf8)
         let credentials = NativeFeedbackCredentials(try .init(data: bytes)), peer = NativeFeedbackOfflinePeer()
@@ -36,10 +34,10 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
                 node: MusicNodeAccountProvider(platform: .netease, client: client, clock: { clock.now() }),
                 peer: peer, gate: heldUpload.gate, started: heldUpload.started)
             owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-                providers: [.netease: provider], feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
+                providers: [.netease: provider], database: outbox, clock: { clock.now() })
         } else {
             owner = NativeMusicAccountService(accounts: AccountSessionCoordinator(store: credentials), scopes: [.netease: identity],
-                platformClient: client, feedbackOutboxStoreFactory: { outbox }, clock: { clock.now() })
+                platformClient: client, database: outbox, clock: { clock.now() })
         }
         _ = try await owner.setAccess(available: true, generation: 1)
         let settingsDocument = NativeMusicTestLibrary()
@@ -56,6 +54,11 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         await owner.flushPendingPlaybackFeedback()
         return .init(owner: owner, native: native, settingsDocument: settingsDocument, outbox: outbox, peer: peer, clock: clock)
     }
+    private func feedbackData(_ database: SQLiteDatabase) throws -> Data? {
+        guard let data = try storageTestRowData(database, "SELECT * FROM ios_music_feedback_outbox ORDER BY occurredAt,id",
+            booleans: ["heartbeat", "startConfirmed"]) else { return nil }
+        return try JSONSerialization.data(withJSONObject: ["entries": JSONSerialization.jsonObject(with: data)], options: [.sortedKeys])
+    }
     private func start(_ f: Fixture) async throws -> MusicNativeFeedbackController {
         let controller = await f.native.playbackFeedback
         let settings = try await f.native.playbackFeedbackSettings()
@@ -66,7 +69,7 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
             }
         await controller.flushRegistrations()
         await f.owner.flushPendingPlaybackFeedback()
-        XCTAssertNotNil(try f.outbox.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNotNil(try feedbackData(f.outbox))
         return controller
     }
     private func sample(_ sequence: UInt64, at: Double, position: Double,
@@ -90,7 +93,7 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         async let first: Void = f.native.prepareForClose()
         async let second: Void = f.native.prepareForClose()
         _ = await (first, second)
-        let data = try XCTUnwrap(f.outbox.read(key: MusicNeteaseFeedbackOutbox.key))
+        let data = try XCTUnwrap(feedbackData(f.outbox))
         let document = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let rows = try XCTUnwrap(document["entries"] as? [[String: Any]])
         XCTAssertEqual(rows.map { $0["phase"] as? String }, ["start", "end"])
@@ -102,7 +105,7 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         f.native.revokeAccess(generation: 1)
         await f.native.close()
         _ = await f.owner.close()
-        XCTAssertEqual(try f.outbox.read(key: MusicNeteaseFeedbackOutbox.key), data)
+        XCTAssertEqual(try feedbackData(f.outbox), data)
         let after = await f.peer.uploadCount()
         XCTAssertEqual(after, uploads, "Closing freezes the local pair without starting another network attempt")
     }
@@ -127,13 +130,13 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
         let first = Task { await f.native.close(); firstReturned.fulfill() }
         let second = Task { await f.native.close(); secondReturned.fulfill() }
         await fulfillment(of: [firstReturned, secondReturned], timeout: 0.05)
-        let frozen = try f.outbox.read(key: MusicNeteaseFeedbackOutbox.key)
+        let frozen = try feedbackData(f.outbox)
         await gate.release()
         await first.value; await second.value
         await f.owner.flushPendingPlaybackFeedback()
         let uploads = await f.peer.uploadCount()
         XCTAssertEqual(uploads, 1, "a cancelled dispatched upload cannot be replayed")
-        XCTAssertEqual(try f.outbox.read(key: MusicNeteaseFeedbackOutbox.key), frozen,
+        XCTAssertEqual(try feedbackData(f.outbox), frozen,
                        "the late receipt cannot recreate or overwrite the retired outbox")
         XCTAssertEqual(f.settingsDocument.snapshot().0, nativeBefore.0)
         XCTAssertEqual(f.settingsDocument.snapshot().2, nativeBefore.2)
@@ -156,7 +159,7 @@ final class MusicNativeFeedbackOutboxIntegrationTests: XCTestCase {
                 }
                 f.settingsDocument.fail(nil)
             }
-            XCTAssertNil(try f.outbox.read(key: MusicNeteaseFeedbackOutbox.key), change)
+            XCTAssertNil(try feedbackData(f.outbox), change)
             await f.native.close(); _ = await f.owner.close()
         }
     }

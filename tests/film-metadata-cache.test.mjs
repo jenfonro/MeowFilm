@@ -1,15 +1,16 @@
 import { stringifyJSONValue, rawJSON } from '@meowfilm/runtime-bridge/json';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
 import { createPlaybackData } from '../packages/film-playback/src/data.js';
 import { createMetadataSettings } from '../apps/runtime/modules/metadata/settings.mjs';
-import fs from 'node:fs/promises';
 import { connectFilmPlayback } from '../apps/runtime/entry.mjs';
+import { databaseProbe } from './storage-test-fixture.mjs';
+import { createMetadataStorage } from '../packages/film-playback/src/metadata-storage.js';
 
 const HOUR = 3_600_000, DAY = 24 * HOUR, STABLE = 14 * DAY;
 const initial = Date.parse('2026-11-08T04:00:00Z');
@@ -27,10 +28,14 @@ const deferred = () => {
   return { promise, resolve };
 };
 const tick = () => new Promise(done => setImmediate(done));
+const probes = new Map();
 
 function fixture(t, { dataRoot = mkdtempSync(join(tmpdir(), 'film-metadata-')),
   maximumBytes, at = initial, persist = true } = {}) {
   const observed = [];
+  const shared = probes.get(dataRoot) ?? { probe: databaseProbe(dataRoot), references: 0 };
+  probes.set(dataRoot, shared); ++shared.references;
+  const probe = shared.probe;
   const settings = Object.fromEntries(['tmdb', 'douban'].map(id => [id, createMetadataSettings(dataRoot, id)]));
   const state = {
     movie: movie(), tv: tv(),
@@ -42,7 +47,7 @@ function fixture(t, { dataRoot = mkdtempSync(join(tmpdir(), 'film-metadata-')),
       : path.startsWith('/3/tv/') ? state.tv : path.startsWith('/3/search/')
         ? { results: [], total_pages: 1 } : state.movie;
   const modules = new Map(['tmdb', 'douban'].map(provider => [provider, { methods: {
-    [provider + '.data.settings.get']: () => ({ ok: true, value: settings[provider].get() }),
+    [provider + '.data.settings.get']: async () => ({ ok: true, value: await settings[provider].get() }),
     [provider + '.data.request']: async (params, { signal }) => {
       observed.push({ provider, ...params, signal });
       return { ok: true, value: await response({ provider, ...params }, signal) };
@@ -50,15 +55,19 @@ function fixture(t, { dataRoot = mkdtempSync(join(tmpdir(), 'film-metadata-')),
   } }]));
   const cache = createPlaybackCache({ now: () => at, ...(maximumBytes ? { maximumBytes } : {}) });
   const data = createPlaybackData({ ...(persist ? { dataRoot } : {}), modules, cache, now: () => at });
-  t.after(async () => { await data.close(); await cache.close(); rmSync(dataRoot, { recursive: true, force: true }); });
-  return { data, dataRoot, cache, state, settings, observed, modules,
+  t.after(async () => {
+    await data.close(); await cache.close();
+    for (const value of Object.values(settings)) await value.close();
+    if (--shared.references === 0) {
+      await probe.close(); probes.delete(dataRoot);
+      rmSync(dataRoot, { recursive: true, force: true });
+    }
+  });
+  return { data, dataRoot, cache, state, settings, observed, modules, probe,
     setResponse: value => { response = value; }, now: () => at,
     setTime: value => { at = value; }, advance: value => { at += value; },
     calls: path => observed.filter(row => row.path === path),
-    files: provider => {
-      try { return readdirSync(join(dataRoot, 'film-metadata', provider)).filter(name => name.endsWith('.json')); }
-      catch (error) { if (error.code === 'ENOENT') return []; throw error; }
-    },
+    entries: probe.entries,
   };
 }
 const readMovie = (f, options) => f.data.metadataEntry('tmdb', '/3/movie/42', { language: 'zh-CN' }, options);
@@ -82,33 +91,38 @@ test('F1 metadata persists across owners and partitions provider, resource, quer
   await next.data.metadataEntry('tmdb', '/3/search/movie', { query: '缓存', page: 1 });
   await next.data.metadataEntry('tmdb', '/3/search/movie', { query: '缓存', page: 2 });
   assert.equal(next.observed.length, 0);
-  assert.equal(f.files('tmdb').length, 5);
-  assert.equal(f.files('douban').length, 1);
+  assert.equal((await f.entries('tmdb')).length, 5);
+  assert.equal((await f.entries('douban')).length, 1);
 });
 
 test('F1 metadata identity survives a real process restart and durable documents exclude request credentials', async t => {
   const f = fixture(t);
-  f.settings.tmdb.update({ accessToken: 'synthetic-settings-token' });
+  await f.settings.tmdb.update({ accessToken: 'synthetic-settings-token' });
   const query = { language: 'zh-CN', api_key: 'synthetic-query-token' };
   const entry = await f.data.metadataEntry('tmdb', '/3/movie/42', query);
   await f.data.close();
-  const bytes = readFileSync(join(f.dataRoot, 'film-metadata/tmdb', f.files('tmdb')[0]), 'utf8');
+  const bytes = JSON.stringify(await f.probe.database.snapshot(
+    ['metadata_cache_entries', 'metadata_cache_entities', 'metadata_cache_members', 'metadata_cache_extensions']
+      .map(table => ({ sql: 'SELECT * FROM ' + table, rows: true, maxRows: 65536 }))));
   assert.equal(bytes.includes('synthetic-settings-token'), false);
   assert.equal(bytes.includes('synthetic-query-token'), false);
   const script = `
+    import { configureStorage } from ${JSON.stringify(new URL('../packages/storage/src/database.js', import.meta.url).href)};
+    import { createDesktopStorageDriver } from ${JSON.stringify(new URL('../packages/script-host/src/native-storage.js', import.meta.url).href)};
+    configureStorage({ driver: createDesktopStorageDriver });
     import {createPlaybackCache} from ${JSON.stringify(new URL('../packages/film-playback/src/cache.js', import.meta.url).href)};
     import {createPlaybackData} from ${JSON.stringify(new URL('../packages/film-playback/src/data.js', import.meta.url).href)};
     import {createMetadataSettings} from ${JSON.stringify(new URL('../apps/runtime/modules/metadata/settings.mjs', import.meta.url).href)};
     const dataRoot = process.argv[1];
     const settings = createMetadataSettings(dataRoot, 'tmdb');
     const modules = new Map([['tmdb', {methods: {
-      'tmdb.data.settings.get': () => ({ok:true, value: settings.get()}),
+      'tmdb.data.settings.get': async () => ({ok:true, value: await settings.get()}),
       'tmdb.data.request': () => { throw new Error('unexpected upstream after restart'); }
     }}]]);
     const cache = createPlaybackCache({now: () => ${initial}});
     const data = createPlaybackData({dataRoot, modules, cache, now: () => ${initial}});
     console.log(JSON.stringify(await data.metadataEntry('tmdb', '/3/movie/42', ${JSON.stringify(query)})));
-    await data.close(); await cache.close();
+    await data.close(); await cache.close(); await settings.close();
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', script, f.dataRoot],
     { encoding: 'utf8', timeout: 30_000 });
@@ -162,7 +176,7 @@ test('F2 requested empty components are complete; missing/failed appends supplem
 test('F2 a partial handoff or search cannot replace full detail or extend its success time', async t => {
   const f = fixture(t), path = '/3/movie/42', query = { language: 'zh-CN' };
   const partial = { kind: 'metadata', provider: 'tmdb', path, query,
-    settings: { revision: f.settings.tmdb.get().revision }, completeness: 'partial',
+    settings: { revision: (await f.settings.tmdb.get()).revision }, completeness: 'partial',
     fetchedAt: f.now(), value: { id: 42, title: '摘要' } };
   await f.data.seed(partial);
   const full = await readMovie(f);
@@ -188,7 +202,7 @@ test('F2/F5 newer public seed/handoff summaries keep full and append evidence wh
   const path = '/3/movie/42', query = { language: 'zh-CN', append_to_response: 'credits,images' };
   const read = options => f.data.metadataEntry('tmdb', path, query, options);
   const partial = { kind: 'metadata', provider: 'tmdb', path, query,
-    settings: { revision: f.settings.tmdb.get().revision }, completeness: 'partial',
+    settings: { revision: (await f.settings.tmdb.get()).revision }, completeness: 'partial',
     fetchedAt: f.now() - HOUR, value: { id: 42, title: '先前摘要' } };
   await f.data.seed(partial);
   const full = await read();
@@ -228,8 +242,7 @@ test('F2/F5 newer public seed/handoff summaries keep full and append evidence wh
   assert.deepEqual(await f.data.cachedEntry(partial, { minimumCompleteness: 'partial' }), summary);
   assert.equal(await f.data.cachedEntry(partial, { minimumCompleteness: 'complete' }), undefined);
   await f.data.close();
-  const files = f.files('tmdb');
-  const bytes = files.map(name => readFileSync(join(f.dataRoot, 'film-metadata/tmdb', name)));
+  const entries = await f.entries('tmdb');
   f = fixture(t, { dataRoot: f.dataRoot, at: f.now() });
   assert.deepEqual(await read({ completeness: 'partial' }), summary);
   assert.equal(await f.data.seed({ ...newer, value: { id: 42, title: '同时间不能覆盖' },
@@ -239,7 +252,7 @@ test('F2/F5 newer public seed/handoff summaries keep full and append evidence wh
   assert.deepEqual(await read({ completeness: 'partial' }), summary);
   assert.equal(f.observed.length, 0, 'ignored seeds and fresh summary reads make no upstream requests');
   await f.data.close();
-  assert.deepEqual(files.map(name => readFileSync(join(f.dataRoot, 'film-metadata/tmdb', name))), bytes);
+  assert.deepEqual(await f.entries('tmdb'), entries);
   const restarted = fixture(t, { dataRoot: f.dataRoot, at: f.now() });
   assert.deepEqual(await restarted.data.metadataEntry('tmdb', path, query, { completeness: 'partial' }), summary);
   assert.deepEqual(await restarted.data.cachedEntry(partial, { minimumCompleteness: 'partial' }), summary);
@@ -272,7 +285,7 @@ test('F2 expired full detail and a refreshed summary keep independent values and
       assert.deepEqual(await active.data.cachedEntry(partial, { minimumCompleteness: 'partial' }), partial);
       assert.equal(await active.data.cachedEntry(partial, { minimumCompleteness: 'complete' }), undefined);
       assert.equal(active.observed.length, 0);
-    } else assert.deepEqual(f.files('tmdb'), []);
+    } else assert.deepEqual(await f.entries('tmdb'), []);
     active.setResponse(() => { throw Object.assign(new Error('synthetic'), { code: 'TIMEOUT' }); });
     const stale = await readMovie(active);
     assert.deepEqual(stale.value, full.value);
@@ -587,7 +600,7 @@ test('F1/F4 effective configuration partitions persistent results without exposi
   const f = fixture(t);
   const before = await readMovie(f);
   await f.data.metadataEntry('douban', '/rexxar/api/v2/movie/51');
-  f.settings.tmdb.update({ accessToken: 'synthetic-next-configuration-token' });
+  await f.settings.tmdb.update({ accessToken: 'synthetic-next-configuration-token' });
   f.state.movie = movie({ overview: '新配置' });
   const after = await readMovie(f);
   assert.notEqual(after.settings.revision, before.settings.revision);
@@ -597,8 +610,8 @@ test('F1/F4 effective configuration partitions persistent results without exposi
   await f.data.metadataEntry('douban', '/rexxar/api/v2/movie/51');
   assert.equal(f.observed.length, 4);
   await f.data.close();
-  assert.equal(f.files('tmdb').length, 2);
-  assert.equal(f.files('douban').length, 1);
+  assert.equal((await f.entries('tmdb')).length, 2);
+  assert.equal((await f.entries('douban')).length, 1);
 });
 
 test('F3 Douban recent_hot home/category pages expire in one hour while details keep their own policy', async t => {
@@ -636,7 +649,7 @@ test('F5 same-key callers merge; leaving stops waiting while accepted metadata s
   assert.equal((await second).cache.status, 'fresh');
   assert.equal(f.observed.length, 1);
   await f.data.close();
-  assert.equal(f.files('tmdb').length, 1);
+  assert.equal((await f.entries('tmdb')).length, 1);
 });
 
 test('F5 distinct append demands share entity work then fetch only their missing components', async t => {
@@ -666,7 +679,7 @@ test('F2/F5 partial handoff during complete production never suppresses the actu
   await entered.promise;
   await f.data.seed({ kind: 'metadata', provider: 'tmdb', path: '/3/movie/42',
     query: { language: 'zh-CN' }, value: { id: 42, title: '摘要' },
-    completeness: 'partial', fetchedAt: f.now(), settings: { revision: f.settings.tmdb.get().revision } });
+    completeness: 'partial', fetchedAt: f.now(), settings: { revision: (await f.settings.tmdb.get()).revision } });
   gate.resolve();
   const complete = await work;
   assert.equal(complete.completeness, 'complete');
@@ -680,7 +693,7 @@ test('F2/F5 partial seed with retained full detail cannot supersede an in-flight
   t.after(() => gate.resolve());
   const f = fixture(t), request = { kind: 'metadata', provider: 'tmdb', path: '/3/movie/42',
     query: { language: 'zh-CN', append_to_response: 'credits,images' },
-    settings: { revision: f.settings.tmdb.get().revision } };
+    settings: { revision: (await f.settings.tmdb.get()).revision } };
   const full = await f.data.metadataEntry(request.provider, request.path, request.query);
   f.advance(1);
   f.setResponse(async () => { entered.resolve(); await gate.promise;
@@ -711,7 +724,7 @@ test('F2/F5 a summary seeded during expired full refresh survives failure in mem
     t.after(() => gate.resolve());
     const f = fixture(t, { persist }), request = { kind: 'metadata', provider: 'tmdb', path: '/3/movie/42',
       query: { language: 'zh-CN', append_to_response: 'credits,images' },
-      settings: { revision: f.settings.tmdb.get().revision } };
+      settings: { revision: (await f.settings.tmdb.get()).revision } };
     const full = await f.data.metadataEntry(request.provider, request.path, request.query);
     f.advance(STABLE);
     f.setResponse(async () => { entered.resolve(); await gate.promise;
@@ -785,15 +798,17 @@ test('F5 invalidate removes provider documents and drains/revokes late writes wi
   await rejected;
   await tick();
   assert.equal(drained, false);
-  assert.equal(f.files('douban').length, 1);
+  assert.equal((await f.entries('douban')).length, 1);
   gate.resolve();
   await invalidation;
-  assert.equal(f.files('tmdb').length, 0);
+  assert.equal((await f.entries('tmdb')).length, 0);
   f.setResponse(() => movie({ overview: '当前配置' }));
   assert.equal((await readMovie(f)).value.overview, '当前配置');
 });
 
-test('F5 explicit deletion failure reports after actual drain without reloading revoked files', async t => {
+test('F5 deletion failure drains producers without reloading revoked rows', async t => {
+  const entered = deferred(), gate = deferred(), removing = deferred();
+  t.after(() => gate.resolve());
   const baseline = fixture(t);
   await readMovie(baseline);
   await baseline.data.metadataEntry('douban', '/rexxar/api/v2/movie/51');
@@ -801,35 +816,27 @@ test('F5 explicit deletion failure reports after actual drain without reloading 
   const f = fixture(t, { dataRoot: baseline.dataRoot });
   await readMovie(f);
   const douban = await f.data.metadataEntry('douban', '/rexxar/api/v2/movie/51');
-  const path = join(f.dataRoot, 'film-metadata/tmdb', f.files('tmdb')[0]);
-  const bytes = readFileSync(path);
-  const unlink = fs.unlink, entered = deferred(), gate = deferred(), removing = deferred();
-  t.mock.method(fs, 'unlink', async name => {
-    if (name === path) { removing.resolve(); throw new Error('controlled private storage failure'); }
-    return unlink(name);
-  });
-  f.setResponse(async (_request, signal) => {
-    entered.resolve(signal); await gate.promise; return movie({ overview: '失效后的晚到值' });
-  });
-  const rejected = assert.rejects(readMovie(f, { refresh: true }), { code: 'CANCELLED' });
+  const entries = await f.entries('tmdb');
+  f.probe.before = input => {
+    if (f.probe.metadataDelete(input)) { removing.resolve(); throw Object.assign(Error('controlled deletion'), {code:'STORAGE_ERROR'}); }
+  };
+  f.setResponse(async (_request, signal) => { entered.resolve(signal); await gate.promise; return movie({overview:'revoked'}); });
+  const rejected = assert.rejects(readMovie(f, {refresh:true}), {code:'CANCELLED'});
   const signal = await entered.promise;
   let settled = false;
-  const invalidation = assert.rejects(f.data.invalidate('tmdb'), { code: 'STORAGE_ERROR' })
-    .then(() => { settled = true; });
+  const invalidation = assert.rejects(f.data.invalidate('tmdb'), {code:'STORAGE_ERROR'}).then(() => {settled=true;});
   assert.equal(signal.aborted, true);
-  await rejected;
-  await removing.promise;
-  assert.equal(settled, false, 'deletion failure still waits for the real producer drain');
-  assert.deepEqual(readFileSync(path), bytes);
-  const requests = f.observed.length;
+  await rejected; await removing.promise;
+  assert.equal(settled, false);
+  assert.deepEqual(await f.entries('tmdb'), entries);
   assert.deepEqual(await f.data.metadataEntry('douban', '/rexxar/api/v2/movie/51'), douban);
-  assert.equal(f.observed.length, requests);
-  gate.resolve();
-  await invalidation;
-  assert.deepEqual(readFileSync(path), bytes, 'revoked producer cannot overwrite the prior document');
-  f.setResponse(() => movie({ overview: '当前请求' }));
-  assert.equal((await readMovie(f)).value.overview, '当前请求');
-  assert.equal(f.observed.length, requests + 1, 'same-revision invalidation cannot reload the undeleted file');
+  const requests = f.observed.length;
+  gate.resolve(); await invalidation;
+  assert.deepEqual(await f.entries('tmdb'), entries);
+  f.probe.before = null;
+  f.setResponse(() => movie({overview:'current'}));
+  assert.equal((await readMovie(f)).value.overview, 'current');
+  assert.equal(f.observed.length, requests+1);
 });
 
 test('F5 close waits for actual producers and preserves previous disk success without accepting late refreshes', async t => {
@@ -886,199 +893,59 @@ test('F2/F8 without a data root oversized full results are delivered whole witho
   assert.equal(partial.cache.status, 'fresh');
   assert.equal(partial.fetchedAt, f.now());
   assert.equal(partial.expiresAt, f.now() + 6 * HOUR);
-  assert.deepEqual(f.files('tmdb'), []);
+  assert.deepEqual(await f.entries('tmdb'), []);
 });
 
-test('F1 unreadable or corrupted durable metadata is a miss and can be rebuilt', async t => {
+test('cache publication is ordered; responses and other providers do not wait, and close drains SQLite', async t => {
+  const entered = deferred(), gate = deferred(), saved = [];
+  t.after(() => gate.resolve());
   const f = fixture(t);
-  await readMovie(f);
-  await f.data.close();
-  const path = join(f.dataRoot, 'film-metadata/tmdb', f.files('tmdb')[0]);
-  writeFileSync(path, '{"version":1,"state":');
-  const next = fixture(t, { dataRoot: f.dataRoot });
-  assert.equal((await readMovie(next)).cache.status, 'fresh');
-  assert.equal(next.observed.length, 1);
-  await next.data.close();
-  assert.doesNotThrow(() => JSON.parse(readFileSync(path, 'utf8')));
-});
-
-test('App-managed root, metadata module and provider directory aliases support cache reuse and atomic publication', async t => {
-  for (const kind of ['app-root', 'module', 'provider']) await t.test(kind, async t => {
-    const baseline = fixture(t);
-    const original = await readMovie(baseline);
-    await baseline.data.close();
-    let dataRoot = baseline.dataRoot;
-    if (kind === 'app-root') {
-      dataRoot = baseline.dataRoot + '-alias';
-      await fs.symlink(baseline.dataRoot, dataRoot, process.platform === 'win32' ? 'junction' : 'dir');
-      t.after(() => fs.unlink(dataRoot));
-    } else {
-      const path = join(dataRoot, 'film-metadata', ...(kind === 'provider' ? ['tmdb'] : []));
-      const actual = join(dataRoot, 'actual-cache');
-      await fs.rename(path, actual);
-      await fs.symlink(actual, path, process.platform === 'win32' ? 'junction' : 'dir');
+  f.probe.before = async input => {
+    if (f.probe.metadataWrite(input)) { entered.resolve(); await gate.promise; }
+  };
+  f.probe.after = input => {
+    if (f.probe.metadataWrite(input)) {
+      const entity = input.statements.find(row => row.sql.startsWith('INSERT INTO metadata_cache_entities') && row.params[1]==='base' && row.params[2]===0);
+      saved.push(entity.params[8+4]); // field_overview follows four title/name fields.
     }
-    // The baseline fixture owns cleanup of the physical root and its aliases.
-    const cache = createPlaybackCache({ now: baseline.now });
-    const data = createPlaybackData({ dataRoot, modules: baseline.modules, cache, now: baseline.now });
-    t.after(async () => { await data.close(); await cache.close(); });
-    assert.deepEqual(await data.metadataEntry('tmdb', '/3/movie/42', { language: 'zh-CN' }), original);
-    assert.equal(baseline.observed.length, 1, 'the alias must reuse the saved document');
-    baseline.state.movie = movie({ overview: 'saved through alias' });
-    const updated = await data.metadataEntry('tmdb', '/3/movie/42', { language: 'zh-CN' }, { refresh: true });
-    assert.equal(updated.value.overview, 'saved through alias');
-    await data.close();
-    const path = join(dataRoot, 'film-metadata/tmdb', baseline.files('tmdb')[0]);
-    assert.equal(JSON.parse(readFileSync(path, 'utf8')).state.value.overview, 'saved through alias');
-    assert.equal(baseline.observed.length, 2);
-  });
+  };
+  const first = await readMovie(f); await entered.promise;
+  f.state.movie = movie({overview:'second'});
+  const second = await readMovie(f, {refresh:true});
+  assert.equal(first.value.overview, '旧简介'); assert.equal(second.value.overview, 'second');
+  assert.equal((await readMovie(f)).value.overview, 'second');
+  assert.equal((await f.data.metadataEntry('douban','/rexxar/api/v2/movie/51')).cache.status,'fresh');
+  let closed=false; const closing=f.data.close().then(() => {closed=true;});
+  await tick(); assert.equal(closed,false);
+  gate.resolve(); await closing;
+  assert.deepEqual(saved.slice(0,2), ['旧简介','second']);
+  f.probe.before=null; f.probe.after=null;
+  const restarted=fixture(t,{dataRoot:f.dataRoot});
+  assert.equal((await readMovie(restarted)).value.overview,'second');
+  assert.equal(restarted.observed.length,0);
 });
 
-test('linked metadata documents are readable, atomically replaced and unlinked on invalidation', async t => {
-  for (const kind of ['hardlink', 'symlink']) await t.test(kind, async t => {
-    const baseline = fixture(t);
-    const original = await readMovie(baseline);
-    await baseline.data.close();
-    const path = join(baseline.dataRoot, 'film-metadata/tmdb', baseline.files('tmdb')[0]);
-    const target = join(baseline.dataRoot, 'linked-document.json');
-    await fs.rename(path, target);
-    const bytes = readFileSync(target, 'utf8');
-    async function link() {
-      if (kind === 'hardlink') await fs.link(target, path);
-      else await fs.symlink(target, path, 'file');
-    }
-    try { await link(); }
-    catch (error) {
-      if (kind === 'symlink' && process.platform === 'win32' && error.code === 'EPERM') {
-        t.skip('Windows file symlinks require Developer Mode or symlink privilege; hardlink case remains covered');
-        return;
-      }
-      throw error;
-    }
-    const next = fixture(t, { dataRoot: baseline.dataRoot });
-    assert.deepEqual(await readMovie(next), original);
-    assert.equal(next.observed.length, 0);
-    next.state.movie = movie({ overview: 'atomic replacement' });
-    assert.equal((await readMovie(next, { refresh: true })).value.overview, 'atomic replacement');
-    await next.data.close();
-    assert.equal(JSON.parse(readFileSync(path, 'utf8')).state.value.overview, 'atomic replacement');
-    assert.equal(readFileSync(target, 'utf8'), bytes, 'publication must preserve the other linked entry');
-    await fs.unlink(path);
-    await link();
-    const clearing = fixture(t, { dataRoot: baseline.dataRoot });
-    await clearing.data.invalidate('tmdb');
-    assert.deepEqual(clearing.files('tmdb'), []);
-    assert.equal(readFileSync(target, 'utf8'), bytes, 'invalidation removes the entry, not its target');
-    clearing.state.movie = movie({ overview: 'after invalidation' });
-    assert.equal((await readMovie(clearing)).value.overview, 'after invalidation');
-    assert.equal(clearing.observed.length, 1);
-  });
+test('publication failure preserves successful results and real stale/error evidence', async t => {
+  const f=fixture(t);
+  f.probe.before=input => { if(f.probe.metadataWrite(input)) throw Object.assign(Error('controlled'),{code:'STORAGE_READONLY'}); };
+  const first=await readMovie(f); assert.equal(first.cache.status,'fresh');
+  f.setResponse(() => {throw Object.assign(Error('upstream'),{code:'NETWORK_ERROR'});});
+  const stale=await readMovie(f,{refresh:true});
+  assert.equal(stale.cache.status,'stale'); assert.deepEqual(stale.cache.error,{code:'NETWORK_ERROR'});
+  assert.deepEqual(stale.value,first.value);
+  await assert.rejects(f.data.metadata('tmdb','/3/movie/42',{}, {refresh:true}),{code:'NETWORK_ERROR'});
+  await f.data.close(); f.probe.before=null;
+  assert.deepEqual(await f.entries('tmdb'),[]);
 });
 
-test('missing cleanup targets are empty while real directory failures miss and do not delay successful results', async t => {
-  const missing = fixture(t);
-  await missing.data.invalidate('tmdb');
-  assert.equal((await readMovie(missing)).cache.status, 'fresh');
-  await missing.data.close();
-  const f = fixture(t);
-  await fs.mkdir(join(f.dataRoot, 'film-metadata'), { recursive: true });
-  const blocked = join(f.dataRoot, 'film-metadata/tmdb');
-  writeFileSync(blocked, 'not a directory');
-  assert.equal((await readMovie(f)).cache.status, 'fresh');
-  assert.equal(f.observed.length, 1);
-  assert.equal((await readMovie(f)).cache.status, 'fresh');
-  await assert.rejects(f.data.invalidate('tmdb'), { code: 'STORAGE_ERROR' });
-  await f.data.close();
-  assert.equal(readFileSync(blocked, 'utf8'), 'not a directory');
-});
-
-test('invalidation accepts a cache entry disappearing after directory enumeration', async t => {
-  const baseline = fixture(t);
-  await readMovie(baseline);
-  await baseline.data.close();
-  const path = join(baseline.dataRoot, 'film-metadata/tmdb', baseline.files('tmdb')[0]);
-  const unlink = fs.unlink;
-  let removed = false;
-  t.mock.method(fs, 'unlink', async name => {
-    if (name === path && !removed) { removed = true; await unlink(name); }
-    return unlink(name);
-  });
-  const next = fixture(t, { dataRoot: baseline.dataRoot });
-  await next.data.invalidate('tmdb');
-  assert.equal(removed, true);
-  assert.deepEqual(next.files('tmdb'), []);
-  assert.equal((await readMovie(next)).cache.status, 'fresh');
-  assert.equal(next.observed.length, 1);
-});
-
-test('cache publication is ordered and does not delay success, reads or another provider; close physically drains it', async t => {
-  const f = fixture(t), entered = deferred(), gate = deferred(), saved = [];
-  const write = fs.writeFile;
-  t.mock.method(fs, 'writeFile', async (path, bytes, options) => {
-    if (dirname(String(path)) === join(f.dataRoot, 'film-metadata', 'tmdb')) {
-      entered.resolve();
-      await gate.promise;
-      saved.push(JSON.parse(bytes).state.value.overview);
-    }
-    return write(path, bytes, options);
-  });
-  const first = await readMovie(f);
-  await entered.promise;
-  f.state.movie = movie({ overview: '第二次成功' });
-  const second = await readMovie(f, { refresh: true });
-  assert.equal(first.value.overview, '旧简介');
-  assert.equal(second.value.overview, '第二次成功');
-  assert.equal((await readMovie(f)).value.overview, '第二次成功');
-  assert.equal((await f.data.metadataEntry('douban', '/rexxar/api/v2/movie/51')).cache.status, 'fresh');
-  let closed = false;
-  const closing = f.data.close().then(() => { closed = true; });
-  await tick();
-  assert.equal(closed, false);
-  gate.resolve();
-  await closing;
-  assert.deepEqual(saved, ['旧简介', '第二次成功']);
-  const restarted = fixture(t, { dataRoot: f.dataRoot });
-  assert.equal((await readMovie(restarted)).value.overview, '第二次成功');
-  assert.equal(restarted.observed.length, 0);
-});
-
-test('publication failure preserves successful results and stale/error evidence, not a fresh or storage error', async t => {
-  const f = fixture(t);
-  t.mock.method(fs, 'writeFile', async () => { throw new Error('controlled cache write failure'); });
-  const first = await readMovie(f);
-  assert.equal(first.cache.status, 'fresh');
-  f.setResponse(() => { throw Object.assign(new Error('real network failure'), { code: 'NETWORK_ERROR' }); });
-  const stale = await readMovie(f, { refresh: true });
-  assert.equal(stale.cache.status, 'stale');
-  assert.deepEqual(stale.cache.error, { code: 'NETWORK_ERROR' });
-  assert.deepEqual(stale.value, first.value);
-  await assert.rejects(f.data.metadata('tmdb', '/3/movie/42', {}, { refresh: true }), { code: 'NETWORK_ERROR' });
-  await f.data.close();
-  assert.deepEqual(f.files('tmdb'), []);
-});
-
-test('cache read errors and decoded unusable values miss without hiding a real upstream failure', async t => {
-  for (const broken of [Buffer.from('{broken'), Buffer.from([0xff]),
-    Buffer.from(JSON.stringify({ key: 'wrong identity', state: { value: {}, components: {} } }))]) {
-    const baseline = fixture(t);
-    await readMovie(baseline);
-    await baseline.data.close();
-    const path = join(baseline.dataRoot, 'film-metadata/tmdb', baseline.files('tmdb')[0]);
-    writeFileSync(path, broken);
-    const next = fixture(t, { dataRoot: baseline.dataRoot });
-    next.setResponse(() => { throw Object.assign(new Error('controlled'), { code: 'TIMEOUT' }); });
-    await assert.rejects(readMovie(next, { refresh: true }), { code: 'TIMEOUT' });
-    assert.equal(next.observed.length, 1);
-  }
-  const baseline = fixture(t);
-  await readMovie(baseline);
-  await baseline.data.close();
-  const f = fixture(t, { dataRoot: baseline.dataRoot });
-  let reads = 0;
-  t.mock.method(fs, 'readFile', async () => { reads++; throw new Error('controlled read failure'); });
-  assert.equal((await readMovie(f)).cache.status, 'fresh');
-  assert.ok(reads > 0);
-  assert.equal(f.observed.length, 1);
+test('cache read errors miss without hiding a real upstream failure', async t => {
+  const baseline=fixture(t); await readMovie(baseline); await baseline.data.close();
+  const f=fixture(t,{dataRoot:baseline.dataRoot}); let reads=0;
+  f.probe.before=input => {if(f.probe.metadataRead(input)){reads++;throw Object.assign(Error('controlled read'),{code:'STORAGE_ERROR'});}};
+  f.setResponse(() => {throw Object.assign(Error('real upstream'),{code:'TIMEOUT'});});
+  await assert.rejects(readMovie(f,{refresh:true}),{code:'TIMEOUT'});
+  assert.equal(reads,1); assert.equal(f.observed.length,1);
+  f.probe.before=null;
 });
 
 test('fresh component evidence with unusable bodies is a miss and refetches the requested identity', async t => {
@@ -1088,10 +955,10 @@ test('fresh component evidence with unusable bodies is a miss and refetches the 
     { name: 'TV genres', path: '/3/tv/43', field: 'genres', component: 'detail' },
     { name: 'TV seasons', path: '/3/tv/43', field: 'seasons', component: 'seasons' },
     { name: 'invalid season rows', path: '/3/tv/43', field: 'seasons', component: 'seasons',
-      replacement: [{ season_number: 'unusable' }] },
+      replacement: [{}] },
     { name: 'season episodes', path: '/3/tv/43/season/1', field: 'episodes', component: 'episodes' },
     { name: 'invalid episode rows', path: '/3/tv/43/season/1', field: 'episodes', component: 'episodes',
-      replacement: [{ episode_number: 'unusable' }] },
+      replacement: [{}] },
     { name: 'Douban genres', provider: 'douban', path: '/rexxar/api/v2/movie/51',
       field: 'genres', component: 'detail' },
     { name: 'Douban intro', provider: 'douban', path: '/rexxar/api/v2/movie/51',
@@ -1109,19 +976,18 @@ test('fresh component evidence with unusable bodies is a miss and refetches the 
     const original = await baseline.data.metadataEntry(provider, path, query, row.options);
     assert.equal(original.cache.status, 'fresh');
     await baseline.data.close();
-    const filename = baseline.files(provider).find(name => {
-      const document = JSON.parse(readFileSync(join(baseline.dataRoot, 'film-metadata', provider, name), 'utf8'));
-      return Object.hasOwn(document.state.components, row.component);
-    });
-    assert.ok(filename);
-    const file = join(baseline.dataRoot, 'film-metadata', provider, filename);
-    const document = JSON.parse(readFileSync(file, 'utf8'));
-    const evidence = document.state.components[row.component];
-    assert.ok(['ready', 'empty'].includes(evidence.status));
-    assert.ok(evidence.expiresAt > baseline.now());
-    if (Object.hasOwn(row, 'replacement')) document.state.value[row.field] = row.replacement;
-    else delete document.state.value[row.field];
-    writeFileSync(file, JSON.stringify(document));
+    const entry = (await baseline.entries(provider)).find(entry => entry.request_path === path);
+    assert.ok(entry);
+    const storage=createMetadataStorage(baseline.dataRoot,baseline.now);
+    try {
+      const state=await storage.read(entry.cache_key);
+      assert.ok(['ready','empty'].includes(state.components[row.component].status));
+      assert.ok(state.components[row.component].expiresAt>baseline.now());
+      if(Object.hasOwn(row,'replacement')) state.value[row.field]=row.replacement;
+      else delete state.value[row.field];
+      state.request={provider,path,query:original.query,settings:original.settings};
+      await storage.save(entry.cache_key,state,entry.estimated_bytes);
+    } finally {await storage.close();}
     const next = fixture(t, { dataRoot: baseline.dataRoot });
     const result = await next.data.metadataEntry(provider, path, query, row.options);
     assert.equal(result.cache.status, 'fresh');
@@ -1162,125 +1028,69 @@ test('usable empty component bodies remain fresh disk hits', async t => {
 });
 
 test('provider settings receipt survives failed cache removal after revocation and drain', async t => {
-  const f = fixture(t);
-  const first = await readMovie(f);
-  await f.data.close();
-  const modules = [...f.modules].map(([id, value]) => ({ id, methods: { ...value.methods } }));
-  const tmdb = modules.find(row => row.id === 'tmdb');
-  tmdb.methods['tmdb.data.settings.update'] = input => ({ ok: true, value: f.settings.tmdb.update(input) });
-  const film = connectFilmPlayback(modules, { dataRoot: f.dataRoot, now: f.now });
-  t.after(() => film.close());
-  const entered = deferred(), gate = deferred(), removing = deferred();
-  f.setResponse(async (_request, signal) => { entered.resolve(signal); await gate.promise; return movie(); });
-  const refresh = assert.rejects(film.methods['film.data.metadata'](
-    { provider: 'tmdb', path: '/3/movie/42', refresh: true }), { code: 'CANCELLED' });
-  const signal = await entered.promise;
-  t.mock.method(fs, 'unlink', async () => { removing.resolve(); throw new Error('controlled removal failure'); });
-  let settled = false;
-  const update = tmdb.methods['tmdb.data.settings.update']({ accessToken: 'new-synthetic-token' })
-    .then(reply => { settled = true; return reply; });
-  await removing.promise;
-  assert.equal(signal.aborted, true);
-  await refresh;
-  assert.equal(settled, false);
-  gate.resolve();
-  const reply = await update;
-  assert.equal(reply.ok, true);
-  assert.notEqual(reply.value.revision, first.settings.revision);
-  assert.equal(reply.value.revision, f.settings.tmdb.get().revision);
+  const entered=deferred(),gate=deferred(),removing=deferred(); t.after(() => gate.resolve());
+  let film;
+  t.after(() => film?.close());
+  const f=fixture(t); const first=await readMovie(f); await f.data.close();
+  const modules=[...f.modules].map(([id,value]) => ({id,methods:{...value.methods}}));
+  const tmdb=modules.find(row => row.id==='tmdb');
+  tmdb.methods['tmdb.data.settings.update']=async input => ({ok:true,value:await f.settings.tmdb.update(input)});
+  film=connectFilmPlayback(modules,{dataRoot:f.dataRoot,now:f.now});
+  f.setResponse(async (_request,signal) => {entered.resolve(signal);await gate.promise;return movie();});
+  const refresh=assert.rejects(film.methods['film.data.metadata']({provider:'tmdb',path:'/3/movie/42',refresh:true}),{code:'CANCELLED'});
+  const signal=await entered.promise;
+  f.probe.before=input => {if(f.probe.metadataDelete(input)){removing.resolve();throw Object.assign(Error('controlled delete'),{code:'STORAGE_ERROR'});}};
+  let settled=false;
+  const update=tmdb.methods['tmdb.data.settings.update']({accessToken:'new-synthetic-token'}).then(reply => {settled=true;return reply;});
+  await removing.promise; assert.equal(signal.aborted,true); await refresh; assert.equal(settled,false);
+  gate.resolve(); const reply=await update; f.probe.before=null;
+  assert.equal(reply.ok,true); assert.notEqual(reply.value.revision,first.settings.revision);
+  assert.equal(reply.value.revision,(await f.settings.tmdb.get()).revision);
 });
 
-test('invalidation revokes asynchronous disk hydration and waits for the actual read to finish', async t => {
-  const baseline = fixture(t);
-  const original = await readMovie(baseline);
-  await baseline.data.close();
-  const f = fixture(t, { dataRoot: baseline.dataRoot });
-  const read = fs.readFile, entered = deferred(), gate = deferred();
-  t.mock.method(fs, 'readFile', async (...args) => {
-    const bytes = await read(...args);
-    entered.resolve();
-    await gate.promise;
-    return bytes;
-  });
-  const cancelled = assert.rejects(readMovie(f), { code: 'CANCELLED' });
-  await entered.promise;
-  let drained = false;
-  const invalidation = f.data.invalidate('tmdb').then(() => { drained = true; });
-  await cancelled;
-  await tick();
-  assert.equal(drained, false);
-  gate.resolve();
-  await invalidation;
-  f.state.movie = movie({ overview: '撤权后的新请求' });
-  const next = await readMovie(f);
-  assert.notEqual(next.value.overview, original.value.overview);
-  assert.equal(f.observed.length, 1);
+test('invalidation revokes SQLite hydration and waits for the actual read', async t => {
+  const entered=deferred(),gate=deferred(); t.after(() => gate.resolve());
+  const baseline=fixture(t); const original=await readMovie(baseline);await baseline.data.close();
+  const f=fixture(t,{dataRoot:baseline.dataRoot});
+  f.probe.after=async input => {if(f.probe.metadataRead(input)){entered.resolve();await gate.promise;}};
+  const cancelled=assert.rejects(readMovie(f),{code:'CANCELLED'});await entered.promise;
+  let drained=false;const invalidation=f.data.invalidate('tmdb').then(() => {drained=true;});
+  await tick(); assert.equal(drained,false); gate.resolve();await cancelled;await invalidation;
+  f.probe.after=null; f.state.movie=movie({overview:'after-revocation'});
+  const next=await readMovie(f); assert.notEqual(next.value.overview,original.value.overview);
+  assert.equal(f.observed.length,1);
 });
 
-test('invalidation waits for an accepted slow write and prevents its publication after revocation', async t => {
-  const f = fixture(t), entered = deferred(), gate = deferred();
-  const write = fs.writeFile;
-  t.mock.method(fs, 'writeFile', async (...args) => {
-    entered.resolve(); await gate.promise; return write(...args);
-  });
-  assert.equal((await readMovie(f)).cache.status, 'fresh');
-  await entered.promise;
-  let drained = false;
-  const invalidation = f.data.invalidate('tmdb').then(() => { drained = true; });
-  await tick();
-  assert.equal(drained, false);
-  gate.resolve();
-  await invalidation;
-  assert.deepEqual(f.files('tmdb'), []);
-  await f.data.close();
-  assert.deepEqual(f.files('tmdb'), []);
+test('invalidation drains an accepted SQLite publication before deleting revoked rows', async t => {
+  const entered=deferred(),gate=deferred(); t.after(() => gate.resolve());const f=fixture(t);
+  f.probe.before=async input => {if(f.probe.metadataWrite(input)){entered.resolve();await gate.promise;}};
+  assert.equal((await readMovie(f)).cache.status,'fresh');await entered.promise;
+  let drained=false;const invalidation=f.data.invalidate('tmdb').then(() => {drained=true;});
+  await tick();assert.equal(drained,false);gate.resolve();await invalidation;f.probe.before=null;
+  assert.deepEqual(await f.entries('tmdb'),[]);await f.data.close();assert.deepEqual(await f.entries('tmdb'),[]);
 });
 
-test('cold refresh settles success or real stale failure without a second disk read, including unretained results', async t => {
-  for (const failure of [false, true]) await t.test(failure ? 'real upstream failure' : 'success', async t => {
-    const baseline = fixture(t);
-    const original = await readMovie(baseline);
-    await baseline.data.close();
-    const f = fixture(t, { dataRoot: baseline.dataRoot, maximumBytes: 1000 });
-    const read = fs.readFile, gate = deferred();
-    let reads = 0;
-    t.mock.method(fs, 'readFile', async (...args) => {
-      reads++;
-      if (reads > 1) await gate.promise;
-      return read(...args);
-    });
-    f.setResponse(() => {
-      if (failure) throw Object.assign(new Error('real upstream'), { code: 'TIMEOUT' });
-      return movie({ overview: 'fresh upstream' });
-    });
-    try {
-      const result = await readMovie(f, { refresh: true });
-      assert.equal(reads, 1);
-      assert.equal(result.cache.status, failure ? 'stale' : 'fresh');
-      if (failure) {
-        assert.deepEqual(result.value, original.value);
-        assert.deepEqual(result.cache.error, { code: 'TIMEOUT' });
-      } else assert.equal(result.value.overview, 'fresh upstream');
-    } finally { gate.resolve(); }
+test('cold refresh settles success or real stale failure with one SQLite snapshot, even when unretained', async t => {
+  for(const failure of [false,true]) await t.test(failure?'failure':'success',async t => {
+    const baseline=fixture(t);const original=await readMovie(baseline);await baseline.data.close();
+    const f=fixture(t,{dataRoot:baseline.dataRoot,maximumBytes:1000}); let reads=0;
+    f.probe.before=input => {if(f.probe.metadataRead(input)) reads++;};
+    f.setResponse(() => {if(failure) throw Object.assign(Error('upstream'),{code:'TIMEOUT'});return movie({overview:'fresh upstream'});});
+    const result=await readMovie(f,{refresh:true}); f.probe.before=null;
+    assert.equal(reads,1);assert.equal(result.cache.status,failure?'stale':'fresh');
+    if(failure){assert.deepEqual(result.value,original.value);assert.deepEqual(result.cache.error,{code:'TIMEOUT'});}
+    else assert.equal(result.value.overview,'fresh upstream');
   });
 });
 
-test('externally obtained metadata seed never reads disk for a merge', async t => {
-  const baseline = fixture(t);
-  await readMovie(baseline);
-  await baseline.data.close();
-  const f = fixture(t, { dataRoot: baseline.dataRoot }), gate = deferred();
-  let reads = 0;
-  t.mock.method(fs, 'readFile', async () => { reads++; await gate.promise; throw new Error('slow cache'); });
-  const entry = { kind: 'metadata', provider: 'tmdb', path: '/3/movie/42', query: { language: 'zh-CN' },
-    settings: { revision: f.settings.tmdb.get().revision }, completeness: 'complete',
-    fetchedAt: f.now(), value: movie() };
-  try {
-    assert.deepEqual(await f.data.seed(entry), entry.value);
-    assert.equal(f.observed.length, 0);
-    assert.deepEqual((await f.data.cachedEntry(entry)).value, entry.value);
-    assert.equal(reads, 0);
-  } finally { gate.resolve(); }
+test('external metadata seed merges without reading SQLite', async t => {
+  const baseline=fixture(t);await readMovie(baseline);await baseline.data.close();
+  const f=fixture(t,{dataRoot:baseline.dataRoot});await f.settings.tmdb.ready;let reads=0;
+  f.probe.before=input => {if(f.probe.metadataRead(input)){reads++;throw Error('unexpected cache read');}};
+  const entry={kind:'metadata',provider:'tmdb',path:'/3/movie/42',query:{language:'zh-CN'},
+    settings:{revision:(await f.settings.tmdb.get()).revision},completeness:'complete',fetchedAt:f.now(),value:movie()};
+  assert.deepEqual(await f.data.seed(entry),entry.value);assert.equal(f.observed.length,0);
+  assert.deepEqual((await f.data.cachedEntry(entry)).value,entry.value);assert.equal(reads,0);f.probe.before=null;
 });
 
 test('durable metadata preserves exact numeric extensions across owners without requesting a replacement', async t => {

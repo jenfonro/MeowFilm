@@ -2,29 +2,27 @@ import Foundation
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowNovelFeature
 
 @MainActor
 final class NovelDiscoveryTests: XCTestCase {
-    private var fixtures: [(NovelDiscoverySession, NovelDiscoveryRuntime, URL)] = []
+    private var fixtures: [(NovelDiscoverySession, NovelDiscoveryRuntime)] = []
     override func tearDown() async throws {
-        for (session, runtime, root) in fixtures {
+        for (session, runtime) in fixtures {
             await runtime.release()
             await session.close(); await session.feature.close()
-            try? FileManager.default.removeItem(at: root)
         }
         fixtures = []
         try await super.tearDown()
     }
 
     private func fixture(sources: [NovelSource]? = nil) throws -> (NovelDiscoverySession, NovelDiscoveryRuntime) {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: root, namespace: NovelLibrary.namespace)
+        let database = try storageTestDatabase(self)
         let runtime = NovelDiscoveryRuntime(sources: sources ?? [Self.source("a"), Self.source("b", order: 1)])
-        let feature = NovelFeature(library: NovelLibrary(store: store), rules: NovelRuleProcessor(runtime: runtime), runtime: runtime)
+        let feature = NovelFeature(library: NovelLibrary(database: database), rules: NovelRuleProcessor(runtime: runtime), runtime: runtime)
         let session = NovelDiscoverySession(feature: feature)
-        fixtures.append((session, runtime, root))
+        fixtures.append((session, runtime))
         return (session, runtime)
     }
 

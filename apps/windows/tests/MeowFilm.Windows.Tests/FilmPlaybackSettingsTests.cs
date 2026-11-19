@@ -71,7 +71,7 @@ public static class FilmPlaybackSettingsTests
             catch (OperationCanceledException) { }
             await BridgeTests.Expect("CLOSED", () => service.SaveManualAsync(FilmJson.Encode(new { id = "offline" })));
             Check(runtime.Calls.Single().Method == "film.manual.update", "manual remains a real runtime business operation without native fallback");
-            store.SeedBytes("film.preferences.v1", [123]);
+            store.Seed("film.preferences.v1", new { version = 2 });
             await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.ReadPreferencesAsync(default));
             await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.SavePreferencesAsync(next));
             Check(runtime.Notifications.Count == 1, "corrupt native preferences are not replaced by defaults");
@@ -110,7 +110,7 @@ public static class FilmPlaybackSettingsTests
             await using var empty = new FilmNativeSettingsFixture();
             var first = new FilmPlaybackSettings(runtime, empty);
             await InvalidPreferences(() => first.SavePreferencesAsync(FilmPreferences.Defaults with { Keywords = ["DDP", "ddp"] }));
-            Check((await empty.ReadAsync("film.preferences.v1")).Data is null && empty.Writes == 0 &&
+            Check((await empty.ReadRecordAsync("film.preferences.v1", MeowFilm.Capabilities.FilmStorageRecords.Preferences)).Data is null && empty.Writes == 0 &&
                 runtime.Notifications.Count == 0 && runtime.Calls.Count == 0, "an invalid first full save cannot create a document");
         });
         yield return Test("native preference receipts and reopen return trimmed values and preserve partial pan orders", async () =>
@@ -146,65 +146,45 @@ public static class FilmPlaybackSettingsTests
         {
             var runtime = new FilmRuleConsumerRuntime();
             await using var store = new FilmNativeSettingsFixture();
-            store.SeedBytes("film.preferences.v1", System.Text.Encoding.UTF8.GetBytes("""
-                {"version":1,"future":1e400,"preferences":{"ruleOrder":["future","quality"],"panOrder":["115","quark"],
-                 "keywords":[],"siteCleanKeywords":[],"iosAutoPrepare":true,"metadataViewProvider":"tmdb","future":9007199254740993}}
-                """));
+            store.Seed("film.preferences.v1", new { version = 1, preferences = new { ruleOrder = new[] { "future", "quality" }, panOrder = new[] { "115", "quark" }, keywords = Array.Empty<object>(), siteCleanKeywords = Array.Empty<object>(), iosAutoPrepare = true, metadataViewProvider = "tmdb" } });
             var service = new FilmPlaybackSettings(runtime, store);
             var original = await service.ReadPreferencesAsync(default);
             var saved = await service.SavePreferencesAsync(original with { RuleOrder = ["quality", "future"] }, "ruleOrder");
             saved = await service.SavePreferencesAsync(saved with { PanOrder = ["quark", "115"] }, "panOrder");
             var raw = store.Value("film.preferences.v1");
-            Check(saved.RuleOrder.SequenceEqual(["quality", "future"]) && saved.PanOrder.SequenceEqual(["quark", "115"]) &&
-                raw.GetProperty("future").GetRawText() == "1e400" &&
-                raw.GetProperty("preferences").GetProperty("future").GetRawText() == "9007199254740993",
+            Check(saved.RuleOrder.SequenceEqual(["quality", "future"]) && saved.PanOrder.SequenceEqual(["quark", "115"]),
                 "real reorder keeps unknown IDs and precise unedited material");
         });
-        yield return Test("explicit and inferred preference edits preserve untouched raw shapes and missing fields", async () =>
+        yield return Test("explicit and inferred preference edits preserve other typed fields and reject missing fields", async () =>
         {
             var runtime = new FilmRuleConsumerRuntime { Respond = (_, _, _) => throw new BridgeException("CLOSED") };
             await using var store = new FilmNativeSettingsFixture();
             var service = new FilmPlaybackSettings(runtime, store);
-            var raw = JsonSerializer.Deserialize<JsonElement>("""
-                {"ruleOrder":["future-rule","quality","future-rule"],"panOrder":{"future":["pan"]},"keywords":["visible",7],
-                 "siteCleanKeywords":[false,{"nested":true}],"iosAutoPrepare":{"future":1},"metadataViewProvider":"tmdb","extra":{"nested":[7]}}
-                """);
-            store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = raw }));
-            var original = await service.ReadPreferencesAsync(default);
-            await service.SavePreferencesAsync(original);
-            Check(store.Writes == 0 && JsonElement.DeepEquals(raw, store.Value("film.preferences.v1").GetProperty("preferences")),
-                "an unchanged projection does not validate, normalize or rewrite unedited extension branches");
-            int writes = 0;
+            var original = FilmPreferences.Defaults with
+            {
+                RuleOrder = ["keyword", "quality", "pan"], PanOrder = ["baidu", "quark"],
+                SiteCleanKeywords = ["keep-clean"], IosAutoPrepare = false, MetadataViewProvider = "douban"
+            };
             foreach (string? field in new string?[] { "keywords", null })
             {
-                store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = raw }));
-                original = await service.ReadPreferencesAsync(default);
-                var draft = original with { Keywords = ["\ufeff visible \u00a0"] };
-                if (field is not null) draft = draft with { RuleOrder = ["future"], PanOrder = ["115"], SiteCleanKeywords = ["x", "X"] };
+                store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = original }));
+                var loaded = await service.ReadPreferencesAsync(default);
+                var draft = loaded with { Keywords = ["\ufeff visible \u00a0"] };
+                if (field is not null) draft = draft with { PanOrder = ["uc"], SiteCleanKeywords = ["x", "X"] };
                 var saved = await service.SavePreferencesAsync(draft, field);
-                var value = store.Value("film.preferences.v1").GetProperty("preferences");
-                foreach (string untouched in new[] { "ruleOrder", "panOrder", "siteCleanKeywords", "iosAutoPrepare", "metadataViewProvider", "extra" })
-                    Check(JsonElement.DeepEquals(raw.GetProperty(untouched), value.GetProperty(untouched)),
-                        "only the selected or actually changed field is replaced: " + untouched);
-                Check(saved.Keywords.SequenceEqual(["visible"]) && value.GetProperty("keywords").GetArrayLength() == 1 &&
-                    store.Writes == ++writes, "a real edit replaces the raw branch even when trimming restores its old projected value");
+                Check(saved.Keywords.SequenceEqual(["visible"]) && saved.RuleOrder.SequenceEqual(original.RuleOrder) &&
+                    saved.PanOrder.SequenceEqual(original.PanOrder) && saved.SiteCleanKeywords.SequenceEqual(original.SiteCleanKeywords) &&
+                    saved.IosAutoPrepare == original.IosAutoPrepare && saved.MetadataViewProvider == original.MetadataViewProvider,
+                    "the explicit or inferred edit changes only its selected typed field");
             }
-            original = await service.ReadPreferencesAsync(default);
-            var changed = await service.SavePreferencesAsync(original with
-                { PanOrder = [" baidu "], SiteCleanKeywords = [], IosAutoPrepare = true });
-            var committed = store.Value("film.preferences.v1").GetProperty("preferences");
-            Check(changed.PanOrder.SequenceEqual(["baidu"]) &&
-                changed.SiteCleanKeywords.Length == 0 && changed.IosAutoPrepare &&
-                JsonElement.DeepEquals(raw.GetProperty("ruleOrder"), committed.GetProperty("ruleOrder")) &&
-                JsonElement.DeepEquals(raw.GetProperty("extra"), committed.GetProperty("extra")),
-                "multiple inferred edits normalize only their changed branches and retain future order values");
-            store.Seed("film.preferences.v1", FilmJson.Encode(new { version = 1, preferences = new { metadataViewProvider = "tmdb", keywords = new[] { "visible" }, extra = 7 } }));
-            original = await service.ReadPreferencesAsync(default);
-            await service.SavePreferencesAsync(original with { Keywords = [" next "] });
-            committed = store.Value("film.preferences.v1").GetProperty("preferences");
-            Check(committed.EnumerateObject().Count() == 3 && committed.GetProperty("keywords")[0].GetString() == "next" &&
-                committed.GetProperty("extra").GetInt32() == 7 && runtime.Calls.Count == 0,
-                "an inferred keyword edit never materializes unedited missing fields");
+            var partial = FilmJson.Encode(new { version = 1, preferences = new { metadataViewProvider = "tmdb", keywords = new[] { "visible" } } });
+            store.Seed("film.preferences.v1", partial);
+            int writes = store.Writes, notifications = runtime.Notifications.Count;
+            await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.ReadPreferencesAsync(default));
+            await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.SavePreferencesAsync(original));
+            Check(store.Writes == writes + 1 && runtime.Notifications.Count == notifications &&
+                JsonElement.DeepEquals(partial, store.Value("film.preferences.v1")) && runtime.Calls.Count == 0,
+                "incomplete current rows remain an error without replacing data or publishing a notification");
         });
         yield return Test("duplicate keyword drafts fail before storage and a corrected draft can still save", async () =>
         {
@@ -226,34 +206,28 @@ public static class FilmPlaybackSettingsTests
                 FilmPreferences.Read(scene.Preferences).Keywords.SequenceEqual(["DDP", "H.265"]) &&
                 scene.Element<TextBox>("Keywords").Text == "DDP,H.265", "a valid retry publishes the canonical native receipt");
         });
-        yield return Test("unrelated preference shapes survive edits and unknown order values remain visible", async () =>
+        yield return Test("unrelated typed preferences survive edits and literal order values remain visible", async () =>
         {
             await using var scene = await Scene.Create();
-            scene.Preferences = JsonSerializer.Deserialize<JsonElement>("""
-                {"ruleOrder":["future-rule","quality","future-rule"],"panOrder":{"future":["pan"]},"keywords":["visible"],
-                 "siteCleanKeywords":[false,{"nested":true}],"iosAutoPrepare":{"future":1},"metadataViewProvider":"tmdb","extra":{"nested":[7]}}
-                """);
+            scene.Preferences = FilmJson.Encode(FilmPreferences.Defaults with
+            {
+                RuleOrder = ["future-rule", "quality"], PanOrder = ["baidu", "quark"], Keywords = ["visible"],
+                SiteCleanKeywords = ["keep-clean"], IosAutoPrepare = false
+            });
             await scene.View.ShowAsync("clean");
             await scene.View.ShowAsync("preferences");
             await Until(() => scene.View.Idle);
             Check(!scene.View.ReadFailed && scene.Element<TextBox>("Keywords").Text == "visible" &&
                 scene.Element<SettingsPriorityList>("RuleOrder").ItemsSource!.Cast<object>().Count() == 2 &&
                 Visuals(scene.View).OfType<TextBlock>().Any(block => block.Text == "future-rule"),
-                "another group's shape and duplicate unknown order ids do not reject the current editable group");
+                "the current typed order values remain visible in the editor");
             var original = scene.Preferences;
             scene.Element<TextBox>("Keywords").Text = "changed";
             Click(scene.Button("保存关键字匹配规则")); await Until(() => scene.View.Idle);
-            foreach (string field in new[] { "ruleOrder", "panOrder", "siteCleanKeywords", "iosAutoPrepare", "metadataViewProvider", "extra" })
+            foreach (string field in new[] { "ruleOrder", "panOrder", "siteCleanKeywords", "iosAutoPrepare", "metadataViewProvider" })
                 Check(JsonElement.DeepEquals(original.GetProperty(field), scene.Preferences.GetProperty(field)),
-                    "saving keywords preserves the original unedited field: " + field);
-            Check(scene.Preferences.GetProperty("keywords")[0].GetString() == "changed",
-                "the explicit field is really saved");
-            await scene.View.ShowAsync("clean");
-            scene.Element<TextBox>("CleanKeywords").Text = "";
-            Click(scene.Button("保存站点净化")); await Until(() => scene.View.Idle);
-            Check(scene.Preferences.GetProperty("siteCleanKeywords").GetArrayLength() == 0 &&
-                JsonElement.DeepEquals(original.GetProperty("iosAutoPrepare"), scene.Preferences.GetProperty("iosAutoPrepare")),
-                "an explicit empty edit replaces only its own formerly unconsumable branch");
+                    "saving keywords preserves the other typed field: " + field);
+            Check(scene.Preferences.GetProperty("keywords")[0].GetString() == "changed", "the selected field is saved");
         });
         yield return Test("full preferences preserve empty keywords and restore only the chosen group across a new view", async () =>
         {
@@ -308,7 +282,7 @@ public static class FilmPlaybackSettingsTests
         {
             await using var scene = await Scene.Create();
             var entered = Gate(); var finish = Gate(); CancellationToken writeToken = default;
-            scene.Store.Writing = async (_, token) =>
+            scene.Store.Writing = async (token) =>
             { writeToken = token; entered.TrySetResult(); await finish.Task; };
             try
             {
@@ -426,7 +400,7 @@ public static class FilmPlaybackSettingsTests
             var list = (ListView)priority.FindName("PriorityItems");
             var moved = list.Items[0];
             var entered = Gate(); var finish = Gate(); CancellationToken writeToken = default;
-            scene.Store.Writing = async (_, token) =>
+            scene.Store.Writing = async (token) =>
             { writeToken = token; entered.TrySetResult(); await finish.Task; };
             try
             {
@@ -435,11 +409,11 @@ public static class FilmPlaybackSettingsTests
                 FilmUiTest.Call(priority, "RequestMove", handle, 1); await entered.Task;
                 Check(!priority.CanEdit && priority.IsEnabled && ReferenceEquals(DesktopVisual.Focused(scene.View), priority),
                     "only list editing pauses while the shared control retains its focus-restoration owner");
-                finish.TrySetResult(); await Until(() => scene.View.Idle);
+                finish.TrySetResult(); await Until(() => scene.View.Idle && ReferenceEquals(DesktopVisual.Focused(scene.View), Grip(list, 1)));
                 Check(ReferenceEquals(list.Items[1], moved) && ReferenceEquals(DesktopVisual.Focused(scene.View), Grip(list, 1)),
                     "the original row regains its handle after the automatic save");
                 var retired = Gate(); var settle = Gate();
-                scene.Store.Writing = async (_, token) =>
+                scene.Store.Writing = async (token) =>
                 { writeToken = token; retired.TrySetResult(); await settle.Task; };
                 try
                 {
@@ -534,6 +508,7 @@ public static class FilmPlaybackSettingsTests
                 sourceKey = "source:fixture", detailId = 0, seasonHint = 0, enabled = true, autoDisable = true, failureCount = 2 } }, blocks = Array.Empty<object>() });
             await scene.View.ShowAsync("clean"); await scene.View.ShowAsync("preferences"); scene.View.UpdateLayout();
             Click(Visuals(scene.View).OfType<Button>().Single(button => Equals(button.Content, "编辑")));
+            await Until(() => FilmUiTest.Dialogs(scene.View).Count == 1);
             var dialog = FilmUiTest.Dialogs(scene.View).Single();
             Check(Visuals(dialog).OfType<TextBox>().Single(box => AutomationProperties.GetName(box) == "详情标识").Text == "0" &&
                 Visuals(dialog).OfType<TextBox>().Single(box => AutomationProperties.GetName(box) == "季线索").Text == "0",
@@ -542,7 +517,7 @@ public static class FilmPlaybackSettingsTests
                 Visuals(dialog).OfType<TextBox>().Count(box => AutomationProperties.GetName(box) is "分享提取码" or "分享链接") == 2,
                 "share fields use the same plain text editing model as data source credentials");
             Click(Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "保存")));
-            await Until(() => !FilmUiTest.Visible(dialog) && scene.View.Idle);
+            await Until(() => !FilmUiTest.Dialogs(scene.View).Contains(dialog) && scene.View.Idle);
             var saved = scene.Runtime.Calls.Last(call => call.Method == "film.manual.update").Parameters.GetProperty("item");
             Check(saved.GetProperty("detailId").ValueKind == JsonValueKind.Number && saved.GetProperty("detailId").GetInt32() == 0 &&
                 saved.GetProperty("seasonHint").GetInt32() == 0 && saved.GetProperty("failureCount").GetInt32() == 2 &&
@@ -552,6 +527,7 @@ public static class FilmPlaybackSettingsTests
         {
             await using var scene = await Scene.Create();
             Click((Button)scene.View.FindName("AddManual"));
+            await Until(() => FilmUiTest.Dialogs(scene.View).Count == 1);
             var dialog = FilmUiTest.Dialogs(scene.View).Single();
             Visuals(dialog).OfType<TextBox>().Single(box => AutomationProperties.GetName(box) == "来源标识").Text = "source:fixture";
             Visuals(dialog).OfType<TextBox>().Single(box => AutomationProperties.GetName(box) == "详情标识").Text = "fixture-detail";
@@ -566,9 +542,10 @@ public static class FilmPlaybackSettingsTests
                 Click(Visuals(dialog).OfType<Button>().Single(button => Equals(button.Content, "保存")));
                 await entered.Task;
                 var next = scene.View.ShowAsync("clean");
-                Check(!FilmUiTest.Visible(dialog), "section retirement closes the editor immediately, not only after its save finishes");
+                await Until(() => !FilmUiTest.Dialogs(scene.View).Contains(dialog));
+                Check(!finish.Task.IsCompleted, "section retirement closes the editor before its save finishes");
                 finish.TrySetResult(); await next;
-                Check(!FilmUiTest.Visible(dialog) && FilmUiTest.Dialogs(scene.View).Count == 0 && scene.View.Rows.Count == 0 && FilmUiTest.Visible(scene.Element<Border>("CleanForm")),
+                Check(FilmUiTest.Dialogs(scene.View).Count == 0 && scene.View.Rows.Count == 0 && FilmUiTest.Visible(scene.Element<Border>("CleanForm")),
                     "late durable success does not reopen the editor or overwrite the next collection");
             }
             finally { finish.TrySetResult(); }

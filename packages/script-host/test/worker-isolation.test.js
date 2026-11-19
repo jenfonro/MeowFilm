@@ -1,3 +1,4 @@
+import '../../../tests/storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -244,14 +245,16 @@ function stuckCatLifecycleSource(signalOrigin, volumeFile, volumeText) {
 }
 
 function assertStuckCatVolume(root, installationId, file, expected) {
-  assert.equal(readFileSync(join(root, 'volumes', installationId, file), 'utf8'), expected);
+  assert.equal(readFileSync(join(root, 'cat', 'volumes', installationId, file), 'utf8'), expected);
 }
 
 function catRootFor(t) {
   const root = mkdtempSync(join(tmpdir(), 'meowfilm-worker-isolation-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  catRoots.add(root);
   return root;
 }
+const catRoots = new Set();
+test.after(() => { for (const root of catRoots) rmSync(root, { recursive: true, force: true }); });
 
 async function healthyCatGatewayFor(t) {
   const runtime = createCatRuntime({ dataRoot: catRootFor(t) });
@@ -641,9 +644,9 @@ for (const operation of ['describe', 'sync']) for (const ending of ['timeout', '
       const session = runtime.sessions.get('managed'), worker = session.worker, thread = worker.threadId;
       const healthySession = runtime.sessions.get('healthy'), healthyThread = healthySession.worker.threadId;
       const port = Number(new URL(session.endpoint().origin).port);
-      const marker = join(root, 'volumes', 'managed', 'management-entered.txt');
+      const marker = join(root, 'cat', 'volumes', 'managed', 'management-entered.txt');
       const entered = deferred(), failed = deferred();
-      const watcher = watch(join(root, 'volumes', 'managed'), (_event, filename) => {
+      const watcher = watch(join(root, 'cat', 'volumes', 'managed'), (_event, filename) => {
         if (String(filename) === 'management-entered.txt' &&
             existsSync(marker) && readFileSync(marker, 'utf8') === 'entered') entered.resolve();
       });
@@ -680,7 +683,7 @@ for (const operation of ['describe', 'sync']) for (const ending of ['timeout', '
         assert.equal(runtime.instance('managed').state, 'ready');
         assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive'), []);
         if (operation === 'sync')
-          assert.deepEqual(JSON.parse(readFileSync(join(root, 'volumes', 'managed', 'credentials.json'), 'utf8')),
+          assert.deepEqual(JSON.parse(readFileSync(join(root, 'cat', 'volumes', 'managed', 'credentials.json'), 'utf8')),
             { cookie: 'fixture' });
       } else {
         const code = ending === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
@@ -696,7 +699,7 @@ for (const operation of ['describe', 'sync']) for (const ending of ['timeout', '
         assert.equal(runtime.instance('managed').state, 'failed');
         assert.equal(runtime.instance('managed').error, code);
         assert.equal(runtime.instance('managed').generation, installed.generation);
-        assert.equal(existsSync(join(root, 'volumes', 'managed', 'credentials.json')), false);
+        assert.equal(existsSync(join(root, 'cat', 'volumes', 'managed', 'credentials.json')), false);
         const rebound = await assertPortReleased(port);
         t.after(() => new Promise(resolve => rebound.close(resolve)));
         assert.deepEqual(diagnostics.filter(event => event.operation === 'worker.unresponsive')
@@ -903,7 +906,7 @@ test('B24 uninstalling a stuck Cat instance stays bounded, releases its port and
     const { runtime, root, installed, port } = await prepareStuckCatLifecycle(t, {
       operation: 'uninstall',
     });
-    const sourceFile = join(root, 'sources', installed.sourceHash + '.js');
+    const sourceFile = join(root, 'cat', 'sources', installed.sourceHash + '.js');
     assert.equal(existsSync(sourceFile), true);
     const started = performance.now();
     await runtime.uninstall('stuck');
@@ -911,7 +914,7 @@ test('B24 uninstalling a stuck Cat instance stays bounded, releases its port and
     assert.ok(elapsed < 1100, `uninstall took ${elapsed}ms`);
     const rebound = await assertPortReleased(port);
     t.after(() => new Promise(resolve => rebound.close(resolve)));
-    assert.equal(existsSync(join(root, 'volumes', 'stuck')), false);
+    assert.equal(existsSync(join(root, 'cat', 'volumes', 'stuck')), false);
     assert.equal(existsSync(sourceFile), false);
     assert.deepEqual((await runtime.status()).instances, []);
   });
@@ -1212,7 +1215,7 @@ test('REV-1A Cat Worker keeps CommonJS stream identity and closes the same retai
     const exited = new Promise(resolve => worker.once('exit', resolve));
     await runtime.setEnabled('streams', false);
     assert.equal(await exited, 0);
-    assert.deepEqual(JSON.parse(readFileSync(join(root, 'volumes', 'streams', 'stream-close.json'),
+    assert.deepEqual(JSON.parse(readFileSync(join(root, 'cat', 'volumes', 'streams', 'stream-close.json'),
       'utf8')), Array.from({ length: 3 }, () => ({ destroyed: true, closed: true, closes: 1 })));
     assert.equal(session.live, false);
     assert.equal(session.cleanupError, null);

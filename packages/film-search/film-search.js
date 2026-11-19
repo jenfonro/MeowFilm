@@ -824,6 +824,7 @@ const enrichTMDBDetail = ({ item, payload: detail, today }) => {
   return {
     ...item,
     title: title || item.title,
+    poster: item.poster || getTMDBPosterPath(detail),
     backdrop: getTMDBBackdropPath(detail),
     year: year > 0 ? year : 0,
     textBadge: buildTMDBDetailTextBadge(detail, tmdbType, normalizeString(today)),

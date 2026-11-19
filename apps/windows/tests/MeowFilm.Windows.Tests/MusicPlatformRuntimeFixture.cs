@@ -79,10 +79,9 @@ internal sealed class MusicPlatformRuntimeFixture : IRuntimeClient, IAsyncDispos
         throw new InvalidOperationException("Unexpected script upload");
 
     internal MusicAccountProtocol CreateAccountProtocol() => new(Client);
-    internal MusicAccountOwner CreateAccountOwner(IDocumentStore store, TimeProvider? clock = null,
-        IDocumentStore? detailsCacheStore = null)
+    internal MusicAccountOwner CreateAccountOwner(IStorageDatabase store, TimeProvider? clock = null)
     {
-        var owner = new MusicAccountOwner(store, CreateAccountProtocol(), clock, detailsCacheStore);
+        var owner = new MusicAccountOwner(store, CreateAccountProtocol(), clock);
         Client.BindSessions(owner);
         return owner;
     }
@@ -125,34 +124,5 @@ internal sealed class MusicPlatformRuntimeFixture : IRuntimeClient, IAsyncDispos
         }
     }
 
-    internal sealed class MemoryStore : IDocumentStore
-    {
-        private readonly object gate = new();
-        private readonly Dictionary<string, byte[]> documents = [];
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested();
-            lock (gate) return Task.FromResult(documents.TryGetValue(ns, out var bytes)
-                ? new DocumentSnapshot(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes))
-                : new(null, DocumentFingerprint.Missing));
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected,
-            CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested();
-            lock (gate)
-            {
-                var before = documents.TryGetValue(ns, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
-                if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
-                documents[ns] = data.ToArray();
-                return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
-            }
-        }
-        public ValueTask DisposeAsync()
-        {
-            lock (gate) { foreach (var bytes in documents.Values) CryptographicOperations.ZeroMemory(bytes); documents.Clear(); }
-            return ValueTask.CompletedTask;
-        }
-    }
+    internal sealed class MemoryStore : NativeTestDatabase { }
 }

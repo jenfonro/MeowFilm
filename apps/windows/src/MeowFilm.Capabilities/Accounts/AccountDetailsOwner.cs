@@ -76,7 +76,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         bool changed = false;
         var result = await DiskAsync(async () =>
         {
-            var document = await ReadDocument(token).ConfigureAwait(false);
+            var document = await ReadDocument(token, platform).ConfigureAwait(false);
             var account = document.Get(platform);
             token.ThrowIfCancellationRequested();
             lock (gate)
@@ -96,7 +96,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             }
         }, token).ConfigureAwait(false);
         if (changed) Notify(platform);
-        var cached = await ReadDetailsCache(token).ConfigureAwait(false);
+        var cached = await ReadDetailsCache(platform, token).ConfigureAwait(false);
         StoredAccountDetails? cache = null;
         try
         {
@@ -227,7 +227,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         await DiskAsync(async () =>
         {
             DetailsGuard(flight);
-            var document = await ReadDocument(flight.Deadline.Token).ConfigureAwait(false);
+            var document = await ReadDocument(flight.Deadline.Token, flight.Session.Platform).ConfigureAwait(false);
             DetailsGuard(flight);
             var actualAccount = document.Get(flight.Session.Platform);
             if (actualAccount.ValueFingerprint != flight.Before.ValueFingerprint)
@@ -247,40 +247,37 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         SaveDetailsCache(flight.Session.Platform, next, () => DetailsGuard(flight));
         DetailsGuard(flight);
     }
-    private async Task<JsonObject> ReadDetailsCache(CancellationToken token)
+    private async Task<JsonObject> ReadDetailsCache(string platform, CancellationToken token)
     {
-        DocumentSnapshot? snapshot = null;
         try
         {
-            snapshot = await detailsCacheStore.ReadAsync(DetailsCacheNamespace, token).ConfigureAwait(false);
-            return snapshot.Data is null ? new() : JsonNode.Parse(snapshot.Data)!.AsObject();
+            var value = await database.ReadAsync(db => AccountDetailsRecords.Details.Read(db, [platform]), token).ConfigureAwait(false);
+            return value is null ? new() : new JsonObject { [platform] = value };
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch { return new(); }
-        finally { if (snapshot?.Data is { } data) CryptographicOperations.ZeroMemory(data); }
     }
     private void SaveDetailsCache(string platform, StoredAccountDetails next, Action guard)
     {
-        try
+        var value = AccountDetailsDocument.Encode(next);
+        try { lock (gate) { guard(); Enter(isPhysical: true); } }
+        catch { return; }
+        _ = SaveAsync();
+        async Task SaveAsync()
         {
-            lock (gate)
+            try
             {
-                guard();
-                var snapshot = detailsCacheStore.ReadMemory(DetailsCacheNamespace);
-                JsonObject root;
-                try
+                await database.WriteAsync(db =>
                 {
-                    try { root = snapshot.Data is null ? new() : JsonNode.Parse(snapshot.Data)!.AsObject(); }
-                    catch { root = new(); }
-                }
-                finally { if (snapshot.Data is { } data) CryptographicOperations.ZeroMemory(data); }
-                root[platform] = AccountDetailsDocument.Encode(next);
-                byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-                try { detailsCacheStore.Save(DetailsCacheNamespace, bytes); }
-                finally { CryptographicOperations.ZeroMemory(bytes); }
+                    lock (gate) guard();
+                    AccountDetailsRecords.Details.Save(db, value, AccountDetailsRecords.Details.Read(db, [platform]), [platform]);
+                    return true;
+                }, retainedBytes: JsonSerializer.SerializeToUtf8Bytes(value).Length,
+                    commit: commit => { lock (gate) { guard(); commit(); } }).ConfigureAwait(false);
             }
+            catch { System.Diagnostics.Trace.TraceWarning("MUSIC_ACCOUNT_DETAILS_CACHE_UNAVAILABLE"); }
+            finally { Leave(isPhysical: true); }
         }
-        catch { System.Diagnostics.Trace.TraceWarning("Music account details cache write failed."); }
     }
 
     private MusicAccountDetails DetailsView(string platform, StoredAccount account, StoredAccountDetails? cache,

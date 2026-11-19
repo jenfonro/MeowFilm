@@ -57,7 +57,7 @@ public static class MusicSongMatcherTests
     private sealed class Fixture : IAsyncDisposable
     {
         internal readonly MemoryStore Store = new();
-        internal readonly CacheDocumentStore CacheStore;
+        internal readonly NativeTestDatabase CacheStore;
         internal readonly Clock Clock = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicSongMatcher Matcher;
@@ -67,7 +67,7 @@ public static class MusicSongMatcherTests
         internal Fixture()
         {
             CacheStore = new(Store);
-            Library = new(MusicTestStores.For(Store));
+            Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage);
             Matcher = new(Library, new(CacheStore), async (request, token) =>
             {
                 lock (Requests) Requests.Add(request);
@@ -88,8 +88,7 @@ public static class MusicSongMatcherTests
         }
         internal Task<JsonElement> Favorite(JsonObject song) => Command("music.library.addSongs",
             new { id = "favorites", ifRevision = 0, songs = new[] { song } });
-        internal JsonArray Saved => CacheStore.ReadMemory(MusicSongMatchStore.Namespace).Data is { } bytes
-            ? JsonNode.Parse(bytes)!["entries"]!.AsArray() : [];
+        internal JsonArray Saved => CacheStore.ReadMatchRowsAsync().GetAwaiter().GetResult();
         public async ValueTask DisposeAsync() { await Matcher.DrainAsync(); await CacheStore.DisposeAsync(); await Library.DisposeAsync(); }
     }
     private static async Task Target()
@@ -301,7 +300,7 @@ public static class MusicSongMatcherTests
             Has(await f.Matcher.KnownAsync(song, default), "tx"));
         int requests = f.Requests.Count;
         await f.CacheStore.DrainAsync();
-        await using var restartedStore = new CacheDocumentStore(f.Store);
+        await using var restartedStore = new NativeTestDatabase(f.Store);
         var restarted = new MusicSongMatcher(f.Library, new(restartedStore), (_, _) =>
             throw new InvalidOperationException("restart must not search"), f.Clock);
         Check(Has((await restarted.MatchAsync(song, "tx", Context("tx"), default)).Song, "tx"));

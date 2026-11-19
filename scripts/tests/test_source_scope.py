@@ -263,30 +263,35 @@ let package = Package(name: "Fixture", products: [
         path.write_text(video)
         self.assertTrue(any("depends on video" in error for error in scope.check(self.root)))
 
-    def sqlite_target(self, consumer="MeowMusicNativeService", module="sqlite3"):
+    def sqlite_target(self, consumer="MeowStorage", binary_path="../SQLite/.cache/Artifacts/MeowSQLite.xcframework"):
         path = self.root / "native/MeowKit/Package.swift"
-        text = path.read_text().replace("targets: [\n", 'targets: [\n.systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),\n'
-            f'.target(name: "{consumer}", dependencies: ["CSQLite"]),\n')
+        text = path.read_text().replace("targets: [\n", f'targets: [\n.binaryTarget(name: "MeowSQLite", path: "{binary_path}"),\n'
+            f'.target(name: "{consumer}", dependencies: ["MeowSQLite"]),\n')
         path.write_text(text)
-        self.write(f"native/MeowKit/Sources/{consumer}/Fixture.swift", "import CSQLite\n")
+        self.write(f"native/MeowKit/Sources/{consumer}/Fixture.swift", "import MeowSQLite\n")
+
+    def test_binary_sqlite_is_explicit_and_owned_by_storage(self):
+        self.sqlite_target()
+        self.assertEqual(scope.check(self.root), [])
+
+    def test_binary_sqlite_rejects_other_paths(self):
+        self.sqlite_target(binary_path="../Foreign/MeowSQLite.xcframework")
+        self.assertIn("Invalid binary target: MeowSQLite", scope.check(self.root))
+
+    def test_binary_sqlite_rejects_unowned_consumers(self):
+        self.sqlite_target(consumer="UnownedSQLiteConsumer")
+        self.assertIn("Unapproved binary dependency: UnownedSQLiteConsumer", scope.check(self.root))
+
+    def system_sqlite_target(self):
+        path = self.root / "native/MeowKit/Package.swift"
+        path.write_text(path.read_text().replace("targets: [\n",
+            'targets: [\n.systemLibrary(name: "CSQLite", pkgConfig: "sqlite3"),\n'))
         self.write("native/MeowKit/Sources/CSQLite/module.modulemap",
-            f'module CSQLite [system] {{ header "shim.h" link "{module}" export * }}\n')
+            'module CSQLite [system] { header "shim.h" link "sqlite3" export * }\n')
         self.write("native/MeowKit/Sources/CSQLite/shim.h", "#include <sqlite3.h>\n")
 
-    def test_system_sqlite_has_an_explicit_declared_native_consumer(self):
-        self.sqlite_target()
-        self.assertEqual(scope.check(self.root), [])
-
-    def test_system_sqlite_rejects_other_linked_libraries(self):
-        self.sqlite_target(module="foreign")
-        self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
-
-    def test_system_sqlite_allows_other_declared_consumers(self):
-        self.sqlite_target(consumer="SQLiteConsumer")
-        self.assertEqual(scope.check(self.root), [])
-
     def test_system_sqlite_accepts_equivalent_declared_paths_providers_and_headers(self):
-        self.sqlite_target()
+        self.system_sqlite_target()
         path = self.root / "native/MeowKit/Package.swift"
         path.write_text(path.read_text().replace('.systemLibrary(name: "CSQLite", pkgConfig: "sqlite3")',
             '.systemLibrary(name: "CSQLite", path: "SystemInterfaces/../SystemInterfaces/SQLite", pkgConfig: "sqlite3", '
@@ -309,7 +314,7 @@ module "CSQLite" [system] {
         self.assertEqual(scope.check(self.root), [])
 
     def test_system_sqlite_accepts_umbrella_headers_and_sdk_imports(self):
-        self.sqlite_target()
+        self.system_sqlite_target()
         self.write("native/MeowKit/Sources/CSQLite/include/SQLite.h", '#pragma once\n#import "sqlite3.h"\n')
         for declaration in ('umbrella "include"', 'umbrella header "include/SQLite.h"'):
             with self.subTest(declaration=declaration):
@@ -320,7 +325,7 @@ module "CSQLite" [system] {
         self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
 
     def test_system_sqlite_requires_the_actual_sdk_header_and_link(self):
-        self.sqlite_target()
+        self.system_sqlite_target()
         self.write("native/MeowKit/Sources/CSQLite/shim.h", "// #include <sqlite3.h>\n")
         self.assertIn("Invalid system module: CSQLite", scope.check(self.root))
         self.write("native/MeowKit/Sources/CSQLite/shim.h", "#include <sqlite3.h>\n")

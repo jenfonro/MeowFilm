@@ -162,7 +162,9 @@ public sealed partial class MusicLibraryOwner
                         saved["lines"] = DecodeCachedDisplayLines(saved["lines"]);
                     }
                 }
-                catch { saved = null; }
+                catch (OperationCanceledException) { throw; }
+                catch (DocumentStoreException) { saved = null; }
+                catch (MusicLibraryException) { saved = null; }
                 if (!LJ.B(Settings(doc)["lyrics"])) result = LJ.Obj(("state", "disabled"), ("lines", new JsonArray()));
                 else if (saved is null ||
                     requested is not null && LJ.S(saved["sourceKey"]) != requested)
@@ -185,6 +187,7 @@ public sealed partial class MusicLibraryOwner
                 var display = LJ.Obj(("sourceKey", requested), ("lines", lines));
                 byte[] bytes = LJ.Bytes(display);
                 LJ.Require(bytes.Length <= 512 * 1024, "LIMIT");
+                gate.Release(); entered = false;
                 try
                 {
                     await presentations.SaveLyricsAsync(key, requested, lines, cacheEpoch, token).ConfigureAwait(false);

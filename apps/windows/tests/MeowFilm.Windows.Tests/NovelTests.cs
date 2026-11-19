@@ -27,10 +27,10 @@ public static partial class NovelTests
     {
         yield return new("novel page raster: shared current buffer independent animation snapshot scale and retirement", () => Sta(NovelTestUi.RasterOwnership));
         yield return new("novel native library: independent shelf/history stable identity accepted write and corruption", Library);
-        yield return new("novel native library: raw extensions exact numbers and UTF8 keys survive edits and reopen", LibraryRoundTrip);
-        yield return new("novel native rules: management projections preserve raw execution through cold open edits and real failures", () => Sta(RuleProjectionExecution));
-        yield return new("novel native library: bad slots remain raw healthy siblings work and ambiguous identities never overwrite", LibraryIsolation);
-        yield return new("novel native library: root JSON version and CAS failures never publish or overwrite", LibraryGuards);
+        yield return new("novel native library: typed fields third-party values and UTF8 keys survive edits and reopen", LibraryRoundTrip);
+        yield return new("novel native rules: typed rules execute after cold open and failures preserve reading", () => Sta(RuleProjectionExecution));
+        yield return new("novel native library: relational constraints and corrupt selected records never overwrite healthy siblings", LibraryIsolation);
+        yield return new("novel native library: corrupt roots fail and independent field writes preserve external commits", LibraryGuards);
         yield return new("novel appearance: unknown values fall back only for consumption and unrelated editing preserves raw values", () => Sta(AppearanceRoundTrip));
         yield return new("novel rule management: offline import persists current rules without an execution preflight", () => Sta(OfflineRules));
         yield return new("novel native library: real atomic store reopens and second process restores reading", Durable);
@@ -121,15 +121,16 @@ public static partial class NovelTests
         Check(!drain.IsCompleted); hold.TrySetResult(); await save; await drain;
         Check(library.Appearance.FontSize == 26);
         var reopened = new NovelLibrary(store); await reopened.InitializeAsync(); Check(reopened.Appearance.FontSize == 26 && reopened.Entries.Single().BookId == "stable");
-        store.Bytes = "broken"u8.ToArray(); var corrupt = new NovelLibrary(store);
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_novel_library SET version=2"));
+        var corrupt = new NovelLibrary(store); var corruptBefore = store.Bytes!;
         try { await corrupt.SaveAppearanceAsync(new()); throw new InvalidOperationException("Corrupt storage overwritten"); }
         catch (DocumentStoreException e) { Check(e.Error == DocumentStoreError.Corrupt); }
-        Check(Encoding.UTF8.GetString(store.Bytes) == "broken");
+        Check(store.Bytes!.SequenceEqual(corruptBefore));
     }
     private static async Task Durable()
     {
         string path = TestWorkspace.DataPath("novel-durable"); Directory.CreateDirectory(path);
-        await using (var store = new LocalDocumentStore(path, [NovelLibrary.DocumentNamespace]))
+        await using (var store = new NativeDatabase(path))
         {
             var library = new NovelLibrary(store); await library.InitializeAsync();
             await library.SaveEntryAsync(new("stable-durable", "key", Book(), true, ReadAt: DateTimeOffset.UtcNow, Anchor: new("chapter", "第一章", 0, 3, 5, .5)));
@@ -147,7 +148,7 @@ public static partial class NovelTests
     internal static async Task<int> RestoreChild(string path)
     {
         TestWorkspace.ValidatePath(TestWorkspace.DataRoot, path);
-        await using var store = new LocalDocumentStore(path, [NovelLibrary.DocumentNamespace]);
+        await using var store = new NativeDatabase(path);
         var library = new NovelLibrary(store); await library.InitializeAsync();
         var entry = library.Entries.Single(); Check(entry.BookId == "stable-durable" && entry.OnShelf && entry.Anchor?.BlockIndex == 3 && entry.Anchor.Utf16Offset == 5 && library.Appearance.FontSize == 25 && library.Appearance.Mode == "scroll");
         Console.WriteLine("NOVEL_RESTORED " + entry.BookId); return 0;
@@ -359,24 +360,24 @@ public static partial class NovelTests
         if (root is T item) yield return item;
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++) foreach (var child in Find<T>(VisualTreeHelper.GetChild(root, i))) yield return child;
     }
-    internal sealed class MemoryStore : IDocumentStore
+    internal sealed class MemoryStore : NativeTestDatabase
     {
-        internal byte[]? Bytes;
         internal bool FailWrite;
         internal Exception? WriteFailure;
-        internal int Writes;
         internal TaskCompletionSource? Hold, Accepted;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => Task.FromResult(new DocumentSnapshot(Bytes?.ToArray(), Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes)));
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
+        internal byte[]? Bytes
         {
-            token.ThrowIfCancellationRequested();
-            var copy = data.ToArray(); Writes++; Accepted?.TrySetResult(); if (Hold is not null) await Hold.Task;
-            if (WriteFailure is { } failure) throw failure;
-            if (FailWrite) throw new IOException("Synthetic atomic write failure");
-            if (expected != (Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes))) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            Bytes = copy; return DocumentFingerprint.FromBytes(copy);
+            get => Project(NovelStorageRecords.Library, "device") is { } value ? JsonSerializer.SerializeToUtf8Bytes(value) : null;
+            set => Seed(NovelStorageRecords.Library, System.Text.Json.Nodes.JsonNode.Parse(value!)!.AsObject(), "device");
         }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null) => base.WriteAsync(db =>
+        {
+            Accepted?.TrySetResult(); Hold?.Task.GetAwaiter().GetResult();
+            if (WriteFailure is { } failure) throw failure;
+            if (FailWrite) throw new IOException("Synthetic transaction failure");
+            return write(db);
+        }, token, retainedBytes, commit);
     }
     internal sealed class Runtime : IRuntimeClient, IRuntimeImageClient
     {

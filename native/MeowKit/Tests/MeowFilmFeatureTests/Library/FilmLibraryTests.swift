@@ -1,190 +1,175 @@
 import Foundation
 import XCTest
 import MeowRuntime
+import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 @MainActor
 final class FilmLibraryTests: XCTestCase {
-    func testFavoritesSaveAndRestoreTheSuppliedTarget() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let target = FilmPlaybackTarget(id: "node-content", kind: .tv, title: "影片", metadataProvider: .tmdb, metadataID: "19")
-        let item = FilmItem(sourceID: "tmdb", id: "19", title: "影片", kind: .tv,
-                            businessID: "node-content", playbackTarget: target)
-        let library = FilmLibrary(defaults: defaults)
-        XCTAssertFalse(library.contains(item))
-        XCTAssertTrue(try library.toggle(item))
-        let restored = FilmLibrary(defaults: defaults)
-        let record = try XCTUnwrap(restored.favorites.first)
-        XCTAssertEqual(record.businessID, item.businessID)
-        XCTAssertEqual(record.playbackTarget, target)
+    private func library(_ database: SQLiteDatabase) async throws -> FilmLibrary {
+        let library = FilmLibrary()
+        try await library.bind(database: database)
+        return library
     }
-
-    func testFavoritesPersistWithSourceAndItemAsSeparateIdentityFields() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set("preserved", forKey: "unrelated-setting")
-        let first = item(sourceID: "first", id: "100", title: "第一来源")
-        let second = item(sourceID: "second", id: "100", title: "第二来源")
-        let library = FilmLibrary(defaults: defaults)
-        XCTAssertFalse(library.contains(first))
-        XCTAssertTrue(try library.toggle(first))
-        XCTAssertTrue(library.contains(first))
-        XCTAssertFalse(library.contains(second))
-
-        let restored = FilmLibrary(defaults: defaults)
-        XCTAssertTrue(restored.contains(first))
-        XCTAssertFalse(restored.contains(second))
-        XCTAssertTrue(try restored.toggle(second))
-        XCTAssertFalse(try restored.toggle(first))
-
-        let rebuilt = FilmLibrary(defaults: defaults)
-        XCTAssertFalse(rebuilt.contains(first))
-        XCTAssertTrue(rebuilt.contains(second))
-        XCTAssertEqual(defaults.string(forKey: "unrelated-setting"), "preserved")
-
-        let delimitedSource = item(sourceID: "a:b", id: "c", title: "不同身份一")
-        let delimitedItem = item(sourceID: "a", id: "b:c", title: "不同身份二")
-        XCTAssertTrue(try rebuilt.toggle(delimitedSource))
-        XCTAssertFalse(rebuilt.contains(delimitedItem))
-        XCTAssertTrue(try rebuilt.toggle(delimitedItem))
-        XCTAssertEqual(FilmLibrary(defaults: defaults).favorites.count, 3)
+    private func rows(_ database: SQLiteDatabase) async throws -> [SQLiteRow] {
+        try await database.snapshot { try $0.query("SELECT * FROM ios_film_favorites ORDER BY businessID") }
     }
-
-    func testUnreadableFavoriteDataDoesNotCrashOrEraseOtherSettings() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let bytes = Data("invalid saved data".utf8)
-        defaults.set(bytes, forKey: FilmLibrary.storageKey)
-        defaults.set("preserved", forKey: "unrelated-setting")
-        let library = FilmLibrary(defaults: defaults)
-        XCTAssertTrue(library.favorites.isEmpty)
-        XCTAssertEqual(library.loadError, .corruptedData)
-        XCTAssertEqual(library.loadError?.localizedDescription, "收藏数据已损坏，原数据已保留，无法更改收藏。")
-        let item = FilmItem(sourceID: "first", id: "100", title: "影片")
-        for _ in 0..<2 {
-            XCTAssertThrowsError(try library.toggle(item)) { error in
-                XCTAssertEqual(error as? FilmLibraryError, .corruptedData)
-            }
-            XCTAssertFalse(library.contains(item))
-            XCTAssertTrue(library.favorites.isEmpty)
-            XCTAssertEqual(defaults.data(forKey: FilmLibrary.storageKey), bytes)
-        }
-        let restored = FilmLibrary(defaults: defaults)
-        XCTAssertEqual(restored.loadError, .corruptedData)
-        XCTAssertFalse(restored.contains(item))
-        XCTAssertEqual(defaults.string(forKey: "unrelated-setting"), "preserved")
-    }
-
-    func testMissingFavoriteDataIsAnEmptyHealthyLibrary() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let library = FilmLibrary(defaults: defaults)
-        XCTAssertTrue(library.favorites.isEmpty)
-        XCTAssertNil(library.loadError)
-        XCTAssertNil(defaults.object(forKey: FilmLibrary.storageKey))
-        let item = item(sourceID: "douban", id: "19", title: "影片", kind: .movie)
-        XCTAssertTrue(try library.toggle(item))
-        let restored = FilmLibrary(defaults: defaults)
-        XCTAssertNil(restored.loadError)
-        XCTAssertTrue(restored.contains(item))
-        XCTAssertFalse(try restored.toggle(item))
-        let empty = FilmLibrary(defaults: defaults)
-        XCTAssertTrue(empty.favorites.isEmpty)
-        XCTAssertNil(empty.loadError)
-    }
-
-    func testWrongStoredValueTypeIsReportedAndNeverReplaced() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set("not saved data", forKey: FilmLibrary.storageKey)
-        let library = FilmLibrary(defaults: defaults)
-        XCTAssertEqual(library.loadError, .corruptedData)
-        let item = FilmItem(sourceID: "douban", id: "19", title: "影片")
-        XCTAssertThrowsError(try library.toggle(item)) { error in
-            XCTAssertEqual(error as? FilmLibraryError, .corruptedData)
-        }
-        XCTAssertEqual(defaults.string(forKey: FilmLibrary.storageKey), "not saved data")
-        XCTAssertFalse(library.contains(item))
-    }
-
-    func testTMDBMovieAndTVWithSameIDAreIndependentAcrossRestorationAndRemoval() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let movie = item(sourceID: "tmdb", id: "19", title: "电影", kind: .movie)
-        let tv = item(sourceID: "tmdb", id: "19", title: "剧集", kind: .tv)
-        let library = FilmLibrary(defaults: defaults)
-        XCTAssertTrue(try library.toggle(movie))
-        XCTAssertTrue(library.contains(movie))
-        XCTAssertFalse(library.contains(tv))
-        XCTAssertTrue(try library.toggle(tv))
-        XCTAssertEqual(library.favorites.count, 2)
-        let restored = FilmLibrary(defaults: defaults)
-        XCTAssertNil(restored.loadError)
-        XCTAssertTrue(restored.contains(movie))
-        XCTAssertTrue(restored.contains(tv))
-        XCTAssertFalse(try restored.toggle(movie))
-        let rebuilt = FilmLibrary(defaults: defaults)
-        XCTAssertFalse(rebuilt.contains(movie))
-        XCTAssertTrue(rebuilt.contains(tv))
-        XCTAssertFalse(try rebuilt.toggle(tv))
-        XCTAssertTrue(FilmLibrary(defaults: defaults).favorites.isEmpty)
-    }
-
-    func testNewUntypedTMDBFavoriteFailsWithoutWritingOrClaimingSuccess() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let library = FilmLibrary(defaults: defaults)
-        let item = FilmItem(sourceID: "tmdb", id: "19", title: "电影或剧集")
-        XCTAssertThrowsError(try library.toggle(item)) { error in
-            XCTAssertEqual(error as? FilmLibraryError, .missingKind)
-        }
-        XCTAssertNil(library.loadError)
-        XCTAssertFalse(library.contains(item))
-        XCTAssertTrue(library.favorites.isEmpty)
-        XCTAssertNil(defaults.object(forKey: FilmLibrary.storageKey))
-    }
-
-    func testFavoriteActionRequiresTheSuppliedTargetToMatchItsBusinessIdentity() throws {
-        let suite = "MeowFilmFeatureTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let library = FilmLibrary(defaults: defaults)
-        for target: FilmPlaybackTarget? in [nil, .init(id: "other", kind: .movie, title: "影片")] {
-            let item = FilmItem(sourceID: "douban", id: "19", title: "影片", businessID: "selected", playbackTarget: target)
-            XCTAssertThrowsError(try library.toggle(item)) { XCTAssertEqual($0 as? FilmLibraryError, .missingTarget) }
-        }
-        XCTAssertNil(defaults.object(forKey: FilmLibrary.storageKey))
-        XCTAssertTrue(library.favorites.isEmpty)
-    }
-
     private func item(sourceID: String, id: String, title: String, kind: FilmItemKind? = nil) -> FilmItem {
         let businessID = sourceID + ":" + (kind?.rawValue ?? "") + ":" + id
         let target = FilmPlaybackTarget(id: businessID, kind: kind == .tv ? .tv : .movie, title: title)
         return FilmItem(sourceID: sourceID, id: id, title: title, kind: kind, businessID: businessID, playbackTarget: target)
     }
 
-    func testHealthyFavoritesSurviveUnreadableSiblingAndKeepExactMaterialWhenToggled() throws {
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: UUID().uuidString))
-        defer { defaults.removeObject(forKey: FilmLibrary.storageKey) }
-        let a = item(sourceID: "a", id: "1", title: "A"), b = item(sourceID: "b", id: "2", title: "B")
-        let opaque = try RuntimeJSON.decode(Data(#"{"broken":true,"n":123456789012345678901234567890,"é":1,"e\u0301":2}"#.utf8))
-        let healthy = try RuntimeJSON.decode(JSONEncoder().encode(a.identity))
-        defaults.set(try RuntimeJSON.encode(.array([opaque, healthy])), forKey: FilmLibrary.storageKey)
-        let library = FilmLibrary(defaults: defaults)
-        XCTAssertNil(library.loadError); XCTAssertTrue(library.contains(a))
-        XCTAssertTrue(try library.toggle(b)); XCTAssertFalse(try library.toggle(a))
-        let raw = try RuntimeJSON.decode(XCTUnwrap(defaults.data(forKey: FilmLibrary.storageKey)))
-        guard case .array(let rows) = raw else { return XCTFail("array") }
-        XCTAssertEqual(rows.first, opaque)
-        XCTAssertTrue(FilmLibrary(defaults: defaults).contains(b))
+    func testFavoritesSaveAndRestoreTheSuppliedTarget() async throws {
+        let database = try storageTestDatabase(self)
+        let target = FilmPlaybackTarget(id: "node-content", kind: .tv, title: "影片", metadataProvider: .tmdb, metadataID: "19")
+        let item = FilmItem(sourceID: "tmdb", id: "19", title: "影片", kind: .tv,
+                            businessID: "node-content", playbackTarget: target)
+        let owner = try await library(database)
+        XCTAssertFalse(owner.contains(item))
+        storageTestTrue(try await owner.toggle(item))
+        let restored = try await library(database)
+        let record = try XCTUnwrap(restored.favorites.first)
+        XCTAssertEqual(record.businessID, item.businessID)
+        XCTAssertEqual(record.playbackTarget, target)
     }
 
+    func testFavoritesPersistWithSourceAndItemAsSeparateIdentityFields() async throws {
+        let database = try storageTestDatabase(self)
+        _ = try await database.transaction { try $0.execute("INSERT INTO ios_search_history(text,used_at) VALUES('preserved',1)") }
+        let first = item(sourceID: "first", id: "100", title: "第一来源")
+        let second = item(sourceID: "second", id: "100", title: "第二来源")
+        let owner = try await library(database)
+        XCTAssertFalse(owner.contains(first))
+        storageTestTrue(try await owner.toggle(first))
+        XCTAssertTrue(owner.contains(first))
+        XCTAssertFalse(owner.contains(second))
+        let restored = try await library(database)
+        XCTAssertTrue(restored.contains(first))
+        XCTAssertFalse(restored.contains(second))
+        storageTestTrue(try await restored.toggle(second))
+        storageTestFalse(try await restored.toggle(first))
+        let rebuilt = try await library(database)
+        XCTAssertFalse(rebuilt.contains(first))
+        XCTAssertTrue(rebuilt.contains(second))
+        let history = try await database.snapshot { try $0.query("SELECT text FROM ios_search_history").map { try $0.text("text") } }
+        XCTAssertEqual(history, ["preserved"])
+        let delimitedSource = item(sourceID: "a:b", id: "c", title: "不同身份一")
+        let delimitedItem = item(sourceID: "a", id: "b:c", title: "不同身份二")
+        storageTestTrue(try await rebuilt.toggle(delimitedSource))
+        XCTAssertFalse(rebuilt.contains(delimitedItem))
+        storageTestTrue(try await rebuilt.toggle(delimitedItem))
+        storageTestEqual(try await library(database).favorites.count, 3)
+    }
+
+    func testUnreadableFavoriteDataDoesNotCrashOrEraseOtherSettings() async throws {
+        let database = try storageTestDatabase(self)
+        let saved = item(sourceID: "first", id: "100", title: "影片")
+        storageTestTrue(try await library(database).toggle(saved))
+        _ = try await database.transaction { db in
+            try db.execute("UPDATE ios_film_favorites SET kind='invalid'")
+            try db.execute("INSERT INTO ios_search_history(text,used_at) VALUES('preserved',1)")
+        }
+        let before = try await rows(database)
+        let owner = FilmLibrary()
+        await storageTestThrows { try await owner.bind(database: database) }
+        XCTAssertTrue(owner.favorites.isEmpty)
+        XCTAssertEqual(owner.loadError, .corruptedData)
+        XCTAssertEqual(owner.loadError?.localizedDescription, "收藏数据已损坏，原数据已保留，无法更改收藏。")
+        for _ in 0..<2 {
+            await storageTestThrows({ try await owner.toggle(saved) }) {
+                XCTAssertEqual($0 as? FilmLibraryError, .corruptedData)
+            }
+            XCTAssertFalse(owner.contains(saved))
+            storageTestEqual(try await rows(database), before)
+        }
+        let restored = FilmLibrary()
+        await storageTestThrows { try await restored.bind(database: database) }
+        XCTAssertEqual(restored.loadError, .corruptedData)
+        storageTestEqual(try await database.snapshot { try $0.query("SELECT text FROM ios_search_history").first?.text("text") }, "preserved")
+    }
+
+    func testMissingFavoriteDataIsAnEmptyHealthyLibrary() async throws {
+        let database = try storageTestDatabase(self)
+        let owner = try await library(database)
+        XCTAssertTrue(owner.favorites.isEmpty)
+        XCTAssertNil(owner.loadError)
+        storageTestEqual(try await rows(database), [])
+        let item = item(sourceID: "douban", id: "19", title: "影片", kind: .movie)
+        storageTestTrue(try await owner.toggle(item))
+        let restored = try await library(database)
+        XCTAssertNil(restored.loadError)
+        XCTAssertTrue(restored.contains(item))
+        storageTestFalse(try await restored.toggle(item))
+        let empty = try await library(database)
+        XCTAssertTrue(empty.favorites.isEmpty)
+        XCTAssertNil(empty.loadError)
+    }
+
+    func testCurrentTargetConstraintsRejectInvalidRowsAndRollBack() async throws {
+        let database = try storageTestDatabase(self)
+        storageTestTrue(try await library(database).toggle(item(sourceID: "a", id: "1", title: "A")))
+        let before = try await rows(database)
+        for sql in ["UPDATE ios_film_favorites SET target_kind='invalid'",
+                    "UPDATE ios_film_favorites SET row_revision=-1",
+                    "UPDATE ios_film_favorites SET target_title=NULL"] {
+            await storageTestThrows { try await database.transaction { try $0.execute(sql) } }
+            storageTestEqual(try await rows(database), before)
+        }
+        storageTestEqual(try await library(database).favorites.count, 1)
+    }
+
+    func testTMDBMovieAndTVWithSameIDAreIndependentAcrossRestorationAndRemoval() async throws {
+        let database = try storageTestDatabase(self)
+        let movie = item(sourceID: "tmdb", id: "19", title: "电影", kind: .movie)
+        let tv = item(sourceID: "tmdb", id: "19", title: "剧集", kind: .tv)
+        let owner = try await library(database)
+        storageTestTrue(try await owner.toggle(movie))
+        XCTAssertTrue(owner.contains(movie)); XCTAssertFalse(owner.contains(tv))
+        storageTestTrue(try await owner.toggle(tv))
+        XCTAssertEqual(owner.favorites.count, 2)
+        let restored = try await library(database)
+        XCTAssertNil(restored.loadError)
+        XCTAssertTrue(restored.contains(movie)); XCTAssertTrue(restored.contains(tv))
+        storageTestFalse(try await restored.toggle(movie))
+        let rebuilt = try await library(database)
+        XCTAssertFalse(rebuilt.contains(movie)); XCTAssertTrue(rebuilt.contains(tv))
+        storageTestFalse(try await rebuilt.toggle(tv))
+        storageTestTrue(try await library(database).favorites.isEmpty)
+    }
+
+    func testNewUntypedTMDBFavoriteFailsWithoutWritingOrClaimingSuccess() async throws {
+        let database = try storageTestDatabase(self)
+        let owner = try await library(database)
+        await storageTestThrows({ try await owner.toggle(FilmItem(sourceID: "tmdb", id: "19", title: "电影或剧集")) }) {
+            XCTAssertEqual($0 as? FilmLibraryError, .missingKind)
+        }
+        XCTAssertNil(owner.loadError); XCTAssertTrue(owner.favorites.isEmpty)
+        storageTestEqual(try await rows(database), [])
+    }
+
+    func testFavoriteActionRequiresTheSuppliedTargetToMatchItsBusinessIdentity() async throws {
+        let database = try storageTestDatabase(self)
+        let owner = try await library(database)
+        for target: FilmPlaybackTarget? in [nil, .init(id: "other", kind: .movie, title: "影片")] {
+            let item = FilmItem(sourceID: "douban", id: "19", title: "影片", businessID: "selected", playbackTarget: target)
+            await storageTestThrows({ try await owner.toggle(item) }) { XCTAssertEqual($0 as? FilmLibraryError, .missingTarget) }
+        }
+        storageTestEqual(try await rows(database), [])
+        XCTAssertTrue(owner.favorites.isEmpty)
+    }
+
+    func testFavoriteToggleChangesOnlyItsOwnRelationshipRows() async throws {
+        let database = try storageTestDatabase(self)
+        let a = item(sourceID: "a", id: "1", title: "A"), b = item(sourceID: "b", id: "2", title: "B")
+        let owner = try await library(database)
+        storageTestTrue(try await owner.toggle(a))
+        let saved = try await rows(database)
+        let first = try XCTUnwrap(saved.first)
+        storageTestTrue(try await owner.toggle(b))
+        storageTestEqual(try await rows(database).first { $0["businessID"] == first["businessID"] }, first)
+        storageTestFalse(try await owner.toggle(b))
+        storageTestEqual(try await rows(database), [first])
+    }
 }

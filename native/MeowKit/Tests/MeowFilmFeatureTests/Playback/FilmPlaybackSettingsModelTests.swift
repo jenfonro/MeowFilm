@@ -10,9 +10,9 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         let settings = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await settings.loadPreferences()
         XCTAssertEqual(settings.preferences?.metadataViewProvider, .tmdb)
-        XCTAssertNil(try store.document.read())
+        let initial = try await store.document.read(); XCTAssertNil(initial)
         settings.edit { $0.keywords = ["已编辑"] }
-        try settings.setMetadataViewProvider(.douban)
+        try await settings.setMetadataViewProvider(.douban)
         try await settings.savePreferences()
         XCTAssertEqual(settings.preferences?.metadataViewProvider, .douban)
         XCTAssertEqual(settings.preferences?.keywords, ["已编辑"])
@@ -26,20 +26,18 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         }
     }
 
-    func testUnknownPreferenceEntriesAreProjectedAndPreservedUntilTheirOrderIsEdited() async throws {
+    func testPreferenceEditsPreserveOtherValidatedOrdersUntilTheirOrderIsEdited() async throws {
         var fields = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
-        fields["ruleOrder"] = .array([.string("keyword"), .string("future-rule"),
-                                      .object(["extra": .bool(true)]), .string("quality")])
-        fields["panOrder"] = .array([.string("quark"), .string("future-provider"), .number(1), .string("baidu")])
-        fields["extra"] = .object(["ruleOrder": .string("unused")])
+        fields["ruleOrder"] = .array([.string("keyword"), .string("quality"), .string("pan")])
+        fields["panOrder"] = .array([.string("quark"), .string("baidu"), .string("uc"), .string("yidong"), .string("tianyi")])
         let original = RuntimeValue.object(fields)
         let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
         let store = try FilmNativeSettingsStore(self, block: .preferences)
-        try store.seed(store.envelope(original, key: "preferences"))
+        try await store.seed(store.envelope(original, key: "preferences"))
         let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await model.loadPreferences()
-        XCTAssertEqual(model.preferences?.ruleOrder, [.keyword, .quality])
-        XCTAssertEqual(model.preferences?.panOrder, [.quark, .baidu])
+        XCTAssertEqual(model.preferences?.ruleOrder, [.keyword, .quality, .pan])
+        XCTAssertEqual(model.preferences?.panOrder, [.quark, .baidu, .uc, .yidong, .tianyi])
         XCTAssertEqual(model.preferences?.iosAutoPrepare, true)
         model.edit { $0.keywords = ["新关键词"] }
         try await model.savePreferences()
@@ -47,7 +45,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.preferences?.value.filmObject?["ruleOrder"], original.filmObject?["ruleOrder"])
         XCTAssertEqual(model.preferences?.value.filmObject?["panOrder"], original.filmObject?["panOrder"])
         var firstSave = fields; firstSave["keywords"] = .array([.string("新关键词")])
-        XCTAssertEqual(try store.document.read()?.filmObject?["preferences"], .object(firstSave))
+        XCTAssertEqual(try store.document.readForTest()?.filmObject?["preferences"], .object(firstSave))
         XCTAssertEqual(store.notifications, ["film.preferences"])
         model.edit { $0.ruleOrder = [.quality, .keyword, .pan] }
         try await model.savePreferences()
@@ -56,7 +54,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.preferences?.value.filmObject?["panOrder"], original.filmObject?["panOrder"])
         var secondSave = firstSave
         secondSave["ruleOrder"] = .array([.string("quality"), .string("keyword"), .string("pan")])
-        XCTAssertEqual(try store.document.read()?.filmObject?["preferences"], .object(secondSave))
+        XCTAssertEqual(try store.document.readForTest()?.filmObject?["preferences"], .object(secondSave))
         XCTAssertEqual(store.notifications, ["film.preferences", "film.preferences"])
         let reloaded = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
         try await reloaded.loadPreferences()
@@ -70,17 +68,19 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
             XCTFail("Preferences must never request the runtime")
             throw FilmPlaybackError.closed
         })
-        let store = try FilmNativeSettingsStore(self, block: .preferences, maximumBytes: 1024)
+        let store = try FilmNativeSettingsStore(self, block: .preferences)
         let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await model.loadPreferences()
-        model.edit { $0.iosAutoPrepare = false; $0.siteCleanKeywords = []; $0.keywords = [String(repeating: "x", count: 2000)] }
+        model.edit { $0.iosAutoPrepare = false; $0.siteCleanKeywords = []; $0.keywords = ["pending"] }
+        try store.readOnly(true)
         do { try await model.savePreferences(); XCTFail("A failed persistence receipt must be reported") }
         catch { XCTAssertEqual(error as? FilmSettingsStorageError, .storageFailure) }
         XCTAssertEqual(model.preferences, .defaults)
         XCTAssertEqual(model.draft?.iosAutoPrepare, false)
         XCTAssertEqual(model.draft?.siteCleanKeywords, [])
         XCTAssertFalse(model.busy)
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
+        try store.readOnly(false)
         model.edit { $0.keywords = [] }
         try await model.savePreferences()
         XCTAssertEqual(model.preferences, model.draft)
@@ -103,7 +103,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertEqual(model.draft, draft)
         let calls = await server.calls()
         XCTAssertTrue(calls.isEmpty)
-        XCTAssertEqual(try store.document.read()?.filmObject?["preferences"], draft.value)
+        XCTAssertEqual(try store.document.readForTest()?.filmObject?["preferences"], draft.value)
         XCTAssertEqual(store.notifications, ["film.preferences"])
         let reopened = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
         try await reopened.loadPreferences()
@@ -155,17 +155,17 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertFalse(model.busy)
     }
 
-    func testExplicitOrderRestoreReplacesOnlyThatGroupsUnconsumedValues() async throws {
+    func testExplicitOrderRestoreReplacesOnlyThatGroupsValidatedValues() async throws {
         var fields = try FilmPlaybackPreferences.defaults.value.filmRequiredObject()
         guard var rules = fields["ruleOrder"]?.filmArray, var providers = fields["panOrder"]?.filmArray else {
             return XCTFail("Fixture")
         }
-        rules.append(.string("future-rule")); providers.append(.object(["unused": .bool(true)]))
+        rules.reverse(); providers.reverse()
         fields["ruleOrder"] = .array(rules); fields["panOrder"] = .array(providers)
         let original = RuntimeValue.object(fields)
         let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
         let store = try FilmNativeSettingsStore(self, block: .preferences)
-        try store.seed(store.envelope(original, key: "preferences"))
+        try await store.seed(store.envelope(original, key: "preferences"))
         let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
         try await model.loadPreferences()
         model.edit { $0.keywords = ["新关键词"] }
@@ -201,7 +201,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertFalse(model.busy)
     }
 
-    func testSelectedLibraryListRejectsUnusableContentAndMalformedRootsButAllowsAnActualEmptyList() throws {
+    func testSelectedLibraryListRejectsUnusableContentAndMalformedRootsButAllowsAnActualEmptyList() async throws {
         for (area, key) in [(FilmPlaybackLibrary.Area.manual, "manual"), (.blocks, "blocks")] {
             for value in [RuntimeValue.null, .array([]), .string("not an object"),
                           .object([:]), .object([key: .object([:])]),
@@ -356,30 +356,13 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         XCTAssertFalse(model.busy)
     }
 
-    func testOnlyEditedPreferenceFieldsAreNormalizedAndOtherRawJSONSurvives() async throws {
+    func testMalformedCurrentPreferenceFieldsAreRejectedWithoutWriting() async throws {
         let store = try FilmNativeSettingsStore(self, block: .preferences)
-        let raw: RuntimeValue = .object([
-            "ruleOrder": .array([.string("future"), .null]), "panOrder": .number(7),
-            "keywords": .object(["future": .bool(true)]), "iosAutoPrepare": .string("not-a-bool"),
-            "future": .object(["nested": .array([.null, .number(0)])]),
-        ])
-        try store.seed(store.envelope(raw, key: "preferences"))
-        let server = FilmPlaybackWireServer(handler: { _, _ in XCTFail("No preferences RPC"); throw FilmPlaybackError.closed })
-        let model = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.document)
-        try await model.loadPreferences()
-        XCTAssertEqual(model.preferences?.value, raw)
-        model.edit { $0.iosAutoPrepare = true }
-        try await model.savePreferences()
-        var expected = try raw.filmRequiredObject(); expected["iosAutoPrepare"] = .bool(true)
-        XCTAssertEqual(model.preferences?.value, .object(expected))
-        XCTAssertNil(model.preferences?.value.filmObject?["siteCleanKeywords"], "Missing untouched fields stay missing")
-        model.restoreDraft(.ruleOrder)
-        try await model.savePreferences()
-        expected["ruleOrder"] = FilmPlaybackPreferences.defaults.value.filmObject?["ruleOrder"]
-        XCTAssertEqual(model.preferences?.value, .object(expected))
-        let reloaded = FilmPlaybackSettingsModel(transport: server.transport, settingsDocument: store.makeDocument())
-        try await reloaded.loadPreferences()
-        XCTAssertEqual(reloaded.preferences?.value, .object(expected))
+        let raw: RuntimeValue = .object(["ruleOrder": .array([.string("future"), .null]), "panOrder": .number(7),
+            "keywords": .object(["future": .bool(true)]), "iosAutoPrepare": .string("not-a-bool")])
+        do { try await store.seed(store.envelope(raw, key: "preferences")); XCTFail("invalid current fields admitted") }
+        catch { XCTAssertEqual(error as? FilmSettingsStorageError, .invalidDocument) }
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
     }
 
     func testPreferenceNormalizationRejectsInvalidDraftsAtomicallyBeforeCommit() async throws {
@@ -389,11 +372,11 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         try await model.loadPreferences()
         model.edit { $0.ruleOrder = [.quality, .quality, .pan]; $0.keywords = ["valid"] }
         await filmRuleFailure(FilmPlaybackError(code: "INVALID_PREFERENCES")) { try await model.savePreferences() }
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         model.restoreDraft(.ruleOrder)
         model.edit { $0.keywords = [" Name ", "name"]; $0.iosAutoPrepare = false }
         await filmRuleFailure(FilmPlaybackError(code: "INVALID_PREFERENCES")) { try await model.savePreferences() }
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         XCTAssertEqual(model.preferences, .defaults)
         XCTAssertEqual(model.draft?.keywords, [" Name ", "name"])
         model.edit { $0.keywords = ["\u{feff}\u{00a0}Name\u{feff}", "\u{0085}keep\u{0085}"]; $0.panOrder = [.quark] }
@@ -434,7 +417,7 @@ final class FilmPlaybackSettingsModelTests: XCTestCase {
         let save = Task { await gate.wait(); try await model.savePreferences() }
         save.cancel(); await gate.release()
         await filmRuleCancelled { try await save.value }
-        XCTAssertNil(try store.document.read()); XCTAssertTrue(store.notifications.isEmpty)
+        XCTAssertNil(try store.document.readForTest()); XCTAssertTrue(store.notifications.isEmpty)
         XCTAssertEqual(model.draft?.keywords, ["pending"]); XCTAssertFalse(model.busy)
         try await model.savePreferences()
         XCTAssertEqual(model.preferences?.keywords, ["pending"])

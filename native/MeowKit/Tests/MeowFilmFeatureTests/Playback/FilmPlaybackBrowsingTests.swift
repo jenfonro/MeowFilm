@@ -332,7 +332,8 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
             playbackPreferences: settings) { FilmPlaybackFixture.request() }
         addTeardownBlock { await model.close() }
         await model.open()?.value
-        XCTAssertNil(try store.document.read(), "Default and automatic projection never save a preference")
+        let initialPreferences = try await store.document.read()
+        XCTAssertNil(initialPreferences, "Default and automatic projection never save a preference")
         await server.reply(to: "browse.metadata", with: value(10, source: "result-a", line: .number(0), metadata: .douban))
         model.browseMetadata("confirmed-douban")
         await model.waitForPendingWork()
@@ -340,6 +341,7 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
         XCTAssertEqual(model.presentation?.browsing.sourceID, "result-a")
         XCTAssertEqual(model.presentation?.browsing.lineID, .number(0))
         model.browseMetadata("confirmed-tmdb")
+        await model.waitForPendingWork()
         XCTAssertEqual(settings.preferences?.metadataViewProvider, .tmdb)
         XCTAssertEqual(model.presentation?.metadataSourceID, "confirmed-tmdb")
         model.browseMetadata("confirmed-douban")
@@ -371,7 +373,7 @@ final class FilmPlaybackBrowsingTests: XCTestCase {
             let store = try FilmNativeSettingsStore(self, block: .preferences)
             var preferences = FilmPlaybackPreferences.defaults
             preferences.metadataViewProvider = preferred
-            try store.seed(store.envelope(preferences.value, key: "preferences"))
+            try await store.seed(store.envelope(preferences.value, key: "preferences"))
             var fields = value(1, source: nil, line: nil, metadata: available).filmObject!
             fields["metadataSources"] = .array(fields["metadataSources"]!.filmArray!.filter {
                 $0.filmObject?["provider"] == .string(available.rawValue)

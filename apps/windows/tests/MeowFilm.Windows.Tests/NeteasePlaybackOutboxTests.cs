@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Text;
 using System.Text.Json;
 using MeowFilm.Capabilities.Feedback;
@@ -230,17 +231,17 @@ public static class NeteasePlaybackOutboxTests
             await next.Protocol.InitializeAsync(); await next.Protocol.DrainAsync();
             Check(next.Remote.Uploads.Count == 1 && next.Saved().Length == 0);
         });
-        yield return Case("malformed local outbox is not overwritten or silently treated as empty", async () =>
+        yield return Case("invalid current outbox fields are not overwritten or silently treated as empty", async () =>
         {
             var store = new Store();
-            byte[] invalid = Encoding.UTF8.GetBytes("{\"version\":1,\"version\":1,\"playbacks\":[]}");
+            byte[] invalid = JsonSerializer.SerializeToUtf8Bytes(new { version = 2, playbacks = Array.Empty<object>() });
             store.Set(NeteasePlaybackOutboxDocument.Namespace, invalid);
             await using var f = await Fixture.Create(store);
             f.ExpectedStorageFailure = true;
             await Error(() => f.Protocol.InitializeAsync(), "FEEDBACK_STORAGE_FAILED");
-            Check(store.Get(NeteasePlaybackOutboxDocument.Namespace)!.SequenceEqual(invalid) && f.Remote.Uploads.Count == 0);
+            Check(JsonNode.DeepEquals(JsonNode.Parse(store.Get(NeteasePlaybackOutboxDocument.Namespace)!),JsonNode.Parse(invalid)) && f.Remote.Uploads.Count == 0);
             await Error(async () => { _ = await f.Start(); }, "FEEDBACK_STORAGE_FAILED");
-            Check(store.Get(NeteasePlaybackOutboxDocument.Namespace)!.SequenceEqual(invalid));
+            Check(JsonNode.DeepEquals(JsonNode.Parse(store.Get(NeteasePlaybackOutboxDocument.Namespace)!),JsonNode.Parse(invalid)));
         });
         foreach (string change in new[] { "account", "scope", "generation", "disabled" })
             yield return Case("cold startup discards pending after " + change, async () =>
@@ -484,40 +485,31 @@ public static class NeteasePlaybackOutboxTests
         public override DateTimeOffset GetUtcNow() => DateTimeOffset.FromUnixTimeSeconds(1800000000).AddMilliseconds(ticks);
         internal void Advance(double seconds) => ticks += (long)(seconds * 1000);
     }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : NativeTestDatabase
     {
-        private readonly Dictionary<string, byte[]> data = [];
-        internal int FailAtOutboxWrite, LoseAtOutboxWrite, OutboxWrites;
+        internal int FailAtOutboxWrite,LoseAtOutboxWrite,OutboxWrites;
         internal bool HoldSettings;
-        internal readonly TaskCompletionSource SettingsEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal readonly TaskCompletionSource SettingsRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal byte[]? Get(string ns) { lock (data) return data.GetValueOrDefault(ns)?.ToArray(); }
-        internal void Set(string ns, byte[] value) { lock (data) data[ns] = value.ToArray(); }
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        internal readonly TaskCompletionSource SettingsEntered=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource SettingsRelease=new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private static RelationalRecord Record(string owner)=>owner==NeteasePlaybackOutboxDocument.Namespace?FeedbackStorageRecords.Outbox:
+            owner==MusicFeedbackSettingsOwner.DocumentNamespace?FeedbackStorageRecords.Settings:throw new InvalidOperationException();
+        internal byte[]? Get(string owner){var row=Project(Record(owner),"device");return row is null?null:JsonSerializer.SerializeToUtf8Bytes(row);}
+        internal void Set(string owner,byte[] value)=>Seed(Record(owner),JsonNode.Parse(value)!.AsObject(),"device");
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)
         {
-            token.ThrowIfCancellationRequested(); var value = Get(ns);
-            return Task.FromResult(new DocumentSnapshot(value, value is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(value)));
+            bool outbox=false;
+            var result=await base.WriteAsync(db=>{
+                var settings=db.Revision(MusicFeedbackSettingsOwner.DocumentNamespace);var before=db.Revision(NeteasePlaybackOutboxDocument.Namespace);
+                var value=write(db);outbox=before!=db.Revision(NeteasePlaybackOutboxDocument.Namespace);
+                if(outbox&&++OutboxWrites==FailAtOutboxWrite)throw new DocumentStoreException(DocumentStoreError.Storage);
+                if(HoldSettings&&settings!=db.Revision(MusicFeedbackSettingsOwner.DocumentNamespace))
+                {HoldSettings=false;SettingsEntered.TrySetResult();SettingsRelease.Task.GetAwaiter().GetResult();}
+                return value;
+            },token,retainedBytes,commit);
+            if(outbox&&OutboxWrites==LoseAtOutboxWrite)throw new DocumentStoreException(DocumentStoreError.Storage);
+            return result;
         }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> value, DocumentFingerprint expected, CancellationToken token = default)
-        {
-            if (ns == MusicFeedbackSettingsOwner.DocumentNamespace && HoldSettings)
-            {
-                HoldSettings = false; SettingsEntered.TrySetResult(); await SettingsRelease.Task;
-            }
-            lock (data)
-            {
-                var old = Get(ns);
-                if ((old is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(old)) != expected)
-                    throw new DocumentStoreException(DocumentStoreError.Conflict);
-                if (ns == NeteasePlaybackOutboxDocument.Namespace && ++OutboxWrites == FailAtOutboxWrite)
-                    throw new DocumentStoreException(DocumentStoreError.Storage);
-                data[ns] = value.ToArray();
-                if (ns == NeteasePlaybackOutboxDocument.Namespace && OutboxWrites == LoseAtOutboxWrite)
-                    throw new DocumentStoreException(DocumentStoreError.Storage);
-                return DocumentFingerprint.FromBytes(value.Span);
-            }
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
     private sealed class Peer
     {
@@ -584,7 +576,7 @@ public static class NeteasePlaybackOutboxTests
         internal MusicFeedbackEnd End(double heard = 10) => new(heard, heard, 0, heard, 1, "ui")
         { PlaybackId = last.PlaybackId, EndedAt = Clock.GetUtcNow() };
         internal NeteasePlaybackPending[] Saved() => NeteasePlaybackOutboxDocument.Decode(
-            Store.ReadAsync(NeteasePlaybackOutboxDocument.Namespace).GetAwaiter().GetResult());
+            Store.ReadRecordAsync(NeteasePlaybackOutboxDocument.Namespace, MeowFilm.Capabilities.Feedback.FeedbackStorageRecords.Outbox).GetAwaiter().GetResult());
         public async ValueTask DisposeAsync()
         {
             Remote.Release.TrySetResult();

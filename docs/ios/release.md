@@ -57,7 +57,7 @@ App 资源包含项目 `NOTICE.md`、现有 LGPL／FFmpeg 许可正文、`FFmpeg
 
 ## Simulator 签名
 
-`scripts/test-native.sh` 构建的 Simulator App 使用本机 ad-hoc 签名和仅 Simulator SDK 生效的 `Meowfilm-Simulator.entitlements`，以使用真实 Keychain。`scripts/check-simulator-signing.py` 核对平台、Bundle ID、ad-hoc 签名和应用身份，拒绝描述文件、团队权限和其他 Keychain 组。
+`scripts/test-native.sh` 构建的 Simulator App 使用本机 ad-hoc 签名和仅 Simulator SDK 生效的 `Meowfilm-Simulator.entitlements`，声明应用身份与调试权限。`scripts/check-simulator-signing.py` 核对平台、Bundle ID、ad-hoc 签名和应用身份，拒绝描述文件、团队权限和其他 Keychain 组；这些签名检查不表示凭据存放于 Keychain。
 
 ## 应用图标
 

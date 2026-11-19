@@ -9,13 +9,15 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// Private resolution candidates and confirmed playback history, never library or download data.
 /// Unreadable or unusable cached values are misses; persistence is optional.
 /// </summary>
-internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? time = null)
+internal sealed class MusicSourceCache(IStorageDatabase database, TimeProvider? time = null)
 {
     internal const string Namespace = "music.playback-sources.v2";
     internal const long HistoryTtl = 30L * 86400000;
     private const int MaximumBytes = 1024 * 1024, MaximumScopes = 4;
     private readonly TimeProvider clock = time ?? TimeProvider.System;
-    private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly object gate = new();
+    private readonly HashSet<(string Scope, string Song)> invalidated = [];
+    private readonly HashSet<(string Scope, string Song, string Source)> rejected = [];
 
     private long Now => clock.GetUtcNow().ToUnixTimeMilliseconds();
 
@@ -23,7 +25,7 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
     {
         ValidateIdentity(scope, song);
         RequireHash(signature);
-        return Access(scope, false, false, (record, now) =>
+        return Access(scope, song, false, false, (record, now) =>
         {
             var url = record["urls"]![song] as JsonObject;
             if (url is null) return (null, false);
@@ -41,7 +43,7 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
         RequireHash(policy);
         RequireText(request, 64);
         if (generation <= 0) throw MusicPlaybackCacheDataException.Corrupt();
-        return Access(scope, false, false, (record, _) =>
+        return Access(scope, song, false, false, (record, _) =>
         {
             var pointer = record["pointers"]![song] as JsonObject;
             var info = pointer?["info"] as JsonObject;
@@ -59,7 +61,8 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
     {
         ValidateIdentity(scope, song);
         RequireHash(signature);
-        await Access(scope, true, true, (record, at) =>
+        info = info.DeepClone().AsObject();
+        await Access(scope, song, true, true, (record, at) =>
         {
             long? expires = info["expiresAt"]?.GetValue<long>();
             long ttl = at > long.MaxValue - HistoryTtl ? long.MaxValue : at + HistoryTtl;
@@ -83,7 +86,7 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
         ValidateIdentity(scope, song);
         RequireHash(signature);
         var metadata = HistoryInfo(scope, song, info);
-        await Access(scope, true, true, (record, at) =>
+        await Access(scope, song, true, true, (record, at) =>
         {
             var pointers = record["pointers"]!.AsObject();
             pointers.Remove(song);
@@ -100,7 +103,8 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
     internal async Task InvalidateAsync(string scope, string song, CancellationToken token)
     {
         ValidateIdentity(scope, song);
-        await Access(scope, true, false, (record, _) =>
+        lock (gate) invalidated.Add((scope, song));
+        await Access(scope, song, true, false, (record, _) =>
         {
             bool removed = record["urls"]!.AsObject().Remove(song);
             return (null, removed);
@@ -110,7 +114,8 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
     internal async Task RejectRecordingAsync(string scope, string song, string sourceKey, CancellationToken token)
     {
         ValidateIdentity(scope, song);
-        await Access(scope, true, false, (record, _) =>
+        lock (gate) rejected.Add((scope, song, sourceKey));
+        await Access(scope, song, true, false, (record, _) =>
         {
             bool removed = false;
             foreach (string area in new[] { "urls", "pointers" })
@@ -120,106 +125,78 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
         }, token).ConfigureAwait(false);
     }
 
-    private async Task<JsonObject?> Access(string scope, bool write, bool create,
+    private static readonly string[] InfoFields = "ok kind platform songId sourceKey scope generation quality actualQuality qualityVerified playbackVerified qualityPolicySignature qualityCacheSignature url expiresAt duration size full delivery requestedQuality headers recording".Split(' ');
+    private async Task<JsonObject?> Access(string scope, string song, bool write, bool create,
         Func<JsonObject, long, (JsonObject? Result, bool Changed)> action, CancellationToken token)
     {
-        if (write) await gate.WaitAsync(token).ConfigureAwait(false);
+        bool changedEntry = false;
         try
         {
-            var saved = write ? store.ReadMemory(Namespace) :
-                await store.ReadAsync(Namespace, token).ConfigureAwait(false);
-            var root = Decode(saved);
-
-            long now = Now;
-            var scopes = root["scopes"]!.AsObject();
-            bool pruned = false;
-            foreach (var pair in scopes.ToArray())
+            JsonObject? Apply(DatabaseSession db)
             {
-                try
+                long now = Now;
+                var current = new JsonObject { ["urls"] = new JsonObject(), ["pointers"] = new JsonObject() };
+                var previous = new Dictionary<string, JsonObject?>();
+                foreach (var kind in new[] { "urls", "pointers" })
                 {
-                    var record = pair.Value!.AsObject();
-                    long at = record["at"]!.GetValue<long>();
-                    if (at > now || at <= now - HistoryTtl)
-                    {
-                        scopes.Remove(pair.Key);
-                        pruned = true;
-                        continue;
-                    }
-                    pruned |= Prune(record, now);
+                    var row = PlaybackCacheRecords.Sources.Read(db, [scope, song, kind]);
+                    previous.Add(kind, row);
+                    if (row is null || row["at"]!.GetValue<long>() > now || row["at"]!.GetValue<long>() <= now - HistoryTtl ||
+                        kind == "urls" && row["until"]!.GetValue<long>() <= now) continue;
+                    bool hidden;
+                    lock (gate) hidden = !write && (kind == "urls" && invalidated.Contains((scope, song)) ||
+                        rejected.Contains((scope, song, row["info"]!["sourceKey"]!.GetValue<string>())));
+                    if (hidden) continue;
+                    var value = row.DeepClone().AsObject(); value.Remove("storedBytes");
+                    if (kind == "pointers") value.Remove("until");
+                    current[kind]![song] = value;
                 }
-                catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
-                { scopes.Remove(pair.Key); pruned = true; }
+                var (result, changed) = action(current, now);
+                changedEntry = changed;
+                if (!write) return result;
+                // Even empty invalidations remove the typed row; a queued read cannot resurrect it.
+                if (changed || !create)
+                    foreach (var kind in new[] { "urls", "pointers" })
+                    {
+                        var value = current[kind]![song]?.DeepClone() as JsonObject;
+                        if (value is not null)
+                        {
+                            var info = value["info"]!.AsObject();
+                            var projection = new JsonObject();
+                            foreach (var name in InfoFields) if (info.ContainsKey(name)) projection[name] = info[name]?.DeepClone();
+                            value["info"] = projection;
+                            value["until"] = kind == "urls" ? value["until"]?.DeepClone() : JsonValue.Create(value["at"]!.GetValue<long>() + HistoryTtl);
+                            int bytes = JsonSerializer.SerializeToUtf8Bytes(value).Length;
+                            if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
+                            value["storedBytes"] = bytes;
+                        }
+                        PlaybackCacheRecords.Sources.Save(db, value, previous[kind], [scope, song, kind]);
+                    }
+                Trim(db, now);
+                return result;
             }
-
-            bool existing = scopes[scope] is JsonObject;
-            var current = scopes[scope] as JsonObject ??
-                new JsonObject { ["at"] = now, ["urls"] = new JsonObject(), ["pointers"] = new JsonObject() };
-            if (!existing && !create)
+            var result = write ? await database.WriteAsync(Apply, token, 65536).ConfigureAwait(false) :
+                await database.ReadAsync(Apply, token).ConfigureAwait(false);
+            if (write && create && changedEntry)
             {
-                // Even an empty invalidation must supersede an initial disk read
-                // that has not loaded yet; otherwise it can resurrect the rejected URL.
-                if (write) await Write(root, token).ConfigureAwait(false);
-                return null;
+                lock (gate) { invalidated.Remove((scope, song)); rejected.RemoveWhere(key => key.Scope == scope && key.Song == song); }
             }
-
-            var (result, changed) = action(current, now);
-            if (!write) return result;
-            if (changed)
-            {
-                current["at"] = now;
-                _ = Prune(current, now);
-                scopes.Remove(scope);
-                scopes[scope] = current;
-                while (scopes.Count > MaximumScopes) scopes.Remove(scopes.First().Key);
-            }
-            if (changed || pruned || !create)
-                await Write(root, token).ConfigureAwait(false);
             return result;
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
-        { return null; }
-        finally { if (write) gate.Release(); }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return null; }
     }
-
-    private static JsonObject Decode(DocumentSnapshot saved)
+    private static void Trim(DatabaseSession db, long now)
     {
-        if (saved.Data is null || saved.Data.Length > MaximumBytes) return Empty();
-        try
-        {
-            var root = JsonNode.Parse(saved.Data)!.AsObject();
-            _ = root["scopes"]!.AsObject();
-            return root;
-        }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return Empty(); }
+        db.Execute("DELETE FROM windows_playback_source WHERE at<=$expired OR at>$now OR until<=$now", ("$expired", now - HistoryTtl), ("$now", now));
+        db.Execute("DELETE FROM windows_playback_source WHERE account_scope IN (SELECT account_scope FROM windows_playback_source GROUP BY account_scope ORDER BY max(at) DESC LIMIT -1 OFFSET $limit)", ("$limit", MaximumScopes));
+        foreach (var (kind, limit) in new[] { ("urls", 50), ("pointers", 200) })
+            foreach (var scope in db.Query("SELECT DISTINCT account_scope FROM windows_playback_source", row => row.GetString(0)))
+                db.Execute("DELETE FROM windows_playback_source WHERE rowid IN (SELECT rowid FROM windows_playback_source WHERE account_scope=$scope AND entry_kind=$kind ORDER BY at DESC,song_id LIMIT -1 OFFSET $limit)",
+                    ("$scope", scope), ("$kind", kind), ("$limit", limit));
+        while (db.Scalar<long>("SELECT coalesce(sum(storedBytes),0) FROM windows_playback_source") > MaximumBytes)
+            db.Execute("DELETE FROM windows_playback_source WHERE rowid=(SELECT rowid FROM windows_playback_source ORDER BY at,account_scope,song_id LIMIT 1)");
     }
-
-    private Task Write(JsonObject root, CancellationToken token)
-    {
-        var scopes = root["scopes"]!.AsObject();
-        byte[] encoded = JsonSerializer.SerializeToUtf8Bytes(root);
-        while (encoded.Length > MaximumBytes)
-        {
-            if (scopes.Count > 1) scopes.Remove(scopes.First().Key);
-            else
-            {
-                var current = scopes.FirstOrDefault().Value as JsonObject;
-                if (current?["urls"]?.AsObject() is { Count: > 0 } urls)
-                    urls.Remove(urls.First().Key);
-                else if (current?["pointers"]?.AsObject() is { Count: > 0 } pointers)
-                    pointers.Remove(pointers.First().Key);
-                else throw MusicPlaybackCacheDataException.Limit();
-            }
-            encoded = JsonSerializer.SerializeToUtf8Bytes(root);
-        }
-        token.ThrowIfCancellationRequested();
-        store.Save(Namespace, encoded);
-        return Task.CompletedTask;
-    }
-
-    private static JsonObject Empty() =>
-        new() { ["scopes"] = new JsonObject() };
-
 
     internal static long? ValidateCandidate(JsonElement info, string scope, string song, string signature)
     {
@@ -321,36 +298,6 @@ internal sealed class MusicSourceCache(CacheDocumentStore store, TimeProvider? t
             recording["sourceKey"]?.GetValue<string>() != sourceKey ||
             NativeMusicSong.SourceKey(recording) != sourceKey)
             throw MusicPlaybackCacheDataException.Corrupt();
-    }
-
-    private static bool Prune(JsonObject record, long now)
-    {
-        bool changed = false;
-        foreach (var (field, maximum) in new[] { ("urls", 50), ("pointers", 200) })
-        {
-            var entries = record[field]!.AsObject();
-            foreach (var entry in entries.ToArray())
-            {
-                try
-                {
-                    long at = entry.Value!["at"]!.GetValue<long>();
-                    if (at > now || at <= now - HistoryTtl ||
-                        field == "urls" && entry.Value!["until"]!.GetValue<long>() <= now)
-                    {
-                        entries.Remove(entry.Key);
-                        changed = true;
-                    }
-                }
-                catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
-                { entries.Remove(entry.Key); changed = true; }
-            }
-            while (entries.Count > maximum)
-            {
-                entries.Remove(entries.First().Key);
-                changed = true;
-            }
-        }
-        return changed;
     }
 
     private static void ValidateIdentity(string scope, string song)

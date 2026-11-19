@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // iWebPlus b900c259: browse-data.js history; account-settings.js search fields.
 import Foundation
+import MeowStorage
 #if os(iOS) || os(macOS)
 import Combine
 
@@ -105,28 +106,77 @@ public struct MusicSearchPreferences: Codable, Equatable, Sendable {
 
 /// Music platform search policy only. Shared keyword history has its own owner.
 @MainActor public final class MusicSearchPreferencesStore: ObservableObject {
-    public static let preferencesKey = "music.search.preferences.v1"
     @Published public private(set) var preferences = MusicSearchPreferences()
-    private let defaults: UserDefaults
+    @Published public private(set) var persistenceError: String?
+    private var database: SQLiteDatabase?
+    private var revision = 0
+    private var epoch = UUID()
+    private var closed = false
 
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        reload()
+    public init(database: SQLiteDatabase? = nil) { self.database = database }
+    public func bind(database: SQLiteDatabase) async {
+        guard self.database == nil, !closed else { return }
+        self.database = database; await reload()
     }
-    public func reload() {
-        if let data = defaults.data(forKey: Self.preferencesKey),
-           let value = try? JSONDecoder().decode(MusicSearchPreferences.self, from: data) {
-            preferences = value
-        } else { preferences = .init() }
+    nonisolated private static func load(_ db: SQLiteConnection) throws -> (MusicSearchPreferences, Int) {
+        guard let row = try db.query("SELECT * FROM ios_music_search_preferences WHERE singleton=1").first else { return (.init(), 0) }
+        let platforms = try db.query("SELECT * FROM ios_music_search_platforms ORDER BY kind,ordinal")
+        func values(_ kind: String) throws -> [MusicPublicBrowsePlatform] {
+            try platforms.filter { try $0.text("kind") == kind }.map {
+                guard let platform = MusicPublicBrowsePlatform(rawValue: try $0.text("platform")) else { throw SQLiteStorageError.corrupt }
+                return platform
+            }
+        }
+        return (try MusicSearchPreferences(songPlatforms: values("song"), searchPlaylists: row.bool("searchPlaylists"),
+            playlistPlatforms: values("playlist"), songPages: row.integer("song_pages"),
+            songConcurrency: row.integer("song_concurrency"), songCacheMinutes: row.integer("song_cache_minutes"),
+            playlistPages: row.integer("playlist_pages"), playlistConcurrency: row.integer("playlist_concurrency"),
+            playlistCacheMinutes: row.integer("playlist_cache_minutes")).validated(), try row.integer("row_revision"))
+    }
+    public func reload() async {
+        guard !closed, let database else { return }
+        let ticket = UUID(); epoch = ticket
+        do {
+            let result = try await database.snapshot(Self.load)
+            guard !closed, epoch == ticket else { return }
+            preferences = result.0; revision = result.1; persistenceError = nil
+        } catch { if !closed, epoch == ticket { persistenceError = "搜索偏好读取失败" } }
     }
     @discardableResult
-    public func update(_ value: MusicSearchPreferences) -> Bool {
+    public func update(_ value: MusicSearchPreferences) async -> Bool {
+        guard !closed else { return false }
         guard let value = try? value.validated() else { return false }
-        guard let data = try? JSONEncoder().encode(value) else { return false }
         guard preferences != value else { return true }
-        preferences = value
-        defaults.set(data, forKey: Self.preferencesKey)
-        return true
+        let ticket = UUID(); epoch = ticket
+        let expected = revision
+        do {
+            if let database {
+                try await database.transaction { db in
+                    guard try Self.load(db).1 == expected else { throw SQLiteStorageError.conflict }
+                    try db.upsert("ios_music_search_preferences",
+                        columns: ["singleton", "searchPlaylists", "song_pages", "song_concurrency", "song_cache_minutes",
+                                  "playlist_pages", "playlist_concurrency", "playlist_cache_minutes", "row_revision"],
+                        values: [.integer(1), .bool(value.searchPlaylists), .integer(value.songs.pages),
+                            .integer(value.songs.concurrency), .integer(value.songs.cacheMinutes),
+                            .integer(value.playlists.pages), .integer(value.playlists.concurrency),
+                            .integer(value.playlists.cacheMinutes), .integer(expected + 1)], key: ["singleton"])
+                    let rows = [("song", value.songPlatforms), ("playlist", value.playlistPlatforms)].flatMap { kind, platforms in
+                        platforms.enumerated().map { [SQLiteValue.text(kind), .integer($0.offset), .text($0.element.rawValue)] }
+                    }
+                    try db.reconcile("ios_music_search_platforms", columns: ["kind", "ordinal", "platform"],
+                        key: ["kind", "ordinal"], rows: rows, replaceChanged: true)
+                }
+            }
+            if !closed, epoch == ticket { preferences = value; revision = expected + 1; persistenceError = nil }
+            return true
+        } catch {
+            if !closed, epoch == ticket { persistenceError = "搜索偏好保存失败" }
+            return false
+        }
+    }
+    public func close() async {
+        closed = true; epoch = UUID()
+        _ = try? await database?.flush()
     }
 }
 #endif

@@ -1,5 +1,6 @@
+import { setTestReadOnly, withTestDatabase } from './storage-test-fixture.mjs';
 import assert from 'node:assert/strict';
-import fs, { mkdtempSync, readFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,10 +12,19 @@ import { createRecognitionRules, filmRuleFailure } from '../packages/film-playba
 import { matchesResults } from '../packages/film-playback/src/recognition.js';
 
 const empty = () => ({ episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] });
-function fixture(t, dataRoot = mkdtempSync(join(tmpdir(), 'film-rules-owner-'))) {
-  const service = createFilmRulesService({ dataRoot });
-  t.after(async () => { await service.close(); rmSync(dataRoot, { recursive: true, force: true }); });
-  return { service, dataRoot, path: join(dataRoot, 'film-rules', 'rules.json') };
+function fixture(t) {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'film-rules-owner-')), owners = [];
+  function open() {
+    const service = createFilmRulesService({ dataRoot });
+    owners.push(service);
+    return service;
+  }
+  const rows = () => withTestDatabase(dataRoot, db => db.snapshot([
+    { sql: 'SELECT group_name,row_revision,overridden FROM film_standalone_rule_groups ORDER BY group_name', rows: true },
+    { sql: 'SELECT * FROM film_standalone_rule_entries ORDER BY group_name,position', rows: true },
+  ]));
+  t.after(async () => { for (const owner of owners) await owner.close(); rmSync(dataRoot, { recursive: true, force: true }); });
+  return { service: open(), dataRoot, open, rows, overridden: async () => (await rows())[0].some(group => group.overridden) };
 }
 const request = { section: 'search', text: '[草稿]真实电影2', query: '真实电影2' };
 
@@ -24,131 +34,61 @@ test('native rule configuration reloads without a runtime writer or repeated sav
   const service = createFilmRulesService({ dataRoot, nativeSettings: { read: () => structuredClone(document) } });
   t.after(async () => { await service.close(); rmSync(dataRoot, { recursive: true, force: true }); });
   assert.deepEqual((await service.get()).rules, document.rules);
-  assert.equal(existsSync(join(dataRoot, 'film-rules', 'rules.json')), false);
+  assert.equal(existsSync(join(dataRoot, 'storage-v1')), false);
   await assert.rejects(service.set({ rules: empty() }), { code: 'PERMISSION_DENIED' });
   document = { version: 1, rules: { ...empty(), aggregateRegexRules: ['native-latest'] } };
   await service.settingsChanged();
   assert.deepEqual((await service.get()).rules, document.rules);
 });
 
-test('real QuickJS owner initializes defaults and reopens only its current document, including saved empty groups', async t => {
-  const f = fixture(t);
-  const initial = await f.service.get();
+test('reading defaults, saving an empty override and clearing have distinct durable effects', async t => {
+  const f = fixture(t), initial = await f.service.get();
   assert.equal(initial.rules.episodeRules.length, 2);
-  assert.equal(Object.isFrozen(initial.rules.episodeRules[0]), true);
-  if (process.platform !== 'win32') assert.equal(statSync(f.path).mode & 0o777, 0o600);
-  assert.deepEqual(JSON.parse(readFileSync(f.path, 'utf8')), { rules: initial.rules });
-  const saved = await f.service.set({ rules: empty() });
+  assert.ok(Object.isFrozen(initial.rules.episodeRules[0]));
+  assert.ok((await f.rows())[0].every(row => row.row_revision === 0 && !row.overridden));
+  const saved = await f.service.setGroup({group: 'episode', rules: []});
   assert.notEqual(saved.revision, initial.revision);
   await f.service.close();
-  const reopened = createFilmRulesService({ dataRoot: f.dataRoot });
-  t.after(() => reopened.close());
-  assert.deepEqual(await reopened.snapshot(), saved);
+  const reopened = f.open();
+  assert.deepEqual(await reopened.get(), saved);
+  assert.deepEqual(saved.rules.episodeRules, []);
+  const row = (await f.rows())[0].find(row => row.group_name === 'episodeRules');
+  assert.deepEqual(row, {group_name:'episodeRules', row_revision:1, overridden:1});
+  assert.deepEqual(await reopened.clear(), initial);
+  await reopened.close();
+  assert.deepEqual(await f.open().get(), initial);
+  assert.equal(await f.overridden(), false);
 });
 
-test('App-managed root, ancestor and module directory aliases support first save, restart and clear', async t => {
-  for (const kind of ['root', 'ancestor', 'module-directory']) {
-    await t.test(kind, async sub => {
-      const base = mkdtempSync(join(tmpdir(), 'film-rules-alias-')), actual = join(base, 'actual');
-      sub.after(() => rmSync(base, { recursive: true, force: true }));
-      mkdirSync(actual);
-      const dataRoot = kind === 'module-directory' ? join(base, 'data') :
-        kind === 'ancestor' ? join(base, 'linked', 'application-support', 'script-runtime') : join(base, 'linked');
-      if (kind === 'module-directory') mkdirSync(dataRoot);
-      fs.symlinkSync(actual, kind === 'module-directory' ? join(dataRoot, 'film-rules') : join(base, 'linked'), 'junction');
-      const f = fixture(sub, dataRoot);
-      assert.equal(existsSync(f.path), false);
-      const initial = await f.service.get();
-      assert.deepEqual(JSON.parse(readFileSync(f.path, 'utf8')), { rules: initial.rules });
-      const saved = await f.service.set({ rules: empty() });
-      await f.service.close();
-      const reopened = createFilmRulesService({ dataRoot });
-      sub.after(() => reopened.close());
-      assert.deepEqual(await reopened.snapshot(), saved);
-      const restored = await reopened.restore({ section: 'movie' });
-      const actualPath = kind === 'ancestor' ?
-        join(actual, 'application-support', 'script-runtime', 'film-rules', 'rules.json') :
-        kind === 'root' ? join(actual, 'film-rules', 'rules.json') : join(actual, 'rules.json');
-      assert.deepEqual(JSON.parse(readFileSync(actualPath, 'utf8')), { rules: restored.rules });
-      await reopened.clear();
-      assert.equal(existsSync(actualPath), false);
-    });
-  }
-});
-
-test('linked rules documents and module directories support reads, atomic replacement and restart', async t => {
-  for (const kind of ['file-symlink', 'hardlink', 'directory-symlink']) {
-    await t.test(kind, async sub => {
-      const f = fixture(sub), directory = join(f.dataRoot, 'film-rules'), actual = join(f.dataRoot, 'actual');
-      mkdirSync(actual);
-      const linkedFile = join(actual, 'rules.json');
-      const rules = { ...empty(), aggregateRegexRules: ['linked'] }, bytes = JSON.stringify({ rules });
-      writeFileSync(linkedFile, bytes);
-      if (kind === 'directory-symlink') fs.symlinkSync(actual, directory, 'junction');
-      else {
-        mkdirSync(directory);
-        if (kind === 'file-symlink') fs.symlinkSync(linkedFile, f.path);
-        else fs.linkSync(linkedFile, f.path);
-      }
-      assert.deepEqual((await f.service.get()).rules, rules);
-      const saved = await f.service.set({ rules: empty() });
-      assert.deepEqual(JSON.parse(readFileSync(f.path, 'utf8')), { rules: saved.rules });
-      if (kind === 'directory-symlink') {
-        assert.deepEqual(JSON.parse(readFileSync(linkedFile, 'utf8')), { rules: saved.rules });
-      } else {
-        assert.equal(readFileSync(linkedFile, 'utf8'), bytes, 'atomic replacement preserves the other linked entry');
-      }
-      await f.service.close();
-      const reopened = createFilmRulesService({ dataRoot: f.dataRoot });
-      sub.after(() => reopened.close());
-      assert.deepEqual(await reopened.get(), saved);
-      await reopened.clear();
-      assert.equal(existsSync(f.path), false);
-      if (kind !== 'directory-symlink') assert.equal(readFileSync(linkedFile, 'utf8'), bytes);
-    });
-  }
-});
-
-test('an App root alias uses its current destination while preserving content fingerprint checks', async t => {
-  const base = mkdtempSync(join(tmpdir(), 'film-rules-alias-'));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  const original = join(base, 'original'), other = join(base, 'other'), linked = join(base, 'linked');
-  mkdirSync(original);
-  mkdirSync(join(other, 'film-rules'), { recursive: true });
-  fs.symlinkSync(original, linked, 'junction');
-  const f = fixture(t, linked);
-  await f.service.get();
-  const bytes = readFileSync(f.path, 'utf8'), otherPath = join(other, 'film-rules', 'rules.json');
-  writeFileSync(otherPath, bytes);
-  fs.unlinkSync(linked);
-  fs.symlinkSync(other, linked, 'junction');
-  const saved = await f.service.set({ rules: empty() });
-  assert.equal(readFileSync(join(original, 'film-rules', 'rules.json'), 'utf8'), bytes);
-  assert.deepEqual(JSON.parse(readFileSync(otherPath, 'utf8')), { rules: saved.rules });
-  await f.service.close();
-  const reopened = createFilmRulesService({ dataRoot: linked });
-  t.after(() => reopened.close());
-  const current = await reopened.get();
-  assert.deepEqual(current, saved);
-  writeFileSync(otherPath, bytes);
-  await assert.rejects(reopened.set({ rules: empty() }), { code: 'STORAGE_CHANGED' });
-  assert.strictEqual(await reopened.get(), current);
-  assert.equal(readFileSync(otherPath, 'utf8'), bytes);
+test('independent rule owners merge different groups and reject stale same-group and full drafts', async t => {
+  const f = fixture(t), first = f.service, second = f.open();
+  await Promise.all([first.get(), second.get()]);
+  await first.setGroup({group:'search',rules:['winner']});
+  const merged = await second.setGroup({group:'movie',rules:[{pattern:'a',replace:'b',flags:'g'}]});
+  assert.deepEqual(merged.rules.aggregateRegexRules,['winner']);
+  assert.deepEqual(merged.rules.movieRules,[{pattern:'a',replace:'b',flags:'g'}]);
+  await assert.rejects(first.setGroup({group:'movie',rules:[]}), {code:'STORAGE_CHANGED'});
+  await assert.rejects(first.set({rules:empty()}), {code:'STORAGE_CHANGED'});
+  assert.deepEqual(await first.get(),merged);
+  assert.deepEqual(await f.open().get(),merged);
+  const updated = await first.setGroup({group:'movie',rules:[]});
+  assert.deepEqual(updated.rules.aggregateRegexRules,['winner']);
+  assert.deepEqual(updated.rules.movieRules,[]);
 });
 
 test('draft preview and normalization use QuickJS without persisting or replacing saved rules', async t => {
   const f = fixture(t), draft = { ...empty(), aggregateRegexRules: ['\\[草稿\\]'] };
   assert.equal((await f.service.preview({ request, rules: draft })).processedText, '真实电影2');
-  assert.equal(existsSync(f.path), false);
+  assert.equal(await f.overridden(), false);
   assert.equal((await f.service.preview({ request: { section: 'episode', text: 'E2' } })).rewrittenText, 'E2');
-  assert.equal(existsSync(f.path), false, 'previewing defaults also never creates the saved document');
+  assert.equal(await f.overridden(), false, 'previewing defaults leaves all groups unmodified');
   assert.deepEqual(await f.service.normalize({ kind: 'match', pattern: ' /\\\\d+/gy ', replace: ' $1 ' }),
     { pattern: '\\d+', replace: '$1', flags: 'gy' });
   assert.equal(await f.service.normalize({ kind: 'clean', pattern: ' /a/m ' }), '/a/m');
-  const snapshot = await f.service.get(), before = readFileSync(f.path, 'utf8');
+  const snapshot = await f.service.get(), before = await f.rows();
   await f.service.preview({ request, rules: draft });
   assert.strictEqual(await f.service.snapshot(), snapshot);
-  assert.equal(readFileSync(f.path, 'utf8'), before);
+  assert.deepEqual(await f.rows(), before);
 });
 
 test('preview and recognition consume only their actual section and ignore unused query and rule groups', async t => {
@@ -162,7 +102,7 @@ test('preview and recognition consume only their actual section and ignore unuse
     request: { section: 'movie', text: 'Movie', query: [65536] } });
   assert.equal(grouped.rewrittenText, 'Film');
   assert.equal(await f.service.normalize({ kind: 'clean', pattern: '/a/m', replace: { unused: true } }), '/a/m');
-  assert.equal(existsSync(f.path), false);
+  assert.equal(await f.overridden(), false);
   assert.equal(await createRecognitionRules({ ...empty(), episodeRules: null }).movie('Movie'), false);
 });
 
@@ -194,88 +134,35 @@ test('preview and restore pass exact numeric draft extensions to the real rule p
   assert.equal((await f.service.previewGroup({ group: 'movie', rules: rows,
     request: { section: 'movie', text: 'Movie' } })).rewrittenText, 'Film');
   assert.equal(stringifyJSONValue(seen[0].rules.movieRules[0].extension), extensionText);
-  assert.equal(existsSync(f.path), false);
+  assert.equal(await f.overridden(), false);
   const restored = await f.service.restore({ section: 'episode',
     rules: { ...empty(), movieRules: rows, extension } });
   assert.equal(stringifyJSONValue(seen[1].rules.extension), extensionText);
   assert.equal(stringifyJSONValue(seen[1].rules.movieRules[0].extension), extensionText);
   assert.deepEqual(restored.rules.movieRules, [{ pattern: '^Movie$', replace: 'Film', flags: '' }]);
-  assert.deepEqual(parseJSONText(readFileSync(f.path, 'utf8')), { rules: restored.rules });
+  assert.deepEqual(await f.open().get(), restored);
   assert.equal(stringifyJSONValue(extension), extensionText);
 });
 
-test('failed durable writes keep the previous snapshot and external changes are detected', async t => {
-  const f = fixture(t), previous = await f.service.snapshot(), saved = readFileSync(f.path, 'utf8');
-  renameSync(f.path, `${f.path}.saved`);
-  mkdirSync(f.path);
-  await assert.rejects(f.service.set({ rules: empty() }), { code: 'STORAGE_ERROR' });
+test('a failed rule write preserves both the committed snapshot and its group revisions', async t => {
+  const f = fixture(t), previous = await f.service.get(), rows = await f.rows();
+  await setTestReadOnly(f.dataRoot, true);
+  await assert.rejects(f.service.set({ rules: empty() }), { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
   assert.strictEqual(await f.service.get(), previous);
-  rmSync(f.path, { recursive: true });
-  renameSync(`${f.path}.saved`, f.path);
-  assert.equal(readFileSync(f.path, 'utf8'), saved);
-  writeFileSync(f.path, JSON.stringify({ rules: empty() }));
-  await assert.rejects(f.service.set({ rules: previous.rules }), { code: 'STORAGE_CHANGED' });
-  assert.strictEqual(await f.service.get(), previous);
+  assert.deepEqual(await f.rows(), rows);
+  await setTestReadOnly(f.dataRoot, false);
+  assert.deepEqual((await f.service.set({ rules: empty() })).rules, empty());
 });
 
-test('a failed first read can recover after the local storage failure is corrected', async t => {
+test('corrupt rule group metadata fails explicitly and no defaults replace the damaged state', async t => {
   const f = fixture(t);
-  mkdirSync(f.path, { recursive: true });
-  await assert.rejects(f.service.snapshot(), { code: 'STORAGE_ERROR' });
-  rmSync(f.path, { recursive: true });
-  assert.equal((await f.service.snapshot()).rules.episodeRules.length, 2);
-  assert.equal(existsSync(f.path), true);
-});
-
-test('malformed JSON, invalid rules and invalid UTF-8 remain explicit corruption without overwriting data', async t => {
-  for (const [name, bytes] of [
-    ['JSON', Buffer.from('{')],
-    ['rules', Buffer.from(JSON.stringify({ rules: { episodeRules: [] } }))],
-    ['UTF-8', Buffer.concat([Buffer.from('{"rules":{"value":"'), Buffer.from([0xff]), Buffer.from('"}}')])],
-  ]) {
-    await t.test(name, async sub => {
-      const f = fixture(sub), previous = await f.service.get();
-      writeFileSync(f.path, bytes);
-      const reopened = createFilmRulesService({ dataRoot: f.dataRoot });
-      sub.after(() => reopened.close());
-      await assert.rejects(reopened.get(), { code: 'CORRUPT_STORAGE' });
-      await assert.rejects(f.service.set({ rules: empty() }), { code: 'CORRUPT_STORAGE' });
-      assert.strictEqual(await f.service.get(), previous);
-      assert.deepEqual(readFileSync(f.path), bytes);
-    });
-  }
-});
-
-test('open/write/fsync/close/rename failures preserve rules on disk and in memory and remove the temporary file', async t => {
-  for (const method of ['openSync', 'writeFileSync', 'fsyncSync', 'closeSync', 'renameSync']) {
-    await t.test(method, async sub => {
-      const f = fixture(sub), previous = await f.service.get(), bytes = readFileSync(f.path);
-      const original = fs[method], open = fs.openSync;
-      let temporaryFD, failed = false;
-      if (method === 'closeSync') {
-        sub.mock.method(fs, 'openSync', function(path, ...rest) {
-          const descriptor = open.call(this, path, ...rest);
-          if (typeof path === 'string' && path.includes('.rules-')) temporaryFD = descriptor;
-          return descriptor;
-        });
-      }
-      const mocked = sub.mock.method(fs, method, function(...args) {
-        const targeted = method === 'openSync' ? typeof args[0] === 'string' && args[0].includes('.rules-') :
-          method === 'closeSync' ? args[0] === temporaryFD : true;
-        if (targeted && !failed) {
-          failed = true;
-          throw Object.assign(new Error('synthetic private storage diagnostic'), { code: 'EIO' });
-        }
-        return original.apply(this, args);
-      });
-      await assert.rejects(f.service.set({ rules: empty() }), { code: 'STORAGE_ERROR', message: 'STORAGE_ERROR' });
-      mocked.mock.restore();
-      assert.equal(failed, true);
-      assert.strictEqual(await f.service.get(), previous);
-      assert.deepEqual(readFileSync(f.path), bytes);
-      assert.deepEqual(fs.readdirSync(join(f.dataRoot, 'film-rules')), ['rules.json']);
-    });
-  }
+  await withTestDatabase(f.dataRoot, db => db.execute("DELETE FROM film_standalone_rule_groups WHERE group_name='movieRules'"));
+  const rows = await f.rows();
+  await assert.rejects(f.service.get(), {code:'CORRUPT_STORAGE'});
+  await assert.rejects(f.service.set({rules:empty()}), {code:'CORRUPT_STORAGE'});
+  assert.deepEqual(await f.rows(), rows);
+  await withTestDatabase(f.dataRoot, db => db.execute("INSERT INTO film_standalone_rule_groups(group_name) VALUES('movieRules')"));
+  assert.equal((await f.service.get()).rules.episodeRules.length, 2);
 });
 
 test('restore saves the full draft and only restores the selected section', async t => {
@@ -335,12 +222,12 @@ test('real previews retain Unicode properties, lookarounds, captures and exact i
     { code: 'INVALID_RULES' });
 });
 
-test('clear removes only the owned document and old snapshots still execute', async t => {
+test('clear removes only the saved rule overrides and old snapshots still execute', async t => {
   const f = fixture(t), unrelated = join(f.dataRoot, 'unrelated.json');
   writeFileSync(unrelated, '{"keep":true}');
   const previous = await f.service.set({ rules: empty() });
   const cleared = await f.service.clear({});
-  assert.equal(existsSync(f.path), false);
+  assert.equal(await f.overridden(), false);
   assert.equal(readFileSync(unrelated, 'utf8'), '{"keep":true}');
   assert.equal(cleared.rules.episodeRules.length, 2);
   assert.strictEqual(await f.service.get(), cleared);
@@ -365,7 +252,7 @@ test('cancellation interrupts pending native rules, drains it and permits later 
 });
 
 test('native resource and timeout errors retain public codes, saved state and subsequent execution', async t => {
-  const f = fixture(t), snapshot = await f.service.snapshot(), bytes = readFileSync(f.path, 'utf8');
+  const f = fixture(t), snapshot = await f.service.snapshot(), bytes = await f.rows();
   await assert.rejects(f.service.preview({ rules: { ...empty(),
     movieRules: [{ pattern: '(a+)', replace: '$1'.repeat(1024), flags: '' }] },
     request: { section: 'movie', text: 'a'.repeat(100_000) } }), { code: 'RESOURCE_LIMIT' });
@@ -375,7 +262,7 @@ test('native resource and timeout errors retain public codes, saved state and su
     movieRules: [{ pattern: '^(a+)+$', replace: '', flags: '' }] },
     request: { section: 'movie', text: `${'a'.repeat(100_000)}!` } }), { code: 'TIMEOUT' });
   assert.strictEqual(await f.service.snapshot(), snapshot);
-  assert.equal(readFileSync(f.path, 'utf8'), bytes);
+  assert.deepEqual(await f.rows(), bytes);
   assert.equal((await f.service.preview({ request: { section: 'episode', text: 'E4' } })).rewrittenText, 'E4');
   await assert.rejects(f.service.invoke({ operation: 'unknown' }), { code: 'SCRIPT_FAILURE' });
   await assert.rejects(f.service.preview({ request: { section: 'movie', text: [65536] } }), { code: 'INVALID_REQUEST' });
@@ -401,7 +288,7 @@ test('a queued clear follows cancelled native work and leaves the old snapshot u
   controller.abort();
   await rejected;
   const current = await cleared;
-  assert.equal(existsSync(f.path), false);
+  assert.equal(await f.overridden(), false);
   assert.equal(current.rules.episodeRules.length, 2);
   assert.equal(await createRecognitionRules(previous).movie('Film.2024.mkv'), false);
   assert.equal(await createRecognitionRules(current).movie('Film.2024.mkv'), true);
@@ -424,16 +311,17 @@ test('close settles active and queued native work, is idempotent and a fresh own
   assert.equal(settled, true);
   for (const result of await drained) assert.equal(result.status, 'rejected');
   await assert.rejects(f.service.snapshot(), { code: 'CLOSED' });
-  const next = createFilmRulesService({ dataRoot: f.dataRoot });
-  t.after(() => next.close());
+  const next = f.open();
   assert.equal((await next.preview({ request: { section: 'episode', text: 'E2' } })).rewrittenText, 'E2');
 });
 
 test('group writes atomically merge the latest saved groups without normalizing unrelated rows', async t => {
   const f = fixture(t);
-  mkdirSync(join(f.dataRoot, 'film-rules'));
   const original = { ...empty(), movieRules: [{ pattern: ' movie ', replace: ' keep ', flags: ' i ' }] };
-  writeFileSync(f.path, JSON.stringify({ rules: original }));
+  await withTestDatabase(f.dataRoot, db => db.transaction([
+    { sql: "UPDATE film_standalone_rule_groups SET overridden=1,row_revision=1 WHERE group_name='movieRules'" },
+    { sql: "INSERT INTO film_standalone_rule_entries VALUES('movieRules',0,?,?,?)", params: [' movie ', ' keep ', ' i '] },
+  ]));
   await f.service.get();
   const search = [' \uFEFFfirst\uFEFF ', ' second ', ''];
   const episode = [{ pattern: ' E(\\d+) ', replace: ' E$1 ', flags: ' g ' }];
@@ -447,38 +335,37 @@ test('group writes atomically merge the latest saved groups without normalizing 
   assert.deepEqual(second.rules.episodeRules, [{ pattern: 'E(\\d+)', replace: ' E$1 ', flags: 'g' }]);
   assert.deepEqual(second.rules.movieRules, original.movieRules);
   assert.equal(Object.isFrozen(second.rules.episodeRules[0]), true);
-  assert.deepEqual(JSON.parse(readFileSync(f.path, 'utf8')), { rules: second.rules });
+  assert.deepEqual(await f.open().get(), second);
   const cleared = await f.service.setGroup({ group: 'episode', rules: [] });
   assert.deepEqual(cleared.rules.episodeRules, []);
   assert.deepEqual(cleared.rules.aggregateRegexRules, second.rules.aggregateRegexRules);
   await f.service.close();
-  const reopened = createFilmRulesService({ dataRoot: f.dataRoot });
-  t.after(() => reopened.close());
+  const reopened = f.open();
   assert.deepEqual(await reopened.get(), cleared);
 });
 
-test('group default drafts and previews do not initialize or write a document', async t => {
+test('group defaults and previews do not create overrides or advance revisions', async t => {
   const f = fixture(t);
   const defaults = await f.service.groupDefaults({ group: 'episode' });
   assert.equal(defaults.length, 3, 'restore includes the full default episode list');
   const clean = await f.service.groupDefaults({ group: 'episodeClean' });
   assert.ok(clean.length > 0);
-  assert.equal(existsSync(f.path), false);
+  assert.equal(await f.overridden(), false);
   const preview = await f.service.previewGroup({ group: 'search', rules: ['\\[草稿\\]'], request });
   assert.equal(preview.processedText, '真实电影2');
-  assert.equal(existsSync(f.path), false);
-  const saved = await f.service.set({ rules: empty() }), bytes = readFileSync(f.path, 'utf8');
+  assert.equal(await f.overridden(), false);
+  const saved = await f.service.set({ rules: empty() }), bytes = await f.rows();
   await f.service.groupDefaults({ group: 'search' });
   await f.service.previewGroup({ group: 'search', rules: ['\\[草稿\\]'], request });
   assert.strictEqual(await f.service.snapshot(), saved);
-  assert.equal(readFileSync(f.path, 'utf8'), bytes);
+  assert.deepEqual(await f.rows(), bytes);
 });
 
 test('group previews use associated saved rules, retain order and preserve isolated UTF16', async t => {
   const f = fixture(t);
   await f.service.set({ rules: { ...empty(), episodeCleanRegexRules: ['^广告'],
     episodeRules: [{ pattern: '第(\\d+)集', replace: 'E$1', flags: '' }] } });
-  const bytes = readFileSync(f.path, 'utf8');
+  const bytes = await f.rows();
   const clean = await f.service.previewGroup({ group: 'episodeClean', rules: ['^草稿'],
     request: { section: 'episode', text: '草稿第12集' } });
   assert.equal(clean.rewrittenText, 'E12', 'the associated episode group comes from saved data');
@@ -495,7 +382,7 @@ test('group previews use associated saved rules, retain order and preserve isola
   const search = await f.service.previewGroup({ group: 'search', rules: ['^.'],
     request: { section: 'search', text: [0xd840, 0xdc00] } });
   assert.deepEqual(search.processedText, [0xdc00]);
-  assert.equal(readFileSync(f.path, 'utf8'), bytes);
+  assert.deepEqual(await f.rows(), bytes);
 });
 
 test('group preview waits for an accepted associated-group save and uses its durable receipt', async t => {
@@ -507,21 +394,21 @@ test('group preview waits for an accepted associated-group save and uses its dur
   const preview = f.service.previewGroup({ group: 'episodeClean', rules: ['^草稿'],
     request: { section: 'episode', text: '草稿第12集' } });
   const saved = await saving;
-  const bytes = readFileSync(f.path, 'utf8');
+  const bytes = await f.rows();
   const result = await preview;
   assert.equal(result.processedText, '第12集');
   assert.equal(result.rewrittenText, 'E12');
   assert.strictEqual(await f.service.snapshot(), saved);
-  assert.equal(readFileSync(f.path, 'utf8'), bytes);
+  assert.deepEqual(await f.rows(), bytes);
 });
 
-test('group write failure preserves the previous document and retries only the selected group', async t => {
-  const f = fixture(t), previous = await f.service.snapshot(), bytes = readFileSync(f.path, 'utf8');
-  renameSync(f.path, `${f.path}.saved`); mkdirSync(f.path);
+test('group write failure preserves the previous rows and retries only the selected group', async t => {
+  const f = fixture(t), previous = await f.service.snapshot(), bytes = await f.rows();
+  await setTestReadOnly(f.dataRoot, true);
   await assert.rejects(f.service.setGroup({ group: 'search', rules: [' pending '] }), { code: 'STORAGE_ERROR' });
   assert.strictEqual(await f.service.get(), previous);
-  rmSync(f.path, { recursive: true }); renameSync(`${f.path}.saved`, f.path);
-  assert.equal(readFileSync(f.path, 'utf8'), bytes);
+  await setTestReadOnly(f.dataRoot, false);
+  assert.deepEqual(await f.rows(), bytes);
   const saved = await f.service.setGroup({ group: 'search', rules: [' pending '] });
   assert.deepEqual(saved.rules.aggregateRegexRules, ['pending']);
   assert.deepEqual(saved.rules.episodeRules, previous.rules.episodeRules);

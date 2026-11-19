@@ -106,7 +106,7 @@ export function createSourceRuntimeModule({
   capabilityOwner,
   platform = 'unknown',
   dataRoot,
-  documents,
+  storage,
   configurationOwner = 'runtime',
 } = {}) {
   requireValue(typeof hostFactory === 'function' &&
@@ -127,6 +127,9 @@ export function createSourceRuntimeModule({
       try { library?.prepareCapability(name, input, context); }
       catch (error) {
         throw new ScriptHostError(error?.code === 'STALE_SOURCE' ? 'STALE_SESSION' : error?.code);
+      }
+      if (name === 'reader.values.read' || name === 'reader.values.apply') {
+        return library.readerValues(name, input, context);
       }
       return owner.invoke(name, input, context);
     },
@@ -154,7 +157,7 @@ export function createSourceRuntimeModule({
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   };
-  library = createSourceLibrary({ dataRoot, documents, host, owner, web, network, configurationOwner,
+  library = createSourceLibrary({ dataRoot, storage, host, owner, web, network, configurationOwner,
     fail: code => new Failure(code), errorCode, guard, lifetime,
     externalInstallation: id => bindings.has(id) || operations.has(id) });
   const current = id => host.list().find(value => value.installationId === id);

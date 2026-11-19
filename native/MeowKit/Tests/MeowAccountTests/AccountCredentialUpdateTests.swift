@@ -54,11 +54,7 @@ final class AccountCredentialUpdateTests: XCTestCase {
         let actual = try await f.coordinator.credential(for: f.token)
         XCTAssertEqual(actual, updated)
 
-        // The refresh still uses the existing v1 persistence envelope.
-        let encoded = CredentialRecordCodec.encode(record)
-        XCTAssertEqual(encoded.prefix(4), Data("MAC1".utf8))
-        XCTAssertEqual(encoded.count, 40 + updated.dataRepresentation().count)
-        XCTAssertEqual(try CredentialRecordCodec.decode(encoded), record)
+        XCTAssertEqual(record.credential.dataRepresentation(), updated.dataRepresentation())
     }
 
     func testLateSameTokenRefreshCannotOverwriteNewerRecordOrRevokeSuccessfulSession() async throws {
@@ -216,8 +212,8 @@ final class AccountCredentialUpdateTests: XCTestCase {
         let original = try AccountFixtures.credential()
         try await coordinator.completeLogin(token, credential: original)
         let lease = try await coordinator.credentialUpdateLease(for: token)
-        store.fail(.remove, with: CredentialStoreError.interactionNotAllowed)
-        await assertAccountError(.storage(.interactionNotAllowed)) {
+        store.fail(.remove, with: CredentialStoreError.unavailable)
+        await assertAccountError(.storage(.unavailable)) {
             try await coordinator.logout(token)
         }
         let counts = [store.calls(.read), store.calls(.write), store.calls(.remove)]

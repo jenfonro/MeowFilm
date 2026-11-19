@@ -137,17 +137,17 @@ public static class MusicNativeRecommendationTests
             finally { Settled.TrySetResult(); }
         }
     }
-    private sealed class Store : IDocumentStore
+    private sealed class Store : NativeTestDatabase
     {
         internal readonly ConcurrentDictionary<(string Namespace, int Number), Barrier> Holds = new();
-        internal readonly ConcurrentDictionary<string, int> Reads = new(), Writes = new();
+        internal new readonly ConcurrentDictionary<string, int> Reads = new(), Writes = new();
         internal readonly ConcurrentBag<Barrier> Barriers = [];
-        private readonly LocalDocumentStore inner;
+        private readonly NativeDatabase inner;
         internal readonly MusicRecordTestStore Records;
-        internal Store(LocalDocumentStore inner, string root)
+        internal Store(NativeDatabase inner, string root) : base(inner, owns: true)
         {
             this.inner = inner;
-            Records = MusicTestStores.Use(this, root);
+            Records = MusicTestStores.Use(this, inner.ProductRoot!);
             Records.AfterReadAsync = async (snapshot, token) =>
             {
                 int count = Reads.AddOrUpdate(MusicRecordsKey, 1, (_, n) => n + 1);
@@ -163,7 +163,7 @@ public static class MusicNativeRecommendationTests
                 Records.Failure = Interlocked.Exchange(ref UnknownQueueWrite, 0);
             };
         }
-        internal int Disposals, UnknownQueueWrite, QueueWrites;
+        internal int UnknownQueueWrite, QueueWrites;
         internal Barrier HoldRead(string ns, int number)
         {
             var point = new Barrier(); Check(Holds.TryAdd((ns, number), point)); Barriers.Add(point); return point;
@@ -178,20 +178,33 @@ public static class MusicNativeRecommendationTests
             var point = new Barrier(); Check(Holds.TryAdd(("queue-write", QueueWrites + 1), point));
             Barriers.Add(point); return point;
         }
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)
         {
-            int count = Reads.AddOrUpdate(ns, 1, (_, n) => n + 1);
-            var document = await inner.ReadAsync(ns, token).ConfigureAwait(false);
-            if (Holds.TryRemove((ns, count), out var point)) await point.Block(token).ConfigureAwait(false);
-            return document;
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes,
-            DocumentFingerprint expected, CancellationToken token = default)
-        {
-            int count = Writes.AddOrUpdate(ns, 1, (_, n) => n + 1);
-            if (Holds.TryRemove(("write:" + ns, count), out var point)) await point.Block(token).ConfigureAwait(false);
-            var value = await inner.WriteAsync(ns, bytes, expected, token).ConfigureAwait(false);
+            var value=await base.ReadAsync(read,token);
+            string? owner=value is RecordSnapshot?MusicAccountOwner.DocumentNamespace:
+                value is JsonObject fields&&fields.ContainsKey("mode")?MusicFmPreferences.DocumentNamespace:null;
+            if(owner is not null)
+            {
+                int count=Reads.AddOrUpdate(owner,1,(_,n)=>n+1);
+                if(Holds.TryRemove((owner,count),out var point))await point.Block(token);
+            }
             return value;
+        }
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)
+        {
+            string? owner=null;
+            var value=await base.WriteAsync(db=>{
+                var account=db.Revision(MusicAccountOwner.DocumentNamespace);
+                string preferences=JsonSerializer.Serialize(FMStorageRecords.Selection.ReadMany(db,[]));
+                var result=write(db);
+                owner=account!=db.Revision(MusicAccountOwner.DocumentNamespace)?MusicAccountOwner.DocumentNamespace:
+                    preferences!=JsonSerializer.Serialize(FMStorageRecords.Selection.ReadMany(db,[]))?MusicFmPreferences.DocumentNamespace:null;
+                if(owner is not null&&Holds.TryRemove(("write:"+owner,Writes.GetValueOrDefault(owner)+1),out var point))
+                    point.Block(CancellationToken.None).GetAwaiter().GetResult();
+                return result;
+            },token,retainedBytes,commit);
+            if(owner is not null)Writes.AddOrUpdate(owner,1,(_,n)=>n+1);return value;
         }
         internal async Task SetAccount(long generation = 1)
         {
@@ -209,11 +222,10 @@ public static class MusicNativeRecommendationTests
         }
         internal Task<string> RawLibrary() => Task.FromResult(Records.Root.ToJsonString());
         internal void ReleaseAll() { foreach (var point in Barriers) point.Release.TrySetResult(); }
-        public async ValueTask DisposeAsync()
+        public override async ValueTask DisposeAsync()
         {
-            Disposals++;
             try { await Records.DisposeAsync(); }
-            finally { await inner.DisposeAsync(); }
+            finally { await base.DisposeAsync(); }
         }
     }
     private sealed class ResponseHold
@@ -302,7 +314,7 @@ public static class MusicNativeRecommendationTests
             string parent = Environment.GetEnvironmentVariable("MEOWFILM_NATIVE_RECOMMENDATIONS_DATA") ??
                 throw new InvalidOperationException("Explicit isolated fixture directory required");
             Root = root ?? Path.Combine(parent, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(Root);
-            Store = new(new LocalDocumentStore(Root, AppIdentity.NativeNamespaces, protectedNamespaces: AppIdentity.ProtectedNamespaces),
+            Store = new(new NativeDatabase(Root),
                 Path.Combine(Root, "music-records"));
             Runtime.OnRequest = Handler.Read;
             Runtime.OnSessionUpdate = (call, _) =>

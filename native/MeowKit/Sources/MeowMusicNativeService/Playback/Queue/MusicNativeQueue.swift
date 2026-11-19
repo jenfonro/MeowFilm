@@ -91,7 +91,7 @@ extension NativeMusicService {
         if queue["entries"].array.count < 2 { return }
         try musicRequire(d.history["playlists"].isArray, .corruptDocument)
         var item = queue
-        for key in ["schema", "serial", "revision", "runId", "failed"] { item.remove(key) }
+        for key in ["schema", "serial", "revision", "runId", "failed", "similar"] { item.remove(key) }
         item["id"] = .string(UUID().uuidString.lowercased()); item["at"] = .number(now().timeIntervalSince1970 * 1000)
         let context = queue["entries"].array.first?["context"] ?? .obj()
         let title = MusicModel.firstText(queue["source"]["title"], context["sourceTitle"], context["playlist"])

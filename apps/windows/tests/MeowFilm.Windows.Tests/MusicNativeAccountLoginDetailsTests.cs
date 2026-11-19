@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Accounts;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -36,8 +37,8 @@ public static partial class MusicNativeAccountDetailsTests
             "Expected finite login error " + string.Join("/", codes));
     private static async Task MissingLoginDocument(MusicAccountDetailsFixture f)
     {
-        var document = await f.Wrapper.Inner.ReadAsync(MusicAccountOwner.DocumentNamespace);
-        try { Check(document.Data is null && !document.Fingerprint.Exists, "A partial login document was saved"); }
+        var document = await f.Wrapper.Inner.ReadAccountsAsync();
+        try { Check(document.Revision == StorageRevision.Empty, "A partial login document was saved"); }
         finally { if (document.Data is not null) CryptographicOperations.ZeroMemory(document.Data); }
     }
     private static async Task LoginDetails(string platform)

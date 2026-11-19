@@ -10,13 +10,9 @@ final class MusicSystemMetadataTests: XCTestCase {
               artwork: URL(string: "https://artwork.invalid/\(cover).png"))
     }
 
-    @MainActor private func store() -> (MusicAppearancePreferencesStore, UserDefaults, String) {
-        let name = "MusicSystemMetadataTests." + UUID().uuidString
-        let defaults = UserDefaults(suiteName: name)!
-        return (MusicAppearancePreferencesStore(defaults: defaults), defaults, name)
-    }
+    @MainActor private func store() -> MusicAppearancePreferencesStore { .init() }
 
-    @MainActor func testUsesOriginalActiveLineAndFavoriteSongTitleNotTranslationOrDisplayVisibility() {
+    @MainActor func testUsesOriginalActiveLineAndFavoriteSongTitleNotTranslationOrDisplayVisibility() async {
         let lines: [MusicLyricLine] = [
             .init(index: 4, time: 3, end: 12, text: "原文一", translation: "Translation one"),
             .init(index: 9, time: 12, end: 30, text: "原文二", translation: "Translation two")
@@ -39,7 +35,7 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertEqual(beforeLine.artist, "歌手")
     }
 
-    @MainActor func testTimelineSeekAndEmptyLyricsRestoreSongAndArtist() {
+    @MainActor func testTimelineSeekAndEmptyLyricsRestoreSongAndArtist() async {
         let lines: [MusicLyricLine] = [
             .init(index: 0, time: 3, end: 12, text: "原文一", translation: "Translation one"),
             .init(index: 1, time: 12, end: 30, text: "原文二", translation: "Translation two")
@@ -86,10 +82,9 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertNotEqual(valid, newAccess)
     }
 
-    @MainActor func testDisplayedArtworkWorksInFixedModeRetainsSameSongCoverAndRejectsRevokedTicket() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
-        appearance.set(\.colorMode, .fixed)
+    @MainActor func testDisplayedArtworkWorksInFixedModeRetainsSameSongCoverAndRejectsRevokedTicket() async throws {
+        let appearance = store()
+        await appearance.set(\.colorMode, .fixed)
         let song = track(), key = MusicAppearanceSongIdentity(track: track())
         appearance.selectSystemArtwork(song)
         let ticket = try XCTUnwrap(appearance.beginDisplayedArtwork(for: key, artworkID: song.artwork!.absoluteString))
@@ -112,9 +107,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertFalse(appearance.applyDisplayedArtwork(Data([5]), ticket: fresh))
     }
 
-    @MainActor func testSameSongNewURLRetainsSystemImageButRevokesOldURLCallbacksAndSwitchingSongClearsIt() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testSameSongNewURLRetainsSystemImageButRevokesOldURLCallbacksAndSwitchingSongClearsIt() async throws {
+        let appearance = store()
         let first = track(), next = track(cover: "replacement")
         let key = MusicAppearanceSongIdentity(track: first)
         appearance.selectSystemArtwork(first)
@@ -132,9 +126,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertFalse(appearance.applyDisplayedArtwork(Data([4]), ticket: newTicket))
     }
 
-    @MainActor func testTwoSurfacesShareOneEncodingAndPaletteModeDoesNotRemoveMetadataImage() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testTwoSurfacesShareOneEncodingAndPaletteModeDoesNotRemoveMetadataImage() async throws {
+        let appearance = store()
         let song = track()
         appearance.selectSystemArtwork(song)
         let mini = MusicNowPlayingArtworkState(), full = MusicNowPlayingArtworkState()
@@ -144,7 +137,7 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertTrue(mini.captureArtwork(revision: mini.artworkRevision) { encodes += 1; return Data([1]) })
         XCTAssertTrue(full.captureArtwork(revision: full.artworkRevision) { encodes += 1; return Data([2]) })
         XCTAssertEqual(encodes, 1)
-        appearance.set(\.colorMode, .fixed)
+        await appearance.set(\.colorMode, .fixed)
         mini.preferencesChanged(); full.preferencesChanged()
         XCTAssertEqual(appearance.displayedArtwork?.data, Data([1]))
         mini.deactivate()
@@ -152,9 +145,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertTrue(full.captureArtwork(revision: full.artworkRevision) { XCTFail("already encoded"); return nil })
     }
 
-    @MainActor func testRevocationRejectsPendingImageButCanReusePreviouslyDisplayedImageWithoutReload() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testRevocationRejectsPendingImageButCanReusePreviouslyDisplayedImageWithoutReload() async throws {
+        let appearance = store()
         let song = track()
         appearance.selectSystemArtwork(song)
         let pending = MusicNowPlayingArtworkState()
@@ -178,9 +170,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertTrue(displayed.isReady, "The AsyncImage mount is retained; no second URL request")
     }
 
-    @MainActor func testBackgroundRevokesRenderRevisionAndResumeKeepsOneAdmittedImage() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testBackgroundRevokesRenderRevisionAndResumeKeepsOneAdmittedImage() async throws {
+        let appearance = store()
         let song = track(), state = MusicNowPlayingArtworkState()
         appearance.selectSystemArtwork(song)
         state.activate(.init(track: song), appearance: appearance)
@@ -211,9 +202,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertFalse(state.captureArtwork(revision: admitted) { XCTFail("Unmounted"); return nil })
     }
 
-    @MainActor func testBackgroundActivationAndSongChangePublishOnlyCurrentSystemArtwork() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testBackgroundActivationAndSongChangePublishOnlyCurrentSystemArtwork() async throws {
+        let appearance = store()
         let state = MusicNowPlayingArtworkState(), first = track(), next = track("next", cover: "next")
         appearance.selectSystemArtwork(first)
         state.activate(.init(track: first), appearance: appearance, rendering: false)
@@ -231,9 +221,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertNil(appearance.displayedArtwork)
     }
 
-    @MainActor func testSystemCoverTargetChangeRequiresNewAdmissionAndRepeatedSelectionKeepsEncoding() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testSystemCoverTargetChangeRequiresNewAdmissionAndRepeatedSelectionKeepsEncoding() async throws {
+        let appearance = store()
         let state = MusicNowPlayingArtworkState(), next = track(cover: "replacement")
         appearance.selectSystemArtwork(track())
         state.activate(.init(track: next), appearance: appearance, rendering: false)
@@ -251,9 +240,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertEqual(appearance.displayedArtwork?.data, Data([2]))
     }
 
-    @MainActor func testArtworkFailureDoesNotRetainPreviousSongAndLargeCurrentImageIsPreserved() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testArtworkFailureAndOversizedImageDoNotRetainPreviousSong() async throws {
+        let appearance = store()
         let state = MusicNowPlayingArtworkState()
         appearance.selectSystemArtwork(track())
         state.activate(.init(track: track()), appearance: appearance, rendering: false)
@@ -273,9 +261,8 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertEqual(metadata.artwork?.data, data)
     }
 
-    @MainActor func testRepeatedSameURLImageChangesCannotLoseReplacementRevision() throws {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+    @MainActor func testRepeatedSameURLImageChangesCannotLoseReplacementRevision() async throws {
+        let appearance = store()
         let song = track(), state = MusicNowPlayingArtworkState()
         appearance.selectSystemArtwork(song)
         state.activate(.init(track: song), appearance: appearance)
@@ -297,8 +284,7 @@ final class MusicSystemMetadataTests: XCTestCase {
     }
 
     @MainActor func testCoordinatorIsPassiveAndCloseCancelsDeferredSubscriptions() async {
-        let (appearance, defaults, name) = store()
-        defer { defaults.removePersistentDomain(forName: name) }
+        let appearance = store()
         let service = MusicCollectionService()
         let model = MusicViewModel(service: service, player: MusicCollectionPlayer())
         let playback = PlaybackController()
@@ -308,7 +294,7 @@ final class MusicSystemMetadataTests: XCTestCase {
         XCTAssertNil(playback.activeAudioMedia)
         bridge.close(); bridge.close()
         await pending?.value
-        appearance.set(\.lockLyric, false)
+        await appearance.set(\.lockLyric, false)
         model.setAvailable(false)
         XCTAssertNil(bridge.pendingUpdate, "Closed subscriptions must not schedule another update")
         XCTAssertNil(playback.currentAttempt)

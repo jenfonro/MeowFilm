@@ -281,10 +281,8 @@ final class MusicSourceManagementPresentationTests: XCTestCase {
     ) async throws {
         let runner = XCUIApplication(bundleIdentifier: try XCTUnwrap(Bundle.main.bundleIdentifier))
         await performSourcePageAction { runner.activate() }
-        let domain = "MusicSourceManagementPresentation." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let appearance = try appStorageTestAppearance(database)
         let fixture = MusicSourcePresentationFixture()
         let model = MusicViewModel(service: fixture, player: MusicSourcePresentationPlayer(), scriptSources: fixture)
         await model.load()

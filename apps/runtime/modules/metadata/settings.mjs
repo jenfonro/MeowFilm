@@ -1,7 +1,6 @@
-import { PrivateDocuments } from '@meowfilm/script-host';
-import { isUtf8 } from 'node:buffer';
+import { openDatabase } from '@meowfilm/storage';
 import { createHash } from 'node:crypto';
-import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 
 export const metadataFailure = code => Object.assign(new Error(code), { code });
 export const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -11,69 +10,76 @@ const defaults = {
   douban: { apiBase: 'https://m.douban.com', searchBase: 'https://search.douban.com',
     imageBase: 'https://img3.doubanio.com', apiProxy: '', imageProxy: '', cookie: '' },
 };
-/** Native assembly supplies a read capability; standalone assembly owns its
- * document. PrivateDocuments is atomic storage, not encryption. */
+const columns = {
+  tmdb: ['api_base', 'image_base', 'api_key', 'access_token', 'language', 'region', 'include_adult'],
+  douban: ['api_base', 'search_base', 'image_base', 'api_proxy', 'image_proxy', 'cookie'],
+};
+
+/** Native settings are a projection, not a second writable fact source. */
 export function createMetadataSettings(dataRoot, id, nativeSettings) {
-  const documents = nativeSettings ? null : new PrivateDocuments(dataRoot, id);
-  let snapshot, document, reload = false;
+  if (!Object.hasOwn(defaults, id)) throw metadataFailure('INVALID_REQUEST');
+  const database = nativeSettings ? null : openDatabase(dataRoot), keys = Object.keys(defaults[id]);
+  const table = `metadata_standalone_${id}`;
+  let snapshot, rowRevision = 0, dirty = true, tail = Promise.resolve();
   const revision = value => createHash('sha256').update(stringifyJSONValue([id,
-    Object.keys(defaults[id]).map(key => [key, value[key]])])).digest('hex');
-  const same = (left, right) => stringifyJSONValue(left) === stringifyJSONValue(right);
-  function load() {
+    keys.map(key => [key, value[key]])])).digest('hex');
+  const visible = value => ({...value, revision:revision(value)});
+  async function read() {
+    if (!dirty && snapshot) return snapshot;
     try {
-      if (nativeSettings) document = nativeSettings.read(id);
-      else {
-        const bytes = documents.read('settings.json');
-        if (bytes === null) document = null;
-        else {
-          if (!isUtf8(bytes)) throw metadataFailure('CORRUPT_STORAGE');
-          document = parseJSONText(new TextDecoder('utf-8').decode(bytes));
-        }
+      if (nativeSettings) {
+        const document = nativeSettings.read(id);
+        if (document !== null && (!object(document) || document.version !== 1 ||
+            !object(document.settings) || isRawJSON(document.settings))) throw metadataFailure('CORRUPT_STORAGE');
+        snapshot = {...defaults[id], ...document?.settings};
+      } else {
+        const [row] = await database.query(`SELECT * FROM ${table} WHERE singleton=1`);
+        rowRevision = row?.row_revision ?? 0;
+        snapshot = row ? Object.fromEntries(keys.map((key,index) => [key,
+          key === 'includeAdult' ? Boolean(row[columns[id][index]]) : row[columns[id][index]]])) : {...defaults[id]};
       }
-      if (document === null) return { ...defaults[id] };
-      if (!object(document) || document.version !== 1 || !object(document.settings) || isRawJSON(document.settings))
-        throw metadataFailure('CORRUPT_STORAGE');
-      return { ...defaults[id], ...document.settings };
+      dirty = false;
+      return snapshot;
     } catch (error) {
-      throw metadataFailure(error?.code === 'STORAGE_ERROR' || error?.code === 'PERMISSION_DENIED'
-        ? 'STORAGE_ERROR' : 'CORRUPT_STORAGE');
+      throw metadataFailure(error?.code === 'STORAGE_CORRUPT' || error?.code === 'CORRUPT_STORAGE'
+        ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
     }
   }
-  function read() {
-    if (snapshot !== undefined && !reload) return snapshot;
-    const value = load();
-    snapshot = value;
-    reload = false;
-    return snapshot;
-  }
-  function visible(value) {
-    return { ...value, revision: revision(value) };
-  }
+  const ready = read(); ready.catch(() => {});
+  let disposal;
   return {
-    read,
-    invalidate() { reload = true; },
-    get: () => visible(read()),
+    ready, read,
+    invalidate() { dirty = true; },
+    async get() { return visible(await read()); },
     update(patch) {
-      if (nativeSettings) throw metadataFailure('PERMISSION_DENIED');
-      if (!object(patch)) {
-        throw metadataFailure('INVALID_REQUEST');
-      }
-      const current = read();
-      const value = cloneJSONValue({ ...current, ...Object.fromEntries(Object.keys(defaults[id])
-        .filter(key => Object.hasOwn(patch, key)).map(key => [key,
-          id === 'tmdb' && ['apiBase', 'imageBase'].includes(key) && patch[key] === ''
-            ? defaults[id][key] : patch[key]])) });
-      if (same(current, value)) return visible(current);
-      try {
-        documents.write('settings.json', Buffer.from(stringifyJSONValue({ ...document, version: 1, settings: value }) + '\n'));
-      } catch {
-        // rename may have committed before directory synchronization failed.
-        // Reload the authoritative file next time instead of claiming rollback.
-        reload = true;
-        throw metadataFailure('STORAGE_ERROR');
-      }
-      snapshot = value;
-      return visible(value);
+      const work = tail.then(async () => {
+        if (nativeSettings) throw metadataFailure('PERMISSION_DENIED');
+        if (!object(patch) || isRawJSON(patch) || Object.keys(patch).some(key => !keys.includes(key)))
+          throw metadataFailure('INVALID_REQUEST');
+        const current = await read(), value = {...current};
+        for (const key of keys) if (Object.hasOwn(patch,key)) {
+          if (key === 'includeAdult' ? typeof patch[key] !== 'boolean' : typeof patch[key] !== 'string')
+            throw metadataFailure('INVALID_REQUEST');
+          value[key] = id === 'tmdb' && ['apiBase','imageBase'].includes(key) && patch[key] === ''
+            ? defaults[id][key] : patch[key];
+        }
+        if (keys.every(key => current[key] === value[key])) return visible(current);
+        const values = keys.map(key => key === 'includeAdult' ? Number(value[key]) : value[key]);
+        try {
+          if (rowRevision) await database.execute(`UPDATE ${table} SET ${columns[id].map(key => key+'=?').join(',')},` +
+            'row_revision=row_revision+1 WHERE singleton=1 AND row_revision=?', [...values,rowRevision], {expectChanges:1});
+          else await database.execute(`INSERT INTO ${table}(singleton,${columns[id].join(',')},row_revision) VALUES(1,` +
+            values.map(() => '?').join(',') + ',1)', values, {expectChanges:1});
+        } catch (error) {
+          dirty = true;
+          throw metadataFailure(error?.code === 'STORAGE_CONFLICT' ? 'STORAGE_CONFLICT' : 'STORAGE_ERROR');
+        }
+        ++rowRevision; snapshot = value;
+        return visible(value);
+      });
+      tail = work.catch(() => {});
+      return work;
     },
+    close() { return disposal ??= (async () => { await Promise.allSettled([ready,tail]); await database?.close(); })(); },
   };
 }

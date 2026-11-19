@@ -4,14 +4,9 @@ public enum CredentialStoreError: Error, Equatable, LocalizedError, Sendable {
     case invalidConfiguration
     case invalidCredential
     case corruptItem
-    case accessibilityMismatch
-    case interactionNotAllowed
     case accessDenied
-    case missingEntitlement
     case unavailable
     case conflict
-    case unsupportedPlatform
-    case systemStatus(Int32)
     case backendFailure
 
     public var errorDescription: String? {
@@ -19,14 +14,9 @@ public enum CredentialStoreError: Error, Equatable, LocalizedError, Sendable {
         case .invalidConfiguration: return "凭据存储配置无效"
         case .invalidCredential: return "凭据数据无效"
         case .corruptItem: return "已存凭据格式无效"
-        case .accessibilityMismatch: return "凭据保护策略不匹配"
-        case .interactionNotAllowed: return "当前无法解锁凭据"
         case .accessDenied: return "凭据访问被拒绝"
-        case .missingEntitlement: return "缺少钥匙串访问权限"
         case .unavailable: return "凭据存储不可用"
         case .conflict: return "凭据存储发生冲突"
-        case .unsupportedPlatform: return "此平台不支持钥匙串存储"
-        case .systemStatus: return "钥匙串操作失败"
         case .backendFailure: return "凭据存储操作失败"
         }
     }
@@ -72,35 +62,4 @@ public struct CredentialRecord: Equatable, Sendable, CustomStringConvertible,
     public var description: String { "CredentialRecord(<redacted>)" }
     public var debugDescription: String { description }
     public var customMirror: Mirror { Mirror(self, children: ["value": "<redacted>"]) }
-}
-
-/// v1 binary envelope: ASCII "MAC1", 36 ASCII UUID bytes, then opaque credential bytes.
-/// Unknown/corrupt formats are rejected, never guessed, logged or overwritten on read.
-enum CredentialRecordCodec {
-    private static let prefix = Data("MAC1".utf8)
-    private static let headerByteCount = 40
-
-    static func encode(_ record: CredentialRecord) -> Data {
-        var data = prefix
-        data.append(contentsOf: record.revision.uuidString.lowercased().utf8)
-        data.append(record.credential.dataRepresentation())
-        return data
-    }
-
-    static func decode(_ data: Data) throws -> CredentialRecord {
-        guard data.count > headerByteCount,
-              data.prefix(4) == prefix,
-              let revisionText = String(data: data.dropFirst(4).prefix(36), encoding: .utf8),
-              let revision = UUID(uuidString: revisionText) else {
-            throw CredentialStoreError.corruptItem
-        }
-        do {
-            return CredentialRecord(
-                revision: revision,
-                credential: try AccountCredential(data: Data(data.dropFirst(headerByteCount)))
-            )
-        } catch {
-            throw CredentialStoreError.corruptItem
-        }
-    }
 }

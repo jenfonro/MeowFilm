@@ -3,24 +3,24 @@ import CryptoKit
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 final class FilmCatNativeSettingsTests: XCTestCase {
-    private func fixture() throws -> (FilmSourceService, FilmSettingsDocument, SourceChangeRecorder, URL, DocumentStore) {
+    private func fixture() throws -> (FilmSourceService, FilmSettingsDocument, SourceChangeRecorder, URL, SQLiteDatabase) {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
+        let store = try storageTestDatabase(self, root: base)
         let changes = SourceChangeRecorder()
-        let document = try sourceTestSettings(base, cats: [], changed: { changes.record($0) })
+        let document = try sourceTestSettings(store, cats: [], changed: { changes.record($0) })
         changes.reset()
         let owner = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"),
-            storeFactory: { store }, settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
+            database: store, settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         return (owner, document, changes, base, store)
     }
 
     func testOfflineImportEditEnableDeleteAndReopenUseOnlyNativeIntent() async throws {
         let (owner, document, changes, base, store) = try fixture()
-        defer { try? FileManager.default.removeItem(at: base) }
         try await owner.initialize()
         let local = try await owner.importLocal(name: "  中文  ", source: "// 中文\nmodule.exports = {}", installationId: "local")
         XCTAssertEqual(local.name, "中文")
@@ -33,10 +33,10 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         _ = try await owner.enableCat("local", enabled: false)
         try await owner.deleteCat("network")
         XCTAssertEqual(changes.values, Array(repeating: "cat.sources", count: 5))
-        XCTAssertNil(try store.read(key: FilmSourceService.documentKey), "A settings commit does not require a runtime/display cache write")
+        XCTAssertNil(try sourceTestRows(store), "A settings commit does not require a runtime/display cache write")
         await owner.close()
         let reopened = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"),
-            storeFactory: { store }, settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
+            database: store, settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await reopened.initialize()
         let snapshot = await reopened.snapshot
         XCTAssertEqual(snapshot.cats.map(\.installationId), ["local"])
@@ -49,114 +49,83 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         await reopened.close()
     }
 
-    func testSourceEditKeepsExactExtensionsAndUnusableSiblingWithoutReadingOtherSettings() async throws {
-        let (owner, document, _, base, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: base) }
+    func testSourceEditRejectsUndeclaredIntentAndPreservesCommittedFields() async throws {
+        let (owner, document, _, _, _) = try fixture()
         _ = try await owner.importNetwork(name: "Healthy", sourceURL: "https://example.invalid/a.js", installationId: "a")
-        let opaque = try RuntimeJSON.decode(Data(#"{"n":1234567890123456789012345,"é":1,"e\u0301":2}"#.utf8))
-        let broken: RuntimeValue = .object(["installationId": .string("bad"), "inputRevision": opaque])
-        _ = try document.update { current in
-            var root = try XCTUnwrap(current?.filmObject)
-            var row = try XCTUnwrap(root["scripts"]?.catArray?.first?.filmObject)
-            row["extra"] = opaque; row["localPath"] = opaque; row["localHash"] = opaque
-            root["scripts"] = .array([.object(row), broken])
-            root["port"] = opaque; root["providers"] = opaque; root["mappings"] = opaque
-            root["extra"] = opaque
-            return .object(root)
-        }
+        let before = try document.readForTest()
+        await storageTestThrows({
+            try await document.update { current in
+                var root = try XCTUnwrap(current?.filmObject)
+                root["extra"] = .string("undeclared")
+                return .object(root)
+            }
+        }) { XCTAssertEqual($0 as? FilmSettingsStorageError, .invalidDocument) }
+        XCTAssertEqual(try document.readForTest(), before)
         _ = try await owner.editCat("a", name: "Renamed")
-        let saved = try XCTUnwrap(try document.read())
-        XCTAssertEqual(saved.catField("extra"), opaque)
-        XCTAssertEqual(saved.catField("port"), opaque)
-        let rows = try XCTUnwrap(saved.catField("scripts")?.catArray)
-        XCTAssertTrue(rows.contains(broken))
-        XCTAssertEqual(rows.first { $0.catField("installationId") == .string("a") }?.catField("extra"), opaque)
-        XCTAssertEqual(rows.first { $0.catField("installationId") == .string("a") }?.catField("localHash"), opaque)
+        let saved = try XCTUnwrap(document.readForTest())
+        XCTAssertNil(saved.catField("extra"))
+        XCTAssertEqual(saved.catField("scripts")?.catArray?.first?.catField("name"), .string("Renamed"))
         await owner.close()
     }
 
-    func testCurrentDisplayCacheIsolatesUnusedRowsAndPreservesRawMaterialOnEdit() throws {
-        let input = CatSourceConfiguration(installationId: "a", name: "A", sourceType: "network",
-            sourceUrl: "https://example.invalid/a.js", localPath: nil, localHash: nil, enabled: true, inputRevision: 1)
+    func testCurrentDisplayRelationsKeepProbeMetadataAndVideoChoicesAcrossIncrementalEdits() async throws {
+        let database = try storageTestDatabase(self)
+        let repository = FilmSourceRepository(database: database)
         let site = FilmSourceSite(key: "site", name: "Site", api: "/api", actions: ["search"], methods: [:])
-        let cat = FilmCatSource(installationId: "a", name: "A", sourceType: "network", sites: [site], inputRevision: 1)
-        let video = FilmVideoSource(key: .init(installationId: "a", siteKey: "site"), name: "Site", api: "/api", actions: ["search"], methods: [:])
-        let healthy = FilmSourceDocument(cats: [StoredFilmCat(cat)], videos: [video])
-        var raw = try RuntimeJSON.decode(JSONEncoder().encode(healthy)).filmRequiredObject()
-        let opaque = try RuntimeJSON.decode(Data(#"{"n":1e400,"é":1,"e\u0301":2}"#.utf8))
-        raw["extra"] = opaque
-        var row = try XCTUnwrap(raw["cats"]?.catArray?.first?.filmObject)
-        row["importedAt"] = opaque; row["extra"] = opaque
-        var siteFields = try XCTUnwrap(row["sites"]?.catArray?.first?.filmObject)
-        siteFields["extra"] = opaque
-        row["sites"] = .array([.object(siteFields)])
-        raw["cats"] = .array([.object(row), opaque])
-        var videoFields = try XCTUnwrap(raw["videos"]?.catArray?.first?.filmObject)
-        var keyFields = try XCTUnwrap(videoFields["key"]?.filmObject)
-        keyFields["extra"] = opaque; videoFields["key"] = .object(keyFields); videoFields["extra"] = opaque
-        raw["videos"] = .array([.object(videoFields)])
-        let bytes = try RuntimeJSON.encode(.object(raw))
-        let loaded = try FilmSourceDocument.read(bytes, configured: [input])
-        XCTAssertEqual(loaded.cats.count, 1); XCTAssertNil(loaded.cats.first?.importedAt)
+        let cat = FilmCatSource(installationId: "a", name: "A", sourceType: "network", importedAt: 1,
+            updatedAt: 2, sites: [site], inputRevision: 1)
+        let video = FilmVideoSource(key: .init(installationId: "a", siteKey: "site"), name: "Site",
+            api: "/api", actions: ["search"], methods: [:], options: .init(enabled: false), order: 4)
+        _ = try await repository.save(.init(cats: [StoredFilmCat(cat)], videos: [video]), expected: 0)
+        let (loaded, revision) = try await repository.load()
+        XCTAssertEqual(loaded.cats, [StoredFilmCat(cat)])
         XCTAssertEqual(loaded.videos, [video])
         var changed = loaded; changed.videos[0].order = 10
-        let saved = try RuntimeJSON.decode(changed.encode(replacing: loaded, original: bytes))
-        XCTAssertEqual(saved.catField("extra"), opaque)
-        XCTAssertEqual(saved.catField("cats"), raw["cats"])
-        XCTAssertEqual(saved.catField("videos")?.catArray?.first?.catField("order"), .number(10))
-        XCTAssertEqual(saved.catField("videos")?.catArray?.count, 1)
-        XCTAssertEqual(saved.catField("videos")?.catArray?.first?.catField("extra"), opaque)
-        XCTAssertEqual(saved.catField("videos")?.catArray?.first?.catField("key")?.catField("extra"), opaque)
-        let refreshed = FilmCatSource(installationId: "a", name: "A", sourceType: "network",
-            sites: [.init(key: "site", name: "Renamed", api: "/api", actions: ["search"], methods: [:])], inputRevision: 1)
-        changed.cats = [StoredFilmCat(refreshed)]
-        let probeSaved = try RuntimeJSON.decode(changed.encode(replacing: loaded, original: bytes))
-        let savedSite = probeSaved.catField("cats")?.catArray?.first?.catField("sites")?.catArray?.first
-        XCTAssertEqual(savedSite?.catField("extra"), opaque)
-        XCTAssertEqual(savedSite?.catField("name"), .string("Renamed"))
+        _ = try await repository.save(changed, expected: revision)
+        let (saved, next) = try await repository.load()
+        XCTAssertEqual(saved.cats, loaded.cats)
+        XCTAssertEqual(saved.videos[0].order, 10)
+        XCTAssertEqual(saved.videos[0].options, video.options)
+        var refreshed = saved
+        let newSite = FilmSourceSite(key: "site", name: "Renamed", api: "/api", actions: ["search"], methods: [:])
+        refreshed.cats = [StoredFilmCat(FilmCatSource(installationId: "a", name: "A", sourceType: "network",
+            importedAt: 1, updatedAt: 3, sites: [newSite], inputRevision: 1))]
+        _ = try await repository.save(refreshed, expected: next)
+        let (probed, _) = try await repository.load()
+        XCTAssertEqual(probed.cats.first?.sites.first?.name, "Renamed")
+        XCTAssertEqual(probed.videos, saved.videos)
     }
 
-    func testSelectedVideoIntentRequiresUsableIdentityAndUnambiguousImageSelection() throws {
-        let input = CatSourceConfiguration(installationId: "a", name: "A", sourceType: "network",
-            sourceUrl: "https://example.invalid/a.js", localPath: nil, localHash: nil, enabled: true, inputRevision: 1)
+    func testSelectedVideoIntentRequiresUsableIdentityAndUnambiguousImageSelection() async throws {
+        let database = try storageTestDatabase(self)
+        let repository = FilmSourceRepository(database: database)
         let first = FilmVideoSource(key: .init(installationId: "a", siteKey: "one"), name: "One",
             api: "/api", actions: [], methods: [:], options: .init(aggregateImages: true))
         let second = FilmVideoSource(key: .init(installationId: "a", siteKey: "two"), name: "Two",
             api: "/api", actions: [], methods: [:], options: .init(aggregateImages: true))
-        for videos in [[first, first], [first, second]] {
-            let bytes = try JSONEncoder().encode(FilmSourceDocument(videos: videos))
-            XCTAssertThrowsError(try FilmSourceDocument.read(bytes, configured: [input]))
+        let invalid = FilmVideoSource(key: .init(installationId: "", siteKey: "broken"), name: "Invalid",
+            api: "/api", actions: [], methods: [:])
+        for videos in [[first, first], [first, second], [invalid]] {
+            await storageTestThrows({ try await repository.save(.init(videos: videos), expected: 0) }) {
+                XCTAssertEqual($0 as? FilmSourceError, .init(code: "INVALID_DOCUMENT"))
+            }
+            let (retained, revision) = try await repository.load()
+            XCTAssertTrue(retained.videos.isEmpty); XCTAssertEqual(revision, 0)
         }
-        let healthy = FilmSourceDocument(videos: [first])
-        var raw = try RuntimeJSON.decode(JSONEncoder().encode(healthy)).filmRequiredObject()
-        let broken: RuntimeValue = .object(["key": .object(["installationId": .string("a"), "siteKey": .string("broken")])])
-        raw["videos"] = .array([broken])
-        XCTAssertThrowsError(try FilmSourceDocument.read(RuntimeJSON.encode(.object(raw)), configured: [input]))
-        let good = try RuntimeJSON.decode(JSONEncoder().encode(first))
-        raw["videos"] = .array([good, broken])
-        let bytes = try RuntimeJSON.encode(.object(raw))
-        let loaded = try FilmSourceDocument.read(bytes, configured: [input])
-        XCTAssertEqual(loaded.videos, [first])
-        var edited = loaded; edited.videos[0].order = 4
-        let saved = try RuntimeJSON.decode(edited.encode(replacing: loaded, original: bytes))
-        XCTAssertTrue(saved.catField("videos")?.catArray?.contains(broken) == true)
-        edited.videos.append(.init(key: .init(installationId: "a", siteKey: "broken"),
-            name: "Conflict", api: "/api", actions: [], methods: [:]))
-        XCTAssertThrowsError(try edited.encode(replacing: loaded, original: bytes)) {
-            XCTAssertEqual($0 as? FilmSourceError, .init(code: "STORAGE_CONFLICT"))
-        }
+        _ = try await repository.save(.init(videos: [first]), expected: 0)
+        let (saved, revision) = try await repository.load()
+        XCTAssertEqual(saved.videos, [first]); XCTAssertEqual(revision, 1)
     }
 
     func testPickerCopyIsConsumedAsCompleteHashInputNotTemporaryPathOrSourceJSON() async throws {
-        let (owner, document, _, base, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: base) }
+        let (owner, document, _, base, store) = try fixture()
         let source = "// 中文 e\u{0301}\n" + String(repeating: "x", count: 65_537)
         let bytes = Data(source.utf8), hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         let picker = base.appendingPathComponent("picker-copy.js")
         try bytes.write(to: picker)
         _ = try await owner.importLocal(name: "Picker", fileURL: picker, installationId: "local")
         try FileManager.default.removeItem(at: picker)
-        let saved = try XCTUnwrap(try document.read())
+        let saved = try XCTUnwrap(try document.readForTest())
         let input = try XCTUnwrap(saved.catField("scripts")?.catArray?.first)
         XCTAssertEqual(input.catField("localPath"), .null)
         XCTAssertEqual(input.catField("localHash"), .string(hash))
@@ -171,7 +140,7 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         XCTAssertEqual(paths, ["sources"], "Preparing input cannot write runtime settings or installation facts")
         await owner.close()
         let reopened = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"),
-            storeFactory: { try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace) },
+            database: store,
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await reopened.initialize()
         let snapshot = await reopened.snapshot
@@ -183,7 +152,6 @@ final class FilmCatNativeSettingsTests: XCTestCase {
 
     func testInputRevisionChangesOnlyForSourceNotRenameOrEnableAndSurvivesTypeSwitches() async throws {
         let (owner, document, changes, base, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: base) }
         let first = try await owner.importLocal(name: "A", source: "// one", installationId: "a")
         let renamed = try await owner.editCat("a", name: "Renamed")
         let disabled = try await owner.enableCat("a", enabled: false)
@@ -199,22 +167,21 @@ final class FilmCatNativeSettingsTests: XCTestCase {
             sourceURL: "https://example.invalid/remote.js")
         XCTAssertEqual(network.inputRevision, 3)
         XCTAssertFalse(network.enabled, "Replacing input retains the enable intent")
-        let wire = try XCTUnwrap(try document.read()?.catField("scripts")?.catArray?.first)
+        let wire = try XCTUnwrap(try document.readForTest()?.catField("scripts")?.catArray?.first)
         XCTAssertEqual(wire.catField("localHash"), .null)
         XCTAssertEqual(wire.catField("localPath"), .null)
         let restored = try await owner.editCat("a", name: "Local again", sourceType: "local", source: "// one")
         XCTAssertEqual(restored.inputRevision, 4)
         XCTAssertNil(restored.sourceUrl)
         XCTAssertFalse(restored.enabled)
-        XCTAssertEqual(try document.read()?.catField("scripts")?.catArray?.first?.catField("sourceUrl"), .null)
+        XCTAssertEqual(try document.readForTest()?.catField("scripts")?.catArray?.first?.catField("sourceUrl"), .null)
         await owner.close()
     }
 
     func testInvalidIntentDuplicateAndMissingLocalInputDoNotCommitOrNotify() async throws {
         let (owner, document, changes, base, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: base) }
         _ = try await owner.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a")
-        let before = try document.read(), notifications = changes.values
+        let before = try document.readForTest(), notifications = changes.values
         for operation in 0..<5 {
             do {
                 switch operation {
@@ -226,60 +193,52 @@ final class FilmCatNativeSettingsTests: XCTestCase {
                 }
                 XCTFail("Invalid input cannot commit: \(operation)")
             } catch {}
-            XCTAssertEqual(try document.read(), before)
+            XCTAssertEqual(try document.readForTest(), before)
             XCTAssertEqual(changes.values, notifications)
         }
         await owner.close()
     }
 
-    func testTrueCASConflictAndValidationFailureDoNotNotifyOrOverwriteOtherFields() throws {
+    func testNativeTransactionRebaseAndValidationFailurePreserveOtherFields() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: base) }
+        let store = try storageTestDatabase(self, root: base)
         let changes = SourceChangeRecorder()
-        let document = try sourceTestSettings(base, cats: [], changed: { changes.record($0) })
+        let document = try sourceTestSettings(store, cats: [], changed: { changes.record($0) })
         let settings = CatSourceSettings(document: document)
-        let store = try DocumentStore(baseURL: base, namespace: FilmSettingsBlock.catSources.namespace)
         let mapping = RuntimeValue.object(["provider": .string("quark"), "aliases": .array([.string("私有别名")])])
-        _ = try document.update { original in
+        _ = try await document.update { original in
             guard case .object(var root) = original else { throw FilmSourceError(code: "FIXTURE") }
             root["port"] = .number(1234); root["providers"] = .object(["quark": .bool(false)])
             root["mappings"] = .array([mapping])
             return .object(root)
         }
         changes.reset()
-        let before = try XCTUnwrap(document.read())
+        let before = try XCTUnwrap(document.readForTest())
         let input = CatSourceConfiguration(installationId: "a", name: "A", sourceType: "network",
             sourceUrl: "https://example.invalid/a.js", localPath: nil, localHash: nil, enabled: true, inputRevision: 1)
-        var external = try RuntimeJSON.encode(before); external.append(0x20)
-        XCTAssertThrowsError(try settings.change { _ in
-            try store.write(external, key: FilmSettingsDocument.key)
-            return [input]
-        }) { XCTAssertEqual($0 as? FilmSettingsStorageError, .conflict) }
-        XCTAssertEqual(try store.read(key: FilmSettingsDocument.key), external)
-        XCTAssertTrue(changes.values.isEmpty)
-        _ = try settings.change { $0 + [input] }
-        let after = try XCTUnwrap(document.read())
+        _ = try await settings.change { $0 + [input] }
+        let after = try XCTUnwrap(document.readForTest())
         for field in ["port", "providers", "mappings"] { XCTAssertEqual(after.catField(field), before.catField(field)) }
         XCTAssertEqual(changes.values, ["cat.sources"])
         var invalid = input; invalid.inputRevision = 0
-        XCTAssertThrowsError(try settings.change { _ in [invalid] })
-        XCTAssertEqual(try document.read(), after)
+        let rejected = invalid
+        do { _ = try await settings.change { _ in [rejected] }; XCTFail("Invalid revision admitted") }
+        catch let error as FilmSourceError { XCTAssertEqual(error.code, "INVALID_DOCUMENT") }
+        XCTAssertEqual(try document.readForTest(), after)
         XCTAssertEqual(changes.values.count, 1)
     }
 
     func testCorruptExistingRuntimeInputIsNotOverwrittenAndDoesNotPublishIntent() async throws {
         let (owner, document, changes, base, _) = try fixture()
-        defer { try? FileManager.default.removeItem(at: base) }
         let source = "// immutable", hash = SHA256.hash(data: Data(source.utf8)).map { String(format: "%02x", $0) }.joined()
         let root = base.appendingPathComponent("cat/sources")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let file = root.appendingPathComponent(hash + ".js"), corrupt = Data("not the selected source".utf8)
         try corrupt.write(to: file)
-        let before = try document.read()
+        let before = try document.readForTest()
         do { _ = try await owner.importLocal(name: "A", source: source, installationId: "a"); XCTFail("Corrupt runtime input") }
         catch let error as FilmSourceError { XCTAssertEqual(error.code, "CORRUPT_STORAGE") }
-        XCTAssertEqual(try document.read(), before)
+        XCTAssertEqual(try document.readForTest(), before)
         XCTAssertEqual(try Data(contentsOf: file), corrupt)
         XCTAssertTrue(changes.values.isEmpty)
         let snapshot = await owner.snapshot
@@ -289,30 +248,31 @@ final class FilmCatNativeSettingsTests: XCTestCase {
 
     func testSettingsReadFailureIsExplicitAndNeverFallsBackToRuntime() async throws {
         let (owner, document, changes, base, store) = try fixture()
-        defer { try? FileManager.default.removeItem(at: base) }
         _ = try await owner.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a")
         let before = await owner.snapshot
-        let settingsStore = try DocumentStore(baseURL: base, namespace: FilmSettingsBlock.catSources.namespace)
-        try settingsStore.write(Data("{}".utf8), key: FilmSettingsDocument.key)
+        _ = try await store.transaction { db in
+            try db.execute("PRAGMA ignore_check_constraints=ON")
+            defer { _ = try? db.execute("PRAGMA ignore_check_constraints=OFF") }
+            return try db.execute("UPDATE ios_cat_settings SET port=-1 WHERE singleton=1")
+        }
         changes.reset()
         do { _ = try await owner.enableCat("a", enabled: false); XCTFail("Invalid native configuration") }
         catch let error as FilmSourceError { XCTAssertEqual(error.code, "INVALID_DOCUMENT") }
         let failed = await owner.snapshot
         XCTAssertEqual(failed, before)
         XCTAssertTrue(changes.values.isEmpty)
-        XCTAssertNil(try store.read(key: FilmSourceService.documentKey))
-        XCTAssertEqual(try document.read(), .object([:]))
+        XCTAssertNil(try sourceTestRows(store))
+        XCTAssertEqual(try document.readForTest()?.catField("port"), .number(-1))
         await owner.close()
     }
 
     func testCurrentCatalogPreservesReadOnlyMetadataAndVideoChoicesAcrossOfflineSaveAndReopen() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: base) }
-        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        let document = try sourceTestSettings(base)
+        let store = try storageTestDatabase(self, root: base)
+        let document = try sourceTestSettings(store)
         let runtime = SourcesRuntimeFixture()
-        let initialOwner = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+        let initialOwner = FilmSourceService(transport: runtime.transport, database: store,
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await initialOwner.refresh()
         let visible = FilmSourceKey(installationId: "a", siteKey: "same")
@@ -324,13 +284,13 @@ final class FilmCatNativeSettingsTests: XCTestCase {
             order: 9, detection: detection)
         try await initialOwner.deleteVideo(deleted)
         try await initialOwner.saveVideoOptions(visible, options: video.options, order: video.order)
-        let initialDocument = try RuntimeJSON.decode(XCTUnwrap(store.read(key: FilmSourceService.documentKey)))
-        guard case .object(var initialFields) = initialDocument else { throw FilmSourceError(code: "INVALID_DOCUMENT") }
-        initialFields["videos"] = .array([try RuntimeJSON.decode(JSONEncoder().encode(video))])
-        let bytes = try RuntimeJSON.encode(.object(initialFields))
-        try store.write(bytes, key: FilmSourceService.documentKey)
+        let repository = FilmSourceRepository(database: store)
+        let (initialDocument, revision) = try await repository.load()
+        _ = try await repository.save(.init(cats: initialDocument.cats, videos: [video], deleted: initialDocument.deleted),
+                                      expected: revision)
+        let rows = try sourceTestRows(store)
         await initialOwner.close()
-        let owner = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"), storeFactory: { store },
+        let owner = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"), database: store,
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await owner.initialize()
         let initial = await owner.snapshot
@@ -338,22 +298,21 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         XCTAssertEqual(initial.cats.first?.sourceUrl, "https://example.invalid/a.js")
         XCTAssertEqual(initial.cats.first?.sites.count, 1)
         XCTAssertEqual(initial.videos, [video])
-        XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes, "Reading does not write a new receipt")
+        XCTAssertEqual(try sourceTestRows(store), rows, "Reading does not write a new receipt")
         try await owner.saveVideoOptions(visible, options: video.options, order: 10)
-        let saved = try RuntimeJSON.decode(XCTUnwrap(store.read(key: FilmSourceService.documentKey)))
-        XCTAssertEqual(saved.catField("version"), .number(2))
-        let cats = try XCTUnwrap(saved.catField("cats")?.catArray)
-        XCTAssertEqual(cats.count, 2)
-        for cat in cats {
-            for field in ["name", "sourceType", "sourceUrl", "enabled", "localPath", "localHash"] {
-                XCTAssertNil(cat.catField(field), "No editable or sensitive input in the display cache")
-            }
-            XCTAssertEqual(cat.catField("sites")?.catArray?.count, 1)
-            XCTAssertEqual(cat.catField("inputRevision"), .number(1))
+        let (saved, _) = try await repository.load()
+        XCTAssertEqual(saved.cats.count, 2)
+        for cat in saved.cats {
+            XCTAssertEqual(cat.sites.count, 1)
+            XCTAssertEqual(cat.inputRevision, 1)
         }
-        XCTAssertEqual(saved.catField("deleted"), initialDocument.catField("deleted"))
+        let columns = try await store.read { try $0.query("PRAGMA table_info(ios_film_source_probes)").map { try $0.text("name") } }
+        for field in ["name", "sourceType", "sourceUrl", "enabled", "localPath", "localHash"] {
+            XCTAssertFalse(columns.contains(field), "Editable input is not duplicated in probe facts")
+        }
+        XCTAssertEqual(saved.deleted, initialDocument.deleted)
         await owner.close()
-        let reopened = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+        let reopened = FilmSourceService(transport: runtime.transport, database: store,
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await reopened.initialize()
         let restored = await reopened.snapshot
@@ -372,11 +331,10 @@ final class FilmCatNativeSettingsTests: XCTestCase {
     func testLateAndMissingStatusCannotDeleteIntentOrRestoreDeletedParentOrVideo() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: base) }
-        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        let document = try sourceTestSettings(base)
+        let store = try storageTestDatabase(self, root: base)
+        let document = try sourceTestSettings(store)
         let runtime = SourcesRuntimeFixture()
-        let owner = FilmSourceService(transport: runtime.transport, storeFactory: { store },
+        let owner = FilmSourceService(transport: runtime.transport, database: store,
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await owner.refresh()
         let deleted = FilmSourceKey(installationId: "a", siteKey: "same")
@@ -388,7 +346,7 @@ final class FilmCatNativeSettingsTests: XCTestCase {
             _ = try await owner.editCat("a", name: "Latest", sourceURL: "https://example.invalid/latest.js")
             try await owner.deleteCat("b")
         } catch { await runtime.release(); _ = try? await pending.value; await owner.close(); throw error }
-        let intent = try document.read()
+        let intent = try document.readForTest()
         await runtime.release()
         try await pending.value
         let late = await owner.snapshot
@@ -398,7 +356,7 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         XCTAssertEqual(late.cats.first?.generation, 0)
         XCTAssertFalse(late.cats.first?.canDetect ?? true)
         XCTAssertTrue(late.videos.isEmpty)
-        XCTAssertEqual(try document.read(), intent)
+        XCTAssertEqual(try document.readForTest(), intent)
         await runtime.returnNext("status", value: .object(["instances": .array([])]))
         try await owner.refresh()
         let missing = await owner.snapshot
@@ -411,9 +369,9 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         XCTAssertEqual(current.cats.map(\.installationId), ["a"])
         XCTAssertTrue(try XCTUnwrap(current.cats.first).canDetect)
         XCTAssertTrue(current.videos.isEmpty)
-        XCTAssertEqual(try document.read(), intent)
+        XCTAssertEqual(try document.readForTest(), intent)
         await owner.close()
-        let reopened = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store },
+        let reopened = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), database: store,
             settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await reopened.initialize()
         let restored = await reopened.snapshot

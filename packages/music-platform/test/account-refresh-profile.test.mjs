@@ -78,10 +78,10 @@ test('rotated credentials never cross the original account fence, and missing re
       return platform === 'tx' ? rpc({ musicid: 99, musickey: 'synthetic-new' }) :
         response({ status: 1, data: { userid: 99, token: 'synthetic-new' } });
     }); seedClients(f);
-    const before = Buffer.from(f.files.get('clients.json'));
+    const before = await f.clientState();
     await assert.rejects(candidate(f, platform, cookies[platform]), { code: 'INVALID_CREDENTIALS' });
     assert.equal(f.requests.length, platform === 'wy' ? 2 : 1);
-    assert.deepEqual(f.files.get('clients.json'), before); assert.equal(f.writes.length, 0);
+    assert.deepEqual(await f.clientState(), before); assert.equal(f.writes.length, 0);
     await f.close();
   });
   const f = fixture(() => assert.fail('missing refresh cannot dispatch')); seedClients(f);
@@ -107,15 +107,15 @@ test('KG refresh anonymously registers before sending the old token and accepts 
       }
       return response({ status: 1, data: { userid: accepted ? 42 : 99 } });
     }); seedClients(f);
-    const clients = JSON.parse(f.files.get('clients.json')); clients.kg.dfid = null;
-    f.files.set('clients.json', Buffer.from(JSON.stringify(clients)));
-    const before = Buffer.from(f.files.get('clients.json'));
+    const clients = (await f.clientState()); clients.kg.dfid = null;
+    await f.setClientState(clients);
+    const before = await f.clientState();
     if (accepted) assert.ok((await candidate(f, 'kg', cookies.kg)).cookie.includes('dfid=registered-dfid'));
     else await assert.rejects(candidate(f, 'kg', cookies.kg), { code: 'INVALID_CREDENTIALS' });
     assert.deepEqual(f.requests.map(r => new URL(r.url).pathname),
       ['/risk/v2/r_register_dev', '/v5/login_by_token', '/v3/get_my_info']);
     assert.equal(f.writes.length, accepted ? 1 : 0);
-    if (!accepted) assert.deepEqual(f.files.get('clients.json'), before);
+    if (!accepted) assert.deepEqual(await f.clientState(), before);
     await f.close();
   }
 });

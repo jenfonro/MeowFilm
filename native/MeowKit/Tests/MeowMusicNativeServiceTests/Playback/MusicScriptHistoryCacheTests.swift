@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import MeowStorage
+import MeowStorageTestSupport
 import MeowContracts
 @testable import MeowMusicFeature
 import MeowMusicPlatform
@@ -61,14 +63,13 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
     @MainActor
     func testPlayedScriptFileSurvivesRestartDeletionAndUpdateWithoutConsultingScriptOrAccount() async throws {
         for change in ["unchanged", "updated", "disabled", "deleted"] {
-            let root = try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-                .appendingPathComponent("meow-script-history-test-" + UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: root) }
+            let database = try storageTestDatabase(self)
+            let root = database.dataRoot.appendingPathComponent("audio")
             let clock = MusicRecoveryTestClock(), scripts = HistoryScripts()
             let song = try MusicNativeCandidateDiscoveryFixture.song()
             let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
             func cache() -> NativeMusicAudioFileCache {
-                .init(rootURL: root, clock: { clock.now() }, transport: HistoryBytes(), inspector: HistoryMeasurement())
+                .init(database: database, rootURL: root, clock: { clock.now() }, transport: HistoryBytes(), inspector: HistoryMeasurement())
             }
             let file = cache()
             let service = NativeMusicService(database: store, scripts: scripts, platformClient: try NativeMusicFixture.client(),
@@ -157,8 +158,8 @@ final class MusicScriptHistoryCacheTests: XCTestCase {
             try await reopened.restoreSourceExclusion(id: XCTUnwrap(rows.first?.id))
             let restored = try await next.match(quality: "flac", sourceID: nil)
             XCTAssertTrue(restored.candidate.isCachedAudio)
-            let index = try Data(contentsOf: root.appendingPathComponent("index.json"))
-            XCTAssertFalse(String(decoding: index, as: UTF8.self).contains("secret="))
+            let index = try storageTestRowData(database, "SELECT * FROM ios_music_audio_files")
+            XCTAssertFalse(String(decoding: try XCTUnwrap(index), as: UTF8.self).contains("secret="))
             await reopened.close()
         }
     }

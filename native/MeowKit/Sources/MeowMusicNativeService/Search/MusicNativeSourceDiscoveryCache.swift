@@ -1,6 +1,7 @@
 import Foundation
 import MeowMusicFeature
 import MeowStorage
+import MeowRuntime
 
 /// Search status refers to permanent records. No musicInfo or song metadata is
 /// duplicated here; accepted source facts live only in the song repository.
@@ -15,6 +16,7 @@ public struct MusicSourceDiscoveryEntry: Codable, Equatable, Sendable {
 public protocol MusicSourceDiscoveryCaching: Sendable {
     var persistsRecords: Bool { get }
     func entries() async -> [String: [String: MusicSourceDiscoveryEntry]]
+    func entries(songID: String) async -> [String: MusicSourceDiscoveryEntry]
     func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) async
     func persist(retaining songIDs: [String]) async
 }
@@ -39,10 +41,22 @@ private struct SourceDiscoveryDocument: Codable {
             sourceKeys: outcome == .failed || outcome == .incomplete ? previous?.sourceKeys ?? [] : sourceKeys,
             observations: retained + [current])
         records[songID] = platforms
-        while let data = try? JSONEncoder().encode(self), data.count > maximumBytes,
+        while records.reduce(0, { $0 + $1.key.utf8.count + Self.bytes($1.value) }) > maximumBytes,
               let oldest = records.min(by: {
                   ($0.value.values.map(\.checkedAt).max() ?? 0) < ($1.value.values.map(\.checkedAt).max() ?? 0)
               })?.key { records.removeValue(forKey: oldest) }
+    }
+    static func bytes(_ platforms: [String: MusicSourceDiscoveryEntry]) -> Int {
+        var size = 0
+        for (platform, entry) in platforms {
+            size += platform.utf8.count + 96
+            for key in entry.sourceKeys { size += key.utf8.count + 16 }
+            for observation in entry.observations {
+                size += 256 + observation.query.utf8.count + observation.context.utf8.count
+                size += observation.platform.utf8.count + (observation.failureCode?.utf8.count ?? 0)
+            }
+        }
+        return size
     }
 }
 
@@ -61,54 +75,87 @@ public actor MusicNativeMemorySourceDiscoveryCache: MusicSourceDiscoveryCaching 
 public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCaching {
     public static let namespace = "music.source-checks.v1"
     public nonisolated var persistsRecords: Bool { true }
-    private let factory: @Sendable () throws -> DocumentStore
+    private let database: SQLiteDatabase
     private let maximumBytes: Int
-    private var store: DocumentStore?
-    private var loaded = false
+    private var loaded: Set<String> = []
+    private var dirty: Set<String> = []
     private var document = SourceDiscoveryDocument()
-    private var persisted: Data?
-    public init(storeFactory: @escaping @Sendable () throws -> DocumentStore, maximumBytes: Int = 4 * 1024 * 1024) {
-        factory = storeFactory; self.maximumBytes = maximumBytes
+    private struct StoredRecord: Codable {
+        let storedBytes: Int
+        let platforms: [String: MusicSourceDiscoveryEntry]
     }
-    private func prepare() -> Bool {
-        if loaded { return true }
+    public init(database: SQLiteDatabase, maximumBytes: Int = 4 * 1024 * 1024) {
+        self.database = database; self.maximumBytes = maximumBytes
+    }
+    private func prepare(_ songID: String) -> Bool {
+        if loaded.contains(songID) { return true }
         do {
-            if store == nil { store = try factory() }
-            if let data = try store?.read(key: "checks"), data.count <= maximumBytes {
-                persisted = data
-                var saved = (try? JSONDecoder().decode(SourceDiscoveryDocument.self, from: data)) ?? .init()
-                for (id, platforms) in document.records {
+            let saved = try database.readSync { db in
+                try SQLiteDatabase.readSnapshot(db) { db in
+                    try MusicStorageRecords.music_source_discovery.read(db, key: [.text(songID)]).map {
+                        try JSONDecoder().decode(StoredRecord.self, from: RuntimeJSON.encode($0))
+                    }
+                }
+            }
+            if let saved {
+                var combined = SourceDiscoveryDocument(records: [songID: saved.platforms])
+                if let platforms = document.records[songID] {
                     for entry in platforms.values {
                         for observation in entry.observations.sorted(by: { $1.isNewer(than: $0) }) {
-                            saved.observe(songID: id, observation: observation, sourceKeys: entry.sourceKeys,
+                            combined.observe(songID: songID, observation: observation, sourceKeys: entry.sourceKeys,
                                           maximumBytes: maximumBytes)
                         }
                     }
                 }
-                document = saved
+                document.records[songID] = combined.records[songID]
             }
-            loaded = true; return true
+            loaded.insert(songID); return true
         } catch { return false }
     }
     public func entries() -> [String: [String: MusicSourceDiscoveryEntry]] {
-        _ = prepare(); return document.records
+        if let ids = try? database.readSync({ try $0.query("SELECT song_id FROM music_source_discovery").map { try $0.text("song_id") } }) {
+            for id in ids { _ = prepare(id) }
+        }
+        return document.records
+    }
+    public func entries(songID: String) -> [String: MusicSourceDiscoveryEntry] {
+        _ = prepare(songID)
+        return document.records[songID] ?? [:]
     }
     public func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) {
         // A failed disk read is a recoverable cache miss, not permission to
         // overwrite unread storage. The in-memory query status remains usable.
-        _ = prepare()
+        _ = prepare(songID)
         document.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
+        dirty.insert(songID)
     }
     public func persist(retaining songIDs: [String]) {
-        guard prepare() else { return }
         let retained = Set(songIDs)
-        let subset = SourceDiscoveryDocument(records: document.records.filter { retained.contains($0.key) })
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        guard let data = try? encoder.encode(subset), data.count <= maximumBytes, data != persisted else { return }
+        let savedIDs = dirty.intersection(retained).filter { prepare($0) }
+        let records = savedIDs.compactMap { id -> (String, StoredRecord)? in
+            guard let platforms = document.records[id] else { return nil }
+            return (id, .init(storedBytes: SourceDiscoveryDocument.bytes(platforms), platforms: platforms))
+        }
         do {
-            try store?.write(data, key: "checks")
-            persisted = data
+            let record = MusicStorageRecords.music_source_discovery
+            try database.transactionSync(ownedBytes: records.reduce(0) { $0 + $1.1.storedBytes }) { db in
+                for row in try db.query("SELECT song_id FROM music_source_discovery") {
+                    let id = try row.text("song_id")
+                    if !retained.contains(id) { try db.execute("DELETE FROM music_source_discovery WHERE song_id=?", [.text(id)]) }
+                }
+                for (id, saved) in records {
+                    let value = try RuntimeJSON.decode(JSONEncoder().encode(saved)), key: [SQLiteValue] = [.text(id)]
+                    try record.save(db, value: value, previous: record.read(db, key: key), key: key)
+                }
+                let rows = try db.query("SELECT song_id,storedBytes FROM music_source_discovery ORDER BY " +
+                    "(SELECT max(checkedAt) FROM music_source_discovery_platforms WHERE music_source_discovery_platforms.song_id=music_source_discovery.song_id)")
+                var bytes = try rows.reduce(0) { try $0 + $1.integer("storedBytes") }
+                for row in rows where bytes > maximumBytes {
+                    try db.execute("DELETE FROM music_source_discovery WHERE song_id=?", [row["song_id"]])
+                    bytes -= try row.integer("storedBytes")
+                }
+            }
+            dirty.subtract(savedIDs); dirty.formIntersection(document.records.keys)
         } catch {}
     }
 }

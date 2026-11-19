@@ -156,7 +156,7 @@ final class MusicAccountSingleFlightTests: XCTestCase {
     }
 
     func testRejectionDuringResolveCannotReinsertRejectedURL() throws {
-        var cache = MusicNativeAccountURLCache(store: nil)
+        var cache = MusicNativeAccountURLCache(database: nil)
         let key = MusicNativeAccountURLCache.Key(scope: String(repeating: "a", count: 64),
                                                  platform: "wy", nativeID: "101", quality: "128k")
         let now = Date(timeIntervalSince1970: 1000)

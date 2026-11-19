@@ -185,7 +185,7 @@ final class NativeMusicAccountSessionObservationTests: XCTestCase {
         await f.otherProvider.holdCapabilities(gate)
         let pending = Task { try await f.service.nativeOptions(platform: .netease, nativeID: "101", sourceKey: "wy:101") }
         await fulfillment(of: [entered], timeout: 3)
-        f.store.failRead(.interactionNotAllowed)
+        f.store.failRead(.unavailable)
         do { _ = try await f.service.nativeRecommendations(platform: .qq, kind: "guess", cursor: nil); XCTFail("Protected read accepted") }
         catch { XCTAssertEqual(error as? MusicServiceError, .storageFailed) }
         await waitForEvents(observation)

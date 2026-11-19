@@ -8,16 +8,17 @@ namespace MeowFilm.Capabilities;
 internal sealed record MusicHomeSnapshot(string Platform, JsonElement[] Pages);
 
 // Display content only. Restored actions still require current account authority.
-internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
+internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
 {
     internal const string Namespace = "music.home.v3";
+    private readonly TypedRecordRepository store = new(database, Namespace, HomeStorageRecords.Home);
     private readonly SemaphoreSlim gate = new(1, 1);
 
     internal async Task<MusicHomeSnapshot?> ReadAsync(Func<string, JsonElement?> song, CancellationToken token = default)
     {
         try
         {
-            return Decode(await store.ReadAsync(Namespace, token).ConfigureAwait(false), song, token);
+            return Decode(await store.ReadAsync(token).ConfigureAwait(false), song, token);
         }
         catch (Exception error) when (IsCacheFailure(error)) { return null; }
     }
@@ -29,16 +30,16 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
         {
             byte[] bytes = Encode(snapshot, token);
             token.ThrowIfCancellationRequested();
-            store.Save(Namespace, bytes);
+            await store.UpdateAsync(_ => JsonSerializer.Deserialize<JsonElement>(bytes), token).ConfigureAwait(false);
         }
         catch (Exception error) when (IsCacheFailure(error)) { }
         finally { gate.Release(); }
     }
 
-    private static MusicHomeSnapshot? Decode(DocumentSnapshot saved, Func<string, JsonElement?> song, CancellationToken token)
+    private static MusicHomeSnapshot? Decode(RecordSnapshot saved, Func<string, JsonElement?> song, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (saved.Data is null || saved.Data.Length > CacheDocumentStore.MaximumDocumentBytes) return null;
+        if (saved.Data is null || saved.Data.Length > (8 * 1024 * 1024)) return null;
         try
         {
             using var document = JsonDocument.Parse(saved.Data);
@@ -79,13 +80,13 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
                 {
                     JsonSerializer.Serialize(writer, ProjectPage(page, snapshot.Platform, token));
                     writer.Flush();
-                    if (output.Length > CacheDocumentStore.MaximumDocumentBytes)
+                    if (output.Length > (8 * 1024 * 1024))
                         throw new DocumentStoreException(DocumentStoreError.Limit);
                 }
                 writer.WriteEndArray();
                 writer.WriteEndObject();
             }
-            if (output.Length > CacheDocumentStore.MaximumDocumentBytes)
+            if (output.Length > (8 * 1024 * 1024))
                 throw new DocumentStoreException(DocumentStoreError.Limit);
             token.ThrowIfCancellationRequested();
             return output.ToArray();
@@ -153,7 +154,7 @@ internal sealed class MusicHomeSnapshotStore(CacheDocumentStore store)
                 result[field] = new JsonArray(MusicCatalogDto.Rows(MusicCatalogDto.Field(value, field))
                     .Select(item => Project(item, field == "tabs" ? "tab" : "tag", token)).ToArray());
         if (kind == "card" && value.TryGetProperty("preview", out var preview) && preview.ValueKind == JsonValueKind.Array)
-            result["preview"] = new JsonArray(preview.EnumerateArray().Take(3).Select(item => Project(item, "preview", token)).ToArray());
+            result["preview"] = new JsonArray(preview.EnumerateArray().Take(3).Select(item => Project(item, "preview", token)).OfType<JsonObject>().Cast<JsonNode?>().ToArray());
         return result;
     }
     private static JsonNode? Restore(JsonNode? value, Func<string, JsonElement?> song, CancellationToken token, bool songReference = false)

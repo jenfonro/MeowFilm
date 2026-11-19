@@ -2,6 +2,7 @@ import Foundation
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowNovelFeature
 
 @MainActor
@@ -37,10 +38,10 @@ final class NovelRuleConsumerTests: XCTestCase {
     func testLocalRuleEditsDoNotNeedTheClosedRuleProcessor() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let store = try DocumentStore(baseURL: root, namespace: NovelLibrary.namespace)
+        let store = try storageTestOpen(root)
+        addTeardownBlock { try await store.close(); try FileManager.default.removeItem(at: root) }
         let runtime = NovelRuleRPCGate(), processor = NovelRuleProcessor(runtime: runtime)
-        let feature = NovelFeature(library: NovelLibrary(store: store), rules: processor, runtime: runtime)
+        let feature = NovelFeature(library: NovelLibrary(database: store), rules: processor, runtime: runtime)
         try await feature.reloadLocal(); await processor.close()
         var inactive = NovelRule(); inactive.pattern = "["; inactive.isRegex = true; inactive.isEnabled = false
         var active = NovelRule(); active.pattern = "广告"
@@ -52,7 +53,7 @@ final class NovelRuleConsumerTests: XCTestCase {
         XCTAssertNil(feature.error)
         let requests = await runtime.requests; XCTAssertTrue(requests.isEmpty)
         await feature.close()
-        let reopened = NovelLibrary(store: store), snapshot = try await reopened.snapshot()
+        let reopened = NovelLibrary(database: store), snapshot = try await reopened.snapshot()
         XCTAssertEqual(snapshot.rules, [active, inactive])
         await reopened.close()
     }

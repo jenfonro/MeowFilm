@@ -368,7 +368,7 @@ test('assembly failure and invalid ready endpoint fail closed without exposing d
     let closed = false;
     const f = fixture(t, { makeRuntime: () => {
       if (failingFactory) throw new Error('private assembly detail');
-      return { baseUrl: 'file:///invalid-runtime', async start() {}, async close() { closed = true; } };
+      return { baseUrl: 'ftp://outside.invalid', async start() {}, async close() { closed = true; } };
     } });
     f.send();
     await assert.rejects(f.started, { code: failingFactory ? 'INVALID_RESPONSE' : 'INVALID_REQUEST' });

@@ -411,18 +411,22 @@ test('portable session variables preserve long UTF-8 keys and clone their values
   assert.equal(sync('variableGet', { key: keys[0] }), null);
 });
 
-test('persistent Reader values decode only consumed fields and preserve untouched exact material', async t => {
-  let saved = '{"values":{"kept":9007199254740993},"variable":false,"extra":1.234567890123456789}';
-  let operation, failWrite = false;
+test('persistent Reader values use incremental typed writes and preserve untouched exact material', async t => {
+  const saved = new Map([['kept', parseJSONText('9007199254740993')]]);
+  let revision = 0, variable, operation, failWrite = false;
   const base = capabilitiesFor({ '/search': '[]' });
   const session = new SourceSession({
     installationId: 'persistent-values', protocol: 'legado', metadata: { persistentSource: true },
     source: { ...legadoSource, ruleSearch: {}, coverDecodeJs: 'fixture()' },
     capabilities: createCapabilityClient({ invoke(name, input, context) {
-      if (name === 'storage.get') return saved;
-      if (name === 'storage.set') {
+      if (name === 'reader.values.read') return { revision,
+        entries: [...saved], ...(variable === undefined ? {} : { variable }) };
+      if (name === 'reader.values.apply') {
         if (failWrite) throw Object.assign(new Error(), { code: 'STORAGE_ERROR' });
-        saved = input.value; return true;
+        assert.equal(input.revision, revision);
+        for (const [key, value] of input.entries) saved.set(key, value);
+        if (input.variable !== undefined) variable = input.variable;
+        return ++revision;
       }
       return base.call(name, input, context);
     } }),
@@ -435,38 +439,41 @@ test('persistent Reader values decode only consumed fields and preserve untouche
   assert.deepEqual((await session.invoke('search', { keyword: 'unused' })).books, []);
   operation = call => call('sourceSet', { key: 'new', value: 'new value' });
   await session.invoke('image', { body: '' });
-  assert.match(saved, /9007199254740993/);
-  assert.match(saved, /1\.234567890123456789/);
-  assert.equal(JSON.parse(saved).variable, false);
+  assert.equal(stringifyJSONValue(saved.get('kept')), '9007199254740993');
+  assert.equal(revision, 1);
   operation = call => call('sourceGet', { key: 'new' });
   assert.equal((await session.invoke('image', { body: '' })).body, 'new value');
   operation = call => typeof call('sourceGet', { key: 'kept' });
   assert.equal((await session.invoke('image', { body: '' })).body, 'number');
-  assert.match(saved, /9007199254740993/);
   operation = call => call('sourceVariableGet');
-  await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
-  const before = saved;
+  assert.equal((await session.invoke('image', { body: '' })).body, '');
   operation = call => call('sourceVariableSet', { value: 'replacement' });
+  const before = [...saved];
   failWrite = true;
   await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
-  assert.equal(saved, before);
+  assert.deepEqual([...saved], before);
+  assert.equal(variable, undefined);
+  assert.equal(revision, 1);
   failWrite = false;
   await session.invoke('image', { body: '' });
-  assert.equal(JSON.parse(saved).variable, 'replacement');
-  assert.match(saved, /9007199254740993/);
+  assert.equal(variable, 'replacement');
+  assert.equal(revision, 2);
+  assert.equal(stringifyJSONValue(saved.get('kept')), '9007199254740993');
 });
 
-test('persistent Reader malformed values do not block unrelated actions or variable-only writes', async t => {
-  for (const initial of ['{broken', '9007199254740993',
-    '{"values":false,"variable":"ready","extra":9007199254740993}',
-    '{"values":9007199254740993,"variable":"ready"}']) {
-    let saved = initial, operation;
+test('persistent Reader read failures never become empty state and ordinary actions stay available', async t => {
+  for (const failRead of [true, false]) {
+    let operation;
+    const saved = new Map();
     const session = new SourceSession({
-      installationId: 'lazy-private', protocol: 'legado', metadata: { persistentSource: true },
+      installationId: 'reader-read-failure', protocol: 'legado', metadata: { persistentSource: true },
       source: { ...legadoSource, coverDecodeJs: 'fixture()' },
-      capabilities: createCapabilityClient({ invoke(name, input) {
-        if (name === 'storage.get') return saved;
-        if (name === 'storage.set') { saved = input.value; return true; }
+      capabilities: createCapabilityClient({ invoke(name) {
+        if (name === 'reader.values.read') {
+          if (failRead) throw Object.assign(new Error(), { code: 'STORAGE_ERROR' });
+          return { revision: 0, entries: [], variable: 'ready' };
+        }
+        if (name === 'reader.values.apply') throw new Error('unexpected write');
         if (name === 'cookie.get') return '';
         throw new Error(name);
       } }),
@@ -478,20 +485,12 @@ test('persistent Reader malformed values do not block unrelated actions or varia
     await session.start(); session.activate();
     assert.equal((await session.invoke('loginStatus')).loggedIn, false);
     operation = call => call('sourceGet', { key: 'unused' });
-    await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+    if (failRead) await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+    else assert.equal((await session.invoke('image', { body: '' })).body, null);
     operation = call => call('sourceVariableGet');
-    if (!initial.includes('"variable"')) {
-      await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
-      operation = call => call('sourceVariableSet', { value: 'updated' });
-      await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
-      assert.equal(saved, initial);
-    } else {
-      assert.equal((await session.invoke('image', { body: '' })).body, 'ready');
-      operation = call => call('sourceVariableSet', { value: 'updated' });
-      await session.invoke('image', { body: '' });
-      if (initial.includes('"values":false')) assert.equal(JSON.parse(saved).values, false);
-      assert.match(saved, /9007199254740993/);
-    }
+    if (failRead) await assert.rejects(session.invoke('image', { body: '' }), { code: 'STORAGE_ERROR' });
+    else assert.equal((await session.invoke('image', { body: '' })).body, 'ready');
+    assert.equal(saved.size, 0);
   }
 });
 
@@ -507,8 +506,8 @@ for (const protocol of ['legado', 'cat', 'qysg']) {
       ['bridge.call', { name: 'getbookVariable', args: ['key'] }, 'book:key'],
     ] : [[`${protocol}.storageGet`, { key: 'key' }, 'key']];
     const stored = new Map(reads.map(([, , key]) => [key, parseJSONText(exact)]));
-    const permanent = '{"values":{"kept":9007199254740993},"variable":"old","extra":1.234567890123456789}';
-    stored.set('reader.source.values', parseJSONText(permanent));
+    const readerValues = new Map([['kept', parseJSONText('9007199254740993')]]);
+    let readerRevision = 0, sourceVariable = 'old';
     let failRead = false;
     const exercise = async (sandbox, _method, _payload, options) => {
       const context = { ...options.context, signal: options.signal };
@@ -532,6 +531,13 @@ for (const protocol of ['legado', 'cat', 'qysg']) {
         : protocol === 'cat' ? 'export default { searchContent() {} }'
           : { bookSourceUrl: 'https://books.invalid/', html: '<script>function imagedecrypt() {}</script>' },
       capabilities: createCapabilityClient({ invoke(name, input) {
+        if (name === 'reader.values.read') return { revision: readerRevision, entries: [...readerValues], variable: sourceVariable };
+        if (name === 'reader.values.apply') {
+          assert.equal(input.revision, readerRevision);
+          for (const [key, value] of input.entries) readerValues.set(key, value);
+          if (input.variable !== undefined) sourceVariable = input.variable;
+          return ++readerRevision;
+        }
         if (name === 'storage.get') {
           if (failRead) throw Object.assign(new Error(), { code: 'STORAGE_ERROR' });
           return stored.get(input.key) ?? null;
@@ -553,7 +559,8 @@ for (const protocol of ['legado', 'cat', 'qysg']) {
     for (const [, , key] of reads) assert.equal(stringifyJSONValue(stored.get(key)), exact);
     assert.equal(stored.get('other'), 'updated');
     if (protocol === 'legado') {
-      assert.equal(stored.get('reader.source.values'), permanent.replace('"old"', '"updated"'));
+      assert.equal(sourceVariable, 'updated');
+      assert.equal(stringifyJSONValue(readerValues.get('kept')), '9007199254740993');
     }
     const before = stringifyJSONValue([...stored]);
     failRead = true;

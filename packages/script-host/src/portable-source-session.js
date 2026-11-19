@@ -132,6 +132,7 @@ export class PortableSourceSession {
     'PERMISSION_DENIED');
     const input = Object.fromEntries(keys.map((key, index) => [key, values[index]]));
     if (name === 'storage.set') input.value = parseJSONText(input.value);
+    if (name === 'reader.values.apply') input.entries = parseJSONText(input.entries, -2);
     const controller = new AbortController();
     const abort = () => controller.abort(hostError(signal.reason));
     if (signal.aborted) abort();
@@ -142,6 +143,7 @@ export class PortableSourceSession {
       const result = await this.capabilitiesClient.call(name, input, {
         signal: controller.signal, scope,
       });
+      if (name === 'reader.values.read') return stringifyJSONValue(result, -3);
       return name === 'storage.get' ? stringifyJSONValue(result) : result;
     }).finally(() => {
       signal.removeEventListener('abort', abort);

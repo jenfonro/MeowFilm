@@ -19,7 +19,8 @@ private let musicAccessGeneration: UInt64 = 1
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
     let playerPreferences = FilmPlayerPreferencesStore()
-    lazy var playback = PlaybackController(volumePreferences: PlaybackVolumePreferences(), videoDecoderFactory: {
+    let volumePreferences = PlaybackVolumePreferences()
+    lazy var playback = PlaybackController(volumePreferences: volumePreferences, videoDecoderFactory: {
         [playerPreferences] in try makePlaybackVideoDecoder(engine: playerPreferences.preferences.engine)
     })
     let appearance = MusicAppearancePreferencesStore()
@@ -142,6 +143,13 @@ final class MeowfilmAssembly: ObservableObject {
             return
         }
         self.resources = resources
+        do {
+            try await appearance.bind(database: resources.database)
+            try await volumePreferences.bind(database: resources.database)
+            await playerPreferences.bind(database: resources.database)
+            try await filmLibrary.bind(database: resources.database)
+        } catch { failedStartup(); return }
+        guard !closed, !Task.isCancelled else { return }
         runtimeAvailability = Task { [weak self] in
             for await _ in await resources.scriptSession.connections() {
                 guard !Task.isCancelled, let self, !self.closed else { return }
@@ -200,6 +208,9 @@ final class MeowfilmAssembly: ObservableObject {
             let model = MusicViewModel(service: service, playback: playback, accounts: resources.musicAccounts,
                                        scriptSources: resources.musicScripts)
             model.setPresentationCache(resources.musicPresentationCache)
+            await model.searchPreferences.bind(database: resources.database)
+            await model.searchHistory.bind(database: resources.database)
+            try await model.channelSelection.bind(database: resources.database)
             return model
         })
     }
@@ -208,7 +219,7 @@ final class MeowfilmAssembly: ObservableObject {
     /// is local only; the service retains the pre-read home for the first page.
     func prepareMusic(_ service: NativeMusicService,
                       prepareAccounts: () async throws -> Void,
-                      makeModel: () -> MusicViewModel) async {
+                      makeModel: () async throws -> MusicViewModel) async {
         guard !closed, !Task.isCancelled else { await service.close(); return }
         self.service = service
         do {
@@ -221,7 +232,7 @@ final class MeowfilmAssembly: ObservableObject {
             _ = try await service.homeSourceSelection()
             _ = try await service.restoredHome()
             guard !closed, !Task.isCancelled else { return }
-            let model = makeModel()
+            let model = try await makeModel()
             model.setAvailable(true)
             systemMetadata = MusicSystemMetadataCoordinator(model: model, playback: playback, appearance: appearance)
             automaticSync = MusicAutomaticLibrarySync(service: service, onLibraryChanged: { [weak model] in
@@ -429,6 +440,14 @@ final class MeowfilmAssembly: ObservableObject {
             do { try await resources?.musicPlatform.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
             await resources?.scriptSession.close()
+            await resources?.musicAudioCache?.close()
+            await resources?.musicPresentationCache.close()
+            await self?.appearance.close()
+            await self?.playerPreferences.close()
+            await self?.volumePreferences.close()
+            await self?.filmLibrary.close()
+            do { try await resources?.database.close() }
+            catch { if self?.shutdownError == nil { self?.shutdownError = "数据库关闭失败" } }
             lease?.cancel()
         }
     }
@@ -464,6 +483,10 @@ final class MeowfilmAssembly: ObservableObject {
         await resources.musicAccountGate?.close()
         try? await resources.musicPlatform.close()
         await resources.scriptSession.close()
+        await resources.musicAudioCache?.close()
+        await resources.musicPresentationCache.close()
+        do { try resources.musicLibrary.close() } catch { NSLog("Music repository shutdown failed") }
+        do { try await resources.database.close() } catch { NSLog("Database shutdown failed") }
     }
 
     deinit {
@@ -506,6 +529,9 @@ final class MeowfilmAssembly: ObservableObject {
             do { try await resources?.musicPlatform.close() }
             catch { NSLog("Music platform shutdown failed") }
             await resources?.scriptSession.close()
+            await resources?.musicAudioCache?.close()
+            await resources?.musicPresentationCache.close()
+            do { try await resources?.database.close() } catch { NSLog("Database shutdown failed") }
             lease?.cancel()
         }
     }

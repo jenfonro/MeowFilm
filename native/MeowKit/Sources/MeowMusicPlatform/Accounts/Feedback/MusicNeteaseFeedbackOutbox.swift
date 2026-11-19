@@ -56,17 +56,14 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
 
         }
     }
-    private struct Document: Codable {
-        var version = 1
-        var entries: [Entry] = []
-    }
     private struct Admission {
         let scope: String
         var confirmed = false
     }
     private let lock = NSLock()
-    private let storeFactory: (@Sendable () throws -> DocumentStore)?
-    private var store: DocumentStore?
+    private let database: SQLiteDatabase?
+    private static let columns = ["id", "instance", "scope", "generation", "phase", "nativeID", "source", "sourceID",
+        "algorithm", "heartbeat", "listened", "media", "rate", "occurredAt", "reason", "state", "startConfirmed"]
     private var loaded = false, writable = true, frozen = false, armed = false, configured = false
     private var dispatchStopped = false
     private var entries: [Entry] = []
@@ -75,12 +72,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     private var scope: String?
     private var authorization = MusicPlaybackFeedbackAuthorization()
 
-    init(storeFactory: (@Sendable () throws -> DocumentStore)?) { self.storeFactory = storeFactory }
-    private func resolvedStore() throws -> DocumentStore? {
-        if let store { return store }
-        store = try storeFactory?()
-        return store
-    }
+    init(database: SQLiteDatabase?) { self.database = database }
     private func locked<T>(_ action: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }; return try action()
     }
@@ -88,11 +80,10 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         // A failed ordinary write must not prevent a later explicit safe unlink.
         guard writable || draft.isEmpty else { throw MusicServiceError.storageFailed }
         do {
-            guard let store = try resolvedStore() else { throw MusicServiceError.storageFailed }
-            if draft.isEmpty { try store.remove(key: Self.key) }
-            else {
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-                try store.write(encoder.encode(Document(entries: draft)), key: Self.key)
+            guard let database else { throw MusicServiceError.storageFailed }
+            let rows = try draft.map { try SQLiteRecord.values($0, columns: Self.columns) }
+            try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
+                try db.reconcile("ios_music_feedback_outbox", columns: Self.columns, key: ["id"], rows: rows)
             }
             entries = draft
         } catch {
@@ -105,15 +96,18 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         guard !loaded else { return }
         loaded = true
         do {
-            if let data = try resolvedStore()?.read(key: Self.key) {
-                let document = try JSONDecoder().decode(Document.self, from: data)
-                guard document.version == 1,
-                      Set(document.entries.map(\.id)).count == document.entries.count,
-                      document.entries.allSatisfy({
+            if let database {
+                let saved = try database.readSync { db in
+                    try db.query("SELECT * FROM ios_music_feedback_outbox ORDER BY occurredAt,id").map {
+                        try SQLiteRecord.decode(Entry.self, row: $0, columns: Self.columns,
+                            booleans: ["heartbeat", "startConfirmed"])
+                    }
+                }
+                guard Set(saved.map(\.id)).count == saved.count, saved.allSatisfy({
                           !$0.scope.isEmpty && $0.generation >= 0 &&
                           (try? $0.eventBody()) != nil
                       }) else { throw MusicServiceError.storageFailed }
-                entries = document.entries
+                entries = saved
                 // A process may have died after sending but before saving ACK.
                 // Such inflight records, and their dependent ends, are spent.
                 let uncertain = Set(entries.filter { $0.state == .inflight && $0.phase == .start }.map(\.instance))

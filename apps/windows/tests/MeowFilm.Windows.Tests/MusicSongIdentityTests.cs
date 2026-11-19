@@ -48,13 +48,13 @@ public static class MusicSongIdentityTests
         foreach (var pair in new[] { (240d, 245d, true), (240d, 245.1d, false), (239d, 240d, true), (181d, 239d, false) })
         {
             await using var store = new MusicOfficialAudioTests.MemoryStore();
-            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var first = await Adopt(owner, Song("wy", "base", pair.Item1));
             var next = await Adopt(owner, Song("tx", "next", pair.Item2));
             Check((Id(first) == Id(next)) == pair.Item3);
         }
         await using var retainedStore = new MusicOfficialAudioTests.MemoryStore();
-        await using var retained = new MusicLibraryOwner(MusicTestStores.For(retainedStore));
+        await using var retained = new MusicLibraryOwner(MusicTestStores.For(retainedStore), database: MusicTestStores.For(retainedStore).Storage);
         var baseline = await Adopt(retained, Song("wy", "base", 240));
         Check(Id(await Adopt(retained, Song("tx", "edge", 245))) == Id(baseline));
         Check(Id(await Adopt(retained, Song("kg", "chain", 250))) != Id(baseline), "later sources must not extend the fixed baseline");
@@ -64,7 +64,7 @@ public static class MusicSongIdentityTests
     private static async Task ExactSource()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var first = await Adopt(owner, Song("wy", "short", 100));
         var second = await Adopt(owner, Song("tx", "long", 106));
         var ambiguous = await Adopt(owner, Song("kw", "middle", 103));
@@ -79,7 +79,7 @@ public static class MusicSongIdentityTests
     private static async Task Updates()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var original = await Adopt(owner, Song("wy", "same", title: "Before"));
         var updated = await Adopt(owner, Song("wy", "same", 181, "After"));
         Check(Id(original) == Id(updated) && LJ.S(updated["title"]) == "After");
@@ -92,7 +92,7 @@ public static class MusicSongIdentityTests
     private static async Task ArtistMetadataUpdates()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var original = await Adopt(owner, Song("wy", "artists"));
         Check((await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { original, original }, index = 1 }))
             .GetProperty("ok").GetBoolean());
@@ -118,7 +118,7 @@ public static class MusicSongIdentityTests
                 !entry.GetProperty("song").TryGetProperty("artistNames", out _) &&
                 entry.GetProperty("song").GetProperty("duration").GetDouble() == 250));
         await owner.DisposeAsync();
-        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var restored = await reopened.ExecuteAsync("music.queue.get");
         Check(restored.GetProperty("ok").GetBoolean() &&
             restored.GetProperty("entries").GetRawText() == after.GetProperty("entries").GetRawText());
@@ -129,7 +129,7 @@ public static class MusicSongIdentityTests
     private static async Task RegisteredSets()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var first = await Adopt(owner, Song("wy", "shared", 103));
         foreach (var extra in new[] { Song("tx", "low", 100), Song("tx", "high", 106), Song("kw", "middle", 100.5) })
         {
@@ -142,7 +142,7 @@ public static class MusicSongIdentityTests
     private static async Task LocalAndUnknown()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var first = await Adopt(owner, MusicSongFixture.Local("file:first", "Song", "Artist", duration: 180));
         var second = await Adopt(owner, MusicSongFixture.Local("file:second", "Song", "Artist", duration: 180));
         Check(Id(first) != Id(second) && Id(first) != Id(await Adopt(owner, Song("wy", "unbound"))));
@@ -162,7 +162,7 @@ public static class MusicSongIdentityTests
     private static async Task PartialObservation()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var first = await Adopt(owner, Song("wy", "primary"));
         var partial = Song("wy", "primary", 0, "", "");
         var result = await Adopt(owner, partial, authoritative: false);
@@ -175,7 +175,7 @@ public static class MusicSongIdentityTests
     private static async Task Detached()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var input = Song("wy", "1"); string before = input.ToJsonString();
         var adopted = await Adopt(owner, input); string id = Id(adopted);
         adopted["title"] = "modified output"; MusicSongFixture.Info(adopted)["singer"] = "modified source";
@@ -186,11 +186,11 @@ public static class MusicSongIdentityTests
     private static async Task Variants()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        var owner = new MusicLibraryOwner(MusicTestStores.For(store)); var ids = new HashSet<string>();
+        var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage); var ids = new HashSet<string>();
         for (int i = 0; i < 160; i++) ids.Add(Id(await Adopt(owner, Song("mg", "variant-" + i, i % 2 == 0 ? 100 : 200))));
         Check(ids.Count == 2 && ids.All(id => owner.SongSnapshot(id)!.Value.GetProperty("sources").GetArrayLength() == 80));
         await owner.DisposeAsync();
-        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         for (int i = 0; i < 80; i++)
         {
             var result = await Adopt(reopened, Song("tx", "later-" + i, i % 2 == 0 ? 100 : 200));
@@ -201,7 +201,7 @@ public static class MusicSongIdentityTests
     private static async Task Normalization()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var original = await Adopt(owner, Song("wy", "one", 180, "  ＳＯＮＧ\u3000 (Live) ", " ＡＲＴＩＳＴ  "));
         var matched = await Adopt(owner, Song("tx", "two", 180, "song (live)", "artist"));
         Check(Id(original) == Id(matched) && LJ.S(matched["title"]) == "  ＳＯＮＧ\u3000 (Live) ");
@@ -219,7 +219,7 @@ public static class MusicSongIdentityTests
     private static async Task StructuredArtists()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var first = await Adopt(owner, Structured("wy", "one", "Ａ", " B "));
         var reordered = await Adopt(owner, Structured("tx", "two", "b", "a", "a"));
         Check(Id(first) == Id(reordered) && LJ.S(reordered["artist"]) == "Ａ /  B ");
@@ -231,7 +231,7 @@ public static class MusicSongIdentityTests
     private static async Task IncompleteStructuredArtists()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var known = await Adopt(owner, Structured("wy", "known", "Artist"));
         string[] missing = ["", " \t\u3000", "未知歌手", "未知歌曲", "Unknown", " UNKNOWN\tARTIST ", "Ｕｎｋｎｏｗｎ　Ｔｉｔｌｅ"];
         for (int i = 0; i < missing.Length; i++)
@@ -248,7 +248,7 @@ public static class MusicSongIdentityTests
     private static async Task UnknownMetadata()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         string[] placeholders = ["未知歌手", "未知歌曲", "Unknown", " UNKNOWN\tARTIST ", "Ｕｎｋｎｏｗｎ　Ｔｉｔｌｅ"];
         for (int i = 0; i < placeholders.Length; i++)
         {
@@ -269,7 +269,7 @@ public static class MusicSongIdentityTests
     private static async Task CompletedMetadata()
     {
         await using var store = new MusicOfficialAudioTests.MemoryStore();
-        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var known = await Adopt(owner, Structured("tx", "known", "Artist"));
         var incomplete = await Adopt(owner, Structured("wy", "incomplete", "Artist", " "));
         var unknown = await Adopt(owner, Song("kg", "unknown", title: "Unknown", artist: "未知歌手"));
@@ -293,8 +293,8 @@ public static class MusicSongIdentityTests
     {
         await using var firstStore = new MusicOfficialAudioTests.MemoryStore();
         await using var secondStore = new MusicOfficialAudioTests.MemoryStore();
-        await using var first = new MusicLibraryOwner(MusicTestStores.For(firstStore));
-        await using var second = new MusicLibraryOwner(MusicTestStores.For(secondStore));
+        await using var first = new MusicLibraryOwner(MusicTestStores.For(firstStore), database: MusicTestStores.For(firstStore).Storage);
+        await using var second = new MusicLibraryOwner(MusicTestStores.For(secondStore), database: MusicTestStores.For(secondStore).Storage);
         Check(Id(await Adopt(first, Song("wy", "same"))) != Id(await Adopt(second, Song("wy", "same"))));
     }
     private static Task Cancellation()

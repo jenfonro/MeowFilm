@@ -108,7 +108,7 @@ public static class FilmSearchRuntimeTests
             "the original opaque selection reads all newly loaded Node members");
         await search.StopAsync(); search.Start(session.Query); await session.Work;
         await SearchFixture.Until(() => !session.Loading);
-        string audit = Path.Combine(root, "script-runtime", "volumes", "search-runtime", "search-audit.jsonl");
+        string audit = Path.Combine(root, "documents", "cat", "volumes", "search-runtime", "search-audit.jsonl");
         var calls = File.ReadAllLines(audit).Select(line => JsonSerializer.Deserialize<JsonElement>(line)).ToArray();
         Check(calls.Length == 3 && calls.All(call => FilmJson.Text(call, "query") == "银河") &&
             calls.Count(call => FilmJson.Text(call, "site") == "a" && call.GetProperty("page").GetInt32() == 1) == 1 &&

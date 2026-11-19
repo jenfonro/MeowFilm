@@ -1,5 +1,11 @@
+import { setTestReadOnly, withTestDatabase } from './storage-test-fixture.mjs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { rawJSON } from '@meowfilm/runtime-bridge/json';
-import test from 'node:test';
+import { encodeValueNodes } from '@meowfilm/storage/values';
+import { nodeInserts } from '@meowfilm/storage/statements';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createScriptHost, ScriptHostError } from '@meowfilm/script-host';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
@@ -8,9 +14,14 @@ import { createSourceWebBroker } from '../apps/runtime/modules/source-web.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 
 const contract = 'source.runtime.v2';
+const results = fileURLToPath(new URL('../tmp/test-results/source-native/', import.meta.url));
+mkdirSync(results, { recursive: true });
+const suiteRoot = mkdtempSync(join(results, 'suite-'));
+after(() => rmSync(suiteRoot, { recursive: true, force: true }));
+const temp = () => mkdtempSync(join(suiteRoot, 'case-'));
 const emptyPrivate = () => ({ cookies: [], storage: [] });
 const privateState = () => ({
-  cookies: [['reader', [['fixture', { name: 'fixture', value: 'mock', domain: 'books.invalid',
+  cookies: [['reader', [[JSON.stringify(['books.invalid', '/', 'fixture']), { name: 'fixture', value: 'mock', domain: 'books.invalid',
     path: '/', hostOnly: true, secure: false, httpOnly: false, sameSite: null, sequence: 1, expires: null }]]]],
   storage: [['reader', [['fixture', { saved: true }]]]],
 });
@@ -49,31 +60,6 @@ function value(reply) {
 }
 function denied(reply, code) {
   assert.deepEqual(reply, { ok: false, contract, code });
-}
-function documents(files = {}) {
-  const stored = new Map(Object.entries(files).map(([name, data]) =>
-    [name, Buffer.from(typeof data === 'string' ? data : JSON.stringify(data))]));
-  const reads = [], writes = [], removals = [];
-  const disk = {
-    stored, reads, writes, removals, failWrite: false, failAfterWrite: false, failRemove: false,
-    read(name) { reads.push(name); return stored.has(name) ? Buffer.from(stored.get(name)) : null; },
-    write(name, bytes) {
-      writes.push(name);
-      if (disk.failWrite) throw new ScriptHostError('STORAGE_ERROR');
-      stored.set(name, Buffer.from(bytes));
-      if (disk.failAfterWrite) {
-        disk.failAfterWrite = false;
-        throw new ScriptHostError('STORAGE_ERROR');
-      }
-    },
-    remove(name) {
-      removals.push(name);
-      if (disk.failRemove) throw new ScriptHostError('STORAGE_ERROR');
-      return stored.delete(name);
-    },
-    json: name => JSON.parse(stored.get(name).toString('utf8')),
-  };
-  return disk;
 }
 function profileOwner() {
   const profiles = new Map(), restored = [], released = [];
@@ -172,12 +158,29 @@ function mockHost(options = {}) {
   host.update = (_id, spec, context) => load(spec, context, 'update');
   return host;
 }
+function databaseFacts(root) {
+  return { root,
+    rows: (sql, params = []) => withTestDatabase(root, db => db.query(sql, params)),
+    async state(id = 'books') {
+      const [revision, profiles, cookies, entries, kv, reader] = await withTestDatabase(root, db => db.snapshot([
+        { sql: 'SELECT revision FROM owner_revisions WHERE owner=?', params: ['source.private'], rows: true },
+        { sql: 'SELECT * FROM source_private_profiles WHERE installation_id=? ORDER BY profile_suffix', params: [id], rows: true },
+        { sql: 'SELECT * FROM source_private_cookies WHERE installation_id=? ORDER BY profile_suffix,sequence', params: [id], rows: true },
+        { sql: 'SELECT * FROM source_private_kv_entries WHERE installation_id=? ORDER BY profile_suffix,position', params: [id], rows: true },
+        { sql: 'SELECT * FROM source_private_kv_nodes WHERE installation_id=? ORDER BY profile_suffix,entry_key,node_id', params: [id], rows: true },
+        { sql: 'SELECT * FROM source_reader_state WHERE installation_id=?', params: [id], rows: true },
+      ]));
+      return { revision: revision[0]?.revision ?? 0, profiles, cookies, entries, kv, reader };
+    },
+  };
+}
 function fixture(t, options = {}) {
-  const disk = options.documents ?? documents(options.files), owner = profileOwner();
+  const dataRoot = options.dataRoot ?? temp(), owner = profileOwner();
+  const disk = databaseFacts(dataRoot);
   const host = mockHost(options);
   const module = createSourceRuntimeModule({
     configurationOwner: options.configurationOwner ?? 'native', platform: 'windows',
-    documents: disk, hostFactory: () => host, capabilityOwner: owner,
+    dataRoot, hostFactory: () => host, capabilityOwner: owner,
     network: async () => { throw new Error('unexpected network'); },
   });
   const rpc = (name, params = {}, context = {}) => module.methods[`source.runtime.${name}`](params, context);
@@ -185,14 +188,35 @@ function fixture(t, options = {}) {
     owner.failRelease = false; host.issues.clear(); host.pending.clear();
     value(await module.close());
   });
-  return { disk, owner, host, module, rpc };
+  return { disk, dataRoot, owner, host, module, rpc };
 }
-const storedLibrary = (sources = [source()], privateValue = privateState()) => ({
-  schema: 1, sources: sources.map(item => ({ ...item, actions: ['search'], private: privateValue })),
-});
-const privateDocument = (installationId = 'books', state = privateState()) => ({
-  schema: 1, sources: [{ installationId, private: state }],
-});
+async function seedPrivate(dataRoot, installationId, state) {
+  await withTestDatabase(dataRoot, async database => {
+    await database.execute('INSERT INTO owner_revisions VALUES(?,?,?) ON CONFLICT DO NOTHING',
+      ['source.private', 1, 'initial']);
+    const statements = [{ sql: 'INSERT INTO source_reader_state(installation_id) VALUES(?)', params: [installationId] }];
+    for (const [suffix, cookies] of state.cookies) {
+      statements.push({ sql: 'INSERT INTO source_private_profiles VALUES(?,?)', params: [installationId, suffix] });
+      for (const [, cookie] of cookies) statements.push({
+        sql: 'INSERT INTO source_private_cookies VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+        params: [installationId, suffix, cookie.domain, cookie.path, cookie.name, cookie.value,
+          Number(cookie.hostOnly), Number(cookie.secure), Number(cookie.httpOnly), cookie.sameSite,
+          cookie.expires, cookie.sequence],
+      });
+    }
+    for (const [suffix, entries] of state.storage) {
+      if (!state.cookies.some(([name]) => name === suffix))
+        statements.push({ sql: 'INSERT INTO source_private_profiles VALUES(?,?)', params: [installationId, suffix] });
+      for (const [position, [key, value]] of entries.entries()) {
+        statements.push({ sql: 'INSERT INTO source_private_kv_entries VALUES(?,?,?,?)',
+          params: [installationId, suffix, key, position] });
+        statements.push(...nodeInserts('source_private_kv_nodes',
+          ['installation_id', 'profile_suffix', 'entry_key'], [installationId, suffix, key], encodeValueNodes(value)));
+      }
+    }
+    await database.transaction(statements);
+  });
+}
 const search = (rpc, item, context) =>
   rpc('library.invoke', { ...target(item), action: 'search', payload: {} }, context);
 
@@ -220,10 +244,11 @@ test('native full snapshots expose the unchanged contract over HTTP and reload o
   assert.equal(host.loads.length, 3);
   assert.deepEqual(host.uninstalls, ['other']);
   assert.equal(value(await search(rpc, changed)).marker, 'changed');
-  assert.deepEqual(disk.json('private.json').sources.map(item => Object.keys(item)), [
-    ['installationId', 'private'], ['installationId', 'private'],
-  ]);
-  assert.equal(disk.stored.has('library.json'), false);
+  const saved = await disk.state('books');
+  assert.deepEqual(saved.profiles, []);
+  assert.equal(saved.reader[0].installation_id, 'books');
+  assert.deepEqual((await disk.state('other')).reader, []);
+  assert.equal((await disk.rows('SELECT count(*) AS count FROM source_installations'))[0].count, 0);
 });
 
 test('native mode reads only private state and refuses runtime-owned configuration writes', async t => {
@@ -236,58 +261,39 @@ test('native mode reads only private state and refuses runtime-owned configurati
     ['library.update', { installationId: 'books', expectedRevision: 1, patch: { enabled: false } }],
     ['library.remove', { installationId: 'books', expectedRevision: 1 }],
   ]) denied(await rpc(name, params), 'PERMISSION_DENIED');
-  assert.deepEqual(disk.writes, []);
+  assert.equal((await disk.state()).revision, 1);
   value(await rpc('library.apply', snapshot([source()])));
   const projected = value(await rpc('library.get', { installationId: 'books' }));
   assert.equal(projected.source.revision, 1);
   assert.equal(JSON.parse(projected.definition).bookSourceName, 'books');
-  assert.ok(disk.reads.every(name => name === 'private.json'));
-  assert.ok(disk.writes.every(name => name === 'private.json'));
-  assert.deepEqual(disk.removals, []);
+  assert.equal((await disk.state()).revision, 2);
 });
 
-for (const legacy of [storedLibrary([source(), source('legacy-only')]), '{broken']) {
-  test(`native mode never accesses an existing ${typeof legacy === 'string' ? 'corrupt' : 'valid'} legacy library`, async t => {
-    const { rpc, disk, host, owner, module } = fixture(t, { files: {
-      'library.json': legacy, 'private.json': privateDocument(),
-    } });
-    const old = Buffer.from(disk.stored.get('library.json'));
-    const read = disk.read;
-    disk.read = name => {
-      assert.notEqual(name, 'library.json');
-      return read(name);
-    };
-    assert.deepEqual(value(await rpc('library.list')), { sources: [] });
-    assert.equal(host.loads.length, 0);
-    const a = source('books', { revision: 7, definition: definition('books', 'native-only') });
-    value(await rpc('library.apply', snapshot([a], 12)));
-    assert.deepEqual(owner.restored[0].state, privateState());
-    assert.equal(value(await search(rpc, a)).marker, 'native-only');
-    denied(await rpc('library.get', { installationId: 'legacy-only' }), 'SOURCE_NOT_FOUND');
-    value(await rpc('library.apply', snapshot([], 13)));
-    value(await module.close());
-    assert.deepEqual(disk.stored.get('library.json'), old);
-    assert.ok(disk.reads.every(name => name === 'private.json'));
-    assert.ok(disk.writes.every(name => name === 'private.json'));
-    assert.deepEqual(disk.removals, []);
-    assert.deepEqual(disk.json('private.json').sources, []);
-  });
-}
-
-test('the runtime-owned default restores and writes its library without native apply', async t => {
-  const disk = documents({ 'library.json': storedLibrary() }), owner = profileOwner(), host = mockHost();
-  const module = createSourceRuntimeModule({ documents: disk, hostFactory: () => host,
+test('the runtime-owned default writes and reopens typed definitions without native apply', async t => {
+  const dataRoot = temp(), owner = profileOwner(), host = mockHost();
+  const module = createSourceRuntimeModule({ dataRoot, hostFactory: () => host,
     capabilityOwner: owner, network: async () => null });
   t.after(async () => value(await module.close()));
   const rpc = (name, params = {}) => module.methods[`source.runtime.${name}`](params);
-  assert.equal(value(await rpc('library.list')).sources.length, 1);
-  assert.equal(host.loads.length, 1);
+  assert.equal(value(await rpc('library.list')).sources.length, 0);
+  assert.equal(host.loads.length, 0);
   denied(await rpc('library.apply', snapshot([source()])), 'PERMISSION_DENIED');
-  value(await rpc('library.save', { installationId: 'books', expectedRevision: 1,
+  const imported = value(await rpc('library.import', { text: definition() })).sources[0];
+  assert.equal(host.loads.length, 1);
+  value(await rpc('library.save', { installationId: imported.installationId, expectedRevision: imported.revision,
     definition: definition('books', 'default-edited') }));
   assert.equal(host.loads.length, 2);
-  assert.equal(disk.json('library.json').sources[0].revision, 2);
-  assert.equal(disk.stored.has('private.json'), false);
+  await withTestDatabase(dataRoot, async db => {
+    const rows = await db.query('SELECT revision,definition_kind FROM source_installations');
+    assert.deepEqual(rows, [{ revision: 2, definition_kind: 'object' }]);
+    assert.equal((await db.query('SELECT bookSourceName FROM source_definitions'))[0].bookSourceName, 'books');
+  });
+  value(await module.close());
+  const reopened = fixture(t, { dataRoot, configurationOwner: 'runtime' });
+  const saved = value(await reopened.rpc('library.list')).sources[0];
+  assert.equal(saved.installationId, imported.installationId);
+  assert.equal(saved.revision, 2);
+  assert.equal(value(await search(reopened.rpc, saved)).marker, 'default-edited');
 });
 
 test('native snapshots and runtime saves preserve definitions above the former 16 MiB boundary', async t => {
@@ -308,7 +314,7 @@ test('native snapshots and runtime saves preserve definitions above the former 1
 test('snapshot identity and consumed configuration failures remain atomic before session changes', async t => {
   const { rpc, host, disk } = fixture(t), a = source(), b = source('other');
   value(await rpc('library.apply', snapshot([a, b])));
-  const stable = value(await rpc('library.list')), bytes = disk.read('private.json');
+  const stable = value(await rpc('library.list')), rows = await disk.state('books');
   const changed = { ...a, revision: 2, definition: definition('books', 'must-not-apply') };
   const invalid = [
     [snapshot([changed, { ...b, enabled: 'true' }], 2), 'INVALID_REQUEST'],
@@ -332,7 +338,7 @@ test('snapshot identity and consumed configuration failures remain atomic before
   for (const [input, code] of invalid) {
     denied(await rpc('library.apply', input), code);
     assert.deepEqual(value(await rpc('library.list')), stable);
-    assert.deepEqual(disk.read('private.json'), bytes);
+    assert.deepEqual(await disk.state('books'), rows);
     assert.equal(host.loads.length, 2);
     assert.equal(host.uninstalls.length, 0);
     assert.equal(host.captures.length, 0);
@@ -362,20 +368,6 @@ test('snapshots project extras and isolate disabled or failing definitions from 
   assert.equal(host.loads.length, 1);
   value(await rpc('library.apply', snapshot([{ ...disabled, revision: 2, order: -0 }, activeBad, healthy], 2)));
   assert.equal(value(await rpc('library.list')).sources.find(item => item.installationId === 'disabled').order, -0);
-});
-
-test('native private envelopes preserve exact extensions across unrelated source writes', async t => {
-  const { disk, call } = libraryFixture(t, { files: { 'private.json':
-    '{"schema":1,"extra":9007199254740993,"sources":[null,{"installationId":"unused","private":false,' +
-    '"extra":1.234567890123456789},{"installationId":"books","extra":1e400,' +
-    '"private":{"cookies":[],"storage":[],"extra":9007199254740995}}]}' } });
-  await call('library.apply', snapshot([source()]));
-  const saved = disk.read('private.json').toString();
-  for (const raw of ['9007199254740993', '1.234567890123456789', '1e400', '9007199254740995']) {
-    assert.ok(saved.includes(raw), raw);
-  }
-  assert.equal(disk.json('private.json').sources[0], null);
-  assert.equal(disk.json('private.json').sources[1].private, false);
 });
 
 test('global and per-source revisions reject stale and inconsistent snapshots, including removed leases', async t => {
@@ -579,18 +571,18 @@ test('cleanup failure on replacement is not an apply success and fences the save
   assert.equal(value(await search(rpc, next)).marker, 'new');
 });
 
-test('removal retains private data until cleanup succeeds and exact snapshots retry cleanup debt', async t => {
-  const { rpc, owner, disk } = fixture(t, { files: { 'private.json': {
-    schema: 1, sources: [{ installationId: 'books', private: privateState() }],
-  } } });
+test('removal retains private SQLite rows until cleanup succeeds', async t => {
+  const dataRoot = temp();
+  await seedPrivate(dataRoot, 'books', privateState());
+  const { rpc, owner, disk } = fixture(t, { dataRoot });
   value(await rpc('library.apply', snapshot([source()])));
   owner.failRelease = true;
   denied(await rpc('library.apply', snapshot([], 2)), 'SOURCE_CLEANUP');
   assert.deepEqual(value(await rpc('library.list')), { sources: [] });
-  assert.deepEqual(disk.json('private.json').sources[0].private, privateState());
+  assert.equal((await disk.state()).profiles.length, 1);
   owner.failRelease = false;
   value(await rpc('library.apply', snapshot([], 2)));
-  assert.deepEqual(disk.json('private.json').sources, []);
+  assert.equal((await disk.state()).profiles.length, 0);
 });
 
 test('failed uninstall still attempts profile cleanup and cannot retain execution admission', async t => {
@@ -612,58 +604,44 @@ test('failed uninstall still attempts profile cleanup and cannot retain executio
   assert.equal(host.list().length, 0);
 });
 
-for (const failure of ['failWrite', 'failAfterWrite']) {
-  test(`private state preserves committed bytes after ${failure} and permits an exact-snapshot retry`, async t => {
-    let owner, library;
-    const setup = libraryFixture(t, { files: { 'private.json': privateDocument() },
-      initialize: (spec, { signal, generation }) => {
-      const prefix = `source:${spec.installationId}:${generation}:`;
-      library.prepareCapability('storage.get', { profile: `${prefix}reader` },
-        { signal, scope: { installationId: spec.installationId, generation } });
-      const changed = privateState(); changed.storage[0][1][0][1] = { changed: true };
-      owner.profiles.set(prefix, changed);
-    } });
-    ({ owner, library } = setup);
-    const { disk, host, call } = setup;
-    const old = disk.read('private.json'), input = snapshot([source()]);
-    disk[failure] = true;
-    assert.equal((await call('library.apply', input)).sources[0].errorCode, 'STORAGE_ERROR');
-    assert.deepEqual(disk.read('private.json'), old);
-    assert.equal(host.list().length, 0);
-    disk[failure] = false;
-    await call('library.apply', input);
-    assert.deepEqual(owner.restored[0].state, privateState());
-    for (const item of disk.json('private.json').sources) {
-      assert.deepEqual(Object.keys(item), ['installationId', 'private']);
-      assert.deepEqual(item.private.storage[0][1][0][1], { changed: true });
-    }
-  });
-}
-
-test('unadmitted private records do not fence healthy sources or lose their material', async t => {
-  const unused = { installationId: 'unused', private: { cookies: {}, storage: 7 }, extra: [1] };
-  const disk = documents({ 'private.json': { schema: 1, extension: { kept: true }, sources: [unused] } });
-  const { rpc, host, owner } = fixture(t, { documents: disk });
-  const result = value(await rpc('library.apply', snapshot([source()])));
-  assert.equal(result.sources[0].errorCode, undefined);
-  assert.equal(host.loads.length, 1);
-  assert.deepEqual(owner.restored[0].state, emptyPrivate());
-  assert.deepEqual(disk.json('private.json').sources[0], unused);
-  assert.deepEqual(disk.json('private.json').extension, { kept: true });
+test('a failed SQLite private-state transaction leaves the last committed rows intact', async t => {
+  let owner, library;
+  const setup = libraryFixture(t, { initialize: (spec, { signal, generation }) => {
+    const prefix = `source:${spec.installationId}:${generation}:`;
+    library.prepareCapability('storage.get', { profile: `${prefix}reader` },
+      { signal, scope: { installationId: spec.installationId, generation } });
+  } });
+  ({ owner, library } = setup);
+  assert.equal((await setup.call('library.apply', snapshot([source()]))).sources[0].errorCode, undefined);
+  const generation = setup.host.list()[0].generation, prefix = `source:books:${generation}:`;
+  const changed = privateState(); changed.storage[0][1][0][1] = { changed: true };
+  owner.profiles.set(prefix, changed);
+  const previous = await setup.disk.state();
+  await setTestReadOnly(setup.disk.root, true);
+  try {
+    await assert.rejects(library.profileChanged(prefix), { code: 'STORAGE_ERROR' });
+    assert.deepEqual(await setup.disk.state(), previous);
+  } finally { await setTestReadOnly(setup.disk.root, false); }
+  await library.profileChanged(prefix);
+  const saved = await setup.disk.state();
+  assert.equal(saved.revision, previous.revision + 1);
+  assert.deepEqual(saved.kv.map(row => row.kind), ['object', 'boolean']);
 });
 
 test('a new runtime must receive native definitions again; private data alone never restores sources', async t => {
-  const disk = documents({ 'private.json': {
-    schema: 1, sources: [{ installationId: 'books', private: privateState() }],
-  } });
-  const first = fixture(t, { documents: disk }), a = source('books', { revision: 7 });
+  const dataRoot = temp(), a = source('books', { revision: 7 });
+  await seedPrivate(dataRoot, 'books', privateState());
+  const first = fixture(t, { dataRoot });
+  assert.deepEqual(value(await first.rpc('library.list')), { sources: [] });
+  assert.equal(first.host.loads.length, 0);
   value(await first.rpc('library.apply', snapshot([a], 12)));
   value(await first.module.close());
-  const second = fixture(t, { documents: disk });
+  const second = fixture(t, { dataRoot });
   assert.deepEqual(value(await second.rpc('library.list')), { sources: [] });
   assert.equal(second.host.loads.length, 0);
   value(await second.rpc('library.apply', snapshot([a], 12)));
-  assert.deepEqual(second.owner.restored[0].state, privateState());
+  assert.deepEqual(second.owner.restored[0].state.storage, privateState().storage);
+  assert.equal(second.owner.restored[0].state.cookies[0][1][0][1].value, 'mock');
   assert.equal(second.host.loads.length, 1);
 });
 
@@ -678,33 +656,31 @@ test('disabled QYSG definitions are never executed even when their script would 
 });
 
 function libraryFixture(t, options = {}) {
-  const disk = documents(options.files), owner = profileOwner(), web = createSourceWebBroker();
+  const dataRoot = temp(), disk = databaseFacts(dataRoot);
+  const owner = profileOwner(), web = createSourceWebBroker();
   const host = mockHost(options), lifetime = new AbortController();
   const guard = signal => {
     if (lifetime.signal.aborted) throw fault('CLOSED');
     if (signal?.aborted) throw fault('CANCELLED');
   };
-  const library = createSourceLibrary({ documents: disk, configurationOwner: 'native', host, owner, web,
+  const library = createSourceLibrary({ dataRoot, configurationOwner: 'native', host, owner, web,
     network: async () => null, fail: fault, errorCode: error => error?.code ?? 'SOURCE_FAILURE', guard, lifetime });
   const call = (name, params = {}, signal = lifetime.signal) => library.methods[name](params, signal);
   t.after(async () => {
     lifetime.abort(); web.close(); library.retireAll();
     await host.close(); await library.close();
   });
-  return { library, disk, owner, web, host, call };
+  return { library, disk, dataRoot, owner, web, host, call };
 }
 
-test('profile changes during initialization and after apply persist only private state at the current generation', async t => {
+test('profile mutations persist typed private rows for the current generation', async t => {
   let library, owner, disk;
-  const setup = libraryFixture(t, { files: { 'private.json': privateDocument() },
+  const setup = libraryFixture(t, {
     initialize: (spec, { signal, generation }) => {
       const prefix = `source:${spec.installationId}:${generation}:`;
       library.prepareCapability('storage.get', { profile: `${prefix}reader` },
         { signal, scope: { installationId: spec.installationId, generation } });
-      assert.deepEqual(owner.profiles.get(prefix), privateState());
-      const writes = disk.writes.length;
-      library.profileChanged(prefix);
-      assert.equal(disk.writes.length, writes);
+      assert.deepEqual(owner.profiles.get(prefix), emptyPrivate());
     },
   });
   ({ library, owner, disk } = setup);
@@ -713,14 +689,16 @@ test('profile changes during initialization and after apply persist only private
   const generation = setup.host.list()[0].generation, prefix = `source:books:${generation}:`;
   const changed = privateState(); changed.storage[0][1][0][1] = { afterApply: true };
   owner.profiles.set(prefix, changed);
-  library.profileChanged(prefix);
-  const saved = disk.json('private.json');
-  assert.deepEqual(saved.sources, [{ installationId: 'books', private: changed }]);
-  assert.equal(disk.read('library.json'), null);
+  await library.profileChanged(prefix);
+  const saved = await disk.state();
+  assert.ok(saved.profiles.some(row => row.profile_suffix === 'reader'));
+  assert.deepEqual(saved.entries.map(row => row.entry_key), ['fixture']);
+  assert.equal(saved.kv[1].prop_key, 'afterApply');
+  assert.equal(saved.kv[1].bool_value, 1);
   const projection = await setup.call('library.get', { installationId: 'books' });
   assert.equal(projection.source.revision, a.revision);
   assert.equal(JSON.parse(projection.definition).marker, 'ready');
-  assert.throws(() => library.profileChanged(`source:books:${generation + 1}:`), { code: 'STALE_SOURCE' });
+  await assert.rejects(library.profileChanged(`source:books:${generation + 1}:`), { code: 'STALE_SOURCE' });
 });
 
 test('replacement retires old Web requests and image streams before reporting completion', async t => {
@@ -793,7 +771,7 @@ test('a native snapshot reserves its IDs before queued application so generic lo
 });
 
 test('the actual ScriptHost transaction manager retires its old session after native apply fails', async t => {
-  const sessions = [], disk = documents(), owner = profileOwner();
+  const sessions = [], dataRoot = temp(), owner = profileOwner();
   function adapter({ installationId, generation, revision }) {
     const raw = JSON.parse(revision.source);
     const session = {
@@ -813,7 +791,7 @@ test('the actual ScriptHost transaction manager retires its old session after na
     return session;
   }
   const host = createScriptHost({ adapters: { legado: adapter, qysg: adapter } });
-  const module = createSourceRuntimeModule({ configurationOwner: 'native', documents: disk,
+  const module = createSourceRuntimeModule({ configurationOwner: 'native', dataRoot,
     hostFactory: () => host, capabilityOwner: owner, network: async () => null });
   t.after(async () => value(await module.close()));
   const rpc = (name, params) => module.methods[`source.runtime.${name}`](params);
@@ -836,7 +814,7 @@ test('native QuickJS apply cancellation drains the initializer, retires the old 
     let host;
     t.after(() => finish.resolve({ statusCode: 200, headers: {}, body: '', url: 'https://books.invalid/' }));
     const inline = '<script>function search() { return [{name:"Ready",bookUrl:"https://books.invalid/book"}]; }</script>';
-    const module = createSourceRuntimeModule({ configurationOwner: 'native', documents: documents(),
+    const module = createSourceRuntimeModule({ configurationOwner: 'native', dataRoot: temp(),
       network: input => {
         started.resolve(input);
         return wait(finish.promise, input.signal);

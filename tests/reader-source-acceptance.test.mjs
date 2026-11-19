@@ -997,6 +997,10 @@ test('Reader keeps failed initialization, thrown invocation and unload or close 
         export const contracts = { source };
       `);
       cpSync('packages/runtime-bridge', join(payload, 'node_modules/@meowfilm/runtime-bridge'), { recursive: true });
+      cpSync('packages/storage', join(payload, 'node_modules/@meowfilm/storage'), { recursive: true });
+      for (const file of ['native-storage.js', 'native-engine.js']) {
+        cpSync(join('packages/script-host/src', file), join(payload, 'node_modules/@meowfilm/script-host/src', file));
+      }
       cpSync('packages/novel-rules/novel-rules.js', join(payload, 'node_modules/@meowfilm/novel-rules/novel-rules.js'));
       writeFileSync(join(payload, 'runtime-manifest.json'), JSON.stringify({
         status: 'complete', files: [modulePath, hostPath, sourcePath,

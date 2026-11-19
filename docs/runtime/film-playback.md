@@ -8,22 +8,12 @@ CatNode／source／pan／TMDB／豆瓣模块，负责规则、搜索聚合、匹
 数据库或播放 API。收藏仍由现有客户端 owner 保存。规则执行与业务会话归 Node；
 规则配置及偏好的存储归属依是否注入原生设置区分。
 
-未注入 `nativeSettings` 时，本地资料库与规则文档分别位于
-`<dataRoot>/film-playback/library.json` 和 `<dataRoot>/film-rules/rules.json`，前者也保存偏好。
-App 提供 `dataRoot`，owner 按正常文件系统路径语义访问，
-支持根、祖先及模块目录别名和文档链接，按需创建目录。保存通过同目录独占临时文件、
-fsync 与 rename 原子替换文档路径；文件链接的其他目录项保留原内容。
-保存前比对已提交文档内容，外部改写返回 `STORAGE_CHANGED`；格式损坏与真实 I/O 失败
-分别返回 `CORRUPT_STORAGE`、`STORAGE_ERROR`，失败不发布新快照。
+未注入 `nativeSettings` 时，影视规则、偏好、历史、人工匹配和屏蔽由 `packages/film-playback` 的 Node owner 写入唯一 SQLite 数据库中的 typed 关系；规则、偏好、library 各按所属 owner revision/CAS 更新。每条历史与成员关系独立存储，分页读取不要求整库 JSON 物化。schema 不匹配或数据库损坏返回明确存储错误，不写入空库。
 
-注入 `nativeSettings` 后，规则与偏好只读 `film.rules`／`film.preferences` 原生块，
-不读写旧规则文件或把偏好写回 Node 资料库；资料库仍保存历史、人工匹配、屏蔽及点映选择。
+注入 `nativeSettings` 后，规则与偏好由原生设置 owner 写入其 typed 关系；Node 仅读取被授权快照，不另存第二份规则或偏好。影视业务资料库仍由 Node owner 持有历史、人工匹配、屏蔽及点映选择关系。
 普通原生保存与按块通知见[共同契约](../common/settings-storage.md)，iOS 设置及保护
 见[存储](../ios/storage.md#影视设置)，Windows 接线见[原生设置](../windows/native-settings.md)。
-HTTP `settings.set` 及规则写入
-在注入模式返回 `PERMISSION_DENIED`，不形成第二个配置写 owner。
-普通资料库读取保留偏好原值与扩展字段，不执行整块编辑校验。会话按实际消费字段读取偏好；
-排序可只包含部分维度，未知维度不参与排序，网盘顺序不自动补齐。显式设置编辑仍检查所写字段的类型和取值。
+HTTP `settings.set` 及规则写入在注入模式返回 `PERMISSION_DENIED`，不形成第二个配置写 owner。
 
 双端 aggregate entry 显式装配九个模块（顺序见[音乐平台运行器](music-platform.md)）；通用 `createRuntime` 未显式启用
 pan／metadata／film 时保持原默认三个模块。`connectFilmPlayback` 在 provider
@@ -186,17 +176,8 @@ iOS 不自动准备，Windows 正常新进入仍沿正式自动播放入口；�
 - `data.target` 只按提供的真实 provider／ID 或来源／详情及准确成员确认 typed target，
   返回 target 本身，不返回另一套地址对象；它不是上游存在性或缓存新鲜度检查。
   该调用可写当前聚合身份注册，但不执行网络搜索、详情加载或媒体解析。
-- `library.json` 只读写当前 `version:2` 文档，包含 `groups` 与业务集合；
-  不升级 v1，不把旧 `displayKey` 链接迁成新目标，也不为缺失目标的历史合成 `playbackTarget`。
-  当前播放 writer 保存实际文件目标。历史投影中的坏对象保留原材料并附单项错误，
-  非对象项投影为单项错误；原持久记录不被删除，健康兄弟仍可展示。
-- 资料库读取只要求当前根版本与集合容器，不做全键或逐条预检。具体身份、计数、
-  分享地址与偏好由实际消费／编辑入口检查；选中身份歧义不能靠覆盖多条记录解决。
-  未编辑扩展和坏兄弟保留，显式删除／清空仍按指定集合执行。
-  持久材料及 metadata 缓存使用公共精确 JSON owner，失真数字保留原 token，
-  不将其转成字符串或普通 `rawJSON` 属性。非 JSON 写入、坏根、真实 I/O、
-  同步原子提交与 `STORAGE_CHANGED` 约束不变。
-  原生配置注入时不采用库中残留偏好，其他业务写入也不删除它；原生收藏仍属原生 owner。
+- 播放收藏、历史、人工匹配、屏蔽与身份分组分别保存在 SQLite typed relations；不会创建 `library.json`，也不把整个业务文档 JSON 塞入数据库。当前播放 writer 保存实际文件目标。历史投影中的坏对象按单项错误处理；具体业务校验由实际消费入口执行。
+资料库和元数据缓存采用关系表、typed columns 与有序子关系，单次变更只更新所属实体和关系；metadata owner 保留上游扩展需要的 typed value-tree，不保存完整 JSON 文档。原生配置注入时只使用原生 owner 的偏好事实，缓存与收藏仍按各自 owner 管理。
 
 `entrySurface:'home'|'search'` 标识进入位置，snapshot 的 `entryTarget` 保留原始卡片目标，
 `target` 是运行器当前使用的目标；客户端不据显示标题重新构造来源。
@@ -238,7 +219,7 @@ full。可选 handoff 中内容无法消费的记录仅作为缓存 miss，健�
 一个 32 MiB 有界内存缓存拥有数据、完整度、过期时间和 in-flight 合并；超预算
 结果完整返回但不在内存保留，不截断业务页。站点数据、盘列表、stored、短效 URL
 随进程，仍分别按真实来源／账号／模式与短效期限失效。TMDB／豆瓣业务元数据另以
-`<dataRoot>/film-metadata/<provider>/<身份散列>.json` 原子持久，复用相同缓存owner；
+共享 SQLite 的 metadata 组件、类型化实体及关系原子持久，复用相同缓存 owner；
 请求身份不以明文文件名或持久请求对象泄露凭据。历史／人工匹配／屏蔽属于独立资料库。
 
 会话保留已读取资料的线路／季集投影及浏览选择，不拥有第二份 TTL。

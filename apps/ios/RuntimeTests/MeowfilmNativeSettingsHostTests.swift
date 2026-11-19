@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import XCTest
 import MeowRuntime
+import MeowStorage
 @testable import MeowFilmFeature
 @testable import Meowfilm
 
@@ -25,7 +26,7 @@ final class MeowfilmNativeSettingsHostTests: XCTestCase {
             try await waitForNativeRuntimeSettings(block, resources: resources)
         }
         try await waitForNativePan(resources, client: client)
-        try NativeSettingsHost.requireProtectedFiles(run: run)
+        try await NativeSettingsHost.requireTypedCredentials(resources, run: run)
 
         let writes: [(FilmSettingsBlock, RuntimeModule, String, RuntimeValue)] = [
             (.tmdb, .tmdb, "settings.update", .object(["language": .string("must-not-save")])),
@@ -34,7 +35,7 @@ final class MeowfilmNativeSettingsHostTests: XCTestCase {
             (.preferences, .film, "settings.set", NativeSettingsHost.preferences(run).value),
         ]
         for (block, module, operation, input) in writes {
-            let before = try resources.filmSettings[block].snapshot().fingerprint
+            let before = try NativeSettingsHost.revisions(resources)[block]
             do {
                 _ = try await client.call(module: module, operation: operation, parameters: input)
                 XCTFail("The legacy configuration writer must be denied: \(block.rawValue)")
@@ -42,7 +43,7 @@ final class MeowfilmNativeSettingsHostTests: XCTestCase {
             } catch RuntimeHTTPError.remote(let code) {
                 guard code == "PERMISSION_DENIED" else { throw NativeSettingsHostFailure.legacyWriteAllowed }
             }
-            XCTAssertTrue(try resources.filmSettings[block].snapshot().fingerprint == before,
+            XCTAssertTrue(try NativeSettingsHost.revisions(resources)[block] == before,
                           "A denied runtime write changed the native document: \(block.rawValue)")
             try await waitForNativeRuntimeSettings(block, resources: resources)
         }
@@ -50,11 +51,11 @@ final class MeowfilmNativeSettingsHostTests: XCTestCase {
         XCTAssertFalse(client.isClosed)
     }
 
-    func testNativeSettingsPreserveExactJSONThroughNodeMobile() async throws {
+    func testTypedSettingsRejectUnknownFieldsAndPreserveDeclaredTextThroughNodeMobile() async throws {
         try NativeSettingsHost.requireSimulator()
         let resources = try await hostResources()
         let document = resources.filmSettings[.tmdb]
-        let original = try document.read() ?? .object([
+        let original = try document.appStorageTestRead() ?? .object([
             "version": .number(1), "settings": FilmTMDBSettings.defaultValue,
         ])
         let originalSettings = try FilmTMDBSettings(XCTUnwrap(original.catField("settings")))
@@ -64,46 +65,43 @@ final class MeowfilmNativeSettingsHostTests: XCTestCase {
         let client = try await resources.scriptSession.connection()
         try await client.validateAppModules()
         addTeardownBlock { @MainActor in
-            _ = try document.update { _ in original }
+            _ = try await document.update { _ in original }
             try await self.waitForNativeRuntimeSettings(.tmdb, resources: resources)
-            XCTAssertEqual(try document.read(), original)
+            XCTAssertEqual(try document.appStorageTestRead(), original)
         }
 
-        var extensionFields = try RuntimeJSON.decode(Data(
-            #"{"decimal":1.234567890123456789,"largeInteger":9007199254740993,"exponent":1e400,"é":"composed","e\u0301":"decomposed"}"#.utf8
-        )).filmRequiredObject()
-        extensionFields["run"] = .string(UUID().uuidString.lowercased())
-        let exact = RuntimeValue.object(extensionFields)
-        // Prime the actual Node snapshot before the write: startup loading is
-        // not evidence that a subsequent native-change notification was applied.
-        let before = try await client.call(module: .tmdb, operation: "settings.get")
-        XCTAssertNotEqual(before.catField("syntheticExtension"), exact)
+        let before = try document.appStorageTestRead()
+        do {
+            _ = try await document.update { current in
+                var root = current?.filmObject ?? ["version": .number(1)]
+                var settings = FilmTMDBSettings.defaultValue.filmObject!
+                settings["syntheticExtension"] = .object(["unknown": .number(1)])
+                root["settings"] = .object(settings)
+                return .object(root)
+            }
+            XCTFail("An undeclared business field must not become an opaque database document")
+        } catch { XCTAssertEqual(error as? FilmSettingsStorageError, .invalidDocument) }
+        XCTAssertEqual(try document.appStorageTestRead(), before)
         var settings = FilmTMDBSettings.defaultValue.filmObject!
-        settings["apiBase"] = .string("http://127.0.0.1:9/synthetic-exact-json/api")
-        settings["imageBase"] = .string("http://127.0.0.1:9/synthetic-exact-json/images")
-        settings["language"] = .string("en-US"); settings["region"] = .string("US")
-        settings["includeAdult"] = .bool(true); settings["syntheticExtension"] = exact
-        let saved = try document.update { current in
-            var root = current?.filmObject ?? ["version": .number(1)]
-            root["settings"] = .object(settings)
-            return .object(root)
+        settings["apiBase"] = .string("http://127.0.0.1:9/synthetic-typed/api")
+        settings["imageBase"] = .string("http://127.0.0.1:9/synthetic-typed/images")
+        settings["language"] = .string("e\u{0301}-\u{00E9}"); settings["region"] = .string("US")
+        settings["includeAdult"] = .bool(true)
+        let selected = settings
+        let saved = try await document.update { _ in
+            .object(["version": .number(1), "settings": .object(selected)])
         }
         try await waitForNativeRuntimeSettings(.tmdb, resources: resources)
         let response = try await client.call(module: .tmdb, operation: "settings.get")
-        let returned = try XCTUnwrap(response.catField("syntheticExtension"))
-        XCTAssertEqual(returned, exact)
-        XCTAssertEqual(try RuntimeJSON.encode(returned), try RuntimeJSON.encode(exact))
-        XCTAssertEqual(response.catField("language"), .string("en-US"))
+        XCTAssertEqual(response.catField("language"), selected["language"])
         XCTAssertEqual(response.catField("region"), .string("US"))
         XCTAssertEqual(response.catField("includeAdult"), .bool(true))
-        XCTAssertEqual(try document.read(), saved, "Runtime reads must not rewrite native settings")
+        XCTAssertEqual(try document.appStorageTestRead(), saved, "Runtime reads must not rewrite native settings")
         XCTAssertFalse(client.isClosed)
     }
 
-    func testNativeSettingsChannelDoesNotRetainItsRuntimeSession() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let settings = try MeowfilmNativeSettings(documentsRoot: directory)
+    func testNativeSettingsChannelDoesNotRetainItsRuntimeSession() async throws {
+        let settings = MeowfilmNativeSettings(database: try appStorageTestDatabase())
         var session: RuntimeSession? = RuntimeSession(launcher: NativeSettingsLifetimeLauncher(settings: settings.access))
         settings.attach(try XCTUnwrap(session))
         weak var released = session
@@ -112,8 +110,8 @@ final class MeowfilmNativeSettingsHostTests: XCTestCase {
         let preferences: RuntimeValue = .object([
             "version": .number(1), "preferences": FilmPlaybackPreferences.defaults.value,
         ])
-        _ = try settings[.preferences].update { _ in preferences }
-        XCTAssertEqual(try settings[.preferences].read(), preferences)
+        _ = try await settings[.preferences].update { _ in preferences }
+        XCTAssertEqual(try settings[.preferences].appStorageTestRead(), preferences)
         XCTAssertNil(released, "An offline document save must not recreate a released runtime session")
     }
 }
@@ -192,11 +190,11 @@ private extension XCTestCase {
         let preferences = NativeSettingsHost.preferenceModel(resources)
         try await preferences.loadPreferences()
         XCTAssertTrue(preferences.preferences == NativeSettingsHost.preferences(run))
-        let nativePan = try NativeSettingsHost.pan(resources).accounts()
-        guard nativePan.count == 7, nativePan[0].configured == true, nativePan[0].status == .unverified else {
+        let nativePan = try await NativeSettingsHost.pan(resources).accounts()
+        guard nativePan.count == PanProviderID.allCases.count, nativePan[0].configured == true, nativePan[0].status == .unverified else {
             throw NativeSettingsHostFailure.unexpectedNativeSettings
         }
-        try NativeSettingsHost.requireProtectedFiles(run: run)
+        try await NativeSettingsHost.requireTypedCredentials(resources, run: run)
         try await NativeSettingsHost.requireClosed(resources, client: client)
 
         // Only a successful prepare may authorize the next process to restore.
@@ -219,13 +217,13 @@ private extension XCTestCase {
         }
         let client = try await resources.scriptSession.connection()
         connection = client
-        let before = try NativeSettingsHost.fingerprints(resources)
+        let before = try NativeSettingsHost.revisions(resources)
         for block in NativeSettingsHost.appliedBlocks {
             try await waitForNativeRuntimeSettings(block, resources: resources)
         }
         try await waitForNativePan(resources, client: client)
-        let accounts = try NativeSettingsHost.pan(resources).accounts()
-        guard accounts.count == 7, accounts[0].configured == true, accounts[0].status == .unverified else {
+        let accounts = try await NativeSettingsHost.pan(resources).accounts()
+        guard accounts.count == PanProviderID.allCases.count, accounts[0].configured == true, accounts[0].status == .unverified else {
             throw NativeSettingsHostFailure.unexpectedNativeSettings
         }
         let cat = try await waitForNativeCat(NativeSettingsHost.catID(run), service: resources.filmSourceSettings)
@@ -238,9 +236,9 @@ private extension XCTestCase {
         let snapshot = await resources.filmSourceSettings.snapshot
         XCTAssertEqual(snapshot.cats.map(\.installationId), [NativeSettingsHost.catID(run)])
         XCTAssertEqual(snapshot.videos.map(\.key), [.init(installationId: cat.installationId, siteKey: "native-settings")])
-        XCTAssertTrue(try NativeSettingsHost.fingerprints(resources) == before,
+        XCTAssertTrue(try NativeSettingsHost.revisions(resources) == before,
                       "Cold reads must not replay offline changes or rewrite native settings")
-        try NativeSettingsHost.requireProtectedFiles(run: run)
+        try await NativeSettingsHost.requireTypedCredentials(resources, run: run)
         print("EVIDENCE native-settings phase=restore pid=\(ProcessInfo.processInfo.processIdentifier) blocks=6 sites=1")
     }
 }
@@ -293,7 +291,7 @@ private enum NativeSettingsHost {
             .panAccounts: PanSettingsStore.empty, .catSources: emptyCats,
         ]
         return try Dictionary(uniqueKeysWithValues: FilmSettingsBlock.allCases.map {
-            ($0, try resources.filmSettings[$0].read() ?? defaults[$0]!)
+            ($0, try resources.filmSettings[$0].appStorageTestRead() ?? defaults[$0]!)
         })
     }
     static func requireEmptyCredentials(_ original: [FilmSettingsBlock: RuntimeValue]) throws {
@@ -401,7 +399,7 @@ private enum NativeSettingsHost {
         try await model.loadPreferences()
         model.edit { $0 = preferences(run + suffix) }
         try await model.savePreferences()
-        let account = try pan(resources).replace(.baidu, credentials: .object(["cookie": .string(secrets(run, suffix: suffix)[3])]))
+        let account = try await pan(resources).replace(.baidu, credentials: .object(["cookie": .string(secrets(run, suffix: suffix)[3])]))
         guard account.configured == true, account.status == .unverified else {
             throw NativeSettingsHostFailure.unexpectedNativeSettings
         }
@@ -424,6 +422,7 @@ private enum NativeSettingsHost {
         var accounts = original[.panAccounts]!.catField("accounts")!.filmObject!
         let revision = accounts["baidu"]?.catField("revision")?.panInteger ?? 0
         accounts["baidu"] = .object(["revision": .number(Double(revision + panWrites)),
+                                     "rowRevision": .number(Double((accounts["baidu"]?.catField("rowRevision")?.panInteger ?? 0) + panWrites)),
                                      "credentials": .object(["cookie": .string(secrets(run)[3])])])
         expected[.panAccounts] = .object(["version": .number(1), "accounts": .object(accounts)])
         if cat {
@@ -436,14 +435,16 @@ private enum NativeSettingsHost {
             expected[.catSources] = .object(fields)
         }
         for block in FilmSettingsBlock.allCases {
-            let actual = try resources.filmSettings[block].read() ?? original[block]!
+            let actual = try resources.filmSettings[block].appStorageTestRead() ?? original[block]!
             guard actual == expected[block] else { throw NativeSettingsHostFailure.unexpectedNativeSettings }
         }
     }
-    static func fingerprints(_ resources: MeowfilmResources) throws -> [FilmSettingsBlock: RuntimeValue] {
-        try Dictionary(uniqueKeysWithValues: FilmSettingsBlock.allCases.map {
-            ($0, try resources.filmSettings[$0].snapshot().fingerprint)
-        })
+    static func revisions(_ resources: MeowfilmResources) throws -> [FilmSettingsBlock: Int64] {
+        try appStorageTestIO {
+            try Dictionary(uniqueKeysWithValues: FilmSettingsBlock.allCases.map {
+                ($0, try resources.filmSettings[$0].snapshotSync().revision)
+            })
+        }
     }
     static func requireClosed(_ resources: MeowfilmResources, client: RuntimeHTTPClient) async throws {
         guard client.isClosed, await resources.scriptSession.connectionIfStarted() == nil else {
@@ -457,27 +458,18 @@ private enum NativeSettingsHost {
     static func digest(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
-    static func requireProtectedFiles(run: String) throws {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let documents = support.appendingPathComponent("meowfilm/documents")
-        let needles = (secrets(run) + secrets(run, suffix: "-superseded")).map { Data($0.utf8) }
-        for block in FilmSettingsBlock.allCases {
-            let plain = documents.appendingPathComponent(block.namespace + "/settings.json")
-            let url = block.isSensitive ? documents.appendingPathComponent(
-                "protected-settings/n-\(digest(block.namespace))/d-\(digest(FilmSettingsDocument.key)).meowenc") : plain
-            if block == .catSources, !FileManager.default.fileExists(atPath: url.path) { continue }
-            let bytes = try Data(contentsOf: url)
-            guard needles.allSatisfy({ bytes.range(of: $0) == nil }),
-                  !block.isSensitive || bytes.starts(with: Data("MEOWEDOC".utf8)) &&
-                    !FileManager.default.fileExists(atPath: plain.path) else {
-                throw NativeSettingsHostFailure.plaintextCredentials
-            }
+    static func requireTypedCredentials(_ resources: MeowfilmResources, run: String) async throws {
+        guard resources.database.url.lastPathComponent == "meowfilm.sqlite3",
+              resources.database.url.deletingLastPathComponent().lastPathComponent == "storage-v1" else {
+            throw NativeSettingsHostFailure.unexpectedNativeSettings
         }
-        for path in ["tmdb/settings.json", "douban/settings.json", "pan/accounts.json"] {
-            guard !FileManager.default.fileExists(atPath: MeowfilmScriptRuntime.dataDirectory.appendingPathComponent(path).path) else {
-                throw NativeSettingsHostFailure.plaintextCredentials
-            }
-        }
+        let tmdb = try await resources.database.snapshot { try $0.query("SELECT apiKey,accessToken FROM ios_tmdb_settings WHERE singleton=1") }
+        let douban = try await resources.database.snapshot { try $0.query("SELECT cookie FROM ios_douban_settings WHERE singleton=1") }
+        let pan = try await resources.database.snapshot { try $0.query("SELECT cookie FROM ios_pan_accounts WHERE provider='baidu'") }
+        XCTAssertEqual(try XCTUnwrap(tmdb.first).text("apiKey"), secrets(run)[0])
+        XCTAssertEqual(try XCTUnwrap(tmdb.first).text("accessToken"), secrets(run)[1])
+        XCTAssertEqual(try XCTUnwrap(douban.first).text("cookie"), secrets(run)[2])
+        XCTAssertEqual(try XCTUnwrap(pan.first).text("cookie"), secrets(run)[3])
     }
     static func writeMarker(run: String, original: [FilmSettingsBlock: RuntimeValue]) throws {
         try requireColdBaseline(original)
@@ -491,7 +483,7 @@ private enum NativeSettingsHost {
         }
         var accounts = RuntimeObject()
         for (id, record) in original[.panAccounts]!.catField("accounts")!.filmObject! {
-            accounts[id] = .object(["revision": record.catField("revision")!,
+            accounts[id] = .object(["revision": record.catField("revision")!, "rowRevision": record.catField("rowRevision")!,
                 "emptyFields": .array(record.catField("credentials")!.filmObject!.keys.sorted().map(RuntimeValue.string))])
         }
         backup[FilmSettingsBlock.panAccounts.rawValue] = .object(["version": .number(1), "accounts": .object(accounts)])
@@ -537,7 +529,7 @@ private enum NativeSettingsHost {
         var accounts = RuntimeObject()
         for (id, record) in records {
             guard let provider = PanProvider.all.first(where: { $0.id.rawValue == id }),
-                  let fields = record.filmObject, Set(fields.keys) == ["revision", "emptyFields"],
+                  let fields = record.filmObject, Set(fields.keys) == ["revision", "rowRevision", "emptyFields"],
                   let names = fields["emptyFields"]?.filmArray else { throw NativeSettingsHostFailure.invalidCheckpoint }
             var credentials = RuntimeObject()
             for name in names {
@@ -547,7 +539,7 @@ private enum NativeSettingsHost {
                 }
                 credentials[text] = field.isNumber ? .number(0) : .string("")
             }
-            accounts[id] = .object(["revision": try fields.filmValue("revision"), "credentials": .object(credentials)])
+            accounts[id] = .object(["revision": try fields.filmValue("revision"), "rowRevision": try fields.filmValue("rowRevision"), "credentials": .object(credentials)])
         }
         original[.panAccounts] = .object(["version": .number(1), "accounts": .object(accounts)])
         try requireColdBaseline(original)
@@ -584,7 +576,7 @@ private enum NativeSettingsHost {
 @MainActor
 private extension XCTestCase {
     func waitForNativePan(_ resources: MeowfilmResources, client: RuntimeHTTPClient) async throws {
-        let expected = try NativeSettingsHost.pan(resources).accounts()
+        let expected = try await NativeSettingsHost.pan(resources).accounts()
         let deadline = Date().addingTimeInterval(10)
         repeat {
             let response = try await client.call(module: .pan, operation: "settings.get")
@@ -607,7 +599,14 @@ private extension XCTestCase {
                                client: RuntimeHTTPClient?, removedCat: String? = nil) async throws {
         var failure: Error?
         for block in FilmSettingsBlock.allCases {
-            do { _ = try resources.filmSettings[block].update { _ in original[block]! } }
+            do {
+                if block == .panAccounts {
+                    for provider in PanProviderID.allCases {
+                        let credentials = original[block]?.catField("accounts")?.catField(provider.rawValue)?.catField("credentials") ?? .object([:])
+                        _ = try await NativeSettingsHost.pan(resources).replace(provider, credentials: credentials)
+                    }
+                } else { _ = try await resources.filmSettings[block].update { _ in original[block]! } }
+            }
             catch { failure = failure ?? error }
         }
         do { try await resources.filmRules.initialize() } catch { failure = failure ?? error }
@@ -639,9 +638,15 @@ private extension XCTestCase {
         }
         for block in FilmSettingsBlock.allCases {
             do {
-                guard try resources.filmSettings[block].read() == original[block] else {
-                    throw NativeSettingsHostFailure.unexpectedNativeSettings
-                }
+                let actual = try resources.filmSettings[block].appStorageTestRead()
+                if block == .panAccounts {
+                    for provider in PanProviderID.allCases {
+                        let expected = original[block]?.catField("accounts")?.catField(provider.rawValue)?.catField("credentials") ?? .object([:])
+                        guard actual?.catField("accounts")?.catField(provider.rawValue)?.catField("credentials") == expected else {
+                            throw NativeSettingsHostFailure.unexpectedNativeSettings
+                        }
+                    }
+                } else if actual != original[block] { throw NativeSettingsHostFailure.unexpectedNativeSettings }
             } catch { failure = failure ?? error }
         }
         if let failure { throw failure }

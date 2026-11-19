@@ -18,13 +18,13 @@ public static class MusicNativeAccountTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("owner.canonical-import-all-revalidate-restart-session", AllPlatforms);
-        yield return Case("owner.dpapi.real-CAS-reopen-logout-no-plaintext", () => Dpapi(Wy));
-        yield return Case("owner.long-canonical-cookie-DPAPI-current-reopen-preserves-value", () => Dpapi(Wy + new string('x', 20_000)));
-        yield return Case("owner.authenticated-cookie-not-input-is-DPAPI-saved-and-cold-restored",
-            () => Dpapi(Wy, Wy + "; deviceId=SYNTHETIC_NODE_DEVICE"));
+        yield return Case("owner.sqlite.real-CAS-reopen-logout-plaintext-field", () => Plaintext(Wy));
+        yield return Case("owner.long-canonical-cookie-SQLite-current-reopen-preserves-value", () => Plaintext(Wy + new string('x', 20_000)));
+        yield return Case("owner.authenticated-cookie-not-input-is-SQLite-saved-and-cold-restored",
+            () => Plaintext(Wy, Wy + "; deviceId=SYNTHETIC_NODE_DEVICE"));
         yield return Case("owner.concurrent-platforms-merge-current-schema", ConcurrentPlatforms);
         yield return Case("owner.logical-revision-same-generation-changed-value-conflict", ValueConflict);
-        yield return Case("owner.storage-fingerprint-CAS-no-retry", FingerprintConflict);
+        yield return Case("owner.storage-revision-CAS-no-retry", RevisionConflict);
         yield return Case("owner.old-auth-failure-cannot-revoke-new-generation", LateFailure);
         yield return Case("owner.cancel-before-commit-no-save", CancelBeforeCommit);
         yield return Case("owner.cancel-after-admission-unknown-explicit-read-waits", CancelAfterCommit);
@@ -40,9 +40,9 @@ public static class MusicNativeAccountTests
         }
         yield return Case("owner.ordinary-validation-failure-keeps-saved-authority-without-credential-write", OrdinaryValidation);
         yield return Case("owner.failed-candidate-does-not-revoke-or-replace-existing-account", CandidateFailure);
-        yield return Case("storage.unknown-entry-survives-account-write", () => UnknownEntry("unsupported-entry", new JsonObject { ["kept"] = true }));
-        yield return Case("storage.account-document-beyond-eight-MiB-preserves-unedited-entry",
-            () => UnknownEntry("large-entry", new JsonObject { ["text"] = new string('x', 8 * 1024 * 1024 + 1) }));
+        yield return Case("storage.unrelated-owner-survives-account-write", () => UnrelatedOwner("retained"));
+        yield return Case("storage.unrelated-owner-field-beyond-eight-MiB-survives-account-write",
+            () => UnrelatedOwner(new string('x', 8 * 1024 * 1024 + 1)));
         yield return Case("credential-cookie-preserves-more-than-sixty-four-pairs", () =>
         {
             string cookie = string.Join("; ", Enumerable.Range(0, 65).Select(i => $"part{i}={new string('x', 256)}"));
@@ -56,9 +56,8 @@ public static class MusicNativeAccountTests
         yield return Case("owner.invalid-commands-pre-cancel-and-constructor-are-passive", Passive);
         yield return Case("owner.verified-stamp-bound-to-session-not-generation-alone", VerifiedStamp);
         yield return Case("owner.observed-durable-tombstone-fences-issued-lease", DurableTombstone);
-        yield return Case("storage.equivalent-json-number-forms-consumed", NoncanonicalNumbers);
         yield return Case("storage.unrelated-account-corruption-does-not-block-selected-account", CorruptDocument);
-        foreach (string variant in new[] { "null", "duplicate-root", "duplicate-key", "version", "null-avatar", "bad-profile", "mixed-null", "fraction", "overflow", "fingerprint" })
+        foreach (string variant in new[] { "version", "null-avatar", "bad-profile", "mixed-null" })
         { string v = variant; yield return Case("storage.current-corruption-" + v, () => Corrupt(v)); }
         foreach (string input in new[] { "MUSIC_U=x\r\nHost:x", "Cookie: MUSIC_U=x", "MUSIC_U=x; MUSIC_U=y", "MUSIC_U=x; Domain=music.163.com",
             "MUSIC_U=中", "MUSIC_U=x; constructor=y", "MUSIC_U=a,b", "MUSIC_U=x;; k=y" })
@@ -71,14 +70,14 @@ public static class MusicNativeAccountTests
             });
             Ok(await f.Owner.CallAsync("music.accounts.import", new { platform = "wy", cookie = Wy,
                 extra = new { url = "https://unused.invalid", headers = new { cookie = "unused" } } }));
-            Check(f.Store.Writes == 1 && f.Runtime.Requests.Count(call => call.Operation == "account.verify") == 1);
+            Check(f.Store.AccountRevision == 1 && f.Runtime.Requests.Count(call => call.Operation == "account.verify") == 1);
         });
         yield return Case("owner.redacted-canonical-errors-and-private-DTOs", Redaction);
         yield return Case("qr.authenticated-without-trusted-handoff-rejected", ForgedQr);
         yield return Case("qr.canonical-state-not-native-display-TTL-controls-handoff", QrExpiry);
         yield return Case("qr.admitted-cancel-handoff-unknown-no-replay", QrUnknown);
     }
-    private static TestCase Case(string name, Func<Task> run) => new("music.native.accounts." + name, run);
+    private static TestCase Case(string name, Func<Task> run) => new("music.native.accounts." + name, () => Task.Run(run));
     private static void Check(bool condition, string message = "native account assertion")
     { if (!condition) throw new InvalidOperationException(message); }
     private static string State(JsonElement response, string platform = "wy") =>
@@ -130,43 +129,27 @@ public static class MusicNativeAccountTests
         }
         throw new InvalidOperationException("Unexpected account operation: " + call.Operation);
     }
-    private sealed class MemoryStore : IDocumentStore
+    private sealed class MemoryStore : NativeTestDatabase
     {
-        private readonly object gate = new();
-        internal byte[]? Bytes;
-        internal int Reads, Writes, Disposals;
-        internal bool BadFingerprint;
-        internal Func<byte[], DocumentFingerprint, CancellationToken, Task<DocumentFingerprint>>? OnWrite;
-        internal Func<Task>? OnRead;
-        public async Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
+        internal long AccountRevision => Inner.ReadAsync(db => db.Revision(MusicAccountOwner.DocumentNamespace).Revision).GetAwaiter().GetResult();
+        internal Exception? WriteError;
+        internal Func<Task>? OnRead,BeforeCommit;
+        internal Action? AfterCommit;
+        internal byte[]? Bytes {get {var value=Inner.Accounts();return value["entries"]!.AsArray().Count==0?null:JsonSerializer.SerializeToUtf8Bytes(value);}set {if(value is not null)Inner.SeedAccounts(JsonNode.Parse(value)!.AsObject());}}
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)
+        {if(OnRead is not null)await OnRead();return await base.ReadAsync(read,token);}
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+            int retainedBytes=0,Action<Action>? commit=null)
         {
-            Check(ns == MusicAccountOwner.DocumentNamespace);
-            Interlocked.Increment(ref Reads);
-            if (OnRead is not null) await OnRead();
-            lock (gate) return new(Bytes?.ToArray(), BadFingerprint ? DocumentFingerprint.Missing : Fingerprint());
+            var result=await base.WriteAsync(db=>{
+                if(WriteError is { } error)throw error;
+                var value=write(db);BeforeCommit?.Invoke().GetAwaiter().GetResult();return value;
+            },token,retainedBytes,commit);
+            AfterCommit?.Invoke();return result;
         }
-        private DocumentFingerprint Fingerprint() => Bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(Bytes);
-        internal DocumentFingerprint Save(byte[] data, DocumentFingerprint expected)
-        {
-            lock (gate)
-            {
-                if (Fingerprint() != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                Bytes = data.ToArray(); return Fingerprint();
-            }
-        }
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            Check(ns == MusicAccountOwner.DocumentNamespace);
-            Interlocked.Increment(ref Writes);
-            byte[] owned = data.ToArray();
-            try { return OnWrite is null ? Save(owned, expected) : await OnWrite(owned, expected, cancellationToken); }
-            finally { CryptographicOperations.ZeroMemory(owned); }
-        }
-        public ValueTask DisposeAsync() { Disposals++; return ValueTask.CompletedTask; }
-        internal void Seed(string json) { lock (gate) Bytes = Encoding.UTF8.GetBytes(json); }
-        internal JsonObject Document() { lock (gate) return JsonNode.Parse(Bytes!)!.AsObject(); }
-        internal JsonObject Row(string platform = "wy") => Document()["entries"]!.AsArray()
-            .Single(row => row!["key"]!.GetValue<string>() == Key(platform))!["value"]!.AsObject();
+        internal void Seed(string json)=>Inner.SeedAccounts(JsonNode.Parse(json)!.AsObject());
+        internal JsonObject Document()=>this.Accounts();
+        internal JsonObject Row(string platform="wy")=>Document()["entries"]!.AsArray().Single(row=>row!["key"]!.GetValue<string>()==Key(platform))!["value"]!.AsObject();
     }
     private sealed class Port : IMusicAccountProtocol
     {
@@ -216,14 +199,23 @@ public static class MusicNativeAccountTests
             var document = store.Document(); document["entries"]![0]!["value"]!["generation"] = generation;
             return document.ToJsonString();
         }
-        finally { owner.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+        finally { owner.DisposeAsync().AsTask().GetAwaiter().GetResult(); store.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+    }
+    private static async Task UnrelatedOwner(string value)
+    {
+        await using var f = new Fixture();
+        await f.Store.WriteAsync(db => db.Execute("INSERT INTO owner_revisions(owner,revision,receipt) VALUES($owner,1,$receipt)",
+            ("$owner", "unrelated-account-fixture"), ("$receipt", value)));
+        Ok(await Import(f.Owner));
+        Check(await f.Store.ReadAsync(db => db.Scalar<string>("SELECT receipt FROM owner_revisions WHERE owner=$owner",
+            ("$owner", "unrelated-account-fixture"))) == value);
     }
     private static async Task AllPlatforms()
     {
         await using var f = new Fixture();
         Check(f.Runtime.Requests.Count == 0 && f.Store.Reads == 0);
         foreach (var platform in new[] { "wy", "tx", "kg" }) Ok(await Import(f.Owner, platform));
-        Check(f.Runtime.Requests.Count(call => call.Operation == "account.verify") == 3 && f.Store.Writes == 3);
+        Check(f.Runtime.Requests.Count(call => call.Operation == "account.verify") == 3 && f.Store.AccountRevision == 3);
         var list = await List(f.Owner); Ok(list);
         foreach (var platform in new[] { "wy", "tx", "kg" }) Check(State(list, platform) == "verified");
         var session = (await f.Owner.AcquireAsync("wy", default))!;
@@ -261,10 +253,10 @@ public static class MusicNativeAccountTests
         store.Seed(CurrentJson(cookie: "MUSIC_U=SYNTHETIC_OTHER"));
         release.SetResult(); Error(await task, "STORAGE_CONFLICT"); Check(store.Writes == 0);
     }
-    private static async Task FingerprintConflict()
+    private static async Task RevisionConflict()
     {
         await using var f = new Fixture();
-        f.Store.OnWrite = (_, _, _) => Task.FromException<DocumentFingerprint>(new DocumentStoreException(DocumentStoreError.Conflict));
+        f.Store.WriteError = new DocumentStoreException(DocumentStoreError.Conflict);
         Error(await Import(f.Owner), "STORAGE_CONFLICT");
         Check(f.Store.Writes == 1 && f.Store.Bytes is null);
         Ok(await List(f.Owner));
@@ -300,7 +292,7 @@ public static class MusicNativeAccountTests
     {
         await using var f = new Fixture();
         var arrived = Signal(); var release = Signal();
-        f.Store.OnWrite = async (bytes, expected, _) => { arrived.SetResult(); await release.Task; return f.Store.Save(bytes, expected); };
+        f.Store.BeforeCommit = async () => { arrived.SetResult(); await release.Task; };
         using var cancel = new CancellationTokenSource();
         var task = Import(f.Owner, token: cancel.Token); await Wait(arrived.Task);
         cancel.Cancel(); Error(await task, "COMMIT_UNKNOWN");
@@ -314,26 +306,25 @@ public static class MusicNativeAccountTests
     {
         await using var f = new Fixture(); Ok(await Import(f.Owner));
         var session = (await f.Owner.AcquireAsync("wy", default))!;
-        f.Store.OnWrite = (_, _, _) => Task.FromException<DocumentFingerprint>(new IOException("SYNTHETIC_SECRET_FAILURE"));
+        f.Store.WriteError = new IOException("SYNTHETIC_SECRET_FAILURE");
         Error(await Command(f.Owner, "logout"), "COMMIT_UNKNOWN");
         Check(!f.Owner.IsCurrent(session) && await f.Owner.AcquireAsync("wy", default) is null);
         Check(State(await List(f.Owner)) == "revoked");
-        f.Store.OnWrite = null; Ok(await Command(f.Owner, "logout")); Check(State(await List(f.Owner)) == "none");
+        f.Store.WriteError = null; Ok(await Command(f.Owner, "logout")); Check(State(await List(f.Owner)) == "none");
     }
     private static async Task LogoutUnknown()
     {
         await using var f = new Fixture(); Ok(await Import(f.Owner));
-        f.Store.OnWrite = (bytes, expected, _) =>
-        { f.Store.Save(bytes, expected); throw new IOException("SYNTHETIC_ACK_LOST"); };
+        f.Store.AfterCommit = () => throw new IOException("SYNTHETIC_ACK_LOST");
         Error(await Command(f.Owner, "logout"), "COMMIT_UNKNOWN");
-        Check(State(await List(f.Owner)) == "none" && f.Store.Writes == 2);
+        Check(State(await List(f.Owner)) == "none" && f.Store.AccountRevision == 2);
     }
     private static async Task PrepareClose()
     {
         var store = new MemoryStore(); var port = new Port();
         await using var owner = new MusicAccountOwner(store, port);
         var arrived = Signal(); var release = Signal();
-        store.OnWrite = async (bytes, expected, _) => { arrived.SetResult(); await release.Task; return store.Save(bytes, expected); };
+        store.BeforeCommit = async () => { arrived.SetResult(); await release.Task; };
         var save = Import(owner); await Wait(arrived.Task);
         using var token = new CancellationTokenSource(); token.Cancel();
         try { await owner.PrepareCloseAsync(token.Token); throw new InvalidOperationException("expected cancelled close"); }
@@ -352,21 +343,7 @@ public static class MusicNativeAccountTests
         var current = (await f.Owner.AcquireAsync("wy", default))!;
         Check(f.Owner.Revoke(current) && !f.Owner.IsCurrent(current) && State(await List(f.Owner)) == "revoked");
     }
-    private static async Task UnknownEntry(string key, JsonObject value)
-    {
-        var store = new MemoryStore(); store.Seed(CurrentJson());
-        var doc = store.Document();
-        doc["entries"]!.AsArray().Add(new JsonObject { ["key"] = key, ["value"] = value });
-        byte[] original = Encoding.UTF8.GetBytes(doc.ToJsonString());
-        store.Bytes = original.ToArray();
-        await using var f = new Fixture(store: store);
-        Ok(await List(f.Owner));
-        Ok(await Import(f.Owner));
-        Ok(await Command(f.Owner, "logout"));
-        var retained = store.Document()["entries"]!.AsArray().OfType<JsonObject>().Single(e => e["key"]!.GetValue<string>() == key);
-        Check(JsonNode.DeepEquals(retained["value"], value) && store.Writes == 2);
-        CryptographicOperations.ZeroMemory(original);
-    }
+
     private static async Task StorageFailure()
     {
         await using var f = new Fixture();
@@ -418,30 +395,20 @@ public static class MusicNativeAccountTests
         Check(await f.Owner.AcquireAsync("wy", default) is null);
         Check(!f.Owner.IsCurrent(old) && changed == 1 && State(await List(f.Owner)) == "none");
     }
-    private static async Task NoncanonicalNumbers()
-    {
-        var store = new MemoryStore();
-        string json = CurrentJson().Replace("\"version\":1", "\"version\":1.0", StringComparison.Ordinal)
-            .Replace("\"generation\":7", "\"generation\":7e0", StringComparison.Ordinal);
-        byte[] original = Encoding.UTF8.GetBytes(json);
-        store.Bytes = original.ToArray();
-        await using var f = new Fixture(store: store);
-        Ok(await List(f.Owner));
-        Ok(await Import(f.Owner));
-        Check(store.Writes == 1);
-        CryptographicOperations.ZeroMemory(original);
-    }
+
     private static async Task CorruptDocument()
     {
         var store = new MemoryStore(); store.Seed(CurrentJson());
-        var doc = store.Document(); doc["entries"]!.AsArray().Add(new JsonObject { ["key"] = Key("kg"), ["value"] = null });
+        var doc = store.Document(); doc["entries"]!.AsArray().Add(new JsonObject { ["key"] = Key("kg"), ["value"] = JsonNode.Parse(CurrentJson())!["entries"]![0]!["value"]!.DeepClone() });
+        doc["entries"]!.AsArray().Last()!["value"]!["version"] = 2;
         byte[] original = Encoding.UTF8.GetBytes(doc.ToJsonString());
         store.Bytes = original.ToArray();
+        long revision = store.AccountRevision;
         await using var f = new Fixture(store: store);
         Ok(await Import(f.Owner));
         Error(await List(f.Owner), "CORRUPT_STORAGE");
-        Check(store.Writes == 1 && store.Document()["entries"]!.AsArray().OfType<JsonObject>()
-            .Single(e => e["key"]!.GetValue<string>() == Key("kg"))["value"] is null);
+        Check(store.AccountRevision == revision + 1 && store.Document()["entries"]!.AsArray().OfType<JsonObject>()
+            .Single(e => e["key"]!.GetValue<string>() == Key("kg"))["value"]!["version"]!.GetValue<int>() == 2);
         CryptographicOperations.ZeroMemory(original);
     }
     private static async Task Corrupt(string variant)
@@ -450,16 +417,11 @@ public static class MusicNativeAccountTests
         var doc = store.Document(); var row = doc["entries"]![0]!["value"]!;
         switch (variant)
         {
-            case "null": store.Seed("null"); break;
-            case "duplicate-root": store.Seed("""{"version":1,"version":1,"entries":[]}"""); break;
-            case "duplicate-key": doc["entries"]!.AsArray().Add(doc["entries"]![0]!.DeepClone()); store.Seed(doc.ToJsonString()); break;
             case "version": row["version"] = 2; store.Seed(doc.ToJsonString()); break;
             case "null-avatar": row["profile"]!["avatar"] = null; store.Seed(doc.ToJsonString()); break;
             case "bad-profile": row["profile"]!["platform"] = "kg"; store.Seed(doc.ToJsonString()); break;
             case "mixed-null": row["cookie"] = null; store.Seed(doc.ToJsonString()); break;
-            case "fraction": row["generation"] = 1.5; store.Seed(doc.ToJsonString()); break;
             case "overflow": row["generation"] = 9007199254740992L; store.Seed(doc.ToJsonString()); break;
-            case "fingerprint": store.BadFingerprint = true; break;
         }
         await using var f = new Fixture(store: store);
         Error(await List(f.Owner), "CORRUPT_STORAGE"); Error(await Import(f.Owner), "CORRUPT_STORAGE");
@@ -488,7 +450,7 @@ public static class MusicNativeAccountTests
     private static async Task QrUnknown()
     {
         await using var f = new Fixture(); var arrived = Signal(); var release = Signal();
-        f.Store.OnWrite = async (bytes, expected, _) => { arrived.SetResult(); await release.Task; return f.Store.Save(bytes, expected); };
+        f.Store.BeforeCommit = async () => { arrived.SetResult(); await release.Task; };
         string id = Challenge(await Command(f.Owner, "qr.begin"));
         using var cancel = new CancellationTokenSource(); var poll = Poll(f.Owner, id, cancel.Token); await Wait(arrived.Task);
         cancel.Cancel(); Error(await poll, "HANDOFF_UNCONFIRMED");
@@ -513,13 +475,13 @@ public static class MusicNativeAccountTests
             Check(begin.GetProperty("challenge").GetProperty("expiresAt").GetInt64() == displayedExpiry);
             var result = await Poll(f.Owner, id); Ok(result);
             Check(result.GetProperty("status").GetString() == status &&
-                f.Store.Writes == (status == "authenticated" ? 1 : 0) &&
+                f.Store.AccountRevision == (status == "authenticated" ? 1 : 0) &&
                 (await f.Owner.AcquireAsync("wy") is not null) == (status == "authenticated"));
             Check(f.Runtime.Requests.Count(call => call.Operation == "qr.create") == 1 &&
                 f.Runtime.Requests.Count(call => call.Operation == "qr.poll") == 1);
         }
     }
-    private static async Task Dpapi(string cookie, string? verifiedCookie = null)
+    private static async Task Plaintext(string cookie, string? verifiedCookie = null)
     {
         string savedCookie = verifiedCookie ?? cookie;
         string path = Path.Combine(Root, Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path);
@@ -532,21 +494,20 @@ public static class MusicNativeAccountTests
             verified["cookie"] = savedCookie;
             return MusicPlatformRuntimeFixture.Json(verified);
         };
-        await using (var store = new LocalDocumentStore(path, [MusicAccountOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
+        await using (var store = new NativeDatabase(path))
         {
             await using var owner = runtime.CreateAccountOwner(store); Ok(await Import(owner, cookie: cookie));
             Check(runtime.Requests.Single(call => call.Operation == "account.verify").Payload.GetProperty("candidate").GetProperty("cookie").GetString() == cookie &&
                 (await owner.AcquireAsync("wy"))?.Cookie == savedCookie);
-            foreach (string file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
-                Check(!Encoding.UTF8.GetString(await File.ReadAllBytesAsync(file)).Contains("SYNTHETIC_WY_SESSION", StringComparison.Ordinal));
+            Check(await store.ReadAsync(db => db.Scalar<string>("SELECT cookie FROM windows_music_account WHERE platform='wy'")) == savedCookie);
         }
-        await using (var store = new LocalDocumentStore(path, [MusicAccountOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace]))
+        await using (var store = new NativeDatabase(path))
         {
             await using var owner = new MusicAccountOwner(store, runtime.CreateAccountProtocol());
             Check(State(await List(owner)) == "saved" && (await owner.AcquireAsync("wy"))?.Cookie == savedCookie &&
                 runtime.Requests.Count(call => call.Operation == "account.verify") == 1);
             Ok(await Command(owner, "logout")); Check(State(await List(owner)) == "none");
-            await owner.PrepareCloseAsync(); Check((await store.ReadAsync(MusicAccountOwner.DocumentNamespace)).Fingerprint.Exists);
+            await owner.PrepareCloseAsync(); Check((await store.RevisionAsync(MusicAccountOwner.DocumentNamespace)).Revision > 0);
         }
         Check(Path.GetFullPath(path).StartsWith(Root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)); Directory.Delete(path, true);
     }
@@ -559,7 +520,7 @@ public static class MusicNativeAccountTests
         string document = f.Store.Document().ToJsonString();
         expired = true; Error(await Command(f.Owner, "validate"), expected);
         Check(!f.Owner.IsCurrent(session) && await f.Owner.AcquireAsync("wy") is null &&
-            f.Store.Writes == 1 && State(await List(f.Owner)) == "revoked");
+            f.Store.AccountRevision == 1 && State(await List(f.Owner)) == "revoked");
         Check(f.Store.Document().ToJsonString() == document, "Authentication rejection invented a durable logout");
     }
     private static async Task OrdinaryValidation()
@@ -578,7 +539,7 @@ public static class MusicNativeAccountTests
             var retained = await f.Owner.AcquireAsync("wy");
             Check(retained is not null && f.Owner.IsCurrent(retained) && retained.Scope == original.Scope &&
                 retained.Generation == original.Generation && retained.Cookie == original.Cookie);
-            Check(State(await List(f.Owner)) == "saved" && f.Store.Writes == 1 && f.Store.Document().ToJsonString() == document);
+            Check(State(await List(f.Owner)) == "saved" && f.Store.AccountRevision == 1 && f.Store.Document().ToJsonString() == document);
             // Start retires the old operation/lease; an ordinary failure adds no authentication revocation.
             Check(events == before + 1);
         }
@@ -600,7 +561,7 @@ public static class MusicNativeAccountTests
             var retained = await f.Owner.AcquireAsync("wy");
             Check(retained is not null && f.Owner.IsCurrent(retained) && retained.Scope == original.Scope &&
                 retained.Generation == original.Generation && retained.Cookie == original.Cookie);
-            Check(State(await List(f.Owner)) == "saved" && f.Store.Writes == 1 && f.Store.Document().ToJsonString() == document);
+            Check(State(await List(f.Owner)) == "saved" && f.Store.AccountRevision == 1 && f.Store.Document().ToJsonString() == document);
         }
         await f.Runtime.Client.DrainAsync();
         Check(f.Runtime.Calls.Where(call => call.Method == "music.platform.session.update")

@@ -1292,7 +1292,7 @@ public static partial class PlaybackRecoveryTests
                 await Until(() => f.App.HistoryWrites == 1, "mixed preload first occurrence");
                 int discoveries = f.App.Discoveries;
                 if (scriptWins)
-                    await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
+                    await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null,
                         "current script completes its bounded file producer before jumping to the final twenty seconds");
                 int beforePreload = f.Origin.Requests.Count;
                 f.Output.SetPosition(105);
@@ -1628,11 +1628,11 @@ public static partial class PlaybackRecoveryTests
             await using var f = await ControlledMusicFixture.Create(playbackCache: true, official: false,
                 scripts: [new(id, quality: "flac")], qualityRequest: "flac");
             await f.Play(); await CompletedHistory(f);
-            var snapshot = await f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace);
+            var snapshot = await f.CacheStore.ReadAudioIndexAsync();
             var index = JsonNode.Parse(snapshot.Data!)!.AsObject();
             index["entries"] = "unusable";
             var raw = Encoding.UTF8.GetBytes(index.ToJsonString());
-            await f.CacheStore.WriteAsync(MusicAudioFileCache.Namespace, raw, snapshot.Fingerprint);
+            await f.Store.Inner.SeedAudioIndexAsync(JsonNode.Parse(raw)!.AsObject());
             int resolves = f.App.Resolutions.Count;
             f.Output.Plan(startBeforeCompletion: true);
             f.Output.Fail(PlaybackError.HttpUnauthorized);
@@ -1682,7 +1682,7 @@ public static partial class PlaybackRecoveryTests
                 await using var f = await ControlledMusicFixture.Create(playbackCache: true, official: false,
                     scripts: [new(a, quality: "flac"), new(b)], qualityRequest: "flac");
                 await f.Play(); await CompletedHistory(f);
-                var saved = await f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace);
+                var saved = await f.CacheStore.ReadAudioIndexAsync();
                 string file = JsonNode.Parse(saved.Data!)!["entries"]!.AsObject().Single().Value!["file"]!.GetValue<string>();
                 f.Module.OpenSourceChoices();
                 var chosen = f.Module.SourceChoices.Single(row => row.Provider == a && row.Selectable);
@@ -1744,9 +1744,9 @@ public static partial class PlaybackRecoveryTests
             await f.Play(); await CompletedHistory(f);
             await f.Play();
             Check(f.Output.ReadOpens == 2, "history is the current file input");
-            var snapshot = await f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace);
+            var snapshot = await f.CacheStore.ReadAudioIndexAsync();
             var corrupt = Encoding.UTF8.GetBytes("{");
-            await f.CacheStore.WriteAsync(MusicAudioFileCache.Namespace, corrupt, snapshot.Fingerprint);
+            await f.Store.Inner.SeedAudioIndexAsync(JsonNode.Parse(corrupt)!.AsObject());
             int resolves = f.App.Resolutions.Count;
             f.Output.Plan(startBeforeCompletion: true);
             f.Output.Fail(PlaybackError.ReadFailed);
@@ -1879,7 +1879,7 @@ public static partial class PlaybackRecoveryTests
                 await using var f = await ControlledMusicFixture.Create(playbackCache: true, official: false,
                     scripts: [new("missing-script", quality: "flac")], qualityRequest: "flac");
                 await f.Play();
-                await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
+                await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null,
                     "script file committed");
                 await f.Module.RefreshSourceManagementAsync();
                 var row = f.Module.Sources.Single(row => row.InstallationId == "missing-script");
@@ -1899,7 +1899,7 @@ public static partial class PlaybackRecoveryTests
                 artist = "fixture", album = "", musicInfo = new { songmid = "42" } });
             f.App.CacheableSongId = (await f.App.AdoptSong(song.GetProperty("song"), default)).GetProperty("songId").GetString();
             await f.Play();
-            await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
+            await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null,
                 "official file committed");
             await f.Play();
             Check(f.Output.ReadOpens == 2, "official complete-file history");
@@ -1996,7 +1996,7 @@ public static partial class PlaybackRecoveryTests
             await using var f = await ControlledMusicFixture.Create(playbackCache: true, official: false,
                 scripts: [new("lifecycle-history", quality: "flac")], qualityRequest: "flac");
             await f.Play();
-            await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
+            await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null,
                 "script cache publication");
             await Until(() => f.Module.PlaybackCacheFraction == 1, "file identity publication");
             foreach (var path in Directory.GetFiles(f.CacheRoot!, "*.audio")) await File.WriteAllBytesAsync(path, [1, 2, 3]);
@@ -2041,7 +2041,7 @@ public static partial class PlaybackRecoveryTests
             await using var f = await ControlledMusicFixture.Create(playbackCache: true, official: false,
                 scripts: [new("lifecycle-cleared", quality: "flac"), new("lifecycle-other", quality: "flac")], qualityRequest: "flac");
             await f.Play();
-            await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
+            await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null,
                 "script cache publication");
             await f.Play();
             Check(f.Output.ReadOpens == 2, "history is loaded");
@@ -2099,7 +2099,7 @@ public static partial class PlaybackRecoveryTests
             await using var f = await ControlledMusicFixture.Create(playbackCache: true,
                 scripts: [new("lifecycle-preload", quality: "flac")], qualityRequest: "flac");
             await f.PlayPair();
-            await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
+            await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null,
                 "current script cached");
             await f.Module.PlayQueueSurfaceItemAsync(f.Module.QueueSurfaceRows.First());
             Check(f.Output.ReadOpens == 2, "current song uses persistent history");
@@ -2246,27 +2246,7 @@ public static partial class PlaybackRecoveryTests
         internal readonly string[] Platforms = platforms ?? ["wy"];
         internal long Generation = 7;
     }
-    private sealed class MemoryStore : IDocumentStore
-    {
-        private readonly Dictionary<string, byte[]> data = [];
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            lock (data) return Task.FromResult(data.TryGetValue(ns, out var bytes)
-                ? new DocumentSnapshot(bytes.ToArray(), DocumentFingerprint.FromBytes(bytes)) : new(null, DocumentFingerprint.Missing));
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            lock (data)
-            {
-                var actual = data.TryGetValue(ns, out var old) ? DocumentFingerprint.FromBytes(old) : DocumentFingerprint.Missing;
-                if (actual != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                data[ns] = bytes.ToArray(); return Task.FromResult(DocumentFingerprint.FromBytes(bytes.Span));
-            }
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    private sealed class MemoryStore : NativeTestDatabase {
     }
     private sealed class Dialogs : IMusicDialogs
     {
@@ -2278,7 +2258,7 @@ public static partial class PlaybackRecoveryTests
         internal readonly Origin Origin = WaveOrigin();
         internal readonly MemoryStore Store = new();
         internal readonly MemoryStore CacheBacking = new();
-        internal readonly CacheDocumentStore CacheStore;
+        internal readonly NativeTestDatabase CacheStore;
         internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly NativeAudioPlayback Native;
         internal readonly MusicApp App;
@@ -2292,9 +2272,9 @@ public static partial class PlaybackRecoveryTests
                 ? new Reply([]) { Status = 401 } : new Reply(bytes, "audio/wav");
             Native = new(audioOutput: NativeAudioOutput.Dummy);
             ScriptSource[] sources = [new("fixture-source", enabled: !official, platforms: platforms)];
-            App = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime, CacheStore), Origin, expiry, official, sources);
+            App = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime), Origin, expiry, official, sources);
             Runtime.OnRequest = App.ReadPlatform;
-            Module = new(App, Store, Native, new Dialogs(), cacheStore: CacheStore);
+            Module = new(App, Store, Native, new Dialogs());
         }
         internal static async Task<MusicFixture> Create(bool firstFails = false, bool bothFail = false, bool expiry = false, bool official = false,
             string[]? platforms = null)
@@ -2341,7 +2321,7 @@ public static partial class PlaybackRecoveryTests
                 album = "", musicInfo = new { songmid = "42" } });
             f.App.CacheableSongId = (await f.App.AdoptSong(song.GetProperty("song"), default)).GetProperty("songId").GetString();
             await f.Play();
-            await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null, "official file");
+            await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null, "official file");
             await f.Play();
             Check(f.Output.ReadOpens == 2, "second occurrence is a complete official file");
             f.Module.OpenSourceChoices();
@@ -2402,7 +2382,7 @@ public static partial class PlaybackRecoveryTests
                 await using var f = await ControlledMusicFixture.Create(playbackCache: true, official: false,
                     scripts: [new(id, quality: "flac")], qualityRequest: "flac");
                 await f.Play();
-                await Until(() => f.CacheStore.ReadAsync(MusicAudioFileCache.Namespace).GetAwaiter().GetResult().Data is not null,
+                await Until(() => f.CacheStore.ReadAudioIndexAsync().GetAwaiter().GetResult().Data is not null,
                     "played script file committed");
                 string songId = f.App.Resolutions[0].GetProperty("song").GetProperty("songId").GetString()!;
                 Check((await f.Cache!.ReadScriptHistoryAsync(songId, default)).Length == 1, f.Module.Status);
@@ -2413,14 +2393,14 @@ public static partial class PlaybackRecoveryTests
                 Check(f.Output.HasMedia && f.Output.IsPlaying, "source management never retires a valid historical input");
                 await f.Module.DisposeAsync();
                 await f.CacheStore.DrainAsync();
-                await using var restartedCache = new CacheDocumentStore(f.CacheBacking);
+                await using var restartedCache = new NativeTestDatabase(f.CacheBacking);
                 await using var restartedRuntime = new MusicPlatformRuntimeFixture();
-                var app = new MusicApp(new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), restartedRuntime, restartedCache), f.Origin,
+                var app = new MusicApp(new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), restartedRuntime), f.Origin,
                     expiry: false, official: false, sources: []) { QualityRequest = "flac" };
                 restartedRuntime.OnRequest = app.ReadPlatform;
                 var output = new ControlledPlayback();
                 var cache = new MusicAudioFileCache(f.CacheRoot!, restartedCache);
-                await using (var module = new MusicCapability(app, f.Store, output, cache, new Dialogs(), cacheStore: restartedCache))
+                await using (var module = new MusicCapability(app, f.Store, output, cache, new Dialogs()))
                 {
                     await app.InitializeAsync(); await module.InitializeAsync(default);
                     await module.PlayOnlineSongAsync("wy", "合成歌曲", "fixture", "", Element(new { songmid = "42" }));
@@ -2692,7 +2672,7 @@ public static partial class PlaybackRecoveryTests
         internal readonly Origin Origin = WaveOrigin();
         internal readonly MemoryStore Store = new();
         internal readonly MemoryStore CacheBacking = new();
-        internal readonly CacheDocumentStore CacheStore;
+        internal readonly NativeTestDatabase CacheStore;
         internal readonly MusicPlatformRuntimeFixture Runtime = new();
         internal readonly ControlledPlayback Output = new();
         internal readonly MusicApp App;
@@ -2714,7 +2694,7 @@ public static partial class PlaybackRecoveryTests
         {
             CacheStore = new(CacheBacking);
             Origin.RequireAuthorization = false;
-            App = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime, CacheStore), Origin,
+            App = new(new MusicNativeApplication(Store, MusicTestStores.For(Store), Runtime), Origin,
                 expiry: false, official, sources)
             {
                 QualityRequest = qualityRequest,
@@ -2730,9 +2710,9 @@ public static partial class PlaybackRecoveryTests
                 Directory.CreateDirectory(CacheRoot);
                 Cache = new(CacheRoot, CacheStore, Validate,
                     httpOptions: new NativeHttpMediaOptions());
-                Module = new(App, Store, Output, Cache, new Dialogs(), cacheStore: CacheStore);
+                Module = new(App, Store, Output, Cache, new Dialogs());
             }
-            else Module = new(App, Store, Output, new Dialogs(), cacheStore: CacheStore);
+            else Module = new(App, Store, Output, new Dialogs());
         }
         internal static async Task<ControlledMusicFixture> Create(bool playbackCache = false,
             bool official = true, ScriptSource[]? scripts = null, string qualityRequest = "320k",

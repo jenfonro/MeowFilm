@@ -248,8 +248,7 @@ public static partial class FilmPlayerOverlayTests
         internal readonly FilmCapability Film;
         internal readonly MusicCapability Music;
         private readonly NativeAudioPlayback audio = new();
-        private readonly QualityFixture.DocumentStore store = new(), cacheBacking = new();
-        private readonly CacheDocumentStore cache;
+        private readonly NativeTestDatabase store = new();
         private readonly NativeMusicScriptTestRuntime musicRuntime = new();
         private readonly MusicNativeApplication musicApplication;
         private readonly AppClosePreferences closePreferences;
@@ -270,9 +269,8 @@ public static partial class FilmPlayerOverlayTests
             Fixture = fixture; Media = new(new FilmNativeMedia(fixture.Native));
             Session = new(async token => (await fixture.Runtime.CaptureConnectionAsync(token)) with { Client = fixture.Traffic }, Media);
             Film = new(new EmptyHome(), Session, new FilmLibrary(new FilmMemoryStore()));
-            cache = new(cacheBacking);
-            musicApplication = new(store, MusicTestStores.For(store), musicRuntime, cache);
-            Music = new(musicApplication, store, audio, cacheStore: cache);
+            musicApplication = new(store, MusicTestStores.For(store), musicRuntime);
+            Music = new(musicApplication, store, audio);
             closePreferences = new(store);
         }
         internal static async Task<NativeShellScene> Create()
@@ -377,8 +375,7 @@ public static partial class FilmPlayerOverlayTests
                 finally
                 {
                     await audio.DisposeAsync(); await musicRuntime.DisposeAsync();
-                    await closePreferences.DisposeAsync(); await cache.DisposeAsync();
-                    await cacheBacking.DisposeAsync(); await store.DisposeAsync();
+                    await closePreferences.DisposeAsync(); await store.DisposeAsync();
                 }
             }
         }

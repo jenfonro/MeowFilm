@@ -70,7 +70,7 @@ public static class MusicManualSourcePolicyTests
     }
     private static async Task OfficialAdmission()
     {
-        await using var store = new QualityFixture.DocumentStore();
+        await using var store = new QualityFixture.Database();
         var runtime = new QualityFixture.ScriptRuntime();
         int calls = 0;
         runtime.Platform.OnRequest = (call, _) =>

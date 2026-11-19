@@ -11,15 +11,12 @@ import { parseIOSConfiguration } from '../apps/ios/runtime/bootstrap.mjs';
 import { createTMDBDataModule } from '../apps/runtime/modules/metadata-data.mjs';
 import { defaultPreferences } from '../packages/film-playback/src/policy.js';
 import { deferred, rawRequest } from '../packages/runtime-bridge/test/http-fixture.js';
+import { withTestDatabase } from './storage-test-fixture.mjs';
 import { connect, okay, root, simulatedIOS, spawnRuntime } from './ios-runtime-support.mjs';
 
 const blocks = ['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences'];
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-const fingerprint = document => {
-  const bytes = document === null ? null : Buffer.from(stringifyJSONValue(document));
-  return { exists: bytes !== null, length: bytes?.length ?? 0, sha256: bytes === null ? null : hash(bytes) };
-};
-const result = (id, document) => ({ kind: 'settings.result', id, ok: true, document, fingerprint: fingerprint(document) });
+const result = (id, document, revision = 1) => ({ kind: 'settings.result', id, ok: true, document, revision });
 const line = value => Buffer.from(stringifyJSONValue(value, -2) + '\n');
 const rules = () => ({ episodeCleanRegexRules: [], episodeRules: [], movieRules: [], aggregateRegexRules: [] });
 const tmdb = language => ({ version: 1, settings: { apiBase: 'https://api.themoviedb.org/3',
@@ -32,7 +29,7 @@ function pipe(t) {
     write(bytes, complete) { requests.push(parseJSONText(bytes.toString())); complete(); },
   }, code => stopped.push(code));
   t.after(() => settings.close());
-  return { settings, requests, stopped, respond(id, document) { settings.accept(line(result(id, document))); } };
+  return { settings, requests, stopped, respond(id, document, revision) { settings.accept(line(result(id, document, revision))); } };
 }
 
 test('native settings configuration is opt-in and never accepts alternative owners or extra configuration fields', () => {
@@ -62,49 +59,45 @@ test('private settings cold-read every registered block and detach all returned 
     assert.equal(f.settings.read(block).test.block, block);
   }
   await assert.rejects(f.settings.reload('unknown'), { code: 'INVALID_REQUEST' });
-  assert.throws(() => f.settings.document('tmdb'), { code: 'INVALID_REQUEST' });
-  await assert.rejects(f.settings.write('tmdb', {}, fingerprint(null)), { code: 'INVALID_REQUEST' });
+  assert.throws(() => f.settings.read('unknown'), { code: 'INVALID_REQUEST' });
+  await assert.rejects(f.settings.update('tmdb', {}), { code: 'INVALID_REQUEST' });
   assert.equal(f.requests.length, blocks.length);
 });
 
-test('private pan writes use the observed fingerprint and rejected CAS never publishes a speculative snapshot', async t => {
+test('private pan updates use provider revisions and rejected CAS never publishes a speculative snapshot', async t => {
   const f = pipe(t), initial = { version: 1, accounts: {} }, read = f.settings.reload('pan.accounts');
   f.respond(1, initial); await read;
-  const store = f.settings.document('pan.accounts'), next = { version: 1, accounts: {
-    baidu: { revision: 1, credentials: { cookie: 'synthetic-private-cas' } },
-  } };
-  const writing = store.write(next);
-  assert.deepEqual(f.requests[1], { kind: 'settings.write', id: 2, block: 'pan.accounts',
-    document: next, expected: fingerprint(initial) });
+  const store = f.settings.accounts('pan.accounts'), command = { provider: 'baidu', mode: 'replace',
+    accountRevision: 0, rowRevision: 0, credentials: { cookie: 'synthetic-private-cas' } };
+  const next = { version: 1, accounts: { baidu: { revision: 1, rowRevision: 1,
+    credentials: { cookie: 'synthetic-private-cas' } } } };
+  const writing = store.update(command);
+  assert.deepEqual(f.requests[1], { kind: 'settings.pan.update', id: 2, block: 'pan.accounts', command });
   const rejected = assert.rejects(writing, { code: 'STORAGE_CONFLICT' });
   f.settings.accept(line({ kind: 'settings.result', id: 2, ok: false, code: 'STORAGE_CONFLICT' }));
   await rejected;
   assert.deepEqual(store.read(), initial);
-  assert.deepEqual(f.settings.read('pan.accounts'), initial);
-  const accepted = store.write(next);
-  f.respond(3, next); await accepted;
+  const accepted = store.update(command);
+  f.respond(3, next, 2); await accepted;
   assert.deepEqual(store.read(), next);
   assert.deepEqual(f.settings.read('pan.accounts'), next);
   const reload = store.reload(), reloaded = { version: 1, accounts: {} };
-  f.respond(4, reloaded); await reload;
-  const last = store.write(next);
-  assert.deepEqual(f.requests[4].expected, fingerprint(reloaded));
-  f.respond(5, next); await last;
+  f.respond(4, reloaded, 3); await reload;
+  assert.deepEqual(store.read(), reloaded);
   store.close();
   assert.throws(() => store.read(), { code: 'CLOSED' });
-  await assert.rejects(store.write(next), { code: 'CLOSED' });
+  await assert.rejects(store.update(command), { code: 'CLOSED' });
 });
 
-test('private settings consume the reply fields without rejecting or changing unused JSON material', async t => {
+test('private settings preserve typed row snapshots and ignore unused reply envelope fields', async t => {
   const f = pipe(t);
   const document = parseJSONText('{"version":1,"accounts":{},"extension":9007199254740993,"é":1,"é":2}');
   const pending = f.settings.reload('pan.accounts');
   const reply = result(1, document);
   reply.extension = 'unused';
-  reply.fingerprint.extension = 1;
   f.settings.accept(line(reply));
   await pending;
-  const copy = f.settings.document('pan.accounts').read();
+  const copy = f.settings.read('pan.accounts');
   assert.equal(stringifyJSONValue(copy), stringifyJSONValue(document));
   const failure = assert.rejects(f.settings.reload('tmdb'), { code: 'STORAGE_ERROR' });
   f.settings.accept(line({ kind: 'settings.result', id: 2, ok: false, code: 'STORAGE_ERROR', extension: true }));
@@ -119,12 +112,15 @@ test('private settings control frames do not consume the document depth budget',
   const document = { nested }, pending = f.settings.reload('pan.accounts');
   f.respond(1, document);
   assert.deepEqual(await pending, document);
-  const store = f.settings.document('pan.accounts');
+  const store = f.settings.accounts('pan.accounts');
   assert.deepEqual(store.read(), document);
-  const written = store.write(document);
-  assert.deepEqual(f.requests[1].document, document);
-  f.respond(2, document);
-  assert.deepEqual(await written, document);
+  const written = store.update({ provider: 'quark', mode: 'replace', accountRevision: 0,
+    rowRevision: 0, credentials: { cookie: 'synthetic-value' } });
+  assert.equal(f.requests[1].kind, 'settings.pan.update');
+  assert.deepEqual(f.requests[1].command.credentials, { cookie: 'synthetic-value' });
+  f.respond(2, { version: 1, accounts: { quark: { revision: 1, rowRevision: 1,
+    credentials: { cookie: 'synthetic-value' } } } }, 2);
+  await written;
   store.close();
   assert.deepEqual(f.stopped, []);
 });
@@ -134,8 +130,8 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
     for (const reply of [
       { ...result(1, null), id: 99 },
       { ...result(1, null), document: [] },
-      { ...result(1, null), fingerprint: { exists: false, length: 1, sha256: null } },
-      { ...result(1, null), fingerprint: { exists: true, length: 1, sha256: 'not-a-digest' } },
+      { ...result(1, null), revision: -1 },
+      { ...result(1, null), revision: 1.5 },
       { kind: 'settings.result', id: 1, ok: false, code: 'private-error-message' },
       Buffer.from([0xff, 10]),
     ]) await t.test(Buffer.isBuffer(reply) ? `bytes-${reply.length}` : JSON.stringify(reply), async sub => {
@@ -153,15 +149,10 @@ test('private frames accept multiple replies, large documents and release pendin
   f.settings.accept(Buffer.concat([line(result(1, null)), line(result(2, { version: 1 }))]));
   assert.equal(await a, null);
   assert.deepEqual(await b, { version: 1 });
-  const document = { large: 'x'.repeat(8 * 1024 * 1024 + 1) };
-  const written = f.settings.write('pan.accounts', document, fingerprint(null));
-  assert.deepEqual(f.requests[2].document, document);
-  const reply = line(result(3, document));
-  f.settings.accept(reply.subarray(0, 8 * 1024 * 1024));
-  f.settings.accept(reply.subarray(8 * 1024 * 1024));
-  assert.deepEqual((await written).document, document);
-  assert.deepEqual(f.settings.read('pan.accounts'), document);
-  assert.equal(f.requests.length, 3);
+  await assert.rejects(f.settings.update('pan.accounts', { provider: 'quark', mode: 'replace',
+    accountRevision: 0, rowRevision: 0, credentials: { cookie: 'x'.repeat(nativeSettingsFrameBytes) } }),
+    { code: 'INVALID_REQUEST' });
+  assert.equal(f.requests.length, 2);
   const waiting = assert.rejects(f.settings.reload('cat.sources'), { code: 'CLOSED' });
   f.settings.close();
   await waiting;
@@ -192,13 +183,18 @@ function nativeRuntime(t, { documents = {}, preload = simulatedIOS, intercept, c
       if (intercepted !== undefined) return intercepted;
       assert.ok(blocks.includes(request.block));
       assert.ok(Number.isSafeInteger(request.id) && request.id > 0);
-      if (request.kind === 'settings.write') {
+      if (request.kind === 'settings.pan.update') {
         assert.equal(request.block, 'pan.accounts');
-        assert.deepEqual(Object.keys(request).sort(), ['block', 'document', 'expected', 'id', 'kind']);
-        if (JSON.stringify(request.expected) !== JSON.stringify(fingerprint(saved.get(request.block)))) {
+        assert.deepEqual(Object.keys(request).sort(), ['block', 'command', 'id', 'kind']);
+        const { provider, mode, accountRevision, rowRevision, credentials } = request.command;
+        const current = saved.get(request.block) ?? { version: 1, accounts: {} };
+        const account = current.accounts[provider] ?? { revision: 0, rowRevision: 0, credentials: {} };
+        if (account.revision !== accountRevision || (account.rowRevision ?? 0) !== rowRevision) {
           return { kind: 'settings.result', id: request.id, ok: false, code: 'STORAGE_CONFLICT' };
         }
-        saved.set(request.block, structuredClone(request.document));
+        saved.set(request.block, { version: 1, accounts: { ...current.accounts, [provider]: {
+          revision: accountRevision + (mode === 'replace' ? 1 : 0), rowRevision: rowRevision + 1, credentials,
+        } } });
         writes.push(request);
       } else {
         assert.equal(request.kind, 'settings.read');
@@ -242,7 +238,8 @@ test('real iOS bootstrap cold-reads all native blocks, applies notifications and
   { timeout: 30000 }, async t => {
     const first = nativeRuntime(t, { documents: {
       tmdb: tmdb('zh-CN'), douban: { version: 1, settings: { cookie: 'synthetic-native-cookie' } },
-      'pan.accounts': { version: 1, accounts: { baidu: { revision: 4, credentials: { cookie: 'synthetic-pan-cookie' } } } },
+      'pan.accounts': { version: 1, accounts: { baidu: { revision: 4, rowRevision: 1,
+        credentials: { cookie: 'synthetic-pan-cookie' } } } },
       'film.rules': { version: 1, rules: rules() },
       'film.preferences': { version: 1, preferences: { ...defaultPreferences(), keywords: ['native-first'] } },
     } });
@@ -275,7 +272,7 @@ test('real iOS bootstrap cold-reads all native blocks, applies notifications and
     first.saved.set('douban', { version: 1, settings: { cookie: 'synthetic-changed-cookie' } });
     first.saved.set('film.rules', { version: 1, rules: { ...rules(), aggregateRegexRules: ['native-latest'] } });
     first.saved.set('film.preferences', { version: 1, preferences: { ...defaultPreferences(), keywords: ['native-latest'] } });
-    first.saved.set('pan.accounts', { version: 1, accounts: { baidu: { revision: 5, credentials: {} } } });
+    first.saved.set('pan.accounts', { version: 1, accounts: { baidu: { revision: 5, rowRevision: 2, credentials: {} } } });
     for (const block of blocks.filter(block => block !== 'cat.sources'))
       assert.deepEqual(await notify(first, block), { ok: true, contract: 'runtime.http.v1', value: { notified: true } });
     assert.equal(okay(await client.call('tmdb.data.settings.get'), 'tmdb.data.v1').language, 'en-US');
@@ -337,11 +334,13 @@ test('real iOS private Cat input notifications download replacements and isolate
     release.resolve();
     const current = await catState(client, 4);
     assert.deepEqual(okay(await home(current), 'cat.script.v2'), { nativeValue: 'latest-local' });
-    const facts = JSON.parse(readFileSync(join(runtime.configuration.dataRoot, 'cat/settings.json'), 'utf8'));
-    assert.equal(facts.version, 2);
-    assert.equal(facts.scripts[0].loadedIdentity, `local:4:${hash(latest)}`);
-    for (const field of ['name', 'sourceType', 'sourceUrl', 'enabled', 'localPath', 'localHash', 'inputRevision'])
-      assert.equal(Object.hasOwn(facts.scripts[0], field), false, field);
+    await withTestDatabase(runtime.configuration.dataRoot, async database => {
+      const [facts] = await database.query(
+        "SELECT loaded_identity, input_revision FROM cat_installations WHERE mode='native' AND installation_id=?",
+        ['native-cat']);
+      assert.equal(facts.loaded_identity, `local:4:${hash(latest)}`);
+      assert.equal(facts.input_revision, null, 'native source intent remains owned by the native repository');
+    });
     assert.equal(existsSync(join(runtime.configuration.dataRoot, 'cat/sources', hash(catSource('late-network')) + '.js')), false);
     await stop(runtime, client);
   });
@@ -402,7 +401,7 @@ test('real iOS private pan refresh CAS commits only native storage and a stale r
     server.listen(0, '127.0.0.1'); await once(server, 'listening');
     t.after(async () => { release.resolve(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
     const runtime = nativeRuntime(t, { documents: { 'pan.accounts': { version: 1, accounts: {
-      quark: { revision: 1, credentials: { cookie: 'session=synthetic-initial' } },
+      quark: { revision: 1, rowRevision: 1, credentials: { cookie: 'session=synthetic-initial' } },
     } } }, preload: `${simulatedIOS}
       import assert from 'node:assert/strict';
       import http from 'node:http';
@@ -427,8 +426,8 @@ test('real iOS private pan refresh CAS commits only native storage and a stale r
     const refreshing = client.call('pan.refresh', { provider: 'quark' });
     await entered.promise;
     const latest = { version: 1, accounts: {
-      quark: { revision: 2, credentials: { cookie: 'session=synthetic-native-later' } },
-      baidu: { revision: 1, credentials: { cookie: 'synthetic-unrelated-native' } },
+      quark: { revision: 2, rowRevision: 3, credentials: { cookie: 'session=synthetic-native-later' } },
+      baidu: { revision: 1, rowRevision: 1, credentials: { cookie: 'synthetic-unrelated-native' } },
     } };
     runtime.saved.set('pan.accounts', latest);
     release.resolve();
@@ -440,7 +439,7 @@ test('real iOS private pan refresh CAS commits only native storage and a stale r
     assert.equal(accounts.accounts.find(account => account.provider === 'baidu').revision, 1);
     assert.equal(accounts.accounts.find(account => account.provider === 'quark').revision, 2);
     assert.equal(JSON.stringify(accounts).includes('synthetic-'), false);
-    assert.equal(runtime.requests.filter(request => request.kind === 'settings.write').length, 2);
+    assert.equal(runtime.requests.filter(request => request.kind === 'settings.pan.update').length, 2);
     await stop(runtime, client);
   });
 

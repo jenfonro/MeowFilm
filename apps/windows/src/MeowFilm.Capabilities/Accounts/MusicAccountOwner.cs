@@ -17,9 +17,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
 {
     public const string DocumentNamespace = "music.accounts.v2";
     public const string Version = "1.3.0";
-    private readonly IDocumentStore store;
-    private readonly CacheDocumentStore detailsCacheStore;
-    private readonly bool ownsDetailsCacheStore;
+    private readonly MusicAccountRepository store;
+    private readonly IStorageDatabase database;
     public const string DetailsCacheNamespace = "music.account-details.v2";
     private readonly IMusicAccountProtocol protocol;
     private readonly TimeProvider clock;
@@ -35,15 +34,12 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     /// <summary>Synchronous invalidation only; subscriber errors cannot change a committed result.</summary>
     public event Action<string>? SessionChanged;
 
-    internal MusicAccountOwner(IDocumentStore store, IMusicAccountProtocol protocol, TimeProvider? clock = null,
-        IDocumentStore? detailsCacheStore = null)
+    internal MusicAccountOwner(IStorageDatabase database, IMusicAccountProtocol protocol, TimeProvider? clock = null)
     {
-        this.store = store ?? throw new ArgumentNullException(nameof(store));
+        store = new(database ?? throw new ArgumentNullException(nameof(database)));
         this.protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
         this.clock = clock ?? TimeProvider.System;
-        this.detailsCacheStore = detailsCacheStore as CacheDocumentStore ??
-            (detailsCacheStore is null ? new CacheDocumentStore() : new CacheDocumentStore(detailsCacheStore));
-        ownsDetailsCacheStore = detailsCacheStore is not CacheDocumentStore;
+        this.database = database;
     }
     private sealed class State
     {
@@ -187,10 +183,10 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             finally { Leave(isPhysical: true); }
         }
     }
-    private async Task<AccountDocument> ReadDocument(CancellationToken token) =>
-        AccountDocument.Decode(await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false));
+    private async Task<AccountDocument> ReadDocument(CancellationToken token, string? platform = null) =>
+        AccountDocument.Decode(await store.ReadAsync(platform, token).ConfigureAwait(false));
     private Task<StoredAccount> Load(string platform, CancellationToken token) =>
-        DiskAsync(async () => (await ReadDocument(token).ConfigureAwait(false)).Get(platform), token);
+        DiskAsync(async () => (await ReadDocument(token, platform).ConfigureAwait(false)).Get(platform), token);
 
     /// <summary>Same safe JSON command shapes as the UI, executed entirely in native code.</summary>
     public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
@@ -337,7 +333,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         {
             Guard(op);
             writeToken.ThrowIfCancellationRequested();
-            var document = await ReadDocument(writeToken).ConfigureAwait(false);
+            var document = await ReadDocument(writeToken, op.Platform).ConfigureAwait(false);
             Guard(op);
             byte[] bytes = document.Replace(op.Platform, before, next);
             try
@@ -349,11 +345,11 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                     states[op.Platform].Uncertain = true;
                     op.Admitted = true;
                 }
-                DocumentFingerprint actual;
+                StorageRevision actual;
                 try
                 {
-                    actual = await store.WriteAsync(DocumentNamespace, bytes, document.Fingerprint, writeToken).ConfigureAwait(false);
-                    AccountRules.Require(actual == DocumentFingerprint.FromBytes(bytes), "COMMIT_UNKNOWN");
+                    actual = await store.WriteAsync(bytes, document.Revision, writeToken).ConfigureAwait(false);
+                    AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
                 }
                 catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
                 {
@@ -600,9 +596,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     private async Task DisposeCore()
     {
         await PrepareCloseAsync().ConfigureAwait(false);
-        if (ownsDetailsCacheStore) await detailsCacheStore.DisposeAsync().ConfigureAwait(false);
         await protocol.DisposeAsync().ConfigureAwait(false);
         transferLifetime.Dispose();
-        // The App owns the shared DPAPI store and disposes it only after every owner drained.
+        // The App closes the shared database only after every owner has drained.
     }
 }

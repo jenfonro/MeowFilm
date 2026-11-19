@@ -25,9 +25,8 @@ MusicFeedbackController
 它借用 App 提供的：
 
 ```text
-IDocumentStore
+NativeDatabase
 IMusicLibraryStore
-CacheDocumentStore
 IRuntimeClient
 播放内核
 ```
@@ -54,7 +53,7 @@ public interface IMusicApplication : IAsyncDisposable
 }
 ```
 
-`MusicCapability` 拥有 application；App 仍拥有业务 document store、`MusicLibraryDatabase`、独立缓存 store、runtime 和 playback。歌曲数据库在首次准入时打开，与 document store 不双写。缓存 store 惰性创建，歌词展示、账号展示、来源候选、自动匹配、首页与音频索引不与业务文档共用根锁或写入队列；成功业务结果只发布缓存内存快照，异步落盘由缓存 owner 排队并在关闭时实际排空。
+`MusicCapability` 拥有 application；App 持有唯一 `NativeDatabase`、runtime 和 playback。音乐歌曲、账号、缓存索引与业务数据按 owner 分表/分关系存储，不建立第二文档数据库或独立缓存根；异步资源 I/O 由对应资源 owner 管理，关闭时等待已受理操作排空。
 
 ## 当前路由
 
@@ -116,8 +115,8 @@ public interface IMusicApplication : IAsyncDisposable
 ## 数据格式
 
 - 当前 App 保持现有 `aggregate` 数据身份。
-- App 通过 `LocalDocumentStore` 的精确命名空间配置，仅对当前 `music.accounts.v2` 使用 DPAPI；匿名平台状态归 Node 私有文档。
-- 曲库、偏好和缓存等普通本地文档直接保存 JSON 字节；存储提供当前文件指纹、原子写入、CAS 与文件隔离。开发阶段不迁移旧普通加密文档，也不自动清理旧数据。
+- 音乐账号、匿名协议身份、歌曲库、队列与缓存索引使用共享 SQLite 中各自 owner 的 typed relations；凭据明文保存，不使用 DPAPI。
+- 曲库、偏好和结构化缓存保存为 typed rows 与有序子关系，事务及 revision CAS 保护并发提交；不保存内部 JSON 文档，不探测、迁移或清理旧数据。
 - 脚本自行保存的 Cookie 等运行产物不由运行器特殊加密；运行器继续提供文件与实例隔离。
 - 每个原生 owner 只支持唯一当前格式。
 - 全新空数据及当前格式正常重载遵循[共同歌曲仓库](../common/music/smart-playback.md)；不读取、识别、迁移或清理历史 namespace。

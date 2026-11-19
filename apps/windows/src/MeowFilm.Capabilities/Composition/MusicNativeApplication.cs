@@ -62,8 +62,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private readonly MusicScriptOwner scripts;
     private readonly MusicLyricApplication lyrics;
     private readonly CatalogSessions sessions;
-    private readonly CacheDocumentStore cacheStore;
-    private readonly bool ownsCacheStore;
+    private readonly IStorageDatabase database;
     internal PlaybackCache.MusicPresentationCache PresentationCache => library.PresentationCache;
     internal Task ArtworkLoadCompletedAsync(string address, bool succeeded) =>
         library.ArtworkLoadCompletedAsync(address, succeeded);
@@ -81,34 +80,31 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private bool stopping, closed, accountReceiptUnknown;
     private long accountReceiptEpoch;
 
-    public MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime)
-        : this(store, libraryStore, scriptRuntime, feedbackFactory: null, discoveryFactory: null) { }
-
-    public MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime,
-        CacheDocumentStore cacheStore, string? presentationCacheRoot = null)
-        : this(store, libraryStore, scriptRuntime, null, null, cacheStore: cacheStore, presentationCacheRoot: presentationCacheRoot) { }
+    public MusicNativeApplication(IStorageDatabase store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime)
+        : this(store, libraryStore, scriptRuntime, null, null) { }
 
     // Native lifecycle tests substitute ports, not platform HTTP implementations.
-    internal MusicNativeApplication(IDocumentStore store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime,
+    internal MusicNativeApplication(IStorageDatabase store, IMusicLibraryStore libraryStore, IRuntimeClient scriptRuntime,
         Func<IMusicPlatformSessionSource, IMusicFeedbackProtocol>? feedbackFactory,
         Func<IMusicPlatformSessionSource, IMusicSearchDiscovery>? discoveryFactory,
-        TimeProvider? searchClock = null, CacheDocumentStore? cacheStore = null, string? presentationCacheRoot = null)
+        TimeProvider? searchClock = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(libraryStore);
         ArgumentNullException.ThrowIfNull(scriptRuntime);
-        this.cacheStore = cacheStore ?? new CacheDocumentStore();
-        ownsCacheStore = cacheStore is null;
+        database = store;
+        if (libraryStore is MusicLibraryDatabase nativeStore && !ReferenceEquals(nativeStore.Database, store))
+            throw new ArgumentException("SHARED_DATABASE_REQUIRED", nameof(libraryStore));
         platform = new(scriptRuntime);
-        library = new(libraryStore, cacheStore: this.cacheStore, presentationCacheRoot: presentationCacheRoot);
-        accounts = new(store, new MusicAccountProtocol(platform), detailsCacheStore: this.cacheStore);
+        library = new(libraryStore, database: store);
+        accounts = new(store, new MusicAccountProtocol(platform));
         vipPage = new(accounts, new MusicVipPageProtocol(platform));
         officialAudio = new(platform);
-        sourceCache = new(this.cacheStore);
+        sourceCache = new(store);
         sessions = new(accounts);
         platform.BindSessions(sessions);
         catalog = new(platform, sessions);
-        songMatcher = new(library, new(this.cacheStore), SearchCatalogAsync, searchClock);
+        songMatcher = new(library, new(store), SearchCatalogAsync, searchClock);
         nativeCatalog = new(catalog, library)
         {
             SearchSongs = SearchAndObserveCatalogAsync
@@ -362,7 +358,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         await Attempt(() => scripts.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => library.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(platform.DrainAsync).ConfigureAwait(false);
-        await Attempt(cacheStore.DrainAsync).ConfigureAwait(false);
+        await Attempt(database.DrainAsync).ConfigureAwait(false);
         // The account port may have returned an unknown receipt while its physical
         // CAS is still running. Without an explicit list/reconciliation, preparation
         // must fail rather than authorize the capability to dispose the shared App store.
@@ -511,8 +507,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         try { catalog.Dispose(); } catch (Exception e) { failure ??= e; }
         await Attempt(catalog.DrainAsync).ConfigureAwait(false);
         await Attempt(() => platform.DisposeAsync().AsTask()).ConfigureAwait(false);
-        await Attempt(cacheStore.DrainAsync).ConfigureAwait(false);
-        if (ownsCacheStore) await Attempt(() => cacheStore.DisposeAsync().AsTask()).ConfigureAwait(false);
+        await Attempt(database.DrainAsync).ConfigureAwait(false);
         try { recommendationLifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         try { lifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         searchPolicyLane.Dispose();

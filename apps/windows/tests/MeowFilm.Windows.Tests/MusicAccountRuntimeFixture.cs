@@ -27,7 +27,7 @@ internal sealed class MusicAccountRuntimeFixture : IAsyncDisposable
     {
         Platform = platform; Root = root ?? TestWorkspace.DataPath("account-runtime", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Root);
-        Store = new(new LocalDocumentStore(Root, [MusicAccountOwner.DocumentNamespace], protectedNamespaces: [MusicAccountOwner.DocumentNamespace]));
+        Store = new(new NativeDatabase(Root));
         Runtime.OnRequest = Respond;
         Owner = Runtime.CreateAccountOwner(Store);
     }
@@ -107,23 +107,24 @@ internal sealed class MusicAccountRuntimeFixture : IAsyncDisposable
         Release.TrySetResult(); Store.Release.TrySetResult();
         await Owner.DisposeAsync(); await Runtime.DisposeAsync(); await Store.DisposeAsync();
     }
-    internal sealed class StoreProbe(LocalDocumentStore inner) : IDocumentStore
+    internal sealed class StoreProbe(NativeDatabase inner) : NativeTestDatabase(inner, owns: true)
     {
-        internal int Writes, Disposals;
         internal bool HoldWrite, LoseReceipt, Conflict, FailRead;
         internal readonly TaskCompletionSource Entered = Signal(), Release = Signal();
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) => FailRead
-            ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : inner.ReadAsync(ns, token);
-        public async Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default)
+        public override Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) => FailRead
+            ? throw new DocumentStoreException(DocumentStoreError.Unavailable) : base.ReadAsync(read, token);
+        public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
-            Writes++;
-            if (HoldWrite) { Entered.TrySetResult(); await Release.Task; token = CancellationToken.None; }
-            if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            var result = await inner.WriteAsync(ns, data, expected, token);
+            var result = await base.WriteAsync(db =>
+            {
+                if (HoldWrite) { Entered.TrySetResult(); Release.Task.GetAwaiter().GetResult(); }
+                if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                return write(db);
+            }, token, retainedBytes, commit);
             if (LoseReceipt) throw new DocumentStoreException(DocumentStoreError.Storage);
             return result;
         }
-        public async ValueTask DisposeAsync() { Disposals++; await inner.DisposeAsync(); }
     }
     internal static IEnumerable<TestCase> QrCases(string platform, string prefix)
     {

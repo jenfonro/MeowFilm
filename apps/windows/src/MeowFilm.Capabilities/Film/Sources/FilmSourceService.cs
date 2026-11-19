@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -10,7 +11,8 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
 {
     public const string DocumentNamespace = "film.video-sources.v1";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false };
-    private readonly IDocumentStore store;
+    private readonly TypedRecordRepository store;
+    private readonly IStorageDatabase database;
     private readonly CatScriptTransport transport;
     private readonly CatSourceSettings settings;
     private readonly IRuntimeRecovery? recovery;
@@ -21,7 +23,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private readonly TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Dictionary<FilmSourceKey, CancellationTokenSource> probes = [];
     private readonly HashSet<string> changingCats = new(StringComparer.Ordinal);
-    private DocumentFingerprint fingerprint = DocumentFingerprint.Missing;
+    private StorageRevision storageRevision = StorageRevision.Empty;
     private StoredState document = new(1, [], [], []);
     private JsonElement rawDocument;
     private Snapshot snapshot = new([], []);
@@ -31,19 +33,20 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private Task? closing;
     private TaskCompletionSource? preparationDrained;
 
-    public FilmSourceService(IRuntimeClient runtime, IDocumentStore store)
+    public FilmSourceService(IRuntimeClient runtime, IStorageDatabase database)
     {
         ArgumentNullException.ThrowIfNull(runtime);
-        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(database);
         Runtime = runtime;
         transport = new(runtime);
-        settings = new(store);
+        settings = new(database);
         recovery = runtime as IRuntimeRecovery;
-        this.store = store;
+        this.database = database;
+        store = new(database, DocumentNamespace, FilmStorageRecords.Sources, ToRows);
     }
 
     internal IRuntimeClient Runtime { get; }
-    internal IDocumentStore Storage => store;
+    internal IStorageDatabase Storage => database;
     public IReadOnlyList<FilmCatSource> Cats => Volatile.Read(ref snapshot).Cats;
     public IReadOnlyList<FilmVideoSource> Videos => Volatile.Read(ref snapshot).Videos;
     public string? RuntimeError => Volatile.Read(ref runtimeError);
@@ -534,10 +537,10 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private async Task LoadAsync(CancellationToken token)
     {
         if (initialized) return;
-        var stored = await store.ReadAsync(DocumentNamespace, token).ConfigureAwait(false);
+        var stored = await store.ReadAsync(token).ConfigureAwait(false);
         try
         {
-            if (stored.Data is null && stored.Fingerprint != DocumentFingerprint.Missing)
+            if (stored.Data is null && stored.Revision != StorageRevision.Empty)
                 throw new FilmSourceException("INVALID_DOCUMENT");
             using var parsed = stored.Data is null ? null : JsonDocument.Parse(stored.Data);
             var root = parsed?.RootElement.Clone() ?? JsonSerializer.SerializeToElement(new StoredState(1, [], [], []), Json);
@@ -564,7 +567,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             foreach (var key in probes.Keys.ToArray()) InvalidateProbe(key);
             document = loaded with { Videos = Freeze(videos) };
             rawDocument = root;
-            fingerprint = stored.Fingerprint;
+            storageRevision = stored.Revision;
             snapshot = new(Freeze(cats), Freeze(videos));
             initialized = true;
         }
@@ -578,45 +581,45 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         var next = new Snapshot(Freeze(cats), Freeze(videos));
         var candidate = new StoredState(1, next.Cats.Select(StoredCat.From).ToArray(), next.Videos,
             deleted.OrderBy(key => key.InstallationId, StringComparer.Ordinal).ThenBy(key => key.SiteKey, StringComparer.Ordinal).ToArray());
-        var root = FilmDocument.Set(rawDocument, "cats", MergeRows(FilmJson.Member(rawDocument, "cats"),
-            document.Cats, candidate.Cats, cat => cat.InstallationId, row => ReadText(row, "installationId"),
-            MergeCat, id => id == removedInstallation));
-        root = FilmDocument.Set(root, "videos", MergeRows(FilmJson.Member(rawDocument, "videos"),
-            document.Videos, candidate.Videos, video => video.Key, ReadVideoKey,
-            (raw, before, after) => FilmDocument.Merge(raw, Encode(before), Encode(after)),
-            key => key.InstallationId == removedInstallation));
-        root = FilmDocument.Set(root, "deleted", MergeRows(FilmJson.Member(rawDocument, "deleted"),
-            document.Deleted, candidate.Deleted, key => key, ReadKey,
-            (raw, before, after) => FilmDocument.Merge(raw, Encode(before), Encode(after)),
-            key => key.InstallationId == removedInstallation));
+        var root = JsonSerializer.SerializeToElement(candidate, Json);
+        var after = storageRevision;
         byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-        var after = DocumentFingerprint.FromBytes(bytes);
         try
         {
             token.ThrowIfCancellationRequested();
-            if (after != fingerprint)
+            if (!JsonElement.DeepEquals(root, rawDocument))
             {
                 try
                 {
-                    // An admitted CAS must settle even if a page or the app cancels its wait.
-                    var receipt = await store.WriteAsync(DocumentNamespace, bytes, fingerprint, CancellationToken.None).ConfigureAwait(false);
-                    if (receipt != after) throw new FilmSourceException("COMMIT_UNKNOWN");
+                    after = await store.WriteAsync(bytes, storageRevision, CancellationToken.None).ConfigureAwait(false);
                 }
                 catch
                 {
                     initialized = false;
-                    var actual = await store.ReadAsync(DocumentNamespace, CancellationToken.None).ConfigureAwait(false);
-                    try { if (actual.Fingerprint != after) throw; }
+                    var actual = await store.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+                    try
+                    {
+                        if (actual.Data is null || actual.Revision == storageRevision ||
+                            !JsonNode.DeepEquals(ToRows(JsonNode.Parse(actual.Data)!.AsObject()), ToRows(JsonNode.Parse(bytes)!.AsObject()))) throw;
+                        after = actual.Revision;
+                    }
                     finally { if (actual.Data is not null) CryptographicOperations.ZeroMemory(actual.Data); }
                 }
             }
             document = candidate;
             rawDocument = root;
-            fingerprint = after;
+            storageRevision = after;
             initialized = true;
             Volatile.Write(ref snapshot, next);
         }
         finally { CryptographicOperations.ZeroMemory(bytes); }
+    }
+    private static JsonObject ToRows(JsonObject value)
+    {
+        foreach (var video in value["videos"]!.AsArray().OfType<JsonObject>())
+            if (video["detection"] is JsonObject detection)
+                foreach (var name in new[] { "mediaPlaybackVerified", "error" }) detection.Remove(name);
+        return value;
     }
 
     private FilmCatSource FindCat(string id) => Cats.FirstOrDefault(cat => cat.InstallationId == id)

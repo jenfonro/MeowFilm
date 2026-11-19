@@ -61,7 +61,7 @@ public static class GeneralAppearanceTests
 
     private static async Task Persistence()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppAppearance(store);
         await owner.LoadAsync();
         Check(owner.CanEdit && owner.ThemeColor == "#E6F3FB" && store.Writes == 0);
@@ -73,7 +73,7 @@ public static class GeneralAppearanceTests
         await owner.SaveAsync("#123456");
         Check(owner.ThemeColor == "#80D0C0" && owner.Status.Length > 0 && owner.CanEdit,
             "stale writer accepts authoritative value without retrying its write");
-        store.FaultNamespace = AppAppearance.DocumentNamespace;
+
         store.Fault = true; store.FaultAfter = true;
         await owner.SaveAsync("#FFAACC");
         Check(owner.ThemeColor == "#FFAACC" && owner.Status == "", "accepted write's lost receipt reconciles");
@@ -84,19 +84,19 @@ public static class GeneralAppearanceTests
         try { await owner.SaveAsync("#XYZ123"); throw new Exception("invalid color accepted"); }
         catch (ArgumentException) { }
         Check(store.Writes == writes);
-        store.Data[AppAppearance.DocumentNamespace] = JsonSerializer.SerializeToUtf8Bytes(new { schema = 99, themeColor = "#ABCDEF" });
+        store.AppearanceData = JsonSerializer.SerializeToUtf8Bytes(new { schema = 99, themeColor = "#ABCDEF" });
         await reopened.LoadAsync();
         Check(!reopened.CanEdit && reopened.Status.Length > 0);
         await reopened.SaveAsync("#112233");
         Check(store.Writes == writes, "unreadable data is never silently replaced");
-        store.Data.Remove(AppAppearance.DocumentNamespace);
+        store.AppearanceData = null;
         await reopened.LoadAsync();
         Check(reopened.CanEdit && reopened.ThemeColor == "#E6F3FB");
     }
 
     private static async Task Shutdown()
     {
-        var store = new DocumentStore { HoldNamespace = AppAppearance.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { HoldWrites = true};
         await using var owner = new AppAppearance(store);
         await owner.LoadAsync();
         var save = owner.SaveAsync("#ABCDEF");
@@ -220,7 +220,7 @@ public static class GeneralAppearanceTests
 
     private static async Task ColorChoices()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var appearance = new AppAppearance(store);
         await appearance.LoadAsync();
         var view = new GeneralSettingsView(appearance, []);
@@ -245,7 +245,7 @@ public static class GeneralAppearanceTests
             Check(store.Writes == 0 && saved.Text == AppearanceColors.DefaultColor, "invalid inline HEX reverts without writing");
             Commit("#12abcd"); await Drain();
             Check(appearance.ThemeColor == "#12ABCD" && saved.Text == "#12ABCD" && store.Writes == 1);
-            store.FaultNamespace = AppAppearance.DocumentNamespace;
+
             store.Fault = true; store.FaultAfter = false;
             choices.SelectedValue = AppearanceColors.DefaultColor; await Drain();
             Check(appearance.ThemeColor == "#12ABCD" && (string)choices.SelectedValue == "custom" &&

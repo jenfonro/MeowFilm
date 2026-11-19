@@ -33,11 +33,13 @@ test('audio consumes quality arrays before dependencies and retains the existing
   for (const platform of ['wy', 'tx', 'kg']) await t.test(platform, async st => {
     const id = platform === 'wy' ? '123' : platform === 'tx' ? 'mid' : kgHash;
     const invalid = fixture(() => assert.fail('unusable quality arrays must not dispatch metadata or audio'));
+    await invalid.owner.ready;
+    const storageCounts = [invalid.reads.length, invalid.writes.length];
     st.after(() => invalid.close());
     for (const qualities of [{}, '128k', 42, { 0: '128k', length: 2 }, { toString: null },
       [null], [{ toString: null }], ['flac', { toString: null }]])
       await assert.rejects(invalid.request(platform, 'audio', { id, qualities }), { code: 'INVALID_REQUEST' });
-    assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, 0); assert.equal(invalid.writes.length, 0);
+    assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, storageCounts[0]); assert.equal(invalid.writes.length, storageCounts[1]);
     const f = fixture(request => {
       if (platform === 'wy') {
         assert.equal(eapi(request).path, '/api/song/enhance/player/url');
@@ -60,10 +62,12 @@ test('audio consumes quality arrays before dependencies and retains the existing
 
 test('KG lyric duration conversion retains request checks while absent candidates produce no lyric', async t => {
   const invalid = fixture(() => assert.fail('unusable request duration must not dispatch lyric search'));
+    await invalid.owner.ready;
+    const storageCounts = [invalid.reads.length, invalid.writes.length];
   t.after(() => invalid.close());
   for (const duration of ['not-a-number', '1e400', {}, { toString: null }])
     await assert.rejects(invalid.request('kg', 'lyrics', { id: kgHash, musicInfo: { duration } }), { code: 'INVALID_REQUEST' });
-  assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, 0); assert.equal(invalid.writes.length, 0);
+  assert.equal(invalid.requests.length, 0); assert.equal(invalid.reads.length, storageCounts[0]); assert.equal(invalid.writes.length, storageCounts[1]);
   const durations = [];
   const f = fixture(request => {
     const url = new URL(request.url);

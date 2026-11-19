@@ -2,20 +2,16 @@ import Foundation
 import XCTest
 import MeowMusicFeature
 import MeowStorage
+import MeowStorageTestSupport
 import MeowRuntime
 @testable import MeowMusicPlatform
 
 final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
     private let setting = MusicPlaybackFeedbackSetting(enabled: true, generation: 1)
     private let now = 1_800_000_010.0
-    private func store(maximum: Int = 8 * 1024 * 1024) throws -> DocumentStore {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-        return try .init(baseURL: root, namespace: "synthetic-pending", maximumDocumentBytes: maximum)
-    }
-    private func ready(_ store: DocumentStore, scope: String = "original-account") throws -> MusicNeteaseFeedbackOutbox {
-        let queue = MusicNeteaseFeedbackOutbox(storeFactory: { store })
+    private func store() throws -> SQLiteDatabase { try storageTestDatabase(self) }
+    private func ready(_ store: SQLiteDatabase, scope: String = "original-account") throws -> MusicNeteaseFeedbackOutbox {
+        let queue = MusicNeteaseFeedbackOutbox(database: store)
         try queue.configure(setting, at: now); try queue.activate(scope: scope, at: now)
         return queue
     }
@@ -24,12 +20,13 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         try queue.enqueue(MusicAccountFeedbackFixture.report(event, platform: .netease, instance: instance),
             scope: scope, setting: setting, at: now)
     }
-    private func rows(_ store: DocumentStore) throws -> [[String: Any]] {
-        guard let data = try store.read(key: MusicNeteaseFeedbackOutbox.key) else { return [] }
+    private func rows(_ store: SQLiteDatabase) throws -> [[String: Any]] {
+        guard let data = try musicFeedbackData(store) else { return [] }
         let document = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         return try XCTUnwrap(document["entries"] as? [[String: Any]])
     }
     func testDurableAdmissionPairsStartBeforeEndAndACKRemovesOnlyAcknowledgedEvent() throws {
+        try storageTestIO { [self] in
         let store = try store(), queue = try ready(store), instance = UUID()
         XCTAssertEqual(try enqueue(queue, .start, instance: instance), .registered)
         XCTAssertEqual(try enqueue(queue, .end, instance: instance), .registered)
@@ -45,10 +42,12 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         let (end, _) = try XCTUnwrap(queue.reserve(ids[1]))
         XCTAssertEqual(end.instance, start.instance)
         try queue.complete(end, confirmed: true, notSent: false)
-        XCTAssertNil(try store.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(store))
         XCTAssertTrue(try queue.candidates(at: now).isEmpty)
+        }
     }
     func testClearlyNotSentRecoversAcrossNormalCloseAndColdStartWithOriginalTimeAndNoCredentials() throws {
+        try storageTestIO { [self] in
         let store = try store(), queue = try ready(store), instance = UUID()
         _ = try enqueue(queue, .start, instance: instance)
         _ = try enqueue(queue, .end, instance: instance)
@@ -56,7 +55,7 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         let (start, _) = try XCTUnwrap(queue.reserve(ids[0]))
         try queue.complete(start, confirmed: false, notSent: true)
         queue.suspend(preserving: true, closing: true)
-        let data = try XCTUnwrap(store.read(key: MusicNeteaseFeedbackOutbox.key))
+        let data = try XCTUnwrap(musicFeedbackData(store))
         let text = String(decoding: data, as: UTF8.self)
         for forbidden in ["MUSIC_U", "Cookie", "token", "credential", "synthetic-user-"] {
             XCTAssertFalse(text.contains(forbidden), forbidden)
@@ -70,8 +69,10 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         try restored.complete(cold, confirmed: true, notSent: false)
         let (end, _) = try XCTUnwrap(restored.reserve(coldIDs[1]))
         XCTAssertEqual(end.occurredAt, 1_800_000_001.25)
+        }
     }
     func testUnknownStartOrInterruptedInflightNeverReplaysAndNeverLeavesOrphanEnd() throws {
+        try storageTestIO { [self] in
         for interrupted in [false, true] {
             let store = try store(), queue = try ready(store), instance = UUID()
             _ = try enqueue(queue, .start, instance: instance)
@@ -81,10 +82,12 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
             if !interrupted { try queue.complete(start, confirmed: false, notSent: false) }
             let cold = try ready(store)
             XCTAssertTrue(try cold.candidates(at: now).isEmpty)
-            XCTAssertNil(try store.read(key: MusicNeteaseFeedbackOutbox.key))
+            XCTAssertNil(try musicFeedbackData(store))
+        }
         }
     }
     func testUnknownEndNeverReplaysButAnAcknowledgedStartCanPairWithSafeColdEnd() throws {
+        try storageTestIO { [self] in
         let store = try store(), queue = try ready(store), instance = UUID()
         _ = try enqueue(queue, .start, instance: instance)
         let first = try XCTUnwrap(queue.candidates(at: now).first)
@@ -99,8 +102,10 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         // Simulated crash after physical end dispatch, before saving its ACK.
         let next = try ready(store)
         XCTAssertTrue(try next.candidates(at: now).isEmpty)
+        }
     }
     func testFrozenHeartbeatSceneAndActualSourceSurviveSafeColdRecovery() throws {
+        try storageTestIO { [self] in
         let store = try store(), queue = try ready(store), instance = UUID()
         let target = MusicPlaybackFeedbackTarget(platform: .netease, nativeID: "101",
             source: "actual-heart-source", sourceID: "actual-source-id", algorithm: "actual-alg",
@@ -127,8 +132,10 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
                 "The local favorite list is not an upstream source ID")
             try cold.complete(entry, confirmed: true, notSent: false)
         }
+        }
     }
     func testNormalCloseKeepsSafeEndAfterAcknowledgedStartAndRejectsFurtherAdmissions() throws {
+        try storageTestIO { [self] in
         let store = try store(), queue = try ready(store), instance = UUID()
         _ = try enqueue(queue, .start, instance: instance)
         let id = try XCTUnwrap(queue.candidates(at: now).first)
@@ -144,8 +151,10 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         XCTAssertEqual(end.phase, .end)
         XCTAssertTrue(end.startConfirmed)
         XCTAssertEqual(end.occurredAt, 1_800_000_001.25)
+        }
     }
     func testAccountSettingAndConsentRevocationFenceQueuedAndPhysicalWork() throws {
+        try storageTestIO { [self] in
         for change in ["account", "disabled", "generation", "revoke"] {
             let store = try store(), queue = try ready(store), instance = UUID()
             _ = try enqueue(queue, .start, instance: instance)
@@ -162,8 +171,10 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
             XCTAssertNil(try queue.reserve(id), change)
             XCTAssertThrowsError(try enqueue(queue, .end, instance: instance), change)
         }
+        }
     }
     func testPendingPairsSurviveFormerCapacityAndStillExpire() throws {
+        try storageTestIO { [self] in
         let store = try store(), queue = try ready(store)
         var first: UUID?
         for _ in 0..<130 {
@@ -177,46 +188,46 @@ final class MusicNeteaseFeedbackOutboxTests: XCTestCase {
         let grouped = Dictionary(grouping: rows) { $0["instance"] as? String }
         XCTAssertTrue(grouped.values.allSatisfy { $0.count == 2 })
         XCTAssertTrue(try queue.candidates(at: now + 7 * 86_400).isEmpty)
-        XCTAssertNil(try store.read(key: MusicNeteaseFeedbackOutbox.key))
+        XCTAssertNil(try musicFeedbackData(store))
+        }
     }
-    func testStorageFailureCannotAdmitOrDispatchAndMalformedDocumentIsNotSilentlyOverwritten() throws {
-        let limited = try store(maximum: 16), queue = try ready(limited)
+    func testStorageFailureCannotAdmitOrDispatchAndMalformedRowsAreNotSilentlyOverwritten() throws {
+        try storageTestIO { [self] in
+        let limited = try store(), queue = try ready(limited)
+        try storageTestReadOnly(limited, true)
         XCTAssertThrowsError(try enqueue(queue, .start, instance: UUID()))
         XCTAssertTrue(try queue.candidates(at: now).isEmpty)
-        let store = try store()
-        let original = Data("not-a-pending-document".utf8)
-        try store.write(original, key: MusicNeteaseFeedbackOutbox.key)
-        let corrupted = MusicNeteaseFeedbackOutbox(storeFactory: { store })
+        try storageTestReadOnly(limited, false)
+        let store = try store(), healthy = try ready(store)
+        _ = try enqueue(healthy, .start, instance: UUID())
+        try store.transactionSync { try $0.execute("UPDATE ios_music_feedback_outbox SET id='invalid-id'") }
+        let original = try musicFeedbackData(store)
+        let corrupted = MusicNeteaseFeedbackOutbox(database: store)
         XCTAssertThrowsError(try corrupted.configure(setting, at: now))
-        XCTAssertEqual(try store.read(key: MusicNeteaseFeedbackOutbox.key), original)
-        corrupted.stopDispatching()
-        corrupted.suspend(preserving: true, closing: true)
-        XCTAssertEqual(try store.read(key: MusicNeteaseFeedbackOutbox.key), original,
-            "Normal close cannot silently erase an unreadable document")
+        XCTAssertEqual(try musicFeedbackData(store), original)
+        corrupted.stopDispatching(); corrupted.suspend(preserving: true, closing: true)
+        XCTAssertEqual(try musicFeedbackData(store), original, "Normal close preserves unreadable durable rows")
         corrupted.suspend(preserving: false, revokingConsent: true)
-        XCTAssertNil(try store.read(key: MusicNeteaseFeedbackOutbox.key), "Explicit revocation may safely unlink its own unreadable queue")
+        XCTAssertNil(try musicFeedbackData(store), "Explicit revocation clears only its own queue")
+        }
     }
     func testInflightWriteFailurePreventsSendAndACKWriteFailureCannotMakeInflightReplayable() throws {
+        try storageTestIO { [self] in
         for ack in [false, true] {
-            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
-            let store = try DocumentStore(baseURL: root, namespace: "pending")
+            let store = try store()
             let queue = try ready(store), instance = UUID()
             _ = try enqueue(queue, .start, instance: instance)
             let id = try XCTUnwrap(queue.candidates(at: now).first)
             var dispatched: MusicNeteaseFeedbackOutbox.Entry?
             if ack { dispatched = try XCTUnwrap(queue.reserve(id)).0 }
-            let directory = root.appendingPathComponent("pending"), displaced = root.appendingPathComponent("displaced")
-            try FileManager.default.moveItem(at: directory, to: displaced)
-            try Data("synthetic-path-fault".utf8).write(to: directory)
+            try storageTestReadOnly(store, true)
             if let dispatched { XCTAssertThrowsError(try queue.complete(dispatched, confirmed: true, notSent: false)) }
             else { XCTAssertThrowsError(try queue.reserve(id), "A sender must never receive an entry before inflight is durable") }
-            try FileManager.default.removeItem(at: directory)
-            try FileManager.default.moveItem(at: displaced, to: directory)
+            try storageTestReadOnly(store, false)
             let cold = try ready(store), candidates = try cold.candidates(at: now)
             XCTAssertEqual(candidates.count, ack ? 0 : 1,
                 "Failed ACK persistence retains only a spent inflight record; failure before send remains safe")
+        }
         }
     }
 }

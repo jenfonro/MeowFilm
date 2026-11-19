@@ -1,6 +1,7 @@
 #if os(iOS)
 import XCTest
 import UIKit
+import MeowStorage
 @testable import MeowMusicFeature
 @testable import MeowUI
 
@@ -363,22 +364,18 @@ final class MusicSearchSettingsPresentationTests: XCTestCase {
         list.layoutIfNeeded()
     }
 
-    private func saved(_ defaults: UserDefaults) throws -> MusicSearchPreferences {
-        try JSONDecoder().decode(MusicSearchPreferences.self,
-            from: XCTUnwrap(defaults.data(forKey: MusicSearchPreferencesStore.preferencesKey)))
+    private func saved(_ database: SQLiteDatabase) throws -> MusicSearchPreferences {
+        try appStorageTestSearchPreferences(database).preferences
     }
 
     private func withPreferences(
         _ initial: MusicSearchPreferences = .init(),
-        body: (UserDefaults, MusicSearchPreferencesStore, MusicAppearancePreferencesStore) throws -> Void
+        body: (SQLiteDatabase, MusicSearchPreferencesStore, MusicAppearancePreferencesStore) throws -> Void
     ) throws {
-        let domain = "MusicSearchSettingsPresentationTests." + UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
-        defer { defaults.removePersistentDomain(forName: domain) }
-        defaults.set(try JSONEncoder().encode(initial), forKey: MusicSearchPreferencesStore.preferencesKey)
-        let store = MusicSearchPreferencesStore(defaults: defaults)
+        let database = try appStorageTestDatabase()
+        let store = try appStorageTestSearchPreferences(database, initial: initial)
         XCTAssertEqual(store.preferences, initial)
-        try body(defaults, store, MusicAppearancePreferencesStore(defaults: defaults))
+        try body(database, store, appStorageTestAppearance(database))
     }
 
     private func descendants(_ view: UIView) -> [UIView] {

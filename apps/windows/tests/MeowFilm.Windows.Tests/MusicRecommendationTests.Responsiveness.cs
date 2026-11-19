@@ -38,7 +38,7 @@ public static partial class MusicRecommendationTests
     private static async Task HotQueueNextResponsiveness()
     {
         await using var store = new RecommendationWriteStore();
-        await using var library = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var library = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var port = new MusicRecommendationQueuePort(library);
         int reads = 0;
         store.Inner.AfterRead = () => Interlocked.Increment(ref reads);
@@ -67,7 +67,7 @@ public static partial class MusicRecommendationTests
             Check(after.GetProperty("ok").GetBoolean() && N(after, "total") == 2 && Current(after) == next &&
                 S(after.GetProperty("current"), "id") == next && SongId(after.GetProperty("current").GetProperty("song")) == "2");
             Check(after.GetProperty("entries").GetRawText() == before.GetProperty("entries").GetRawText());
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var durable = await Ok(reopened, "music.queue.get");
             Check(Current(durable) == next && N(durable, "total") == 2 &&
                 S(durable.GetProperty("current"), "id") == next && SongId(durable.GetProperty("current").GetProperty("song")) == "2",

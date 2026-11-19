@@ -47,12 +47,14 @@ export const runtime = Object.freeze({
           if (name.startsWith('encoding.') || name.startsWith('crypto.')) {
             return localCapability(name, value);
           }
-          const input = name === 'storage.set'
-            ? { ...value, value: stringifyJSONValue(value.value) } : value;
+          const input = { ...value };
+          if (name === 'storage.set') input.value = stringifyJSONValue(value.value);
+          if (name === 'reader.values.apply') input.entries = stringifyJSONValue(value.entries, -2);
           const keys = Object.keys(input);
           const result = host('source.capability', [
             name, context.scope, keys, ...keys.map(key => input[key]),
           ]);
+          if (name === 'reader.values.read') return result.then(text => parseJSONText(text, -3));
           return name === 'storage.get' ? result.then(parseJSONText) : result;
         },
       }),

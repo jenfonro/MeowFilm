@@ -1003,12 +1003,11 @@ public static partial class MusicUiTests
             .AddTicks(Interlocked.Read(ref ticks));
         internal void Advance(TimeSpan duration) => Interlocked.Add(ref ticks, duration.Ticks);
     }
-    private sealed class SearchStore(IDocumentStore inner) : IDocumentStore
+    private sealed class SearchStore(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
         private AccountReadHold? nextAccountRead;
         internal int AccountReads;
         internal bool FailNextWrite;
-
         internal AccountReadHold HoldNextAccountRead()
         {
             var hold = new AccountReadHold();
@@ -1016,34 +1015,23 @@ public static partial class MusicUiTests
                 throw new InvalidOperationException("Account read already held");
             return hold;
         }
-
-        public async Task<DocumentSnapshot> ReadAsync(string documentNamespace,
-            CancellationToken cancellationToken = default)
+        public override async Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default)
         {
-            if (documentNamespace == MeowFilm.Capabilities.Accounts.MusicAccountOwner.DocumentNamespace)
-            {
-                Interlocked.Increment(ref AccountReads);
-                var hold = Interlocked.Exchange(ref nextAccountRead, null);
-                if (hold is not null)
-                {
-                    hold.Arrived.TrySetResult();
-                    await hold.Released.Task;
-                }
-            }
-            return await inner.ReadAsync(documentNamespace, cancellationToken);
+            Interlocked.Increment(ref AccountReads);
+            var result = await base.ReadAsync(read, token);
+            var hold = Interlocked.Exchange(ref nextAccountRead, null);
+            if (hold is not null) { hold.Arrived.TrySetResult(); await hold.Released.Task; }
+            return result;
         }
-
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
+        public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
+            int retainedBytes = 0, Action<Action>? commit = null)
         {
             if (FailNextWrite) { FailNextWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return inner.WriteAsync(documentNamespace, data, expected, cancellationToken);
+            return base.WriteAsync(write, token, retainedBytes, commit);
         }
-
-        public async ValueTask DisposeAsync()
+        public override async ValueTask DisposeAsync()
         {
-            Interlocked.Exchange(ref nextAccountRead, null)?.Release();
-            await inner.DisposeAsync();
+            Interlocked.Exchange(ref nextAccountRead, null)?.Release(); await base.DisposeAsync();
         }
     }
     private sealed class AccountReadHold

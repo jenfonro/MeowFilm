@@ -21,8 +21,8 @@ final class MusicAppearanceSettingsState: ObservableObject {
             .store(in: &subscriptions)
     }
 
-    func setMode(_ value: MusicColorMode) { store.set(\.colorMode, value) }
-    func selectPalette(_ value: PagePalette) { store.selectFixedPalette(value) }
+    func setMode(_ value: MusicColorMode) { Task { await store.set(\.colorMode, value) } }
+    func selectPalette(_ value: PagePalette) { Task { await store.selectFixedPalette(value) } }
 }
 
 @MainActor
@@ -229,14 +229,17 @@ final class MusicCustomColorPickerController: UIColorPickerViewController, UICol
         dismiss(animated: true)
     }
     @objc func commit() {
-        guard store.selectFixedPalette(.custom(rgb)) else {
-            let alert = UIAlertController(title: "错误", message: store.persistenceError, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "确定", style: .default))
-            present(alert, animated: true)
-            return
+        let selected = rgb
+        Task {
+            guard await store.selectFixedPalette(.custom(selected)) else {
+                let alert = UIAlertController(title: "错误", message: store.persistenceError, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "确定", style: .default))
+                present(alert, animated: true)
+                return
+            }
+            finished = true; store.endColorPreview()
+            dismiss(animated: true)
         }
-        finished = true; store.endColorPreview()
-        dismiss(animated: true)
     }
 }
 #endif

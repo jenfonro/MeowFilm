@@ -83,6 +83,15 @@ public struct NovelBook: Codable, Equatable, Sendable, Identifiable {
         get { business.fields["variable"] ?? .null }
         set { business.fields["variable"] = newValue }
     }
+    var storedExtensions: RuntimeObject {
+        get {
+            var fields = business.fields
+            for key in ["id", "installationId", "bookUrl", "name", "author", "tocUrl", "coverUrl",
+                        "intro", "latestChapterTitle"] { fields[key] = nil }
+            return fields
+        }
+        set { business.fields = newValue }
+    }
     public init(id: String = UUID().uuidString.lowercased(), installationId: String, bookUrl: String,
                 name: String, author: String = "", tocUrl: String = "", coverUrl: String = "",
                 intro: String = "", latestChapterTitle: String = "", variable: RuntimeValue = .null) {

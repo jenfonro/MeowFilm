@@ -52,7 +52,7 @@ public static class MusicOfficialSourcesPolicyTests
             var entry = store.State("native-official-sources");
             Equal(1, entry["schema"]!.GetValue<int>());
             await owner.AbortAsync();
-            await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store)))
+            await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             {
                 var settings = Ok(await reopened.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings");
                 Enabled(settings, ["wy", "kg"]);
@@ -62,7 +62,7 @@ public static class MusicOfficialSourcesPolicyTests
                 Enabled(empty, []);
                 Equal(2L, empty.GetProperty("revision").GetInt64());
             }
-            await using var finalOwner = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var finalOwner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var final = Ok(await finalOwner.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings");
             Enabled(final, []);
             Equal(2L, final.GetProperty("revision").GetInt64());
@@ -125,7 +125,7 @@ public static class MusicOfficialSourcesPolicyTests
                 document["areas"]!["native-official-sources"] = JsonNode.Parse(value);
                 // Keep the outer document canonical, so the policy itself is what must fail.
                 store.Data = LJ.Bytes(document);
-                await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+                await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
                 Code(await reopened.ExecuteAsync("music.officialSources.settings.get"), "CORRUPT_STORAGE");
                 Code(await reopened.ExecuteAsync("music.officialSources.settings.save",
                     new { ifRevision = 1, enabled = Platforms }), "CORRUPT_STORAGE");
@@ -139,7 +139,7 @@ public static class MusicOfficialSourcesPolicyTests
             var document = JsonNode.Parse(store.Data!)!.AsObject();
             document["areas"]!["native-official-sources"]!["extra"] = true;
             store.Data = LJ.Bytes(document);
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             Enabled(Ok(await reopened.ExecuteAsync("music.officialSources.settings.get")).GetProperty("settings"), ["wy"]);
             Ok(await reopened.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 1, enabled = Platforms }));
             Equal(true, store.State("native-official-sources")["extra"]!.GetValue<bool>());
@@ -222,7 +222,7 @@ public static class MusicOfficialSourcesPolicyTests
         new(name, async () =>
         {
             await using var store = new PolicyStore();
-            var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             try { await run(owner, store); }
             finally { await owner.AbortAsync(); }
         });

@@ -62,6 +62,13 @@ function fixture(t, { releaseGate } = {}) {
   };
   const service = createPlaybackService({ data, media, rules: { async snapshot() { return snapshot; } },
     library: { read() { return structuredClone(document); },
+      async history(targetId) { return structuredClone(document.history.find(row => row?.targetId === targetId)); },
+      async saveHistory(value) {
+        document.history = document.history.filter(row => row?.targetId !== value.targetId);
+        document.history.push(structuredClone(value));
+      },
+      async list() { return {...structuredClone(document),historyAfter:null}; },
+      async removeHistory(targetId) { document.history = targetId == null ? [] : document.history.filter(row => row?.targetId !== targetId); },
       update(mutator) { const next = structuredClone(document); mutator(next); document = next; } } });
   t.after(async () => { releaseGate?.resolve(); await service.close(); });
   const command = (sessionId, action, fields = {}) => service.command({ sessionId, action, ...fields });

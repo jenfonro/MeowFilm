@@ -22,31 +22,29 @@ public static partial class AppUserDataResetTests
         var bundle = RuntimeBundle.Verify(Path.Combine(bundles, "aggregate"), AppIdentity.RuntimeId);
         string parent = TestWorkspace.DataPath("reset-native-owners-" + Guid.NewGuid().ToString("N"));
         var paths = new AppDataPaths(Path.Combine(parent, "aggregate"));
-        using var data = new UserDataDirectory(paths.Documents, paths.Caches);
+        using var data = new UserDataDirectory(paths.Documents);
         data.Open();
         Directory.CreateDirectory(paths.Documents);
         Directory.CreateDirectory(paths.Caches);
         var errors = new List<string>();
-        var store = new LocalDocumentStore(paths.Documents, AppIdentity.NativeNamespaces,
-            AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-        var cache = new CacheDocumentStore(() => new LocalDocumentStore(paths.Caches, AppIdentity.CacheNamespaces,
-            protectedNamespaces: AppIdentity.CacheProtectedNamespaces));
+        var store = new NativeDatabase(paths.Documents);
+        var cache = new NativeTestDatabase(store);
         NodeRuntime? session = null;
         Process? child = null;
         var runtime = new AppRuntimeConnectionHost(async token =>
         {
+            await store.Ready;
             session = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, AppIdentity.ScriptModules,
-                paths.ScriptRuntime, token, ownerRevoked: token, settingsStore: store,
-                settingsNamespaces: AppIdentity.RuntimeSettingsNamespaces);
+                paths.ScriptRuntime, token, ownerRevoked: token, settingsStore: new FilmRuntimeSettings(store));
             child = Process.GetProcessById(session.ProcessId);
             _ = child.SafeHandle;
             return session;
         });
         var audio = new NativeAudioPlayback(audioOutput: NativeAudioOutput.Dummy);
         var video = new FilmPlayback();
-        var library = new MusicLibraryDatabase(Path.Combine(paths.Documents, "music-library"));
-        var application = new MusicNativeApplication(store, library, runtime, cache);
-        var music = new MusicCapability(application, store, audio, cacheStore: cache,
+        var library = new MusicLibraryDatabase(store);
+        var application = new MusicNativeApplication(store, library, runtime);
+        var music = new MusicCapability(application, store, audio,
             playbackCacheRoot: Path.Combine(paths.Caches, "music-audio"));
         var rules = new FilmRuleService(runtime, store);
         var sources = new FilmSourceService(runtime, store);
@@ -103,7 +101,7 @@ public static partial class AppUserDataResetTests
                     data.Open();
                     Directory.CreateDirectory(paths.Documents);
                     Directory.CreateDirectory(paths.Caches);
-                    await using var freshLibrary = new MusicLibraryDatabase(Path.Combine(paths.Documents, "music-library"));
+                    await using var freshLibrary = new MusicLibraryDatabase(store);
                     var fresh = await freshLibrary.ReadAsync("music:native");
                     Check(fresh.Revision == MusicLibraryRevision.Empty && fresh.Areas.Count == 0 &&
                         freshLibrary.SongIds().Count == 0);

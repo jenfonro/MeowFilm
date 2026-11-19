@@ -521,40 +521,54 @@ final class MeowfilmScriptShutdownHostTests: XCTestCase {
 }
 
 /// Uses the App's real publication path with synthetic local stores and a
-/// transport that rejects every request. No Keychain or runtime is opened.
+/// transport that rejects every request. No runtime is opened.
 @MainActor
 final class MeowfilmMusicStartupHostTests: XCTestCase {
-    func testSQLiteSongsAndControlsReopenInsideTheAppContainer() throws {
+    func testSQLiteSongsAndControlsReopenInsideTheAppContainer() async throws {
         let base = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true)
-        let root = try MusicNativeLibraryDatabase.canonicalSystemBaseURL(base)
+        let root = try SQLiteDatabase.canonicalSystemBaseURL(base)
             .appendingPathComponent("music-sqlite-host-" + UUID().uuidString, isDirectory: true)
-        let file = root.appendingPathComponent(MusicNativeLibraryDatabase.filename)
-        let database = MusicNativeLibraryDatabase(url: file)
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let storage = try appStorageTestOpen(root)
+        var reopenedStorage: SQLiteDatabase?
+        addTeardownBlock {
+            try await reopenedStorage?.close()
+            try await storage.close()
+            try FileManager.default.removeItem(at: root)
+        }
         var song = try MusicModel.normalize(.init(platform: "tx", data: MJ.obj([
             ("songmid", .string("host-synthetic-song")), ("name", .string("Host synthetic song")),
             ("singer", .string("Fixture")), ("duration", .n(180))]).bytes))
         let id = UUID().uuidString.lowercased()
         song["songId"] = .string(id)
-        try database.withTransaction {
-            try $0.saveSong(song.bytes)
-            try $0.saveArea("catalogSource", data: MusicModel.catalogSource.bytes)
+        let storedSong = song
+        let committed = try appStorageTestIO {
+            let database = MusicNativeLibraryDatabase(database: storage)
+            defer { try? database.close() }
+            try database.withTransaction {
+                try $0.saveSong(storedSong.bytes)
+                try $0.saveArea("catalogSource", value: try MusicModel.catalogSource.storageValue)
+            }
+            let committed = try database.readSnapshot()
+            XCTAssertEqual(committed.revision, 1)
+            XCTAssertEqual(try database.sourceOwner(key: storedSong["sources"].array[0]["sourceKey"].string), id)
+            return committed
         }
-        let committed = try database.readSnapshot()
-        XCTAssertEqual(committed.revision, 1)
-        XCTAssertEqual(try database.sourceOwner(key: song["sources"].array[0]["sourceKey"].string), id)
         let protection = try FileManager.default.attributesOfItem(atPath: root.path)[.protectionKey]
         XCTAssertNotEqual(NativeFileProtectionVerification.inspect(protection), .rejected)
-        try database.close()
-        let reopened = MusicNativeLibraryDatabase(url: file)
-        defer { try? reopened.close() }
-        XCTAssertEqual(try reopened.readSnapshot().identity, committed.identity)
-        XCTAssertEqual(try reopened.readSnapshot().areas["catalogSource"], MusicModel.catalogSource.bytes)
-        let restored = try MJ.parse(XCTUnwrap(reopened.songData(id: id)))
-        XCTAssertEqual(restored["songId"], .string(id))
-        XCTAssertEqual(restored["sources"], song["sources"])
-        XCTAssertEqual(try reopened.allSongIDs(), [id])
+        try await storage.close()
+        let connection = try appStorageTestOpen(root)
+        reopenedStorage = connection
+        try appStorageTestIO {
+            let reopened = MusicNativeLibraryDatabase(database: connection)
+            defer { try? reopened.close() }
+            XCTAssertEqual(try reopened.readSnapshot().identity, committed.identity)
+            XCTAssertEqual(try MJ.parse(XCTUnwrap(reopened.readSnapshot().areas["catalogSource"])).stable, MusicModel.catalogSource.stable)
+            let restored = try MJ.parse(XCTUnwrap(reopened.songData(id: id)))
+            XCTAssertEqual(restored["songId"], .string(id))
+            XCTAssertEqual(restored["sources"].stable, storedSong["sources"].stable)
+            XCTAssertEqual(try reopened.allSongIDs(), [id])
+        }
     }
 
     func testLocalPreparationHoldsPublicationAndCacheMissEntersBeforeLibraryLoad() async {
@@ -957,7 +971,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         model.playbackState.state = .init(currentId: "dock", total: 1)
         model.playbackState.phase = .paused
         let content = MusicPlayerContentModel(model: model, playback: playback,
-            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            appearance: try appStorageTestAppearance(),
             presentation: MusicMiniPlayerPresentation())
         addTeardownBlock { await model.close(); await service.close() }
         let navigation = PageNavigationController(themeProvider: content.appearance)
@@ -1107,19 +1121,19 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         let network = MusicStartupNoNetwork()
         let service = NativeMusicService(database: MusicStartupLibrary(failure: nil), platformClient: network.client())
         let playback = PlaybackController()
-        let model = MusicViewModel(service: service, playback: playback)
+        let database = try appStorageTestDatabase()
+        let model = try appStorageTestMusicModel(MusicViewModel(service: service, playback: playback), database: database)
         model.nativeAttempt = .init(id: UUID(), resourceID: "music:fixed-backdrop")
         model.playbackState.queue = [.init(id: "fixed-backdrop", track: .init(
             ref: .init(kind: .queue, id: "fixed-backdrop"), songId: "fixed-backdrop", title: "Fixed backdrop"))]
         model.playbackState.state = .init(currentId: "fixed-backdrop", total: 1)
         model.playbackState.phase = .paused
-        let suite = UUID().uuidString, defaults = UserDefaults(suiteName: suite)!
-        let appearance = MusicAppearancePreferencesStore(defaults: defaults)
-        let history = SearchHistoryStore(defaults: defaults)
+        let appearance = try appStorageTestAppearance(database)
+        let history = try appStorageTestHistory(database)
         let router = MusicFixedBackdropRouter()
         let content = MusicPlayerContentModel(model: model, playback: playback,
             appearance: appearance, presentation: router.primaryPlaybackPresentation)
-        addTeardownBlock { await model.close(); await service.close(); defaults.removePersistentDomain(forName: suite) }
+        addTeardownBlock { await model.close(); await service.close() }
         let search = MusicSearchViewController(model: model, appearance: appearance, router: router, history: history)
         let navigation = PageNavigationController(themeProvider: appearance)
         navigation.setViewControllers([search], animated: false)
@@ -1194,7 +1208,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         XCTAssertEqual(surface.form, .card)
         phase = "history"; stableFrames = 0
         search.view.endEditing(true)
-        for index in 0..<20 { history.record("Fixed backdrop history row \(index)") }
+        for index in 0..<20 { _ = try appStorageTestWait { await history.record("Fixed backdrop history row \(index)") } }
         await fulfillment(of: [ready["history"]!], timeout: 5)
         XCTAssertGreaterThan(table.contentSize.height, initialContentHeight, "Exercise real content layout, not only the player")
         let results = MusicSearchResultsViewController(model: model, query: "", appearance: appearance,
@@ -1272,7 +1286,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         model.playbackState.state = .init(currentId: "dock", total: 1)
         model.playbackState.phase = .paused
         let content = MusicPlayerContentModel(model: model, playback: playback,
-            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            appearance: try appStorageTestAppearance(),
             presentation: MusicMiniPlayerPresentation())
         addTeardownBlock { await model.close(); await service.close() }
         let surface = MusicPlayerSurface(content: content)
@@ -1404,7 +1418,7 @@ final class MeowfilmMusicPlayerMorphHostTests: XCTestCase {
         let origin = try XCTUnwrap(model.current?.id)
         let nextID = try XCTUnwrap(model.recordPreview(.next)?.id)
         let content = MusicPlayerContentModel(model: model, playback: playback,
-            appearance: MusicAppearancePreferencesStore(defaults: UserDefaults(suiteName: UUID().uuidString)!),
+            appearance: try appStorageTestAppearance(),
             presentation: MusicMiniPlayerPresentation())
         addTeardownBlock { await model.close() }
         let surface = MusicPlayerSurface(content: content)
@@ -1809,11 +1823,8 @@ final class MusicStartupLibrary: MusicNativeLibraryStoring, @unchecked Sendable 
     private var count = 0, writeCount = 0
     private var nextCommitReceipt: MusicSettingsHostCommitReceipt?
     private let root = FileManager.default.temporaryDirectory.appendingPathComponent("music-startup-sqlite-" + UUID().uuidString, isDirectory: true)
-    private lazy var backing = MusicNativeLibraryDatabase(urlFactory: { [root] in
-        try MusicNativeLibraryDatabase.canonicalSystemBaseURL(root.deletingLastPathComponent())
-            .appendingPathComponent(root.lastPathComponent, isDirectory: true)
-            .appendingPathComponent(MusicNativeLibraryDatabase.filename)
-    })
+    private lazy var database = try! SQLiteDatabase(url: root.appendingPathComponent("storage-v1/meowfilm.sqlite3"), dataRoot: root)
+    private lazy var backing = MusicNativeLibraryDatabase(database: database)
     init(failure: MusicServiceError?) { self.failure = failure }
     deinit { try? backing.close(); try? FileManager.default.removeItem(at: root) }
     var reads: Int { lock.lock(); defer { lock.unlock() }; return count }

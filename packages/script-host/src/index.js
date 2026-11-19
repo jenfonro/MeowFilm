@@ -6,7 +6,7 @@ export { ScriptHostError } from './errors.js';
 export { createNodeNetwork } from './node-network.js';
 export { createSourceDownload } from './source-download.js';
 export { CatRuntime, createCatRuntime } from './cat-runtime.js';
-export { PrivateDocuments } from './private-documents.js';
+export { PrivateSources } from './private-sources.js';
 export { createNodeSourceCapabilities } from './source-capabilities.js';
 export { createPortableSourceAdapter } from './portable-source-session.js';
 export { LXSession } from './lx-session.js';

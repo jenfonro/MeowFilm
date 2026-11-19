@@ -12,7 +12,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     private let model: MusicViewModel
     private let browser: (any MusicPublicBrowsing)?
     private weak var router: (any MusicUIRouting)?
-    private let selection = MusicChannelSelection()
+    private let selection: MusicChannelSelection
     private let catalogue: MusicPublicBrowseViewModel?
     private let pager = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
     /// A scroll pager cannot hold an empty controller list while the catalogue is empty.
@@ -38,6 +38,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     public init(model: MusicViewModel, browser: (any MusicPublicBrowsing)?,
                 appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
         self.model = model; self.browser = browser; self.router = router
+        selection = model.channelSelection
         catalogue = browser.map { MusicPublicBrowseViewModel(service: $0, request: .discovery(.channels)) }
         super.init(appearance: appearance)
     }

@@ -11,7 +11,7 @@ public static class MusicSearchPreferenceTests
     {
         yield return Case("original-five-platform-defaults-are-passive", async () =>
         {
-            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var settings = (await Call(owner, "music.search.settings.get")).GetProperty("settings");
             Check(settings.GetProperty("schema").GetInt32() == 3 && settings.GetProperty("revision").GetInt64() == 0);
             foreach (var kind in new[] { settings.GetProperty("songs"), settings.GetProperty("playlists") })
@@ -25,10 +25,10 @@ public static class MusicSearchPreferenceTests
         });
         yield return Case("all-disabled-is-durable-not-reset-to-default", async () =>
         {
-            var store = new Store(); await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store)))
+            var store = new Store(); await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
                 await Call(owner, "music.search.settings.save", Policy(0,
                     Kind(enabled: []), Kind(enabled: [])));
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var value = (await Call(reopened, "music.search.settings.get")).GetProperty("settings");
             Check(value.GetProperty("songs").GetProperty("enabled").GetArrayLength() == 0 &&
                 value.GetProperty("playlists").GetProperty("enabled").GetArrayLength() == 0 &&
@@ -36,7 +36,7 @@ public static class MusicSearchPreferenceTests
         });
         yield return Case("settings-revision-conflict-keeps-newer-policy", async () =>
         {
-            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             await Call(owner, "music.search.settings.save", Policy(0,
                 Kind(enabled: ["wy"]), Kind(enabled: ["kg"], pages: 3, concurrency: 2, cacheMinutes: 5)));
             await Code(owner, "music.search.settings.save", Policy(0,
@@ -50,7 +50,7 @@ public static class MusicSearchPreferenceTests
         });
         yield return Case("search page and concurrency accept any positive int while cache stays bounded", async () =>
         {
-            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var saved = await Call(owner, "music.search.settings.save", Policy(0,
                 Kind(pages: 11, concurrency: 12), Kind(pages: int.MaxValue, concurrency: int.MaxValue)));
             var songs = saved.GetProperty("settings").GetProperty("songs");
@@ -72,20 +72,20 @@ public static class MusicSearchPreferenceTests
         })
             yield return Case("invalid-policy-" + JsonSerializer.Serialize(invalid), async () =>
             {
-                var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+                var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
                 await Code(owner, "music.search.settings.save", invalid, "INVALID_REQUEST");
                 Check(store.Writes == 0);
             });
         yield return Case("history-deduplicates-trims-and-retains-all-on-cold-reopen", async () =>
         {
             var store = new Store();
-            await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store)))
+            await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             {
                 for (int i = 0; i < 65; i++) await Call(owner, "music.search.history.record",
                     new { text = "词" + i, kind = "songs" });
                 await Call(owner, "music.search.history.record", new { text = " 词20 ", kind = "playlists" });
             }
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var history = (await Call(reopened, "music.search.history.get")).GetProperty("history");
             var items = history.GetProperty("items").EnumerateArray().ToArray();
             Check(items.Length == 65 && items[0].GetProperty("text").GetString() == "词20" &&
@@ -95,7 +95,7 @@ public static class MusicSearchPreferenceTests
         });
         yield return Case("history-clear-requires-current-revision-and-explicit-confirmation", async () =>
         {
-            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             await Call(owner, "music.search.history.record", new { text = "保留", kind = "local" });
             await Code(owner, "music.search.history.clear", new { ifRevision = 1, confirm = false }, "CONFIRMATION_REQUIRED");
             await Code(owner, "music.search.history.clear", new { ifRevision = 0, confirm = true }, "REVISION_CONFLICT");
@@ -105,7 +105,7 @@ public static class MusicSearchPreferenceTests
         });
         yield return Case("history-has-one-clear-operation-and-rejects-per-row-removal", async () =>
         {
-            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             foreach (string text in new[] { "A", "B" })
                 await Call(owner, "music.search.history.record", new { text, kind = "songs" });
             await Code(owner, "music.search.history.remove", new { text = "A", ifRevision = 2 }, "CAPABILITY_UNAVAILABLE");
@@ -125,13 +125,13 @@ public static class MusicSearchPreferenceTests
             yield return Case("invalid-history-text-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
                 System.Text.Encoding.UTF8.GetBytes(text)))[..8], async () =>
             {
-                var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+                var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
                 await Code(owner, "music.search.history.record", new { text, kind = "songs" }, "INVALID_REQUEST");
                 Check(store.Writes == 0);
             });
         yield return Case("lost-policy-ack-is-resolved-by-the-next-current-read-without-replaying-write", async () =>
         {
-            var store = new Store { Lose = true }; await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var store = new Store { Lose = true }; await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             await Code(owner, "music.search.settings.save", Policy(0,
                 Kind(enabled: []), Kind(enabled: [])), "COMMIT_UNKNOWN");
             Check((await Call(owner, "music.search.settings.get")).GetProperty("settings")
@@ -144,7 +144,7 @@ public static class MusicSearchPreferenceTests
                 ?? throw new InvalidOperationException("Isolated root required"), "search-" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(root);
             await using (var store = new MusicRecordTestStore(root))
-            await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store)))
+            await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             {
                 await Call(owner, "music.library.create", new { name = "保留歌单" });
                 await Call(owner, "music.search.settings.save", Policy(0,
@@ -152,7 +152,7 @@ public static class MusicSearchPreferenceTests
                 await Call(owner, "music.search.history.record", new { text = "本机", kind = "local" });
             }
             await using var reopened = new MusicRecordTestStore(root);
-            await using var library = new MusicLibraryOwner(MusicTestStores.For(reopened));
+            await using var library = new MusicLibraryOwner(MusicTestStores.For(reopened), database: MusicTestStores.For(reopened).Storage);
             Check((await Call(library, "music.library.list")).GetProperty("items").GetArrayLength() == 2);
             Check((await Call(library, "music.search.settings.get")).GetProperty("settings")
                 .GetProperty("songs").GetProperty("enabled")[0].GetString() == "mg");

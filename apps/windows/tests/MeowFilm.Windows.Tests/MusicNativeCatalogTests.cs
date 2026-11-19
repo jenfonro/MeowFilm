@@ -228,7 +228,7 @@ public static partial class MusicNativeCatalogTests
         internal readonly MusicNativeCatalogOwner Owner;
         internal readonly List<TaskCompletionSource> Releases = [];
         internal bool ExpectedCloseTimeout;
-        internal Fixture() { Library = new(MusicTestStores.For(Store)); Owner = new(Platform, Library, Clock); }
+        internal Fixture() { Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage); Owner = new(Platform, Library, Clock); }
         internal TaskCompletionSource Hold() { var signal = Signal(); Releases.Add(signal); return signal; }
         internal Task<JsonElement> Run(string method, object? input = null, CancellationToken token = default) =>
             Owner.ExecuteAsync("music.catalog." + method, input, token);
@@ -478,7 +478,7 @@ public static partial class MusicNativeCatalogTests
             snapshot.Library.GetProperty("collections").GetArrayLength() == 1 &&
             snapshot.Library.GetProperty("networkPlaylists").GetArrayLength() == 1);
         Error(await f.Library.ExecuteAsync("music.library.detail", new { id = S(saved.GetProperty("collection"), "id") }), "READ_ONLY");
-        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
         Check(N(Ok(await reader.ExecuteAsync("music.library.list")), "total") == 2);
         Check(S(Ok(await reader.ExecuteAsync("music.library.network.get", new { platform = "wy", id = "42" }))
             .GetProperty("collection"), "remoteId") == "42");
@@ -536,7 +536,7 @@ public static partial class MusicNativeCatalogTests
             S(queue.GetProperty("source"), "title") == title);
         Ok(await f.Library.ExecuteAsync("music.queue.replace",
             new { songs = new[] { Song("wy", 99) }, index = 0, context = new { searchKeyword = keyword } }));
-        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store));
+        await using var reader = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
         var restored = Ok(await reader.ExecuteAsync("music.queue.get"));
         Check(S(restored.GetProperty("current").GetProperty("context"), "searchKeyword") == keyword);
         var archives = Ok(await reader.ExecuteAsync("music.history.list", new { kind = "playlists" })).GetProperty("items");

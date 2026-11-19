@@ -20,6 +20,7 @@ final class PanLoginModelTests: XCTestCase {
         model.setVisible(true)
         model.draft = ["username": "synthetic-user", "password": "synthetic-password"]
         model.save()
+        await panEventually(self) { !model.busy }
         XCTAssertTrue(model.saved); XCTAssertTrue(model.completed); XCTAssertFalse(model.confirmed)
         XCTAssertTrue(model.draft.isEmpty); XCTAssertNil(model.progress)
         XCTAssertEqual(accounts.count, 1)
@@ -27,6 +28,7 @@ final class PanLoginModelTests: XCTestCase {
         XCTAssertEqual(try runtime.storage.credentials(.tianyi), .object([
             "username": .string("synthetic-user"), "password": .string("synthetic-password")]))
         model.save()
+        await panEventually(self) { !model.busy }
         XCTAssertEqual(try runtime.storage.read().panField("accounts")?.panField("tianyi")?.panField("revision"), .number(1))
         let calls = await runtime.calls
         XCTAssertTrue(calls.isEmpty)
@@ -37,17 +39,19 @@ final class PanLoginModelTests: XCTestCase {
 
     func testFailedNativeWriteKeepsDraftAndFormOpenThenCanSave() async throws {
         let runtime = try PanTestRuntime()
-        runtime.storage.committer.fail(true)
+        try runtime.storage.failWrites(true)
         let model = try login(runtime, provider: .tianyi)
         model.setVisible(true); model.draft = ["cookie": "synthetic-cookie"]
         model.save()
+        await panEventually(self) { !model.busy }
         XCTAssertFalse(model.completed); XCTAssertFalse(model.confirmed); XCTAssertFalse(model.busy)
         XCTAssertEqual(model.draft["cookie"], "synthetic-cookie")
         XCTAssertEqual(model.notice?.message, "网盘账号保存失败")
-        XCTAssertNil(try runtime.storage.document.read())
+        XCTAssertNil(try runtime.storage.document.readForTest())
         XCTAssertEqual(runtime.storage.changes.values, [])
-        runtime.storage.committer.fail(false)
+        try runtime.storage.failWrites(false)
         model.save()
+        await panEventually(self) { !model.busy }
         XCTAssertTrue(model.saved); XCTAssertFalse(model.confirmed)
         model.close()
     }
@@ -59,6 +63,7 @@ final class PanLoginModelTests: XCTestCase {
         let model = try login(runtime, provider: .tianyi) { snapshots.append($0) }
         model.setVisible(true); model.draft = ["username": "synthetic-user", "password": " synthetic-password "]
         model.save()
+        await panEventually(self) { !model.busy }
         XCTAssertTrue(model.saved); XCTAssertFalse(model.confirmed); XCTAssertEqual(snapshots.count, 1)
         XCTAssertEqual(snapshots[0].configured, true); XCTAssertEqual(snapshots[0].status, .unverified)
         XCTAssertEqual(try runtime.storage.credentials(.tianyi)?.panField("password"), .string(" synthetic-password "))
@@ -73,9 +78,10 @@ final class PanLoginModelTests: XCTestCase {
         let form = try login(runtime, provider: .yidong)
         form.setVisible(true); form.draft = ["authorization": "synthetic-authorization", "refreshedAt": "-1"]
         form.save(); XCTAssertNotNil(form.notice); XCTAssertFalse(form.completed)
-        XCTAssertNil(try runtime.storage.document.read())
+        XCTAssertNil(try runtime.storage.document.readForTest())
         form.draft["refreshedAt"] = ""
         form.save()
+        await panEventually(self) { !form.busy }
         XCTAssertTrue(form.saved); XCTAssertFalse(form.confirmed)
         form.close()
     }
@@ -86,8 +92,9 @@ final class PanLoginModelTests: XCTestCase {
         model.selectMethod(.manual)
         model.setVisible(true); model.draft = ["cookie": "synthetic\r\ninvalid"]
         model.save()
+        await panEventually(self) { !model.busy }
         XCTAssertFalse(model.completed); XCTAssertFalse(model.busy)
-        XCTAssertNil(try runtime.storage.document.read())
+        XCTAssertNil(try runtime.storage.document.readForTest())
         XCTAssertEqual(model.draft["cookie"], "synthetic\r\ninvalid")
         XCTAssertEqual(model.notice?.message, "网盘凭据无效")
         model.close()
@@ -95,6 +102,7 @@ final class PanLoginModelTests: XCTestCase {
 
     func testQRProgressWaitsForConfirmedPersistenceReceiptAndCloseNeverClearsAccount() async throws {
         let runtime = try PanTestRuntime()
+        try await runtime.setAccount(.baidu, status: .signedOut, revision: 3)
         await runtime.polls([panReceipt(.pending), panReceipt(.scanned),
             panReceipt(.confirmed, account: panAccountValue(.baidu, .signedIn, revision: 4))])
         var snapshots: [PanAccount] = []
@@ -158,6 +166,7 @@ final class PanLoginModelTests: XCTestCase {
             let runtime = try PanTestRuntime()
             let owner = PanAccountsModel(service: runtime.service)
             owner.start()
+            await panEventually(self) { owner.rows.allSatisfy { $0.account != nil } && !owner.rows.isEmpty }
             await runtime.challenge(panChallengeValue("synthetic-old-session"))
             let entered = expectation(description: "start admitted for \(boundary)")
             let gate = PanTestGate { entered.fulfill() }
@@ -233,6 +242,7 @@ final class PanLoginModelTests: XCTestCase {
         await runtime.gate("login.poll", gate)
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
+        await panEventually(self) { owner.rows.allSatisfy { $0.account != nil } && !owner.rows.isEmpty }
         let old = try XCTUnwrap(owner.openLogin(.baidu))
         old.setVisible(true)
         await fulfillment(of: [entered], timeout: 2)
@@ -241,6 +251,7 @@ final class PanLoginModelTests: XCTestCase {
         let next = try XCTUnwrap(owner.openLogin(.baidu))
         next.selectMethod(.manual); next.setVisible(true)
         next.draft = ["cookie": "synthetic-newer-account"]; next.save()
+        await panEventually(self) { !next.busy }
         XCTAssertTrue(next.saved)
         let revision = owner.rows[0].account?.revision
         await gate.release(); await polling?.value
@@ -254,7 +265,7 @@ final class PanLoginModelTests: XCTestCase {
     func testQRStorageFailureNeverPublishesConfirmedAndCanRetry() async throws {
         let runtime = try PanTestRuntime()
         await runtime.polls([panReceipt(.confirmed, account: panAccountValue(.baidu, .signedIn, revision: 1))])
-        runtime.storage.committer.fail(true)
+        try runtime.storage.failWrites(true)
         var snapshots: [PanAccount] = []
         let model = try login(runtime) { snapshots.append($0) }
         model.setVisible(true)
@@ -263,8 +274,8 @@ final class PanLoginModelTests: XCTestCase {
         XCTAssertNotEqual(model.progress, .confirmed)
         XCTAssertEqual(model.notice?.message, "网盘账号保存失败")
         XCTAssertTrue(model.canRetry); XCTAssertTrue(snapshots.isEmpty)
-        XCTAssertNil(try runtime.storage.document.read())
-        runtime.storage.committer.fail(false)
+        XCTAssertNil(try runtime.storage.document.readForTest())
+        try runtime.storage.failWrites(false)
         model.retry()
         await panEventually(self) { model.confirmed }
         XCTAssertEqual(snapshots.count, 1)

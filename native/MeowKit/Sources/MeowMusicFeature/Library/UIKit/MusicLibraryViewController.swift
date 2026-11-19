@@ -157,7 +157,9 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
 
     public func togglePlaylistAppearance() {
         let next: MusicPlaylistAppearance = appearance.preferences.playlistView == .grid ? .list : .grid
-        if !appearance.set(\.playlistView, next), let error = appearance.persistenceError { showError(error) }
+        Task {
+            if !(await appearance.set(\.playlistView, next)), let error = appearance.persistenceError { showError(error) }
+        }
     }
 
     private func updatePlaylistLayout() {

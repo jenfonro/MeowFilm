@@ -73,13 +73,12 @@ The new runtime implementation remains application source under GPL-3.0-only.
 ## Microsoft.Data.Sqlite — MIT
 
 - NuGet packages: `Microsoft.Data.Sqlite` and `Microsoft.Data.Sqlite.Core`
-  `10.0.15`, locked in the Windows capability project and affected consumer locks.
+  `10.0.15`, locked in the Windows platform project and its consumers.
 - Copyright (c) .NET Foundation and Contributors. The upstream MIT text is
   identical to the existing `dotnet-runtime-MIT.txt`, which is reused.
 - Source: `https://github.com/dotnet/dotnet`, package repository commit
   `8e0f8ed2312954727f8919d7d1c2f78b483b4ee7`.
-- Used as the Windows native music repository's ADO.NET SQLite provider;
-  no ORM or system SQLite installation is included.
+- The Windows native repositories use this ADO.NET SQLite provider.
 
 ## SQLitePCLRaw / SQLite — Apache-2.0 / public domain
 
@@ -94,8 +93,10 @@ The new runtime implementation remains application source under GPL-3.0-only.
   is preserved in `sqlite-LICENSE.md`, from
   `https://github.com/sqlite/sqlite/blob/version-3.53.3/LICENSE.md`.
   SQLite's build-only third-party configuration scripts are not distributed.
-- iOS uses the operating system's sqlite3 through the SwiftPM `CSQLite`
-  system-library module; it does not bundle SQLitePCLRaw or another SQLite binary.
+- iOS ships one `MeowSQLite.framework` shared by the Swift repositories and the
+  embedded Node binding. Its public-domain SQLite 3.53.4 amalgamation comes
+  from `https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip`. The
+  source hashes and compile options are recorded in `native/SQLite/sqlite.json`.
 
 ## iWebPlus / iWebPlayer — Apache-2.0
 

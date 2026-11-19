@@ -102,9 +102,9 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
       if (reference) requireValue(object(reference));
       const handoff = reference && search.findHandoff({ ...reference, sources: input.sources });
       const value = handoff ? { ...input, ...handoff } : { ...input, searchReference: undefined };
-      value.target = catalog.resolve(value.target, value.sources);
+      value.target = await catalog.resolve(value.target, value.sources);
       if (value.resumeTarget && !(value.resumeTarget.kind === 'group' && !value.resumeTarget.members?.length))
-        value.resumeTarget = catalog.resolve(value.resumeTarget, value.sources);
+        value.resumeTarget = await catalog.resolve(value.resumeTarget, value.sources);
       return service.open(value, handoff
         ? { ruleSnapshot: search.ruleSnapshot(reference), searchHandoff: handoff } : undefined);
     },
@@ -121,8 +121,8 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     'session.media.release': input => service.releaseMedia(input),
     'settings.get': () => service.settings(),
     'settings.set': input => service.setSettings(input),
-    'library.get': () => {
-      const value = service.library();
+    'library.get': async input => {
+      const value = await service.library(input);
       return { ...value, history: value.history.map(catalog.history) };
     },
     'library.remove': input => service.removeLibrary(input),
@@ -163,7 +163,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     },
   };
   return {
-    id: 'film', version: spec.version, contract: spec.contract,
+    id: 'film', ready: library.ready, version: spec.version, contract: spec.contract,
     async settingsChanged(block) {
       if (block === 'film.rules') await rules.settingsChanged();
       else if (block === 'film.preferences') await service.settingsChanged();
@@ -177,6 +177,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
         if (closed) throw fail('CLOSED');
         if (context?.signal?.aborted) throw fail('CANCELLED');
         requireValue(object(input));
+        await library.ready;
         return { ok: true, contract: spec.contract, value: await handler(input, context?.signal) };
       }])),
     events(path, context) {

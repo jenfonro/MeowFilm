@@ -1,6 +1,6 @@
 import Combine
 import Foundation
-import MeowRuntime
+import MeowStorage
 
 public enum FilmLibraryError: Error, Equatable, LocalizedError {
     case corruptedData
@@ -17,77 +17,54 @@ public enum FilmLibraryError: Error, Equatable, LocalizedError {
 
 @MainActor
 public final class FilmLibrary: ObservableObject {
-    @Published public private(set) var favorites: Set<FilmItemIdentity>
-    public let loadError: FilmLibraryError?
+    @Published public private(set) var favorites: Set<FilmItemIdentity> = []
+    @Published public private(set) var loadError: FilmLibraryError?
+    private var database: SQLiteDatabase?
+    private var changes: [FilmItemIdentity: UUID] = [:]
+    private var closed = false
 
-    static let storageKey = "meowfilm.film.library.v1"
-    private let defaults: UserDefaults
-    private var rows: [RuntimeValue] = []
-    private var positions: [FilmItemIdentity: Int] = [:]
-
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
-        guard let stored = defaults.object(forKey: Self.storageKey) else {
-            favorites = []
-            loadError = nil
-            return
-        }
+    public init() {}
+    public func bind(database: SQLiteDatabase) async throws {
+        guard self.database == nil, !closed else { return }
         do {
-            guard let data = stored as? Data else { throw FilmLibraryError.corruptedData }
-            guard case .array(let rows) = try RuntimeJSON.decode(data) else { throw FilmLibraryError.corruptedData }
-            let parsed = rows.enumerated().compactMap { index, value -> (Int, FilmItemIdentity)? in
-                guard let item = try? JSONDecoder().decode(FilmItemIdentity.self, from: RuntimeJSON.encode(value)),
-                      let businessID = item.businessID, !businessID.isEmpty,
-                      let target = item.playbackTarget, target.id.utf8.elementsEqual(businessID.utf8),
-                      item.sourceID != "tmdb" || item.kind != nil else { return nil }
-                return (index, item)
-            }
-            let identities = rows.compactMap { $0.filmObject?["businessID"]?.filmText }.map { Data($0.utf8) }
-            let counts = Dictionary(grouping: identities, by: { $0 }).mapValues(\.count)
-            let unique = parsed.filter { counts[Data($0.1.businessID!.utf8)] == 1 }
-            guard rows.isEmpty || !unique.isEmpty else { throw FilmLibraryError.corruptedData }
-            self.rows = rows
-            let positions = Dictionary(uniqueKeysWithValues: unique.map { ($0.1, $0.0) })
-            self.positions = positions
-            favorites = Set(positions.keys)
-            loadError = nil
+            let saved = try await database.snapshot(FilmFavoriteRepository.load)
+            guard !closed else { return }
+            self.database = database; favorites = saved; loadError = nil
         } catch {
-            favorites = []
             loadError = .corruptedData
+            throw error
         }
     }
-
-    public func contains(_ item: FilmItem) -> Bool {
-        favorites.contains(item.identity)
-    }
+    public func contains(_ item: FilmItem) -> Bool { favorites.contains(item.identity) }
 
     @discardableResult
-    public func toggle(_ item: FilmItem) throws -> Bool {
+    public func toggle(_ item: FilmItem) async throws -> Bool {
+        guard !closed else { throw SQLiteStorageError.closed }
         if let loadError { throw loadError }
         guard item.sourceID != "tmdb" || item.kind != nil else { throw FilmLibraryError.missingKind }
         guard let businessID = item.businessID, !businessID.isEmpty,
               let target = item.playbackTarget, target.id.utf8.elementsEqual(businessID.utf8) else { throw FilmLibraryError.missingTarget }
-        var updated = rows
+        let identity = item.identity, ticket = UUID()
+        changes[identity] = ticket
         let added: Bool
-        if let position = positions[item.identity] {
-            updated.remove(at: position)
-            added = false
-        } else {
-            guard !rows.contains(where: { $0.filmObject?["businessID"] == .string(businessID) }) else {
-                throw FilmLibraryError.corruptedData
+        if let database {
+            added = try await database.transaction { db in
+                if try !db.query("SELECT businessID FROM ios_film_favorites WHERE businessID=?", [.text(businessID)]).isEmpty {
+                    try db.execute("DELETE FROM ios_film_favorites WHERE businessID=?", [.text(businessID)])
+                    return false
+                }
+                try FilmFavoriteRepository.insert(identity, db)
+                return true
             }
-            updated.append(try RuntimeJSON.decode(JSONEncoder().encode(item.identity)))
-            added = true
+        } else { added = !favorites.contains(identity) }
+        if changes[identity] == ticket, !closed {
+            if added { favorites.insert(identity) } else { favorites.remove(identity) }
+            changes[identity] = nil
         }
-        let data = try RuntimeJSON.encode(.array(updated))
-        defaults.set(data, forKey: Self.storageKey)
-        rows = updated
-        if added { positions[item.identity] = rows.count - 1 }
-        else {
-            let removed = positions.removeValue(forKey: item.identity)!
-            for (identity, index) in positions where index > removed { positions[identity] = index - 1 }
-        }
-        favorites = Set(positions.keys)
         return added
+    }
+    public func close() async {
+        closed = true
+        _ = try? await database?.flush()
     }
 }

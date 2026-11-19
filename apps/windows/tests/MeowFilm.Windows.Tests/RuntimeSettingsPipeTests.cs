@@ -1,6 +1,7 @@
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using MeowFilm.Capabilities;
 using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -10,7 +11,7 @@ public static class RuntimeSettingsPipeTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return new("runtime-settings.large-request-response-and-persisted-document", LargeFrames);
+        yield return new("runtime-settings.large-request-response-and-persisted-fields", LargeFrames);
         yield return new("runtime-settings.incomplete-frame-is-not-accepted", IncompleteFrame);
     }
 
@@ -20,18 +21,18 @@ public static class RuntimeSettingsPipeTests
         Directory.CreateDirectory(root);
         try
         {
-            const string ns = "test.settings";
             string value = new('x', 8 * 1024 * 1024 + 17);
             string write = JsonSerializer.Serialize(new
             {
-                kind = "settings.write", id = 1, block = "pan.accounts",
-                expected = new { exists = false, length = 0, sha256 = (string?)null },
-                document = new { value }
+                kind = "settings.pan.update", id = 1, block = "pan.accounts",
+                command = new { provider = "baidu", mode = "replace", accountRevision = 0,
+                    rowRevision = 0, credentials = new { cookie = value } }
             });
             using var stream = new DuplexFixture(write + "\n" +
                 """{"kind":"settings.read","id":2,"block":"pan.accounts"}""" + "\n");
-            await using var store = new LocalDocumentStore(root, [ns], protectedNamespaces: [ns]);
-            Check(await Run(stream, store, new Dictionary<string, string> { ["pan.accounts"] = ns }) == "CLOSED");
+            await using var database = new NativeTestDatabase(root);
+            var store = new FilmRuntimeSettings(database);
+            Check(await Run(stream, store) == "CLOSED");
             string[] replies = Encoding.UTF8.GetString(stream.Output.ToArray()).Split('\n', StringSplitOptions.RemoveEmptyEntries);
             Check(replies.Length == 2);
             for (int index = 0; index < replies.Length; index++)
@@ -39,10 +40,12 @@ public static class RuntimeSettingsPipeTests
                 using var reply = JsonDocument.Parse(replies[index]);
                 Check(reply.RootElement.GetProperty("ok").GetBoolean() &&
                     reply.RootElement.GetProperty("id").GetInt32() == index + 1 &&
-                    reply.RootElement.GetProperty("document").GetProperty("value").GetString() == value);
+                    reply.RootElement.GetProperty("revision").GetInt64() == 1 &&
+                    reply.RootElement.GetProperty("document").GetProperty("accounts")
+                        .GetProperty("baidu").GetProperty("credentials").GetProperty("cookie").GetString() == value);
             }
-            using var saved = JsonDocument.Parse((await store.ReadAsync(ns)).Data!);
-            Check(saved.RootElement.GetProperty("value").GetString() == value);
+            Check(await database.ReadAsync(db => db.Scalar<string>(
+                "SELECT cookie FROM windows_pan_accounts WHERE provider='baidu'")) == value);
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -50,14 +53,14 @@ public static class RuntimeSettingsPipeTests
     private static async Task IncompleteFrame()
     {
         using var stream = new DuplexFixture("""{"kind":"settings.read","id":1""");
-        Check(await Run(stream, null, null) == "INVALID_RESPONSE" && stream.Output.Length == 0);
+        Check(await Run(stream, null) == "INVALID_RESPONSE" && stream.Output.Length == 0);
     }
 
-    private static Task<string> Run(Stream stream, IDocumentStore? store, IReadOnlyDictionary<string, string>? namespaces)
+    private static Task<string> Run(Stream stream, IRuntimeSettingsStore? store)
     {
         var type = typeof(NodeRuntime).Assembly.GetType("MeowFilm.Platform.Runtime.RuntimeSettingsPipe", throwOnError: true)!;
         var pipe = Activator.CreateInstance(type, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
-            binder: null, args: [stream, store, namespaces], culture: null)!;
+            binder: null, args: [stream, store], culture: null)!;
         return (Task<string>)type.GetMethod("RunAsync", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(pipe, null)!;
     }
 

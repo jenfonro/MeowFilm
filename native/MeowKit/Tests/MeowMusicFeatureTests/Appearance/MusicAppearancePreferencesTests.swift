@@ -2,227 +2,225 @@
 // Deterministic native tests only; no account, network, script or player fixture.
 import XCTest
 import MeowUI
+import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicFeature
 
 @MainActor final class MusicAppearancePreferencesTests: XCTestCase {
-    private func isolated(_ body: (UserDefaults) throws -> Void) rethrows {
-        let suite = "meowfilm.tests.appearance." + UUID().uuidString
-        let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removePersistentDomain(forName: suite) }
-        try body(defaults)
+    private func makeStore(_ database: SQLiteDatabase) async throws -> MusicAppearancePreferencesStore {
+        let store = MusicAppearancePreferencesStore(database: database)
+        try await store.bind(database: database)
+        return store
+    }
+    private func rows(_ database: SQLiteDatabase) async throws -> [SQLiteRow] {
+        try await database.snapshot { try $0.query("SELECT * FROM ios_music_appearance ORDER BY singleton") }
     }
     private let red: [UInt8] = [240, 45, 55, 255]
     private let green: [UInt8] = [40, 220, 120, 255]
     private func song(_ id: String) -> MusicAppearanceSongIdentity { .init(songID: "song:" + id) }
 
-    func testCustomColorPreviewDoesNotPersistAndCancellationRestoresTheSavedPalette() throws {
-        try isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            store.selectFixedPalette(.preset(.mint))
-            let saved = defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey)
-            store.previewFixedColor(0xff0077)
-            XCTAssertEqual(store.pagePalette, .custom(0xff0077))
-            XCTAssertEqual(store.preferences.colorPalette, .preset(.mint))
-            XCTAssertEqual(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey), saved)
-            XCTAssertEqual(MusicAppearancePreferencesStore(defaults: defaults).pagePalette, .preset(.mint))
-            store.endColorPreview()
-            XCTAssertEqual(store.pagePalette, .preset(.mint))
-            store.previewFixedColor(0x40ab93)
-            XCTAssertTrue(store.selectFixedPalette(.custom(0x40ab93)))
-            store.endColorPreview()
-            XCTAssertEqual(store.pagePalette, .custom(0x40ab93))
-            let reopened = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(reopened.preferences.colorPalette, .custom(0x40ab93))
-            XCTAssertEqual(reopened.pagePalette, .custom(0x40ab93))
-            let bytes = try XCTUnwrap(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey))
-            XCTAssertTrue(String(decoding: bytes, as: UTF8.self).contains("#40AB93"))
-        }
+    func testCustomColorPreviewDoesNotPersistAndCancellationRestoresTheSavedPalette() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        storageTestTrue(await store.selectFixedPalette(.preset(.mint)))
+        let saved = try await rows(database)
+        store.previewFixedColor(0xff0077)
+        XCTAssertEqual(store.pagePalette, .custom(0xff0077))
+        XCTAssertEqual(store.preferences.colorPalette, .preset(.mint))
+        storageTestEqual(try await rows(database), saved)
+        storageTestEqual(try await makeStore(database).pagePalette, .preset(.mint))
+        store.endColorPreview()
+        XCTAssertEqual(store.pagePalette, .preset(.mint))
+        store.previewFixedColor(0x40ab93)
+        storageTestTrue(await store.selectFixedPalette(.custom(0x40ab93)))
+        store.endColorPreview()
+        XCTAssertEqual(store.pagePalette, .custom(0x40ab93))
+        let reopened = try await makeStore(database)
+        XCTAssertEqual(reopened.preferences.colorPalette, .custom(0x40ab93))
+        XCTAssertEqual(reopened.pagePalette, .custom(0x40ab93))
+        let savedRows = try await rows(database)
+        XCTAssertEqual(try savedRows.first?.text("colorPalette"), "#40AB93")
+        await store.close(); await reopened.close()
     }
 
-    func testSongModeStillUsesItsOwnCacheAfterCustomColorAndLateCoverCannotOverwriteFixedColor() throws {
-        try isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            store.selectSong(song("custom-roundtrip"))
-            let pending = try XCTUnwrap(store.beginCover(for: song("custom-roundtrip"), artworkID: "cover"))
-            XCTAssertTrue(store.applyCover(rgba: green, ticket: pending))
-            store.selectFixedPalette(.custom(0x2143aa))
-            XCTAssertFalse(store.applyCover(rgba: red, ticket: pending))
-            store.set(\.colorMode, .song)
-            XCTAssertEqual(store.pagePalette, .preset(.mint))
-            store.set(\.colorMode, .fixed)
-            XCTAssertEqual(store.pagePalette, .custom(0x2143aa))
-        }
+    func testSongModeStillUsesItsOwnCacheAfterCustomColorAndLateCoverCannotOverwriteFixedColor() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        store.selectSong(song("custom-roundtrip"))
+        let pending = try XCTUnwrap(store.beginCover(for: song("custom-roundtrip"), artworkID: "cover"))
+        XCTAssertTrue(store.applyCover(rgba: green, ticket: pending))
+        storageTestTrue(await store.selectFixedPalette(.custom(0x2143aa)))
+        XCTAssertFalse(store.applyCover(rgba: red, ticket: pending))
+        storageTestTrue(await store.set(\.colorMode, .song))
+        XCTAssertEqual(store.pagePalette, .preset(.mint))
+        storageTestTrue(await store.set(\.colorMode, .fixed))
+        XCTAssertEqual(store.pagePalette, .custom(0x2143aa))
+        await store.close()
     }
 
-    func testDefaultsMatchReferenceAndDoNotNeedAMusicService() {
-        isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(store.preferences, .init())
-            XCTAssertEqual(store.effectivePalette, .preset(.lilac))
-            XCTAssertEqual(MusicPlayerAppearance.allCases, [.starlight])
-            XCTAssertEqual(store.preferences.playlistView, .grid)
-            XCTAssertTrue(store.preferences.lockLyric)
-            XCTAssertTrue(store.preferences.lyricTranslation)
-            XCTAssertTrue(store.preferences.lyricBackground)
-            XCTAssertNil(defaults.object(forKey: MusicAppearancePreferencesStore.preferencesKey), "Reading defaults is not an import/write")
-        }
+    func testDefaultsMatchReferenceAndDoNotNeedAMusicService() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        XCTAssertEqual(store.preferences, .init())
+        XCTAssertEqual(store.effectivePalette, .preset(.lilac))
+        XCTAssertEqual(MusicPlayerAppearance.allCases, [.starlight])
+        XCTAssertEqual(store.preferences.playlistView, .grid)
+        XCTAssertTrue(store.preferences.lockLyric)
+        XCTAssertTrue(store.preferences.lyricTranslation)
+        XCTAssertTrue(store.preferences.lyricBackground)
+        storageTestEqual(try await rows(database), [])
+        await store.close()
     }
 
-    func testPreferencesPersistIndependentlyOfOtherSettings() {
-        isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            store.set(\.playlistView, .list)
-            store.selectFixedPalette(.preset(.mint))
-            store.set(\.lockLyric, false)
-            store.set(\.lyricTranslation, false)
-            store.set(\.lyricBackground, false)
-            let reopened = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(reopened.preferences, .init(playlistView: .list, colorMode: .fixed, colorPalette: .preset(.mint),
-                                                       lockLyric: false, lyricTranslation: false, lyricBackground: false))
-            XCTAssertNil(defaults.string(forKey: "unrelated.setting"))
-            XCTAssertEqual(reopened.effectivePalette, .preset(.mint))
-            defaults.set("grid", forKey: "unrelated.setting")
-            reopened.reload()
-            XCTAssertEqual(reopened.preferences.playlistView, .list)
-            XCTAssertEqual(defaults.string(forKey: "unrelated.setting"), "grid")
-            XCTAssertFalse(reopened.preferences.lyricTranslation)
-        }
+    func testPreferencesPersistIndependentlyOfOtherSettings() async throws {
+        let database = try storageTestDatabase(self)
+        _ = try await database.transaction { try $0.execute("INSERT INTO ios_search_history(text,used_at) VALUES('preserved',1)") }
+        let store = try await makeStore(database)
+        storageTestTrue(await store.set(\.playlistView, .list))
+        storageTestTrue(await store.selectFixedPalette(.preset(.mint)))
+        storageTestTrue(await store.set(\.lockLyric, false))
+        storageTestTrue(await store.set(\.lyricTranslation, false))
+        storageTestTrue(await store.set(\.lyricBackground, false))
+        let reopened = try await makeStore(database)
+        XCTAssertEqual(reopened.preferences, .init(playlistView: .list, colorMode: .fixed, colorPalette: .preset(.mint),
+                                                   lockLyric: false, lyricTranslation: false, lyricBackground: false))
+        XCTAssertEqual(reopened.effectivePalette, .preset(.mint))
+        await reopened.reload()
+        XCTAssertEqual(reopened.preferences.playlistView, .list)
+        XCTAssertFalse(reopened.preferences.lyricTranslation)
+        storageTestEqual(try await database.snapshot { try $0.query("SELECT text FROM ios_search_history").first?.text("text") }, "preserved")
+        await store.close(); await reopened.close()
     }
 
-    func testFieldUpdatesRebaseRatherThanLoseAnotherOwnersEdit() {
-        isolated { defaults in
-            let first = MusicAppearancePreferencesStore(defaults: defaults)
-            let second = MusicAppearancePreferencesStore(defaults: defaults)
-            first.set(\.lyricBackground, false)
-            second.selectFixedPalette(.preset(.rose))
-            first.set(\.lockLyric, false)
-            let reopened = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertFalse(reopened.preferences.lockLyric)
-            XCTAssertFalse(reopened.preferences.lyricBackground)
-            XCTAssertEqual(reopened.effectivePalette, .preset(.rose))
-        }
+    func testFieldUpdatesRebaseRatherThanLoseAnotherOwnersEdit() async throws {
+        let database = try storageTestDatabase(self)
+        let first = try await makeStore(database), second = try await makeStore(database)
+        storageTestTrue(await first.set(\.lyricBackground, false))
+        storageTestTrue(await second.selectFixedPalette(.preset(.rose)))
+        storageTestTrue(await first.set(\.lockLyric, false))
+        let reopened = try await makeStore(database)
+        XCTAssertFalse(reopened.preferences.lockLyric)
+        XCTAssertFalse(reopened.preferences.lyricBackground)
+        XCTAssertEqual(reopened.effectivePalette, .preset(.rose))
+        await first.close(); await second.close(); await reopened.close()
     }
 
-    func testNativeLyricChoicePersists() {
-        isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            store.set(\.colorMode, .fixed)
-            store.set(\.lyricTranslation, false)
-            let reopened = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertFalse(reopened.preferences.lyricTranslation)
-            XCTAssertEqual(reopened.preferences.colorMode, .fixed)
-            reopened.set(\.lyricTranslation, true)
-            XCTAssertTrue(MusicAppearancePreferencesStore(defaults: defaults).preferences.lyricTranslation)
-        }
+    func testNativeLyricChoicePersists() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        storageTestTrue(await store.set(\.colorMode, .fixed))
+        storageTestTrue(await store.set(\.lyricTranslation, false))
+        let reopened = try await makeStore(database)
+        XCTAssertFalse(reopened.preferences.lyricTranslation)
+        XCTAssertEqual(reopened.preferences.colorMode, .fixed)
+        storageTestTrue(await reopened.set(\.lyricTranslation, true))
+        storageTestTrue(try await makeStore(database).preferences.lyricTranslation)
+        await store.close(); await reopened.close()
     }
 
-    func testCorruptCurrentPreferencesAreNotSilentlyOverwritten() {
-        isolated { defaults in
-            let bytes = Data("{broken".utf8)
-            defaults.set(bytes, forKey: MusicAppearancePreferencesStore.preferencesKey)
-            defaults.set("untouched", forKey: "music.library.test-marker")
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertNotNil(store.persistenceError)
-            XCTAssertFalse(store.set(\.lockLyric, false))
-            XCTAssertEqual(defaults.data(forKey: MusicAppearancePreferencesStore.preferencesKey), bytes)
-            store.resetPreferences()
-            XCTAssertNil(store.persistenceError)
-            XCTAssertEqual(store.preferences, .init())
-            XCTAssertEqual(defaults.string(forKey: "music.library.test-marker"), "untouched")
-        }
+    func testCorruptCurrentPreferencesAreNotSilentlyOverwritten() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        storageTestTrue(await store.set(\.lockLyric, false))
+        _ = try await database.transaction { try $0.execute("UPDATE ios_music_appearance SET colorPalette='invalid'") }
+        let before = try await rows(database)
+        await store.reload()
+        XCTAssertNotNil(store.persistenceError)
+        storageTestFalse(await store.set(\.lockLyric, true))
+        storageTestEqual(try await rows(database), before)
+        await store.resetPreferences()
+        XCTAssertNil(store.persistenceError)
+        XCTAssertEqual(store.preferences, .init())
+        storageTestEqual(try await rows(database), [])
+        await store.close()
     }
 
     func testMalformedCurrentPreferencesAreNotSilentlyDefaulted() throws {
         let current = try JSONEncoder().encode(MusicAppearancePreferences())
         let fields = try XCTUnwrap(try JSONSerialization.jsonObject(with: current) as? [String: Any])
         for key in ["playlistView", "playerTheme", "colorMode", "colorPalette"] {
-            var malformed = fields
-            malformed[key] = "invalid"
+            var malformed = fields; malformed[key] = "invalid"
             let bytes = try JSONSerialization.data(withJSONObject: malformed)
             XCTAssertThrowsError(try JSONDecoder().decode(MusicAppearancePreferences.self, from: bytes))
         }
-        var missing = fields
-        missing.removeValue(forKey: "lyricTranslation")
+        var missing = fields; missing.removeValue(forKey: "lyricTranslation")
         XCTAssertThrowsError(try JSONDecoder().decode(MusicAppearancePreferences.self,
                                                      from: JSONSerialization.data(withJSONObject: missing)))
     }
 
-    func testLateCoverCannotRepaintAnotherSongOrANewerCoverOrFixedMode() throws {
-        try isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            store.selectSong(song("a"))
-            let old = try XCTUnwrap(store.beginCover(for: song("a"), artworkID: "first"))
-            store.selectSong(song("b"))
-            XCTAssertFalse(store.applyCover(rgba: red, ticket: old))
-            XCTAssertNil(store.beginCover(for: song("a"), artworkID: "wrong-song"))
-            let first = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "old-cover"))
-            let second = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "display-cover"))
-            XCTAssertFalse(store.applyCover(rgba: red, ticket: first))
-            XCTAssertTrue(store.applyCover(rgba: green, ticket: second))
-            XCTAssertEqual(store.effectivePalette, .preset(.mint))
-            let pending = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "late"))
-            store.selectFixedPalette(.preset(.lemon))
-            XCTAssertFalse(store.applyCover(rgba: red, ticket: pending))
-            XCTAssertNil(store.beginCover(for: song("b"), artworkID: "fixed"))
-            XCTAssertEqual(store.effectivePalette, .preset(.lemon))
-            store.set(\.colorMode, .song)
-            XCTAssertEqual(store.effectivePalette, .preset(.mint))
-        }
+    func testLateCoverCannotRepaintAnotherSongOrANewerCoverOrFixedMode() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        store.selectSong(song("a"))
+        let old = try XCTUnwrap(store.beginCover(for: song("a"), artworkID: "first"))
+        store.selectSong(song("b"))
+        XCTAssertFalse(store.applyCover(rgba: red, ticket: old))
+        XCTAssertNil(store.beginCover(for: song("a"), artworkID: "wrong-song"))
+        let first = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "old-cover"))
+        let second = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "display-cover"))
+        XCTAssertFalse(store.applyCover(rgba: red, ticket: first))
+        XCTAssertTrue(store.applyCover(rgba: green, ticket: second))
+        XCTAssertEqual(store.effectivePalette, .preset(.mint))
+        let pending = try XCTUnwrap(store.beginCover(for: song("b"), artworkID: "late"))
+        storageTestTrue(await store.selectFixedPalette(.preset(.lemon)))
+        XCTAssertFalse(store.applyCover(rgba: red, ticket: pending))
+        XCTAssertNil(store.beginCover(for: song("b"), artworkID: "fixed"))
+        XCTAssertEqual(store.effectivePalette, .preset(.lemon))
+        storageTestTrue(await store.set(\.colorMode, .song))
+        XCTAssertEqual(store.effectivePalette, .preset(.mint))
+        await store.close()
     }
 
-    func testCancellationPlaceholderAndMissingCoverKeepTheFallbackWithoutErrors() throws {
-        try isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            store.selectSong(song("a"))
-            let fallback = store.effectivePalette
-            XCTAssertNil(store.beginCover(for: song("a"), artworkID: "placeholder", isPlaceholder: true))
-            XCTAssertNil(store.beginCover(for: song("a"), artworkID: ""))
-            let pending = try XCTUnwrap(store.beginCover(for: song("a"), artworkID: "cover"))
-            XCTAssertFalse(store.applyCover(rgba: [0, 0, 0, 0], ticket: pending))
-            store.cancelCover()
-            XCTAssertFalse(store.applyCover(rgba: green, ticket: pending))
-            XCTAssertEqual(store.effectivePalette, fallback)
-            XCTAssertNil(store.persistenceError)
-            store.selectSong(nil)
-            XCTAssertEqual(store.effectivePalette, fallback)
-        }
+    func testCancellationPlaceholderAndMissingCoverKeepTheFallbackWithoutErrors() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        store.selectSong(song("a"))
+        let fallback = store.effectivePalette
+        XCTAssertNil(store.beginCover(for: song("a"), artworkID: "placeholder", isPlaceholder: true))
+        XCTAssertNil(store.beginCover(for: song("a"), artworkID: ""))
+        let pending = try XCTUnwrap(store.beginCover(for: song("a"), artworkID: "cover"))
+        XCTAssertFalse(store.applyCover(rgba: [0, 0, 0, 0], ticket: pending))
+        store.cancelCover()
+        XCTAssertFalse(store.applyCover(rgba: green, ticket: pending))
+        XCTAssertEqual(store.effectivePalette, fallback)
+        XCTAssertNil(store.persistenceError)
+        store.selectSong(nil)
+        XCTAssertEqual(store.effectivePalette, fallback)
+        await store.close()
     }
 
-    func testPrimingIsNotPlaybackAndCacheIsBoundedInReferenceOrder() throws {
-        try isolated { defaults in
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            for index in 0..<130 { store.primeCover(rgba: green, for: song("\(index)")) }
-            XCTAssertEqual(store.effectivePalette, .preset(.lilac))
-            let bytes = try XCTUnwrap(defaults.data(forKey: MusicAppearancePreferencesStore.songColorsKey))
-            let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
-            let colors = try XCTUnwrap(json["colors"] as? [[String]])
-            XCTAssertEqual(colors.count, 128)
-            XCTAssertEqual(colors.first, ["song:2", "mint"])
-            store.selectSong(song("2")) // A cache hit does not reorder the Map.
-            XCTAssertEqual(store.effectivePalette, .preset(.mint))
-            store.primeCover(rgba: red, for: song("2")) // A changed sample DOES.
-            XCTAssertEqual(store.effectivePalette, .preset(.mint))
-            let reopened = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(reopened.effectivePalette, .preset(.mint))
-            reopened.selectSong(song("2"))
-            XCTAssertEqual(reopened.effectivePalette, .preset(.coral))
-            reopened.selectSong(nil)
-            XCTAssertEqual(reopened.effectivePalette, .preset(.coral))
-        }
+    func testPrimingIsNotPlaybackAndCacheIsBoundedInReferenceOrder() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        for index in 0..<130 { store.primeCover(rgba: green, for: song("\(index)")) }
+        XCTAssertEqual(store.effectivePalette, .preset(.lilac))
+        await store.close()
+        let colors = try await database.snapshot { try $0.query("SELECT * FROM ios_music_song_palettes ORDER BY used_at,song_key") }
+        XCTAssertEqual(colors.count, 128)
+        XCTAssertEqual(try colors.first?.text("song_key"), "song:2")
+        let next = try await makeStore(database)
+        next.selectSong(song("2"))
+        XCTAssertEqual(next.effectivePalette, .preset(.mint))
+        next.primeCover(rgba: red, for: song("2"))
+        XCTAssertEqual(next.effectivePalette, .preset(.mint))
+        await next.close()
+        let reopened = try await makeStore(database)
+        XCTAssertEqual(reopened.effectivePalette, .preset(.mint))
+        reopened.selectSong(song("2"))
+        XCTAssertEqual(reopened.effectivePalette, .preset(.coral))
+        reopened.selectSong(nil)
+        XCTAssertEqual(reopened.effectivePalette, .preset(.coral))
+        await reopened.close()
     }
 
-    func testCacheFilteringAndLongKeysNeverOverwritePreferences() {
-        isolated { defaults in
-            let key = MusicAppearancePreferencesStore.songColorsKey
-            defaults.set(Data(#"{"last":"missing","colors":[["song:a","mint"],["song:a","rose"],["song:b","missing"],["bad"],4]}"#.utf8), forKey: key)
-            let store = MusicAppearancePreferencesStore(defaults: defaults)
-            XCTAssertEqual(store.effectivePalette, .preset(.lilac))
-            store.selectSong(song("a"))
-            XCTAssertEqual(store.effectivePalette, .preset(.rose))
-            store.primeCover(rgba: green, for: song(String(repeating: "x", count: 2050)))
-            XCTAssertNil(defaults.object(forKey: MusicAppearancePreferencesStore.preferencesKey))
-            XCTAssertEqual(store.preferences, .init())
-        }
+    func testLongCacheKeysNeverOverwritePreferences() async throws {
+        let database = try storageTestDatabase(self)
+        let store = try await makeStore(database)
+        store.primeCover(rgba: green, for: song(String(repeating: "x", count: 2050)))
+        await store.close()
+        storageTestEqual(try await rows(database), [])
+        storageTestEqual(try await database.snapshot { try $0.query("SELECT * FROM ios_music_song_palettes") }, [])
+        XCTAssertEqual(store.preferences, .init())
     }
 
     func testLyricsAreDisplayOnlyAndRecordPreviewIsAlwaysOriginalOnly() {

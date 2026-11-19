@@ -9,10 +9,10 @@ import MeowUI
 @MainActor
 final class FilmPlayerGestureUIKitTests: XCTestCase {
     func testDoubleTapDoesNotAlsoRunSingleTapAndSideDirectionUsesConfiguredStep() async throws {
-        let store = makeStore()
-        XCTAssertTrue(store.set(\.singleTapSides, .seek))
-        XCTAssertTrue(store.set(\.doubleTapSides, .playPause))
-        XCTAssertTrue(store.set(\.seekStep, 20))
+        let store = try makeStore()
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.singleTapSides, .seek) })
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.doubleTapSides, .playPause) })
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.seekStep, 20) })
         let (_, model, media, _) = try await mount(store: store)
         try await touch { app in
             app.otherElements["film.player.video"].coordinate(withNormalizedOffset: .init(dx: 0.8, dy: 0.4)).doubleTap()
@@ -33,9 +33,9 @@ final class FilmPlayerGestureUIKitTests: XCTestCase {
     }
 
     func testControlTouchDoesNotTriggerVideoGestureAndCenterNoneDoesNothing() async throws {
-        let store = makeStore()
-        XCTAssertTrue(store.set(\.singleTapCenter, .none))
-        XCTAssertTrue(store.set(\.singleTapSides, .seek))
+        let store = try makeStore()
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.singleTapCenter, .none) })
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.singleTapSides, .seek) })
         let (page, _, media, _) = try await mount(store: store)
         let video = try XCTUnwrap(descendant("film.player.video", in: page.view))
         let play = try XCTUnwrap(descendant("film.player.play-pause", in: page.view) as? UIButton)
@@ -59,9 +59,9 @@ final class FilmPlayerGestureUIKitTests: XCTestCase {
     }
 
     func testRealLongPressUsesTemporaryChannelAndRestoresManualRateWithoutTapping() async throws {
-        let store = makeStore()
-        XCTAssertTrue(store.set(\.holdRate, 4))
-        XCTAssertTrue(store.set(\.singleTapCenter, .playPause))
+        let store = try makeStore()
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.holdRate, 4) })
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.singleTapCenter, .playPause) })
         let (_, model, media, _) = try await mount(store: store)
         model.setRate(1.25)
         try await touch { app in
@@ -91,7 +91,7 @@ final class FilmPlayerGestureUIKitTests: XCTestCase {
     }
 
     func testHorizontalDragSeeksOnceAndVerticalRightDragChangesOnlyVolume() async throws {
-        let store = makeStore()
+        let store = try makeStore()
         let (page, _, media, _) = try await mount(store: store)
         try await drag(in: page, fromX: 0.35, toX: 0.6, upwards: false, horizontal: true)
         try await waitFor("The completed horizontal gesture seeks once") { media.base.seeks.count == 1 }
@@ -106,7 +106,7 @@ final class FilmPlayerGestureUIKitTests: XCTestCase {
     }
 
     func testBrightnessIsReturnedWhenPlayerLeavesAndDisabledSwipeDoesNotChangeIt() async throws {
-        let store = makeStore()
+        let store = try makeStore()
         let (page, model, media, _) = try await mount(store: store)
         let screen = try XCTUnwrap(page.view.window?.screen)
         let original = screen.brightness
@@ -133,7 +133,7 @@ final class FilmPlayerGestureUIKitTests: XCTestCase {
         #else
         try await waitFor("The real screen brightness decreases") { screen.brightness < baseline }
         #endif
-        XCTAssertTrue(store.set(\.swipeBrightness, false))
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.swipeBrightness, false) })
         let changed = screen.brightness
         try await drag(in: page, fromX: 0.2, toX: 0.2, upwards: false)
         XCTAssertEqual(observation.translations.count, 2)
@@ -150,13 +150,13 @@ final class FilmPlayerGestureUIKitTests: XCTestCase {
     }
 
     func testShortVideoVerticalCenterDragUsesEpisodeCommandOnlyWithModeAndPreference() async throws {
-        let store = makeStore()
+        let store = try makeStore()
         let (page, model, media, server) = try await mount(store: store, shortVideo: true)
         try await drag(in: page, fromX: 0.5, toX: 0.5, upwards: true)
         await model.waitForPendingWork()
         var actions = await server.calls().compactMap(\.action)
         XCTAssertEqual(actions.filter { $0 == "next" }, ["next"])
-        XCTAssertTrue(store.set(\.swipeEpisodes, false))
+        XCTAssertTrue(try appStorageTestWait { await store.set(\.swipeEpisodes, false) })
         try await drag(in: page, fromX: 0.5, toX: 0.5, upwards: true)
         await model.waitForPendingWork()
         actions = await server.calls().compactMap(\.action)
@@ -165,12 +165,7 @@ final class FilmPlayerGestureUIKitTests: XCTestCase {
         XCTAssertTrue(media.base.volumes.isEmpty)
     }
 
-    private func makeStore() -> FilmPlayerPreferencesStore {
-        let name = "FilmPlayerGestureUIKitTests.\(UUID())"
-        let defaults = UserDefaults(suiteName: name)!
-        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
-        return FilmPlayerPreferencesStore(defaults: defaults)
-    }
+    private func makeStore() throws -> FilmPlayerPreferencesStore { try appStorageTestPlayerPreferences() }
 
     private func mount(store: FilmPlayerPreferencesStore, shortVideo: Bool = false) async throws
         -> (FilmPlayerViewController, FilmPlaybackModel, FilmPlayerGestureMedia, FilmUIKitPlaybackServer) {

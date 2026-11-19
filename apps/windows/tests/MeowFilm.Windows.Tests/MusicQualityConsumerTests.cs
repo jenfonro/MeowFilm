@@ -121,7 +121,7 @@ public static class MusicQualityConsumerTests
     }
     private static async Task RealLx()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         await using var runtime = new NativeMusicScriptTestRuntime();
         await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
         async Task<JsonElement> Call(string method, object? p = null)

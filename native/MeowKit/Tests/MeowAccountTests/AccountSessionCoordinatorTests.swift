@@ -290,11 +290,11 @@ final class AccountSessionCoordinatorTests: XCTestCase {
         let token = try await coordinator.beginLogin(for: identity)
         let expected = try AccountFixtures.credential()
         try await coordinator.completeLogin(token, credential: expected)
-        store.fail(.read, with: CredentialStoreError.interactionNotAllowed)
-        await assertAccountError(.storage(.interactionNotAllowed)) { try await coordinator.credential(for: token) }
+        store.fail(.read, with: CredentialStoreError.unavailable)
+        await assertAccountError(.storage(.unavailable)) { try await coordinator.credential(for: token) }
         let denied = await coordinator.snapshot(for: identity)
         XCTAssertEqual(denied.phase, .signedIn)
-        XCTAssertEqual(denied.failure, .storage(.interactionNotAllowed))
+        XCTAssertEqual(denied.failure, .storage(.unavailable))
         store.fail(.read, with: nil)
         let actual = try await coordinator.credential(for: token)
         XCTAssertEqual(actual, expected)
@@ -308,8 +308,8 @@ final class AccountSessionCoordinatorTests: XCTestCase {
         let identity = try AccountFixtures.identity()
         try store.write(AccountFixtures.record(), for: identity)
         let coordinator = AccountSessionCoordinator(store: store)
-        store.fail(.read, with: CredentialStoreError.missingEntitlement)
-        await assertAccountError(.storage(.missingEntitlement)) { try await coordinator.restore(for: identity) }
+        store.fail(.read, with: CredentialStoreError.accessDenied)
+        await assertAccountError(.storage(.accessDenied)) { try await coordinator.restore(for: identity) }
         let failed = await coordinator.snapshot(for: identity)
         XCTAssertEqual(failed.phase, .failed)
         store.fail(.read, with: nil)
@@ -356,8 +356,8 @@ final class AccountSessionCoordinatorTests: XCTestCase {
         let coordinator = AccountSessionCoordinator(store: store)
         let identity = try AccountFixtures.identity()
         let old = try await coordinator.beginLogin(for: identity)
-        store.fail(.remove, with: CredentialStoreError.interactionNotAllowed)
-        await assertAccountError(.storage(.interactionNotAllowed)) { try await coordinator.beginLogin(for: identity) }
+        store.fail(.remove, with: CredentialStoreError.unavailable)
+        await assertAccountError(.storage(.unavailable)) { try await coordinator.beginLogin(for: identity) }
         let state = await coordinator.snapshot(for: identity)
         XCTAssertEqual(state.phase, .removalPending)
         await assertAccountError(.staleSession) {

@@ -1,43 +1,53 @@
 import Foundation
 import XCTest
 import MeowStorage
+import MeowStorageTestSupport
 import MeowRuntime
 @testable import MeowFilmFeature
 
-/// Real native document/CAS fixture. Runtime transports are tested separately;
-/// synthetic credentials here never represent a real account.
+/// Real current rows and transactions. Synthetic values never represent a real account.
 final class FilmNativeSettingsStore: @unchecked Sendable {
     let root: URL
-    let store: DocumentStore
+    let database: SQLiteDatabase
     let block: FilmSettingsBlock
     private let lock = NSLock()
     private var changes: [String] = []
-    var notifications: [String] { lock.lock(); defer { lock.unlock() }; return changes }
+    var notifications: [String] { lock.withLock { changes } }
     lazy var document = makeDocument()
 
-    init(_ test: XCTestCase, block: FilmSettingsBlock, maximumBytes: Int = 8 * 1024 * 1024) throws {
+    init(_ test: XCTestCase, block: FilmSettingsBlock) throws {
         self.block = block
-        root = FileManager.default.temporaryDirectory
+        root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("film-native-settings-" + UUID().uuidString.lowercased(), isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-        store = try DocumentStore(baseURL: root, namespace: block.namespace, maximumDocumentBytes: maximumBytes)
         let path = root
-        test.addTeardownBlock { try? FileManager.default.removeItem(at: path) }
+        database = try storageTestOpen(path)
+        let database = database
+        test.addTeardownBlock { try await database.close(); try FileManager.default.removeItem(at: path) }
     }
 
     func makeDocument() -> FilmSettingsDocument {
-        let store = store
-        return .init(block: block, storage: .plain { store }, changed: { [weak self] block in
+        .init(block: block, database: database, changed: { [weak self] block in
             guard let self else { return }
-            lock.lock(); changes.append(block); lock.unlock()
+            self.lock.withLock { self.changes.append(block) }
         })
     }
-
-    func seed(_ value: RuntimeValue) throws {
-        try store.write(RuntimeJSON.encode(value), key: FilmSettingsDocument.key)
+    func seed(_ value: RuntimeValue) async throws {
+        _ = try await FilmSettingsDocument(block: block, database: database).update { _ in value }
     }
+    func readOnly(_ value: Bool) throws { try storageTestReadOnly(database, value) }
+    func damageRules(_ damaged: Bool) async throws {
+        try await database.transaction { db in
+            _ = try db.query("PRAGMA ignore_check_constraints=ON")
+            defer { _ = try? db.query("PRAGMA ignore_check_constraints=OFF") }
+            try db.execute(damaged ? "UPDATE ios_film_rules SET rule_group='damaged' WHERE rule_group='movieRules'" :
+                "UPDATE ios_film_rules SET rule_group='movieRules' WHERE rule_group='damaged'")
+        }
+    }
+    func envelope(_ value: RuntimeValue, key: String) -> RuntimeValue { .object(["version": .number(1), key: value]) }
+}
 
-    func envelope(_ value: RuntimeValue, key: String) -> RuntimeValue {
-        .object(["version": .number(1), key: value])
+extension FilmSettingsDocument {
+    func readForTest() throws -> RuntimeValue? {
+        try storageTestIO { try self.snapshotSync().document }
     }
 }

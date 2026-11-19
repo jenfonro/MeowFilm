@@ -14,11 +14,3 @@ public protocol CredentialStore: Sendable {
     /// Idempotent: a missing item is already removed.
     func remove(for identity: AccountIdentity) throws
 }
-
-public enum CredentialAccessibility: String, CaseIterable, Hashable, Sendable {
-    /// Default: access while unlocked; not migrated to another device.
-    case whenUnlockedThisDeviceOnly
-    /// Explicit opt-in for background use after first unlock until restart.
-    /// Still device-bound, but less restrictive while the device is subsequently locked.
-    case afterFirstUnlockThisDeviceOnly
-}

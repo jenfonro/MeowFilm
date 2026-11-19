@@ -18,7 +18,6 @@ public static partial class MusicUiTests
         yield return Case("TMDB save cancels old details without allowing late data to replace new query metadata", MetadataLateConsumer);
         yield return Case("TMDB admitted settings save drains before close and never restores a revoked search", MetadataSaveDrain);
         yield return Case("native TMDB and Douban settings work offline with CAS failures and block notifications", MetadataNativeOwner);
-        yield return Case("metadata field edits ignore extra patch input and preserve exact raw extensions", MetadataRawInputs);
         yield return Case("native metadata saves preserve canonical text endpoints and proxy validation offline", MetadataNativeNormalization);
     }
     private static void MetadataSearch(FilmSearchConsumerRuntime runtime)
@@ -101,7 +100,7 @@ public static partial class MusicUiTests
         using var settings = new MetadataRuntime();
         await using var store = new FilmNativeSettingsFixture();
         var metadata = new FilmMetadataService(settings, store);
-        store.Writing = (_, _) => receipt.Task;
+        store.Writing = (_) => receipt.Task;
         using var runtime = new FilmSearchConsumerRuntime(); MetadataSearch(runtime);
         await using var scene = await UnifiedScene.Create(metadata: metadata, runtime: runtime);
         await scene.Submit("目标", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
@@ -129,7 +128,7 @@ public static partial class MusicUiTests
             await scene.Page.OpenCardAsync(scene.Page.Cards.Single()); var retained = scene.Film.Playback!;
             string snapshot = retained.Request.Metadata!.Value.GetRawText();
             var finalReceipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            store.Writing = (_, _) => finalReceipt.Task;
+            store.Writing = (_) => finalReceipt.Task;
             var finalSave = metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["region"] = "JP" });
             var abort = scene.Film.AbortAsync();
             try
@@ -166,11 +165,11 @@ public static partial class MusicUiTests
         }
         store.WriteError = null;
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
-        int writes = store.Writes;
+        int writes = store.WritesFor("film.tmdb.v1");
         try { await metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["language"] = "en-US" }, cancelled.Token); throw new Exception("Cancelled edit wrote"); }
         catch (OperationCanceledException) { }
         await BridgeTests.Expect("INVALID_REQUEST", () => metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["includeAdult"] = "true" }));
-        True(store.Writes == writes && metadata.Settings!.Language != original.Language, "cancelled and invalid edits do not replace the committed snapshot");
+        True(store.WritesFor("film.tmdb.v1") == writes && metadata.Settings!.Language != original.Language, "cancelled and invalid edits do not replace the committed snapshot");
         await BridgeTests.Expect("CLOSED", () => Read(new
         { provider = "tmdb", path = "/3/search/multi", query = new { query = "离线", page = 1 }, imageSize = "w500" }));
         await BridgeTests.Expect("CLOSED", () => Read(new
@@ -179,37 +178,16 @@ public static partial class MusicUiTests
         await using var reopened = new FilmMetadataService(runtime, store);
         Equal("ja-JP", (await reopened.GetSettingsAsync()).Language);
         Equal("https://douban.fixture.invalid", (await reopened.GetDoubanSettingsAsync()).ApiBase);
-        store.SeedBytes("film.tmdb.v1", [123]);
+        store.Seed("film.tmdb.v1", new { version = 2 });
         await MetadataStoreError(DocumentStoreError.Corrupt, () => metadata.GetSettingsAsync());
         await MetadataStoreError(DocumentStoreError.Corrupt, () => metadata.SaveSettingsAsync(new Dictionary<string, object?>()));
-        True(store.Writes == writes && runtime.Notifications.Count == 2, "a corrupt document is never repaired by blind overwrite or runtime fallback");
+        True(store.WritesFor("film.tmdb.v1") == writes && runtime.Notifications.Count == 2, "a corrupt document is never repaired by blind overwrite or runtime fallback");
         async Task Read(object input)
         {
             var owner = await runtime.CaptureConnectionAsync();
             await new FilmPlaybackClient(owner.Client).CallAsync("data.metadata", input, owner.Revoked);
         }
     }
-    private static async Task MetadataRawInputs()
-    {
-        using var runtime = new MetadataRuntime { Offline = true };
-        await using var store = new FilmNativeSettingsFixture();
-        await using var metadata = new FilmMetadataService(runtime, store);
-        await metadata.SaveSettingsAsync(new Dictionary<string, object?>());
-        var raw = store.Value("film.tmdb.v1").GetRawText();
-        raw = raw.Insert(1, "\"future\":1e400,\"future\":9007199254740993,");
-        int at = raw.IndexOf("\"settings\":{", StringComparison.Ordinal) + "\"settings\":{".Length;
-        raw = raw.Insert(at, "\"future\":9007199254740993,\"future\":0.12345678901234567890123456789,");
-        store.SeedBytes("film.tmdb.v1", System.Text.Encoding.UTF8.GetBytes(raw));
-        await metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["language"] = " ja-JP ", ["unused"] = new object() });
-        var after = store.Value("film.tmdb.v1");
-        var settings = after.GetProperty("settings");
-        True(after.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
-            settings.EnumerateObject().Count(item => item.NameEquals("future")) == 2 &&
-            settings.GetProperty("future").GetRawText() == "0.12345678901234567890123456789" &&
-            settings.GetProperty("language").GetString() == "ja-JP" && !settings.TryGetProperty("unused", out _),
-            "only the consumed patch field changes; unused inputs do not become runtime settings");
-    }
-
     private static async Task MetadataNativeNormalization()
     {
         using var runtime = new MetadataRuntime { Offline = true };
@@ -232,7 +210,7 @@ public static partial class MusicUiTests
             douban.ApiProxy == "https://relay.fixture.invalid/?url={encodedUrl}" && douban.ImageProxy == "" &&
             (await metadata.GetSettingsAsync()) == saved && (await metadata.GetDoubanSettingsAsync()) == douban,
             "text and ordinary endpoints normalize while the validated proxy template keeps its exact replacement slot");
-        int writes = store.Writes;
+        int writes = store.WritesFor("film.douban.v1");
         foreach (var patch in new Dictionary<string, object?>[]
         {
             new() { ["apiBase"] = "" },
@@ -244,7 +222,7 @@ public static partial class MusicUiTests
             new() { ["cookie"] = "synthetic\r\ninvalid" }
         })
             await BridgeTests.Expect("INVALID_REQUEST", () => metadata.SaveDoubanSettingsAsync(patch));
-        True(store.Writes == writes && (await metadata.GetDoubanSettingsAsync()) == douban &&
+        True(store.WritesFor("film.douban.v1") == writes && (await metadata.GetDoubanSettingsAsync()) == douban &&
             runtime.Notifications.SequenceEqual(["tmdb", "douban"]) && runtime.Captures == 0,
             "invalid drafts cannot write notify or replace accepted local settings while offline");
     }

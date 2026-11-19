@@ -60,8 +60,8 @@ internal static class MusicLiveAcceptance
         string data = TestWorkspace.ValidatePath(root, Path.Combine(root, "data"));
         Directory.CreateDirectory(data);
         Require(!Directory.EnumerateFileSystemEntries(data).Any(), "STORAGE_CONFLICT");
-        LocalDocumentStore? store = null, cacheBacking = null;
-        CacheDocumentStore? cache = null;
+        NativeDatabase? store = null, cacheBacking = null;
+        NativeTestDatabase? cache = null;
         NodeRuntime? runtime = null;
         NativeAudioPlayback? player = null;
         MusicNativeApplication? application = null;
@@ -78,20 +78,18 @@ internal static class MusicLiveAcceptance
                 AppIdentity.RuntimeId);
             Directory.CreateDirectory(Path.Combine(data, "native"));
             Directory.CreateDirectory(Path.Combine(data, "cache"));
-            store = new(Path.Combine(data, "native"), AppIdentity.NativeNamespaces,
-                AppIdentity.NativeCollections, AppIdentity.ProtectedNamespaces);
-            cacheBacking = new(Path.Combine(data, "cache"), AppIdentity.CacheNamespaces,
-                protectedNamespaces: AppIdentity.CacheProtectedNamespaces);
+            store = new(Path.Combine(data, "native"));
+            cacheBacking = store;
             cache = new(cacheBacking);
+            await store.Ready;
             runtime = await NodeRuntime.StartAsync(TestWorkspace.NodePath, bundle, AppIdentity.ScriptModules,
-                Path.Combine(data, "scripts"));
+                store.ProductRoot!, settingsStore: new MeowFilm.Capabilities.FilmRuntimeSettings(store));
             report.Record("live.runtime-pid", "PASS", count: runtime.ProcessId);
             var observed = new ObservedRuntime(runtime, report);
-            MusicTestStores.Use(store, Path.Combine(data, "native", "music-library"));
-            application = new(store, MusicTestStores.For(store), observed, cache,
-                presentationCacheRoot: Path.Combine(data, "music-presentation-v2"));
+            MusicTestStores.Use(store, store.ProductRoot!);
+            application = new(store, MusicTestStores.For(store), observed);
             player = new(audioOutput: NativeAudioOutput.SystemDefault);
-            module = new(application, store, player, playbackCacheRoot: Path.Combine(data, "media"), cacheStore: cache);
+            module = new(application, store, player, playbackCacheRoot: Path.Combine(data, "media"));
 
             var layout = new Grid();
             layout.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });

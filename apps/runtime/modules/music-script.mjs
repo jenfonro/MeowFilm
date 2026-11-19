@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  createScriptHost, createNodeNetwork, createSourceDownload, PrivateDocuments, ScriptHostError,
+  createScriptHost, createNodeNetwork, createSourceDownload, PrivateSources, ScriptHostError,
 } from '@meowfilm/script-host';
 import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
 import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { contracts } from '../contracts.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
+import { createMusicStorage } from './music-storage.mjs';
 
 export const musicScriptContract = contracts.music.contract;
 /** Platforms an LX source can resolve for the native music catalog. */
@@ -45,6 +46,7 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const shape = (value, keys) => object(value) && Object.keys(value).length === keys.length &&
   keys.every(key => Object.hasOwn(value, key));
 const digest = value => createHash('sha256').update(value).digest('hex');
+const encodedLength = value => Buffer.byteLength(stringifyJSONValue(value, -Infinity));
 const scalars = value => [...value].length;
 const control = /[\u0000-\u001f\u007f]/;
 function fields(value, allowed, required = allowed) {
@@ -185,6 +187,11 @@ function errorCode(error) {
     UPSTREAM_HTTP_ERROR: 'UPSTREAM_HTTP', HTTP_ERROR: 'UPSTREAM_HTTP', INVALID_JSON: 'UPSTREAM_FORMAT',
     SCRIPT_PROTOCOL_ERROR: 'SCRIPT_PROTOCOL_ERROR', ROLLBACK_UNAVAILABLE: 'ROLLBACK_UNAVAILABLE',
   })[error.code] ?? 'SCRIPT_FAILURE';
+  if (['STORAGE_CORRUPT', 'STORAGE_SCHEMA'].includes(error?.code)) return 'CORRUPT_STORAGE';
+  if (['STORAGE_BUSY', 'STORAGE_CLOSED', 'STORAGE_CONFIGURATION', 'STORAGE_CONFLICT',
+    'STORAGE_CONSTRAINT', 'STORAGE_DRIVER_REQUIRED', 'STORAGE_ERROR', 'STORAGE_FULL',
+    'STORAGE_IO', 'STORAGE_READONLY', 'STORAGE_RESULT_LIMIT', 'UNSAFE_PATH'].includes(error?.code))
+    return 'STORAGE_ERROR';
   return error?.name === 'AbortError' ? 'CANCELLED' : 'SCRIPT_FAILURE';
 }
 function storageError(code) {
@@ -267,9 +274,13 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
     typeof network === 'function' && typeof download === 'function' && typeof clock === 'function' &&
     typeof setTimer === 'function' && typeof clearTimer === 'function');
-  let documents;
-  try { documents = new PrivateDocuments(dataRoot, 'music'); }
+  let sourceFiles;
+  try { sourceFiles = new PrivateSources(dataRoot, 'music'); }
   catch { throw new Failure('INVALID_REQUEST'); }
+  const persistence = createMusicStorage(dataRoot);
+  let catalogWrites = Promise.resolve();
+  const ready = persistence.load().then(value => {requireValue(validCatalog(value), 'CORRUPT_STORAGE');cached=value;});
+  ready.catch(() => {});
   const failures = new Map(), temporaryUse = new Map(), observations = new Map();
   const adapterTasks = new Set(), proposals = new Map(), active = new Map(), retirements = new Map();
   const sources = new SourceCandidates({ module: 'music', fail: code => new Failure(code) });
@@ -330,40 +341,30 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       } finally { if (active.get(id) === owner) active.delete(id); }
     });
   }
-  function catalog() {
-    if (cached) return cached;
-    const bytes = documents.read('catalog.json');
-    if (!bytes) return cached = { schema: 1, revision: 0, installations: [] };
-    let value;
-    try { value = parseJSONText(decode(bytes), -Infinity); }
-    catch { throw new Failure('CORRUPT_STORAGE'); }
-    finally { bytes.fill(0); }
-    requireValue(validCatalog(value), 'CORRUPT_STORAGE');
-    return cached = value;
-  }
+  function catalog() {requireValue(cached, 'STORAGE_ERROR');return cached;}
   function find(id) {
     const item = catalog().installations.find(entry => entry.id === id);
     requireValue(item, 'SOURCE_NOT_FOUND');
     return item;
   }
-  /** Applies change to the current catalog and replaces the file in the same turn.
-   * change returns false for a no-op. A failed write never publishes a guess. */
+  /** Serialize catalog changes and publish only after the typed transaction commits. */
   function commit(change) {
-    const next = cloneJSONValue(catalog(), -Infinity);
-    if (change(next) === false) return;
-    next.revision += 1;
-    requireValue(validCatalog(next));
-    const bytes = Buffer.from(stringifyJSONValue(next, -Infinity));
-    try { documents.write('catalog.json', bytes); }
-    catch (error) { cached = null; throw error; }
-    finally { bytes.fill(0); }
-    cached = next;
+    const work = catalogWrites.then(async () => {
+      await ready;
+      const next = cloneJSONValue(catalog(), -Infinity);
+      if (change(next) === false) return;
+      next.revision += 1;
+      requireValue(validCatalog(next));
+      await persistence.save(next);
+      cached = next;
+    });
+    catalogWrites = work.catch(() => {});
+    return work;
   }
   function edit(id, change) {
-    commit(next => {
+    return commit(next => {
       const target = next.installations.find(entry => entry.id === id);
-      requireValue(target, 'SOURCE_NOT_FOUND');
-      return change(target);
+      requireValue(target, 'SOURCE_NOT_FOUND');return change(target);
     });
   }
   /** Source files no installation references any more. An orphan grants nothing. */
@@ -373,16 +374,16 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       for (const item of catalog().installations)
         for (const version of [item.current, item.previous])
           if (version) referenced.add(`sources/${version.contentHash}.js`);
-      for (const name of documents.list('sources'))
-        if (!referenced.has(name)) documents.remove(name);
+      for (const name of sourceFiles.list('sources'))
+        if (!referenced.has(name)) sourceFiles.remove(name);
     } catch { /* The next completed management command retries collection. */ }
   }
   function prepare(bytes, basename, trustedHash) {
     requireValue(bytes.length > 0, 'SCRIPT_ENCODING');
     const header = describe(decode(bytes), basename);
     const contentHash = trustedHash ?? digest(bytes), name = `sources/${contentHash}.js`;
-    const existing = documents.read(name);
-    try { if (!existing?.equals(bytes)) documents.write(name, bytes); }
+    const existing = sourceFiles.read(name);
+    try { if (!existing?.equals(bytes)) sourceFiles.write(name, bytes); }
     finally { existing?.fill(0); }
     proposals.set(contentHash, (proposals.get(contentHash) ?? 0) + 1);
     return { name: header.name, version: { contentHash, bytes: bytes.length, version: header.version,
@@ -395,7 +396,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     collect();
   }
   function readSource(version) {
-    const bytes = documents.read(`sources/${version.contentHash}.js`);
+    const bytes = sourceFiles.read(`sources/${version.contentHash}.js`);
     requireValue(bytes, 'CORRUPT_STORAGE');
     try {
       requireValue(bytes.length === version.bytes && digest(bytes) === version.contentHash, 'CORRUPT_STORAGE');
@@ -429,54 +430,29 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     } catch (error) { response?.body?.fill?.(0); throw error; }
   }
 
-  const dataName = id => `data/${id}.json`;
-  function readData(id) {
-    const bytes = documents.read(dataName(id));
-    if (!bytes) return { schema: 1, sites: {} };
-    let value;
-    try { value = parseJSONText(decode(bytes), -Infinity); }
-    catch { throw new Failure('CORRUPT_STORAGE'); }
-    finally { bytes.fill(0); }
-    requireValue(validData(value), 'CORRUPT_STORAGE');
-    try {
-      for (const entries of Object.values(value.sites)) {
-        for (const entry of entries) {
-          validateJSONValue(entry.value);
-        }
-      }
-    } catch { throw new Failure('CORRUPT_STORAGE'); }
-    return value;
-  }
-  /** Request-bound guest storage of the current generation's declared sites only. */
+  /** Guest KV permission is checked both before enqueueing and before commit. */
   async function storage(operation, input) {
     try {
-      requireValue(object(input) && typeof input.installationId === 'string' &&
-        uuidPattern.test(input.installationId) && Number.isSafeInteger(input.generation) && input.generation > 0 &&
-        typeof input.siteId === 'string' && sitePattern.test(input.siteId) &&
-        typeof input.key === 'string' && input.key.length > 0, 'PERMISSION_DENIED');
-      requireValue(!closed && input.signal instanceof AbortSignal && !input.signal.aborted &&
-        typeof input.isCurrent === 'function' && input.isCurrent() === true, 'STALE_SOURCE');
-      const record = live(input.installationId);
-      requireValue(record?.state === 'ready' && record.generation === input.generation, 'STALE_SOURCE');
-      requireValue(Object.hasOwn(record.capabilities, input.siteId), 'PERMISSION_DENIED');
-      const data = readData(input.installationId);
-      const values = Object.hasOwn(data.sites, input.siteId) ? data.sites[input.siteId] : [];
-      if (operation === 'get') return lxValue(values.find(entry => entry.key === input.key)?.value ?? null);
-      const next = values.filter(entry => entry.key !== input.key);
+      requireValue(object(input) && typeof input.installationId === 'string' && uuidPattern.test(input.installationId) &&
+        Number.isSafeInteger(input.generation) && input.generation > 0 && typeof input.siteId === 'string' &&
+        sitePattern.test(input.siteId) && typeof input.key === 'string' && input.key.length > 0, 'PERMISSION_DENIED');
+      const check = () => {
+        requireValue(!closed && input.signal instanceof AbortSignal && !input.signal.aborted &&
+          typeof input.isCurrent === 'function' && input.isCurrent() === true, 'STALE_SOURCE');
+        const record = live(input.installationId);
+        requireValue(record?.state === 'ready' && record.generation === input.generation, 'STALE_SOURCE');
+        requireValue(Object.hasOwn(record.capabilities,input.siteId),'PERMISSION_DENIED');
+      };
       if (operation === 'set') {
-        try { validateJSONValue(input.value); } catch { throw new Failure('INVALID_REQUEST'); }
-        next.push({ key: input.key, value: input.value });
+        validateJSONValue(input.value);
       }
-      const sites = { ...data.sites };
-      if (next.length) sites[input.siteId] = next; else delete sites[input.siteId];
-      const bytes = Buffer.from(stringifyJSONValue({ schema: 1, sites }, -Infinity));
-      try {
-        documents.write(dataName(input.installationId), bytes);
-      } finally { bytes.fill(0); }
-      return null;
+      const value = await persistence.kv(operation,input,encodedLength,check);
+      return operation === 'get' ? lxValue(value) : null;
     } catch (error) {
       if (error instanceof ScriptHostError) throw error;
-      throw storageError(error instanceof Failure ? error.code : 'STORAGE_ERROR');
+      if (error instanceof BridgeError) throw storageError('INVALID_REQUEST');
+      if (error?.code === 'STORAGE_CORRUPT') throw storageError('CORRUPT_STORAGE');
+      throw storageError(error instanceof Failure ? error.code : error?.code ?? 'STORAGE_ERROR');
     }
   }
 
@@ -537,9 +513,9 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       throw error;
     }
   }
-  function remember(item, record) {
+  async function remember(item, record) {
     const declared = declaredOf(record);
-    edit(item.id, target => {
+    await edit(item.id, target => {
       if (target.current.contentHash !== record.contentHash ||
           canonical(target.declared) === canonical(declared)) return false;
       target.declared = declared;
@@ -598,7 +574,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         cleanup(id);
       }
       guard(signal);
-      edit(id, target => {
+      await edit(id, target => {
         Object.assign(target, { current, previous, declared: record ? declaredOf(record) : null, check: null });
       });
       if (record) observations.set(id, host.observe(id));
@@ -619,7 +595,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       const item = find(id);
       requireValue(item.enabled, 'SOURCE_DISABLED');
       const loaded = await ensureLoaded(item, scoped);
-      remember(item, loaded);
+      await remember(item, loaded);
       return loaded;
     });
     const value = await host.invoke({ installationId: id, generation: record.generation, siteId,
@@ -645,7 +621,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         guard(scoped);
         const item = find(id);
         const record = await ensureLoaded(item, scoped);
-        try { remember(item, record); }
+        try { await remember(item, record); }
         catch (error) {
           if (!item.enabled && !temporaryUse.has(id)) {
             await retire(id);
@@ -665,7 +641,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       if (['CANCELLED', 'CLOSED', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'CORRUPT_STORAGE', 'STORAGE_ERROR', 'SCRIPT_CLEANUP'].includes(code)) throw error;
       const item = find(id);
       const outcome = { contentHash: item.current.contentHash, checkedAt: clock(), failure: code, sites: {} };
-      edit(id, target => {
+      await edit(id, target => {
         if (target.current.contentHash !== outcome.contentHash) return false;
         target.check = outcome;
       });
@@ -708,7 +684,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     }
     guard(signal);
     const outcome = { contentHash: record.contentHash, checkedAt, failure: null, sites: Object.fromEntries(results) };
-    edit(id, target => {
+    await edit(id, target => {
       if (target.current.contentHash !== outcome.contentHash) return false;
       target.check = outcome;
       if (target.declared?.contentHash !== record.contentHash) target.declared = declaredOf(record);
@@ -726,6 +702,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         requireValue(object(context));
         const { signal } = context;
         requireValue(signal === undefined || signal instanceof AbortSignal);
+        await ready;
         guard(signal); fields(parameters, allowed, required);
         const captured = snapshot(parameters);
         const scoped = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
@@ -751,6 +728,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         await operations.drain();
         // Downloads have no guest session to drain them; wait for the actual adapter.
         await Promise.allSettled([...adapterTasks].filter(task => task.kind === 'download').map(task => task.promise));
+        await Promise.allSettled([ready,catalogWrites]);
+        await persistence.close();
         failures.clear(); temporaryUse.clear(); observations.clear();
       }
       requireValue(!cleanupFailure && result?.cleanupComplete && adapterTasks.size === 0, 'SCRIPT_CLEANUP');
@@ -761,8 +740,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   async function close() {
     try { return success(await shutdown()); } catch (error) { return failure(error); }
   }
-  function add(id, prepared, origin) {
-    commit(next => {
+  async function add(id, prepared, origin) {
+    await commit(next => {
       requireValue(!next.installations.some(item => item.id === id), 'STALE_SOURCE');
       next.installations.push({ id, name: prepared.name, origin, enabled: false,
         current: prepared.version, previous: null, declared: null, check: null });
@@ -780,7 +759,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     }),
     'music.script.sources.add': business(['installationId', 'sourceRevision'], undefined, (params, signal) => {
       installation(params.installationId); integer(params.sourceRevision, 1);
-      return locked(params.installationId, signal, scoped => {
+      return locked(params.installationId, signal, async scoped => {
         guard(scoped);
         requireValue(!catalog().installations.some(item => item.id === params.installationId), 'STALE_SOURCE');
         const input = sources.take(params.installationId, params.sourceRevision);
@@ -788,7 +767,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         let prepared, published = false;
         try {
           prepared = prepare(bytes, input.basename, input.contentHash);
-          const result = add(params.installationId, prepared, { kind: 'file' });
+          const result = await add(params.installationId, prepared, { kind: 'file' });
           published = true;
           return result;
         } finally {
@@ -804,7 +783,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       try {
         guard(signal);
         prepared = prepare(bytes, sourceBasename(url));
-        return add(id, prepared, { kind: 'network', url });
+        return await add(id, prepared, { kind: 'network', url });
       } finally { bytes.fill(0); if (prepared) releaseSource(prepared.version); }
     }),
     'music.script.sources.edit': business(['installationId', 'name', 'url'], ['installationId'], (params, signal) => {
@@ -813,8 +792,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       if (params.name !== undefined) requireValue(plainText(params.name, undefined, false) && params.name.trim().length > 0);
       const url = params.url === undefined ? undefined : sourceURL(params.url);
       requireValue(url === undefined || find(params.installationId).origin.kind === 'network');
-      return locked(params.installationId, signal, () => {
-        edit(params.installationId, target => {
+      return locked(params.installationId, signal, async () => {
+        await edit(params.installationId, target => {
           if (params.name !== undefined) target.name = params.name.trim();
           if (url !== undefined) target.origin = { kind: 'network', url };
         });
@@ -866,7 +845,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         const record = await ensureLoaded(item, scoped, true);
         try {
           guard(scoped);
-          edit(item.id, target => {
+          await edit(item.id, target => {
             const declared = declaredOf(record);
             if (target.enabled && canonical(target.declared) === canonical(declared)) return false;
             target.enabled = true; target.declared = declared;
@@ -896,7 +875,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         sources.remove(item.id); temporaryUse.delete(item.id); observations.delete(item.id);
         let cleanupFailure;
         try { await retiring; await retire(item.id); } catch (error) { cleanupFailure = error; }
-        edit(item.id, target => { if (!target.enabled) return false; target.enabled = false; });
+        await edit(item.id, target => { if (!target.enabled) return false; target.enabled = false; });
         requireValue(!cleanupFailure && !live(item.id), 'SCRIPT_CLEANUP');
         cleanup(item.id);
         failures.delete(item.id);
@@ -915,8 +894,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         sources.remove(item.id); temporaryUse.delete(item.id); observations.delete(item.id);
         let cleanupFailure;
         try { await retiring; await retire(item.id); } catch (error) { cleanupFailure = error; }
-        documents.remove(dataName(item.id));
-        commit(next => { next.installations = next.installations.filter(entry => entry.id !== item.id); });
+        await commit(next => { next.installations = next.installations.filter(entry => entry.id !== item.id); });
         failures.delete(item.id); collect();
         requireValue(!cleanupFailure && !live(item.id), 'SCRIPT_CLEANUP');
         cleanup(item.id);

@@ -66,7 +66,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟与 D3D11 原生 HDR 输出；固定 KSPlayer 机制来源及静态依赖，不包含上游 UI 或音乐 owner
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
-  - `MeowFilm.Platform` — 本地文档存储与敏感信息保护、私密启动管道、HTTP 子进程会话、文件授权
+  - `MeowFilm.Platform` — 本地 SQLite 与资源文件能力、私密启动管道、HTTP 子进程会话、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
   - `MeowFilm.Audio` — 独立音乐解码、PCM／DSP 与 WASAPI 输出
   - `MeowFilm.Media` — 视频播放与自适应流
@@ -124,6 +124,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 
 ## 实现
 
+- 内部业务数据与结构化缓存遵循[共享 SQLite 存储契约](docs/common/settings-storage.md)，使用每个 App 数据根的同一数据库及明确 owner 的类型字段、关系、事务和 revision；禁止内部 JSON 文件及整份业务 JSON TEXT/BLOB 入库。第三方自管文件、用户主动导出和网络／IPC JSON 不在禁令内；不增加旧数据迁移、兼容或回退。
 - 满足需求及必要的可控、可观测、可验证和生命周期要求后，综合运行性能、实现复杂度和长期维护成本选择方案；单处性能差异较小也计入，避免各处开销叠加。不增加未要求的功能、框架、配置或扩展点。
 - 技术栈、框架与实现方式按具体职责逐项选择，同样综合运行性能、可控性、实现复杂度和长期维护成本。
 - 优先复用已有实现、标准库和平台能力；替代实现保持所需业务语义。类型准确表达身份、状态和约束，不用任意字符串和静默默认值掩盖错误。

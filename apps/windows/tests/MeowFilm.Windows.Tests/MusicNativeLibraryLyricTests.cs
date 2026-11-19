@@ -11,7 +11,7 @@ public static partial class MusicNativeLibraryTests
 {
     private static IEnumerable<TestCase> LyricPersistenceCases()
     {
-        yield return new("Native music lyric display independent cache preserves plain and true words across restart", LyricDisplayRestart);
+        yield return new("Native music lyric display independent cache preserves plain and true words across restart", () => Task.Run(LyricDisplayRestart));
         yield return new("Native music local lyrics current schema preserves plain and true words across restart", LocalLyricsRestart);
         yield return new("Native music local lyrics beyond sixty four songs and two MiB reopen without truncation", LargeLocalLyrics);
         yield return new("Native music current local lyric documents reject damaged schema fields without writes", LyricSnapshotSchemas);
@@ -53,8 +53,6 @@ public static partial class MusicNativeLibraryTests
     private static async Task LyricDisplayRestart()
     {
         await using var f = new Fixture();
-        string directory = TestWorkspace.DataPath("native-lyric-display-" + Guid.NewGuid().ToString("N"), MusicPresentationCache.DirectoryName);
-        Directory.CreateDirectory(directory);
         JsonObject song;
         string sourceKey;
         var lines = CurrentLyricRows();
@@ -62,16 +60,16 @@ public static partial class MusicNativeLibraryTests
         lines[0]!["romanization"] = "A B";
         byte[] bytes;
         int writes;
-        await using (var owner = new MusicLibraryOwner(f.Store, presentationCacheRoot: directory))
+        await using (var owner = new MusicLibraryOwner(f.Store, database: f.Store.Storage))
         {
             var seeded = await SeedLyricSong(owner); song = seeded.Song; sourceKey = seeded.SourceKey;
             await Ok(owner, "music.lyrics.display.save", new { song, sourceKey, lines });
             await owner.PresentationCache.DrainAsync();
             bytes = f.Store.Bytes!.ToArray(); writes = f.Store.Writes;
         }
-        Check(Directory.EnumerateFiles(directory, "*.resource").Count() == 1);
+        Check(await f.Store.Storage.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_lyrics")) == 1);
 
-        await using var reopened = new MusicLibraryOwner(f.Store, presentationCacheRoot: directory);
+        await using var reopened = new MusicLibraryOwner(f.Store, database: f.Store.Storage);
         var restored = await Ok(reopened, "music.lyrics.display.get", new { song, sourceKey });
         Check(restored.GetProperty("state").GetString() == "restored" && restored.GetProperty("sourceKey").GetString() == sourceKey);
         Check(JsonNode.DeepEquals(JsonNode.Parse(restored.GetProperty("lines").GetRawText()), lines));
@@ -159,19 +157,7 @@ public static partial class MusicNativeLibraryTests
         Check(!(await Ok(owner, "music.lyrics.display.get", new { song })).GetProperty("lines")[0].TryGetProperty("timing", out _));
         Check(f.Store.Writes == writes && bytes.SequenceEqual(f.Store.Bytes!));
     }
-    private sealed class LyricCacheStore : IDocumentStore
-    {
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested();
-            throw new InvalidOperationException("Unexpected document cache read in native library fixture: " + ns);
-        }
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> bytes, DocumentFingerprint expected, CancellationToken token = default)
-        {
-            token.ThrowIfCancellationRequested();
-            throw new InvalidOperationException("Unexpected document cache write in native library fixture: " + ns);
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    private sealed class LyricCacheStore : NativeTestDatabase {
     }
 
 }

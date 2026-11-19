@@ -69,7 +69,7 @@ public static class AppMediaWindowAttachmentTests
     {
         var window = new PreparationWindow();
         await using var keys = new ShortcutFixture(window: window);
-        await using var settings = new AppMediaControlSettings(new QualityFixture.DocumentStore());
+        await using var settings = new AppMediaControlSettings(new QualityFixture.Database());
         await settings.LoadAsync(); await settings.SaveAsync(ShortcutFixture.Preferences());
         await using var owner = new AppMediaWindowAttachment(window, settings);
         var system = new SystemFixture(window);
@@ -263,7 +263,7 @@ public static class AppMediaWindowAttachmentTests
 
     private static async Task SaveNotifications()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         await using var settings = new AppMediaControlSettings(store);
         await settings.LoadAsync(); await settings.SaveAsync(ShortcutFixture.Preferences());
         await using var keys = new ShortcutFixture();
@@ -274,7 +274,7 @@ public static class AppMediaWindowAttachmentTests
         int updates = system.Backend.Updates;
         var registration = keys.Native.Latest;
         keys.Post(registration);
-        store.HoldNamespace = store.FaultNamespace = AppMediaControlSettings.DocumentNamespace;
+        store.HoldWrites = true;
         store.Fault = true;
         var saving = settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = false });
         try
@@ -293,7 +293,7 @@ public static class AppMediaWindowAttachmentTests
 
     private static async Task ShellClosePreparation()
     {
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         await using var settings = new AppMediaControlSettings(store);
         await using var appearance = new AppAppearance(store);
         await using var closePreferences = new AppClosePreferences(store);
@@ -388,7 +388,7 @@ public static class AppMediaWindowAttachmentTests
             shell.Show(); await Pump();
             shell.Close(); await Pump();
             Check(dialog.IsOpen, "a fresh close still asks after the one-time tray choice");
-            store.HoldNamespace = AppAppearance.DocumentNamespace;
+            store.HoldWrites = true;
             saving = appearance.SaveAsync("#315A7D");
             await store.Entered.Task.WaitAsync(timeout);
             Check(!saving.IsCompleted && settings.IsAvailable, "a real accepted appearance save is awaiting physical settlement");
@@ -409,7 +409,7 @@ public static class AppMediaWindowAttachmentTests
             await saving.WaitAsync(timeout);
             await domainEntered.Task.WaitAsync(timeout);
             Check(!settings.IsAvailable && !appearance.CanEdit && !closePreferences.CanEdit &&
-                appearance.ThemeColor == "#315A7D" && store.Data.ContainsKey(AppAppearance.DocumentNamespace),
+                appearance.ThemeColor == "#315A7D" && store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_app_appearance")).GetAwaiter().GetResult() == 1,
                 "the actual save settles before domain preparation while media admission remains closed");
             prepare.TrySetException(new InvalidOperationException("synthetic-preparation-failure"));
             await shell.ShutdownCompletion.WaitAsync(timeout); await Pump();

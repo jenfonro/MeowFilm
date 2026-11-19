@@ -141,6 +141,8 @@ public final class FilmPlaybackModel: ObservableObject {
     private var heldRate: (token: UUID, identity: FilmPlayerControlIdentity)?
     private var allocatedSessionID: UUID?
     private var openingTask: Task<Void, Never>?
+    private var metadataSelectionTask: Task<Void, Never>?
+    private var metadataSelectionAdmission = UUID()
     private var observationTask: Task<Void, Never>?
     private var observationAdmission = UUID()
     private var runtimeClosureTask: Task<Void, Never>?
@@ -263,15 +265,24 @@ public final class FilmPlaybackModel: ObservableObject {
 
     @discardableResult
     public func open(restoreOnly: Bool = false) -> Task<Void, Never>? {
-        do { try playbackPreferences?.reloadPreferences() }
-        catch { actionError = Self.failure(error); return nil }
         if runtimeClosed { return recoverRuntime() }
         if closingTask != nil { return reopenAfterDrain() }
         if let openingTask { return openingTask }
         guard !closed else { return nil }
         if snapshot != nil {
-            observeRuntimeClosure(); observe(); observeSearchContext()
-            return nil
+            let generation = generation
+            openingTask = Task { [weak self] in
+                guard let self else { return }
+                defer { openingTask = nil }
+                do { try await playbackPreferences?.reloadPreferences() }
+                catch {
+                    if !closed, self.generation == generation { actionError = Self.failure(error) }
+                    return
+                }
+                guard !closed, self.generation == generation else { return }
+                observeRuntimeClosure(); observe(); observeSearchContext()
+            }
+            return openingTask
         }
         if allocatedSessionID != nil { return reopenAfterDrain() }
         opening = true; actionError = nil
@@ -280,6 +291,7 @@ public final class FilmPlaybackModel: ObservableObject {
             guard let self else { return }
             defer { self.opening = false; self.openingTask = nil }
             do {
+                try await self.playbackPreferences?.reloadPreferences()
                 let previous = self.presentation
                 let base = try await self.makeRequest()
                 var request = self.reentryTarget.map { base.retargeted($0, errorCode: self.reentryError) } ?? base
@@ -876,11 +888,31 @@ public final class FilmPlaybackModel: ObservableObject {
         return send("media.retry", parameters: id.map { ["attemptId": .string($0)] } ?? [:])
     }
     public func browseMetadata(_ id: String) {
-        guard let selected = snapshot?.metadataSources.first(where: { $0.id == id }) else { return }
-        do { try playbackPreferences?.setMetadataViewProvider(selected.provider) }
-        catch { actionError = Self.failure(error); return }
-        metadataViewProvider = selected.provider
-        browseMetadataDirectory(id)
+        guard !closed, let selected = snapshot?.metadataSources.first(where: { $0.id == id }) else { return }
+        guard let playbackPreferences else {
+            metadataViewProvider = selected.provider
+            browseMetadataDirectory(id)
+            return
+        }
+        let previous = metadataSelectionTask
+        let admission = UUID(); metadataSelectionAdmission = admission
+        let generation = generation
+        metadataSelectionTask = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            defer { if metadataSelectionAdmission == admission { metadataSelectionTask = nil } }
+            guard !closed, self.generation == generation else { return }
+            do { try await playbackPreferences.setMetadataViewProvider(selected.provider) }
+            catch {
+                if !closed, self.generation == generation, metadataSelectionAdmission == admission {
+                    actionError = Self.failure(error)
+                }
+                return
+            }
+            guard !closed, self.generation == generation, metadataSelectionAdmission == admission else { return }
+            metadataViewProvider = selected.provider
+            browseMetadataDirectory(id)
+        }
     }
     private func browseMetadataDirectory(_ id: String) {
         if presentation?.metadataSourceID == id { return }
@@ -1259,6 +1291,7 @@ public final class FilmPlaybackModel: ObservableObject {
         let keepNative = retained
         closingAdmission = UUID()
         closingTask = Task { [self] in
+            await metadataSelectionTask?.value
             await searchUpdateTask?.value
             await observationTask?.value; observationTask = nil
             await preparationWorker?.value
@@ -1317,9 +1350,10 @@ public final class FilmPlaybackModel: ObservableObject {
         await recoveryTask?.value
         await reopeningTask?.value
         await closingTask?.value
-        while openingTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
+        while openingTask != nil || metadataSelectionTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
             cancellingPreparation != nil || stoppingMedia != nil {
-            await openingTask?.value; await searchUpdateTask?.value; await commandWorker?.value; await preparationWorker?.value
+            await openingTask?.value; await metadataSelectionTask?.value
+            await searchUpdateTask?.value; await commandWorker?.value; await preparationWorker?.value
             await cancellingPreparation?.value; await stoppingMedia?.value
         }
     }

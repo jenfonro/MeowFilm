@@ -3,10 +3,9 @@ using System.Text.Json;
 
 namespace MeowFilm.Platform.Storage;
 
-/// <summary>Native settings edits use the document store's real CAS receipt, not a runtime acknowledgement.</summary>
-public sealed class SettingsDocument(IDocumentStore store, string documentNamespace)
+/// <summary>In-memory settings edits commit fixed rows and a monotonic receipt in one transaction.</summary>
+public sealed class SettingsDocument(TypedRecordRepository store)
 {
-    private readonly SemaphoreSlim serial = new(1, 1);
 
     public static JsonElement SetMember(JsonElement original, string name, JsonElement value) =>
         Patch(original, new Dictionary<string, JsonElement> { [name] = value });
@@ -55,41 +54,13 @@ public sealed class SettingsDocument(IDocumentStore store, string documentNamesp
 
     public async Task<JsonElement?> ReadAsync(CancellationToken token = default)
     {
-        var snapshot = await store.ReadAsync(documentNamespace, token).ConfigureAwait(false);
+        var snapshot = await store.ReadAsync(token).ConfigureAwait(false);
         try { return Decode(snapshot.Data); }
         finally { if (snapshot.Data is not null) CryptographicOperations.ZeroMemory(snapshot.Data); }
     }
 
-    public async Task<JsonElement> UpdateAsync(Func<JsonElement?, JsonElement> edit, CancellationToken token = default)
-    {
-        await serial.WaitAsync(token).ConfigureAwait(false);
-        try
-        {
-            var before = await store.ReadAsync(documentNamespace, token).ConfigureAwait(false);
-            byte[]? bytes = null;
-            try
-            {
-                var next = edit(Decode(before.Data));
-                bytes = System.Text.Encoding.UTF8.GetBytes(next.GetRawText());
-                var expected = DocumentFingerprint.FromBytes(bytes);
-                token.ThrowIfCancellationRequested();
-                if (expected != before.Fingerprint)
-                {
-                    // After admission a cancelled page cannot revoke a durable write.
-                    var receipt = await store.WriteAsync(documentNamespace, bytes, before.Fingerprint,
-                        CancellationToken.None).ConfigureAwait(false);
-                    if (receipt != expected) throw new DocumentStoreException(DocumentStoreError.Storage);
-                }
-                return next.Clone();
-            }
-            finally
-            {
-                if (before.Data is not null) CryptographicOperations.ZeroMemory(before.Data);
-                if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
-            }
-        }
-        finally { serial.Release(); }
-    }
+    public Task<JsonElement> UpdateAsync(Func<JsonElement?, JsonElement> edit, CancellationToken token = default) =>
+        store.UpdateAsync(edit, token);
 
     private static JsonElement? Decode(byte[]? bytes)
     {

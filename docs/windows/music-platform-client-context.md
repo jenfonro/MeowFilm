@@ -10,7 +10,7 @@
 
 ## 文档与账号交接
 
-原生 `MusicAccountOwner` 安全保存当前 `music.accounts.v2` 后发布授权；`music.account-details.v2` 是独立展示缓存。AppIdentity 只将当前敏感账号 namespace 配置为 DPAPI。当前内部账号材料为 platform／userId／cookie，平台设备、QIMEI、匿名登记和 prepare 由 Node 当前文档维护，原生没有独立客户端文档 writer。
+原生 `MusicAccountOwner` 将 platform／userId／cookie 明文保存于共享 SQLite 账号关系后发布授权；平台设备、QIMEI、匿名登记和 prepare 由 Node owner 保存在对应关系表，不建立第二份账号或匿名文档库。
 
 显式外部账号文件继续走[现行文件契约](../common/music/account-transfer.md)，由原生文件 owner 检查和条件保存；不能把文件格式等同内部账号文档。歌曲仓库、引用队列和图片归属分别见[曲库](music-native-library.md)和[元数据／资源](music-metadata-policy.md)。
 

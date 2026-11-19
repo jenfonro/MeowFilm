@@ -1,3 +1,4 @@
+import '../../../tests/storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -83,7 +84,7 @@ for (const [label, sites] of cases) {
       assert.equal(installed.state, 'ready');
       const instance = (await runtime.status()).instances[0];
       assert.deepEqual(instance.sites.map(value => value.key), sites.map(value => value.key));
-      const requestsPath = join(root, 'volumes', installationId, 'requests.ndjson');
+      const requestsPath = join(root, 'cat', 'volumes', installationId, 'requests.ndjson');
       assert.equal(readFileSync(requestsPath, 'utf8'), '', 'discovery must not probe action endpoints');
       const payload = { wd: 'space 中文 &?=+', page: 2, filters: { year: '2026' }, quick: false };
       const query = { wd: 'space 中文 &?=+', page: '2', filters: '{"year":"2026"}', quick: 'false' };
@@ -159,7 +160,7 @@ async function evidenceFixture(t, source, sites) {
   worker = session.worker;
   assert.ok(worker.threadId > 0);
   exited = once(worker, 'exit');
-  const path = join(root, 'volumes', 'method-evidence', 'requests.ndjson');
+  const path = join(root, 'cat', 'volumes', 'method-evidence', 'requests.ndjson');
   const requests = () => {
     const text = readFileSync(path, 'utf8').trim();
     return text ? text.split('\n').map(JSON.parse) : [];

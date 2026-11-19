@@ -36,6 +36,7 @@ function loadBinding() {
         || (target.sdk === 'iphoneos' && target.arch !== 'arm64')
         || !['arm64', 'x64'].includes(target.arch)
         || !/^[a-f0-9]{64}$/.test(manifest.bindingIdentity ?? '')
+        || manifest.sqlite?.version !== '3.53.4'
         || manifest.artifact?.path !== `.cache/ios-native/${target.sdk}-${target.xcframeworkArchitecture}/MeowScriptHost.framework/MeowScriptHost`) {
       throw fault('NATIVE_ARTIFACT_INVALID');
     }
@@ -50,18 +51,21 @@ function loadBinding() {
     // No business argument, environment variable or receipt path chooses code.
     for (const relative of ['Runtime', 'Runtime/node_modules', 'Runtime/node_modules/@meowfilm',
       'Runtime/node_modules/@meowfilm/script-host', 'Runtime/node_modules/@meowfilm/script-host/src',
-      'Frameworks', 'Frameworks/MeowScriptHost.framework']) {
+      'Frameworks', 'Frameworks/MeowScriptHost.framework', 'Frameworks/MeowSQLite.framework']) {
       const entry = lstatSync(join(app, relative));
       if (!entry.isDirectory() || entry.isSymbolicLink()) throw fault('NATIVE_ARTIFACT_INVALID');
     }
     const executable = join(app, 'Frameworks/MeowScriptHost.framework/MeowScriptHost');
     const stat = lstatSync(executable);
     if (!stat.isFile() || stat.isSymbolicLink()) throw fault('NATIVE_ARTIFACT_INVALID');
+    const sqlite = lstatSync(join(app, 'Frameworks/MeowSQLite.framework/MeowSQLite'));
+    if (!sqlite.isFile() || sqlite.isSymbolicLink()) throw fault('NATIVE_ARTIFACT_INVALID');
     const module = { exports: {} };
     process.dlopen(module, executable, constants.dlopen.RTLD_NOW | constants.dlopen.RTLD_LOCAL);
     const loaded = module.exports;
     if (loaded.abi !== 1 || loaded.napi !== 8 || loaded.bindingIdentity !== manifest.bindingIdentity
-        || loaded.sdk !== target.sdk || loaded.arch !== target.arch || loaded.minimumOS !== target.minimumOS) {
+        || loaded.sdk !== target.sdk || loaded.arch !== target.arch || loaded.minimumOS !== target.minimumOS
+        || loaded.storageSQLiteVersion !== manifest.sqlite.version) {
       throw fault('NATIVE_ABI_MISMATCH');
     }
     // Code integrity after embedding/re-signing belongs to the App signature.
@@ -97,6 +101,19 @@ export function normalizeNFKCNative(value) {
   const loaded = loadBinding();
   if (typeof loaded.normalizeNFKC !== 'function') throw fault('NATIVE_ABI_MISMATCH');
   return loaded.normalizeNFKC(value);
+}
+
+/** App storage is a separate native mechanism, never a QuickJS/guest capability. */
+export function loadNativeStorageBinding() {
+  const loaded = loadBinding();
+  if (typeof loaded.openStorage !== 'function') throw fault('NATIVE_ABI_MISMATCH');
+  return loaded;
+}
+
+export function acquireNativeStorageLock(path, exclusive, timeout) {
+  const loaded = loadBinding();
+  if (typeof loaded.acquireStorageLock !== 'function') throw fault('NATIVE_ABI_MISMATCH');
+  return loaded.acquireStorageLock(path, exclusive, timeout);
 }
 
 /**

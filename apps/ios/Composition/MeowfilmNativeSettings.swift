@@ -3,26 +3,15 @@ import MeowFilmFeature
 import MeowRuntime
 import MeowStorage
 
-/// The App's sole document instances are shared by pages and the trusted Node
-/// channel. Each block starts with its current native document.
+/// Pages and the private Node channel share the same typed native repositories.
 final class MeowfilmNativeSettings: @unchecked Sendable {
-    static let keychainService = MeowfilmIdentity.bundleIdentifier + ".film.settings.keys.v1"
     let documents: [FilmSettingsBlock: FilmSettingsDocument]
     private let notifications = SettingsNotifications()
 
-    init(documentsRoot: URL) throws {
-        try FileManager.default.createDirectory(at: documentsRoot, withIntermediateDirectories: true)
-        let protectedRoot = documentsRoot.appendingPathComponent("protected-settings", isDirectory: true)
-        try FileManager.default.createDirectory(at: protectedRoot, withIntermediateDirectories: true)
-        let keys = try KeychainEncryptedDocumentKeyProvider(service: Self.keychainService)
+    init(database: SQLiteDatabase) {
         let notifications = notifications
         documents = Dictionary(uniqueKeysWithValues: FilmSettingsBlock.allCases.map { block in
-            let storage: FilmSettingsDocument.Storage = block.isSensitive ? .protected {
-                try EncryptedDocumentStore(baseURL: protectedRoot, namespace: block.namespace, keyProvider: keys)
-            } : .plain {
-                try DocumentStore(baseURL: documentsRoot, namespace: block.namespace)
-            }
-            return (block, FilmSettingsDocument(block: block, storage: storage) { notifications.changed($0) })
+            (block, FilmSettingsDocument(block: block, database: database) { notifications.changed($0) })
         })
     }
 
@@ -36,13 +25,12 @@ final class MeowfilmNativeSettings: @unchecked Sendable {
                      writableBlocks: [FilmSettingsBlock.panAccounts.rawValue], read: { name in
             do {
                 guard let block = FilmSettingsBlock(rawValue: name) else { throw RuntimeSettingsAccessError.storageFailure }
-                return try documents[block]!.snapshot()
+                return try documents[block]!.snapshotSync()
             } catch { throw RuntimeSettingsAccessError.storageFailure }
-        }, write: { name, value, expected in
+        }, update: { name, command in
             do {
                 guard name == FilmSettingsBlock.panAccounts.rawValue else { throw RuntimeSettingsAccessError.storageFailure }
-                try PanAccountService.validateSettingsDocument(value)
-                return try documents[.panAccounts]!.compareAndSwap(expected: expected, document: value)
+                return try documents[.panAccounts]!.updatePanSync(command)
             } catch FilmSettingsStorageError.conflict { throw RuntimeSettingsAccessError.conflict }
             catch { throw RuntimeSettingsAccessError.storageFailure }
         })

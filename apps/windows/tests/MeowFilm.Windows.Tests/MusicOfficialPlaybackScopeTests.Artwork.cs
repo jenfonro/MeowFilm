@@ -193,9 +193,9 @@ public static partial class MusicOfficialPlaybackScopeTests
 
     private sealed class ArtworkScene : IAsyncDisposable
     {
-        internal readonly MusicOfficialAudioTests.MemoryStore Store = new(), CacheBacking = new();
+        internal readonly MusicOfficialAudioTests.MemoryStore Store = new();
         internal readonly MusicPlatformRuntimeFixture Runtime = new();
-        internal readonly CacheDocumentStore Cache;
+        internal readonly NativeTestDatabase Cache;
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
         internal readonly Output Output = new();
@@ -207,14 +207,14 @@ public static partial class MusicOfficialPlaybackScopeTests
         internal bool HoldDiscovery;
         internal ArtworkScene(string? presentationCacheRoot = null)
         {
-            Cache = new(CacheBacking);
+            Cache = new(Store);
             Runtime.OnRequest = Read;
             Runtime.OnOtherCall = (call, _) => call.Method == "music.script.sources.list"
                 ? Task.FromResult(MusicPlatformRuntimeFixture.Json(new { ok = true, contract = "music.script.v3",
                     value = new { items = Array.Empty<object>() } }))
                 : throw new InvalidOperationException("unexpected script operation: " + call.Method);
-            App = new(Store, MusicTestStores.For(Store), Runtime, Cache, presentationCacheRoot);
-            Module = new(App, Store, Output, new Dialogs(), cacheStore: Cache);
+            App = new(Store, MusicTestStores.For(Store), Runtime);
+            Module = new(App, Store, Output, new Dialogs());
         }
         internal static async Task<ArtworkScene> Create(string? presentationCacheRoot = null)
         {
@@ -294,7 +294,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         {
             DiscoveryRelease.TrySetResult();
             try { await Module.DisposeAsync(); }
-            finally { await Runtime.DisposeAsync(); await Cache.DisposeAsync(); await Store.DisposeAsync(); await CacheBacking.DisposeAsync(); }
+            finally { await Runtime.DisposeAsync(); await Cache.DisposeAsync(); await Store.DisposeAsync(); }
         }
     }
 
@@ -383,42 +383,36 @@ public static partial class MusicOfficialPlaybackScopeTests
         const string original = "https://images.example.test/shared.png?size=128&tokenless=1";
         const string alias = "HTTPS://IMAGES.EXAMPLE.TEST:443/shared.png?size=128&tokenless=1";
         const string variant = "https://images.example.test/shared.png?size=256&tokenless=1";
-        string directory = NewArtworkResourceRoot();
-        await using (var cache = new MusicPresentationCache(directory))
-        await using (var loader = new ArtworkService(new ArtworkHttpProbe(), byteCache: cache))
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using (var documents = new NativeTestDatabase(backing))
+        await using (var loader = new ArtworkService(new ArtworkHttpProbe(), byteCache: new MusicPresentationCache(documents)))
         {
             using var first = await loader.AcquireAsync(original);
             using var second = await loader.AcquireAsync(alias);
             Check(ReferenceEquals(first.Image, second.Image), "memory decoded pixels are shared independently of song or display size");
-            await cache.DrainAsync();
         }
-        Check(File.ReadAllBytes(ArtworkResourceFile(directory, "image", original)).SequenceEqual(ArtworkHttpProbe.Encode()),
-            "the independent image leaf contains original compressed bytes");
-        await using var coldCache = new MusicPresentationCache(directory);
+        await using var coldDocuments = new NativeTestDatabase(backing);
         var http = new ArtworkHttpProbe();
-        await using var cold = new ArtworkService(http, byteCache: coldCache);
+        await using var cold = new ArtworkService(http, byteCache: new MusicPresentationCache(coldDocuments));
         using var restored = await cold.AcquireAsync(alias);
         Check(http.Addresses.Count == 0 && restored.Image.PixelWidth == 1, "cold loader must decode disk before issuing image HTTP");
         using var otherSize = await cold.AcquireAsync(variant);
         Check(http.Addresses.SequenceEqual([variant]), "real URL query variants remain separate resources");
-        await coldCache.DrainAsync();
-        Check(Directory.EnumerateFiles(directory, "*.resource").Count() == 2 &&
-            File.Exists(ArtworkResourceFile(directory, "image", variant)));
+        var entries = await coldDocuments.ReadPresentationEntriesAsync();
+        Check(entries.Count == 2 && entries.All(pair => pair.Value!["kind"]!.GetValue<string>() == "image"));
     }
 
     private static async Task SharedArtworkFailures()
     {
         const string address = "https://images.example.test/corrupt.png";
         const string healthy = "https://images.example.test/healthy.png";
-        string directory = NewArtworkResourceRoot(), songId = Guid.NewGuid().ToString("D");
-        await using (var seeded = new MusicPresentationCache(directory))
-        {
-            await seeded.WriteAsync(address, new byte[] { 1, 2, 3 }, seeded.Epoch, default);
-            await seeded.WriteAsync(healthy, ArtworkHttpProbe.Encode(), seeded.Epoch, default);
-            await seeded.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "healthy" }),
-                seeded.LyricEpoch, default);
-        }
-        await using var cache = new MusicPresentationCache(directory);
+        string songId = Guid.NewGuid().ToString("D");
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using var documents = new NativeTestDatabase(backing);
+        var cache = new MusicPresentationCache(documents);
+        await cache.WriteAsync(address, new byte[] { 1, 2, 3 }, cache.Epoch, default);
+        await cache.WriteAsync(healthy, ArtworkHttpProbe.Encode(), cache.Epoch, default);
+        await cache.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "healthy" }), cache.LyricEpoch, default);
         var http = new ArtworkHttpProbe();
         await using (var loader = new ArtworkService(http, byteCache: cache))
         {
@@ -429,10 +423,10 @@ public static partial class MusicOfficialPlaybackScopeTests
             Check(http.Addresses.SequenceEqual([address]) && intact.Image.PixelWidth == 1);
             Check((await cache.ReadLyricsAsync(songId, default))!["lines"]![0]!["text"]!.GetValue<string>() == "healthy");
         }
-        Check(File.ReadAllBytes(ArtworkResourceFile(directory, "image", address)).SequenceEqual(ArtworkHttpProbe.Encode()));
-        string blocked = Path.Combine(NewArtworkResourceRoot(), "not-a-directory");
-        await File.WriteAllBytesAsync(blocked, new byte[] { 0 });
-        await using var failedDisk = new MusicPresentationCache(blocked);
+        Check((await cache.ReadAsync(address, default))!.Content.SequenceEqual(ArtworkHttpProbe.Encode()));
+        await using var failedStore = new NativeTestDatabase(backing);
+        failedStore.BeforeWrite = _ => throw new DocumentStoreException(DocumentStoreError.Storage);
+        await using var failedDisk = new MusicPresentationCache(failedStore);
         var fallbackHttp = new ArtworkHttpProbe();
         await using var fallback = new ArtworkService(fallbackHttp, byteCache: failedDisk);
         using var decoded = await fallback.AcquireAsync(address + "?new=1");
@@ -440,7 +434,7 @@ public static partial class MusicOfficialPlaybackScopeTests
             "failed persistence cannot turn successful decoding into a failed image");
         using var reused = await fallback.AcquireAsync(address + "?new=1");
         Check(ReferenceEquals(decoded.Image, reused.Image) && fallbackHttp.Addresses.Count == 1 &&
-            File.ReadAllBytes(blocked).SequenceEqual(new byte[] { 0 }));
+            (await cache.ReadAsync(healthy, default))!.Content.SequenceEqual(ArtworkHttpProbe.Encode()));
     }
 
     private static async Task SharedArtworkCancellation()
@@ -487,7 +481,9 @@ public static partial class MusicOfficialPlaybackScopeTests
         const string address = "https://images.example.test/retired.png";
         foreach (bool clear in new[] { false, true })
         {
-            await using var cache = new MusicPresentationCache(NewArtworkResourceRoot());
+            await using var backing = new MusicOfficialAudioTests.MemoryStore();
+            await using var documents = new NativeTestDatabase(backing);
+            var cache = new MusicPresentationCache(documents);
             var http = new ArtworkHttpProbe { Hold = true };
             await using var loader = new ArtworkService(http, byteCache: cache);
             using var departed = new CancellationTokenSource();
@@ -543,7 +539,9 @@ public static partial class MusicOfficialPlaybackScopeTests
     private static async Task SharedArtworkClear()
     {
         const string address = "https://images.example.test/late.png";
-        await using var cache = new MusicPresentationCache(NewArtworkResourceRoot());
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using var documents = new NativeTestDatabase(backing);
+        var cache = new MusicPresentationCache(documents);
         string songId = Guid.NewGuid().ToString("D");
         await cache.SaveLyricsAsync(songId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "healthy" }), cache.LyricEpoch, default);
         var http = new ArtworkHttpProbe { Hold = true };
@@ -778,47 +776,40 @@ public static partial class MusicOfficialPlaybackScopeTests
     {
         const string displayed = "https://images.example.test/displayed.png";
         var http = new ArtworkHttpProbe();
-        string directory = NewArtworkResourceRoot();
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using var documents = new NativeTestDatabase(backing);
         var clock = new MusicOfficialAudioTests.Clock();
-        await using var cache = new MusicPresentationCache(directory, clock);
+        await using var cache = new MusicPresentationCache(documents, clock);
         await using var loader = new ArtworkService(http, byteCache: cache, time: clock);
         using var visible = await loader.AcquireAsync(displayed);
         var pixels = visible.Image;
         clock.Now++;
         string songId = Guid.NewGuid().ToString("D");
-        var lines = new JsonArray();
-        for (int i = 0; i < 4; i++)
-            lines.Add(new JsonObject { ["time"] = i, ["text"] = new string('l', 60 * 1024) });
-        await cache.SaveLyricsAsync(songId, "source", lines, cache.LyricEpoch, default);
-        Check(JsonNode.DeepEquals((await cache.ReadLyricsAsync(songId, default))!["lines"], lines),
-            "the budget fixture starts with valid lyrics below the 512 KiB resource limit");
-        byte[] imageBytes = new byte[2 * 1024 * 1024];
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 12; i++)
         {
+            await cache.SaveLyricsAsync(i == 0 ? songId : Guid.NewGuid().ToString("D"), "source",
+                new JsonArray(new JsonObject { ["text"] = new string('l', 500 * 1024) }), cache.LyricEpoch, default);
             clock.Now++;
-            await cache.WriteAsync(displayed + "?large=" + i, imageBytes, cache.Epoch, default);
         }
-        await cache.DrainAsync();
-        long actual = Directory.EnumerateFiles(directory).Sum(path => new FileInfo(path).Length);
-        Check(actual <= 8L * 1024 * 1024 &&
-            await cache.ReadAsync(displayed, default) is null && await cache.ReadLyricsAsync(songId, default) is null,
-            "images and lyrics compete in the original 8 MiB raw-resource budget, not two independent allocations");
-        for (int i = 0; i < 4; i++)
-            Check((await cache.ReadAsync(displayed + "?large=" + i, default))!.Content.Length == imageBytes.Length);
+        clock.Now++;
+        await cache.WriteAsync(displayed + "?large=1", new byte[3 * 1024 * 1024], cache.Epoch, default);
+        long actual = await documents.ReadAsync(db => db.Scalar<long>("SELECT (SELECT coalesce(sum(bytes),0) FROM windows_images)+(SELECT coalesce(sum(storedBytes),0) FROM windows_lyrics)"));
+        Check(actual <= 8 * 1024 * 1024 &&
+            await cache.ReadAsync(displayed, default) is null && cache.ReadLyricsAsync(songId, default).GetAwaiter().GetResult() is null,
+            "images and lyrics compete in the common 8 MiB logical content budget, not two independent allocations");
         Check(ReferenceEquals(visible.Image, pixels), "disk eviction cannot revoke displayed pixels");
 
         var memoryHttp = new ArtworkHttpProbe(size: 512);
         await using var memory = new ArtworkService(memoryHttp);
-        using var held = await memory.AcquireAsync(displayed);
+        var held = await memory.AcquireAsync(displayed);
         var heldPixels = held.Image;
-        Check(heldPixels.PixelWidth == 512 && heldPixels.PixelHeight == 512);
-        for (int i = 0; i < 65; i++)
+        for (int i = 0; i <= ArtworkService.CacheBytes / (512 * 512 * 8); i++)
         { using var item = await memory.AcquireAsync(displayed + "?item=" + i); }
         using (var stillVisible = await memory.AcquireAsync(displayed))
-            Check(ReferenceEquals(stillVisible.Image, heldPixels), "a display lease survives the existing 32 MiB decoded-pixel budget eviction");
+            Check(ReferenceEquals(stillVisible.Image, heldPixels), "a display lease survives decoded-byte cache eviction");
         held.Dispose();
         using var reloaded = await memory.AcquireAsync(displayed);
-        Check(!ReferenceEquals(reloaded.Image, heldPixels) && memoryHttp.Addresses.Count == 67,
+        Check(!ReferenceEquals(reloaded.Image, heldPixels) && memoryHttp.Addresses.Count > 1,
             "released evicted resources are recoverable misses");
     }
 
@@ -826,8 +817,9 @@ public static partial class MusicOfficialPlaybackScopeTests
     {
         const string address = "https://images.example.test/lifetime.png";
         var clock = new MusicOfficialAudioTests.Clock();
-        string directory = NewArtworkResourceRoot();
-        await using var cache = new MusicPresentationCache(directory, clock);
+        await using var backing = new MusicOfficialAudioTests.MemoryStore();
+        await using var documents = new NativeTestDatabase(backing);
+        var cache = new MusicPresentationCache(documents, clock);
         var http = new ArtworkHttpProbe();
         await using var loader = new ArtworkService(http, byteCache: cache, time: clock);
         string songId = Guid.NewGuid().ToString("D");
@@ -847,7 +839,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         var old = new MusicOfficialAudioTests.Clock { Now = DateTimeOffset.UtcNow.AddDays(-29).ToUnixTimeMilliseconds() };
         var played = await MusicSongFixture.AdoptAsync(scene.App, ArtworkSong("wy", "played", address));
         string playedId = played["songId"]!.GetValue<string>();
-        await using (var seeded = new MusicPresentationCache(playedDirectory, old))
+        await using (var seeded = new MusicPresentationCache(scene.Store, old))
         {
             await seeded.WriteAsync(address, ArtworkHttpProbe.Encode(), seeded.Epoch, default);
             await seeded.SaveLyricsAsync(playedId, "source", new JsonArray(new JsonObject { ["time"] = 0, ["text"] = "played line" }),
@@ -859,16 +851,15 @@ public static partial class MusicOfficialPlaybackScopeTests
         Check(queue.GetProperty("current").GetProperty("song").GetProperty("songId").GetString() == playedId);
         await scene.Replay();
         await scene.Module.PrepareShutdownAsync();
-        await scene.App.PresentationCache.DrainAsync();
-        var entries = Directory.EnumerateFiles(playedDirectory, "*.resource").ToArray();
-        Check(entries.Length == 2 && entries.All(path =>
-            new DateTimeOffset(File.GetLastWriteTimeUtc(path)).ToUnixTimeMilliseconds() > old.Now + 28L * 86400000),
+        await scene.Cache.DrainAsync();
+        var entries = await scene.Cache.ReadPresentationEntriesAsync();
+        Check(entries.Count == 2 && entries.All(pair => pair.Value!["updatedAt"]!.GetValue<long>() > old.Now + 28L * 86400000),
             "the real Started playback consumer renews shared image and lyric resources");
     }
 
     private static string NewArtworkResourceRoot()
     {
-        string path = TestWorkspace.DataPath("music-artwork-" + Guid.NewGuid().ToString("N"), MusicPresentationCache.DirectoryName);
+        string path = TestWorkspace.DataPath("music-artwork-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path); return path;
     }
     private static string ArtworkResourceFile(string directory, string group, string resource) =>

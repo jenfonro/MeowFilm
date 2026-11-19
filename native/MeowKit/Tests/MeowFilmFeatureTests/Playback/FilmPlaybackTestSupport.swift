@@ -131,7 +131,7 @@ enum FilmPlaybackFixture {
     }
     static func library(preferences: FilmPlaybackPreferences = .defaults,
                         manual: [RuntimeValue] = [], history: [RuntimeValue] = [], blocks: [RuntimeValue] = []) -> RuntimeValue {
-        .object(["version": .number(2), "preferences": preferences.value, "history": .array(history),
+        .object(["version": .number(2), "preferences": preferences.value, "history": .array(history), "historyAfter": .null,
                  "manual": .array(manual), "blocks": .array(blocks), "groups": .array([])])
     }
 }

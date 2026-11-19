@@ -14,10 +14,11 @@ final class PanAccountsUIKitTests: XCTestCase {
     private weak var previousKeyWindow: UIWindow?
 
     func testPageEntryHasNoRPCValidationOrReadIndicators() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         try await runtime.set(.baidu, status: .signedIn)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await eventually { model.rows.allSatisfy { $0.account != nil } }
         let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
         page.loadViewIfNeeded()
         defer { PageViewController.invalidatePages(in: page); model.close() }
@@ -37,11 +38,12 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testTableHasExactlyThreeColumnsAtPhoneWidthsWithThreeStateActionsAndTheme() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         try await runtime.set(.baidu, status: .signedIn)
         try await runtime.set(.quark, status: .expired)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await eventually { model.rows.allSatisfy { $0.account != nil } }
         await model.refresh(.baidu)?.value
         await model.refresh(.quark)?.value
         let theme = PanAccountsTheme()
@@ -125,12 +127,13 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testTableSemanticColorsAndBusyActionsFollowStyleWithoutFollowingPalette() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         try await runtime.set(.baidu, status: .signedIn)
         try await runtime.set(.quark, status: .expired)
         try await runtime.set(.tianyi, status: .signedIn)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await eventually { model.rows.allSatisfy { $0.account != nil } }
         await model.refresh(.baidu)?.value
         await model.refresh(.quark)?.value
         let theme = PanAccountsTheme()
@@ -196,7 +199,7 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testStatusBadgeFitsPhoneWidthsAndDynamicTypeWithoutClaimingOnlineLogin() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         try await runtime.set(.baidu, status: .signedIn)
         let model = PanAccountsModel(service: runtime.service)
         let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
@@ -304,8 +307,10 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testUnavailableAccountUsesNeutralBadgeWithoutActions() async throws {
-        let runtime = try PanUIKitRuntime()
-        try runtime.storage.store.write(Data("synthetic-invalid-document".utf8), key: FilmSettingsDocument.key)
+        let runtime = try PanUIKitRuntime(self)
+        try appStorageTestIO { _ = try runtime.storage.database.transactionSync {
+            try $0.execute("ALTER TABLE ios_settings_blocks RENAME TO unavailable_settings_blocks")
+        } }
         let model = PanAccountsModel(service: runtime.service)
         model.start()
         let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
@@ -321,11 +326,14 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testCorruptAccountUsesDangerBadgeAndKeepsLongStatusReadableWithoutActions() async throws {
-        let runtime = try PanUIKitRuntime()
-        let document = RuntimeValue.object(["version": .number(1), "accounts": .object([
-            "baidu": .object(["revision": .number(1), "credentials": .object(["cookie": .number(1)])]),
-        ])])
-        try runtime.storage.store.write(RuntimeJSON.encode(document), key: FilmSettingsDocument.key)
+        let runtime = try PanUIKitRuntime(self)
+        try runtime.storage.seed(.baidu, configured: false)
+        try appStorageTestIO { _ = try runtime.storage.database.transactionSync { db in
+            try db.execute("PRAGMA ignore_check_constraints=ON")
+            defer { try? db.execute("PRAGMA ignore_check_constraints=OFF") }
+            try db.execute("UPDATE ios_pan_accounts SET account_revision=-1 WHERE provider='baidu'")
+        } }
+        let document = try runtime.storage.read()
         let model = PanAccountsModel(service: runtime.service)
         let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
         let window = mount(page)
@@ -378,10 +386,11 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testTableRefreshCallsRuntimeButLogoutIsNativeAndLoginOpensSharedFloatingCard() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         try await runtime.set(.baidu, status: .signedIn)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await eventually { model.rows.allSatisfy { $0.account != nil } }
         await model.refresh(.baidu)?.value
         let page = PanAccountsViewController(model: model, themeProvider: PanAccountsTheme())
         let window = mount(page)
@@ -414,9 +423,10 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testManualFloatingFormBindsFieldsHidesSecretsAndNeverLoadsOldValues() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         let model = PanAccountsModel(service: runtime.service)
         model.start()
+        await eventually { model.rows.allSatisfy { $0.account != nil } }
         let login = try XCTUnwrap(model.openLogin(.tianyi))
         let card = PanLoginViewController(model: login, themeProvider: PanAccountsTheme(), close: { model.closeLogin() })
         let window = mount(card)
@@ -437,9 +447,10 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testManualNativeSaveClosesCardWithoutClaimingOnlineLogin() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
+        await eventually { owner.rows.allSatisfy { $0.account != nil } }
         let login = try XCTUnwrap(owner.openLogin(.tianyi))
         var closed = false
         let card = PanLoginViewController(model: login, themeProvider: PanAccountsTheme(), close: { closed = true })
@@ -455,12 +466,13 @@ final class PanAccountsUIKitTests: XCTestCase {
         let calls = await runtime.operations
         XCTAssertTrue(calls.isEmpty)
         owner.closeLogin(); owner.close(); owner.start()
+        await eventually { owner.rows[3].account?.revision == 1 }
         XCTAssertEqual(owner.rows[3].account?.status, .unverified)
         XCTAssertEqual(owner.rows[3].account?.revision, 1)
     }
 
     func testQRMethodPickerBindsManualCookieAndCancelsQR() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         let provider = try PanProvider(panUIProvider(.quark))
         let model = PanLoginModel(provider: provider, service: runtime.service, update: { _ in })
         let card = PanLoginViewController(model: model, themeProvider: PanAccountsTheme(), close: { model.close() })
@@ -485,9 +497,10 @@ final class PanAccountsUIKitTests: XCTestCase {
     }
 
     func testBackgroundCancelsQRAndConfirmedReceiptClosesCardWithoutClearingAccount() async throws {
-        let runtime = try PanUIKitRuntime()
+        let runtime = try PanUIKitRuntime(self)
         let owner = PanAccountsModel(service: runtime.service)
         owner.start()
+        await eventually { owner.rows.allSatisfy { $0.account != nil } }
         let page = PanAccountsViewController(model: owner, themeProvider: PanAccountsTheme())
         let window = mount(page)
         defer { unmount(page, window: window); owner.close() }
@@ -694,34 +707,43 @@ private func panUIAccount(_ id: PanProviderID, _ status: PanAccountStatus = .sig
              "configured": .bool(!fields.isEmpty), "fields": .array(fields.map(RuntimeValue.string)),
              "status": .string(status.rawValue)])
 }
-private final class PanUIKitKeys: EncryptedDocumentKeyProvider, @unchecked Sendable {
-    private let lock = NSLock()
-    private var key: Data?
-    func readKey(namespace: String) throws -> Data? { lock.lock(); defer { lock.unlock() }; return key }
-    func createKeyIfAbsent(namespace: String) throws -> Data {
-        lock.lock(); defer { lock.unlock() }
-        if key == nil { key = Data(repeating: 0x57, count: 32) }
-        return key!
-    }
-}
 private final class PanUIKitStorage: @unchecked Sendable {
-    let root: URL
-    let store: EncryptedDocumentStore
+    let database: SQLiteDatabase
     let document: FilmSettingsDocument
-    init() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pan-ui-native-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-        let store = try EncryptedDocumentStore(baseURL: root, namespace: FilmSettingsBlock.panAccounts.namespace,
-                                               keyProvider: PanUIKitKeys())
-        self.root = root; self.store = store
-        document = FilmSettingsDocument(block: .panAccounts, storage: .protected { store })
+    init(_ test: XCTestCase) throws {
+        database = try test.appStorageTestDatabase()
+        document = FilmSettingsDocument(block: .panAccounts, database: database)
     }
-    func read() throws -> RuntimeValue { try document.read() ?? .object(["version": .number(1), "accounts": .object([:])]) }
-    func replace(_ id: PanProviderID, revision: Int, configured: Bool) throws -> RuntimeValue {
-        var accounts = try read().panField("accounts")!.panObject!
-        accounts[id.rawValue] = .object(["revision": .number(Double(revision)), "credentials":
-            configured ? panUICredentials(id) : .object([:])])
-        return .object(["version": .number(1), "accounts": .object(accounts)])
+    func read() throws -> RuntimeValue {
+        try document.appStorageTestRead() ?? .object(["version": .number(1), "accounts": .object([:])])
+    }
+    func seed(_ id: PanProviderID, revision: Int = 1, configured: Bool) throws {
+        let credentials = configured ? panUICredentials(id).panObject! : RuntimeObject()
+        try appStorageTestIO {
+            _ = try self.database.transactionSync { db in
+                let fields = ["cookie", "username", "password", "authorization", "refreshedAt"]
+                let values: [SQLiteValue] = fields.map { name in
+                    switch credentials[name] {
+                    case .string(let value): return .text(value)
+                    case .number(let value): return .integer(Int(value))
+                    default: return .null
+                    }
+                }
+                try db.execute("UPDATE ios_pan_accounts SET account_revision=?,row_revision=row_revision+1," +
+                    fields.map { "\($0)=?" }.joined(separator: ",") + " WHERE provider=?",
+                    [.integer(revision)] + values + [.text(id.rawValue)])
+                try db.execute("UPDATE ios_settings_blocks SET revision=revision+1 WHERE block='pan.accounts'")
+            }
+        }
+    }
+    func revision(_ id: PanProviderID) throws -> (account: Int, row: Int) {
+        try appStorageTestIO {
+            try self.database.readSync { db in
+                let row = try XCTUnwrap(db.query("SELECT account_revision,row_revision FROM ios_pan_accounts WHERE provider=?",
+                    [.text(id.rawValue)]).first)
+                return (try row.integer("account_revision"), try row.integer("row_revision"))
+            }
+        }
     }
     func snapshot(_ id: PanProviderID) throws -> RuntimeValue {
         let record = try read().panField("accounts")?.panField(id.rawValue)
@@ -731,23 +753,21 @@ private final class PanUIKitStorage: @unchecked Sendable {
         return panUIAccount(id, fields.isEmpty ? .signedOut : .signedIn,
                             revision: Int(record?.panField("revision")?.panInteger ?? 0), fields: fields)
     }
-    deinit { try? FileManager.default.removeItem(at: root) }
 }
 private actor PanUIKitRuntime {
     nonisolated let storage: PanUIKitStorage
     private(set) var operations: [String] = []
     private var states: [PanProviderID: (record: RuntimeValue, status: PanAccountStatus)] = [:]
     private var sessionProvider = PanProviderID.baidu
-    private var expected: RuntimeValue?
+    private var expected: (account: Int, row: Int)?
     private var confirmed = false
-    init() throws { storage = try PanUIKitStorage() }
+    init(_ test: XCTestCase) throws { storage = try PanUIKitStorage(test) }
     nonisolated var service: PanAccountService {
         .init(document: storage.document, request: { try await self.call($0, $1, $2) })
     }
     func set(_ id: PanProviderID, status: PanAccountStatus) throws {
-        let value = try storage.replace(id, revision: 1, configured: status != .signedOut)
-        try storage.store.write(RuntimeJSON.encode(value), key: FilmSettingsDocument.key)
-        states[id] = (value.panField("accounts")!.panField(id.rawValue)!, status)
+        try storage.seed(id, configured: status != .signedOut)
+        states[id] = (try storage.read().panField("accounts")!.panField(id.rawValue)!, status)
     }
     func count(_ operation: String) -> Int { operations.filter { $0 == operation }.count }
     func confirmLogin() { confirmed = true }
@@ -761,7 +781,7 @@ private actor PanUIKitRuntime {
             return .object(["refreshed": .bool(true), "account": try storage.snapshot(id)])
         case "login.start":
             sessionProvider = id
-            expected = try storage.document.snapshot().fingerprint
+            expected = try storage.revision(id)
             return .object(["sessionId": .string("synthetic-ui-session"), "provider": .string(id.rawValue),
                 "status": .string("pending"), "expiresAt": .number((Date().timeIntervalSince1970 * 1000).rounded() + 180_000),
                 "challenge": .object(["type": .string("url"), "url": .string("https://scan.example.test/synthetic")])])
@@ -770,10 +790,11 @@ private actor PanUIKitRuntime {
                 "status": .string(confirmed ? "confirmed" : "pending")]
             if confirmed {
                 guard let expected else { throw RuntimeHTTPError.remote("LOGIN_EXPIRED") }
-                let document = try storage.replace(id, revision: 2, configured: true)
-                try PanAccountService.validateSettingsDocument(document)
-                _ = try storage.document.compareAndSwap(expected: expected, document: document)
-                self.expected = try storage.document.snapshot().fingerprint
+                let command: RuntimeValue = .object(["provider": .string(id.rawValue), "mode": .string("replace"),
+                    "accountRevision": .number(Double(expected.account)), "rowRevision": .number(Double(expected.row)),
+                    "credentials": panUICredentials(id)])
+                _ = try storage.document.updatePanSync(command)
+                self.expected = try storage.revision(id)
                 value["account"] = try storage.snapshot(id)
             }
             return .object(value)

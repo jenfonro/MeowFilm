@@ -2,17 +2,18 @@ import Foundation
 import XCTest
 import MeowRuntime
 import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowFilmFeature
 
 final class FilmSourceDetectionFenceTests: XCTestCase {
     private let key = FilmSourceKey(installationId: "a", siteKey: "same")
     private let options = FilmVideoOptions(enabled: false, homeVisible: false, searchEnabled: false, aggregateImages: true)
 
-    private func owner(_ fixture: DetectionValueFixture) throws -> (FilmSourceService, DocumentStore, URL) {
+    private func owner(_ fixture: DetectionValueFixture) throws -> (FilmSourceService, SQLiteDatabase, URL) {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: base, namespace: FilmSourceService.documentNamespace)
-        return (FilmSourceService(transport: fixture.transport, storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+        let store = try storageTestDatabase(self, root: base)
+        return (FilmSourceService(transport: fixture.transport, database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat")), store, base)
     }
 
@@ -20,10 +21,9 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         let paused = expectation(description: "Final search value")
         let fixture = DetectionValueFixture(boundary: .result, paused: { paused.fulfill() })
         let (service, store, base) = try owner(fixture)
-        defer { try? FileManager.default.removeItem(at: base) }
         try await service.refresh()
         try await service.saveVideoOptions(key, options: options)
-        let bytes = try store.read(key: FilmSourceService.documentKey)
+        let bytes = try sourceTestRows(store)
         let detection = Task { try await service.detect(key) }
         await fulfillment(of: [paused], timeout: 5)
         // The runtime changes independently after capturing the complete value.
@@ -33,7 +33,7 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         XCTAssertEqual(status.catField("instances")?.catArray?.first?.catField("generation"), .number(2))
         let cached = await service.snapshot
         XCTAssertEqual(cached.cats.first?.generation, 1)
-        XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes)
+        XCTAssertEqual(try sourceTestRows(store), bytes)
         await fixture.release()
         do { _ = try await detection.value; XCTFail("Old-generation detection must not complete") }
         catch { XCTAssertTrue(error is CancellationError, "\(error)") }
@@ -41,7 +41,7 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         XCTAssertEqual(snapshot.cats.first?.generation, 2)
         XCTAssertNil(snapshot.videos.first { $0.key == key }?.detection)
         XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
-        XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes)
+        XCTAssertEqual(try sourceTestRows(store), bytes)
         let completed = await fixture.completedResults
         XCTAssertEqual(completed, 1)
         await service.close()
@@ -50,7 +50,6 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
     func testSameGenerationValuePersistsOnlyAfterHostConfirmation() async throws {
         let fixture = DetectionValueFixture()
         let (service, store, base) = try owner(fixture)
-        defer { try? FileManager.default.removeItem(at: base) }
         try await service.refresh()
         try await service.saveVideoOptions(key, options: options)
         let result = try await service.detect(key)
@@ -59,7 +58,7 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         XCTAssertEqual(Array(calls.suffix(2)), ["invoke", "status"])
         let completed = await fixture.completedResults
         XCTAssertEqual(completed, 1)
-        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), storeFactory: { store }, settingsDocument: try sourceTestSettings(base),
+        let rebuilt = FilmSourceService(transport: unavailableCatTransport("OFFLINE"), database: store, settingsDocument: try sourceTestSettings(store),
             runtimeSourceRoot: base.appendingPathComponent("cat"))
         try await rebuilt.initialize()
         let snapshot = await rebuilt.snapshot
@@ -72,10 +71,9 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         let paused = expectation(description: "Complete search value")
         let fixture = DetectionValueFixture(boundary: .result, paused: { paused.fulfill() })
         let (service, store, base) = try owner(fixture)
-        defer { try? FileManager.default.removeItem(at: base) }
         try await service.refresh()
         try await service.saveVideoOptions(key, options: options)
-        let bytes = try store.read(key: FilmSourceService.documentKey)
+        let bytes = try sourceTestRows(store)
         let detection = Task { try await service.detect(key) }
         await fulfillment(of: [paused], timeout: 5)
         await fixture.runtime.failNext("status", code: "HOST_CLOSED")
@@ -86,7 +84,7 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
         XCTAssertEqual(snapshot.runtimeError, "HOST_CLOSED")
         XCTAssertNil(snapshot.videos.first { $0.key == key }?.detection)
         XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options)
-        XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes)
+        XCTAssertEqual(try sourceTestRows(store), bytes)
         let completed = await fixture.completedResults
         XCTAssertEqual(completed, 1)
         await service.close()
@@ -99,8 +97,7 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
             let fixture = DetectionValueFixture(boundary: .confirmation, paused: { paused.fulfill() },
                 cancelled: { cancelled?.fulfill() })
             let (service, store, base) = try owner(fixture)
-            defer { try? FileManager.default.removeItem(at: base) }
-            try await service.refresh()
+                try await service.refresh()
             try await service.saveVideoOptions(key, options: options)
             let detection = Task { try await service.detect(key) }
             await fulfillment(of: [paused], timeout: 5)
@@ -112,14 +109,14 @@ final class FilmSourceDetectionFenceTests: XCTestCase {
                 closing = Task { await service.close() }
                 await fulfillment(of: [try XCTUnwrap(cancelled)], timeout: 5)
             }
-            let bytes = try store.read(key: FilmSourceService.documentKey)
+            let bytes = try sourceTestRows(store)
             await fixture.release()
             do { _ = try await detection.value; XCTFail("Invalidated completion: \(invalidation)") }
             catch { XCTAssertTrue(error is CancellationError, "\(error)") }
             await closing?.value
             let snapshot = await service.snapshot
             XCTAssertTrue(snapshot.videos.allSatisfy { $0.detection == nil })
-            XCTAssertEqual(try store.read(key: FilmSourceService.documentKey), bytes)
+            XCTAssertEqual(try sourceTestRows(store), bytes)
             if invalidation == "delete" { XCTAssertFalse(snapshot.videos.contains { $0.key == key }) }
             else { XCTAssertEqual(snapshot.videos.first { $0.key == key }?.options, options) }
             await service.close()

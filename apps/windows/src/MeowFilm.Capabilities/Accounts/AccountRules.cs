@@ -31,7 +31,7 @@ internal static class AccountRules
         {
             DocumentStoreError.Conflict => "STORAGE_CONFLICT",
             DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",
-            DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion or DocumentStoreError.Protection => "CORRUPT_STORAGE",
+            DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
             DocumentStoreError.Limit => "LIMIT",
             DocumentStoreError.Closed => "CLOSED",
             _ => "STORAGE"

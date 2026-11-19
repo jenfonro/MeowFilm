@@ -92,13 +92,13 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ### 数据源与智能播放设置
 
-`FilmDataSourceSettingsViewController` 顶部以独立完整胶囊切换 TMDB／豆瓣，不外套设置卡片；下方使用书源编辑共用的 `ManagementFormView` 整体表单，无重复供应商节头。字段采用上方标签、下方无框输入，复用表单分隔且不增加输入下划线，供应商字段实例及草稿分别保留，切换和主题变化不重建输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsDocument:connection:)` 和 `FilmDoubanSettingsService(settingsDocument:)` 直接访问各自加密原生文档；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
+`FilmDataSourceSettingsViewController` 顶部以独立完整胶囊切换 TMDB／豆瓣，不外套设置卡片；下方使用书源编辑共用的 `ManagementFormView` 整体表单，无重复供应商节头。字段采用上方标签、下方胶囊输入，供应商字段实例及草稿分别保留，切换和主题变化不重建输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsDocument:connection:)` 和 `FilmDoubanSettingsService(settingsDocument:)` 通过原生设置 owner 访问同一 SQLite 数据库中的对应类型化设置行；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
 
-偏好优先片源与网盘排序共用音乐歌词／封面的 `SettingsOrderingSection` 直接拖动列表，只修改各组草稿，由页头保存；不新增启用开关，也不保留偏好页的恢复默认入口。偏好关键词和站点净化词共用同一 SwiftUI 列表与原生输入承载，使用卡内“关键字匹配规则”标题、下方单行下划线输入，即使与节头同名仍保留字段标题；词条逗号分隔，键入、主题及辅助字号变化不重建输入或结束编辑。获得焦点或字段／键盘视口尺寸变化时显露原输入的触达区域，稳定布局不回拉用户滚动；站点净化及其他组仍保留各自恢复能力。`FilmPlaybackSettingsModel(transport:settingsDocument:)` 在原生文档读取／保存偏好，只规范化实际编辑字段、保留其他原始 JSON；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，添加／编辑使用同一 `ManagementFormView` 整体表单，短选项紧凑组织，长身份及分享链接保留全宽，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
+偏好优先片源与网盘排序共用音乐歌词／封面的 `SettingsOrderingSection` 直接拖动列表，只修改各组草稿，由页头保存；不新增启用开关，也不保留偏好页的恢复默认入口。偏好关键词和站点净化词用单行逗号分隔，键入不重建输入；站点净化及其他组仍保留各自恢复能力。`FilmPlaybackSettingsModel(transport:settingsDocument:)` 通过原生 SQLite 设置投影读取／保存偏好，只更新所属类型化字段和有序关系；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，添加／编辑使用同一 `ManagementFormView` 整体表单，短选项紧凑组织，长身份及分享链接保留全宽，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
 
 `FilmPlaybackLibrary` 只投影当前 Manual 或屏蔽页面所需的列表；偏好走独立设置入口。Manual 选影片只读取历史的 targetId/title，不校验位置、时长或时间；无法读取这两个字段的辅助历史不进入选项。当前列表可分离坏项不阻断健康兄弟，真实空列表有效，坏根／列表形状错误及非空但全部不可用仍报错。读取投影不回写资料，删除仍提交原始 typed block 身份，保存失败不发布。
 
-偏好通过 `FilmPlaybackSettingsModel.loadPreferences/savePreferences` 独立读取和提交原生文档，成功 CAS 才发布保存值，不经 HTTP `settings.get`／`settings.set` 写回。读取只投影可识别的排序维度／网盘偏好，不执行未知值或替它补默认排序。未编辑某组排序时，保存其他字段保留该组原始数组；显式重排或恢复该组才替换，重排规则维度须完整，编辑网盘顺序时补齐其余已知平台。原生播放快照不复制或解码 `preferences`，媒体准入仍读取真实 `attempt.prepareOnly`。辅助 cache／supplement 不阻断主资料和会话：返回的缓存说明无法识别时保守按 non-fresh 处理，不解锁 stale 限制；现有组件完成证据独立保留。无法消费的补充资料不参与展示，不代替主身份。session、sequence、attempt／resource 及真实执行材料继续按原契约消费。
+偏好通过 `FilmPlaybackSettingsModel.loadPreferences/savePreferences` 独立读取和提交原生 SQLite 设置行，成功 CAS 才发布保存值，不经 HTTP `settings.get`／`settings.set` 写回。读取只投影可识别的排序维度／网盘偏好，不执行未知值或替它补默认排序。未编辑某组排序时，保存其他字段保留该组原始数组；显式重排或恢复该组才替换，重排规则维度须完整，编辑网盘顺序时补齐其余已知平台。原生播放快照不复制或解码 `preferences`，媒体准入仍读取真实 `attempt.prepareOnly`。辅助 cache／supplement 不阻断主资料和会话：返回的缓存说明无法识别时保守按 non-fresh 处理，不解锁 stale 限制；现有组件完成证据独立保留。无法消费的补充资料不参与展示，不代替主身份。session、sequence、attempt／resource 及真实执行材料继续按原契约消费。
 
 通用设置的缓存管理提供豆瓣、TMDB、两者三个动作，由 `FilmPlaybackSettingsModel` 调用运行器 `data.invalidate`，不直接清文件、不重启或清用户资料；两项都结算后才解除 busy，部分失败仍报告失败。它不触发配置保存或自动搜索。
 
@@ -108,26 +108,26 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 普通字号保留平台、状态、操作三列，适配窄屏；辅助字号改为三个全宽纵向内容区，避免平台名与操作逐字竖排，不压缩字体。平台主文字及操作仍为 Body Regular，表头为 Subheadline Regular，平台图标保持 24pt。操作表头及按钮在同一内容区居中，离散状态采用公共小胶囊、浅色底及同色深文字／图标。未登录／不可用为中性，已登录为成功，未验证为警告，失效／配置损坏为错误；busy 继续显示真实操作进度。登录沿用音乐账号浮层、输入和按钮的共享视觉组件，不依赖音乐账号服务或存储。刷新、整份替换、退出与二维码取消以[网盘公共契约](../runtime/pan-runtime.md#设置页)为唯一来源。
 
-原生 `PanProviderID` 只声明百度、普通夸克、普通 UC、天翼、移动五个平台；登录表单直接按各平台现行凭证字段生成。`PanAccountService` 只消费所选平台的真实 revision 和已知凭据，手动输入先投影本平台凭据，再整份替换所选已知凭据。其他账号及原文档的未知平台／字段材料原样保留，不注册能力、不转为请求凭据，也不作为旧数据兼容。
+原生 `PanProviderID` 只声明百度、普通夸克、普通 UC、天翼、移动五个平台；登录表单直接按各平台现行凭证字段生成。`PanAccountService` 只消费所选平台的真实 revision 和已知凭据，手动输入先投影本平台凭据，再整份替换所选已知凭据。其他已知平台账号保持不变；设置只接受当前声明的类型字段，不保存未知平台或扩展字段。
 
-`PanAccountsModel.start()` 同步读取原生 providers／accounts，无配置读取进度，不连接运行器或自动刷新账号。`PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 的 replace／clear 直接提交同一加密文档；仅有配置时显示「未验证」，真实在线观察才可显示已登录／失效，且绑定当前 revision、字段及凭据内容身份。
+`PanAccountsModel.start()` 通过后台 SQLite 队列异步读取原生 providers／accounts，不连接运行器或自动刷新账号。`PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 的 replace／clear 直接提交同一数据库中所属 provider 的账号行及 account／row revision；仅有配置时显示「未验证」，真实在线观察才可显示已登录／失效，且绑定当前 revision、字段及凭据内容身份。
 
-单个账号记录损坏时，`PanAccount` 与运行器 `settings.get` 的 `{provider,errorCode:"CORRUPT_STORAGE"}` 对齐；不伪造 revision、configured、fields 或 status。该行显示「账号数据损坏」、不提供账号操作，健康兄弟仍可读取、保存和验证。文档根或解密失败仍整体报错；坏账号不自动重置，不覆盖原始记录。错误快照不能成为扫码确认或刷新成功回执，原 provider／session 身份、凭据签名及提交 CAS 约束不变。
+单个账号记录损坏时，`PanAccount` 与运行器 `settings.get` 的 `{provider,errorCode:"CORRUPT_STORAGE"}` 对齐；不伪造 revision、configured、fields 或 status。该行显示「账号数据损坏」、不提供账号操作，健康兄弟仍可读取、保存和验证。数据库读取或设置块投影失败仍整体报错；坏账号不自动重置，不覆盖原始记录。错误快照不能成为扫码确认或刷新成功回执，原 provider／session 身份、凭据签名及提交 CAS 约束不变。
 
-扫码、二维码轮询、显式刷新与真实网盘请求仍由运行器执行；新凭据通过受信 `pan.accounts` CAS 写回同一原生 owner。手动保存完成与扫码 confirmed 分开，不因离线无法验证而撤回已保存配置。关闭、离页及后台停止扫码轮询，已确认账号不因关闭浮层退出；手动表单仍只有当前草稿、不回显旧 Cookie／密码／token，保存则写入上述原生加密文档。
+扫码、二维码轮询、显式刷新与真实网盘请求仍由运行器执行；新凭据通过受信 `pan.accounts` CAS 写回同一原生 owner。手动保存完成与扫码 confirmed 分开，不因离线无法验证而撤回已保存配置。关闭、离页及后台停止扫码轮询，已确认账号不因关闭浮层退出；手动表单仍只有当前草稿、不回显旧 Cookie／密码／token，保存则写入上述原生 SQLite 账号行。
 
 ### 既有 owner 与专用验证
 
 页面隐藏取消规则测试／检测及页面订阅，不销毁 App owner。已提交的管理操作取得真实回执，返回后不继续尚未交接的批量更新或改变导航；批量重启重试保留已成功项，只继续剩余项。批量及单项删除都依据已提交本地事实协调重试，删除后的同步失败仍显示原错误，不从已删除项重新执行，也不迟到退出用户随后进入的其他页面。
 
-App 关闭先停止接纳并排空规则执行／来源任务；规则适配的 prepare／clear／close 共享物理排空，关闭不提前越过已接纳 clear，也不关闭借用的 runtime。音乐薄适配器拒绝新工作、取消并排空已接纳的调用与传输，通过 `music.script.close` 的 `closed:true, cleanupComplete:true` 回执确认音乐模块收口，空实例清单或连接断开不等于清理成功。并发／重复关闭共用同一终态，取消等待者不放弃收尾。音乐不关闭共享连接／Cat 模块；App 最后关闭并等待共享连接和 Node 线程。数据清除仍按既有下次冷启动流程覆盖原生文档、专用设置密钥和运行器数据，不在原进程重建 Node。
+App 关闭先停止接纳并排空规则执行／来源任务；规则适配的 prepare／clear／close 共享物理排空，关闭不提前越过已接纳 clear，也不关闭借用的 runtime。音乐薄适配器拒绝新工作、取消并排空已接纳的调用与传输，通过 `music.script.close` 的 `closed:true, cleanupComplete:true` 回执确认音乐模块收口，空实例清单或连接断开不等于清理成功。并发／重复关闭共用同一终态，取消等待者不放弃收尾。音乐不关闭共享连接／Cat 模块；App 最后关闭并等待共享连接和 Node 线程。数据清除仍按既有下次冷启动流程覆盖当前共享数据库、原始资源和运行器数据，不在原进程重建 Node。
 
 下列为验证入口及职责，不代表本轮已经执行；编译、传输替身与真实 App 业务须分别记录。
 
 - Swift 规则精确 filter：`FilmRuleLifecycleTests|FilmRulePersistenceTests|FilmRuleReferenceTests|FilmRuleTextTests`，覆盖原生分组 CAS／回执／失败、离线默认及文本规范化、预览取消和物理排空、UTF16 每码元往返；传输替身不代表真实 Node。
-- `FilmSettingsDocumentTests` 覆盖文档 CAS、按块通知、保护存储失败及精确 JSON 扩展保留；领域测试 `FilmCatNativeSettingsTests`、`PanAccountServiceTests|PanAccountsModelTests|PanLoginModelTests`、`FilmTMDBServiceTests`、`FilmPlaybackSettingsModelTests` 分别核对原生保存和在线业务边界。
-- `MeowfilmNativeSettingsHostTests/testNativeSettingsPreserveExactJSONThroughNodeMobile` 在真实 App 内先读取 Node 设置快照，再原生提交普通 TMDB 设置及 synthetic 高精度小数、大整数、溢出指数和不同 UTF-8 键的扩展；经实际通知、私密设置读取及 HTTP `settings.get` 返回后由 `RuntimeJSON` 比较精确材料。拒绝非空账号凭据基线，teardown 恢复原设置并等待运行器应用；主机测试或编译不能替代此 NodeMobile 链验证。
-- `MeowfilmRuntimeTests/FilmSettingsPlatformTests`：真实前台 UIKit 草稿、导航生命周期、控件、失败／重试、确认、取消、窄／宽视口和大字体截图。普通规则配置使用独立原生文档，规则执行才走 NodeMobile；来源状态／调用仍有协议夹具，不能替代实际脚本装载验收。
+- `FilmSettingsDocumentTests` 覆盖类型化字段、revision CAS、按块通知和事务失败；领域测试 `FilmCatNativeSettingsTests`、`PanAccountServiceTests|PanAccountsModelTests|PanLoginModelTests`、`FilmTMDBServiceTests`、`FilmPlaybackSettingsModelTests` 分别核对原生保存和在线业务边界。
+- `MeowfilmNativeSettingsHostTests/testTypedSettingsRejectUnknownFieldsAndPreserveDeclaredTextThroughNodeMobile` 在真实 App 内核对未知字段拒绝及声明文本字段经原生 SQLite、私密设置通知和 NodeMobile HTTP 的往返。拒绝非空账号凭据基线，teardown 恢复原设置并等待运行器应用；主机测试或编译不能替代此 NodeMobile 链验证。
+- `MeowfilmRuntimeTests/FilmSettingsPlatformTests`：真实前台 UIKit 草稿、导航生命周期、控件、失败／重试、确认、取消、窄／宽视口和大字体截图。普通规则配置使用共享数据库中的原生规则关系，规则执行才走 NodeMobile；来源状态／调用仍有协议夹具，不能替代实际脚本装载验收。
 - `MeowfilmFilmSettingsHostTests`：原生规则保存／草稿一致性与真实 Node 预览，固定共享 reference cases 每例两次、Unicode 属性／前后瞻／捕获／g-y／孤立码元，以及正则取消／截止／长编译／全局删除后的恢复；固定 JSON 以内嵌 Swift 常量进入宿主测试，不依赖产品载荷包含 test 目录。Node 宿主的 `native-json` 用例另保留通用无 I/O、内存失败、循环、排队／关闭与真实 C 入口不可捕获中断覆盖。Cat HTTP 五阶段与原生来源／客户端目录持久化、落盘前换代拒旧检测、前台确认／失败弹窗仍保留。显式重启不是实际内存超限实验；后台快照不能替代前台系统弹窗。`MeowfilmRuntimeHostTests` 在同一个 NodeMobile 中并发调用 source 与影视规则，验证共享载体但 Runtime／Context 独立，不另启运行器。
 
 规则载体的精确 `MeowfilmAcceptance` 选择如下；每项须实际执行，编译或跳过不算规则载体通过：

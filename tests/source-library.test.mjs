@@ -1,10 +1,14 @@
-import test from 'node:test';
+import { withTestDatabase } from './storage-test-fixture.mjs';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { PrivateDocuments, ScriptHostError } from '@meowfilm/script-host';
+import { ScriptHostError } from '@meowfilm/script-host';
+import { encodeValueNodes } from '@meowfilm/storage/values';
+import { parseJSONText } from '@meowfilm/runtime-bridge/json';
+import { nodeInserts } from '@meowfilm/storage/statements';
 import { createSourceRuntimeModule } from '../apps/runtime/modules/source-runtime.mjs';
 import { moduleHttp } from './runtime-http-fixture.mjs';
 import { deferred } from '../packages/runtime-bridge/test/http-fixture.js';
@@ -30,12 +34,12 @@ function value(reply) {
 function denied(reply, code) {
   assert.deepEqual(reply, { ok: false, contract: 'source.runtime.v2', code });
 }
-function temp(t) {
-  const root = new URL('../tmp/test-results/source-library/', import.meta.url);
-  mkdirSync(root, { recursive: true });
-  const path = mkdtempSync(join(fileURLToPath(root), 'case-'));
-  t.after(() => rmSync(path, { recursive: true, force: true }));
-  return path;
+const results = new URL('../tmp/test-results/source-library/', import.meta.url);
+mkdirSync(results, { recursive: true });
+const suiteRoot = mkdtempSync(join(fileURLToPath(results), 'suite-'));
+after(() => rmSync(suiteRoot, { recursive: true, force: true }));
+function temp() {
+  return mkdtempSync(join(suiteRoot, 'case-'));
 }
 function setup(t, options = {}) {
   const calls = [];
@@ -75,7 +79,7 @@ async function pending(rpc) {
 }
 
 test('library manages batch imports, origin updates, revisions, edits, ordering and exports', async t => {
-  const { rpc } = setup(t, { dataRoot: temp(t) });
+  const { rpc } = setup(t, { dataRoot: temp() });
   const imported = value(await rpc('library.import', { text: JSON.stringify([
     source, { unknown: true }, { ...source, bookSourceName: 'Other', bookSourceUrl: 'https://other.invalid/' },
   ]), fileName: 'books.json' }));
@@ -198,125 +202,40 @@ test('ordinary RPC extras are inert and management patches cannot replace source
   for (const [key, value] of Object.entries(extras)) assert.deepEqual(exported[key], value);
 });
 
-test('failed definition initialization and disk transactions preserve the published definition', async t => {
-  const dataRoot = temp(t), disk = new PrivateDocuments(dataRoot, 'source');
-  let failWrite = false;
-  const { rpc } = setup(t, { respond: input => ({
-    statusCode: 200, url: input.url,
-    headers: new URL(input.url).pathname === '/broken.js' ? { 'set-cookie': 'trial=discarded; Path=/' } : {},
-    body: new URL(input.url).pathname === '/broken.js' ? 'function search( {' : html,
-  }), documents: {
-    read: name => disk.read(name),
-    write(name, bytes) {
-      if (failWrite) throw new ScriptHostError('STORAGE_ERROR');
-      disk.write(name, bytes);
-    },
-  } });
-  const item = await importSource(rpc);
-  const old = value(await rpc('library.get', { installationId: item.installationId }));
-  const bad = { bookSourceName: 'Broken', bookSourceUrl: source.bookSourceUrl,
-    html: '<script src="https://books.invalid/broken.js"></script>' };
-  denied(await rpc('library.save', { installationId: item.installationId,
-    expectedRevision: item.revision, definition: JSON.stringify(bad) }), 'SOURCE_FAILURE');
-  assert.deepEqual(value(await rpc('library.get', { installationId: item.installationId })), old);
-  assert.equal(value(await invoke(rpc, item, 'loginStatus')).loggedIn, false);
-  failWrite = true;
-  denied(await rpc('library.save', { installationId: item.installationId, expectedRevision: item.revision,
-    definition: JSON.stringify({ ...source, bookSourceName: 'Not committed' }) }), 'STORAGE_ERROR');
-  assert.deepEqual(value(await rpc('library.get', { installationId: item.installationId })), old);
-  assert.equal(value(await invoke(rpc, item, 'search', { keyword: 'old definition' })).books[0].name, 'Result');
-  failWrite = false;
-});
-
-test('a storage failure after replacement restores the last committed library bytes', async t => {
-  const dataRoot = temp(t), disk = new PrivateDocuments(dataRoot, 'source');
-  let failAfterWrite = false;
-  const { rpc } = setup(t, { documents: {
-    read: name => disk.read(name),
-    remove: name => disk.remove(name),
-    write(name, bytes) {
-      disk.write(name, bytes);
-      if (failAfterWrite) {
-        failAfterWrite = false;
-        throw new ScriptHostError('STORAGE_ERROR');
-      }
-    },
-  } });
-  const item = await importSource(rpc);
-  const committed = disk.read('library.json');
-  failAfterWrite = true;
-  denied(await rpc('library.update', { installationId: item.installationId,
-    expectedRevision: item.revision, patch: { group: 'Not committed' } }), 'STORAGE_ERROR');
-  assert.deepEqual(disk.read('library.json'), committed);
-  assert.deepEqual(value(await rpc('library.list')).sources, [item]);
-  assert.equal(value(await invoke(rpc, item, 'search', { keyword: 'old' })).books[0].name, 'Result');
-});
-
-test('failed private writes report storage errors and keep the last accepted source value', async t => {
-  const disk = new PrivateDocuments(temp(t), 'source');
-  let failWrite = false;
-  const { rpc } = setup(t, { documents: {
-    read: name => disk.read(name),
-    write(name, bytes) {
-      if (failWrite) throw new ScriptHostError('STORAGE_ERROR');
-      disk.write(name, bytes);
-    },
-  } });
+test('failed private writes roll back all Reader keys, the variable and the revision', async t => {
+  const dataRoot = temp(), { rpc } = setup(t, { dataRoot });
   const item = await importSource(rpc, { ...source, coverDecodeJs: `
-    if (result !== '') source.put('private', result);
-    source.get('private')`,
+    if (result !== '') {
+      source.put('first', result);
+      source.put('second', result);
+      source.setVariable(result);
+    }
+    [source.get('first'), source.get('second'), source.getVariable()].join('|')`,
   });
-  assert.equal(value(await invoke(rpc, item, 'image', { body: 'accepted' })).body, 'accepted');
-  const committed = disk.read('library.json');
-  failWrite = true;
-  denied(await invoke(rpc, item, 'image', { body: 'rejected' }), 'STORAGE_ERROR');
-  failWrite = false;
-  assert.equal(value(await invoke(rpc, item, 'image', { body: '' })).body, 'accepted');
-  assert.deepEqual(disk.read('library.json'), committed);
-});
-
-test('uncertain storage recovery fences private writes from already admitted source calls', async t => {
-  const disk = new PrivateDocuments(temp(t), 'source');
-  let failedWrites = 0, writeCount = 0;
-  const { rpc } = setup(t, { documents: {
-    read: name => disk.read(name),
-    write(name, bytes) {
-      writeCount++;
-      disk.write(name, bytes);
-      if (failedWrites > 0) {
-        failedWrites--;
-        throw new ScriptHostError('STORAGE_ERROR');
-      }
-    },
-  } });
-  const a = await importSource(rpc, { ...source, loginUrl: 'https://books.invalid/login' });
-  const b = await importSource(rpc, { ...source, bookSourceUrl: 'https://second.invalid/',
-    loginUrl: 'https://second.invalid/login' });
-  const first = invoke(rpc, a, 'login'), firstPage = await pending(rpc);
-  const second = invoke(rpc, b, 'login');
-  let pages;
-  await eventually(async () => {
-    pages = value(await rpc('web.pending')).requests;
-    return pages.length === 2;
+  const read = body => invoke(rpc, item, 'image', { body });
+  assert.equal(value(await read('accepted')).body, 'accepted|accepted|accepted');
+  await withTestDatabase(dataRoot, async db => {
+    const facts = () => db.snapshot([
+      { sql: 'SELECT revision,variable FROM source_reader_state WHERE installation_id=?', params: [item.installationId], rows: true },
+      { sql: 'SELECT * FROM source_reader_value_nodes WHERE installation_id=? ORDER BY entry_key,node_id', params: [item.installationId], rows: true },
+    ]);
+    const committed = await facts();
+    assert.equal(committed[0][0].revision, 1);
+    assert.equal(committed[1].length, 2);
+    const second = Buffer.from('second', 'utf16le').toString('hex');
+    await db.execute(`CREATE TEMP TRIGGER reject_second_reader_key BEFORE INSERT ON source_reader_value_nodes
+      WHEN NEW.entry_key=x'${second}' BEGIN SELECT RAISE(ABORT,'rejected'); END`);
+    denied(await read('rejected'), 'STORAGE_ERROR');
+    assert.deepEqual(await facts(), committed);
+    assert.equal(value(await read('')).body, 'accepted|accepted|accepted');
+    await db.execute('DROP TRIGGER reject_second_reader_key');
+    assert.equal(value(await read('recovered')).body, 'recovered|recovered|recovered');
+    assert.equal((await facts())[0][0].revision, 2);
   });
-  failedWrites = 2;
-  value(await rpc('web.respond', { id: firstPage.id, result: {
-    value: true, url: 'https://books.invalid/login', headers: { 'set-cookie': ['private=first; Path=/'] },
-  } }));
-  denied(await first, 'STORAGE_ERROR');
-  const fencedWrites = writeCount, fencedBytes = disk.read('library.json');
-  const secondPage = pages.find(page => page.installationId === b.installationId);
-  value(await rpc('web.respond', { id: secondPage.id, result: {
-    value: true, url: 'https://second.invalid/login', headers: { 'set-cookie': ['private=second; Path=/'] },
-  } }));
-  denied(await second, 'STORAGE_ERROR');
-  assert.equal(writeCount, fencedWrites);
-  assert.deepEqual(disk.read('library.json'), fencedBytes);
-  denied(await rpc('library.list'), 'STORAGE_ERROR');
 });
 
 test('Web login, dynamic request and cancellation bind responses and cookies to the exact source', async t => {
-  const { rpc, calls } = setup(t, { dataRoot: temp(t) });
+  const { rpc, calls } = setup(t, { dataRoot: temp() });
   const first = await importSource(rpc, { ...source, loginUrl: 'https://books.invalid/login',
     searchUrl: 'https://books.invalid/search,{"webView":true}' });
   const second = await importSource(rpc, { ...source, bookSourceName: 'Independent',
@@ -356,7 +275,7 @@ test('Web login, dynamic request and cancellation bind responses and cookies to 
 
 test('disable, remove and close revoke Web requests and prevent cookie writeback', async t => {
   for (const action of ['disable', 'remove', 'close']) {
-    const { rpc, module } = setup(t, { dataRoot: temp(t) });
+    const { rpc, module } = setup(t, { dataRoot: temp() });
     let item = await importSource(rpc, { ...source, loginUrl: 'https://books.invalid/login' });
     const running = invoke(rpc, item, 'login');
     const request = await pending(rpc);
@@ -383,7 +302,7 @@ test('disable, remove and close revoke Web requests and prevent cookie writeback
 
 test('a remote URL match cannot revive a cancelled or retired Web request or write its Cookies', async t => {
   for (const ending of ['cancel', 'disable']) {
-    const { rpc, module, calls } = setup(t, { dataRoot: temp(t) });
+    const { rpc, module, calls } = setup(t, { dataRoot: temp() });
     let item = await importSource(rpc, { ...source, loginUrl: 'https://books.invalid/login' });
     const controller = new AbortController();
     const login = invoke(rpc, item, 'login', {}, { signal: controller.signal });
@@ -457,65 +376,23 @@ test('Cookie envelopes unwrap scalar verification, rule, webview and QYSG result
   assert.equal(value(await qysg).content, 'QYSG scalar');
 });
 
-test('Web origin Cookie changes persist as one transaction without changing unchanged seeds or other sources', async t => {
-  const disk = new PrivateDocuments(temp(t), 'source');
-  let writes = 0, failWrite = false;
-  const { rpc } = setup(t, { documents: {
-    read: name => disk.read(name),
-    write(name, bytes) {
-      writes++;
-      if (failWrite) throw new ScriptHostError('STORAGE_ERROR');
-      disk.write(name, bytes);
-    },
-  } });
-  const item = await importSource(rpc, { ...source, loginUrl: 'https://books.invalid/private/login' });
-  const other = await importSource(rpc, { ...source, bookSourceUrl: 'https://other-source.invalid/',
-    loginUrl: 'https://other-source.invalid/login' });
-  const first = invoke(rpc, item, 'login'), firstPage = await pending(rpc);
-  assert.deepEqual(firstPage.request.cookies, []);
-  writes = 0;
-  value(await rpc('web.respond', { id: firstPage.id, result: { value: true,
-    url: 'https://redirect.invalid/final', headers: { 'set-cookie': [] },
-    cookieChanges: [
-      { url: 'https://books.invalid/private/login',
-        setCookie: 'session=private; Path=/private; Secure; HttpOnly; SameSite=Strict' },
-      { url: 'https://books.invalid/', setCookie: '__Host-session=root; Path=/; Secure; HttpOnly' },
-      { url: 'https://redirect.invalid/', setCookie: 'redirect=other; Path=/; Secure; SameSite=None' },
-    ] } }));
-  assert.equal(value(await first).value, true);
-  assert.equal(writes, 1);
-  const committed = disk.read('library.json');
-  const second = invoke(rpc, item, 'login'), secondPage = await pending(rpc);
-  assert.equal(secondPage.request.cookies.length, 3);
-  assert.deepEqual(secondPage.request.cookies.find(cookie => cookie.name === 'session'), {
-    name: 'session', value: 'private', domain: 'books.invalid', hostOnly: true, path: '/private',
-    secure: true, httpOnly: true, sameSite: 'Strict', expires: null,
-  });
-  writes = 0;
-  value(await rpc('web.respond', { id: secondPage.id, result: { value: false,
-    url: 'https://books.invalid/private/login', headers: { 'set-cookie': [] }, cookieChanges: [] } }));
-  assert.equal(value(await second).value, false);
-  assert.equal(writes, 0);
-  assert.deepEqual(disk.read('library.json'), committed);
-  const independent = invoke(rpc, other, 'login'), independentPage = await pending(rpc);
-  assert.deepEqual(independentPage.request.cookies, []);
-  value(await rpc('web.respond', { id: independentPage.id, cancelled: true }));
-  denied(await independent, 'CANCELLED');
-
-  const rejected = invoke(rpc, item, 'login'), rejectedPage = await pending(rpc);
-  failWrite = true;
-  value(await rpc('web.respond', { id: rejectedPage.id, result: { value: null,
-    url: 'https://redirect.invalid/final', headers: {}, cookieChanges: [
-      { url: 'https://books.invalid/private/login', setCookie: 'session=rejected; Path=/private; Secure' },
-      { url: 'https://redirect.invalid/', setCookie: 'redirect=rejected; Path=/; Secure' },
-    ] } }));
-  denied(await rejected, 'STORAGE_ERROR');
-  assert.deepEqual(disk.read('library.json'), committed);
-  failWrite = false;
-  const read = invoke(rpc, item, 'login'), readPage = await pending(rpc);
-  assert.deepEqual(readPage.request.cookies, secondPage.request.cookies);
-  value(await rpc('web.respond', { id: readPage.id, cancelled: true }));
-  denied(await read, 'CANCELLED');
+test('Web Cookies persist as typed rows isolated to their source installation', async t => {
+  const dataRoot=temp(), {rpc}=setup(t,{dataRoot});
+  const item=await importSource(rpc,{...source,loginUrl:'https://books.invalid/private/login'});
+  const other=await importSource(rpc,{...source,bookSourceUrl:'https://other-source.invalid/',loginUrl:'https://other-source.invalid/login'});
+  const login=invoke(rpc,item,'login'),page=await pending(rpc);
+  value(await rpc('web.respond',{id:page.id,result:{value:true,url:'https://books.invalid/private/login',headers:{},
+    cookieChanges:[{url:'https://books.invalid/private/login',setCookie:'session=private; Path=/private; Secure; HttpOnly; SameSite=Strict'}]}}));
+  assert.equal(value(await login).value,true);
+  const rows=await withTestDatabase(dataRoot,db=>db.query('SELECT name,value,path,secure,http_only,same_site FROM source_private_cookies WHERE installation_id=?',[item.installationId]));
+  assert.deepEqual(rows,[{name:'session',value:'private',path:'/private',secure:1,http_only:1,same_site:'Strict'}]);
+  const otherLogin=invoke(rpc,other,'login');
+  let requests;
+  await eventually(async()=>{requests=value(await rpc('web.pending')).requests;return requests.some(request=>request.installationId===other.installationId)});
+  const otherPage=requests.find(request=>request.installationId===other.installationId);
+  assert.deepEqual(otherPage.request.cookies,[]);
+  value(await rpc('web.respond',{id:otherPage.id,cancelled:true}));
+  denied(await otherLogin,'CANCELLED');
 });
 
 test('protected image fetching and decoding uses a revocable binary reference', async t => {
@@ -563,11 +440,8 @@ test('protected image fetching and decoding uses a revocable binary reference', 
   assert.equal(JSON.parse((await fetchImage(retired.reference)).body).code, 'SOURCE_NOT_FOUND');
 });
 
-test('Cookie, source values, cache and management flags recover through an App directory alias in another Node process', async t => {
-  const base = temp(t), actual = join(base, 'private', 'var'), alias = join(base, 'var');
-  mkdirSync(actual, { recursive: true });
-  symlinkSync(actual, alias, process.platform === 'win32' ? 'junction' : 'dir');
-  const dataRoot = join(alias, 'data'), { rpc, module } = setup(t, { dataRoot });
+test('Cookie, source values, cache and management flags recover in another Node process', async t => {
+  const dataRoot = temp(), { rpc, module } = setup(t, { dataRoot });
   let item = await importSource(rpc, { ...source, loginUrl: 'https://books.invalid/login', searchUrl: `@js:
     if (key === 'write') {
       cookie.setCookie('https://books.invalid/', 'fixture=persisted; Path=/; Secure; HttpOnly; SameSite=Lax');
@@ -588,6 +462,7 @@ test('Cookie, source values, cache and management flags recover through an App d
     bookSourceUrl: 'https://disabled.invalid/', enabled: false });
   value(await module.close());
   const childSource = `
+    import './tests/storage-test-fixture.mjs';
     import { createSourceRuntimeModule } from './apps/runtime/modules/source-runtime.mjs';
     const module = createSourceRuntimeModule({dataRoot:process.argv[1],
       network:async input=>({statusCode:200,headers:{},url:input.url,body:${JSON.stringify(html)}})});
@@ -642,143 +517,44 @@ test('Cookie, source values, cache and management flags recover through an App d
   denied(restored.disabled, 'SOURCE_DISABLED');
 });
 
-test('real Reader SDK keeps unused permanent fields lazy and preserves exact values on variable writes', async t => {
-  const dataRoot = temp(t), first = setup(t, { dataRoot });
+test('real Reader SDK keeps unused permanent fields lazy and preserves exact values', async t => {
+  const dataRoot = temp(), first = setup(t, { dataRoot });
   const item = await importSource(first.rpc, { ...source,
     coverDecodeJs: 'result === "read" ? source.get("retained") : ' +
       'result === "number" ? typeof source.get("unused") : source.setVariable(result)' });
+  await withTestDatabase(dataRoot, async db => {
+    const values = new Map([['retained','value'], ['unused',parseJSONText('9007199254740993')]]);
+    await db.execute('UPDATE source_reader_state SET variable=? WHERE installation_id=?',
+      [Buffer.from('','utf16le'), item.installationId]);
+    const statements=[];
+    for (const [key,value] of values) {
+      const nodes=encodeValueNodes(value);
+      for(const node of nodes){
+        if(node.propKey!==null) node.propKey=Buffer.from(node.propKey,'utf16le');
+        if(node.kind==='text') node.textValue=Buffer.from(node.textValue,'utf16le');
+      }
+      statements.push(...nodeInserts('source_reader_value_nodes',['installation_id','entry_key'],
+        [item.installationId,Buffer.from(key,'utf16le')],nodes));
+    }
+    await db.transaction(statements);
+  });
   value(await first.module.close());
-  const path = join(dataRoot, 'source/library.json');
-  const document = JSON.parse(readFileSync(path, 'utf8'));
-  const raw = '{"values":{"retained":"value","unused":9007199254740993},"variable":false,' +
-    '"extension":1.234567890123456789}';
-  document.sources[0].private.storage = [['storage', [['reader.source.values', raw]]]];
-  writeFileSync(path, JSON.stringify(document));
   const second = setup(t, { dataRoot });
   assert.equal(value(await second.rpc('library.list')).sources[0].errorCode, undefined);
   assert.equal(value(await invoke(second.rpc, item, 'search', { keyword: 'unused' })).books[0].name, 'Result');
   assert.equal(value(await invoke(second.rpc, item, 'image', { body: 'read' })).body, 'value');
   assert.equal(value(await invoke(second.rpc, item, 'image', { body: 'number' })).body, 'number');
   assert.equal(value(await invoke(second.rpc, item, 'image', { body: 'updated' })).body, 'updated');
-  const saved = JSON.parse(readFileSync(path, 'utf8')).sources[0].private.storage[0][1]
-    .find(([key]) => key === 'reader.source.values')[1];
-  assert.match(saved, /9007199254740993/);
-  assert.match(saved, /1\.234567890123456789/);
-  assert.equal(JSON.parse(saved).variable, 'updated');
-});
-
-test('source private storage stays exact across restart, actual script reads and unrelated writes', async t => {
-  const dataRoot = temp(t), first = setup(t, { dataRoot });
-  const item = await importSource(first.rpc, { ...source, coverDecodeJs:
-    'const value = await cache.get("unread"); const type = typeof value.number; ' +
-    'value.number = 0; await cache.put("other", "updated"); return type;' });
-  value(await first.module.close());
-  const path = join(dataRoot, 'source/library.json');
-  const document = JSON.parse(readFileSync(path, 'utf8'));
-  document.sources[0].private.storage = [['storage', [['unread', 'exact-placeholder']]]];
-  writeFileSync(path, JSON.stringify(document).replace('"exact-placeholder"', '{"number":9007199254740993}'));
-  const second = setup(t, { dataRoot });
-  assert.equal(value(await second.rpc('library.list')).sources[0].errorCode, undefined);
-  assert.equal(value(await invoke(second.rpc, item, 'search', { keyword: 'unused' })).books[0].name, 'Result');
-  assert.match(readFileSync(path, 'utf8'), /9007199254740993/);
-  assert.equal(value(await invoke(second.rpc, item, 'image', { body: '' })).body, 'number');
-  const saved = readFileSync(path, 'utf8');
-  assert.match(saved, /9007199254740993/);
-  assert.equal(JSON.parse(saved).sources[0].private.storage[0][1].find(([key]) => key === 'other')[1], 'updated');
-});
-
-test('definition previews and unrelated library edits preserve exact numbers and stored envelopes', async t => {
-  const dataRoot = temp(t);
-  const first = setup(t, { dataRoot });
-  const original = JSON.stringify({ ...source, enabled: false }).replace(/}$/, ',"unused":9007199254740993}');
-  const preview = value(await first.rpc('library.previewImport', { text: `[${original}]` }));
-  assert.deepEqual(preview.failures, []);
-  assert.match(preview.items[0].definition, /9007199254740993/);
-  let item = value(await first.rpc('library.import', { text: preview.items[0].definition })).sources[0];
-  value(await first.module.close());
-  const path = join(dataRoot, 'source/library.json');
-  const document = JSON.parse(readFileSync(path, 'utf8'));
-  document.sources[0].actions = [123];
-  document.sources[0].private.extension = 'exact-placeholder';
-  document.sources.push(null, { installationId: 'bad', revision: false, sourceUrl: 'https://bad.invalid/' });
-  writeFileSync(path, JSON.stringify(document).replace('"exact-placeholder"', '1.234567890123456789')
-    .replace(/}$/, ',"extension":9007199254740995}'));
-  const second = setup(t, { dataRoot });
-  const list = value(await second.rpc('library.list')).sources;
-  assert.equal(list.length, 1);
-  assert.deepEqual(list[0].actions, []);
-  item = value(await second.rpc('library.update', { installationId: item.installationId,
-    expectedRevision: item.revision, patch: { name: '', order: 1.5, group: 'changed' } })).source;
-  assert.equal(item.name, '');
-  assert.equal(item.order, 1.5);
-  for (const text of [
-    value(await second.rpc('library.get', { installationId: item.installationId })).definition,
-    value(await second.rpc('library.export', { installationIds: [item.installationId] })).text,
-  ]) assert.match(text, /9007199254740993/);
-  const stored = readFileSync(path, 'utf8');
-  assert.equal(JSON.parse(stored).sources[0].definition, document.sources[0].definition);
-  for (const token of ['9007199254740993', '9007199254740995', '1.234567890123456789']) {
-    assert.ok(stored.includes(token), token);
-  }
-  assert.equal(JSON.parse(stored).sources[1], null);
-  assert.equal(JSON.parse(stored).sources[2].revision, false);
-});
-
-test('disabled malformed definitions remain untouched by unrelated management updates', async t => {
-  const dataRoot = temp(t), first = setup(t, { dataRoot });
-  let item = await importSource(first.rpc, { ...source, enabled: false });
-  value(await first.module.close());
-  const path = join(dataRoot, 'source/library.json');
-  const document = JSON.parse(readFileSync(path, 'utf8'));
-  document.sources[0].definition = '{broken';
-  writeFileSync(path, JSON.stringify(document));
-  const second = setup(t, { dataRoot });
-  item = value(await second.rpc('library.update', { installationId: item.installationId,
-    expectedRevision: item.revision, patch: { name: '', group: 'changed', order: 1.5 } })).source;
-  assert.equal(item.errorCode, undefined);
-  assert.equal(item.name, '');
-  assert.equal(item.order, 1.5);
-  assert.equal(JSON.parse(readFileSync(path, 'utf8')).sources[0].definition, '{broken');
-  denied(await second.rpc('library.get', { installationId: item.installationId }), 'INVALID_REQUEST');
-  denied(await second.rpc('library.export', { installationIds: [item.installationId] }), 'INVALID_REQUEST');
-  denied(await second.rpc('library.update', { installationId: item.installationId,
-    expectedRevision: item.revision, patch: { enabled: true } }), 'UNSUPPORTED_PROTOCOL');
-  assert.equal(value(await second.rpc('library.list')).sources[0].enabled, false);
-  assert.equal(JSON.parse(readFileSync(path, 'utf8')).sources[0].definition, '{broken');
-});
-
-test('a failed private restore keeps its original material while healthy sources continue', async t => {
-  const dataRoot = temp(t), first = setup(t, { dataRoot });
-  const broken = await importSource(first.rpc);
-  const healthy = await importSource(first.rpc, { ...source, bookSourceUrl: 'https://healthy.invalid/' });
-  value(await first.module.close());
-  const path = join(dataRoot, 'source/library.json');
-  const document = JSON.parse(readFileSync(path, 'utf8'));
-  document.sources[0].private.storage = false;
-  writeFileSync(path, JSON.stringify(document));
-  const second = setup(t, { dataRoot });
-  const restored = value(await second.rpc('library.list')).sources;
-  assert.equal(restored.find(item => item.installationId === broken.installationId).errorCode, 'SOURCE_FAILURE');
-  assert.equal(restored.find(item => item.installationId === healthy.installationId).errorCode, undefined);
-  denied(await invoke(second.rpc, broken, 'search', { keyword: 'broken' }), 'SOURCE_FAILURE');
-  assert.equal(value(await invoke(second.rpc, healthy, 'search', { keyword: 'healthy' })).books[0].name, 'Result');
-  assert.deepEqual(JSON.parse(readFileSync(path, 'utf8')).sources[0], document.sources[0]);
-});
-
-test('corrupt persistent storage is reported and is never replaced by an empty library', async t => {
-  const dataRoot = temp(t);
-  mkdirSync(join(dataRoot, 'source'));
-  writeFileSync(join(dataRoot, 'source/library.json'), 'broken-private-data');
-  const { rpc } = setup(t, { dataRoot });
-  denied(await rpc('library.list'), 'CORRUPT_STORAGE');
-  denied(await rpc('library.import', { text: JSON.stringify(source) }), 'CORRUPT_STORAGE');
-  assert.equal(readFileSync(join(dataRoot, 'source/library.json'), 'utf8'), 'broken-private-data');
+  const values = await withTestDatabase(dataRoot, db => db.query('SELECT entry_key,kind,text_value FROM source_reader_value_nodes WHERE installation_id=?',[item.installationId]));
+  assert.ok(values.some(row => row.kind === 'number_text' && row.text_value === '9007199254740993'));
+  const variable = await withTestDatabase(dataRoot, db => db.query('SELECT hex(variable) AS value FROM source_reader_state WHERE installation_id=?',[item.installationId]));
+  assert.equal(variable[0].value, Buffer.from('updated','utf16le').toString('hex').toUpperCase());
 });
 
 test('a late HTTP response after disable cannot persist its Set-Cookie header', async t => {
   const entered = deferred(), release = deferred();
   let networkSignal;
-  const { rpc } = setup(t, { dataRoot: temp(t), respond: async input => {
+  const { rpc } = setup(t, { dataRoot: temp(), respond: async input => {
     networkSignal = input.signal;
     entered.resolve();
     await release.promise;
@@ -799,7 +575,7 @@ test('a late HTTP response after disable cannot persist its Set-Cookie header', 
 });
 
 test('import preview is read-only, preserves protocols and metadata, and imports only confirmed definitions', async t => {
-  const dataRoot = temp(t), disk = new PrivateDocuments(dataRoot, 'source');
+  const dataRoot = temp();
   const { rpc, calls } = setup(t, { dataRoot });
   const candidates = [
     { ...source, enabled: false, weight: 7, respondTime: 12, lastUpdateTime: 42,
@@ -813,7 +589,7 @@ test('import preview is read-only, preserves protocols and metadata, and imports
   assert.deepEqual(preview.items.map(item => item.protocol), ['legado', 'legado', 'qysg']);
   assert.ok(preview.items.every(item => item.exists === false));
   assert.deepEqual(value(await rpc('library.list')).sources, []);
-  assert.equal(disk.read('library.json'), null);
+  assert.deepEqual(await withTestDatabase(dataRoot, db => db.query('SELECT installation_id FROM source_installations')), []);
   assert.deepEqual(calls, []);
   // A cancelled preview needs no discard RPC and must not leave an installation.
   const selected = JSON.parse(preview.items[0].definition);
@@ -856,7 +632,7 @@ test('default URL preview follows HTTP redirects without executing candidates or
       response.writeHead(302, { location: '/definitions' }).end();
     } else response.end(JSON.stringify([definition]));
   });
-  const module = createSourceRuntimeModule({ platform: 'fixture', dataRoot: temp(t) });
+  const module = createSourceRuntimeModule({ platform: 'fixture', dataRoot: temp() });
   const rpc = moduleHttp(t, module);
   const preview = value(await rpc('library.previewImport', { url: `${socketOrigin}/redirect` }));
   assert.deepEqual(preview.failures, []);
@@ -902,7 +678,7 @@ test('default URL preview shutdown drains the real HTTP exchange without install
     response.write('[');
     entered.resolve();
   });
-  const module = createSourceRuntimeModule({ platform: 'fixture', dataRoot: temp(t) });
+  const module = createSourceRuntimeModule({ platform: 'fixture', dataRoot: temp() });
   const rpc = moduleHttp(t, module);
   const preview = rpc('library.previewImport', { url: socketOrigin + '/held' });
   await entered.promise;

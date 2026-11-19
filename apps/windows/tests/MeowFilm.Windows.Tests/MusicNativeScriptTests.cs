@@ -54,7 +54,7 @@ public static class MusicNativeScriptTests
         internal readonly Runtime Runtime = new();
         internal readonly MusicLibraryOwner Library;
         internal readonly MusicScriptOwner Owner;
-        internal Fixture() { Library = new(MusicTestStores.For(Store)); Owner = new(Library, Runtime); }
+        internal Fixture() { Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage); Owner = new(Library, Runtime); }
         public async ValueTask DisposeAsync() { Store.Release?.TrySetResult(); await Owner.DisposeAsync(); await Library.DisposeAsync(); }
     }
     private static async Task Forwarding()
@@ -201,7 +201,7 @@ public static class MusicNativeScriptTests
             token.ThrowIfCancellationRequested();
             return Runtime.Reply(new { });
         };
-        var store = new QualityFixture.DocumentStore();
+        var store = new QualityFixture.Database();
         await using var port = new AppRuntimeClient(_ => Task.FromResult<IRuntimeSession>(runtime));
         port.Start();
         await using var application = new MusicNativeApplication(store, MusicTestStores.For(store), port);

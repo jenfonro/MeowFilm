@@ -78,6 +78,8 @@ test('WY write receipts distinguish not-sent, explicit nested rejection and an u
 test('sync consumed arrays and member keys fail as requests before directory reads, lookups or writes', async t => {
   for (const platform of ['wy', 'tx', 'kg']) await t.test(platform, async st => {
     const f = fixture(() => assert.fail('unusable mutation material must not dispatch dependencies'));
+    await f.owner.ready;
+    const storageCounts = [f.reads.length, f.writes.length];
     st.after(() => f.close()); await f.session(platform);
     const params = { id: platform === 'kg' ? '0:7' : '501',
       remote: { kind: platform === 'wy' ? 'favorites' : 'playlist', locator: { dirId: '7', listId: '7', version: '9' } } };
@@ -113,7 +115,7 @@ test('sync consumed arrays and member keys fail as requests before directory rea
         assert.deepEqual(await f.request(platform, 'sync.write', { ...params, action: 'add', ids: [kgHash],
           remote: { locator: { listId } } }), { status: 'notSent', errorCode: 'INVALID_REQUEST' });
     }
-    assert.equal(f.requests.length, 0); assert.equal(f.reads.length, 0); assert.equal(f.writes.length, 0);
+    assert.equal(f.requests.length, 0); assert.equal(f.reads.length, storageCounts[0]); assert.equal(f.writes.length, storageCounts[1]);
   });
 });
 
@@ -161,6 +163,8 @@ test('sync create ignores unrelated remote and ID material without changing the 
 test('sync create, rename and delete still fail on truly unusable names and locators before dispatch', async t => {
   for (const platform of ['wy', 'tx', 'kg']) await t.test(platform, async st => {
     const f = fixture(() => assert.fail('unusable required mutation material must not dispatch'));
+    await f.owner.ready;
+    const storageCounts = [f.reads.length, f.writes.length];
     st.after(() => f.close()); await f.session(platform);
     const target = platform === 'wy' ? { id: '501' } :
       { remote: { locator: platform === 'tx' ? { dirId: '7' } : { listId: '7', totalVersion: '9' } } };
@@ -171,7 +175,7 @@ test('sync create, rename and delete still fail on truly unusable names and loca
       { ...target, action: 'rename', name: null },
       { action: 'delete', id: {}, remote: { locator: { dirId: {}, listId: {} } } },
     ]) assert.deepEqual(await f.request(platform, 'sync.write', params), { status: 'notSent', errorCode: 'INVALID_REQUEST' });
-    assert.equal(f.requests.length, 0); assert.equal(f.reads.length, 0); assert.equal(f.writes.length, 0);
+    assert.equal(f.requests.length, 0); assert.equal(f.reads.length, storageCounts[0]); assert.equal(f.writes.length, storageCounts[1]);
   });
 });
 

@@ -26,6 +26,7 @@ public partial class MusicAccountsView : UserControl
     private bool loginShowing, logoutShowing, surfaceVisible;
     private Button? logoutAnchor;
     private DesktopWindow? window;
+    private Microsoft.UI.Windowing.AppWindow? observedWindow;
     private CancellationTokenSource? pollingCancellation;
     private Task? polling;
     private DispatcherTimer? smsCountdown;
@@ -166,7 +167,8 @@ public partial class MusicAccountsView : UserControl
         if (observed is not null) observed.PropertyChanged += OwnerChanged;
         ObserveTableRows();
         window = DesktopWindow.GetWindow(this);
-        if (window is not null) window.AppWindow.Changed += WindowChanged;
+        observedWindow = window?.AppWindow;
+        if (observedWindow is not null) observedWindow.Changed += WindowChanged;
         ClearSmsInputs();
         VisibilityChanged();
     }
@@ -181,7 +183,8 @@ public partial class MusicAccountsView : UserControl
             tableSource.CollectionChanged -= PlatformSettingsChanged;
         tableSource = null;
         tableRows.Clear();
-        if (window is not null) window.AppWindow.Changed -= WindowChanged;
+        if (observedWindow is not null) observedWindow.Changed -= WindowChanged;
+        observedWindow = null;
         window = null;
         CloseTransientPopups();
         if (old is not null && !ReferenceEquals(old, retiringLogin)) _ = Leave(old);

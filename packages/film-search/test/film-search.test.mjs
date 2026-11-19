@@ -491,6 +491,11 @@ test('TMDB detail updates display data while preserving matching identity, score
       assert.equal(actual.backdrop, '/detail-back');
     }
     if (fixture.payload === null) assert.deepEqual(actual, item);
+    if (fixture.payload !== null) {
+      const withPoster = { ...item, poster: '/v1/tmdb/images/w500/search.png' };
+      assert.equal(invoke({ operation: 'detail', item: withPoster, payload: fixture.payload,
+        today: fixture.today }).poster, withPoster.poster);
+    }
   }
 });
 

@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import XCTest
+import MeowStorageTestSupport
 import Combine
 import MeowRuntime
 import MeowStorage
@@ -152,10 +153,10 @@ final class FilmSearchAuthorizationScopeTests: XCTestCase {
     private func sourceOwner(_ runtime: SourcesRuntimeFixture) async throws -> (FilmSourceService, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let store = try DocumentStore(baseURL: directory, namespace: FilmSourceService.documentNamespace)
+        let store = try storageTestDatabase(self, root: directory)
         await runtime.setCat(SourcesRuntimeFixture.cat("b", state: "disabled", enabled: false))
-        let sources = FilmSourceService(transport: runtime.transport, storeFactory: { store },
-            settingsDocument: try sourceTestSettings(directory, cats: [
+        let sources = FilmSourceService(transport: runtime.transport, database: store,
+            settingsDocument: try sourceTestSettings(store, cats: [
                 SourcesRuntimeFixture.cat("a"), SourcesRuntimeFixture.cat("b", state: "disabled", enabled: false)
             ]), runtimeSourceRoot: directory.appendingPathComponent("cat"))
         try await sources.refresh()

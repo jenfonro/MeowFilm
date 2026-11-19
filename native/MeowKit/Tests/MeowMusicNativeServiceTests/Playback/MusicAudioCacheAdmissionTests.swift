@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import MeowStorage
+import MeowStorageTestSupport
 import MeowMusicFeature
 import MeowMusicPlatform
 @testable import MeowMusicNativeService
@@ -313,9 +315,8 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
 
     func testPreparationDownloadsBeforePlayingAndPauseDoesNotStopIt() async throws {
         let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes()
-        let root = try cacheRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
+        let database = try storageTestDatabase(self), root = database.dataRoot.appendingPathComponent("audio")
+        let real = NativeMusicAudioFileCache(database: database, rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
         let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
         let song = try MusicNativeCandidateDiscoveryFixture.song()
         let store = try MusicNativeCandidateDiscoveryFixture.store(song: song)
@@ -358,9 +359,9 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
 
     func testInactiveFactsCannotPublishUnplayedDownloadOrCreateHistory() async throws {
         for kind: MusicPlaybackFact.Kind in [.progress, .paused, .ended, .failed, .stopped] {
-            let clock = MusicRecoveryTestClock(), root = try cacheRoot()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: AdmissionBytes(), inspector: AdmissionMeasurement())
+            let clock = MusicRecoveryTestClock(), database = try storageTestDatabase(self)
+            let root = database.dataRoot.appendingPathComponent("audio")
+            let real = NativeMusicAudioFileCache(database: database, rootURL: root, clock: { clock.now() }, transport: AdmissionBytes(), inspector: AdmissionMeasurement())
             let accounts = AdmissionAccounts()
             let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
                 platformClient: try NativeMusicFixture.client(), audioFileCache: real, clock: { clock.now() })
@@ -382,9 +383,9 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
     }
 
     func testPreparationRejectsOldAttemptAfterScopeSuspensionAndQueueChange() async throws {
-        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes(), root = try cacheRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
+        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes(), database = try storageTestDatabase(self)
+        let root = database.dataRoot.appendingPathComponent("audio")
+        let real = NativeMusicAudioFileCache(database: database, rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
         let accounts = AdmissionAccounts(), file = AdmissionFillCache(real: real, clock: clock)
         let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(), accounts: accounts,
             platformClient: try NativeMusicFixture.client(), audioFileCache: file, clock: { clock.now() })
@@ -419,9 +420,9 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         for rotation in [false, true] { try await checkRevokedPreparation(rotation: rotation) }
     }
     private func checkRevokedPreparation(rotation: Bool) async throws {
-        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes(), root = try cacheRoot()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
+        let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes(), database = try storageTestDatabase(self)
+        let root = database.dataRoot.appendingPathComponent("audio")
+        let real = NativeMusicAudioFileCache(database: database, rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
         let file = AdmissionFillCache(real: real, clock: clock), accounts = AdmissionAccounts()
         let song = try MusicNativeCandidateDiscoveryFixture.song(), source = try XCTUnwrap(MusicModel.sources(song).first)
         let service = NativeMusicService(database: try MusicNativeCandidateDiscoveryFixture.store(song: song), accounts: accounts,
@@ -455,9 +456,8 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
     func testDirectRealPortRejectsRevokedAudioEvenWithFreshRequestFences() async throws {
         for revoke in [false, true] {
             let clock = MusicRecoveryTestClock(), bytes = AdmissionBytes()
-            let root = try cacheRoot()
-            defer { try? FileManager.default.removeItem(at: root) }
-            let real = NativeMusicAudioFileCache(rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
+            let database = try storageTestDatabase(self), root = database.dataRoot.appendingPathComponent("audio")
+            let real = NativeMusicAudioFileCache(database: database, rootURL: root, clock: { clock.now() }, transport: bytes, inspector: AdmissionMeasurement())
             let media = MusicQueueAuthorization()
             if revoke { media.revoke() }
             let identity = MusicAudioFileCacheIdentity(scope: "replacement-account-scope", songID: "synthetic-song", sourceKey: "tx:synthetic",
@@ -497,10 +497,6 @@ final class MusicAudioCacheAdmissionTests: XCTestCase {
         await service.close()
     }
 
-    private func cacheRoot() throws -> URL {
-        try FileManager.default.url(for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
-            .appendingPathComponent("meow-cache-admission-test-" + UUID().uuidString)
-    }
     private func drainCaptures(_ service: NativeMusicService) async {
         let captures = await Array(service.audioCacheCaptures.values)
         for capture in captures { await capture.value }

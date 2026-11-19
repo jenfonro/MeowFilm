@@ -15,7 +15,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | `apps/ios/Navigation` | 根容器、普通页面导航、播放器及其他非导航呈现的路由 |
 | `apps/ios/Presentation` | 主页面外壳、页头、底部导航和播放器停靠区 |
 | `apps/ios/UITests` | UIKit 与音乐 UI 组件测试，复用已有 UIKit runner，不属于 App 源成员 |
-| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；音乐本地启动测试使用合成存储与拒绝网络的 transport，冷启动清理测试使用临时数据与模拟 Keychain |
+| `apps/ios/RuntimeTests` | `TEST_HOST` 指向 App 的宿主测试：运行器集成实际链接、启动 Node；音乐本地启动测试使用合成存储与拒绝网络的 transport，冷启动清理测试使用临时数据 |
 | `apps/ios/runtime` | iOS socketpair 启动参数／受限原生设置能力／失败边界与 music/cat/source/pan/tmdb/douban/film/netease/music-platform 九模块薄 entry，复用公共 JS 模块 |
 
 工程文件由 `scripts/generate-ios-project.py` 生成。App 只编译上述四个职责目录；UITests、RuntimeTests 使用独立测试 target。NodeMobile.xcframework 链接并嵌入签名，完整 JS 载荷作为 `Runtime` 资源随包签名；构建输入准备见[发布](release.md)。
@@ -52,7 +52,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | --- | --- | --- |
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
 | `MeowJSON` | Codable DTO 值、JSON 语法解析、UTF-8 成员与数字原文转发 | 无 |
-| `MeowStorage` | 普通及加密文档存储 | Contracts |
+| `MeowStorage` | 共享 SQLite、类型化关系及原始资源目录 | Contracts |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、MeowAudio |
@@ -184,11 +184,11 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | 身份 | 所有者／用途 |
 | --- | --- |
 | `dev.meowfilm.aggregate` | 固定产品身份；安装宿主改写安装标识时，内部存储身份不变 |
-| Application Support 下 `meowfilm/documents` | 原生业务数据根目录 |
-| Caches 下 `meowfilm/documents` | 普通缓存文档和逐资源原始字节文件根目录 |
+| Application Support 下 `meowfilm/storage-v1/meowfilm.sqlite3` | 原生客户端与 Node runtime 共用的唯一 SQLite 数据库 |
+| Application Support 下 `meowfilm/resources-v1` | 原始图片、歌词、音频等资源 owner 的文件目录 |
 | Application Support 下 `meowfilm/script-runtime/music-platform` | Node 唯一维护的匿名协议状态 |
-| `music-library-v1/music-library-v1.sqlite3` | 系统 SQLite 永久歌曲仓库、来源索引、引用队列、历史和播放记录 |
-| `dev.meowfilm.aggregate.music.platform.accounts.v1` | 三平台 Keychain 账号凭据与固定账号槽 |
+
+| `music_accounts` / 音乐相关关系表 | 音乐账号、歌曲、平台状态与缓存索引的 SQLite owner tables |
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
 | `music.presentation-resources.v2` | 共享图片／歌词原始字节叶子，首用文件 metadata 仅保留在内存 |

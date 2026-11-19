@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "workspaces": [
+    "packages/storage",
     "packages/runtime-bridge",
     "packages/script-host",
     "packages/source-runtime",

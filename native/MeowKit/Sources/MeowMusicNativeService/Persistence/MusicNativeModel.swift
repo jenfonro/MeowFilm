@@ -69,7 +69,9 @@ enum MusicModel {
     /// Missing matching evidence is retained as missing, not manufactured.
     static func cleanSong(_ raw: MJ) throws -> MJ {
         try musicRequire(raw.isObject && raw["sources"].isArray, .invalidResponse)
-        var song = durable(raw)
+        var song = raw
+        song.remove("sources")
+        song = durable(song)
         song["cover_url"] = publicURL(raw["cover_url"])
         song["sources"] = .array(try raw["sources"].array.map(cleanSource))
         return song
@@ -77,7 +79,9 @@ enum MusicModel {
     static func cleanSource(_ raw: MJ) throws -> MJ {
         let info = try nativeMetadata(raw["musicInfo"])
         let key = try sourceKey(info)
-        var source = durable(raw)
+        var source = raw
+        source.remove("musicInfo")
+        source = durable(source)
         source["sourceKey"] = .string(key); source["source"] = info["source"]; source["musicInfo"] = info
         return source
     }
@@ -93,10 +97,13 @@ enum MusicModel {
     }
     /// Source ownership is decided by the repository, not by pairwise evidence.
     static func mergeSources(_ input: MJ, adding incoming: [MJ], preferIncoming: Bool = false) throws -> MJ {
-        var song = try cleanSong(input), rows = song["sources"].array
+        try mergeCleanSources(cleanSong(input), adding: incoming.map(cleanSource), preferIncoming: preferIncoming)
+    }
+    static func mergeCleanSources(_ input: MJ, adding incoming: [MJ], preferIncoming: Bool) -> MJ {
+        var song = input, rows = song["sources"].array
         var positions = Dictionary(rows.enumerated().map { ($0.element["sourceKey"].string, $0.offset) }, uniquingKeysWith: min)
-        for raw in incoming {
-            let proposed = try cleanSource(raw), key = proposed["sourceKey"].string
+        for proposed in incoming {
+            let key = proposed["sourceKey"].string
             if let index = positions[key] {
                 if preferIncoming {
                     rows[index] = proposed
@@ -143,9 +150,8 @@ enum MusicModel {
         try musicRequire(song["sources"].isArray, .corruptDocument)
         var seen = Set<String>()
         return try song["sources"].array.map { row in
-            let source = try cleanSource(row)
-            try musicRequire(source["sourceKey"] == row["sourceKey"] && seen.insert(row["sourceKey"].string).inserted, .nativeIDConflict)
-            let info = sourceData(source)
+            let info = row["musicInfo"], key = try sourceKey(info)
+            try musicRequire(musicSame(key, row["sourceKey"].string) && seen.insert(key).inserted, .nativeIDConflict)
             return .init(sourceKey: row["sourceKey"].string, platform: info["source"].string, nativeId: info["songmid"].id)
         }
     }

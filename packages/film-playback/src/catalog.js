@@ -1,4 +1,4 @@
-import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { checkSource, checkTarget, clone, identity, isIdentifier, object, requireValue,
   resultDetailId, sourceIdentity, text } from './identity.js';
 import { candidateIdentity, candidateResourceIdentity } from './recognition.js';
@@ -62,36 +62,29 @@ export function createFilmCatalog({ library } = {}) {
     return checkTarget(result);
   }
 
-  function commit(groups) {
-    if (stringifyJSONValue(library.read().groups) === stringifyJSONValue(groups)) return;
-    library.update(document => { document.groups = groups; });
-  }
-
-  function resolve(value, sources = []) {
+  async function resolve(value, sources = []) {
     requireValue(Array.isArray(sources));
-    const groups = cloneJSONValue(library.read().groups);
-    const resolved = target(value, sources, groups);
-    commit(groups);
+    let resolved;
+    await library.update(document => {resolved = target(value,sources,document.groups);});
     return resolved;
   }
 
-  function search(cards, sources, revision) {
-    const groups = cloneJSONValue(library.read().groups);
-    const result = cards.map(card => {
-      const members = (card.aggregateItems?.length ? card.aggregateItems : card.sourceKind === 'site' ? [card] : [])
-        .map(row => ({ sourceKey: row.siteKey, detailId: row.detailId }));
-      const raw = card.sourceKind === 'site' && card.displayKey.startsWith('site:');
-      const value = card.sourceKind === 'tmdb' ? {
-        kind: card.tmdbType, title: text(card.title), metadataProvider: 'tmdb', metadataId: String(card.tmdbId),
-        ...(members.length ? { members } : {}),
-      } : raw ? { kind: 'source', title: text(card.title),
-        source: { key: card.siteKey, detailId: card.detailId } }
-        : { kind: 'group', title: text(card.title), members };
-      const key = value.kind === 'group' ? identity('aggregation', revision, card.groupKey) : undefined;
-      const resolved = target(value, sources, groups, key);
-      return { ...card, businessId: resolved.id, playbackTarget: resolved };
+  async function search(cards, sources, revision) {
+    let result;
+    await library.update(document => {
+      result = cards.map(card => {
+        const members = (card.aggregateItems?.length ? card.aggregateItems : card.sourceKind === 'site' ? [card] : [])
+          .map(row => ({sourceKey:row.siteKey,detailId:row.detailId}));
+        const raw = card.sourceKind === 'site' && card.displayKey.startsWith('site:');
+        const value = card.sourceKind === 'tmdb' ? {kind:card.tmdbType,title:text(card.title),
+          metadataProvider:'tmdb',metadataId:String(card.tmdbId),...(members.length ? {members} : {})}
+          : raw ? {kind:'source',title:text(card.title),source:{key:card.siteKey,detailId:card.detailId}}
+            : {kind:'group',title:text(card.title),members};
+        const key = value.kind === 'group' ? identity('aggregation',revision,card.groupKey) : undefined;
+        const resolved = target(value,sources,document.groups,key);
+        return {...card,businessId:resolved.id,playbackTarget:resolved};
+      });
     });
-    commit(groups);
     return result;
   }
 

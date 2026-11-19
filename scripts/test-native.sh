@@ -30,11 +30,12 @@ check_tests() {
   fi
 }
 arch="$(uname -m)"
+logged sqlite-kernel python3 -I -B scripts/prepare-ios-sqlite.py --target macos || exit 4
 if [ "$phase" = test ]; then
   logged audio-kernel python3 -I -B scripts/prepare-ios-audio-kernel.py --target "macos-$arch" || exit 4
   logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" || exit 4
   logged aether-kernel python3 -I -B scripts/prepare-ios-aether-kernel.py --target "macos-$arch" || exit 4
-  logged swift-test swift test --package-path native/MeowKit -j 2 --filter "$2" || status=4
+  logged swift-test env NSUnbufferedIO=YES swift test --package-path native/MeowKit -j 2 --filter "$2" || status=4
   check_tests
   exit "$status"
 fi
@@ -45,6 +46,7 @@ logged source-scope python3 -I -B scripts/check-source-scope.py || status=4
 logged audio-kernel python3 -I -B scripts/prepare-ios-audio-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
 logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
 logged aether-kernel python3 -I -B scripts/prepare-ios-aether-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
+logged sqlite-simulator python3 -I -B scripts/prepare-ios-sqlite.py --target ios-simulator || exit 4
 logged swift-build swift build --build-tests --package-path native/MeowKit -j 2 || status=4
 # The App targets cannot build against absent or stale runtime inputs.
 logged runtime-inputs python3 -I -B scripts/prepare-ios-runtime.py --sdk iphonesimulator --arch "$arch" || exit 4

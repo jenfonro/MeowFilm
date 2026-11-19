@@ -1,9 +1,12 @@
 import { startWindowsAppRuntime, reportWindowsRuntimeStartFailure } from '../bootstrap.mjs';
+import { configureStorage } from '@meowfilm/storage';
+import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
 import { createAppRuntime, createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule,
   createPanRuntimeModule, createTMDBDataModule, createDoubanDataModule, connectFilmPlayback,
   createNeteaseTokenModule, connectMusicPlatform } from '../../../runtime/entry.mjs';
 
 // Current wire identity; one App, not a selectable aggregate product.
+configureStorage({ driver: createDesktopStorageDriver, initialize: false });
 await startWindowsAppRuntime({
   createRuntime: async ({ dataRoot, settings, ...config }) => {
     await settings?.initialize();
@@ -14,7 +17,7 @@ await startWindowsAppRuntime({
         configuration: { read: () => settings.read('cat.sources'), reload: () => settings.reload('cat.sources') }
       } : {}) }));
       modules.push(createSourceRuntimeModule({ dataRoot, platform: 'windows', configurationOwner: 'native' }));
-      modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.document('pan.accounts') } : {}) }));
+      modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.accounts('pan.accounts') } : {}) }));
       modules.push(createTMDBDataModule({ dataRoot, nativeSettings: settings }));
       modules.push(createDoubanDataModule({ dataRoot, nativeSettings: settings }));
       connectFilmPlayback(modules, { dataRoot, nativeSettings: settings });

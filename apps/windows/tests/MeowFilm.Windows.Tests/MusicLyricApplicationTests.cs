@@ -402,7 +402,7 @@ public static class MusicLyricApplicationTests
         { var value = Signal(); releaseOnClose.Add(value); return value; }
         internal Fixture()
         {
-            Library = new(MusicTestStores.For(Store)); Owner = new(Library, Provider, Script, Clock);
+            Library = new(MusicTestStores.For(Store), database: MusicTestStores.For(Store).Storage); Owner = new(Library, Provider, Script, Clock);
         }
         internal ScriptSource AddSource(string id, string platform, bool enabled = true, bool idle = false, bool lyrics = true)
         {

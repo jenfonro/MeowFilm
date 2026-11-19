@@ -1,6 +1,7 @@
+import './storage-test-fixture.mjs';
 import http from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -507,10 +508,9 @@ export async function startCatPanBridgeFixture({ scenario = 'success', intercept
     client = createRuntimeClient({ baseUrl: app.baseUrl });
     const call = async (operation, input = {}, options) => bridgeOkay(await client.call(operation, input, options));
     const status = await call('cat.script.start');
-    const settings = JSON.parse(readFileSync(status.settingsPath, 'utf8'));
-    settings.providers.quark = interception;
-    settings.providers.uc = interception;
-    writeFileSync(status.settingsPath, JSON.stringify(settings));
+    await cat.settings.save(settings => ({ ...settings,
+      providers: { ...settings.providers, quark: interception, uc: interception },
+    }));
     await call('cat.script.refresh');
     await client.upload('cat', 'cat-pan-bridge', 1, Buffer.from(catSource(controlUrl, searchDetailId))).then(bridgeOkay);
     const installReply = await client.call('cat.script.install', { installationId: 'cat-pan-bridge',

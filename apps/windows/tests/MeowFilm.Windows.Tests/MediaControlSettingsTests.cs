@@ -28,7 +28,7 @@ public static class MediaControlSettingsTests
 
     private static async Task Defaults()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppMediaControlSettings(store);
         Check(!owner.IsAvailable && !owner.CanEdit);
         await owner.LoadAsync();
@@ -53,14 +53,12 @@ public static class MediaControlSettingsTests
                 new MediaShortcutGesture(key, ModifierKeys.Control | ModifierKeys.Alt)));
             Check(MediaControlDefaults.Label(action) == label);
         }
-        Check(store.Writes == 0 && store.Names.SetEquals([AppMediaControlSettings.DocumentNamespace]));
-        Check(AppIdentity.NativeNamespaces.Contains("app.media-controls.v1"));
-        Check(!AppIdentity.ProtectedNamespaces.Contains("app.media-controls.v1"));
+        Check(store.Writes == 0 && store.ControlsData is null);
     }
     private static async Task Persistence()
     {
-        var store = new DocumentStore();
-        store.Data[AppAppearance.DocumentNamespace] = [1, 2, 3];
+        var store = new AppSettingsTestDatabase();
+        store.AppearanceData = "{\"schema\":1,\"themeColor\":\"#123456\"}"u8.ToArray();
         var musicBefore = MusicTestStores.For(store).Snapshot().Revision;
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
@@ -78,16 +76,16 @@ public static class MediaControlSettingsTests
         await reopened.LoadAsync();
         Check(reopened.Preferences.GlobalEnabled && !reopened.Preferences.SystemMediaEnabled);
         Check(reopened.Preferences.Bindings.SequenceEqual(owner.Preferences.Bindings));
-        var data = JsonNode.Parse(store.Data[AppMediaControlSettings.DocumentNamespace])!.AsObject();
+        var data = JsonNode.Parse(store.ControlsData!)!.AsObject();
         Check(data["schema"]!.GetValue<int>() == 1 && data["bindings"]!.AsArray().Count == 8);
         Check(data["bindings"]![0]!["global"] is null, "cleared keys remain unassigned after persistence");
-        Check(store.WriteNames.SetEquals([AppMediaControlSettings.DocumentNamespace]));
-        Check(store.Data[AppAppearance.DocumentNamespace].SequenceEqual(new byte[] { 1, 2, 3 }));
+        Check(store.WrittenOwners.SetEquals([AppMediaControlSettings.DocumentNamespace]));
+        Check(JsonNode.Parse(store.AppearanceData!)!["themeColor"]!.GetValue<string>() == "#123456");
         Check(MusicTestStores.For(store).Snapshot().Revision == musicBefore);
     }
     private static async Task WriteFailures()
     {
-        var store = new DocumentStore { FaultNamespace = AppMediaControlSettings.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { };
         await using var first = new AppMediaControlSettings(store);
         await using var second = new AppMediaControlSettings(store);
         await first.LoadAsync(); await second.LoadAsync();
@@ -106,18 +104,15 @@ public static class MediaControlSettingsTests
     }
     private static async Task CorruptDocuments()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         await owner.SaveAsync(owner.Preferences with { GlobalEnabled = false });
-        var good = store.Data[AppMediaControlSettings.DocumentNamespace].ToArray();
+        var good = store.ControlsData!.ToArray();
         Action<JsonNode>[] corrupt =
         [
             node => node["schema"] = 9,
-            node => node["extra"] = true,
-            node => node["globalEnabled"] = "true",
             node => node["bindings"]!.AsArray().RemoveAt(0),
-            node => node["bindings"]![1]!["action"] = "TogglePlayback",
             node => node["bindings"]![0]!["local"]!["key"] = "LeftCtrl",
             node => node["bindings"]![0]!["local"]!["modifiers"] = 32,
             node => node["bindings"]![0]!["local"]!["key"] = "F",
@@ -129,22 +124,22 @@ public static class MediaControlSettingsTests
         {
             var node = JsonNode.Parse(good)!; change(node);
             var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(node);
-            store.Data[AppMediaControlSettings.DocumentNamespace] = bytes;
+            store.ControlsData = bytes;
             await owner.LoadAsync();
             Check(!owner.IsAvailable && !owner.CanEdit && owner.Status.Length > 0);
             await owner.SaveAsync(MediaControlDefaults.Preferences);
-            Check(store.Writes == writes && store.Data[AppMediaControlSettings.DocumentNamespace].SequenceEqual(bytes));
+            Check(store.Writes == writes && store.ControlsData!.SequenceEqual(bytes));
         }
-        store.Data[AppMediaControlSettings.DocumentNamespace] = [0xff, 0x00];
+        store.ControlsData = "{\"schema\":99}"u8.ToArray();
         await owner.LoadAsync();
         Check(!owner.IsAvailable);
-        store.Data[AppMediaControlSettings.DocumentNamespace] = good;
+        store.ControlsData = good;
         await owner.LoadAsync();
         Check(owner.IsAvailable && !owner.Preferences.GlobalEnabled && owner.Status == "");
     }
     private static async Task ReadFailures()
     {
-        var inner = new DocumentStore { FaultNamespace = AppMediaControlSettings.DocumentNamespace };
+        var inner = new AppSettingsTestDatabase { };
         var store = new ReadFailureStore(inner);
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
@@ -164,7 +159,7 @@ public static class MediaControlSettingsTests
     }
     private static async Task Validation()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         MediaShortcutGesture[] invalid =
@@ -190,7 +185,7 @@ public static class MediaControlSettingsTests
     }
     private static async Task RuntimeState()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         await using var owner = new AppMediaControlSettings(store);
         int refreshes = 0; owner.RegistrationRefreshRequested += (_, _) => refreshes++;
         owner.SetRecording(true); owner.RequestRegistrationRefresh();
@@ -212,7 +207,7 @@ public static class MediaControlSettingsTests
     }
     private static async Task Shutdown()
     {
-        var store = new DocumentStore { HoldNamespace = AppMediaControlSettings.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { HoldWrites = true};
         await using var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         owner.SetRecording(true);
@@ -235,7 +230,7 @@ public static class MediaControlSettingsTests
     }
     private static async Task FailedPreparation()
     {
-        var store = new DocumentStore();
+        var store = new AppSettingsTestDatabase();
         var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         bool released = false;
@@ -252,7 +247,7 @@ public static class MediaControlSettingsTests
     }
     private static async Task ForceRelease()
     {
-        var store = new DocumentStore { HoldNamespace = AppMediaControlSettings.DocumentNamespace };
+        var store = new AppSettingsTestDatabase { HoldWrites = true};
         var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
         var save = owner.SaveAsync(owner.Preferences with { GlobalEnabled = false });
@@ -281,14 +276,11 @@ public static class MediaControlSettingsTests
         try { await owner.SaveAsync(value); throw new Exception("invalid settings accepted"); }
         catch (ArgumentException) { }
     }
-    private sealed class ReadFailureStore(IDocumentStore inner) : IDocumentStore
+    private sealed class ReadFailureStore(IStorageDatabase inner) : NativeTestDatabase(inner)
     {
         internal bool FailReads;
-        public Task<DocumentSnapshot> ReadAsync(string ns, CancellationToken token = default) =>
-            FailReads ? Task.FromException<DocumentSnapshot>(new DocumentStoreException(DocumentStoreError.Storage)) : inner.ReadAsync(ns, token);
-        public Task<DocumentFingerprint> WriteAsync(string ns, ReadOnlyMemory<byte> data, DocumentFingerprint expected, CancellationToken token = default) =>
-            inner.WriteAsync(ns, data, expected, token);
-        public ValueTask DisposeAsync() => inner.DisposeAsync();
+        public override Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) =>
+            FailReads ? throw new DocumentStoreException(DocumentStoreError.Storage) : base.ReadAsync(read, token);
     }
     private sealed class FailingParticipant : IDesktopShutdownParticipant
     {

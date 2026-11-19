@@ -74,7 +74,7 @@ public static class MusicRecommendationLibraryTests
 
     private static async Task Restore(int count)
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         if (count > 0) await Ok(owner, "music.queue.replace", new { songs = Enumerable.Range(1, count).Select(x => Song(x.ToString())).ToArray(), index = 0,
             context = new { sourceTitle = "Original", sourceType = "search", sourceId = "source", searchKeyword = "q", dailyBranch = "default" } });
         var before = await Full(owner); int writes = store.Writes;
@@ -95,7 +95,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task RestoreCurrentMetadata()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0,
             context = new { sourceType = "search", searchKeyword = "original" } });
         var before = await Queue(owner);
@@ -118,13 +118,13 @@ public static class MusicRecommendationLibraryTests
         Check(restored.GetProperty("entries").EnumerateArray().Select(row => S(row, "id"))
             .SequenceEqual(before.GetProperty("entries").EnumerateArray().Select(row => S(row, "id"))) &&
             S(restored.GetProperty("current").GetProperty("context"), "searchKeyword") == "original");
-        await using var cold = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var cold = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var reloaded = await Queue(cold);
         Check(reloaded.GetProperty("current").GetProperty("song").GetRawText() == song.GetRawText());
     }
     private static async Task RestoreCurrent(string original)
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         if (original != "empty")
             await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2"), Song(original == "duplicate" ? "5" : "3") },
                 index = 1, context = new { sourceTitle = "Original", sourceType = "search", searchKeyword = "needle",
@@ -160,7 +160,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task RestoreCurrentPriority()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0 });
         var appended = await Ok(owner, "music.queue.append", new { songs = new[] { Song("3") }, next = true });
         string retained = appended.GetProperty("entryIds")[0].GetString()!;
@@ -177,7 +177,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task Seed()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 1 });
         var before = await Queue(owner); string seed = Current(before); int writes = store.Writes;
         var entered = await Enter(owner, seed);
@@ -189,7 +189,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task SequentialEntry()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0 });
         await Ok(owner, "music.queue.mode", new { mode = 3 });
         var before = await Queue(owner); int writes = store.Writes;
@@ -205,7 +205,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task Replay()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         string nonce = Nonce(); var p = new { nonce, expectedVersion = N(await Queue(owner), "version"), songs = new[] { Song("1") } };
         var result = await Command(owner, "enter", p); int writes = store.Writes;
         Check((await Command(owner, "enter", p)).GetRawText() == result.GetRawText() && store.Writes == writes);
@@ -216,7 +216,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task VersionConflict()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         long version = N(await Queue(owner), "version");
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0 });
         int writes = store.Writes;
@@ -226,7 +226,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task UnacceptedReceipt()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var port = new MusicRecommendationQueuePort(owner);
         string nonce = Nonce(); store.Failure = 2;
         await Error(owner, "enter", new { nonce, expectedVersion = 0, songs = new[] { Song("1") } }, "COMMIT_UNKNOWN");
@@ -247,7 +247,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task ReceiptLifetime()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         long version = N(await Queue(owner), "version");
         string first = Nonce();
         var previous = await Command(owner, "capture", new { nonce = first, expectedVersion = version });
@@ -263,7 +263,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task UnknownEnter(bool applied)
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2"), Song("3") }, index = 0 });
         var q = await Queue(owner); string a = Current(q), b = S(q.GetProperty("entries")[1], "id");
         await Ok(owner, "music.queue.mode", new { mode = 2 }); await Ok(owner, "music.queue.select", new { id = b });
@@ -277,7 +277,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task UnknownRestore(bool applied, bool retainCurrent = false)
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0 });
         var entered = await Enter(owner); string checkpoint = S(entered, "checkpoint"), nonce = Nonce();
         var recommendation = await Queue(owner);
@@ -301,7 +301,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task Append()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0 });
         string nonce = Nonce(); var p = new { nonce, expectedVersion = N(await Queue(owner), "version"), songs = new[] { Song("2"), Song("3") }, selectIndex = 1 };
         int writes = store.Writes; store.Failure = 2;
@@ -313,7 +313,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task AppendUnselected()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 1,
             context = new { sourceTitle = "Original", sourceType = "search", searchKeyword = "needle",
                 queueSource = new { id = "source", title = "Original", kind = "search", platform = "wy" } } });
@@ -327,7 +327,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task AppendInvalidSelection()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1") }, index = 0 });
         var before = await Queue(owner); int writes = store.Writes;
         var result = await owner.ExecuteAsync(Prefix + "append", new { nonce = Nonce(), expectedVersion = N(before, "version"),
@@ -338,7 +338,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task AppendTailAndVersion()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Ok(owner, "music.queue.replace", new { songs = new[] { Song("1"), Song("2") }, index = 0 });
         var priority = await Ok(owner, "music.queue.append", new { songs = new[] { Song("9") }, next = true });
         var before = await Queue(owner); int writes = store.Writes;
@@ -363,7 +363,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task FullBatches()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var first = Enumerable.Range(1, 1001).Select(id => Song(id.ToString())).ToArray();
         var entered = await Command(owner, "enter", new { nonce = Nonce(), expectedVersion = N(await Queue(owner), "version"), songs = first });
         Check(entered.GetProperty("entryIds").GetArrayLength() == first.Length && N(await Queue(owner), "total") == first.Length);
@@ -375,21 +375,21 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task OwnerScope()
     {
-        var store = new Store(); await using var first = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var first = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var result = await Enter(first);
-        await using var other = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using var other = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         await Error(other, "restore", new { nonce = Nonce(), expectedVersion = N(await Queue(other), "version"), checkpoint = S(result, "checkpoint") }, "CHECKPOINT_NOT_FOUND");
     }
     private static async Task CancelBefore()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         using var cancel = new CancellationTokenSource(); cancel.Cancel();
         var result = await owner.ExecuteAsync(Prefix + "enter", new { nonce = Nonce(), expectedVersion = 0, songs = new[] { Song("1") } }, cancel.Token);
         Check(S(result, "code") == "CANCELLED" && store.Writes == 0);
     }
     private static async Task CancelAfter()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         long version = N(await Queue(owner), "version");
         store.Entered = NewSignal(); store.Release = NewSignal();
         using var cancel = new CancellationTokenSource();
@@ -400,7 +400,7 @@ public static class MusicRecommendationLibraryTests
     }
     private static async Task CloseBudget()
     {
-        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+        var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         long version = N(await Queue(owner), "version");
         for (int i = 0; i < 8; i++) await Command(owner, "capture", new { nonce = Nonce(), expectedVersion = version });
         await owner.PrepareShutdownAsync(); await owner.CancelShutdownPreparationAsync();
@@ -419,8 +419,8 @@ public static class MusicRecommendationLibraryTests
         Directory.CreateDirectory(directory);
         await using var store = new MusicRecordTestStore(directory);
         string checkpoint;
-        await using (var first = new MusicLibraryOwner(MusicTestStores.For(store))) checkpoint = S(await Enter(first), "checkpoint");
-        await using var second = new MusicLibraryOwner(MusicTestStores.For(store));
+        await using (var first = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage)) checkpoint = S(await Enter(first), "checkpoint");
+        await using var second = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         var q = await Queue(second); Check(N(q, "total") == 1);
         await Error(second, "restore", new { nonce = Nonce(), expectedVersion = N(q, "version"), checkpoint }, "CHECKPOINT_NOT_FOUND");
     }

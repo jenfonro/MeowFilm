@@ -4,9 +4,9 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore store)
+internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase database)
 {
-    private readonly SettingsDocument document = new(store, "pan.accounts.v1");
+    private readonly PanCredentialRepository repository = new(database);
     private static readonly JsonElement Empty = JsonSerializer.SerializeToElement(new { version = 1, accounts = new { } });
     internal static IReadOnlyList<JsonElement> Providers { get; } = new[]
     {
@@ -20,7 +20,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
     {
         try
         {
-            var saved = await document.ReadAsync(token).ConfigureAwait(false) ?? Empty;
+            var saved = (await repository.SnapshotAsync(token).ConfigureAwait(false)).Document ?? Empty;
             var accounts = Accounts(saved);
             return Providers.Select(provider => Snapshot(accounts, provider.GetProperty("provider").GetString()!)).ToArray();
         }
@@ -29,7 +29,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
 
     internal async Task<PanAccountSnapshot> ReadAsync(string provider, CancellationToken token)
     {
-        try { return Snapshot(Accounts(await document.ReadAsync(token).ConfigureAwait(false) ?? Empty), provider); }
+        try { return Snapshot(Accounts(await repository.ReadAsync(provider, token).ConfigureAwait(false)), provider); }
         catch (DocumentStoreException error) { throw StorageError(error); }
     }
 
@@ -47,24 +47,12 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IDocumentStore st
         JsonElement saved;
         try
         {
-            saved = await document.UpdateAsync(current =>
-            {
-                var root = current ?? Empty;
-                var accounts = Accounts(root);
-                var account = Account(accounts, provider);
-                long revision = account is { } old ? Revision(old) + 1 : 1;
-                if (revision > BridgeCodec.MaximumSafeInteger) throw new BridgeException("STORAGE_ERROR");
-                var next = account ?? JsonSerializer.SerializeToElement(new { });
-                var nextCredentials = replacement;
-                if (account is { } prior && BridgeCodec.RequiredProperty(prior, "credentials") is { ValueKind: JsonValueKind.Object } stored)
-                {
-                    // Replacing known credentials does not erase extensions owned by a newer consumer.
-                    nextCredentials = PreserveExtensions(stored, replacement, fields);
-                }
-                next = SettingsDocument.SetMember(next, "revision", JsonSerializer.SerializeToElement(revision));
-                next = SettingsDocument.SetMember(next, "credentials", nextCredentials);
-                return SettingsDocument.SetMember(root, "accounts", SettingsDocument.SetMember(accounts, provider, next));
-            }, token).ConfigureAwait(false);
+            var current = Accounts(await repository.ReadAsync(provider, token).ConfigureAwait(false));
+            var account = Account(current, provider);
+            if (Snapshot(current, provider).ErrorCode is not null) throw new BridgeException("CORRUPT_STORAGE");
+            long revision = account is null ? 0 : Revision(account.Value);
+            long rowRevision = account is null ? 0 : account.Value.GetProperty("rowRevision").GetInt64();
+            saved = await repository.ReplaceAsync(provider, replacement, revision, rowRevision, token).ConfigureAwait(false);
         }
         catch (DocumentStoreException error) { throw StorageError(error); }
         // A runtime failure cannot change the successful local commit.

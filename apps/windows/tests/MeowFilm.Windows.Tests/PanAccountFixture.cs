@@ -2,10 +2,11 @@ using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
+using MeowFilm.Platform.Runtime;
 
 namespace MeowFilm.Windows.Tests;
 
-internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRuntimeSettingsNotifications
+internal sealed class PanAccountFixture : NativeTestDatabase, IRuntimeClient, IRuntimeSettingsNotifications
 {
     internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     internal static readonly (string Id, string[] Fields)[] Providers =
@@ -23,82 +24,55 @@ internal sealed class PanAccountFixture : IRuntimeClient, IDocumentStore, IRunti
     internal string LastSession = "";
     internal int Starts;
     internal readonly List<string> Notifications = [];
-    internal readonly List<JsonElement> Writes = [];
-    internal Func<CancellationToken, Task<DocumentSnapshot>>? ReadOverride;
-    internal Func<ReadOnlyMemory<byte>, DocumentFingerprint, CancellationToken, Task<DocumentFingerprint>>? WriteOverride;
+    internal new readonly List<JsonElement> Writes = [];
+    internal Func<CancellationToken, Task>? ReadOverride;
+    internal Func<Action, CancellationToken, Task>? WriteOverride;
     internal bool Offline, NotificationFails;
-    private byte[]? document;
-
     internal void Account(string provider, long revision, string status, params string[] fields)
     {
-        Accounts[provider] = new(provider, revision, fields.Length > 0, status, fields);
-        var root = Saved.GetProperty("accounts").EnumerateObject().ToDictionary(item => item.Name, item => item.Value.Clone());
-        root[provider] = JsonSerializer.SerializeToElement(new
-        {
-            revision, credentials = fields.ToDictionary(field => field, field =>
-                field is "refreshedAt" ? (object)1730000000000L : "synthetic-" + field)
-        }, Json);
-        document = JsonSerializer.SerializeToUtf8Bytes(new { version = 1, accounts = root }, Json);
+        var allowed=Providers.Single(item=>item.Id==provider).Fields;
+        var values=new List<(string,object?)>{("$provider",provider),("$revision",revision)};
+        foreach(var field in new[]{"cookie","username","password","authorization","refreshedAt"})
+            values.Add(("$"+field,fields.Contains(field)?field=="refreshedAt"?(object)1730000000000L:"synthetic-"+field:null));
+        Inner.WriteAsync(db=>{
+            db.Execute("UPDATE windows_pan_accounts SET account_revision=$revision,row_revision=row_revision+1,cookie=$cookie,username=$username,password=$password,authorization=$authorization,refreshedAt=$refreshedAt WHERE provider=$provider",values.ToArray());
+            db.Execute("UPDATE windows_pan_state SET revision=revision+1 WHERE singleton=1");return true;
+        }).GetAwaiter().GetResult();
+        Accounts[provider]=new(provider,revision,fields.Length>0,status,fields.Where(allowed.Contains).ToArray());
     }
-    internal JsonElement Saved
+    internal void Corrupt(string provider) => Inner.WriteAsync(db=>db.Execute(
+        "UPDATE windows_pan_accounts SET "+(provider=="yidong"?"authorization":"cookie")+"=$value WHERE provider=$provider",
+        ("$value","synthetic\r\ninvalid"),("$provider",provider))).GetAwaiter().GetResult();
+    internal RuntimeSettingsSnapshot Snapshot()=>new PanCredentialRepository(Inner).SnapshotAsync(default).GetAwaiter().GetResult();
+    internal JsonElement Saved=>Snapshot().Document??JsonSerializer.SerializeToElement(new{version=1,accounts=new{}},Json);
+    public override async Task<T> ReadAsync<T>(Func<DatabaseSession,T> read,CancellationToken token=default)
     {
-        get
+        var result=await base.ReadAsync(read,token);
+        if(ReadOverride is { } hook)await hook(token);
+        return result;
+    }
+    public override async Task<T> WriteAsync<T>(Func<DatabaseSession,T> write,CancellationToken token=default,
+        int retainedBytes=0,Action<Action>? commit=null)
+    {
+        var result=await base.WriteAsync(db=>{
+            T value=default!; bool executed=false;
+            void Execute(){if(executed)throw new InvalidOperationException("Only one actual transaction is allowed");executed=true;value=write(db);}
+            if(WriteOverride is { } hook)hook(Execute,CancellationToken.None).GetAwaiter().GetResult();else Execute();
+            if(!executed)throw new DocumentStoreException(DocumentStoreError.Storage);return value;
+        },token,retainedBytes,commit);
+        Writes.Add(Saved);
+        foreach(var provider in Providers.Select(item=>item.Id))
         {
-            if (document is null) return JsonSerializer.SerializeToElement(new { version = 1, accounts = new { } }, Json);
-            using var json = JsonDocument.Parse(document);
-            return json.RootElement.Clone();
+            var account=new PanSettingsStore(this,Inner).ReadAsync(provider,default).GetAwaiter().GetResult();
+            Accounts[provider]=account;
         }
-    }
-    internal void SetDocument(string json) => document = System.Text.Encoding.UTF8.GetBytes(json);
-    internal DocumentSnapshot Snapshot() => new(document?.ToArray(),
-        document is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(document));
-    public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
-    {
-        Check(documentNamespace == "pan.accounts.v1", "only the protected pan namespace is used");
-        if (ReadOverride is { } read) return read(cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(Snapshot());
-    }
-    public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-        DocumentFingerprint expected, CancellationToken cancellationToken = default)
-    {
-        Check(documentNamespace == "pan.accounts.v1", "only the protected pan namespace is used");
-        if (WriteOverride is { } write) return write(data, expected, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        return Task.FromResult(Commit(data, expected));
-    }
-    internal DocumentFingerprint Commit(ReadOnlyMemory<byte> data, DocumentFingerprint expected)
-    {
-        if (Snapshot().Fingerprint != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-        document = data.ToArray();
-        var root = Saved;
-        Writes.Add(root);
-        foreach (var (provider, allowed) in Providers)
-        {
-            var rows = root.GetProperty("accounts").EnumerateObject().Where(item => item.NameEquals(provider)).ToArray();
-            if (rows.Length == 0) { Accounts[provider] = new(provider, 0, false, "signedOut", []); continue; }
-            try
-            {
-                if (rows.Length != 1) throw new InvalidOperationException();
-                long revision = rows[0].Value.GetProperty("revision").GetInt64();
-                if (revision is < 1 or > BridgeCodec.MaximumSafeInteger) throw new InvalidOperationException();
-                var fields = rows[0].Value.GetProperty("credentials").EnumerateObject()
-                    .Where(field => allowed.Any(name => field.NameEquals(name))).Where(field =>
-                        field.Value.ValueKind == JsonValueKind.Number ? field.Value.GetInt64() != 0 :
-                        field.Value.GetString()!.Length != 0).Select(field => field.Name).ToArray();
-                Accounts[provider] = new(provider, revision, fields.Length > 0, fields.Length > 0 ? "signedIn" : "signedOut", fields);
-            }
-            catch (Exception error) when (error is InvalidOperationException or KeyNotFoundException or FormatException)
-            { Accounts[provider] = PanAccountSnapshot.Corrupt(provider); }
-        }
-        return Snapshot().Fingerprint;
+        return result;
     }
     public void SettingsChanged(string block)
     {
         if (NotificationFails) throw new BridgeException("CLOSED");
         if (!Offline) Notifications.Add(block);
     }
-    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     internal static JsonElement Ok(object value) =>
         JsonSerializer.SerializeToElement(new { ok = true, contract = "pan.runtime.v1", value }, Json);
     internal static JsonElement Failure(string code) =>

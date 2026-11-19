@@ -1120,47 +1120,8 @@ public static class FilmSettingsUiTests
             throw new InvalidOperationException("Rules do not upload source.");
     }
 
-    private sealed class MemoryStore : IDocumentStore
+    private sealed class MemoryStore : FilmNativeSettingsFixture
     {
-        private readonly object gate = new();
-        private readonly Dictionary<string, byte[]> documents = [];
-        private readonly Dictionary<string, int> writesByNamespace = [];
-        internal int WritesFor(string name) { lock (gate) return writesByNamespace.GetValueOrDefault(name); }
-        internal int Writes;
-        internal bool FailWrite;
-        internal void Seed(string name, object value) { lock (gate) documents[name] = JsonSerializer.SerializeToUtf8Bytes(value, Json); }
-        internal JsonElement Read(string name)
-        {
-            lock (gate)
-            {
-                using var document = JsonDocument.Parse(documents[name]);
-                return document.RootElement.Clone();
-            }
-        }
-        public Task<DocumentSnapshot> ReadAsync(string documentNamespace, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            lock (gate)
-            {
-                byte[]? bytes = documents.TryGetValue(documentNamespace, out var stored) ? stored.ToArray() : null;
-                return Task.FromResult(new DocumentSnapshot(bytes, bytes is null ? DocumentFingerprint.Missing : DocumentFingerprint.FromBytes(bytes)));
-            }
-        }
-        public Task<DocumentFingerprint> WriteAsync(string documentNamespace, ReadOnlyMemory<byte> data,
-            DocumentFingerprint expected, CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            lock (gate)
-            {
-                if (FailWrite) throw new DocumentStoreException(DocumentStoreError.Storage);
-                var before = documents.TryGetValue(documentNamespace, out var bytes) ? DocumentFingerprint.FromBytes(bytes) : DocumentFingerprint.Missing;
-                if (before != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                documents[documentNamespace] = data.ToArray(); Writes++;
-                writesByNamespace[documentNamespace] = WritesFor(documentNamespace) + 1;
-                return Task.FromResult(DocumentFingerprint.FromBytes(data.Span));
-            }
-        }
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed class RecordingRuntime : IRuntimeSession, IRuntimeSettingsNotifications, IRuntimeConnectionSource

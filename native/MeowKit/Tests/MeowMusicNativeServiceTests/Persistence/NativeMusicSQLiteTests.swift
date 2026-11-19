@@ -1,10 +1,13 @@
 import XCTest
 import MeowMusicFeature
+import MeowRuntime
+import MeowStorage
+import MeowStorageTestSupport
 @testable import MeowMusicNativeService
 
 final class NativeMusicSQLiteTests: XCTestCase {
     private func location() throws -> URL {
-        try MusicNativeLibraryDatabase.canonicalSystemBaseURL(FileManager.default.temporaryDirectory)
+        FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
             .appendingPathComponent("music-sqlite-test-" + UUID().uuidString, isDirectory: true)
     }
     private func song(_ index: Int, platforms: [String] = MusicModel.sites) throws -> MJ {
@@ -26,88 +29,66 @@ final class NativeMusicSQLiteTests: XCTestCase {
         XCTAssertEqual(store.snapshot().2, 0)
         await service.close()
     }
-    func testCanonicalTrustedBaseOpensNewDatabaseAndReopensCommittedState() throws {
-        let root = try location(), trusted = root.appendingPathComponent("system-directory", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: trusted, withIntermediateDirectories: true)
-        let alias = root.appendingPathComponent("system-alias", isDirectory: true)
-        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: trusted)
-        let directory = try MusicNativeLibraryDatabase.canonicalSystemBaseURL(alias)
-            .appendingPathComponent("music-library-v1", isDirectory: true)
-        XCTAssertEqual(directory.deletingLastPathComponent().path, trusted.path)
-        let file = directory.appendingPathComponent(MusicNativeLibraryDatabase.filename)
-        let database = MusicNativeLibraryDatabase(urlFactory: { file })
-        defer { try? database.close() }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+    private func database(_ root: URL) throws -> NativeMusicSQLiteFixture {
+        NativeMusicSQLiteFixture(try storageTestDatabase(self, root: root))
+    }
+    func testCurrentAppDatabaseReopensCommittedStateAndBorrowedCloseDoesNotCloseIt() async throws {
+        let root = try location(), database = try database(root)
         XCTAssertEqual(try database.readSnapshot().revision, 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path + "-wal"))
-        try database.withTransaction { try $0.saveArea("playback", data: MusicModel.playback.bytes) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: database.storage.url.path))
+        try database.withTransaction { try $0.saveArea("playback", value: try MusicModel.playback.storageValue) }
         let committed = try database.readSnapshot()
         XCTAssertEqual(committed.revision, 1)
         try database.close()
-        let reopened = MusicNativeLibraryDatabase(url: file)
-        defer { try? reopened.close() }
+        XCTAssertThrowsError(try database.readSnapshot()) { XCTAssertEqual($0 as? MusicServiceError, .closed) }
+        let shared = try await database.storage.read { try $0.query("SELECT revision FROM music_owner_state").first!.integer("revision") }
+        XCTAssertEqual(shared, 1)
+        try await database.storage.close()
+        let connection = try storageTestOpen(root)
+        addTeardownBlock { try await connection.close() }
+        let reopened = NativeMusicSQLiteFixture(connection)
         XCTAssertEqual(try reopened.readSnapshot().identity, committed.identity)
-        XCTAssertEqual(try reopened.readSnapshot().areas["playback"], MusicModel.playback.bytes)
-    }
-    func testMissingTrustedBaseFailsWithoutCreatingOwnedDirectory() throws {
-        let base = try location()
-        let database = MusicNativeLibraryDatabase(urlFactory: {
-            try MusicNativeLibraryDatabase.canonicalSystemBaseURL(base)
-                .appendingPathComponent("music-library-v1", isDirectory: true)
-                .appendingPathComponent(MusicNativeLibraryDatabase.filename)
-        })
-        defer { try? database.close(); try? FileManager.default.removeItem(at: base) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: base.path))
-        XCTAssertThrowsError(try database.readSnapshot()) { XCTAssertEqual($0 as? MusicServiceError, .storageFailed) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: base.path))
-    }
-    func testLinksInsideOwnedPathAndAtDatabaseLeafRemainRejected() throws {
-        let root = try location(), target = root.appendingPathComponent("target", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
-        let alias = root.appendingPathComponent("owned-link", isDirectory: true)
-        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
-        let linkedFile = alias.appendingPathComponent("music-library-v1", isDirectory: true)
-            .appendingPathComponent(MusicNativeLibraryDatabase.filename)
-        let linkedParent = MusicNativeLibraryDatabase(url: linkedFile)
-        defer { try? linkedParent.close() }
-        XCTAssertThrowsError(try linkedParent.readSnapshot()) { XCTAssertEqual($0 as? MusicServiceError, .storageFailed) }
-        XCTAssertFalse(FileManager.default.fileExists(atPath: linkedFile.path))
-
-        let untouched = root.appendingPathComponent("untouched"), bytes = Data("synthetic link target".utf8)
-        try bytes.write(to: untouched)
-        let leaf = target.appendingPathComponent(MusicNativeLibraryDatabase.filename)
-        try FileManager.default.createSymbolicLink(at: leaf, withDestinationURL: untouched)
-        let linkedDatabase = MusicNativeLibraryDatabase(url: leaf)
-        defer { try? linkedDatabase.close() }
-        XCTAssertThrowsError(try linkedDatabase.readSnapshot()) { XCTAssertEqual($0 as? MusicServiceError, .storageFailed) }
-        XCTAssertEqual(try Data(contentsOf: untouched), bytes)
+        XCTAssertEqual(try MJ.parse(XCTUnwrap(reopened.readSnapshot().areas["playback"])).stable, MusicModel.playback.stable)
     }
     func testTenThousandMultiPlatformSongsUseIndexedHotReadsAndOnlyChangedRows() async throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         let measured = MusicSQLiteMeasuredStore(database)
         let service = NativeMusicService(database: measured, platformClient: try NativeMusicFixture.client())
         try await service.setAccess(available: true, generation: 1)
+        let clock = ContinuousClock()
+        var mark = clock.now
+        func elapsed(_ phase: String) {
+            let now = clock.now
+            print("TenThousandSongs \(phase) \(mark.duration(to: now))")
+            mark = now
+        }
         let input = try (0..<10_000).map { try song($0) }
+        elapsed("prepare-five-source-input")
         let adopted = try await service.adoptSongs(input, authoritative: true)
+        elapsed("adopt-and-project")
         XCTAssertEqual(adopted.count, 10_000)
         XCTAssertEqual(try database.allSongIDs().count, 10_000)
+        var counts = measured.counts()
+        XCTAssertEqual(counts.candidateBatches, 1)
+        XCTAssertEqual(counts.sourceOwnerBatches, 1)
         let revision = try database.readSnapshot().revision
-        let wal = root.appendingPathComponent(MusicNativeLibraryDatabase.filename + "-wal")
+        let wal = URL(fileURLWithPath: database.storage.url.path + "-wal")
         let walBytes = try FileManager.default.attributesOfItem(atPath: wal.path)[.size] as? UInt64
         measured.reset()
+        mark = clock.now
         let repeated = try await service.adoptSongs(Array(input.prefix(10)), authoritative: true)
+        elapsed("repeat-ten")
         XCTAssertEqual(repeated.map { $0["songId"] }, Array(adopted.prefix(10)).map { $0["songId"] })
         XCTAssertEqual(try database.readSnapshot().revision, revision)
         XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: wal.path)[.size] as? UInt64, walBytes)
-        var counts = measured.counts()
+        counts = measured.counts()
         XCTAssertEqual(counts.enumerations, 0)
         XCTAssertEqual(counts.candidates, 0)
         XCTAssertEqual(counts.saved, 0)
         measured.reset()
+        mark = clock.now
         _ = try await service.repositoryTracks(songIDs: Set(adopted.prefix(10).map { $0["songId"].string }))
+        elapsed("read-ten")
         counts = measured.counts()
         XCTAssertEqual(counts.songReads, 10)
         XCTAssertEqual(counts.enumerations, 0)
@@ -126,13 +107,24 @@ final class NativeMusicSQLiteTests: XCTestCase {
         let collections = try await service.collections()
         let favorites = try XCTUnwrap(collections.first { $0.kind == "favorites" })
         let references = adopted.map { MusicReference(kind: .library, id: $0["songId"].string) }
+        mark = clock.now
         let saved = try await service.editPlaylist(favorites, name: nil, refs: Array(references.dropLast()), order: nil)
+        elapsed("add-9999-members")
         measured.reset()
+        let databaseConnection = database.storage
+        let beforeRows = try await databaseConnection.read { db in try db.query(
+            "SELECT count(*) AS count FROM music_collection_members WHERE scope_key=? AND collections_key=?",
+            [.text("device"), .text(saved.id)]).first!.integer("count") }
         _ = try await service.changeCollectionMembership(saved, adding: [references.last!], removing: [])
+        elapsed("add-last-member")
         counts = measured.counts()
         XCTAssertEqual(counts.songReads, 0)
         XCTAssertLessThan(counts.referenceChecks, 6)
         XCTAssertEqual(counts.saved, 0)
+        let afterRows = try await databaseConnection.read { db in try db.query(
+            "SELECT count(*) AS count FROM music_collection_members WHERE scope_key=? AND collections_key=?",
+            [.text("device"), .text(saved.id)]).first!.integer("count") }
+        XCTAssertEqual(afterRows, beforeRows + 1)
         measured.reset()
         try await service.sqliteSyncCheckpoint()
         counts = measured.counts()
@@ -141,15 +133,35 @@ final class NativeMusicSQLiteTests: XCTestCase {
         XCTAssertEqual(counts.enumerations, 0)
         XCTAssertEqual(counts.saved, 0)
         await service.close()
-        let reopened = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
+        try await database.storage.close()
+        let connection = try storageTestOpen(root)
+        addTeardownBlock { try await connection.close() }
+        let reopened = NativeMusicSQLiteFixture(connection)
         defer { try? reopened.close() }
         XCTAssertEqual(try reopened.allSongIDs().count, 10_000)
         XCTAssertEqual(try MJ.parse(XCTUnwrap(reopened.songData(id: adopted[0]["songId"].string)))["album"].string, "New album")
         XCTAssertEqual(try MJ.parse(XCTUnwrap(reopened.songData(id: adopted[0]["songId"].string)))["sources"].array.count, 5)
     }
+    func testControlSnapshotInvalidatesAfterAnotherOwnerCommits() async throws {
+        let root = try location(), first = try database(root)
+        try first.withTransaction { try $0.saveArea("playback", value: try MusicModel.playback.storageValue) }
+        _ = try first.readSnapshot()
+        let second = NativeMusicSQLiteFixture(first.storage)
+        defer { try? second.close() }
+        var source = MusicModel.catalogSource
+        source["platform"] = .string("tx")
+        try second.withTransaction { try $0.saveArea("catalogSource", value: try source.storageValue) }
+        let refreshed = try first.readSnapshot()
+        XCTAssertEqual(try MJ.parse(XCTUnwrap(refreshed.areas["catalogSource"]))["platform"], .string("tx"))
+        var playback = MusicModel.playback
+        playback["mode"] = .n(2)
+        try first.withTransaction { try $0.saveArea("playback", value: try playback.storageValue) }
+        let saved = try second.readSnapshot()
+        XCTAssertEqual(try MJ.parse(XCTUnwrap(saved.areas["playback"]))["mode"], .n(2))
+        XCTAssertEqual(try MJ.parse(XCTUnwrap(saved.areas["catalogSource"]))["platform"], .string("tx"))
+    }
     func testSongAndQueueCommitAtomicallyAndRollbackOnFailureOrCancellation() async throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         let service = NativeMusicService(database: database, platformClient: try NativeMusicFixture.client())
         try await service.setAccess(available: true, generation: 1)
         let incoming = try song(1)
@@ -165,7 +177,10 @@ final class NativeMusicSQLiteTests: XCTestCase {
         XCTAssertEqual(try database.allSongIDs().count, 1)
         XCTAssertEqual(try database.readSnapshot().revision, 1)
         await service.close()
-        let reopened = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
+        try await database.storage.close()
+        let connection = try storageTestOpen(root)
+        addTeardownBlock { try await connection.close() }
+        let reopened = NativeMusicSQLiteFixture(connection)
         defer { try? reopened.close() }
         let restored = NativeMusicService(database: reopened, platformClient: try NativeMusicFixture.client())
         try await restored.setAccess(available: true, generation: 1)
@@ -175,8 +190,7 @@ final class NativeMusicSQLiteTests: XCTestCase {
         await restored.close()
     }
     func testActualTaskCancellationBeforeCommitRollsBackAndMissingQueueReferenceIsRejected() async throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         let service = NativeMusicService(database: database, platformClient: try NativeMusicFixture.client())
         try await service.setAccess(available: true, generation: 1)
         let incoming = try song(2)
@@ -190,23 +204,21 @@ final class NativeMusicSQLiteTests: XCTestCase {
         XCTAssertEqual(try database.allSongIDs(), [])
         await service.close()
     }
-    func testRetiredWriterCannotMutateAndUnrelatedOldDataIsNeverReadOrDeleted() throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+    func testRetiredWriterCannotMutateAndUnrelatedUserFilesRemainUntouched() throws {
+        let root = try location(), database = try database(root)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let old = root.appendingPathComponent("music.library.v3.json"), oldBytes = Data("old synthetic data".utf8)
+        let old = root.appendingPathComponent("unrelated-user-file"), oldBytes = Data("synthetic user data".utf8)
         try oldBytes.write(to: old)
         var retained: (any MusicNativeLibraryWriting)?
         try database.withTransaction { retained = $0 }
         XCTAssertEqual(try database.readSnapshot().revision, 0)
-        XCTAssertThrowsError(try XCTUnwrap(retained).saveArea("playback", data: MusicModel.playback.bytes)) {
+        XCTAssertThrowsError(try XCTUnwrap(retained).saveArea("playback", value: try MusicModel.playback.storageValue)) {
             XCTAssertEqual($0 as? MusicServiceError, .storageConflict)
         }
         XCTAssertEqual(try Data(contentsOf: old), oldBytes)
     }
     func testCommitReceiptLossIsReportedWithoutReplayingAndSourceOwnershipCannotRebind() throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         var first = try song(1); first["songId"] = .string(UUID().uuidString.lowercased())
         XCTAssertThrowsError(try database.withTransaction(commit: { commit in
             try commit(); throw MusicServiceError.storageFailed
@@ -219,22 +231,19 @@ final class NativeMusicSQLiteTests: XCTestCase {
         XCTAssertEqual(try database.allSongIDs(), [first["songId"].string])
         XCTAssertEqual(try database.sourceOwner(key: first["sources"].array[0]["sourceKey"].string), first["songId"].string)
     }
-    func testUnknownCurrentDatabaseIsNotRepairedAndClosedStoreCannotReopenItself() throws {
-        let root = try location(), file = root.appendingPathComponent(MusicNativeLibraryDatabase.filename)
+    func testUnknownCurrentDatabaseIsNotRepaired() throws {
+        let root = try location(), directory = root.appendingPathComponent("storage-v1", isDirectory: true)
+        let file = directory.appendingPathComponent("meowfilm.sqlite3")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let invalid = Data("not a sqlite database".utf8)
         try invalid.write(to: file)
-        let corrupt = MusicNativeLibraryDatabase(url: file)
-        XCTAssertThrowsError(try corrupt.readSnapshot())
+        XCTAssertThrowsError(try storageTestOpen(root)) { XCTAssertEqual($0 as? SQLiteStorageError, .corrupt) }
         XCTAssertEqual(try Data(contentsOf: file), invalid)
-        try corrupt.close()
-        XCTAssertThrowsError(try corrupt.readSnapshot()) { XCTAssertEqual($0 as? MusicServiceError, .closed) }
     }
 
     func testRegisteredSourcesAndRecordingBaselineCannotBeRemovedOrChanged() throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         var original = try song(1)
         original["songId"] = .string(UUID().uuidString.lowercased())
         original["baselineDuration"] = .n(180)
@@ -252,12 +261,11 @@ final class NativeMusicSQLiteTests: XCTestCase {
         }
         XCTAssertEqual(try database.readSnapshot().revision, revision)
         let saved = try MJ.parse(XCTUnwrap(database.songData(id: original["songId"].string)))
-        XCTAssertEqual(Dictionary(uniqueKeysWithValues: saved.fields), Dictionary(uniqueKeysWithValues: original.fields))
+        XCTAssertEqual(saved.stable, original.stable)
     }
 
     func testReceiptLossSettlesTheSameOccurrencePositionAndChangedSongWithoutReplay() async throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         let measured = MusicSQLiteMeasuredStore(database)
         let service = NativeMusicService(database: measured, platformClient: try NativeMusicFixture.client())
         try await service.setAccess(available: true, generation: 1)
@@ -296,9 +304,8 @@ final class NativeMusicSQLiteTests: XCTestCase {
 
     func testUnknownReceiptReadbackUsesExactIdentityAndNeverReplaysOrAcceptsAnotherCommit() async throws {
         for interveningWrite in [false, true] {
-            let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-            defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
-            let measured = MusicSQLiteMeasuredStore(database)
+            let root = try location(), database = try database(root)
+                let measured = MusicSQLiteMeasuredStore(database)
             let service = NativeMusicService(database: measured, platformClient: try NativeMusicFixture.client())
             try await service.setAccess(available: true, generation: 1)
             measured.loseNextReceipt(unknown: true)
@@ -306,7 +313,7 @@ final class NativeMusicSQLiteTests: XCTestCase {
             catch { XCTAssertEqual(error as? MusicServiceError, .commitUnconfirmed) }
             let committed = try database.readSnapshot().identity
             if interveningWrite {
-                try database.withTransaction { try $0.saveArea("catalogSource", data: MusicModel.catalogSource.bytes) }
+                try database.withTransaction { try $0.saveArea("catalogSource", value: try MusicModel.catalogSource.storageValue) }
                 do { _ = try await service.state(); XCTFail("A third identity must remain fenced") }
                 catch { XCTAssertEqual(error as? MusicServiceError, .storageConflict) }
             } else {
@@ -319,8 +326,7 @@ final class NativeMusicSQLiteTests: XCTestCase {
     }
 
     func testSearchAdoptionMatchesAnUnknownSourceOnceAndRevokedSourceReadsFail() async throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         let measured = MusicSQLiteMeasuredStore(database)
         let service = NativeMusicService(database: measured, platformClient: try NativeMusicFixture.client())
         try await service.setAccess(available: true, generation: 1)
@@ -329,7 +335,8 @@ final class NativeMusicSQLiteTests: XCTestCase {
         let request = await service.beginSourceDiscoveryObservation(platform: "tx", query: "Track 1 Fixture")
         let adopted = try await service.adoptSearchSongs([song(1, platforms: ["tx"])], observation: request, checks: [:])
         XCTAssertEqual(adopted[0]["songId"], first[0]["songId"])
-        XCTAssertEqual(measured.counts().candidates, 1)
+        XCTAssertEqual(measured.counts().candidateBatches, 1)
+        XCTAssertEqual(measured.counts().candidates, 0)
         service.revokeAccess(generation: 1)
         let track = MusicNativeTrackData(platform: "tx", data: adopted[0]["sources"].array.last!["musicInfo"].bytes)
         do { _ = try await service.registeredSongID(track); XCTFail("Source reads must use the access fence") }
@@ -338,8 +345,7 @@ final class NativeMusicSQLiteTests: XCTestCase {
     }
 
     func testSlowSongObserverReceivesTheUnionOfUnconsumedChanges() async throws {
-        let root = try location(), database = MusicNativeLibraryDatabase(url: root.appendingPathComponent(MusicNativeLibraryDatabase.filename))
-        defer { try? database.close(); try? FileManager.default.removeItem(at: root) }
+        let root = try location(), database = try database(root)
         let service = NativeMusicService(database: database, platformClient: try NativeMusicFixture.client())
         try await service.setAccess(available: true, generation: 1)
         let changes = await service.songChanges()
@@ -372,10 +378,12 @@ private extension NativeMusicService {
         }
     }
     func sqliteCancelAtomicSongAndQueue(_ incoming: MJ) throws {
-        try transaction(["queue", "library"]) { draft in
-            var library = draft.library["library"]
-            _ = try registerSongs([incoming], library: &library)
-            withUnsafeCurrentTask { $0?.cancel() }
+        try withUnsafeCurrentTask { task in
+            try transaction(["queue", "library"]) { draft in
+                var library = draft.library["library"]
+                _ = try registerSongs([incoming], library: &library)
+                task?.cancel()
+            }
         }
     }
 
@@ -388,26 +396,33 @@ private extension NativeMusicService {
 }
 
 private final class MusicSQLiteMeasuredStore: MusicNativeLibraryStoring, @unchecked Sendable {
-    struct Counts { var songReads = 0, referenceChecks = 0, candidates = 0, enumerations = 0, saved = 0 }
+    struct Counts { var songReads = 0, referenceChecks = 0, candidates = 0, candidateBatches = 0, sourceOwnerBatches = 0, enumerations = 0, saved = 0 }
     private let lock = NSLock()
     private var value = Counts()
     private var receiptLoss: Bool?
-    let database: MusicNativeLibraryDatabase
-    init(_ database: MusicNativeLibraryDatabase) { self.database = database }
+    let database: NativeMusicSQLiteFixture
+    init(_ database: NativeMusicSQLiteFixture) { self.database = database }
     func reset() { lock.lock(); value = .init(); lock.unlock() }
     func counts() -> Counts { lock.lock(); defer { lock.unlock() }; return value }
     func loseNextReceipt(unknown: Bool = false) { lock.lock(); receiptLoss = unknown; lock.unlock() }
     private func count(_ body: (inout Counts) -> Void) { lock.lock(); body(&value); lock.unlock() }
+    func readRevision() throws -> MusicNativeLibraryRevision { try database.readRevision() }
     func readSnapshot() throws -> MusicNativeLibrarySnapshot { try database.readSnapshot() }
     func songData(id: String) throws -> Data? { count { $0.songReads += 1 }; return try database.songData(id: id) }
     func containsSong(id: String) throws -> Bool { count { $0.referenceChecks += 1 }; return try database.containsSong(id: id) }
     func sourceOwner(key: String) throws -> String? { try database.sourceOwner(key: key) }
+    func sourceOwners(keys: Set<String>) throws -> [String: String] {
+        count { $0.sourceOwnerBatches += 1 }; return try database.sourceOwners(keys: keys)
+    }
     func candidateIDs(lookupKey: String) throws -> [String] { count { $0.candidates += 1 }; return try database.candidateIDs(lookupKey: lookupKey) }
+    func candidateIDs(lookupKeys: Set<String>) throws -> [String: [String]] {
+        count { $0.candidateBatches += 1 }; return try database.candidateIDs(lookupKeys: lookupKeys)
+    }
     func querySongIDs(query: String) throws -> [String] { try database.querySongIDs(query: query) }
     func allSongIDs() throws -> [String] { count { $0.enumerations += 1 }; return try database.allSongIDs() }
     func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void, _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
         lock.lock(); let loss = receiptLoss; receiptLoss = nil; lock.unlock()
-        let before = try database.readSnapshot().identity
+        let before = try database.readRevision()
         do {
             return try database.withTransaction(commit: { action in
                 try withoutActuallyEscaping(action) { sqlCommit in
@@ -418,7 +433,7 @@ private final class MusicSQLiteMeasuredStore: MusicNativeLibraryStoring, @unchec
                 }
             }) { try body(Writer(store: self, base: $0)) }
         } catch MusicNativeLibraryCommitError.receiptLost where loss == true {
-            throw MusicNativeLibraryCommitError.outcomeUnknown(before: before, after: try database.readSnapshot().identity)
+            throw MusicNativeLibraryCommitError.outcomeUnknown(before: before, after: try database.readRevision())
         }
     }
     func close() throws { try database.close() }
@@ -426,14 +441,44 @@ private final class MusicSQLiteMeasuredStore: MusicNativeLibraryStoring, @unchec
         let store: MusicSQLiteMeasuredStore
         let base: any MusicNativeLibraryWriting
         var changedSongIDs: Set<String> { base.changedSongIDs }
+        func readRevision() throws -> MusicNativeLibraryRevision { try base.readRevision() }
         func readSnapshot() throws -> MusicNativeLibrarySnapshot { try base.readSnapshot() }
         func songData(id: String) throws -> Data? { store.count { $0.songReads += 1 }; return try base.songData(id: id) }
         func containsSong(id: String) throws -> Bool { store.count { $0.referenceChecks += 1 }; return try base.containsSong(id: id) }
         func sourceOwner(key: String) throws -> String? { try base.sourceOwner(key: key) }
+        func sourceOwners(keys: Set<String>) throws -> [String: String] { try store.sourceOwners(keys: keys) }
         func candidateIDs(lookupKey: String) throws -> [String] { store.count { $0.candidates += 1 }; return try base.candidateIDs(lookupKey: lookupKey) }
+        func candidateIDs(lookupKeys: Set<String>) throws -> [String: [String]] { try store.candidateIDs(lookupKeys: lookupKeys) }
         func querySongIDs(query: String) throws -> [String] { try base.querySongIDs(query: query) }
         func allSongIDs() throws -> [String] { store.count { $0.enumerations += 1 }; return try base.allSongIDs() }
         func saveSong(_ data: Data) throws { try base.saveSong(data); store.count { $0.saved += 1 } }
-        func saveArea(_ area: String, data: Data) throws { try base.saveArea(area, data: data) }
+        func saveArea(_ area: String, value: RuntimeValue) throws { try base.saveArea(area, value: value) }
     }
+}
+
+private final class NativeMusicSQLiteFixture: MusicNativeLibraryStoring, @unchecked Sendable {
+    let storage: SQLiteDatabase
+    private let owner: MusicNativeLibraryDatabase
+    init(_ storage: SQLiteDatabase) { self.storage = storage; owner = .init(database: storage) }
+    func readRevision() throws -> MusicNativeLibraryRevision { try storageTestIO { try self.owner.readRevision() } }
+    func readSnapshot() throws -> MusicNativeLibrarySnapshot { try storageTestIO { try self.owner.readSnapshot() } }
+    func songData(id: String) throws -> Data? { try storageTestIO { try self.owner.songData(id: id) } }
+    func containsSong(id: String) throws -> Bool { try storageTestIO { try self.owner.containsSong(id: id) } }
+    func sourceOwner(key: String) throws -> String? { try storageTestIO { try self.owner.sourceOwner(key: key) } }
+    func sourceOwners(keys: Set<String>) throws -> [String: String] { try storageTestIO { try self.owner.sourceOwners(keys: keys) } }
+    func candidateIDs(lookupKey: String) throws -> [String] { try storageTestIO { try self.owner.candidateIDs(lookupKey: lookupKey) } }
+    func candidateIDs(lookupKeys: Set<String>) throws -> [String: [String]] { try storageTestIO { try self.owner.candidateIDs(lookupKeys: lookupKeys) } }
+    func querySongIDs(query: String) throws -> [String] { try storageTestIO { try self.owner.querySongIDs(query: query) } }
+    func allSongIDs() throws -> [String] { try storageTestIO { try self.owner.allSongIDs() } }
+    func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void,
+                            _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
+        // The product normally calls this from its non-main music owner.
+        // A test assertion can borrow that lane synchronously without a fake store.
+        try withoutActuallyEscaping(commit) { committed in
+            try withoutActuallyEscaping(body) { action in
+                try storageTestIO { try self.owner.withTransaction(commit: committed, action) }
+            }
+        }
+    }
+    func close() throws { try storageTestIO { try self.owner.close() } }
 }
