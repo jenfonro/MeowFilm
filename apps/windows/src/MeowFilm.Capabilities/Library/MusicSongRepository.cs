@@ -99,7 +99,7 @@ public sealed partial class MusicLibraryOwner
             }
             var candidate = document.Candidate(true);
             var policy = MetadataPolicy(candidate);
-            var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
+            var platforms = MetadataOrder(policy);
             var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
             bool changed = false;
             foreach (string id in ids)
@@ -147,7 +147,7 @@ public sealed partial class MusicLibraryOwner
         long observation = 0, Dictionary<(string SongId, string Platform), long>? accepted = null)
     {
         var policy = MetadataPolicy(doc);
-        var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
+        var platforms = MetadataOrder(policy);
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
         var ids = new List<string>();
         foreach (var song in input)
@@ -172,7 +172,7 @@ public sealed partial class MusicLibraryOwner
     {
         if (!HasValue(doc, "library")) return;
         var policy = MetadataPolicy(doc);
-        var platforms = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
+        var platforms = MetadataOrder(policy);
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
         foreach (string id in doc.Songs.Ids())
         {

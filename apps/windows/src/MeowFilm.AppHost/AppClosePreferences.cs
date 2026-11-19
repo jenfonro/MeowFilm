@@ -29,7 +29,7 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
         {
             using var doc = JsonDocument.Parse(bytes);
             var value = doc.RootElement;
-            if (value.ValueKind != JsonValueKind.Object || value.EnumerateObject().Count() != 2 ||
+            if (value.ValueKind != JsonValueKind.Object ||
                 !value.TryGetProperty("schema", out var schema) || schema.GetInt32() != 1 ||
                 !value.TryGetProperty("closeBehavior", out var saved))
                 throw new DocumentStoreException(DocumentStoreError.Corrupt);

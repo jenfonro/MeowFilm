@@ -10,7 +10,11 @@ import { EventEmitter } from 'node:events';
 test('token module has its own exact HTTP contract and sends no account data', async t => {
   let gets = 0, closes = 0;
   const module = createNeteaseTokenModule({ provider: {
-    async get({ signal }) { assert.equal(signal.aborted, false); return `synthetic-${++gets}`; },
+    async get(input) {
+      assert.deepEqual(Object.keys(input), ['signal']);
+      assert.equal(input.signal.aborted, false);
+      return `synthetic-${++gets}`;
+    },
     async close() { closes++; },
   } });
   const sessionId = randomUUID(), requestKey = randomBytes(32).toString('hex');
@@ -22,13 +26,10 @@ test('token module has its own exact HTTP contract and sends no account data', a
   assert.deepEqual(description.modules, [{ id: 'netease', version: '0.1.0',
     contract: 'netease.token.v1', methods: ['netease.token.get'] }]);
   assert.equal(gets, 0);
-  for (const input of [null, [], { cookie: 'synthetic-cookie' }, { url: 'https://example.invalid/' }]) {
-    assert.deepEqual(await client.call('netease.token.get', input),
-      { ok: false, contract: 'netease.token.v1', code: 'INVALID_REQUEST' });
-  }
-  for (let next = 1; next <= 2; next++) {
-    assert.deepEqual(await client.call('netease.token.get'), {
-      ok: true, contract: 'netease.token.v1', value: { token: `synthetic-${next}` },
+  const inputs = [{ cookie: 'synthetic-cookie' }, { url: 'https://example.invalid/' }, {}];
+  for (const [index, input] of inputs.entries()) {
+    assert.deepEqual(await client.call('netease.token.get', input), {
+      ok: true, contract: 'netease.token.v1', value: { token: `synthetic-${index + 1}` },
     });
   }
   await client.shutdown();

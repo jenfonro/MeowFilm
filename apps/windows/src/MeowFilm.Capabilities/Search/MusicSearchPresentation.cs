@@ -75,7 +75,6 @@ public sealed partial class MusicCapability
     private Task BeginSearchAsync(string keyword, CancellationToken token, bool refresh = false)
     {
         if (stopping) return Task.CompletedTask;
-        if (!searchPreferencesLoaded) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
         RememberSearch();
         if (searchKeyword != keyword)
         {
@@ -84,6 +83,7 @@ public sealed partial class MusicCapability
             CatalogSearchKind = "歌曲";
         }
         string kind = searchView == "playlists" ? "playlists" : "songs";
+        if (!SearchPreferencesLoaded(kind)) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
         searchKind = kind;
         string[] platforms = SearchDispatchPlatforms(kind);
         var key = SearchStartIdentity(keyword, kind, platforms);
@@ -427,6 +427,7 @@ public sealed partial class MusicCapability
     }
     private Task StartMissingSearchKindAsync(string kind, CancellationToken token)
     {
+        if (!SearchPreferencesLoaded(kind)) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
         long epoch = searchEpoch, navigation = loadGeneration;
         string keyword = searchKeyword;
         string[] platforms = SearchDispatchPlatforms(kind);

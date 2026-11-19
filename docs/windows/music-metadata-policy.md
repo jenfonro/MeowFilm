@@ -35,10 +35,10 @@ native-local-lyrics
 }
 ```
 
-- `platforms` 必须是五个平台的完整无重复排列。
+- `platforms` 是已知平台的无重复优先顺序，可以只列部分平台；显式启用但未排序的平台按 `enabled` 顺序排在其后。读取不补写设置。
 - `enabled` 必须是无重复子集，可以为空。
 - `music.metadata.settings.get` 返回当前权威设置。
-- `music.metadata.settings.save` 必须提交准确 `ifRevision`、完整 `platforms` 与 `enabled`；成功后 revision 加一并立即生效。
+- `music.metadata.settings.save` 必须提交准确 `ifRevision`、本次 `platforms` 与 `enabled`；成功后 revision 加一并立即生效。设置页补足内建选项只影响展示，未编辑的值不因此改写。
 - revision 冲突、待确认写入或格式错误不会通过额外刷新、延时重试或影子设置掩盖。
 - 平台顺序同时约束歌词和封面元数据选择，但不改变音频播放来源优先级。
 - 播放器起播复用歌曲当前封面，同曲候选增加保留仍被策略允许的已选 URL；只有缺图或加载失败才继续选择。显式变更平台顺序或启用集合重新按新策略选择，失败保存期间仍按现有权威确认流程处理，见[原生公共图像](artwork.md)。

@@ -32,6 +32,55 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SearchConsumerCases()
     {
+        yield return Case("settings display completion does not rewrite partial search metadata or quality priorities", async () =>
+        {
+            await using var f = new SearchScene(scriptRuntime: new QualityFixture.ScriptRuntime());
+            var kind = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = 1, concurrency = 1, cacheMinutes = 60 };
+            await f.Call("music.search.settings.save", new { ifRevision = 0, songs = kind, playlists = kind });
+            await f.Call("music.metadata.settings.save", new
+                { ifRevision = 0, platforms = new[] { "wy" }, enabled = new[] { "tx" } });
+            var quality = JsonNode.Parse((await f.Call("music.quality.settings.get")).GetProperty("settings").GetRawText())!.AsObject();
+            quality["ifRevision"] = quality["revision"]!.DeepClone();
+            quality["qualityOrder"] = new JsonArray("lossless");
+            await f.Call("music.quality.settings.save", quality);
+            await f.Module.InitializeAsync(default);
+            await f.Module.SetSearchAdvancedAsync("songs", 2, 1, 60);
+            var search = (await f.Call("music.search.settings.get")).GetProperty("settings");
+            Equal(1, search.GetProperty("songs").GetProperty("order").GetArrayLength());
+            Equal(1, search.GetProperty("playlists").GetProperty("order").GetArrayLength());
+            var row = f.Module.MetadataPlatforms.Single(value => value.Platform == "wy");
+            await f.Module.SetMetadataEnabledAsync(row, true);
+            var metadata = (await f.Call("music.metadata.settings.get")).GetProperty("settings");
+            Equal(1, metadata.GetProperty("platforms").GetArrayLength());
+            True(metadata.GetProperty("enabled").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["tx", "wy"]),
+                "changing another row retains the explicitly enabled unordered source");
+            await f.Module.ActivateQualitySettingsAsync();
+            await f.Module.SetPlaybackQualityRequestAsync("320k");
+            var saved = (await f.Call("music.quality.settings.get")).GetProperty("settings");
+            Equal(1, saved.GetProperty("qualityOrder").GetArrayLength());
+            Equal("lossless", saved.GetProperty("qualityOrder")[0].GetString());
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
+        });
+        yield return Case("selected song search accepts extensions and ignores an unconsumed broken playlist policy", async () =>
+        {
+            await using var f = new SearchScene(scriptRuntime: new QualityFixture.ScriptRuntime());
+            var kind = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = 1, concurrency = 1, cacheMinutes = 60 };
+            var records = MusicTestStores.For(f.Store);
+            var document = await Task.Run(() => records.Root);
+            document["areas"]!["native-search-policy"] = JsonSerializer.SerializeToNode(new
+                { schema = 3, revision = 0, songs = kind,
+                    playlists = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = -1, concurrency = 1, cacheMinutes = 60 } });
+            records.Seed(document);
+            await f.Module.InitializeAsync(default);
+            var started = await f.Call("music.search.start", new
+                { keyword = "direct", kind = "songs", platforms = new[] { "wy" }, extra = new { value = true } });
+            await f.Call("music.search.cancel", new { id = started.GetProperty("id").GetString() });
+            await f.Module.SearchOnlineAsync("healthy", default);
+            await SearchUntil(() => f.Module.Songs.Count == 1 && !f.Module.SearchSongsLoading);
+            True(!f.Module.CanEditSearchPreferences, "the broken playlist settings are not editable defaults");
+            Equal(-1L, (await Task.Run(() => records.Root))["areas"]!["native-search-policy"]!["playlists"]!["pages"]!.GetValue<long>());
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
+        });
         yield return Case("search overview second song menu preserves the complete section order and current index", async () =>
         {
             // Exercise the real search/menu/queue path with no available media sources.
@@ -647,7 +696,7 @@ public static partial class MusicUiTests
         });
         yield return Case("search start draining an old query does not block get next or cancel behind the policy lane", async () =>
         {
-            await using var f = await SearchScene.Create();
+            await using var f = await SearchScene.Create(scriptRuntime: new QualityFixture.ScriptRuntime());
             await f.Policy(["wy"], [], automaticPlaylists: false);
             f.Http.Hold = true;
             await f.Search("旧查询");
@@ -683,10 +732,11 @@ public static partial class MusicUiTests
                 f.App.SearchChanged -= Changed;
                 f.Http.Release.TrySetResult();
             }
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
         });
         yield return Case("search start queued during a settings save cannot dispatch the replaced policy", async () =>
         {
-            await using var f = await SearchScene.Create();
+            await using var f = await SearchScene.Create(scriptRuntime: new QualityFixture.ScriptRuntime());
             await f.Policy(["wy"], [], automaticPlaylists: false);
             f.Http.Hold = true;
             await f.Search("旧策略");
@@ -711,15 +761,16 @@ public static partial class MusicUiTests
                 "the settings save commits");
             Equal("SEARCH_SETTINGS_CHANGED", (await start.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("code").GetString());
             Equal(1, f.Http.SearchRequests);
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
         });
         yield return Case("unconfirmed search settings block start until the next authoritative read", async () =>
         {
-            await using var f = await SearchScene.Create();
+            await using var f = await SearchScene.Create(scriptRuntime: new QualityFixture.ScriptRuntime());
             await f.Policy(["wy"], [], automaticPlaylists: false);
             var settings = (await f.Call("music.search.settings.get")).GetProperty("settings");
             var songs = JsonNode.Parse(settings.GetProperty("songs").GetRawText())!.AsObject();
             songs["pages"] = 2;
-            f.Store.FailNextWrite = true;
+            MusicTestStores.For(f.Store).FailBeforeWrite = true;
             var save = await f.App.ExecuteAsync("music.search.settings.save", new
             {
                 ifRevision = settings.GetProperty("revision").GetInt64(),
@@ -736,6 +787,7 @@ public static partial class MusicUiTests
             True((await f.Call("music.search.start",
                 new { keyword = "已确认", kind = "songs", platforms = new[] { "wy" } })).GetProperty("ok").GetBoolean(),
                 "start succeeds after the authoritative read");
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
         });
         yield return Case("native search transient failure is retried by the next round and real native search controls", async () =>
         {
@@ -951,7 +1003,7 @@ public static partial class MusicUiTests
         internal readonly SearchHttp Http = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
-        private SearchScene(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
+        internal SearchScene(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
         {
             var platform = scriptRuntime is QualityFixture.ScriptRuntime selected ? selected.Platform : Runtime.Platform;
             platform.OnRequest = Http.Read;
@@ -1007,7 +1059,6 @@ public static partial class MusicUiTests
     {
         private AccountReadHold? nextAccountRead;
         internal int AccountReads;
-        internal bool FailNextWrite;
         internal AccountReadHold HoldNextAccountRead()
         {
             var hold = new AccountReadHold();
@@ -1022,12 +1073,6 @@ public static partial class MusicUiTests
             var hold = Interlocked.Exchange(ref nextAccountRead, null);
             if (hold is not null) { hold.Arrived.TrySetResult(); await hold.Released.Task; }
             return result;
-        }
-        public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
-            int retainedBytes = 0, Action<Action>? commit = null)
-        {
-            if (FailNextWrite) { FailNextWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return base.WriteAsync(write, token, retainedBytes, commit);
         }
         public override async ValueTask DisposeAsync()
         {

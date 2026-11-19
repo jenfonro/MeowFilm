@@ -26,14 +26,36 @@ public static class MusicMetadataPolicyTests
             Equal(string.Join(',', reverse), string.Join(',', settings.GetProperty("platforms").EnumerateArray().Select(x => x.GetString())));
             Equal(0, settings.GetProperty("enabled").GetArrayLength()); Equal(1L, settings.GetProperty("revision").GetInt64());
         });
-        yield return Case("duplicate missing unknown and nonstring platforms are all rejected without writes", async (owner, store) =>
+        yield return Case("duplicate unknown and nonstring platforms are rejected without writes", async (owner, store) =>
         {
-            foreach (var order in new object[] { new[] { "wy" }, new[] { "wy", "wy", "kg", "kw", "mg" },
+            foreach (var order in new object[] { new[] { "wy", "wy", "kg", "kw", "mg" },
                 new[] { "wy", "tx", "kg", "kw", "other" }, new object[] { "wy", "tx", "kg", "kw", 1 } })
                 Code(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = order, enabled = Platforms }), "INVALID_REQUEST");
             foreach (var enabled in new[] { new[] { "wy", "wy" }, new[] { "other" } })
                 Code(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = Platforms, enabled }), "INVALID_REQUEST");
             Equal(0, store.Writes);
+        });
+        yield return Case("partial platform order remains authoritative across a cold read", async (owner, store) =>
+        {
+            Ok(await owner.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0, platforms = new[] { "wy" }, enabled = new[] { "wy" } }));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
+            var settings = Ok(await reopened.ExecuteAsync("music.metadata.settings.get")).GetProperty("settings");
+            Equal("wy", settings.GetProperty("platforms")[0].GetString());
+            Equal(1, settings.GetProperty("platforms").GetArrayLength());
+            Equal(1, store.Writes);
+        });
+        yield return Case("enabled source missing from priority order remains usable without enabling other sources", async (owner, _) =>
+        {
+            const string image = "https://images.example.test/explicit.png";
+            Ok(await owner.ExecuteAsync("music.metadata.settings.save", new
+                { ifRevision = 0, platforms = new[] { "wy" }, enabled = new[] { "tx" } }));
+            var song = MusicSongFixture.Online("tx", "partial-priority", "Partial", cover: image);
+            Ok(await owner.ExecuteAsync("music.queue.replace", new { songs = new[] { song }, index = 0 }));
+            Equal(image, Ok(await owner.ExecuteAsync("music.queue.get")).GetProperty("current").GetProperty("song").GetProperty("cover_url").GetString());
+            var settings = Ok(await owner.ExecuteAsync("music.metadata.settings.get")).GetProperty("settings");
+            Equal("wy", settings.GetProperty("platforms")[0].GetString());
+            Equal("tx", settings.GetProperty("enabled")[0].GetString());
+            Equal(1, settings.GetProperty("enabled").GetArrayLength());
         });
         yield return Case("unconsumed fields do not grant writes and stale revisions remain fenced", async (owner, store) =>
         {
@@ -171,7 +193,7 @@ public static class MusicMetadataPolicyTests
         new("Native metadata policy " + name, async () =>
         {
             await using var store = new Store(); var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
-            try { await body(owner, store); } finally { await owner.AbortAsync(); }
+            try { await Task.Run(() => body(owner, store)); } finally { await owner.AbortAsync(); }
         });
     private static JsonElement LocalSong(string id = "one") =>
         MusicSongFixture.Element(MusicSongFixture.Local("library:local:" + id, "Local " + id, "Synthetic", duration: 80));

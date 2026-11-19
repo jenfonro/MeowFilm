@@ -6,6 +6,11 @@ public sealed partial class MusicLibraryOwner
 {
     private const string MetadataPolicyArea = "native-metadata-policy";
     internal static readonly string[] MetadataPlatforms = ["wy", "tx", "kg", "kw", "mg"];
+    private static string[] MetadataOrder(JsonObject policy)
+    {
+        var order = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
+        return order.Concat(LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).Except(order)).ToArray();
+    }
     private JsonObject MetadataPolicy(MusicLibraryData doc)
     {
         var value = Area(doc, MetadataPolicyArea) ??
@@ -23,9 +28,9 @@ public sealed partial class MusicLibraryOwner
         _ = Revision(policy);
         var order = LJ.Array(policy["platforms"]).Select(value => LJ.Text(value, 8)).ToArray();
         var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.Text(value, 8)).ToArray();
-        LJ.Require(order.Length == MetadataPlatforms.Length && order.Distinct(StringComparer.Ordinal).Count() == order.Length &&
+        LJ.Require(order.Distinct(StringComparer.Ordinal).Count() == order.Length &&
             order.All(MetadataPlatforms.Contains));
-        LJ.Require(enabled.Length <= order.Length && enabled.Distinct(StringComparer.Ordinal).Count() == enabled.Length &&
+        LJ.Require(enabled.Distinct(StringComparer.Ordinal).Count() == enabled.Length &&
             enabled.All(MetadataPlatforms.Contains));
     }
 

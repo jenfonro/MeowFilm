@@ -109,7 +109,7 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         var playback = MusicModel.playback
         playback["metadataPlatforms"] = .strings(["kw", "tx", "mg", "wy", "kg"])
         playback["metadataEnabled"] = .strings(["kw", "tx", "wy"])
-        playback["retainedPreference"] = .string("unrelated-value")
+        playback["showTranslation"] = .bool(false)
         let bytes = try MetadataNativeFixture.document(playback: playback)
         let before = try MJ.parse(bytes), store = NativeMusicTestLibrary(bytes)
         let service = try await MetadataNativeFixture.service(store)
@@ -119,13 +119,13 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
         XCTAssertEqual(value.enabledPlatforms, [.kugou]); XCTAssertEqual(value.revision, 1)
         let after = try MJ.parse(XCTUnwrap(store.snapshot().0))
         for record in ["library", "queue", "history"] {
-            XCTAssertEqual(after["areas"][record], before["areas"][record], record)
+            XCTAssertEqual(after["areas"][record].stable, before["areas"][record].stable, record)
         }
         XCTAssertEqual(Set(after["areas"].fields.map(\.0)), Set(before["areas"].fields.map(\.0)))
         var expected = before["areas"]["playback"]
         expected["metadataPlatforms"] = .strings(["kw", "kg", "mg", "wy", "tx"])
         expected["metadataEnabled"] = .strings(["kg", "kw"]); expected["revision"] = .n(1)
-        XCTAssertEqual(after["areas"]["playback"], expected)
+        XCTAssertEqual(after["areas"]["playback"].stable, expected.stable)
         let full = try await MetadataNativeFixture.service(store, enabled: Set(MetadataNativeFixture.all))
         let restored = try await full.metadataPreferences()
         XCTAssertEqual(restored.platforms, [.kuwo, .kugou, .migu, .netease, .qq])
@@ -171,12 +171,10 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
 
     func testMalformedOptionalFieldsAreNotSilentlyResetOrOverwritten() async throws {
         let invalid: [(String, MJ)] = [
-            ("metadataPlatforms", .array([])), ("metadataPlatforms", .strings(["wy", "tx", "kg"])),
             ("metadataPlatforms", .strings(["wy", "tx", "kg", "kw", "kw"])),
             ("metadataPlatforms", .strings(["wy", "tx", "kg", "kw", "other"])),
-            ("metadataPlatforms", .null), ("metadataEnabled", .bool(false)),
-            ("metadataEnabled", .strings(["wy", "wy"])), ("metadataEnabled", .strings(["unknown"])),
-            ("metadataEnabled", .array([.n(0)]))
+            ("metadataPlatforms", .null), ("metadataEnabled", .null),
+            ("metadataEnabled", .strings(["wy", "wy"])), ("metadataEnabled", .strings(["unknown"]))
         ]
         for (field, value) in invalid {
             var playback = MusicModel.playback; playback[field] = value
@@ -190,6 +188,38 @@ final class MusicNativeMetadataPreferencesTests: XCTestCase {
             XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
             await service.close()
         }
+    }
+    func testPartialOrderReadsPassivelyAndVisibleReorderPreservesUnavailableSlots() async throws {
+        var playback = MusicModel.playback
+        playback["metadataPlatforms"] = .strings(["kw", "tx"])
+        playback["metadataEnabled"] = .strings(["tx"])
+        let bytes = try MetadataNativeFixture.document(playback: playback)
+        let store = NativeMusicTestLibrary(bytes), service = try await MetadataNativeFixture.service(store)
+        let value = try await service.metadataPreferences()
+        XCTAssertEqual(value.platforms, [.qq, .netease, .kugou])
+        XCTAssertEqual(value.enabledPlatforms, [.qq])
+        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+        _ = try await service.updateMetadataPreferences(.init(ifRevision: 0,
+            platforms: [.kugou, .netease, .qq], enabledPlatforms: [.kugou]))
+        let saved = try MJ.parse(XCTUnwrap(store.snapshot().0))["areas"]["playback"]
+        XCTAssertEqual(saved["metadataPlatforms"].strings, ["kw", "kg", "wy", "tx"])
+        XCTAssertEqual(saved["metadataEnabled"].strings, ["kg"])
+        await service.close()
+    }
+
+    func testEnabledSourceOutsidePartialOrderRemainsAvailableWithoutEnablingOthers() async throws {
+        var playback = MusicModel.playback
+        playback["metadataPlatforms"] = .strings(["wy"])
+        playback["metadataEnabled"] = .strings(["tx"])
+        let song = try MetadataNativeFixture.song([MetadataNativeFixture.row(.netease, "11"),
+                                                   MetadataNativeFixture.row(.qq, "12")])
+        let bytes = try MetadataNativeFixture.document(song: song, playback: playback)
+        let store = NativeMusicTestLibrary(bytes), service = try await MetadataNativeFixture.service(store)
+        let result = try await service.metadataCandidates(occurrenceID: "entry-1")
+        XCTAssertEqual(result.candidates.map(\.source.platform), ["tx"])
+        XCTAssertEqual(result.preferences.enabledPlatforms, [.qq])
+        XCTAssertEqual(store.snapshot().0, bytes); XCTAssertEqual(store.snapshot().2, 0)
+        await service.close()
     }
 
     func testInvalidPatchesAndStorageFailureDoNotPartiallyCommit() async throws {

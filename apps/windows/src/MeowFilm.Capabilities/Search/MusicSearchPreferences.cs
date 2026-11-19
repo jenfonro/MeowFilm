@@ -24,6 +24,7 @@ public sealed class MusicSearchPlatformRow(string platform, bool enabled) : INot
 public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChanged
 {
     private int pages = 1, concurrency = 1, cacheMinutes = 60;
+    private string[] savedOrder = [], savedEnabled = [];
     public string Kind { get; } = kind;
     public int Pages => pages;
     public int Concurrency => concurrency;
@@ -40,8 +41,9 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var order = value.GetProperty("order").EnumerateArray()
             .Select(item => item.GetString()!).ToArray();
-        MusicDto.Require(order.Length == 5 && order.Distinct(StringComparer.Ordinal).Count() == 5 &&
-            order.All(key => key is "wy" or "tx" or "kw" or "kg" or "mg"));
+        savedOrder = order;
+        savedEnabled = order.Where(enabled.Contains).ToArray();
+        order = order.Concat(MusicLibraryOwner.SearchPlatforms.Except(order)).ToArray();
         var existing = Platforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
         for (var index = 0; index < order.Length; index++)
         {
@@ -62,8 +64,7 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
     }
 
     internal SearchKindState Snapshot() => new(
-        Platforms.Select(row => row.Platform).ToArray(),
-        Platforms.Where(row => row.Enabled).Select(row => row.Platform).ToArray(),
+        savedOrder, savedEnabled,
         pages, concurrency, cacheMinutes);
 
     private void Changed([CallerMemberName] string name = "") =>
@@ -85,7 +86,9 @@ public sealed partial class MusicCapability
         Discovery = 2
     }
 
-    private bool searchPreferencesLoaded, searchPreferencesBusy, searchHistoryLoaded;
+    private bool songSearchLoaded, playlistSearchLoaded, searchPreferencesBusy, searchHistoryLoaded;
+    private bool searchPreferencesLoaded => songSearchLoaded && playlistSearchLoaded;
+    private bool SearchPreferencesLoaded(string kind) => kind == "songs" ? songSearchLoaded : playlistSearchLoaded;
     private int searchHistoryCount;
     private long searchPreferenceRevision, searchHistoryRevision, searchSubmission;
     private long searchHistoryEpoch;
@@ -105,26 +108,33 @@ public sealed partial class MusicCapability
     private void RetireSearchPreferencesSettings()
     {
         searchPreferencesGeneration++;
-        searchPreferencesLoaded = false;
+        songSearchLoaded = playlistSearchLoaded = false;
     }
 
     private async Task ReadSearchPreferences(CancellationToken token)
     {
         long generation = searchPreferencesGeneration;
+        Exception? failure = null;
         try
         {
-            var reply = await Call("music.search.settings.get", cancellationToken: token);
-            if (!SearchPreferencesCurrent(generation)) return;
-            PublishSearchPreferences(reply.GetProperty("settings"));
-            searchPreferenceStatus = "";
-        }
-        catch (OperationCanceledException) { throw; }
-        catch
-        {
-            if (!SearchPreferencesCurrent(generation)) return;
-            searchPreferencesLoaded = false;
-            searchPreferenceStatus = "搜索设置不可用";
-            throw;
+            foreach (string kind in new[] { "songs", "playlists" })
+            {
+                try
+                {
+                    var reply = await Call("music.search.settings.get", new { kind }, token);
+                    if (!SearchPreferencesCurrent(generation)) return;
+                    PublishSearchPreferences(reply.GetProperty("settings"), kind);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception error)
+                {
+                    if (!SearchPreferencesCurrent(generation)) return;
+                    if (kind == "songs") songSearchLoaded = false; else playlistSearchLoaded = false;
+                    failure ??= error;
+                }
+            }
+            searchPreferenceStatus = failure is null ? "" : "搜索设置不可用";
+            if (failure is not null) throw failure;
         }
         finally
         {
@@ -132,12 +142,19 @@ public sealed partial class MusicCapability
         }
     }
 
-    private void PublishSearchPreferences(JsonElement value)
+    private void PublishSearchPreferences(JsonElement value, string? kind = null)
     {
         searchPreferenceRevision = MusicDto.Integer(value, "revision");
-        SongSearch.Apply(value.GetProperty("songs"));
-        PlaylistSearch.Apply(value.GetProperty("playlists"));
-        searchPreferencesLoaded = true;
+        if (kind is null or "songs")
+        {
+            SongSearch.Apply(value.GetProperty("songs"));
+            songSearchLoaded = true;
+        }
+        if (kind is null or "playlists")
+        {
+            PlaylistSearch.Apply(value.GetProperty("playlists"));
+            playlistSearchLoaded = true;
+        }
         SearchPreferenceBindings();
     }
 
@@ -250,7 +267,8 @@ public sealed partial class MusicCapability
         {
             var values = state.Enabled.ToHashSet(StringComparer.Ordinal);
             if (enabled) values.Add(row.Platform); else values.Remove(row.Platform);
-            return state with { Enabled = state.Order.Where(values.Contains).ToArray() };
+            var order = enabled && !state.Order.Contains(row.Platform) ? state.Order.Append(row.Platform).ToArray() : state.Order;
+            return state with { Order = order, Enabled = order.Where(values.Contains).ToArray() };
         }
         if (kind == "songs") songs = Change(songs); else playlists = Change(playlists);
         return SaveSearchPreferencesAsync(songs, playlists);
@@ -266,7 +284,7 @@ public sealed partial class MusicCapability
         var playlists = PlaylistSearch.Snapshot();
         SearchKindState Move(SearchKindState state)
         {
-            var order = state.Order.ToList();
+            var order = settings.Platforms.Select(row => row.Platform).ToList();
             int from = order.IndexOf(source.Platform), to = order.IndexOf(target.Platform);
             if (from < 0 || to < 0) return state;
             order.RemoveAt(from);
@@ -278,11 +296,13 @@ public sealed partial class MusicCapability
         return SaveSearchPreferencesAsync(songs, playlists);
     }
 
-    private static bool Matches(MusicSearchKindSettings current, SearchKindState desired) =>
-        current.Pages == desired.Pages && current.Concurrency == desired.Concurrency &&
-        current.CacheMinutes == desired.CacheMinutes &&
-        current.Platforms.Select(row => row.Platform).SequenceEqual(desired.Order) &&
-        current.Platforms.Where(row => row.Enabled).Select(row => row.Platform).SequenceEqual(desired.Enabled);
+    private static bool Matches(MusicSearchKindSettings current, SearchKindState desired)
+    {
+        var saved = current.Snapshot();
+        return saved.Pages == desired.Pages && saved.Concurrency == desired.Concurrency &&
+            saved.CacheMinutes == desired.CacheMinutes && saved.Order.SequenceEqual(desired.Order) &&
+            saved.Enabled.SequenceEqual(desired.Enabled);
+    }
 
     private Task SaveSearchPreferencesAsync(SearchKindState songs, SearchKindState playlists)
     {
@@ -327,7 +347,7 @@ public sealed partial class MusicCapability
                 catch
                 {
                     if (!SearchPreferencesCurrent(generation)) return;
-                    searchPreferencesLoaded = false;
+                    songSearchLoaded = playlistSearchLoaded = false;
                     searchPreferenceStatus = "搜索设置保存失败";
                     throw;
                 }
@@ -375,6 +395,5 @@ public sealed partial class MusicCapability
     }
 
     private string[] SearchDispatchPlatforms(string kind) =>
-        (kind == "songs" ? SongSearch : PlaylistSearch).Platforms
-            .Where(row => row.Enabled).Select(row => row.Platform).ToArray();
+        (kind == "songs" ? SongSearch : PlaylistSearch).Snapshot().Enabled;
 }

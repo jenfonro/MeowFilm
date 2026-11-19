@@ -176,13 +176,17 @@ quality = area("native-quality-policy", "windows_quality", "schema:i revision:i 
 for name in ("qualityOrder", "qualityEnabled", "spatialOrder", "spatialEnabled"):
     values(quality, name)
 for area_name, table in (("native-official-sources", "windows_official_sources"),
-                         ("native-metadata-policy", "windows_metadata"),
-                         ("native-search-policy", "windows_search")):
+                         ("native-metadata-policy", "windows_metadata")):
     row = area(area_name, table, "schema:i revision:i")
     for name in ("platforms", "enabled"):
         values(row, name)
-search = area("native-search-history", "windows_search_history", "schema:i")
-values(search, "items")
+search = area("native-search-policy", "windows_search", "schema:i revision:i")
+for kind in ("songs", "playlists"):
+    row = relation(search, kind, "object", "pages:i concurrency:i cacheMinutes:i")
+    for name in ("order", "enabled"):
+        values(row, name)
+search_history = area("native-search-history", "windows_search_history", "schema:i revision:i")
+relation(search_history, "items", "array", "text:t kind:t")
 exclusions = area("native-source-exclusions", "windows_exclusions", "schema:i revision:i")
 relation(exclusions, "items", "array", "songId:t provider:t platform:t providerName:t title:t artist:t at:i")
 lyrics = area("native-local-lyrics", "windows_local_lyrics", "schema:i")
