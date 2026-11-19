@@ -62,20 +62,18 @@ internal static class NativeDesktopCapture
         try
         {
             if (presenter is not null) presenter.IsAlwaysOnTop = true;
-            var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            bool renderingObserved = false;
-            EventHandler<object> rendering = (_, _) => renderingObserved = true;
-            EventHandler<RenderedEventArgs> completed = (_, _) =>
+            // An unchanged XAML tree need not produce a fresh Rendered event.
+            // Sample after the next render pass, then flush the actual compositor and desktop.
+            var rendering = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            EventHandler<object> onRendering = (_, _) =>
             {
-                if (!renderingObserved) return;
                 for (DependencyObject? current = target; current is not null; current = VisualTreeHelper.GetParent(current))
                     if (current is UIElement { Opacity: < 1 }) return;
-                rendered.TrySetResult();
+                rendering.TrySetResult();
             };
-            CompositionTarget.Rendering += rendering;
-            CompositionTarget.Rendered += completed;
-            try { await rendered.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
-            finally { CompositionTarget.Rendering -= rendering; CompositionTarget.Rendered -= completed; }
+            CompositionTarget.Rendering += onRendering;
+            try { await rendering.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { CompositionTarget.Rendering -= onRendering; }
             await ElementCompositionPreview.GetElementVisual(target).Compositor.RequestCommitAsync();
             Marshal.ThrowExceptionForHR(DwmFlush());
             // TransformToVisual includes the handoff visual's compositor values.

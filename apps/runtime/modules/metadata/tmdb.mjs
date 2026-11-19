@@ -114,6 +114,7 @@ function responseData(response, path, size) {
   const interaction = /(?:captcha|cf-chl-|challenge-platform|turnstile|verify\s+(?:you|that)|verification|log[ -]?in|sign[ -]?in|登录|验证码|人机)/i;
   requireValue(!(header(response.headers, 'cf-mitigated').toLowerCase() === 'challenge' ||
     html && interaction.test(text)), 'WEB_INTERACTION_REQUIRED');
+  requireValue(response.status !== 401 && response.status !== 403, 'AUTH_FAILED');
   requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
   requireValue(!html && Buffer.from(text, 'utf8').equals(response.body), 'UPSTREAM_FORMAT');
   let value;
@@ -160,6 +161,7 @@ export async function requestTMDB(input, { settings, request, signal }) {
   const token = credential.replace(/^Bearer\s+/i, '').trim();
   if (token && (accessToken || /^Bearer\s+/i.test(credential) || token.includes('.'))) headers.Authorization = `Bearer ${token}`;
   else if (token) url.searchParams.set('api_key', token);
+  requireValue(url.hostname !== 'api.themoviedb.org' || token || url.searchParams.get('api_key'), 'NOT_CONFIGURED');
   requireValue(!signal?.aborted, 'CANCELLED');
   let response;
   try {

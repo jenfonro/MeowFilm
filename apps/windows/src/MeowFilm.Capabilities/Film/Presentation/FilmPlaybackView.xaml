@@ -155,6 +155,7 @@
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,100,0,0">
          <Button Content="重连" Click="Reconnect_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="4,0" Visibility="{Binding NeedsRecovery,Converter={StaticResource Film.Visible}}" />
+         <Button x:Name="RetryLoadingButton" Content="重新加载" Click="RetryLoading_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="4,0" Visibility="{Binding CanRetryLoading,Converter={StaticResource Film.Visible}}" AutomationProperties.Name="重新加载影片资料" />
          <Button x:Name="RetryMediaRecoveryButton" Content="重新取址" Click="RetryMedia_Click" Margin="4,0" AutomationProperties.Name="重试当前媒体地址" Style="{StaticResource Film.PlayerTextButton}" Visibility="Collapsed">
           </Button>
         </StackPanel>

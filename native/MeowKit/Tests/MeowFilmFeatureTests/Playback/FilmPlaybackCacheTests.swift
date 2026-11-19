@@ -122,25 +122,43 @@ final class FilmPlaybackCacheTests: XCTestCase {
         await model.close()
     }
 
-    func testAddressRetryCarriesPendingCurrentOrExplicitIdentityAndLeavesLastFailedSelectionToOwner() async throws {
+    func testAddressRetryCarriesPendingCurrentOrLastFailedIdentitySuppliedByOwner() async throws {
         let values = [
             FilmPlaybackFixture.snapshot(stage: "prepared", attempt: FilmPlaybackFixture.attempt("pending", prepareOnly: true)),
             FilmPlaybackFixture.snapshot(stage: "playing", current: FilmPlaybackFixture.current("current")),
-            FilmPlaybackFixture.snapshot(stage: "unavailable")
+            FilmPlaybackFixture.snapshot(stage: "unavailable", retryMediaAttemptID: "failed")
         ]
-        for (value, expected) in zip(values, [RuntimeValue.string("pending"), .string("current"), .null]) {
+        for (value, expected) in zip(values, [RuntimeValue.string("pending"), .string("current"), .string("failed")]) {
             let server = FilmPlaybackWireServer(value)
             let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
             await model.open()?.value
+            XCTAssertTrue(model.canRetryMedia)
             await model.retryMedia()?.value
             await model.retryMedia(attemptID: "captured")?.value
             let retries = await server.calls().filter { $0.1.filmObject?["action"] == .string("media.retry") }
             XCTAssertEqual(retries.count, 2)
-            XCTAssertEqual(retries[0].1.filmObject?["attemptId"], expected == .null ? nil : expected)
+            XCTAssertEqual(retries[0].1.filmObject?["attemptId"], expected)
             XCTAssertEqual(retries[1].1.filmObject?["attemptId"], .string("captured"))
             XCTAssertFalse(retries.contains { $0.1.filmObject?["candidateId"] != nil })
             await model.close()
         }
+    }
+
+    func testInitializationFailureHasNoMediaRetryAndRefreshUsesTheLoadingOwner() async throws {
+        let server = FilmPlaybackWireServer(FilmPlaybackFixture.snapshot(stage: "error",
+            initializationError: "NOT_CONFIGURED"))
+        let media = FilmPlaybackTestMedia(), model = makeModel(server, media)
+        await model.open()?.value
+        XCTAssertEqual(model.snapshot?.initializationError, "NOT_CONFIGURED")
+        XCTAssertFalse(model.canStartPlayback)
+        XCTAssertFalse(model.canRetryMedia)
+        XCTAssertNil(model.retryMedia())
+        await model.refreshBrowsing()?.value
+        let actions = await server.calls().filter { $0.0 == "session.command" }
+        XCTAssertTrue(actions.contains { $0.1.filmObject?["action"] == .string("browse.refresh") })
+        XCTAssertFalse(actions.contains { $0.1.filmObject?["action"] == .string("media.retry") })
+        XCTAssertTrue(media.prepared.isEmpty)
+        await model.close()
     }
 
     func testRejectedStaleRetryKeepsTheAdmittedPendingAndCurrentUntilTheOriginalPendingCommits() async throws {

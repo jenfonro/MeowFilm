@@ -178,8 +178,8 @@ internal sealed class FilmPlaybackNativeFixture : IAsyncDisposable
         await Until(async () => FilmJson.Text(await SnapshotAsync(id), "stage") != "loading", "real session initialization");
         var entry = FilmJson.Member(await SnapshotAsync(id), "entryTarget");
         string resolvedId = FilmJson.RequiredText(entry, "id");
-        Check(resolvedId == "tmdb:movie:1" && FilmJson.Text(entry, "metadataProvider") == "tmdb" &&
-            FilmJson.Text(entry, "metadataId") == "1", "the real Node catalog owns the canonical metadata identity");
+        Check(resolvedId == target.Id && FilmJson.Text(entry, "metadataProvider") == "tmdb" &&
+            FilmJson.Text(entry, "metadataId") == target.MetadataId, "the real Node catalog owns the canonical metadata identity");
         return new(session, page, id, resolvedId);
     }
 

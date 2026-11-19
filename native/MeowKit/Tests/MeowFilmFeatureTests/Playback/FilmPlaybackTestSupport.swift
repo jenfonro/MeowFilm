@@ -82,10 +82,14 @@ enum FilmPlaybackFixture {
                          episodes: [RuntimeValue] = [], target: RuntimeValue = target,
                          metadataSources: [RuntimeValue]? = nil, metadataSourceID: String? = nil,
                          metadataError: String? = nil, metadataCache: RuntimeValue = .null,
-                         metadataSupplement: RuntimeValue = .null, workInfo: RuntimeValue = .null) -> RuntimeValue {
+                         metadataSupplement: RuntimeValue = .null, workInfo: RuntimeValue = .null,
+                         initializationError: String? = nil, retryMediaAttemptID: String? = nil) -> RuntimeValue {
         var fields: RuntimeObject = [
             "sessionId": .string(sessionID.uuidString.lowercased()), "sequence": .number(Double(sequence)),
             "target": target, "stage": .string(stage), "error": .null, "metadata": metadata,
+            "initializationError": initializationError.map(RuntimeValue.string) ?? .null,
+            "retryMediaAttemptId": (retryMediaAttemptID ?? attempt.filmObject?["id"]?.filmText ??
+                current.filmObject?["attemptId"]?.filmText).map(RuntimeValue.string) ?? .null,
             "workInfo": workInfo, "metadataCache": metadataCache, "metadataSupplement": metadataSupplement,
             "sources": .array([.object(["businessId": .string("source-fixture"), "playbackTarget": sourceTarget(),
                                          "id": .string("result-a"), "title": .string("星河"), "source": source,
@@ -269,6 +273,7 @@ actor FilmPlaybackWireServer {
             if action == "stop" {
                 pending = nil; current = nil
                 fields["attempt"] = .null; fields["current"] = .null; fields["stage"] = .string("stopped")
+                fields["retryMediaAttemptId"] = .null
             }
             value = .object(fields)
         }

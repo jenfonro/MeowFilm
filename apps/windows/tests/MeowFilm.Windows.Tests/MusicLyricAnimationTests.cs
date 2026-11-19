@@ -390,6 +390,13 @@ public static class MusicLyricAnimationTests
             }
             Equal(1, completions);
             Near(1500, scroll.VerticalOffset, .5, "same in-flight target completes once instead of restarting");
+            int replacedCompletions = 0;
+            MusicLyricScroll.Move(scroll, 100, () => replacedCompletions++);
+            var replacement = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            MusicLyricScroll.Move(scroll, 800, () => replacement.TrySetResult());
+            await replacement.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(0, replacedCompletions);
+            Near(800, scroll.VerticalOffset, .5, "retargeting completes only the actual latest native scroll");
             var completed = completions;
             MusicLyricScroll.Move(scroll, 300, Settled);
             MusicLyricScroll.Stop(scroll);
@@ -415,8 +422,8 @@ public static class MusicLyricAnimationTests
         internal static Fixture WithLines(MusicLyricWord[][] lines, double position) =>
             new(lines, LineTemplate(), position);
 
-        private static DataTemplate WordTemplate() => MusicTestUi.Template("<local:MusicLyricWordView Word='{Binding}' FontSize='20' FontWeight='Normal' Foreground='Gray' Highlight='White'/>");
-        private static DataTemplate LineTemplate() => MusicTestUi.Template("<ItemsControl ItemsSource='{Binding}'><ItemsControl.ItemsPanel><ItemsPanelTemplate><local:MusicWrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><local:MusicLyricWordView Word='{Binding}' FontSize='20' FontWeight='Normal' Foreground='Gray' Highlight='White'/></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>");
+        private static DataTemplate WordTemplate() => (DataTemplate)Application.Current.Resources["LyricTestWord"];
+        private static DataTemplate LineTemplate() => (DataTemplate)Application.Current.Resources["LyricTestLine"];
 
         private Fixture(System.Collections.IEnumerable items, DataTemplate template, double position)
         {

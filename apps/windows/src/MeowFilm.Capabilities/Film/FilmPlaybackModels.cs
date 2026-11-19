@@ -33,7 +33,7 @@ internal static class FilmPlaybackError
         "NO_MATCH" => "未找到匹配片源",
         "PERMISSION_DENIED" => "没有访问权限",
         "AUTH_REQUIRED" => "请先登录账号",
-        "AUTH_FAILED" => "账号认证失败，请重新登录",
+        "AUTH_FAILED" => "认证失败，请检查凭据",
         PlaybackError.HttpUnauthorized => "媒体认证失败",
         "LOGIN_EXPIRED" => "账号登录已失效，请重新登录",
         "NOT_CONFIGURED" => "尚未完成配置",

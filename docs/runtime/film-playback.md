@@ -377,6 +377,7 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   `browse.season {season}` 按需真实分季；映射无证据时不造季或集。
 - `browse.refresh {refresh?}` 默认显式刷新当前元数据及所看季、或准确站点详情／线路目录。
   `refresh:false` 用于普通页面恢复，仅让owner判定是否过期／缺资料，不强刷。
+  snapshot 的 `initializationError` 非空时，重跑失败的资料初始化，包括豆瓣入口查找、TMDB 详情和所选季；成功前不允许启动新媒体。初始化失败没有媒体候选，不能用 `media.retry` 恢复。
   保留旧成功展示并报告刷新错误，不更换当前播放文件、目标坐标或媒体lease。
   已加载目录在校验期间以 `browsing.refreshing:true` 保留 rows，不先发布空目录再还原。
   新成功资料已删除的线路／文件不能因随后扩展失败而回滚复活。
@@ -408,6 +409,7 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   candidateId；替代失败保旧输出与恢复目标，成功后才保存新文件身份。
 - `media.retry {attemptId?}` 定向撤掉准确 pending/current（或最近失败候选）的短效地址，
   重新取同一文件，不变成换源搜索，保同集进度／暂停意图。传入旧 attemptId 则拒绝。
+  客户端按 snapshot 的 `retryMediaAttemptId` 启用重试并原样传回；值由运行器按 pending、current、失败终态的 lastFailed 顺序推导，没有有效候选、初始化失败、来源失效或已停止时为 null，不按通用 error/unavailable 状态猜测。候选耗尽仍可重试有效的最后失败项。
   `media.failed` 同样使失败地址失效，随后仍按既有暂时排除和换源逻辑续选，不永久屏蔽目录。
 - `preview {enabled}` 只切未播集显示／选择范围并按内容持久；不凭目录最大集号
   推已播。`shortvideo {enabled}` 准备已知相邻地址，预取下一集真实有限媒体字节。
@@ -446,7 +448,7 @@ data: JSON
 只保留当前状态并随背压合并，不积累无限事件历史。重新连接先交当前快照；
 断开观察不关闭业务会话，也不停止实际媒体。snapshot 含 entryTarget、entrySurface、target、stage、metadata、workInfo、
 metadataSources、sources、search、browsing、episodes、candidates、attempt、current、
-preferences、error、errorStage、reportError 和 prefetch；不含 URL、头、分享密码、playId 或 DRM key。
+preferences、error、initializationError、retryMediaAttemptId、errorStage、reportError 和 prefetch；不含 URL、头、分享密码、playId 或 DRM key。
 仍发送完整快照，sequence 语义不变；没有新增目录 revision 或差量协议。
 
 `metadata`／`metadataSourceId` 是当前浏览资料；`workInfo` 是独立作品投影，为 null 或

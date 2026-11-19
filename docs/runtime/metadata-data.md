@@ -70,6 +70,8 @@ App 冷启动先读配置，活跃块通知由装配层重读并调用模块 `se
 
 get 直接返回上述值。双端只有一个明文“TMDB API TOKEN”输入项；支持 v3 key、v4 JWT 和 `Bearer ` 前缀。保存空 TOKEN 即清除，不提供额外的清除按钮。数据／图片代理留空保存使用官方端点。地址使用 HTTP(S)，不允许混入控制字符、query 或 fragment；没有域名名单、Origin 检查或自动探测代理。
 
+实际请求官方 TMDB API 时，缺少 TOKEN 与显式 `api_key` 返回 `NOT_CONFIGURED`，不先等待无鉴权的网络请求。显式配置的数据代理可以自行提供鉴权，因此不要求客户端额外填 TOKEN。此检查只发生在实际请求处，不影响离线设置或运行器启动。数据代理地址是 HTTP(S) API 基址，不是系统 HTTP CONNECT 代理地址；Windows Node 请求不自动继承系统代理。
+
 例如与服务器同样使用多级部署地址：
 
 ```json
@@ -240,6 +242,8 @@ Windows 运行器图片 GET 使用独立的可复用 handler；两个 `ReadImage
 | `INVALID_REQUEST` | 参数、设置、路径或资源引用的格式不合法 |
 | `CLOSED` / `CANCELLED` | 模块关闭／请求取消 |
 | `NETWORK_ERROR` | 上游网络失败 |
+| `NOT_CONFIGURED` | 请求官方 TMDB API 时未提供凭据 |
+| `AUTH_FAILED` | TMDB 数据请求返回 HTTP 401／403；网页验证仍优先报告 `WEB_INTERACTION_REQUIRED` |
 | `UPSTREAM_HTTP` | 上游 HTTP 失败或重定向未能终结 |
 | `UPSTREAM_FORMAT` | 响应格式不符或图片入口返回非图片 |
 | `WEB_INTERACTION_REQUIRED` | 豆瓣登录／网页验证要求 |

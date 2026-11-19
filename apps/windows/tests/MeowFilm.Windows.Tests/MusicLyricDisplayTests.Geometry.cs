@@ -191,7 +191,9 @@ public static partial class MusicLyricDisplayTests
             foreach (var size in new[] { new Size(1298, 848), new Size(1000, 740) })
             foreach (var key in new[] { VirtualKey.Home, VirtualKey.End, VirtualKey.PageUp })
             {
-                window.Resize(size.Width, size.Height); view.Width = size.Width; view.Height = size.Height; DesktopTestUi.WindowRoot(window).UpdateLayout();
+                double scale = view.XamlRoot.RasterizationScale;
+                window.AppWindow.ResizeClient(new((int)Math.Round(size.Width * scale), (int)Math.Round(size.Height * scale)));
+                view.Width = size.Width; view.Height = size.Height; DesktopTestUi.WindowRoot(window).UpdateLayout();
                 Equal(size.Width, view.ActualWidth); Equal(size.Height, view.ActualHeight);
                 await MusicTestUi.Drain();
                 await WaitForLyric(() => !intermediate && !MusicLyricScroll.IsMoving(scroll) &&
@@ -213,7 +215,7 @@ public static partial class MusicLyricDisplayTests
                         .Select(row => $"{list.IndexFromContainer(row)}:{DesktopTestUi.Bounds(row, scroll)}:context={row.DataContext?.GetType().Name}")) : "none";
                     throw new InvalidOperationException($"{error.Message}; key={key}, size={size}, preview={f.Module.HasLyricPreview}, " +
                         $"index={previous}->{f.Module.LyricDisplayIndex}, gap={CenterGap(list, scroll, f.Module.LyricDisplayIndex)}, " +
-                        $"offset={scroll.VerticalOffset}, moving={MusicLyricScroll.IsMoving(scroll)}, intermediate={intermediate}, scrollable={scroll.ScrollableHeight}, viewport={scroll.ViewportHeight}, " +
+                        $"offset={scroll.VerticalOffset}, target={MusicLyricScroll.ManualTarget(scroll)}, moving={MusicLyricScroll.IsMoving(scroll)}, intermediate={intermediate}, scrollable={scroll.ScrollableHeight}, viewport={scroll.ViewportHeight}, " +
                         $"extent={scroll.ExtentHeight}, list={list.ActualWidth}x{list.ActualHeight}, rows={rows}", error);
                 }
                 // Pixel capture must observe one preview, independently of its idle timeout.
