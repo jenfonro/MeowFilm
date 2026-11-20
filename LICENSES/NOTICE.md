@@ -313,8 +313,14 @@ Adapted portions:
   families represented by `src/plugins/api/onlineScriptAdapters.js`; requests go directly
   to the selected installation's current managed endpoint.
 - Provider capture, Cat root-level extension and display metadata behavior in
-  `pan-interceptor.js` and `cat-output.js` were informed by
-  `runtimePanCapture.js`, `panmockDetailCodec.js` and `panDisplayMeta.js`.
+  `pan-interceptor.js`, `pan-placeholders.js` and `cat-output.js` were informed by
+  `onlineRuntime.js`, `runtimePanCapture.js`, `panmockDetailCodec.js` and `panDisplayMeta.js`.
+  The Quark/UC placeholder fields, Baidu share verification cookie and list shape,
+  Tianyi numeric share/file binding and Mobile nested/AES-CBC placeholder protocol
+  adapt the reference interception behavior to an invocation-local capture scope;
+  unknown requests fail locally instead of being sent to provider endpoints.
+  Those placeholder protocols were checked against `CatPawRunner/src/util/onlineRuntime.js`
+  in `jenfonro/meowfilm-server` snapshot `934a03e5aeda7edbcef0cfb037734fed93bfe881`.
   That script-capture layer does not include provider SDKs. The separately selectable
   pan runtime below implements the provider protocols directly.
 

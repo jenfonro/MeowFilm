@@ -7,6 +7,7 @@ export function createPanRuntimeModule(options) {
   return {
     id: 'pan', version: spec.version, contract: spec.contract,
     ready: service.ready,
+    accounts: service.accounts,
     settingsChanged: () => service.settingsChanged(),
     methods: Object.fromEntries(spec.operations.map(operation => [spec.prefix + operation,
       async (input, context) => ({ ok: true, contract: spec.contract,

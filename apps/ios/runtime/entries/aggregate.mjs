@@ -5,7 +5,7 @@ import { createSourceRuntimeModule } from '../../../runtime/modules/source-runti
 import { createNeteaseTokenModule } from '../../../runtime/modules/netease-token.mjs';
 import { createPanRuntimeModule } from '../../../runtime/modules/pan-runtime.mjs';
 import { createTMDBDataModule, createDoubanDataModule } from '../../../runtime/modules/metadata-data.mjs';
-import { connectFilmPlayback, connectMusicPlatform } from '../../../runtime/entry.mjs';
+import { connectFilmPlayback, connectMusicPlatform, connectPanAccounts } from '../../../runtime/entry.mjs';
 
 let stage = 'arguments', owners;
 try {
@@ -25,6 +25,7 @@ try {
         modules.push(createSourceRuntimeModule({ dataRoot, platform: 'ios' }));
         stage = 'pan';
         modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.accounts('pan.accounts') } : {}) }));
+        connectPanAccounts(modules);
         stage = 'tmdb';
         modules.push(createTMDBDataModule({ dataRoot, nativeSettings: settings }));
         stage = 'douban';

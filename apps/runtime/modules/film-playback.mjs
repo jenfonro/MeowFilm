@@ -1,4 +1,5 @@
 import { contracts } from '../contracts.mjs';
+import { isDeepStrictEqual } from 'node:util';
 import { createPlaybackCache, createPlaybackLibrary, createMediaService, createPlaybackData,
   createPlaybackService, createFilmRulesService, createFilmSearchService, createFilmCatalog,
   fail, object, requireValue } from '@meowfilm/film-playback';
@@ -20,7 +21,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
   const spec = contracts.film;
   let closed = false, closing;
   const sourceMutations = {
-    cat: new Set(['refresh', 'install', 'import', 'edit', 'update', 'restart', 'enable', 'uninstall', 'management.sync']),
+    cat: new Set(['refresh', 'install', 'import', 'edit', 'update', 'restart', 'enable', 'uninstall']),
     source: new Set(['load', 'unload', 'close']),
   };
   const panMutations = new Set(['settings.set', 'settings.clear', 'refresh', 'login.poll']);
@@ -39,9 +40,11 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     .filter(id => owners.has(id)).map(id => [id, providerState(id).catch(() => null)]) : []);
   const sourceChanged = (a, b) => ['generation', 'revision', 'state', 'enabled', 'sourceHash', 'contentHash']
     .some(key => a?.[key] !== b?.[key]) || !!a !== !!b;
-  const sourceMatches = (scope, domain) => object(domain) ? domain.kind === 'source' &&
-    scope.sourceEngine === domain.engine &&
-    (domain.installationId === undefined || scope.sourceInstallationId === domain.installationId)
+  const sourceMatches = (scope, domain) => object(domain) ?
+    (domain.kind === 'source' || domain.kind === 'script-account' && !scope.accountProvider && !scope.fileProvider) &&
+    scope.sourceEngine === (domain.kind === 'script-account' ? 'cat' : domain.engine) &&
+    (domain.installationId === undefined || scope.sourceInstallationId === domain.installationId) &&
+    (domain.generation === undefined || scope.sourceGeneration === domain.generation)
     : domain === 'source' ? ['cat', 'source'].includes(scope.sourceEngine)
       : domain === 'pan' ? !!(scope.accountProvider || scope.fileProvider)
         : scope.sourceKey === domain || scope.accountProvider === domain || scope.fileProvider === domain;
@@ -57,18 +60,17 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
       !(discardCacheError && index === 0 && result.reason?.code === 'STORAGE_ERROR'));
     if (failure) throw failure.reason;
   }
-  async function applyProviderChange(moduleId, before, after, { operation, input, value, succeeded } = {}) {
+  async function applyProviderChange(moduleId, before, after, { succeeded } = {}) {
     const work = [];
     let instances;
     if (moduleId === 'cat' || moduleId === 'source') {
       const old = before?.instances ?? [], next = after?.instances ?? [];
       instances = next;
       const ids = new Set([...old, ...next].map(row => row.installationId));
+      const routingChanged = moduleId === 'cat' && !isDeepStrictEqual(before?.routing, after?.routing);
       for (const installationId of ids) {
-        if (sourceChanged(old.find(row => row.installationId === installationId),
-            next.find(row => row.installationId === installationId)) ||
-            succeeded && operation === 'management.sync' && value?.status === 'saved' &&
-              installationId === input.installationId) {
+        if (routingChanged || sourceChanged(old.find(row => row.installationId === installationId),
+            next.find(row => row.installationId === installationId))) {
           work.push(invalidate({ kind: 'source', engine: moduleId, installationId }, next));
         }
       }
@@ -172,6 +174,8 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
       else if (block === 'cat.sources') await observeProviderChange('cat');
     },
     observesMutation,
+    accountSaved: ({ installationId, generation, provider }) =>
+      invalidate({ kind: 'script-account', installationId, generation, provider }),
     methods: Object.fromEntries(Object.entries(operations).map(([operation, handler]) =>
       [spec.prefix + operation, async (input, context) => {
         if (closed) throw fail('CLOSED');

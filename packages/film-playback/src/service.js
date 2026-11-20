@@ -423,6 +423,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       delete source.manualSeasonHint;
       if (manual?.seasonHint !== undefined) source.manualSeasonHint = manual.seasonHint;
     }
+    const lines = detail.lines;
     const candidates = (await calculate(session, signal =>
       recognizeCandidates(detail, { target, source, metadata, rules: session.rules, signal,
         completeDirectory: true }), lifetime))
@@ -434,7 +435,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         recognizeVariantCandidates(candidate, variants, { rules: session.rules, signal }), lifetime));
       else expanded.push(candidate);
     }
-    return expanded;
+    return detail.lines === lines ? expanded : [];
   }
   async function candidatesFrom(session, result, detail) {
     if (closed || session.released || result.detail !== detail || !session.results.includes(result) ||
@@ -442,7 +443,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     const target = session.target, metadata = playbackMetadata(session), generation = session.generation;
     const manual = result.manualId ? currentManual(session, result) : null;
     const manualKey = manual ? manualIdentity(manual) : null;
-    const context = { detail, metadata: target.kind === 'group' ? null : metadata,
+    const context = { detail, lines: detail.lines, metadata: target.kind === 'group' ? null : metadata,
       targetId: target.id, kind: target.kind, variants: result.variants,
       manualKey, seasonHint: result.source.manualSeasonHint, hint: result.hint, verifiedRaw: result.verifiedRaw };
     const previous = result.recognized;
@@ -458,6 +459,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     const current = result.manualId ? currentManual(session, result) : null;
     if (target !== session.target ||
         metadata !== playbackMetadata(session) || generation !== session.generation || result.detail !== detail ||
+        detail.lines !== context.lines ||
         !session.results.includes(result) || result.variants !== context.variants ||
         result.hint !== context.hint || result.verifiedRaw !== context.verifiedRaw ||
         result.source.manualSeasonHint !== context.seasonHint ||
@@ -621,7 +623,9 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           accountProviders: line.episodes.map(item => item.file?.provider ?? item.share?.provider ?? item.provider ?? line.provider),
         }, () => data.expand(result.source, line, { canSchedule: () => valid(session, generation) }));
         if (!valid(session, generation)) return false;
-        detail = replaceLine(result, detail, index, expanded);
+        const currentIndex = detail.lines.findIndex(value => value.id === line.id);
+        if (currentIndex < 0) continue;
+        detail = replaceLine(result, detail, currentIndex, expanded);
         await candidatesFrom(session, result, detail);
         if (!valid(session, generation)) return false;
         publish(session);
@@ -1825,7 +1829,8 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       return previous.episodes;
     const candidates = await recognizeResult(session, result, result.detail, target, metadata, 'session');
     if (closed || session.released || generation !== session.browseGeneration ||
-        metadata !== (selected ? session.metadata : null) || !currentSource(session, result.source)) return null;
+        metadata !== (selected ? session.metadata : null) || !result.detail.lines.includes(line) ||
+        !currentSource(session, result.source)) return null;
     const episodes = browseEpisodes(result, line, candidates, parent);
     Object.assign(result.directories.get(line.id), { metadata, variants: result.variants });
     return episodes;
@@ -1909,7 +1914,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           detail = { lines: [line], detailId: row.id };
           result.baseDetail = detail; result.detail = detail;
         }
-      } else detail = !refresh && result.detail ? result.detail
+      } else detail = !refresh && result.detail && result.detailEntry ? result.detail
         : await loadDetail(session, result, generation, true, refresh);
       if (!admitted()) return;
       if (!detail) throw fail(result.error ?? 'UPSTREAM_ERROR');
@@ -2451,16 +2456,17 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           ? recognizeResult(session, result, result.detail, neighbor.target) : []))).flat();
         const eligibility = await Promise.all(available.map(candidate =>
           allowed(session, candidate, { gate: false, target: neighbor.target })));
-        if (!usable()) return;
+        if (!usable() || session.prefetch.get(key) !== entry) return;
         const candidates = available.filter((_, index) => eligibility[index]);
         candidates.sort((a, b) => compareCandidates(a, b, { preferences: preferences(), current: session.current.candidate }));
         const candidate = candidates[0];
         requireValue(candidate, 'NO_MATCH');
         entry.candidate = candidate;
-        const descriptor = await data.resolve(candidate, { canSchedule: usable });
-        if (!usable()) return;
+        const admitted = () => usable() && session.prefetch.get(key) === entry;
+        const descriptor = await data.resolve(candidate, { canSchedule: admitted });
+        if (!admitted()) return;
         const resource = await media.prepare(descriptor, { scope: descriptor.scope, cache: neighbor.direction === 1 });
-        if (!usable()) { await media.release(resource.id); return; }
+        if (!admitted()) { await media.release(resource.id); return; }
         Object.assign(entry, { candidate, descriptor, resource, preparedAt: now(), state: 'prepared' });
         if (neighbor.direction === 1) {
           entry.warming = true;
@@ -2498,6 +2504,75 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     if (error) session.error = codeOf(error);
     publish(session);
     if (error) throw error;
+  }
+  async function invalidateScriptAccount({ installationId, generation }) {
+    const matchesSource = source => source.engine === 'cat' && source.installationId === installationId &&
+      source.generation === generation;
+    const scriptCandidate = candidate => candidate && matchesSource(candidate.source) && !candidate.file && !candidate.share;
+    const retainLine = line => {
+      const episodes = line.episodes.filter(item => item.file || item.share);
+      return episodes.length === line.episodes.length ? line : episodes.length ? { ...line, episodes } : null;
+    };
+    const drains = [];
+    for (const session of sessions.values()) {
+      const results = session.results.filter(result => matchesSource(result.source));
+      if (!results.length && !session.sources.some(matchesSource)) continue;
+      const activity = session.runActivity;
+      const interrupted = activity && matchesSource(activity.source) &&
+        !activity.candidate?.file && !activity.candidate?.share && !activity.candidate?.accountProviders;
+      if (interrupted) { session.generation++; session.runKey = null; }
+      for (const source of session.sources.filter(matchesSource)) session.search.set(source.key,
+        { sourceKey: source.key, page: 0, completed: false, loading: false, error: null, seen: new Set() });
+      for (const [id, candidate] of session.candidates) if (scriptCandidate(candidate)) session.candidates.delete(id);
+      if (scriptCandidate(session.lastFailed?.candidate)) session.lastFailed = null;
+      if (scriptCandidate(session.actionCurrent)) session.actionCurrent = null;
+      const revoked = [session.current, session.pending].filter(value => scriptCandidate(value?.candidate));
+      if (revoked.includes(session.current)) session.current = null;
+      if (revoked.includes(session.pending)) session.pending = null;
+      for (const value of revoked) drains.push(retire(session, value));
+      for (const [key, value] of session.prefetch) if (!value.candidate || scriptCandidate(value.candidate)) {
+        session.prefetch.delete(key);
+        if (value.resource) drains.push(media.release(value.resource.id));
+      }
+      for (const result of results) {
+        // The script's raw receipt is stale; accepted pan share/file identities
+        // and their owner-produced directories do not consume that credential.
+        delete result.detailEntry;
+        delete result.recognized;
+        result.variants = new Map();
+        for (const detail of new Set([result.detail, result.baseDetail])) {
+          if (!detail) continue;
+          const lines = detail.lines.map(retainLine).filter(Boolean);
+          if (lines.length !== detail.lines.length || lines.some((line, index) => line !== detail.lines[index]))
+            detail.lines = lines;
+        }
+        for (const [id, directory] of result.directories ?? []) {
+          if (!result.detail?.lines.some(line => line.id === id && line === directory.line)) result.directories.delete(id);
+        }
+        if (!result.detail?.lines.length) result.state = 'idle';
+        if (result.browsing) delete result.browsing;
+        if (session.browsing.sourceId !== result.id) continue;
+        const lines = result.detail?.lines ?? [];
+        if (lines.some(line => line.id === session.browsing.lineId)) {
+          session.browsing = { ...session.browsing, lines: lines.map(line => fields(line, ['id', 'label', 'provider'])) };
+        } else {
+          session.browseGeneration++;
+          session.browsing = { ...session.browsing, loading: false, error: 'STALE_ACCOUNT',
+            lines: lines.map(line => fields(line, ['id', 'label', 'provider'])), episodes: [] };
+        }
+      }
+      session.searchUpdateEpoch++;
+      session.discoveryComplete = false;
+      if (interrupted || revoked.length) {
+        session.stage = session.current && !session.current.resourceReleased ? 'playing'
+          : session.pending && !session.pending.resourceReleased ? (session.pending.prepareOnly ? 'prepared' : 'pending') : 'idle';
+        session.error = 'STALE_ACCOUNT';
+      }
+      publish(session);
+    }
+    const settled = await Promise.allSettled(drains);
+    const failure = settled.find(value => value.status === 'rejected');
+    if (failure) throw failure.reason;
   }
   async function command(input, { searchHandoff } = {}) {
     requireValue(object(input) && text(input.action));
@@ -2907,6 +2982,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       return library.read().manual;
     },
     async invalidate(domain, instances) {
+      if (object(domain) && domain.kind === 'script-account') return invalidateScriptAccount(domain);
       const drains = [];
       const sourceScope = object(domain) && domain.kind === 'source' ? domain : null;
       const matchesSource = source => sourceScope

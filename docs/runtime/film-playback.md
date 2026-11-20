@@ -429,9 +429,23 @@ raw 保持准确单源／详情，不接受关联扩大。页面重进保当前�
   其他改名只更新标签，不强停此前已开始的 current 媒体。
   原生设置块通知与直接设置操作共用已观察的 provider 状态：
   `pan.accounts` 仅撤销实际 revision 变化的网盘 provider，`cat.sources` 仅撤销
-  实际 generation／revision／执行状态变化或移除的 installation。未变化账号、来源的
+  实际 generation／revision／执行状态变化或移除的 installation；网盘接管开关或别名
+  变化会撤销 Cat 来源的旧目录与媒体，防止继续使用此前接管方式生成的结果。
+  显式与主动账号同步收到脚本持久保存回执后，通过 installation／generation 的
+  `script-account` 依赖撤销原始脚本目录、搜索、详情、取址和 handoff；脚本没有公开
+  每项结果所用账号，因此该依赖覆盖对应实例的脚本结果。已交接的 pan 分享／文件、
+  内置目录和当前媒体只消费来源身份及 pan 账号，不因脚本保存而撤销；同账号代次
+  Cookie 轮换触发脚本同步时，正在执行的内置列盘／取址继续完成。混合详情撤销
+  脚本部分并保留 pan 部分，后续脚本消费重新读取当前详情。
+  未变化账号、来源的
   目录、pending/current 和媒体 lease 保留；真实撤权仍同时作用于 data、播放、
   搜索和受控媒体 owner，发布失效并等待资源排空，不以设置成功回执推测实际提交结果。
+
+开启网盘接管后，脚本请求落入尚不支持的端点或无法确定分享身份时，不发送该网盘请求。
+本次调用的明确接管失败以 `PAN_INTERCEPTION_UNSUPPORTED` 原样通过 film 返回客户端，
+提示关闭对应网盘接管后重试；脚本返回空详情、原始 opaque ID 或另一成功分享都不能
+掩盖该失败。无失败且准确交接的分享作为按需入口使用，占位响应不代表内置 pan 已列盘
+或账号已验证成功。
 
 ## 观察与媒体反馈
 
@@ -469,6 +483,8 @@ TMDB 空简介的可靠豆瓣填缺同步投影至该资料。收藏／页面入
 `attempt` 只是媒体意图；私有 `session.attempt` receipt 含
 `attemptId,id,url,mediaOrigin?,format?,drm?,title,position,paused,scope?`。
 只有可信 native owner 消费，不记录日志或放系统 NowPlaying。
+内部媒体 scope 保留来源 installation／generation 及实际 pan 账号依赖，供所属 owner
+精确失效；原生不从附加 scope 字段推导业务权限。
 有上游请求头时一次性生成本地流式资源，由 `mediaOrigin` 标识其本地资源来源；
 不把 Cookie 等凭据放进公开候选或快照，不要求播放器先直连失败再换路。
 候选和公开投影保留实际存在的 `quality/resolution/fps/codec`；这些字段来自网盘／媒体

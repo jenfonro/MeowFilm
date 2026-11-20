@@ -17,6 +17,8 @@ public partial class FilmSettingsView
     private CancellationTokenSource? sourceOperation;
     private bool sourcesLoaded, sourcesBusy, sourcesFailed;
     private string sourceWork = "";
+    private IReadOnlyDictionary<string, bool>? panInterception;
+    public bool CanEditPanInterception => panInterception is not null && !sourcesBusy;
     public ObservableCollection<FilmSettingsCatRow> CatRows { get; } = [];
     public ObservableCollection<FilmSettingsVideoRow> VideoRows { get; } = [];
     public bool SourcesLoaded => sourcesLoaded;
@@ -37,7 +39,32 @@ public partial class FilmSettingsView
     {
         foreach (string name in new[] { nameof(SourcesLoaded), nameof(SourcesBusy), nameof(SourcesIdle),
             nameof(SourcesFailed), nameof(HasSourceWork), nameof(CanEditSources), nameof(SourceWork), nameof(CatsEmpty),
-            nameof(VideosEmpty), nameof(CanDeleteCats), nameof(CanDeleteVideos), nameof(CanDetectVideos) }) Changed(name);
+            nameof(VideosEmpty), nameof(CanDeleteCats), nameof(CanDeleteVideos), nameof(CanDetectVideos),
+            nameof(CanEditPanInterception) }) Changed(name);
+    }
+
+    private CheckBox[] PanInterceptionSwitches =>
+        [BaiduInterception, QuarkInterception, UcInterception, TianyiInterception, YidongInterception];
+
+    private void ReplacePanInterception(IReadOnlyDictionary<string, bool> saved)
+    {
+        panInterception = saved;
+        foreach (var control in PanInterceptionSwitches) control.IsChecked = saved[(string)control.Tag];
+    }
+
+    private Task LoadPanInterceptionAsync() => RunSourcesAsync("正在读取网盘接管设置…", async token =>
+    {
+        var saved = await sources.ReadPanInterceptionAsync(token);
+        ReplacePanInterception(saved);
+    });
+
+    private async void PanInterception_Click(object sender, RoutedEventArgs e)
+    {
+        if (!Active || section != "pan-routing" || !CanEditPanInterception || sender is not CheckBox { Tag: string provider } control) return;
+        bool enabled = control.IsChecked == true;
+        await RunSourcesAsync("正在保存网盘接管设置…", async token =>
+            ReplacePanInterception(await sources.SavePanInterceptionAsync(provider, enabled, token)));
+        if (panInterception is not null) ReplacePanInterception(panInterception);
     }
 
     private Task LoadSourcesAsync() => RunSourcesAsync("正在读取来源…", async token =>
@@ -274,7 +301,11 @@ public partial class FilmSettingsView
         Active && section == "videos" && CanEditSources && MeowFilm.Desktop.DesktopVisual.IsVisible(element) && element is Control { IsEnabled: true } &&
         ReferenceEquals(element.DataContext, row) && VideoRows.Contains(row);
 
-    private async void SourcesRetry_Click(object sender, RoutedEventArgs e) => await LoadSourcesAsync();
+    private async void SourcesRetry_Click(object sender, RoutedEventArgs e)
+    {
+        if (section == "pan-routing") await LoadPanInterceptionAsync();
+        else await LoadSourcesAsync();
+    }
     private void SourcesCancel_Click(object sender, RoutedEventArgs e) => sourceOperation?.Cancel();
     private async Task<string[]> PickLocalScriptsAsync(string title)
     {

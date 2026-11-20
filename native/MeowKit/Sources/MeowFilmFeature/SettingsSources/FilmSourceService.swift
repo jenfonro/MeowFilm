@@ -70,6 +70,24 @@ public actor FilmSourceService {
         observeStartedRuntime()
     }
 
+    public func readPanInterception() async throws -> [PanProviderID: Bool] {
+        try await run { try await self.settings.readPanInterception() }
+    }
+
+    public func savePanInterception(_ provider: PanProviderID, enabled: Bool) async throws -> [PanProviderID: Bool] {
+        try await run {
+            let saved = try await self.settings.savePanInterception(provider, enabled: enabled)
+            await self.panInterceptionChanged()
+            return saved
+        }
+    }
+
+    private func panInterceptionChanged() {
+        configurationEpoch = UUID()
+        cancelDetections()
+        observeStartedRuntime()
+    }
+
     private func load() async throws {
         let configured = try await settings.read()
         if initialized { applyConfiguration(configured, received: snapshot.cats); return }

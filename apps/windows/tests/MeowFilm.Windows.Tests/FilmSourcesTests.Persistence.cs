@@ -8,6 +8,50 @@ namespace MeowFilm.Windows.Tests;
 
 public static partial class FilmSourcesTests
 {
+    private static async Task PanInterceptionSettings()
+    {
+        var runtime = new Runtime(); runtime.Add("a");
+        await using var store = new Store(runtime);
+        var root = JsonNode.Parse(store.CatBytes!)!.AsObject();
+        root["port"] = 1234;
+        root["providers"] = new JsonObject { ["quark"] = false, ["external"] = false };
+        root["mappings"] = new JsonArray(new JsonObject { ["provider"] = "quark", ["aliases"] = new JsonArray("自定义线路") });
+        store.CatBytes = JsonSerializer.SerializeToUtf8Bytes(root);
+        using var before = JsonDocument.Parse(store.CatBytes!);
+        string[] providers = ["baidu", "quark", "uc", "tianyi", "yidong"];
+        await using (var service = new FilmSourceService(runtime, store))
+        {
+            int writes = store.Writes;
+            var initial = await service.ReadPanInterceptionAsync();
+            Check(initial.Count == 5 && !initial["quark"] && providers.Where(id => id != "quark").All(id => initial[id]),
+                "missing app provider values default on while explicit false is retained");
+            Check(store.Writes == writes, "reading default switches does not persist them");
+            foreach (string provider in providers)
+            {
+                var previous = await service.ReadPanInterceptionAsync();
+                var saved = await service.SavePanInterceptionAsync(provider, !previous[provider]);
+                Check(saved[provider] != previous[provider] && providers.Where(id => id != provider).All(id => saved[id] == previous[id]),
+                    "one switch never changes a sibling");
+                using var current = JsonDocument.Parse(store.CatBytes!);
+                foreach (string field in new[] { "scripts", "mappings", "port" })
+                    Check(JsonElement.DeepEquals(current.RootElement.GetProperty(field), before.RootElement.GetProperty(field)),
+                        "provider saves retain unrelated source configuration");
+                Check(!current.RootElement.GetProperty("providers").GetProperty("external").GetBoolean() &&
+                    current.RootElement.GetProperty("providers").GetProperty(provider).GetBoolean() == saved[provider],
+                    "explicit provider writes preserve non-target providers");
+            }
+            var retained = store.CatBytes!;
+            try { await service.SavePanInterceptionAsync("external", true); throw new InvalidOperationException("Unknown provider admitted"); }
+            catch (FilmSourceException error) when (error.Code == "INVALID_ARGUMENT") { }
+            Check(store.CatBytes!.SequenceEqual(retained), "unsupported UI providers cannot commit");
+            Check(runtime.Calls.Count == 0, "offline native switches do not call Cat RPC");
+        }
+        await using var reopened = new FilmSourceService(runtime, store);
+        var restored = await reopened.ReadPanInterceptionAsync();
+        Check(restored["quark"] && providers.Where(id => id != "quark").All(id => !restored[id]),
+            "all five explicit values survive a new native owner");
+    }
+
     private const string SourceFacts = """
         {"version":1,"cats":[
           {"installationId":"a","name":"猫a","sourceType":"local","enabled":true,"inputRevision":1,"updateState":"future-update","sites":[

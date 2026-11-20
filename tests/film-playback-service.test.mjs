@@ -2504,6 +2504,48 @@ test('shortvideo prepares known neighbor address and real media bytes without al
   assert.equal(f.calls.filter(call => call[0] === 'resolve').length, resolves);
 });
 
+test('script account saves discard an unselected neighbor computation but keep a selected pan prefetch', async t => {
+  const original = await rules.snapshot(), entered = deferred(), gate = deferred();
+  let armed = false;
+  const ruleSnapshot = bindRuleSnapshot(Object.freeze({ ...original }), async (request, options) => {
+    const value = await invokeFilmRules(original, request, options);
+    if (armed && request.operation === 'recognition.candidates') {
+      armed = false; entered.resolve(); await gate.promise;
+    }
+    return value;
+  });
+  const f = fixture({ rules: { snapshot: async () => ruleSnapshot }, data: {
+    async detail() { return detail([1, 2].map(number => ({ name: `Series.S01E0${number}`, file: {
+      provider: 'quark', kind: 'share', shareId: 'share', fileId: `file-${number}`, accountRevision: 1,
+    } }))); },
+  } });
+  t.after(async () => { gate.resolve(); await f.service.close(); });
+  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')], target: {
+    id: 'account-prefetch', kind: 'source', title: 'Series', source: { key: 'a', detailId: 'entry' },
+  } });
+  await selectFirstDirectory(f, sessionId);
+  const current = await f.current(sessionId), resolves = f.calls.filter(row => row[0] === 'resolve').length;
+  armed = true;
+  await f.command(sessionId, 'shortvideo', { enabled: true });
+  await entered.promise;
+  assert.equal(f.snapshot(sessionId).prefetch[0].state, 'resolving');
+  const domain = { kind: 'script-account', installationId: 'install-a', generation: 1, provider: 'quark' };
+  await f.service.invalidate(domain);
+  assert.deepEqual(f.snapshot(sessionId).prefetch, [], 'an unfinished selection has no isolated pan dependency yet');
+  gate.resolve(); await tick();
+  assert.equal(f.calls.filter(row => row[0] === 'resolve').length, resolves, 'the discarded computation cannot resolve a late neighbor');
+  assert.deepEqual(f.snapshot(sessionId).prefetch, []);
+  assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
+  await f.command(sessionId, 'shortvideo', { enabled: true });
+  await until(() => f.snapshot(sessionId).prefetch.some(value => value.state === 'buffered'));
+  const buffered = f.snapshot(sessionId).prefetch;
+  const resource = f.calls.find(row => row[0] === 'prefetch')[1];
+  await f.service.invalidate(domain);
+  assert.deepEqual(f.snapshot(sessionId).prefetch, buffered);
+  assert.equal(f.resources.has(resource), true, 'an already selected pan file keeps its exact media lease');
+  assert.equal(f.snapshot(sessionId).current.attemptId, current.id);
+});
+
 test('Windows film kernel errors preserve the finite native prepare and playback stages', () => {
   for (const code of ['FILM_FORMAT_UNSUPPORTED', 'FILM_ENCRYPTION_UNSUPPORTED', 'FILM_DECODE_FAILED',
     'FILM_AUDIO_FAILED', 'FILM_RENDER_FAILED', 'FILM_HDR_DISPLAY_UNSUPPORTED',

@@ -1,9 +1,12 @@
 import '../../../tests/storage-test-fixture.mjs';
+
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
+import tls from 'node:tls';
+import http2 from 'node:http2';
 import { createHash, generateKeyPairSync, sign, X509Certificate } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
 import { rootCertificates } from 'node:tls';
@@ -28,6 +31,7 @@ import { NodeCapabilities } from '../src/node-capabilities.js';
 import { PrivateVolume } from '../src/private-volume.js';
 import { ResourceScope } from '../src/scope.js';
 import { ScriptServices } from '../src/script-services.js';
+import { PanInterceptor } from '../src/pan-interceptor.js';
 import { projectHttpRequestOptions, projectFields } from '../src/native-roles.js';
 import { parse, tokenizer, parseExpressionAt } from 'acorn';
 import { createLocalStartupLookup, startupWrapperTarget } from '../src/cat-source-routes.js';
@@ -172,7 +176,7 @@ async function route(request, response) {
       api: 'http://127.0.0.1:' + requestedPort + '/api/' + options.id,
       actions: ['home', 'search', 'detail', 'play', 'probe', 'scopedFile', 'cachedNative',
         'timerBurst', 'parallel', 'pipeLifecycle', 'slow', 'pan', 'panOpaque', 'panLists', 'guestMeow',
-        'externalPlay'],
+        'externalPlay', 'panProtocol'],
     }] } });
     return;
   }
@@ -561,6 +565,11 @@ async function route(request, response) {
     const upstream = await external('https://pan.quark.cn/1/clouddrive/share/sharepage/token',
       { pwd_id: 'x', passcode: '' });
     json(response, { upstream: JSON.parse(upstream.body) });
+    return;
+  }
+  if (action === 'panProtocol') {
+    const upstream = await external(input.url, input.body || {});
+    json(response, { upstream: JSON.parse(upstream.body), upstreamShape: upstream.shape });
     return;
   }
   if (action === 'panLists') {
@@ -3020,21 +3029,23 @@ test('Cat service timeout detaches request ownership and leaves only a late-clos
     live: false,
     root,
     scope: () => root,
+    scopeIdentity: () => ({}),
     nativeRequests: new Set(),
     limits: { cleanupTimeoutMs: 10 },
-    node: { tags: new WeakMap() },
+    node: { observeEmitter() {} },
   };
   const services = new ScriptServices(session);
   const request = new EventEmitter();
   request.closed = false;
   request.destroyed = false;
   request.destroy = () => { request.destroyed = true; };
-  services.ownForward(request, context);
+  services.trackRequest(request, context);
   assert.equal(context.cleanups.size, 2);
   await assert.rejects(services.close(), { code: 'TIMEOUT' });
   assert.equal(session.nativeRequests.size, 0);
   assert.equal(services.requestCleanup.size, 0);
-  assert.equal(context.cleanups.size, 1);
+  assert.equal(context.signal.aborted, true);
+  assert.equal(context.cleanups.size, 0);
   assert.equal(request.listenerCount('close'), 0);
   assert.equal(request.listenerCount('error'), 1);
   assert.doesNotThrow(() => request.emit('error', new Error('late request error')));
@@ -3912,7 +3923,7 @@ test('Cat listeners and aggregate accept external callers while preserving paths
     await assert.rejects(request(external(instance.managementUrl)), { code: 'ECONNREFUSED' });
   });
 
-test('Cat provider interception is settings-controlled, emits one Cat root and falls back to script networking',
+test('Cat provider interception is settings-controlled, emits one Cat root and blocks opaque requests while enabled',
   { timeout: 30000 }, async t => {
     const calls = [];
     const runtime = await installed(t, rootFor(t), {
@@ -3955,16 +3966,15 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
     await waitFor(() => runtime.host.get('fixture-a').resources.networkRequests === 0,
       'completed provider interception retained a native request');
     const resourcesBefore = runtime.host.get('fixture-a').resources.networkRequests;
-    const opaque = await runtime.invoke({
+    await assert.rejects(runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'panOpaque', payload: {},
-    });
-    assert.equal(opaque.upstream.data.stoken, 'upstream');
+    }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
     await waitFor(() =>
       runtime.host.get('fixture-a').resources.networkRequests === resourcesBefore,
     'opaque provider request did not release its native resources');
     const resourcesAfter = runtime.host.get('fixture-a').resources.networkRequests;
     assert.equal(resourcesAfter, resourcesBefore);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 0);
 
     const guest = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'guestMeow', payload: {},
@@ -3982,7 +3992,7 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
     const fallback = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'pan', payload: {},
     });
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
     assert.match(fallback.list[0].vod_play_url, /https:\/\/pan\.quark\.cn\/s\/abcd1234/);
     assert.equal(fallback._meow, undefined);
 
@@ -3991,13 +4001,13 @@ test('Cat provider interception is settings-controlled, emits one Cat root and f
     const stillApplied = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'pan', payload: {},
     });
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 2);
     assert.equal(stillApplied._meow, undefined);
     await writeSettings(runtime, value => ({ ...value, port: 0 }));
     await runtime.refresh();
   });
 
-test('Cat provider list identity distinguishes missing, invalid and unknown shares after capture',
+test('Cat provider list identity requires explicit share or returned token instead of replaying ambiguous requests',
   { timeout: 30000 }, async t => {
     const calls = [];
     const runtime = await installed(t, rootFor(t), {
@@ -4008,55 +4018,48 @@ test('Cat provider list identity distinguishes missing, invalid and unknown shar
           body: JSON.stringify({ originalNetwork: true }) };
       },
     });
-    const status = await runtime.status();
     await writeSettings(runtime, value => ({
       ...value, providers: { ...value.providers, quark: true, uc: true },
     }));
     await runtime.refresh();
     for (const provider of ['quark', 'uc']) {
       const invoke = async payload => {
-        const output = await runtime.invoke({
-          installationId: 'fixture-a', siteId: 'site-a', operation: 'panLists',
-          payload: { provider, ...payload },
-        });
-        await waitFor(() => runtime.host.get('fixture-a').resources.networkRequests === 0,
-          'provider list interception or fallback retained a native request');
-        return output;
+        try {
+          return await runtime.invoke({
+            installationId: 'fixture-a', siteId: 'site-a', operation: 'panLists',
+            payload: { provider, ...payload },
+          });
+        } finally {
+          await waitFor(() => runtime.host.get('fixture-a').resources.networkRequests === 0,
+            'provider list interception retained a native request');
+        }
       };
       const captures = output => (output._meow?.captures ?? []).map(item => decodePanResource(item.id));
       for (const body of [
-        { pwd_id: '' }, { pwd_id: 'x' }, { pwd_id: 'root' }, { pwd_id: 'unknown-share' },
+        { pwd_id: '' }, { pwd_id: 'x' }, { pwd_id: 'root' },
         { pwd_id: null }, { pwd_id: false }, { pwd_id: true }, { pwd_id: ['abcd1234'] },
         { pwd_id: { id: 'abcd1234' } }, { params: { pwd_id: null } },
         { pwd_id: null, surl: 'abcd1234' },
       ]) {
         const before = calls.length;
-        const result = await invoke({ body });
-        assert.deepEqual(result.upstream, { originalNetwork: true });
-        assert.equal(calls.length, before + 1);
-        assert.equal(calls.at(-1).method, 'POST');
-        assert.equal(calls.at(-1).body, JSON.stringify(body));
-        assert.equal(new URL(calls.at(-1).url).pathname, '/1/clouddrive/share/sharepage/detail');
-        assert.deepEqual(captures(result).map(item => [item.provider, item.shareId, item.password]),
-          [[provider, 'abcd1234', 'synthetic-share-password']]);
+        await assert.rejects(invoke({ body }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+        assert.equal(calls.length, before);
       }
-      for (const query of ['?pwd_id=', '?pwd_id=x', '?pwd_id=unknown-share']) {
+      for (const query of ['?pwd_id=', '?pwd_id=x']) {
         const before = calls.length;
-        const result = await invoke({ query });
-        assert.deepEqual(result.upstream, { originalNetwork: true });
-        assert.equal(calls.length, before + 1);
-        assert.equal(new URL(calls.at(-1).url).search, query);
+        await assert.rejects(invoke({ query }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+        assert.equal(calls.length, before);
       }
       const before = calls.length;
       for (const body of [
-        { pwd_id: 'abcd1234' }, {}, { pwd_id: 'abcd1234', passcode: '' }, { passcode: '' },
-        { pwd_id: 'abcd1234', passcode: 'synthetic-new-password' }, { passcode: 'synthetic-new-password' },
+        { pwd_id: 'abcd1234' }, { pwd_id: 'abcd1234', passcode: '' },
+        { pwd_id: 'abcd1234', passcode: 'synthetic-new-password' },
       ]) {
         const result = await invoke({ body, inspectMetadata: true });
         assert.equal(result.upstream.code, 0);
         assert.match(result.upstream.data.list[0].fid, /^meow_/);
         assert.equal(result.listTotal, 1);
-        assert.deepEqual(result.upstream.metadata, { _total: 1 });
+        assert.equal(result.upstream.metadata._total, 1);
         assert.deepEqual(result.upstream.data.metadata, result.upstream.metadata);
         assert.equal(calls.length, before);
         assert.deepEqual(captures(result).map(item => [item.provider, item.shareId, item.password]),
@@ -4068,13 +4071,152 @@ test('Cat provider list identity distinguishes missing, invalid and unknown shar
       }
       for (const payload of [{ capture: false }, { secondShare: true }]) {
         const before = calls.length;
-        const result = await invoke(payload);
-        assert.deepEqual(result.upstream, { originalNetwork: true });
-        assert.equal(calls.length, before + 1);
-        assert.equal(captures(result).length, payload.secondShare ? 2 : 0);
+        await assert.rejects(invoke(payload), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+        assert.equal(calls.length, before);
       }
     }
   });
+
+test('Cat worker consumes five provider placeholder protocols and drains every native request',
+  { timeout: 30000 }, async t => {
+    let calls = 0;
+    const runtime = await installed(t, rootFor(t), {
+      network: async () => { calls++; throw new Error('provider network must remain unused'); },
+    });
+    await writeSettings(runtime, value => ({ ...value, providers: {
+      baidu: true, quark: true, uc: true, tianyi: true, yidong: true,
+    } }));
+    await runtime.refresh();
+    const input = [
+      ['baidu', 'https://pan.baidu.com/share/list?shorturl=shareABCD&pwd=a1b2', {}],
+      ['quark', 'https://drive.quark.cn/1/clouddrive/share/sharepage/detail', { pwdId: 'shareABCD', password: 'a1b2' }],
+      ['uc', 'https://open-api-drive.uc.cn/1/clouddrive/share/sharepage/detail', { pwd_id: 'shareABCD', passcode: 'a1b2' }],
+      ['tianyi', 'https://api.cloud.189.cn/api/open/share/getShareInfoByCodeV2.action?shareCode=shareABCD&accessCode=a1b2', {}],
+      ['yidong', 'https://share-kd-njs.yun.139.com/IOutLink/getOutLinkInfoV6', {
+        getOutLinkInfoReq: { linkID: 'shareABCD', passwdStr: 'a1b2', pCaID: 'root' },
+      }],
+    ];
+    for (const [provider, url, body] of input) {
+      const output = await runtime.invoke({ installationId: 'fixture-a', siteId: 'site-a',
+        operation: 'panProtocol', payload: { url, body } });
+      assert.deepEqual(output.upstreamShape, { rawHeaders: true, trailers: true, rawTrailers: true,
+        httpVersion: '1.1', major: 1, minor: 1, complete: true });
+      assert.deepEqual(output._meow.captures.map(item => {
+        const share = decodePanResource(item.id);
+        return [share.provider, share.shareId, share.password];
+      }), [[provider, 'shareABCD', 'a1b2']]);
+      assert.equal(output.upstream.errno ?? output.upstream.res_code ?? output.upstream.code, 0);
+      await waitFor(() => runtime.host.get('fixture-a').resources.networkRequests === 0,
+        'five provider placeholder retained a native request');
+    }
+    assert.equal(calls, 0);
+  });
+
+test('Cat enabled pan interception refuses HTTP2 and raw socket connections and reuse before native network calls',
+  async t => {
+    const root = new ResourceScope();
+    const invocation = new ResourceScope(root.signal);
+    invocation.panShares = new Map();
+    invocation.settings = { providers: { baidu: true, quark: true, uc: true, tianyi: true, yidong: true } };
+    let current = invocation;
+    const session = { installationId: 'pan-connection-boundary', revision: { source: '' }, root,
+      limits: { cleanupTimeoutMs: 1000 }, live: true, activated: true,
+      scope: () => current, resourceScope: () => root, storageWritten() {}, trackAdapter() {},
+      interceptor: new PanInterceptor() };
+    const services = new ScriptServices(session);
+    const node = nativeCapabilities(session, services, rootFor(t));
+    session.node = node;
+    t.after(async () => { current = root; await node.close(); root.close(); });
+    const calls = [];
+    const socket = kind => {
+      const value = new EventEmitter();
+      value.closed = false;
+      value.destroy = () => { value.destroyed = value.closed = true; value.emit('close'); };
+      value.write = () => { calls.push(kind + ':write'); return true; };
+      value.end = () => { calls.push(kind + ':end'); return value; };
+      return value;
+    };
+    t.mock.method(net, 'connect', () => { calls.push('net:connect'); return socket('net'); });
+    t.mock.method(tls, 'connect', () => { calls.push('tls:connect'); return socket('tls'); });
+    t.mock.method(http.Agent.prototype, 'createConnection', () => { calls.push('http:connect'); return socket('http'); });
+    t.mock.method(https.Agent.prototype, 'createConnection', () => { calls.push('https:connect'); return socket('https'); });
+    t.mock.method(http2, 'connect', () => {
+      calls.push('h2:connect');
+      const value = socket('h2');
+      value.request = () => { calls.push('h2:request'); return socket('h2-stream'); };
+      value.ping = () => calls.push('h2:ping');
+      value.settings = () => calls.push('h2:settings');
+      return value;
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    const protocols = [
+      ['net', host => node.builtins.net.connect({ host, port: 443 })],
+      ['tls', host => node.builtins.tls.connect({ host, port: 443 })],
+      ['h2', host => node.builtins.http2.connect('https://' + host)],
+      ['http', host => new services.http.Agent().createConnection({ host, port: 443 })],
+      ['https', host => new services.https.Agent().createConnection({ host, port: 443 })],
+    ];
+    const hosts = ['pan.baidu.com', 'DRIVE.QUARK.CN.', 'open-api-drive.uc.cn', 'api.cloud.189.cn', 'share-kd-njs.yun.139.com'];
+    for (const [, connect] of protocols) for (const host of hosts) {
+      const before = calls.length;
+      assert.throws(() => connect(host), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+      assert.equal(calls.length, before);
+    }
+    assert.equal(session.interceptor.hasFailure(invocation.panShares), true);
+    assert.equal(node.builtins.dgram, undefined);
+    assert.throws(() => node.source('dgram'), { code: 'UNSUPPORTED_DEPENDENCY' });
+
+    for (const [kind, connect] of protocols) {
+      current = root;
+      const retained = connect('drive.quark.cn');
+      const retainedStream = kind === 'h2' ? retained.request() : retained;
+      current = invocation;
+      const before = calls.length;
+      for (const action of kind === 'h2'
+        ? [() => retained.request(), () => retained.ping(), () => retained.settings(),
+          () => retainedStream.write('x'), () => retainedStream.end('x')]
+        : [() => retained.write('x'), () => retained.end('x')])
+        assert.throws(action, { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+      assert.equal(calls.length, before);
+      invocation.settings.providers.quark = false;
+      retainedStream.write('allowed');
+      assert.equal(calls.at(-1), (kind === 'h2' ? 'h2-stream' : kind) + ':write');
+      connect('drive.quark.cn');
+      invocation.settings.providers.quark = true;
+      const unrelated = connect('example.invalid');
+      (kind === 'h2' ? unrelated.request() : unrelated).write('unrelated');
+      current = root;
+      retainedStream.end();
+      assert.equal(calls.at(-1), (kind === 'h2' ? 'h2-stream' : kind) + ':end');
+    }
+  });
+
+test('Cat HTTP2 keeps native local sessions and streams usable with pan interception enabled', async t => {
+  const upstream = http2.createServer();
+  upstream.on('stream', stream => { stream.respond({ ':status': 200 }); stream.end('native-h2'); });
+  await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => upstream.close(resolve)));
+  const session = await createCatSessionForInternalTest(t, {
+    installationId: 'pan-local-http2', settings: { value: { providers: { quark: true }, mappings: [] } },
+    source: `
+      const http2 = require('http2');
+      module.exports = { home: () => new Promise((resolve, reject) => {
+        const client = http2.connect('http://127.0.0.1:${upstream.address().port}');
+        client.once('error', reject);
+        const request = client.request({ ':path': '/' });
+        let body = '';
+        request.on('data', chunk => { body += chunk.toString(); });
+        request.once('error', reject);
+        request.once('end', () => client.close(() => resolve({ body })));
+        request.end();
+      }) };
+    `,
+  });
+  assert.deepEqual(await session.invoke({ siteId: 'default', operation: 'home', payload: {} }), { body: 'native-h2' });
+  await waitFor(() => session.node.networkResources.size === 0,
+    'local HTTP2 sessions or streams retained their native owner');
+});
 
 test('Cat old and new management protocols persist synchronized credentials without repeat synchronization',
   { timeout: 30000 }, async t => {
@@ -4751,17 +4893,20 @@ test('Cat cancels and unlocks session-owned native Web streams when the installa
     assert.equal(session.node.resourceCleanup.size, 0);
   });
 
-test('Cat invocation uses one settings snapshot while a refresh publishes the next turn',
+test('Cat provider mode changes cancel old invocations and replace their cached execution state',
   { timeout: 30000 }, async t => {
     let enteredResolve, releaseResolve;
     const entered = new Promise(resolve => { enteredResolve = resolve; });
     const release = new Promise(resolve => { releaseResolve = resolve; });
     let calls = 0;
     const runtime = await installed(t, rootFor(t), {
-      network: async () => {
+      network: async input => {
         calls++;
         enteredResolve();
-        await release;
+        await new Promise(resolve => {
+          release.then(resolve);
+          input.signal.addEventListener('abort', resolve, { once: true });
+        });
         return {
           statusCode: 200,
           headers: { 'content-type': 'application/json' },
@@ -4773,6 +4918,7 @@ test('Cat invocation uses one settings snapshot while a refresh publishes the ne
     const pending = runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'pan', payload: {},
     });
+    const retired = assert.rejects(pending, { code: 'STALE_SESSION' });
     await entered;
     await writeSettings(runtime, value => ({
       ...value,
@@ -4781,10 +4927,9 @@ test('Cat invocation uses one settings snapshot while a refresh publishes the ne
     }));
     await runtime.refresh();
     releaseResolve();
-    const first = await pending;
+    await retired;
     assert.equal(calls, 1);
-    assert.equal(first._meow, undefined);
-    assert.match(first.list[0].vod_play_url, /https:\/\/pan\.quark\.cn\/s\/abcd1234/);
+    assert.ok(runtime.instance('fixture-a').generation > status.instances[0].generation);
 
     const second = await runtime.invoke({
       installationId: 'fixture-a', siteId: 'site-a', operation: 'pan', payload: {},
@@ -8522,3 +8667,128 @@ test('Cat accepts a synchronous guest callback result larger than the external m
     }), { class: [] });
   });
 import '../../../tests/storage-test-fixture.mjs';
+
+
+test('Cat cached placeholder details and tokens keep exact same-site share identity across invocations', async t => {
+  let networkCalls = 0;
+  const session = await createCatSessionForInternalTest(t, {
+    installationId: 'pan-cached-identity',
+    settings: { value: { providers: { quark: true, tianyi: true }, mappings: [] } },
+    network: async () => { networkCalls++; throw new Error('provider I/O is forbidden'); },
+    source: `
+      let cached, token;
+      module.exports.detail = async id => {
+        if (id === 'unrelated') return { list: [{ vod_id: id, vod_play_from: '原线路', vod_play_url: '正片$ordinary-id' }] };
+        if (id === 'cached' && cached) return cached;
+        const endpoint = 'https://drive.quark.cn/1/clouddrive/share/sharepage/';
+        if (!token) token = (await (await fetch(endpoint + 'token', { method: 'POST',
+          body: JSON.stringify({ pwd_id: 'cached-share', passcode: 'synthetic-code' }) })).json()).data.stoken;
+        const list = await (await fetch(endpoint + 'detail?pwd_id=cached-share&stoken=' + token)).json();
+        cached = { list: [{ vod_id: id, vod_play_from: '夸克原画',
+          vod_play_url: list.data.list[0].file_name + '$' + list.data.list[0].fid }] };
+        return cached;
+      };
+    `,
+  });
+  const invoke = id => session.invoke({ siteId: 'default', operation: 'detail', payload: { id } });
+  const first = await invoke('cached'), second = await invoke('cached');
+  assert.equal(second.list[0].vod_play_from, '夸克-cached-share');
+  assert.deepEqual(second._meow.resources, first._meow.resources);
+  assert.equal(decodePanResource(second._meow.resources[0].id).password, 'synthetic-code');
+  const tokenReuse = await invoke('token-reuse');
+  assert.equal(tokenReuse.list[0].vod_play_from, '夸克-cached-share');
+  assert.equal(decodePanResource(tokenReuse._meow.resources[0].id).shareId, 'cached-share');
+  const unrelated = await invoke('unrelated');
+  assert.equal(unrelated._meow, undefined, 'historical captures do not leak into unrelated details');
+  assert.equal(unrelated.list[0].vod_play_url, '正片$ordinary-id');
+  assert.equal(networkCalls, 0);
+});
+
+test('Cat issued numeric IDs and HTTP references become one share entrance regardless of line aliases', async t => {
+  let networkCalls = 0;
+  const session = await createCatSessionForInternalTest(t, {
+    installationId: 'pan-exact-numeric-output',
+    settings: { value: { providers: { tianyi: true }, mappings: [] } },
+    network: async () => { networkCalls++; throw new Error('provider I/O is forbidden'); },
+    source: `
+      let cached;
+      module.exports.detail = async id => {
+        if (id === 'cached' && cached) return cached;
+        if (id === 'cached-opaque') return { list: [{vod_id:id, vod_play_from:'私有线路$$$天翼极速',
+          vod_play_url:cached.list[0].vod_play_url.split('$$$')[0] + '$$$正片$opaque-id'}] };
+        const value = await (await fetch('https://api.cloud.189.cn/api/open/share/getShareInfoByCodeV2.action?shareCode=numeric-share')).json();
+        if (id === 'unknown-provider-path') return { list: [{vod_id:id, vod_play_from:'天翼原画',
+          vod_play_url:'正片$https://cloud.189.cn/play/' + value.fileId}] };
+        const numeric = '正片$' + value.fileId;
+        const url = '正片$https://cloud.189.cn/api/open/share/play?fileId=' + value.fileId + '&shareId=' + value.shareId;
+        cached = { list: [{ vod_id: id, vod_play_from: '私有线路$$$天翼极速$$$普通线路',
+          vod_play_url: numeric + '$$$' + url + '$$$预告$ordinary-non-pan-id' }] };
+        return cached;
+      };
+    `,
+  });
+  for (let turn = 0; turn < 2; turn++) {
+    const value = await session.invoke({ siteId: 'default', operation: 'detail', payload: { id: 'cached' } });
+    assert.equal(value.list[0].vod_play_from, '天翼-numeric-share$$$普通线路');
+    assert.equal(value._meow.resources.length, 1);
+    assert.equal(value.list[0].vod_play_url.split('$$$')[1], '预告$ordinary-non-pan-id');
+    assert.equal(decodePanResource(value._meow.resources[0].id).shareId, 'numeric-share');
+  }
+  for (const id of ['cached-opaque', 'unknown-provider-path']) await assert.rejects(session.invoke({
+    siteId: 'default', operation: 'detail', payload: { id },
+  }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+  assert.equal(networkCalls, 0);
+});
+
+test('Cat local interception rejection cannot become an empty or opaque successful detail', async t => {
+  let networkCalls = 0;
+  const session = await createCatSessionForInternalTest(t, {
+    installationId: 'pan-failed-handoff',
+    settings: { value: { providers: { quark: true, tianyi: true }, mappings: [] } },
+    network: async () => { networkCalls++; throw new Error('provider I/O is forbidden'); },
+    source: `
+      module.exports.detail = async id => {
+        let known;
+        if (id === 'mixed') known = (await (await fetch('https://drive.quark.cn/1/clouddrive/share/sharepage/token',
+          { method: 'POST', body: JSON.stringify({pwd_id:'known-share'}) })).json()).data.stoken;
+        await (await fetch('https://api.cloud.189.cn/unknown/action')).json();
+        return { list: [{ vod_id: id, vod_play_from: id === 'empty' ? '' : '原线路',
+          vod_play_url: id === 'empty' ? '' : '正片$' + (known || 'opaque-original-id') }] };
+      };
+    `,
+  });
+  for (const id of ['empty', 'opaque', 'mixed']) await assert.rejects(session.invoke({
+    siteId: 'default', operation: 'detail', payload: { id },
+  }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+  assert.equal(networkCalls, 0);
+});
+
+test('Cat placeholder handoff rejects extension collisions, unknown markers and unassigned opaque results', async t => {
+  const session = await createCatSessionForInternalTest(t, {
+    installationId: 'pan-handoff-boundary',
+    settings: { value: { providers: { quark: true }, mappings: [] } },
+    network: async () => { throw new Error('provider I/O is forbidden'); },
+    source: `
+      module.exports.detail = async id => {
+        if (id === 'unknown') return { list: [{ vod_id:id, vod_play_from:'原线路',
+          vod_play_url:'正片$meow_aaaaaaaaaaaaaaaaaaaaaaaa' }] };
+        const token = (await (await fetch('https://drive.quark.cn/1/clouddrive/share/sharepage/token',
+          { method:'POST', body:JSON.stringify({pwd_id:'handoff-share'}) })).json()).data.stoken;
+        if (id === 'pure') return { list: [{ vod_id:id }] };
+        return { ...(id === 'collision' ? {_meow:{guest:true}} : {}),
+          list:[{vod_id:id, vod_play_from:'私有别名', vod_play_url:'正片$' + (id==='opaque'?'unassigned-id':token)}] };
+      };
+      module.exports.play = id => ({parse:0,url:'https://media.invalid/movie.mp4'});
+    `,
+  });
+  for (const id of ['unknown', 'collision', 'opaque']) await assert.rejects(session.invoke({
+    siteId: 'default', operation: 'detail', payload: { id },
+  }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+  const pure = await session.invoke({ siteId: 'default', operation: 'detail', payload: { id: 'pure' } });
+  assert.equal(pure.list[0].vod_play_from, '夸克-handoff-share');
+  await assert.rejects(session.invoke({ siteId: 'default', operation: 'play',
+    payload: { flag: '原线路', id: 'meow_aaaaaaaaaaaaaaaaaaaaaaaa' } }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+  session.applySettings({ providers: { quark: false }, mappings: [] });
+  await assert.rejects(session.invoke({ siteId: 'default', operation: 'detail', payload: { id: 'unknown' } }),
+    { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+});

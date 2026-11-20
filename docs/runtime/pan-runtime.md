@@ -54,6 +54,8 @@ await runtime.close();
 
 手动换号／clear 撤销旧代次的进行中网络、登录和文件引用，旧结果不得覆盖新配置。自动刷新只 patch 当前代次，轮换凭据持久化成功后才报告成功。
 
+aggregate 装配还将该 owner 的账号变更连接到 Cat 管理同步：保存、扫码确认、刷新／轮换及清除后主动安排；原生 owner 重读及脚本新 generation 同样同步当前事实。此同步与五盘接管开关独立，脚本管理保存失败不回滚本端账号提交。只有脚本实际支持的管理协议、字段和端点才会接收凭据，成功必须得到私有卷持久回执；不支持与失败分别报告，未配置过的空账号不擦除脚本自行管理的账号。同账号代次的凭据轮换不会因脚本同步而取消内置 pan 的请求或媒体；真实换号／退出仍按账号 revision 撤销旧权限。同步完成状态及缓存／关闭边界见 [Cat 管理同步](cat-script-runtime.md#管理同步与生命周期)。
+
 ### 原生凭据 store
 
 `createPanService`／`createPanRuntimeModule` 可接收受信 typed `store`，提供 `read/write/close` 和可选 `reload`；注入后不会建立第二份账号存储。`settingsChanged()` 通过串行变更边界重读同一原生 owner，撤销旧账号代次的请求、登录及引用。
