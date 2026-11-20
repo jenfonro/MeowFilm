@@ -226,7 +226,7 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
         if (!request.url.startsWith('/') || request.url.startsWith('//')) invalid();
         const url = new URL(request.url, baseUrl);
         if (url.pathname + url.search !== request.url || url.hash) invalid();
-        route = resolveRoute({ method: request.method, url });
+        route = resolveRoute({ method: request.method, url, headers: request.headers });
         if (!route) { send(404, failed('METHOD_NOT_FOUND')); request.resume(); return; }
         if (route.contentType && request.headers['content-type'] !== route.contentType) {
           send(415, failed('INVALID_REQUEST')); request.resume(); return;
@@ -243,8 +243,14 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
             else input = route.contentType === 'application/json' ? decodeJSONValue(bytes) : bytes;
             route.validate?.(input);
             admitted = true;
+            const debugOpId = typeof request.headers['x-meow-debug-op'] === 'string' && request.headers['x-meow-debug-op']
+              ? request.headers['x-meow-debug-op'] : undefined;
+            const debugTraceId = typeof request.headers['x-meow-debug-trace'] === 'string' && request.headers['x-meow-debug-trace']
+              ? request.headers['x-meow-debug-trace'] : undefined;
             const result = await route.handler(input, { signal: controller.signal, sessionId,
               requestId, sequence: owner.sequence,
+              ...(debugOpId ? { debugOpId } : {}),
+              ...(debugTraceId ? { debugTraceId } : {}),
               isCurrent: () => owner.current && !closed && !controller.signal.aborted });
             if (route.responseType === 'stream') {
               await streamResponse(result, response, { signal: controller.signal, requestId,
@@ -334,7 +340,8 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
   const pending = new Set();
   let closed = false, closing;
   function send({ method = 'POST', path, body, contract = HTTP_PROTOCOL, codes = publicCodes,
-    signal, timeout: deadline = timeout, requestId = randomUUID(), raw = false } = {}, withDeadline) {
+    signal, timeout: deadline = timeout, requestId = randomUUID(), raw = false,
+    debugOpId, debugTraceId } = {}, withDeadline) {
     if (closed) return Promise.reject(new BridgeError('CLOSED'));
     if (signal?.aborted) return Promise.reject(new BridgeError('CANCELLED'));
     let bytes;
@@ -358,6 +365,8 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
       owner.done = new Promise(done => { drained = done; });
       const outgoing = transport.request(new URL(path, endpoint), {
         method, agent, headers: { 'x-meow-request-id': requestId,
+          ...(typeof debugOpId === 'string' && debugOpId ? { 'x-meow-debug-op': debugOpId } : {}),
+          ...(typeof debugTraceId === 'string' && debugTraceId ? { 'x-meow-debug-trace': debugTraceId } : {}),
           ...(bytes === undefined ? {} : { 'content-type': raw ? 'application/octet-stream' : 'application/json',
             'content-length': bytes.length }) },
       });

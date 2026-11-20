@@ -12,38 +12,41 @@ try {
   await startIOSAppRuntime({
     product: 'aggregate',
     onStage: value => { stage = value; },
-    assemble: ({ dataRoot, settings }) => {
+    assemble: ({ dataRoot, settings, debug, onStage }) => {
+      const markStage = value => { stage = value; onStage?.(value); };
       const modules = [];
       try {
-        stage = 'music';
-        modules.push(createMusicScriptModule({ dataRoot }));
-        stage = 'cat';
+        markStage('music');
+        modules.push(createMusicScriptModule({ dataRoot, debug }));
+        markStage('cat');
         modules.push(createCatScriptModule({ dataRoot, ...(settings ? {
           configuration: { read: () => settings.read('cat.sources'), reload: () => settings.reload('cat.sources') },
-        } : {}) }));
-        stage = 'source';
-        modules.push(createSourceRuntimeModule({ dataRoot, platform: 'ios' }));
-        stage = 'pan';
-        modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.accounts('pan.accounts') } : {}) }));
+        } : {}), debug }));
+        markStage('source');
+        modules.push(createSourceRuntimeModule({ dataRoot, platform: 'ios', debug }));
+        markStage('pan');
+        modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.accounts('pan.accounts') } : {}), debug }));
         connectPanAccounts(modules);
-        stage = 'tmdb';
-        modules.push(createTMDBDataModule({ dataRoot, nativeSettings: settings }));
-        stage = 'douban';
-        modules.push(createDoubanDataModule({ dataRoot, nativeSettings: settings }));
-        stage = 'film';
-        connectFilmPlayback(modules, { dataRoot, nativeSettings: settings });
-        stage = 'netease';
-        modules.push(createNeteaseTokenModule());
-        stage = 'music-platform';
-        connectMusicPlatform(modules, { dataRoot });
+        markStage('tmdb');
+        modules.push(createTMDBDataModule({ dataRoot, nativeSettings: settings, debug }));
+        markStage('douban');
+        modules.push(createDoubanDataModule({ dataRoot, nativeSettings: settings, debug }));
+        markStage('film');
+        connectFilmPlayback(modules, { dataRoot, nativeSettings: settings, debug });
+        markStage('netease');
+        modules.push(createNeteaseTokenModule({ debug }));
+        markStage('music-platform');
+        connectMusicPlatform(modules, { dataRoot, debug });
         owners = new Map(modules.map(module => [module.id, module]));
         return modules;
       } catch (error) {
+        debug?.emit({ level: 'error', cat: 'runtime-node', sub: 'ios.aggregate', event: 'aggregate.assembly.error', data: { stage, dataRoot }, error });
         for (const module of modules) void Promise.resolve(module.close()).catch(() => {});
         throw error;
       }
     },
-    async settingsChanged(block, { settings }) {
+    async settingsChanged(block, { settings, debug }) {
+      debug?.emit({ level: 'info', cat: 'runtime-bridge', sub: 'ios.settings', event: 'settings.changed', data: { block } });
       if (block === 'cat.sources') await owners.get('cat').settingsChanged();
       else if (block === 'pan.accounts') await owners.get('pan').settingsChanged();
       else {

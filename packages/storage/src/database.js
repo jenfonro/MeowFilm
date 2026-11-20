@@ -1,6 +1,7 @@
 import { readFile, mkdir, lstat, realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { resolve, join, dirname, isAbsolute } from 'node:path';
+import { performance } from 'node:perf_hooks';
 
 const APPLICATION_ID = 0x4d464442;
 const MAX_PENDING = 64;
@@ -8,8 +9,54 @@ const MAX_BYTES = 16 * 1024 * 1024;
 const roots = new Map();
 let platform;
 let schema;
+let observer = null;
 
 export const storageError = code => Object.assign(new Error(code), { code });
+
+/** Optional debug observer injected only in Debug mode; null disables all hooks. */
+export function setStorageObserver(value) {
+  observer = value && typeof value.emit === 'function' ? value : null;
+}
+
+/** Aggregate active storage owner diagnostics for Debug inspection. */
+export function getStorageDiagnostics() {
+  let pendingCount = 0;
+  let pendingBytes = 0;
+  const activeRoots = [];
+  for (const [root, owner] of roots.entries()) {
+    const diag = owner.diagnostics();
+    pendingCount += diag.pendingCount;
+    pendingBytes += diag.pendingBytes;
+    activeRoots.push({
+      root,
+      references: owner.references,
+      closing: owner.closing,
+      pendingCount: diag.pendingCount,
+      pendingBytes: diag.pendingBytes,
+    });
+  }
+  return { openDatabases: roots.size, pendingCount, pendingBytes, roots: activeRoots };
+}
+
+function storageLog(level, event, data, { durationMs, error } = {}) {
+  if (!observer || observer.isEnabled?.('storage') === false) return;
+  observer.emit({ level, cat: 'storage', sub: 'sqlite', event, durationMs, data, error });
+}
+
+function summarizeStatement(input) {
+  if (!input || typeof input !== 'object') return {};
+  if (input.kind === 'query' || input.kind === 'execute') {
+    return { kind: input.kind, sql: input.sql, params: input.params, maxRows: input.maxRows, expectChanges: input.expectChanges };
+  }
+  if (input.kind === 'transaction' || input.kind === 'snapshot') {
+    return {
+      kind: input.kind,
+      statementCount: Array.isArray(input.statements) ? input.statements.length : 0,
+      statements: input.statements,
+    };
+  }
+  return { kind: input.kind, ...(input.path ? { path: input.path } : {}) };
+}
 
 /** Only the trusted platform bootstrap selects the driver, before opening owners. */
 export function configureStorage({ driver, initialize = true } = {}) {
@@ -62,13 +109,23 @@ function createOwner(root, options) {
   let driver, pending = 0, bytes = 0, closing = false, disposal;
   let tail = Promise.resolve();
   const ready = (async () => {
+    const startedAt = observer ? performance.now() : 0;
     const factory = options.driver ?? platform?.driver;
     if (!factory) throw storageError('STORAGE_DRIVER_REQUIRED');
     const initialize = options.initialize ?? platform?.initialize ?? true;
     const directory = join(root, 'storage-v1');
-    await ensureDirectory(directory, initialize);
-    driver = await factory(join(directory, 'meowfilm.sqlite3'), await schemaSource(), initialize);
-    await driver.ready;
+    const file = join(directory, 'meowfilm.sqlite3');
+    try {
+      await ensureDirectory(directory, initialize);
+      driver = await factory(file, await schemaSource(), initialize);
+      await driver.ready;
+      storageLog('info', 'database.open', { root, file, initialize },
+        { durationMs: observer ? performance.now() - startedAt : undefined });
+    } catch (error) {
+      storageLog('error', 'database.open.error', { root, file, initialize },
+        { durationMs: observer ? performance.now() - startedAt : undefined, error });
+      throw error;
+    }
   })();
   ready.catch(() => {});
   const request = (input, signal, admitted) => {
@@ -85,8 +142,33 @@ function createOwner(root, options) {
     const result = tail.then(async () => {
       await ready;
       if (signal?.aborted) throw storageError('CANCELLED');
+      const startedAt = observer ? performance.now() : 0;
       // Once execution starts, cancellation cannot claim an accepted commit rolled back.
-      return driver.request(owned);
+      try {
+        const value = await driver.request(owned);
+        if (observer) {
+          const durationMs = performance.now() - startedAt;
+          const rowCount = Array.isArray(value) ? value.length
+            : Array.isArray(value?.rows) ? value.rows.length : undefined;
+          storageLog('debug', `database.${owned.kind}`, {
+            root,
+            ...summarizeStatement(owned),
+            ...(rowCount !== undefined ? { rowCount } : {}),
+            ...(typeof value?.changes === 'number' ? { changes: value.changes } : {}),
+            pendingCount: pending,
+            pendingBytes: bytes,
+          }, { durationMs });
+        }
+        return value;
+      } catch (error) {
+        storageLog('error', `database.${owned.kind}.error`, {
+          root,
+          ...summarizeStatement(owned),
+          pendingCount: pending,
+          pendingBytes: bytes,
+        }, { durationMs: observer ? performance.now() - startedAt : undefined, error });
+        throw error;
+      }
     }).finally(() => { --pending; bytes -= size; });
     tail = result.then(() => {}, () => {});
     admitted(tail);
@@ -101,10 +183,15 @@ function createOwner(root, options) {
     close() {
       return disposal ??= (async () => {
         closing = true;
+        const startedAt = observer ? performance.now() : 0;
         await tail;
         try { await ready; } catch { /* Open failure is delivered by ready and requests. */ }
         try { await driver?.close(); }
-        finally { roots.delete(root); }
+        finally {
+          roots.delete(root);
+          storageLog('info', 'database.close', { root },
+            { durationMs: observer ? performance.now() - startedAt : undefined });
+        }
       })();
     },
   };

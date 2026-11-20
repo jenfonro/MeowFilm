@@ -1,11 +1,14 @@
 import { Socket } from 'node:net';
 import { isAbsolute, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { BridgeError, HTTP_PROTOCOL, decodeJSONValue, validateEndpoint, validateSession } from '@meowfilm/runtime-bridge';
+import { createNodeDebug, parseDebugHandshake, serializeDebugError } from '../../runtime/debug.mjs';
 import { createWindowsNativeSettings } from './native-settings.mjs';
 
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const sessionPattern = new RegExp(`^${uuid}$(?![\\s\\S])`);
 const pipePattern = new RegExp(`^meowfilm-${uuid}$(?![\\s\\S])`);
+const DEBUG_ERROR_SYMBOL = Symbol.for('meowfilm.windowsBootstrapDebug');
 
 /** Same fixed identity as native AppDataPaths, delivered only through the private pipe. */
 export function windowsScriptDataRoot(input) {
@@ -98,20 +101,44 @@ export function connectWindowsNamedPipe(pipeName, {
 export async function startWindowsRuntimeOnPipe(stream, {
   sessionId, createRuntime, timeout = 5000, signal,
 } = {}) {
-  let runtime, startup, closing, stopError, settings, started = false, stopped = false, configured = false;
+  let runtime, startup, closing, stopError, settings, debug, started = false, stopped = false, configured = false;
   let length = 0, chunks = [];
   let acceptConfig, rejectConfig, rejectStopped;
+  let exceptionMonitor;
   const config = new Promise((resolve, reject) => { acceptConfig = resolve; rejectConfig = reject; });
   const interrupted = new Promise((_, reject) => { rejectStopped = reject; });
   // Interruption can happen while startup or the ready write is still pending.
   interrupted.catch(() => {});
+  const logNode = (level, event, data, extra = {}) => {
+    if (!debug) return;
+    debug.emit({ level, cat: 'runtime-node', sub: 'windows.bootstrap', event, data, ...extra });
+  };
+  const removeProcessHooks = () => {
+    if (exceptionMonitor) { process.off('uncaughtExceptionMonitor', exceptionMonitor); exceptionMonitor = undefined; }
+  };
+  const installProcessHooks = () => {
+    if (!debug || exceptionMonitor) return;
+    exceptionMonitor = (error, origin) => {
+      const isRejection = origin === 'unhandledRejection';
+      logNode(
+        isRejection ? 'error' : 'fatal',
+        isRejection ? 'process.unhandledRejection' : 'process.uncaughtException',
+        { sessionId, origin: origin ?? 'uncaughtException' },
+        { error },
+      );
+    };
+    process.on('uncaughtExceptionMonitor', exceptionMonitor);
+  };
   const close = () => {
     if (closing) return closing;
     stopped = true;
     clearTimeout(timer);
     signal?.removeEventListener('abort', cancelled);
     chunks = [];
+    removeProcessHooks();
     settings?.close();
+    const closeStart = debug ? performance.now() : 0;
+    logNode('info', 'bootstrap.close.begin', { sessionId });
     closing = (async () => {
       try {
         // Wait for a racing listen operation before reporting resource cleanup.
@@ -126,13 +153,19 @@ export async function startWindowsRuntimeOnPipe(stream, {
         stream.off('end', ended);
         stream.off('close', ended);
         stream.off('error', failed);
+        logNode('info', 'bootstrap.close.end', { sessionId },
+          { durationMs: debug ? performance.now() - closeStart : undefined });
       }
-    })().catch(() => { throw new BridgeError('INVALID_RESPONSE'); });
+    })().catch(error => {
+      logNode('error', 'bootstrap.close.error', { sessionId }, { error });
+      throw new BridgeError('INVALID_RESPONSE');
+    });
     return closing;
   };
   const stop = code => {
     if (stopped) return;
     stopError = new BridgeError(code);
+    logNode('warn', 'bootstrap.stop', { sessionId, code });
     rejectConfig(stopError);
     rejectStopped(stopError);
     void close().catch(() => { if (started) reportWindowsRuntimeStartFailure(); });
@@ -162,10 +195,27 @@ export async function startWindowsRuntimeOnPipe(stream, {
         throw new BridgeError('INVALID_REQUEST');
       }
       validateSession({ sessionId: value.sessionId });
-      if (value.nativeSettings === true) settings = createWindowsNativeSettings(stream, stop);
+      const parsedDebug = Object.hasOwn(value, 'debug') && value.debug !== undefined
+        ? parseDebugHandshake(value.debug)
+        : null;
+      if (parsedDebug) {
+        debug = createNodeDebug(parsedDebug);
+        installProcessHooks();
+        logNode('info', 'bootstrap.configured', {
+          sessionId: value.sessionId,
+          dataRoot: value.dataRoot,
+          nativeSettings: value.nativeSettings === true,
+          debug: debug.getConfig(),
+        });
+      }
+      if (value.nativeSettings === true) settings = createWindowsNativeSettings(stream, stop, { debug });
       acceptConfig({ sessionId: value.sessionId, dataRoot: windowsScriptDataRoot(value.dataRoot),
-        ...(settings ? { settings } : {}) });
-    } catch { stop('INVALID_REQUEST'); }
+        ...(settings ? { settings } : {}),
+        ...(debug ? { debug } : {}) });
+    } catch (error) {
+      logNode('error', 'bootstrap.config.invalid', { sessionId }, { error });
+      stop('INVALID_REQUEST');
+    }
   };
   const timer = setTimeout(() => stop('TIMEOUT'), timeout);
   stream.on('data', data);
@@ -178,7 +228,10 @@ export async function startWindowsRuntimeOnPipe(stream, {
     if (stream.destroyed || stream.readableEnded) stop('CLOSED');
     const input = await config;
     if (stopped) throw stopError;
+    const startedAt = debug ? performance.now() : 0;
+    logNode('info', 'bootstrap.createRuntime', { sessionId: input.sessionId, dataRoot: input.dataRoot });
     runtime = await createRuntime(input);
+    logNode('info', 'bootstrap.runtime.start', { sessionId: input.sessionId });
     startup = Promise.resolve(runtime.start());
     await Promise.race([startup, interrupted]);
     if (stopped) throw stopError;
@@ -190,14 +243,27 @@ export async function startWindowsRuntimeOnPipe(stream, {
     if (stopped) throw stopError;
     clearTimeout(timer);
     started = true;
+    logNode('info', 'bootstrap.ready', { sessionId: input.sessionId, baseUrl: runtime.baseUrl },
+      { durationMs: debug ? performance.now() - startedAt : undefined });
     return Object.freeze({
       get baseUrl() { return runtime.baseUrl; },
       get state() { return runtime.state; },
       close,
     });
   } catch (error) {
+    logNode('error', 'bootstrap.failed', { sessionId }, { error });
     await close();
-    throw error instanceof BridgeError ? error : new BridgeError('INVALID_RESPONSE');
+    const wrapped = error instanceof BridgeError ? error : new BridgeError('INVALID_RESPONSE');
+    if (debug) {
+      if (Object.isExtensible(wrapped)) {
+        Object.defineProperty(wrapped, DEBUG_ERROR_SYMBOL, {
+          value: { debug, cause: error },
+          enumerable: false,
+          configurable: true,
+        });
+      }
+    }
+    throw wrapped;
   }
 }
 
@@ -210,8 +276,21 @@ export async function startWindowsAppRuntime({
   return startWindowsRuntimeOnPipe(stream, { sessionId: launch.session, createRuntime, timeout: connectTimeout, signal });
 }
 
-export function reportWindowsRuntimeStartFailure() {
+export function reportWindowsRuntimeStartFailure(error) {
   // No argv, provider error message, stack, URL, business data or credentials.
   process.stderr.write('WINDOWS_RUNTIME_START_FAILED\n');
+  const debugInfo = error?.[DEBUG_ERROR_SYMBOL];
+  if (debugInfo?.debug) {
+    const serialized = serializeDebugError(debugInfo.cause ?? error);
+    debugInfo.debug.emit({
+      level: 'fatal',
+      cat: 'runtime-node',
+      sub: 'windows.bootstrap',
+      event: 'bootstrap.start_failed',
+      data: { code: error?.code ?? null },
+      error: debugInfo.cause ?? error,
+    });
+    process.stderr.write(`WINDOWS_RUNTIME_START_FAILED_DEBUG ${JSON.stringify(serialized)}\n`);
+  }
   process.exitCode = 1;
 }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   createNodeNetwork,
   createNodeSourceCapabilities,
@@ -102,15 +103,17 @@ function errorCode(error) {
 
 export function createSourceRuntimeModule({
   hostFactory = createScriptHost,
-  network = createNodeNetwork(),
+  network,
   capabilityOwner,
   platform = 'unknown',
   dataRoot,
   storage,
   configurationOwner = 'runtime',
+  debug,
 } = {}) {
+  const activeNetwork = network ?? createNodeNetwork({ debug, debugCategory: 'novel', debugSub: 'source.http' });
   requireValue(typeof hostFactory === 'function' &&
-    typeof network === 'function' &&
+    typeof activeNetwork === 'function' &&
     typeof platform === 'string' && platform.length > 0 &&
     ['runtime', 'native'].includes(configurationOwner) &&
     (capabilityOwner === undefined ||
@@ -119,7 +122,7 @@ export function createSourceRuntimeModule({
   let library;
   const web = createSourceWebBroker();
   const owner = capabilityOwner ?? createNodeSourceCapabilities({
-    network, web: input => web.interact(input),
+    network: activeNetwork, web: input => web.interact(input),
     readStorage: input => library.readStorage(input),
     onProfileChange: prefix => library?.profileChanged(prefix),
   });
@@ -141,6 +144,7 @@ export function createSourceRuntimeModule({
   });
   const host = hostFactory({
     adapters: { legado: adapter, qysg: adapter, cat: adapter },
+    debug,
   });
   const sources = new SourceCandidates({ module: 'source', fail: code => new Failure(code) });
   const operations = new InstallationOperations();
@@ -158,7 +162,7 @@ export function createSourceRuntimeModule({
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   };
-  library = createSourceLibrary({ dataRoot, storage, host, owner, web, network, configurationOwner,
+  library = createSourceLibrary({ dataRoot, storage, host, owner, web, network: activeNetwork, configurationOwner,
     fail: code => new Failure(code), errorCode, guard, lifetime,
     externalInstallation: id => bindings.has(id) || operations.has(id) });
   const current = id => host.list().find(value => value.installationId === id);
@@ -231,7 +235,7 @@ export function createSourceRuntimeModule({
   };
 
   function method(parametersUsed, body) {
-    return async (parameters = {}, context = {}) => {
+    return async (parameters = {}, context = {}, debugHook) => {
       try {
         requireValue(object(context));
         const { signal } = context;
@@ -244,7 +248,10 @@ export function createSourceRuntimeModule({
         const result = await body(captured, active);
         guard(active);
         return success(result);
-      } catch (error) { return failure(error); }
+      } catch (error) {
+        debugHook?.onError?.(error);
+        return failure(error);
+      }
     };
   }
 
@@ -590,6 +597,38 @@ export function createSourceRuntimeModule({
     return web.respond(params);
   });
 
+  if (debug) {
+    for (const [name, handler] of Object.entries(methods)) {
+      const op = name.slice('source.runtime.'.length);
+      methods[name] = async (parameters = {}, context = {}) => {
+        const startedAt = performance.now();
+        let rawError = null;
+        const protocol = typeof parameters?.installationId === 'string'
+          ? bindings.get(parameters.installationId)?.protocol : undefined;
+        const cat = ['load', 'unload', 'status', 'close'].includes(op)
+          ? 'runtime-node'
+          : op === 'invoke' && protocol === 'cat'
+            ? 'film-catalog'
+            : 'novel';
+        const sub = `source.${op}`;
+        debug.emit({ level: 'debug', cat, sub, event: 'source.call.start', data: { operation: op, input: parameters } });
+        const reply = await handler(parameters, context, { onError: err => { rawError = err; } });
+        debug.emit({
+          level: reply?.ok === false ? 'warn' : 'debug',
+          cat,
+          sub,
+          event: reply?.ok === false ? 'source.call.error' : 'source.call.end',
+          durationMs: performance.now() - startedAt,
+          data: reply?.ok === false
+            ? { operation: op, input: parameters, code: reply.code }
+            : { operation: op, result: reply?.value },
+          error: reply?.ok === false ? rawError : null,
+        });
+        return reply;
+      };
+    }
+  }
+
   const close = async () => {
     try { return success(await shutdown()); }
     catch (error) { return failure(error); }
@@ -598,6 +637,19 @@ export function createSourceRuntimeModule({
     try { guard(signal); return success(sources.put(input, bytes, signal)); }
     catch (error) { return failure(error); }
   }
-  return { id: 'source', version: contracts.source.version, contract: sourceRuntimeContract,
-    methods, upload, close, image: (reference, context) => library.image(reference, context) };
+  return {
+    id: 'source',
+    version: contracts.source.version,
+    contract: sourceRuntimeContract,
+    diagnostics: () => ({
+      closed,
+      bindings: bindings.size,
+      webPending: web.pending().requests.length,
+      host: host.stats(),
+    }),
+    methods,
+    upload,
+    close,
+    image: (reference, context) => library.image(reference, context),
+  };
 }

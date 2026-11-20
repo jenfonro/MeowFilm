@@ -2,6 +2,7 @@ import { fail, MusicPlatformError } from './errors.mjs';
 import { decodeJSON } from './model.mjs';
 import http, { validateHeaderName, validateHeaderValue } from 'node:http';
 import https from 'node:https';
+import { performance } from 'node:perf_hooks';
 import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
@@ -12,6 +13,7 @@ function networkFailure(error, signal) {
   if (signal?.aborted) throw signal.reason;
   if (error instanceof MusicPlatformError) throw error;
   const failure = new MusicPlatformError('NETWORK_ERROR');
+  failure.cause = error;
   // Only actual connection-establishment failures prove zero HTTP bytes sent.
   failure.beforeSend = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']
     .includes(error.code ?? error.cause?.code);
@@ -23,7 +25,7 @@ function responseStatus(status, allowRedirect) {
   error.status = status;
   throw error;
 }
-async function nodeExchange({ url, method, headers, body, json, signal, allowRedirect, dispatched }) {
+async function nodeExchange({ url, method, headers, body, json, signal, allowRedirect, dispatched, onResponseHeaders }) {
   // Use the existing managed Node network's per-exchange ownership pattern.
   // No shared agent survives the operation; completion includes physical close.
   const resources = [], closing = [];
@@ -48,6 +50,7 @@ async function nodeExchange({ url, method, headers, body, json, signal, allowRed
       request.end(body);
     });
     signal?.throwIfAborted();
+    onResponseHeaders?.(response.headers);
     responseStatus(response.statusCode, allowRedirect);
     const encodings = method === 'HEAD' || [204, 205, 304].includes(response.statusCode) ? [] :
       String(response.headers['content-encoding'] ?? 'identity').split(',').map(value => value.trim().toLowerCase()).reverse();
@@ -84,7 +87,7 @@ async function nodeExchange({ url, method, headers, body, json, signal, allowRed
 }
 
 /** Fixed recipes use this transport; it never validates business objects. */
-export function createMusicTransport({ fetch: fetcher } = {}) {
+export function createMusicTransport({ fetch: fetcher, debug } = {}) {
   return async ({ url, method = 'GET', headers = {}, body,
     json = true, signal, allowRedirect = false, dispatched }) => {
     signal?.throwIfAborted();
@@ -93,33 +96,87 @@ export function createMusicTransport({ fetch: fetcher } = {}) {
         validateHeaderName(name); validateHeaderValue(name, value);
       }
     } catch { fail('INVALID_REQUEST'); }
-    if (!fetcher) return nodeExchange({ url, method, headers, body, json, signal, allowRedirect, dispatched });
-    let response;
-    dispatched?.();
-    try { response = await fetcher(url, { method, headers, body, signal, redirect: 'manual' }); }
-    catch (error) { networkFailure(error, signal); }
-    if (!response.ok && !(allowRedirect && redirects.has(response.status))) {
-      await response.body?.cancel().catch(() => {});
-      responseStatus(response.status, allowRedirect);
+    const startedAt = debug ? performance.now() : 0;
+    if (debug) {
+      debug.emit({
+        level: 'debug',
+        cat: 'music-platform',
+        sub: 'http',
+        event: 'http.request',
+        data: { url, method, headers, body: body ?? null, json, allowRedirect },
+      });
     }
-    const chunks = [];
-    let length = 0;
-    const reader = response.body?.getReader();
     try {
-      while (reader) {
-        const { done, value: chunk } = await reader.read();
-        if (done) break;
-        signal?.throwIfAborted();
-        length += chunk.byteLength;
-        chunks.push(chunk);
+      let result;
+      let rawResponseHeaders = null;
+      if (!fetcher) {
+        result = await nodeExchange({
+          url, method, headers, body, json, signal, allowRedirect, dispatched,
+          onResponseHeaders: debug ? value => { rawResponseHeaders = value; } : undefined,
+        });
+      } else {
+        let response;
+        dispatched?.();
+        try { response = await fetcher(url, { method, headers, body, signal, redirect: 'manual' }); }
+        catch (error) { networkFailure(error, signal); }
+        if (debug && typeof response.headers?.entries === 'function') {
+          rawResponseHeaders = Object.fromEntries(response.headers.entries());
+        }
+        if (!response.ok && !(allowRedirect && redirects.has(response.status))) {
+          await response.body?.cancel().catch(() => {});
+          responseStatus(response.status, allowRedirect);
+        }
+        const chunks = [];
+        let length = 0;
+        const reader = response.body?.getReader();
+        try {
+          while (reader) {
+            const { done, value: chunk } = await reader.read();
+            if (done) break;
+            signal?.throwIfAborted();
+            length += chunk.byteLength;
+            chunks.push(chunk);
+          }
+        } catch (error) {
+          networkFailure(error, signal);
+        } finally { reader?.releaseLock(); }
+        const bytes = Buffer.concat(chunks, length);
+        result = { value: json ? decodeJSON(bytes) : bytes,
+          cookies: response.headers.getSetCookie(), headers: response.headers, status: response.status };
       }
+      if (debug) {
+        debug.emit({
+          level: 'debug',
+          cat: 'music-platform',
+          sub: 'http',
+          event: 'http.response',
+          durationMs: performance.now() - startedAt,
+          data: {
+            url,
+            method,
+            status: result.status,
+            headers: rawResponseHeaders,
+            cookies: result.cookies,
+            location: result.headers?.get?.('location') ?? null,
+            contentType: result.headers?.get?.('content-type') ?? null,
+            value: result.value,
+          },
+        });
+      }
+      return result;
     } catch (error) {
-      if (signal?.aborted) throw signal.reason;
-      if (error instanceof MusicPlatformError) throw error;
-      fail('NETWORK_ERROR');
-    } finally { reader?.releaseLock(); }
-    const bytes = Buffer.concat(chunks, length);
-    return { value: json ? decodeJSON(bytes) : bytes,
-      cookies: response.headers.getSetCookie(), headers: response.headers, status: response.status };
+      if (debug) {
+        debug.emit({
+          level: 'warn',
+          cat: 'music-platform',
+          sub: 'http',
+          event: 'http.error',
+          durationMs: performance.now() - startedAt,
+          data: { url, method, status: error?.status ?? null, code: error?.code ?? null },
+          error,
+        });
+      }
+      throw error;
+    }
   };
 }

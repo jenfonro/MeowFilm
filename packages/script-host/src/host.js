@@ -1,5 +1,6 @@
 import { cloneJSONValue as copyJSON } from '@meowfilm/runtime-bridge/json';
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
 
 function cloneJSONValue(value) {
@@ -90,7 +91,7 @@ export class ScriptHost {
   #cleanupIssues = new Map();
   #closing;
 
-  constructor({ adapters, network, storage, onDiagnostic, onScriptError, limits = {} }) {
+  constructor({ adapters, network, storage, onDiagnostic, onScriptError, limits = {}, debug }) {
     requireValue(adapters && typeof adapters === 'object');
     requireValue(network === undefined || typeof network === 'function');
     requireValue(storage === undefined || (storage && typeof storage === 'object'));
@@ -105,8 +106,36 @@ export class ScriptHost {
     this.adapters = { ...adapters };
     this.network = network;
     this.storage = storage;
-    this.onDiagnostic = onDiagnostic;
-    this.onScriptError = onScriptError;
+    this.debug = debug ?? null;
+    this.onDiagnostic = this.debug
+      ? entry => {
+          this.debug.emit({
+            level: 'debug',
+            cat: 'runtime-node',
+            sub: 'script-host',
+            event: 'script.diagnostic',
+            data: entry,
+          });
+          onDiagnostic?.(entry);
+        }
+      : onDiagnostic;
+    // Raw guest name/stack stay inside Debug logs; external observers keep the event + message shape.
+    const observeScriptError = onScriptError
+      ? ({ raw, ...entry }) => onScriptError(Object.freeze(entry)) : undefined;
+    this.onScriptError = this.debug
+      ? entry => {
+          const { raw, ...data } = entry;
+          this.debug.emit({
+            level: 'error',
+            cat: 'runtime-node',
+            sub: 'script-host',
+            event: 'script.error',
+            data,
+            error: raw ?? { message: entry.message },
+          });
+          observeScriptError?.(entry);
+        }
+      : observeScriptError;
   }
 
   #open() { requireValue(!this.#closed, 'HOST_CLOSED'); }
@@ -140,6 +169,14 @@ export class ScriptHost {
     requireValue(typeof factory === 'function', 'UNSUPPORTED_PROTOCOL');
     const generation = (this.#generations.get(id) ?? 0) + 1;
     this.#generations.set(id, generation);
+    const startedAt = this.debug ? performance.now() : 0;
+    this.debug?.emit({
+      level: 'info',
+      cat: 'runtime-node',
+      sub: 'script-host',
+      event: 'session.start',
+      data: { installationId: id, generation, protocol: rev.protocol, version: rev.version, contentHash: rev.hash },
+    });
     let session;
     session = factory({
       installationId: id, generation, revision: rev,
@@ -174,10 +211,27 @@ export class ScriptHost {
     }).catch(() => {});
     try {
       await initializing;
+      this.debug?.emit({
+        level: 'info',
+        cat: 'runtime-node',
+        sub: 'script-host',
+        event: 'session.ready',
+        durationMs: this.debug ? performance.now() - startedAt : undefined,
+        data: { installationId: id, generation, protocol: rev.protocol },
+      });
       return session;
     } catch (e) {
       const failure = signal?.aborted ? fault('CANCELLED')
         : e instanceof Error && e.code ? e : safeError(e);
+      this.debug?.emit({
+        level: 'error',
+        cat: 'runtime-node',
+        sub: 'script-host',
+        event: 'session.start.error',
+        durationMs: this.debug ? performance.now() - startedAt : undefined,
+        data: { installationId: id, generation, protocol: rev.protocol, code: failure.code },
+        error: e,
+      });
       try { await this.#stop(session); } catch { /* Preserve the initiating failure. */ }
       throw failure;
     } finally { signal?.removeEventListener('abort', abort); }
@@ -219,6 +273,14 @@ export class ScriptHost {
     const record = this.#records.get(id);
     if (!record || record.session !== session) return;
     record.lastFailure = safeError(failure).code;
+    this.debug?.emit({
+      level: 'error',
+      cat: 'runtime-node',
+      sub: 'script-host',
+      event: 'session.failed',
+      data: { installationId: id, generation: session.generation, code: record.lastFailure },
+      error: failure,
+    });
   }
   #stop(session) {
     if (!session) return Promise.resolve();
@@ -230,9 +292,19 @@ export class ScriptHost {
     return stopping;
   }
   async #stopOwned(session) {
+    const startedAt = this.debug ? performance.now() : 0;
     let failure;
     try { await session.stop(); } catch (error) { failure ??= safeError(error); }
     try { await session.drainAdapters(); } catch (error) { failure ??= safeError(error); }
+    this.debug?.emit({
+      level: failure ? 'warn' : 'info',
+      cat: 'runtime-node',
+      sub: 'script-host',
+      event: failure ? 'session.stop.error' : 'session.stop',
+      durationMs: this.debug ? performance.now() - startedAt : undefined,
+      data: { installationId: session.installationId, generation: session.generation },
+      error: failure ?? null,
+    });
     let stats;
     try { stats = session.stats(); } catch (error) {
       failure ??= safeError(error);

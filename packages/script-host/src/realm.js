@@ -68,7 +68,9 @@ export const realmSource = String.raw`
     if (trustedErrors.has(e)) return;
     try {
       withScope(scope, () => emit('diagnostic', {
-        diagnostic: describeDiagnostic(e), ...(observeScriptErrors ? {message:String(e?.message ?? '')} : {}),
+        diagnostic: describeDiagnostic(e), ...(observeScriptErrors ? {message:String(e?.message ?? ''),
+          name:typeof e?.name === 'string' ? e.name : '', stack:typeof e?.stack === 'string' ? e.stack : '',
+          ...(typeof e?.code === 'string' ? {code:e.code} : {})} : {}),
       }));
     } catch (_) {}
   }

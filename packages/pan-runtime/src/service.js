@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { cloneJSONValue, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { PanError, requireValue } from './errors.js';
 import { createTransport } from './http.js';
@@ -75,14 +76,14 @@ function accountRevision(account) {
 }
 
 /** One in-process owner. Neither script engines nor platform credential bridges are required. */
-export function createPanService({ dataRoot, transport, now = Date.now, store: suppliedStore } = {}) {
+export function createPanService({ dataRoot, transport, now = Date.now, store: suppliedStore, debug } = {}) {
   requireValue(typeof now === 'function' && (transport === undefined ||
     typeof transport?.request === 'function' && typeof transport?.close === 'function'));
   const store = suppliedStore ?? new PanStore(dataRoot);
   requireValue(typeof store.read === 'function' && typeof store.update === 'function' &&
     typeof store.close === 'function' && (store.reload === undefined || typeof store.reload === 'function'));
   let document = { version: 1, accounts: {} };
-  const http = transport ?? createTransport();
+  const http = transport ?? createTransport({ debug });
   const accounts = new Map([...providers.keys()].map(id => [id, accountValue(document, id)]));
   const pending = new Set(), controllers = new Set(), shared = new Map(), logins = new Map(), loginStarts = new Map();
   const accountListeners = new Set();
@@ -506,11 +507,45 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       },
     }),
     settingsChanged: () => ready.then(() => change(reload)),
+    diagnostics() {
+      return {
+        closed,
+        pendingOperations: pending.size,
+        activeLogins: logins.size,
+        providers: [...providers.keys()],
+        transport: http.diagnostics?.() ?? null,
+      };
+    },
     invoke(operation, params = {}, { signal } = {}) {
+      const startedAt = debug ? performance.now() : 0;
+      const sub = typeof params?.provider === 'string' && params.provider ? `pan.${params.provider}` : 'pan';
+      debug?.emit({ level: 'debug', cat: 'film-playback', sub, event: `pan.${operation}.start`, data: { operation, params } });
       return track(ready.then(() => {
         requireValue(signal === undefined || signal instanceof AbortSignal);
         return dispatch(operation, params, signal);
-      }).catch(error => { throw failure(error); }));
+      }).then(value => {
+        debug?.emit({
+          level: 'debug',
+          cat: 'film-playback',
+          sub,
+          event: `pan.${operation}.end`,
+          durationMs: debug ? performance.now() - startedAt : undefined,
+          data: { operation, value },
+        });
+        return value;
+      }).catch(error => {
+        const wrapped = failure(error);
+        debug?.emit({
+          level: 'warn',
+          cat: 'film-playback',
+          sub,
+          event: `pan.${operation}.error`,
+          durationMs: debug ? performance.now() - startedAt : undefined,
+          data: { operation, params, code: wrapped.code },
+          error,
+        });
+        throw wrapped;
+      }));
     },
     close() {
       return closing ??= (async () => {

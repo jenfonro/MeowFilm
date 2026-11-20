@@ -494,6 +494,16 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
     has: id => sessions.has(id),
     snapshot: input => snapshot(get(input.sessionId)),
     ruleSnapshot: input => get(input.sessionId).ruleSnapshot,
+    diagnostics() {
+      let activeEventStreams = 0;
+      for (const session of sessions.values()) activeEventStreams += session.listeners.size;
+      return {
+        closed,
+        activeSessions: sessions.size,
+        activeJobs: jobs.size,
+        activeEventStreams,
+      };
+    },
     close() {
       return closing ??= (async () => {
         for (const session of sessions.values()) {

@@ -33,10 +33,16 @@ function milliseconds(value) {
   return value;
 }
 
-export function createTransport({ timeout = 30000 } = {}) {
+export function createTransport({ timeout = 30000, debug } = {}) {
   milliseconds(timeout);
   const sockets = new Map(), requests = new Set(), operations = new Set();
   let closed = false, closing;
+  // Debug keeps the raw socket/TLS/decoder failure as cause; the public code is unchanged.
+  const upstream = (code, cause) => {
+    const failure = new PanError(code);
+    if (debug && cause !== undefined) failure.cause = cause;
+    return failure;
+  };
 
   function track(socket) {
     if (sockets.has(socket)) return;
@@ -104,7 +110,7 @@ export function createTransport({ timeout = 30000 } = {}) {
           if (!socketClosed) socket.once('close', socketClose);
           if (failure) socket.destroy();
         });
-        request.on('error', () => { if (!stopping) fail(new PanError('NETWORK_ERROR')); });
+        request.on('error', error => { if (!stopping) fail(upstream('NETWORK_ERROR', error)); });
         request.once('close', () => {
           requestClosed = true;
           if (!response && !failure) fail(new PanError('NETWORK_ERROR'));
@@ -118,7 +124,7 @@ export function createTransport({ timeout = 30000 } = {}) {
             if (!incoming.complete && !failure && !stopping) fail(new PanError('NETWORK_ERROR'));
             finish();
           });
-          incoming.on('error', () => { if (!stopping) fail(new PanError('NETWORK_ERROR')); });
+          incoming.on('error', error => { if (!stopping) fail(upstream('NETWORK_ERROR', error)); });
           incoming.once('aborted', () => { if (!stopping) fail(new PanError('NETWORK_ERROR')); });
           if (failure) { incoming.destroy(); return; }
           if (responseMode === 'headers') {
@@ -143,7 +149,7 @@ export function createTransport({ timeout = 30000 } = {}) {
               requireValue(Object.hasOwn(decompressors, name), 'UPSTREAM_FORMAT');
               const stream = decompressors[name]();
               streams.add(stream);
-              stream.on('error', () => fail(new PanError('UPSTREAM_FORMAT')));
+              stream.on('error', error => fail(upstream('UPSTREAM_FORMAT', error)));
               stream.once('close', () => { streams.delete(stream); finish(); });
               output = output.pipe(stream);
             }
@@ -164,8 +170,8 @@ export function createTransport({ timeout = 30000 } = {}) {
         signal.addEventListener('abort', abort, { once: true });
         if (signal.aborted) abort();
         else request.end(body);
-      } catch {
-        failure = new PanError('NETWORK_ERROR');
+      } catch (error) {
+        failure = upstream('NETWORK_ERROR', error);
         if (request) fail(failure);
         else { requestClosed = true; finish(); }
       }
@@ -214,7 +220,43 @@ export function createTransport({ timeout = 30000 } = {}) {
         const visited = new Set([`${method} ${url.href}`]);
         while (true) {
           if (controller.signal.aborted) throw controller.signal.reason;
-          const result = await exchange(url, method, headers, body, responseMode, controller.signal);
+          const hopStart = debug ? performance.now() : 0;
+          if (debug) {
+            debug.emit({
+              level: 'debug',
+              cat: 'film-playback',
+              sub: 'pan.http',
+              event: 'http.request',
+              data: { url: url.href, method, headers, body: body ?? null, responseMode },
+            });
+          }
+          let result;
+          try {
+            result = await exchange(url, method, headers, body, responseMode, controller.signal);
+          } catch (error) {
+            if (debug) {
+              debug.emit({
+                level: 'warn',
+                cat: 'film-playback',
+                sub: 'pan.http',
+                event: 'http.error',
+                durationMs: performance.now() - hopStart,
+                data: { url: url.href, method, code: error?.code ?? null },
+                error,
+              });
+            }
+            throw error;
+          }
+          if (debug) {
+            debug.emit({
+              level: 'debug',
+              cat: 'film-playback',
+              sub: 'pan.http',
+              event: 'http.response',
+              durationMs: performance.now() - hopStart,
+              data: { url: url.href, method, status: result.status, headers: result.headers, body: result.body ?? null },
+            });
+          }
           if (redirect === 'manual' || !redirects.has(result.status) || !result.headers.location) return result;
           let next;
           try { next = address(new URL(result.headers.location, url), 'UPSTREAM_FORMAT'); }
@@ -259,7 +301,16 @@ export function createTransport({ timeout = 30000 } = {}) {
     return closing;
   }
 
-  return { request, close };
+  return {
+    request,
+    diagnostics: () => ({
+      closed,
+      activeOperations: operations.size,
+      activeRequests: requests.size,
+      activeSockets: sockets.size,
+    }),
+    close,
+  };
 }
 
 function requestOptions(ctx, options) {

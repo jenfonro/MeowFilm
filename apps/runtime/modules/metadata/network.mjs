@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import { performance } from 'node:perf_hooks';
 import { createNodeNetwork } from '@meowfilm/script-host';
 import { metadataFailure } from './settings.mjs';
 
@@ -14,14 +15,40 @@ function address(value) {
 
 /** Reuse the buffered HTTP adapter, including explicit headers on redirects.
  * Cookie-jar consumers request individual hops and select their own cookies. */
-export function createMetadataRequest() {
+export function createMetadataRequest({ debug, provider = 'metadata' } = {}) {
   const network = createNodeNetwork();
   return async (url, { signal, ...options } = {}) => {
+    const startedAt = debug ? performance.now() : 0;
+    debug?.emit({
+      level: 'debug',
+      cat: 'film-catalog',
+      sub: `${provider}.http`,
+      event: 'http.request',
+      data: { url, method: options.method ?? 'GET', headers: options.headers ?? {}, body: options.body ?? null },
+    });
     try {
       const result = await network({ url, signal, validateURL: address,
         options });
-      return { status: result.statusCode, headers: result.headers, body: result.body, url: result.url };
+      const output = { status: result.statusCode, headers: result.headers, body: result.body, url: result.url };
+      debug?.emit({
+        level: 'debug',
+        cat: 'film-catalog',
+        sub: `${provider}.http`,
+        event: 'http.response',
+        durationMs: debug ? performance.now() - startedAt : undefined,
+        data: output,
+      });
+      return output;
     } catch (error) {
+      debug?.emit({
+        level: 'warn',
+        cat: 'film-catalog',
+        sub: `${provider}.http`,
+        event: 'http.error',
+        durationMs: debug ? performance.now() - startedAt : undefined,
+        data: { url, code: error?.code ?? null },
+        error,
+      });
       throw metadataFailure(signal?.aborted ? 'CANCELLED'
         : error?.code === 'INVALID_ARGUMENT' ? 'INVALID_REQUEST' : 'NETWORK_ERROR');
     }

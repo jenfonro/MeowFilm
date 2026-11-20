@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
@@ -132,7 +133,7 @@ function rangeFor(value, length) {
   return { start, end };
 }
 
-export function createMediaService() {
+export function createMediaService({ debug } = {}) {
   const owners = new Map(), operations = new Set(), inboundSockets = new Map();
   const cachePool = createMediaCachePool();
   let server, starting, closing, closed = false, baseUrl;
@@ -777,11 +778,38 @@ export function createMediaService() {
     if (!resource) { sendError(response, 404, 'MEDIA_NOT_FOUND'); return; }
     if (operations.size >= maximumActiveRequests) { sendError(response, 503, 'MEDIA_BUSY'); return; }
     const task = operation(owner, response);
+    const startedAt = debug ? performance.now() : 0;
+    debug?.emit({
+      level: 'debug',
+      cat: 'film-playback',
+      sub: 'film.media',
+      event: 'media.proxy.request',
+      data: { ownerId: owner.id, method: request.method, path, targetUrl: resource.url, range: request.headers.range ?? null },
+    });
     try { await serve(task, owner, resource, request, response); }
     catch (error) {
       const code = typeof error?.code === 'string' && /^MEDIA_[A-Z_]+$/.test(error.code) ? error.code : 'MEDIA_UPSTREAM_ERROR';
+      debug?.emit({
+        level: 'warn',
+        cat: 'film-playback',
+        sub: 'film.media',
+        event: 'media.proxy.error',
+        durationMs: debug ? performance.now() - startedAt : undefined,
+        data: { ownerId: owner.id, targetUrl: resource.url, code },
+        error,
+      });
       sendError(response, code === 'MEDIA_UPSTREAM_TIMEOUT' ? 504 : 502, code);
-    } finally { await task.finish(); }
+    } finally {
+      await task.finish();
+      debug?.emit({
+        level: 'debug',
+        cat: 'film-playback',
+        sub: 'film.media',
+        event: 'media.proxy.finish',
+        durationMs: debug ? performance.now() - startedAt : undefined,
+        data: { ownerId: owner.id, statusCode: response.statusCode },
+      });
+    }
   }
 
   async function revoke(owner) {
@@ -818,10 +846,27 @@ export function createMediaService() {
       try {
         const url = useStream ? register(owner, { url: input.url,
           ...(input.format === undefined ? {} : { format: input.format }) }) : input.url;
+        debug?.emit({
+          level: 'info',
+          cat: 'film-playback',
+          sub: 'film.media',
+          event: 'media.prepare',
+          data: { id, useStream, url, targetUrl: input.url, format: input.format ?? null, cache },
+        });
         return { id, url, ...(useStream ? { mediaOrigin: `${baseUrl}/` } : {}),
           ...(input.format === undefined ? {} : { format: input.format }),
           ...(input.drm === undefined ? {} : { drm: cloneJSONValue(input.drm) }) };
       } catch (error) { await revoke(owner); throw error; }
+    },
+    diagnostics() {
+      return {
+        closed,
+        listening: Boolean(server?.listening),
+        baseUrl: baseUrl ?? null,
+        activeOwners: owners.size,
+        activeStreams: operations.size,
+        inboundSockets: inboundSockets.size,
+      };
     },
     async prefetch(id) {
       if (closed) throw failure('MEDIA_CLOSED');

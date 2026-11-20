@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { createCatRuntime, ScriptHostError } from '@meowfilm/script-host';
 import { validateJSONValue } from '@meowfilm/runtime-bridge';
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
@@ -60,18 +61,23 @@ function linkedSignal(external, lifetime) {
 }
 
 /** Passive Cat protocol owner; the caller owns its data-root and session. */
-export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock, configuration } = {}) {
+export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock, configuration, debug } = {}) {
   requireValue(typeof dataRoot === 'string' && typeof runtimeFactory === 'function');
   const sources = new SourceCandidates({ module: 'cat', fail: code => new ScriptHostError(code) });
   const lifetime = new AbortController();
   const pending = new Set();
   let runtime, closing, closed = false;
-  const get = () => runtime ??= runtimeFactory({ dataRoot, clock, configuration });
+  const get = () => runtime ??= runtimeFactory({ dataRoot, clock, configuration, debug });
   const nativeWrites = new Set(['install', 'import', 'edit', 'enable', 'uninstall']);
   const methods = {};
   function method(name, parameters, body) {
     methods['cat.script.' + name] = (input = {}, context = {}) => {
       const task = (async () => {
+        const startedAt = debug ? performance.now() : 0;
+        const cat = ['install', 'import', 'update', 'restart', 'enable', 'uninstall', 'status'].includes(name)
+          ? 'runtime-node' : 'film-catalog';
+        const sub = `cat.${name}`;
+        debug?.emit({ level: 'debug', cat, sub, event: 'cat.call.start', data: { name, input } });
         try {
           if (closed) throw new ScriptHostError('HOST_CLOSED');
           if (configuration && nativeWrites.has(name)) throw new ScriptHostError('PERMISSION_DENIED');
@@ -91,8 +97,28 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
           } catch (failure) { error = failure; }
           try { linked.release(); } catch (failure) { error ??= failure; }
           if (error) throw error;
+          debug?.emit({
+            level: 'debug',
+            cat,
+            sub,
+            event: 'cat.call.end',
+            durationMs: debug ? performance.now() - startedAt : undefined,
+            data: { name, value },
+          });
           return success(value);
-        } catch (error) { return failure(error); }
+        } catch (error) {
+          const reply = failure(error);
+          debug?.emit({
+            level: 'warn',
+            cat,
+            sub,
+            event: 'cat.call.error',
+            durationMs: debug ? performance.now() - startedAt : undefined,
+            data: { name, input, code: reply.code },
+            error,
+          });
+          return reply;
+        }
       })();
       pending.add(task);
       task.finally(() => pending.delete(task)).catch(() => {});
@@ -214,6 +240,14 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
     })();
   }
   return { id: 'cat', version: contracts.cat.version, contract: catScriptContract,
+    diagnostics() {
+      const runtimeDiag = runtime?.diagnostics?.() ?? null;
+      return {
+        closed,
+        pendingModuleCalls: pending.size,
+        ...(runtimeDiag ?? { installations: 0, liveWorkers: 0, readyWorkers: 0 }),
+      };
+    },
     async settingsChanged() {
       if (!configuration || closed) throw new ScriptHostError('HOST_CLOSED');
       // Applying a saved input is owned by the module lifetime, not the short notification HTTP request.

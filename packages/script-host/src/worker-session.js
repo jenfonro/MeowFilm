@@ -56,6 +56,14 @@ export class WorkerSession {
     this.worker = worker;
     worker.on('message', message => this.#message(message));
     worker.on('error', error => {
+      this.input.debug?.emit({
+        level: 'error',
+        cat: 'runtime-node',
+        sub: 'cat.worker',
+        event: 'worker.error',
+        data: { installationId: this.installationId, generation: this.generation },
+        error,
+      });
       this.#failed(safeError(error, 'SCRIPT_EXCEPTION'), 'worker.exit');
     });
     worker.on('exit', code => this.#exited(worker, code));

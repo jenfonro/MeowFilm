@@ -3185,5 +3185,16 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         if (failure) throw failure.reason;
       })();
     },
+    diagnostics() {
+      let activeEventStreams = 0;
+      for (const session of sessions.values()) activeEventStreams += session.listeners?.size ?? 0;
+      return {
+        closed,
+        activeSessions: sessions.size,
+        activeJobs: jobs.size,
+        activeCalculations: calculations.size,
+        activeEventStreams,
+      };
+    },
   };
 }
