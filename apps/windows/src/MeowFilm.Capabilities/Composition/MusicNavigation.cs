@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Collections.ObjectModel;
 using MeowFilm.Threading;
 using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
@@ -19,6 +20,19 @@ public sealed partial class MusicCapability
     private CancellationTokenSource? collectionPageCancellation;
     private long loadGeneration, libraryRead, libraryRevision = -1;
     private bool publishing;
+
+    private void PublishContentSelection((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous)
+    {
+        if (!ReferenceEquals(previous.Sections, CatalogSections))
+        { Changed(nameof(CatalogSections)); Changed(nameof(DisplayCatalogSections)); }
+        if (previous.Route == location.Route && (!IsSearchPage || previous.SearchView == searchView)) return;
+        foreach (var name in new[] { nameof(ContentPage), nameof(Songs), nameof(IsHistory), nameof(IsArchives), nameof(IsSongList),
+            nameof(IsLocalLibraryPage), nameof(ShowsSongTable), nameof(IsUtilityCatalogSurface), nameof(IsCatalogHome),
+            nameof(IsCatalogPage), nameof(IsChannelDirectory), nameof(CurrentChannelKey), nameof(IsCatalogLanding),
+            nameof(IsCatalogUtilityPage), nameof(IsChannelLanding), nameof(IsCatalogPlaylist), nameof(IsCatalogArtist),
+            nameof(IsCatalogDetailPage), nameof(IsSearchPage), nameof(IsCatalogBrowsePage), nameof(SearchTab),
+            nameof(IsSearchOverview), nameof(IsSearchSongs), nameof(IsSearchPlaylists), nameof(IsDiscovery), nameof(IsCatalogContent) }) Changed(name);
+    }
 
     private Location CaptureLocation() => location with { Selected = selectedSong?.SelectionKey, Scroll = Presentation.CaptureScroll() };
     private void RememberLocation()
@@ -186,9 +200,7 @@ public sealed partial class MusicCapability
             await OpenSearchTabAsync(SearchOverview);
             return;
         }
-        searchView = SearchOverview;
-        searchKind = "songs";
-        await BeginSearchAsync(query, token);
+        await BeginSearchAsync(query, token, overview: true);
     }
     private void RetireOperationStatus()
     {
@@ -294,6 +306,7 @@ public sealed partial class MusicCapability
             publishing = true;
             try
             {
+                var previousSelection = (location.Route, searchView, CatalogSections);
                 location = target; collection = detail; heading = title; total = count;
                 selectedSong = null; Changed(nameof(SelectedSong));
                 Songs.Clear(); foreach (var row in rows) Songs.Add(row);
@@ -301,7 +314,7 @@ public sealed partial class MusicCapability
                 Archives.Clear(); foreach (var archive in archives) Archives.Add(archive);
                 SelectedSong = rows.FirstOrDefault(row => row.SelectionKey == target.Selected);
                 locations[target.Key] = target;
-                RefreshBindings();
+                PublishContentSelection(previousSelection); RefreshBindings();
             }
             finally { publishing = false; }
             _ = Presentation.Dispatcher.EnqueueAsync(() =>

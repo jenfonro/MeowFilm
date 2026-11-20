@@ -19,9 +19,10 @@ public static partial class MusicUiTests
     internal static IEnumerable<TestCase> CatalogLayoutCases()
     {
         yield return Case("section more retains full bounds at narrow and wide native render scales", CatalogMoreGeometry);
-        yield return Case("first-load skeletons match real two-banner and entry geometry without artwork", CatalogSkeletonGeometry);
         yield return Case("banner frame stays 2.56 to 1 with wide square and portrait artwork", CatalogBannerAspect);
         yield return Case("two-banner paging retains final resources resize and indicator position", CatalogBannerPaging);
+        yield return Case("shelf pages through full-height arrow buttons while native scrolling stays with the page", CatalogShelfPagingHitArea);
+        yield return Case("catalog content buttons keep hover feedback inside their card artwork", CatalogCardContentStates);
         yield return Case("native indicator keeps its anchor while neighboring dots slide and scale", CatalogIndicatorDrawing);
         yield return Case("fixed entry labels captions and resting gradient bind without input", CatalogEntryRoles);
         yield return Case("artwork demand visibility respects clipping hiding and reentry without input", CatalogArtworkVisibility);
@@ -54,59 +55,7 @@ public static partial class MusicUiTests
             await NativeDesktopCapture.SaveAsync(section, $"catalog-more-{width:0}-{scale * 100:0}");
         }
     }
-    private static DataTemplate CatalogCardTemplate(bool entry = false) => MusicTestUi.Template(entry
-        ? "<local:EntryCard/>" : "<local:MusicCatalogCardView Presentation='Banner'/>");
-    private static async Task CatalogSkeletonGeometry()
-    {
-        foreach (int width in new[] { 560, 826, 1490 })
-        foreach (bool home in new[] { false, true })
-        {
-            var skeleton = new MusicCatalogSkeleton { IsHome = home, Width = width, VerticalAlignment = VerticalAlignment.Top };
-            using var host = new DesktopTestUi.Host(skeleton, width, 900);
-            await TestUiHost.LoadedAsync(skeleton); await Drain(); skeleton.UpdateLayout();
-            True(!Visuals(skeleton).OfType<ArtworkImage>().Any(), "a placeholder cannot request artwork");
-            var shapes = skeleton.Children.Cast<LoadingSkeleton>().ToArray();
-            var squares = shapes.Where(shape => Math.Abs(shape.ActualWidth - shape.ActualHeight) < .5).ToArray();
-            True(squares.Length > 0 && squares.All(shape => shape.ActualWidth is >= 123.5 and <= 168.5),
-                "ordinary covers have the same bounded square geometry as native shelves");
-            var first = DesktopTestUi.Bounds(shapes[0], skeleton);
-            if (!home)
-            {
-                True(Math.Abs(first.Width - (width - 20) / 2) < .5, "two equal banners fit with the real gap");
-                True(Math.Abs(DesktopTestUi.Bounds(shapes[1], skeleton).Left - first.Right - 20) < .5,
-                    "the banner gap matches the content");
-            }
-            var card = (FrameworkElement)CatalogCardTemplate(home).LoadContent();
-            card.Width = first.Width;
-            card.DataContext = new MusicCatalogCard("1", "测试", "描述", "", "playlist", "wy", ActionId: "1");
-            using var cardHost = new DesktopTestUi.Host(card, (int)Math.Round(first.Width), 900);
-            card.VerticalAlignment = VerticalAlignment.Top;
-            await TestUiHost.LoadedAsync(card); await Drain(); card.UpdateLayout();
-            True(Math.Abs(first.Height - card.ActualHeight) < 1, "the skeleton has the current native card height");
-            True(shapes.All(shape => DesktopTestUi.Bounds(shape, skeleton).Right <= width + .5),
-                "no placeholder extends beyond its content column");
-            skeleton.Visibility = Visibility.Collapsed; await Drain();
-            True(shapes.All(shape => !shape.IsSweeping), "hidden placeholders retire their native sweep");
-            if (!home)
-            {
-                var section = new MusicCatalogSection("", Enumerable.Range(1, 3).Select(index =>
-                    new MusicCatalogCard(index.ToString(), "横幅" + index, "", "", "playlist", "wy", ActionId: index.ToString()))
-                    .ToArray(), Layout: "banner");
-                var shelf = new Shelf { DataContext = section, Width = width, CardTemplate = CatalogCardTemplate(), VerticalAlignment = VerticalAlignment.Top };
-                host.Mount(shelf);
-                double pitch = first.Width + 20;
-                var items = (ListView)shelf.FindName("ItemsHost");
-                await Until(() => shelf.ScrollHost is not null && Math.Abs(shelf.CardWidth - pitch) < .5 && items.ContainerFromIndex(1) is not null);
-                Button Banner(int index) => Visuals((DependencyObject)items.ContainerFromIndex(index)).OfType<Button>()
-                    .Single(button => ReferenceEquals(button.Tag, section.Items[index]));
-                var firstBanner = Banner(0); var secondBanner = Banner(1);
-                True(Math.Abs(firstBanner.ActualWidth - first.Width) < .5 && Math.Abs(firstBanner.ActualHeight - first.Height) < 1,
-                    "the real virtualized banner matches the shared skeleton width and height");
-                True(Math.Abs(DesktopTestUi.Bounds(secondBanner, shelf).Left - DesktopTestUi.Bounds(firstBanner, shelf).Right - 20) < .5,
-                    "the real virtualized banners use the same 20 DIP gap as the skeleton");
-            }
-        }
-    }
+    private static DataTemplate CatalogCardTemplate() => MusicTestUi.Template("<local:MusicCatalogCardView Presentation='Banner'/>");
     private static async Task CatalogBannerAspect()
     {
         foreach (var (width, height) in new[] { (343, 133), (400, 100), (400, 400), (100, 400) })
@@ -271,5 +220,63 @@ public static partial class MusicUiTests
         Equal("第 9 / 9 组", AutomationProperties.GetName(dots));
         DesktopTheme.SetIsHighContrast(dots, true); var contrast = await Frame();
         Equal((byte)255, Alpha(contrast, 36, 6));
+    }
+    private static async Task CatalogShelfPagingHitArea()
+    {
+        var section = new MusicCatalogSection("歌单", Enumerable.Range(0, 8).Select(index =>
+            new MusicCatalogCard(index.ToString(), "歌单" + index, "", "", "playlist", "wy")).ToArray());
+        var shelf = new Shelf { DataContext = section, VerticalAlignment = VerticalAlignment.Top,
+            CardTemplate = MusicTestUi.Template("<Border Height='140' Background='Transparent'><TextBlock Text='{Binding Title}'/></Border>") };
+        var list = (ListView)shelf.FindName("ItemsHost");
+        // Compare container states without an unrelated native item entrance animation.
+        list.ItemContainerTransitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection();
+        var content = new StackPanel(); content.Children.Add(shelf); content.Children.Add(new Border { Height = 600 });
+        var outer = new ScrollViewer { Content = content, VerticalScrollMode = ScrollMode.Enabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden };
+        using var host = new DesktopTestUi.Host(outer, 560, 360);
+        await Until(() => shelf.ScrollHost is not null && shelf.MaximumOffset > 0);
+        var rail = shelf.ScrollHost!;
+        await Until(() => list.ContainerFromIndex(0) is ListViewItem);
+        await MusicTestUi.ContentStatesRetainPixels((ListViewItem)list.ContainerFromIndex(0));
+        True(rail.HorizontalScrollMode == ScrollMode.Disabled && rail.VerticalScrollMode == ScrollMode.Disabled &&
+            rail.IsHorizontalScrollChainingEnabled && rail.IsVerticalScrollChainingEnabled,
+            "the native shelf leaves wheel and touch scrolling to its parent while retaining programmatic paging");
+        CardMotion.SetProgress(shelf, 1); shelf.UpdateLayout();
+        var next = (Button)shelf.FindName("Next"); var previous = (Button)shelf.FindName("Previous");
+        void CheckHitArea(Button button)
+        {
+            True(button.ActualHeight >= 139, "the arrow button spans the complete card height");
+            foreach (double y in new[] { 2d, button.ActualHeight / 2, button.ActualHeight - 2 })
+            {
+                var point = button.TransformToVisual(shelf).TransformPoint(new Point(button.ActualWidth / 2, y));
+                True(DesktopTestUi.Hit(shelf, point) is { } hit && DesktopVisual.Contains(button, hit),
+                    "the arrow's upper space, symbol, and lower space all hit the same native button");
+            }
+        }
+        CheckHitArea(next); Click(next);
+        await Until(() => shelf.PresentedOffset > .5 && previous.IsEnabled && shelf.IsSettled);
+        CardMotion.SetProgress(shelf, 1); CheckHitArea(previous); Click(previous);
+        await Until(() => shelf.PresentedOffset < .5 && shelf.IsSettled);
+        True(shelf.Navigate(global::Windows.System.VirtualKey.Right), "keyboard paging remains available");
+        await Until(() => shelf.PresentedOffset > .5 && shelf.IsSettled);
+        double retained = shelf.PresentedOffset;
+        outer.ChangeView(null, 80, null, true);
+        await Until(() => outer.VerticalOffset > 79);
+        True(Math.Abs(shelf.PresentedOffset - retained) < .5, "page scrolling leaves the shelf's selected page unchanged");
+    }
+    private static async Task CatalogCardContentStates()
+    {
+        var card = new MusicCatalogCardView { Width = 152, VerticalAlignment = VerticalAlignment.Top,
+            DataContext = new MusicCatalogCard("playlist", "歌单名称", "", "", "playlist", "wy", ActionId: "1") };
+        using var host = new DesktopTestUi.Host(card, 320, 400);
+        await TestUiHost.LoadedAsync(card); await Drain(); card.UpdateLayout();
+        var open = Visuals(card).OfType<Button>().Single(button => button.Content is StackPanel);
+        await MusicTestUi.ContentStatesRetainPixels(open);
+        var motion = (Grid)card.Content;
+        CardMotion.SetPointerActive(motion, true);
+        await Until(() => !CardMotion.HasActiveAnimation(motion));
+        True(CardMotion.GetProgress(motion) == 1 && Visuals(card).OfType<Border>().Any(border => border.Opacity == 1 && !border.IsHitTestVisible),
+            "the content owner still reveals its artwork shade and play action");
+        await NativeDesktopCapture.SaveAsync(card, "catalog-content-hover");
     }
 }

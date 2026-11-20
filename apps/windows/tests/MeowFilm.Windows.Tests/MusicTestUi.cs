@@ -15,6 +15,19 @@ namespace MeowFilm.Windows.Tests;
 // Native UI test mechanisms only; domain operations remain on each fixture's real owners.
 internal static class MusicTestUi
 {
+    internal static async Task ContentStatesRetainPixels(Control control)
+    {
+        control.UpdateLayout();
+        VisualStateManager.GoToState(control, "Normal", false);
+        var resting = await DesktopTestUi.Pixels(control);
+        foreach (string state in new[] { "PointerOver", "Pressed", "Selected", "PointerOverSelected" })
+        {
+            VisualStateManager.GoToState(control, state, false);
+            var actual = await DesktopTestUi.Pixels(control);
+            if (!resting.SequenceEqual(actual))
+                throw new InvalidOperationException("A content-owned container painted a separate " + state + " surface");
+        }
+    }
     internal static DesktopWindow Window(UIElement content, int width, int height)
     {
         var window = new DesktopWindow { Content = content };

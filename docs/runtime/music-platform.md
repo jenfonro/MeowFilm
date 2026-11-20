@@ -23,7 +23,7 @@ FM 封面需求使用既有 `operation:"fm", params:{preview:true,...}`：规则
 
 `operation:"lyrics"` 保持 `{text,translation,romanization}`；QQ／咪咕附属轨失败时额外返回 `errors`，以 `translation`／`romanization` 为键、有限错误码为值。失败轨为空字符串，健康主轨及兄弟轨继续返回；没有任何可用轨的解析失败仍抛错。取消、超时、会话失效及资源超限不降级为轨道错误。原生可继续消费原三个字段，不能把 `errors` 中的附属失败解释成主轨失败。
 
-网易 `playlist` 先选择当前成员再消费详情，`memberIds`／`consumed` 保持真实成员顺序和重复 occurrence；`sourcePositions` 只对已关联成员给出位置，canonical 别名返回的未知关联仍为 null。`playlist.complete` 消费全集，不借分页清理省略完整成员。
+网易 `playlist` 先选择当前成员再消费详情；`tracks` 中只有定位字段、没有歌曲字段的成员引用不作为已取得的歌曲记录，仍按选中成员执行既有每批 100 个 ID 的详情读取。已包含歌曲字段的稀疏记录保持上游实际值，不因歌手、专辑、封面或时长等可选字段为空补读；详情未返回的成员不伪造为空歌曲。`memberIds`／`consumed` 保持真实成员顺序和重复 occurrence；`sourcePositions` 只对已关联成员给出位置，canonical 别名返回的未知关联仍为 null。`playlist.complete` 消费全集，不借分页清理省略完整成员。
 
 两端 aggregate 按 `music, cat, source, pan, tmdb, douban, film, netease, music-platform` 顺序装配九模块。`connectMusicPlatform` 从已装配 netease 的真实 `netease.token.get` 能力借用 token；不创建第二个 SDK owner。通用 `createRuntime` 默认仍三模块，仅显式 `musicPlatform` 选项连接此模块。
 

@@ -53,7 +53,6 @@ public sealed partial class MusicCapability
         token.ThrowIfCancellationRequested();
         if (generation != metadataGeneration || stopping || disposed || current?.Id != song.Id) return;
         current.ApplyRepository(snapshot.Songs.GetValueOrDefault(song.Id), snapshot.Publication);
-        RefreshCurrentArtwork();
     }
     private void RetireMetadataSettings()
     {
@@ -87,8 +86,6 @@ public sealed partial class MusicCapability
         while (MetadataPlatforms.Count > platforms.Length)
             MetadataPlatforms.RemoveAt(MetadataPlatforms.Count - 1);
         metadataLoaded = true;
-        RefreshCurrentArtwork();
-        Changed(nameof(CurrentArtwork));
         Changed(nameof(CanEditMetadata));
     }
 

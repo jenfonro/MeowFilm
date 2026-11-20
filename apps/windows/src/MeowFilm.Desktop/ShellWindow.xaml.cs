@@ -29,7 +29,7 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly List<(IDesktopNavigationSource Source, EventHandler<DesktopNavigationRequestEventArgs> Handler)> _navigationSubscriptions = [];
     private readonly List<(IDesktopSidebarSource Source, EventHandler Handler)> _sidebarSubscriptions = [];
     private readonly object _moduleChangesGate = new();
-    private readonly Dictionary<IDesktopModule, (bool Navigation, bool Views)> _moduleChanges = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<IDesktopModule, (bool Navigation, bool Presentation, bool Player)> _moduleChanges = new(ReferenceEqualityComparer.Instance);
     private bool _moduleChangesQueued;
     private TaskCompletionSource _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private ModuleSession? _current, _playerSession;
@@ -112,7 +112,7 @@ public sealed partial class ShellWindow : DesktopWindow
         Root.GotFocus += OnGotKeyboardFocus;
         PlayerSurfaceInput.AddDismissRequestedHandler(Root, OnQueueDismissClick);
         ShellWindowStartupSize.ApplyToPrimaryScreen(this, Handle);
-        _nativeCaption = new(this, CaptionDragRegion, PageHeaderHost, CaptionBar, PlayerDetailSurface,
+        _nativeCaption = new(this, CaptionDragRegion, HeaderChrome, BackButton, ForwardButton, SearchInput, PageHeaderHost, CaptionBar, PlayerDetailSurface,
             ChannelDialogHost, CloseDialog, ResetDialog, NotificationOverlay);
         InitializeTrayIcon();
         ChannelDialogHost.Attach(this);
@@ -222,11 +222,7 @@ public sealed partial class ShellWindow : DesktopWindow
         // Hide the previous capability before attaching the first-visited surface.
         // Visited surfaces retain their visual tree and owner-managed state.
         ApplyPresentation();
-        _suppressSelection = true;
-        try { NavigationList.SelectedItem = null; }
-        finally { _suppressSelection = false; }
         Mount(session);
-        BindNavigation(session);
         ApplyPresentation();
     }
 
@@ -270,13 +266,11 @@ public sealed partial class ShellWindow : DesktopWindow
     private void BindNavigation(ModuleSession session)
     {
         var navigation = session.Module.Navigation ?? throw new InvalidOperationException();
-        if (!ReferenceEquals(session.Navigation, navigation))
-        {
-            if (session.Navigation is not null) session.Navigation.CollectionChanged -= OnNavigationChanged;
-            session.Navigation = navigation;
-            navigation.CollectionChanged += OnNavigationChanged;
-        }
-        RebuildSidebar();
+        if (ReferenceEquals(session.Navigation, navigation)) return;
+        if (session.Navigation is not null) session.Navigation.CollectionChanged -= OnNavigationChanged;
+        session.Navigation = navigation;
+        navigation.CollectionChanged += OnNavigationChanged;
+        SynchronizeNavigation(session);
     }
 
     private void ApplyPresentation()
@@ -311,7 +305,6 @@ public sealed partial class ShellWindow : DesktopWindow
         SidebarBackground.Visibility = Brand.Visibility = SidebarScroll.Visibility =
             immersive ? Visibility.Collapsed : Visibility.Visible;
         SidebarEdge.Visibility = immersive || _accessibility.HighContrast ? Visibility.Collapsed : Visibility.Visible;
-        if (immersive) PlayerFrame.Visibility = Visibility.Collapsed;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
             current.IsSettingsOpen || _history.Count > 1;
         _state.CanGoForward = !_queueOpen && !_playerDetailOpen &&
@@ -379,7 +372,8 @@ public sealed partial class ShellWindow : DesktopWindow
         else if (PlayerHost.Content is not null)
             PlayerHost.Content = null;
 
-        PlayerFrame.Visibility = !current.IsSettingsOpen && PlayerHost.Content is not null
+        PlayerFrame.Visibility = !current.IsSettingsOpen && PlayerHost.Content is not null &&
+            !(_currentPage is null && current.Module is IDesktopImmersiveSource { IsImmersive: true })
             ? Visibility.Visible
             : Visibility.Collapsed;
     }
@@ -500,7 +494,8 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void OnNavigationChanged(object? sender, NotifyCollectionChangedEventArgs e) => QueueUi(() =>
     {
-        RebuildSidebar();
+        foreach (var session in _sessions.Where(session => ReferenceEquals(session.Navigation, sender)))
+            SynchronizeNavigation(session);
     });
 
     private void OnModulePropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -508,12 +503,19 @@ public sealed partial class ShellWindow : DesktopWindow
         if (sender is not IDesktopModule module || _isClosing ||
             Dispatcher.IsClosing) return;
         var all = string.IsNullOrEmpty(e.PropertyName);
+        bool navigation = all || e.PropertyName == nameof(IDesktopModule.Navigation);
+        bool player = all || e.PropertyName == nameof(IDesktopModule.PlayerView);
+        bool presentation = all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView) or nameof(IDesktopModule.Title) ||
+            module is IDesktopSidebarSource && e.PropertyName == nameof(IDesktopSidebarSource.SidebarView) ||
+            module is IDesktopImmersiveSource && e.PropertyName == nameof(IDesktopImmersiveSource.IsImmersive);
+        if (!navigation && !player && !presentation) return;
         lock (_moduleChangesGate)
         {
             _moduleChanges.TryGetValue(module, out var previous);
             _moduleChanges[module] = (
-                previous.Navigation || all || e.PropertyName == nameof(IDesktopModule.Navigation),
-                previous.Views || all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView));
+                previous.Navigation || navigation,
+                previous.Presentation || presentation,
+                previous.Player || player);
             if (_moduleChangesQueued) return;
             _moduleChangesQueued = true;
         }
@@ -530,7 +532,7 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void ApplyModuleChanges()
     {
-        KeyValuePair<IDesktopModule, (bool Navigation, bool Views)>[] changes;
+        KeyValuePair<IDesktopModule, (bool Navigation, bool Presentation, bool Player)>[] changes;
         lock (_moduleChangesGate)
         {
             changes = _moduleChanges.ToArray();
@@ -540,16 +542,18 @@ public sealed partial class ShellWindow : DesktopWindow
         // A skipped presentation must still release its batch admission so a cancelled close can resume updates.
         if (_isClosing) return;
         var refreshPresentation = false;
+        var refreshPlayer = false;
         foreach (var change in changes)
         {
             var session = _sessions.FirstOrDefault(item => ReferenceEquals(item.Module, change.Key));
             if (session is null) continue;
             if (change.Value.Navigation) BindNavigation(session);
-            if (change.Value.Views && session.Mounted && ReferenceEquals(session, _current) && _currentPage is null)
-                RefreshSuppliedViews(session);
-            refreshPresentation |= ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession);
+            refreshPresentation |= ReferenceEquals(session, _current) && change.Value.Presentation;
+            refreshPlayer |= change.Value.Player && (ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession));
         }
         if (refreshPresentation) ApplyPresentation();
+        else if (refreshPlayer && _current is { } current)
+        { ApplyPlayerPresentation(current); ApplyGlobalSurfacePresentation(current); }
     }
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => RunUiAction(async () =>
@@ -830,7 +834,6 @@ public sealed partial class ShellWindow : DesktopWindow
                 }
             }
             RefreshSuppliedViews(plan.Session);
-            BindNavigation(plan.Session);
             SetStatus();
         }
         catch (OperationCanceledException)

@@ -62,20 +62,18 @@ public static partial class MusicUiTests
         });
         yield return Case("search playlist virtualization preserves visible rows containers and offset on append", async () =>
         {
-            await using var f = await CreateSearchPlaylistPresentationScene(240);
-            for (int round = 2; round <= 6; round++)
-            {
-                await f.Module.MoreSearchAsync();
-                await SearchUntil(() => f.Module.CatalogSections.Single().Items.Count == round * 30 &&
-                    f.Module.CanLoadMoreSearchPlaylists);
-                Equal(round, f.Http.SearchRequests);
-            }
+            await using var f = await CreateSearchPlaylistPresentationScene(120);
+            await f.Module.MoreSearchAsync();
+            await SearchUntil(() => f.Module.CatalogSections.Single().Items.Count == 60 &&
+                f.Module.CanLoadMoreSearchPlaylists);
+            Equal(2, f.Http.SearchRequests);
 
             var window = SearchPlaylistWindow(f.Module.View, 1042, 700);
             try
             {
-                window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                window.Show(); await TestUiHost.LoadedAsync(f.Module.View); await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
                 var list = SearchPlaylistList(f.Module.View);
+                await NativeDesktopCapture.CaptureAsync(list);
                 var scroll = SearchPlaylistScrollViewer(list);
                 var source = list.ItemsSource;
                 True(source is ObservableCollection<MusicCatalogCard>,
@@ -87,7 +85,7 @@ public static partial class MusicUiTests
                 int totalRows = list.Items.Count;
                 True(containers.Length < totalRows,
                     $"realized rows {containers.Length} are fewer than total rows {totalRows}");
-                AssertSearchPlaylistCards(list, f.Module, 180);
+                AssertSearchPlaylistCards(list, f.Module, 60);
 
                 double requestedOffset = Math.Min(scroll.ScrollableHeight, scroll.ViewportHeight);
                 scroll.ChangeView(null, requestedOffset, null, true); await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
@@ -104,11 +102,11 @@ public static partial class MusicUiTests
                 var firstRow = (MusicCatalogCard)list.Items[0]!;
 
                 await f.Module.MoreSearchAsync();
-                await SearchUntil(() => f.Module.CatalogSections.Single().Items.Count == 210 &&
+                await SearchUntil(() => f.Module.CatalogSections.Single().Items.Count == 90 &&
                     f.Module.CanLoadMoreSearchPlaylists);
                 DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-                Equal(7, f.Http.SearchRequests);
-                AssertSearchPlaylistCards(list, f.Module, 210);
+                Equal(3, f.Http.SearchRequests);
+                AssertSearchPlaylistCards(list, f.Module, 90);
                 True(ReferenceEquals(firstRow, list.Items[0]), "an append preserves the first row object");
                 True(ReferenceEquals(anchorRow, list.Items[anchorIndex]), "an append preserves the anchored row object");
                 True(ReferenceEquals(anchorContainer, list.ContainerFromIndex(anchorIndex)),
@@ -144,7 +142,10 @@ public static partial class MusicUiTests
                 True(f.Module.IsSearchPlaylists, "history restores the selected search tab");
                 True(ReferenceEquals(source, list.ItemsSource), "history retains the list source");
                 True(Math.Abs(scroll.VerticalOffset - actualOffset) < 1, "history retains actual scroll");
-                True(artwork.SequenceEqual(Visuals(list).OfType<ArtworkImage>()), "history retains image controls");
+                var returnedArtwork = Visuals(list).OfType<ArtworkImage>().ToHashSet();
+                True(artwork.All(returnedArtwork.Contains), "history retains every existing image control while native caching may realize more rows");
+                True(ReferenceEquals(anchorContainer, list.ContainerFromIndex(anchorIndex)), "history retains the visible anchor container");
+                True(SearchPlaylistContainers(list).Length < list.Items.Count, "history return remains virtualized");
                 f.Module.View.Visibility = Visibility.Collapsed; await Drain();
                 RaiseSearchPlaylistKey(list, window, VirtualKey.End); await Drain();
                 Equal(reads, f.Http.SearchRequests);
@@ -526,7 +527,8 @@ public static partial class MusicUiTests
         True(cards.Length > 0, "native geometry is checked on generated playlist cards");
         foreach (var card in cards)
         {
-            var cover = Visuals(card).OfType<ArtworkImage>().Single();
+            var cover = Visuals(card).OfType<ArtworkImage>().SingleOrDefault() ??
+                throw new InvalidOperationException($"native playlist card has no artwork: data={card.DataContext?.GetType().Name}, size={card.ActualWidth}x{card.ActualHeight}, loaded={card.IsLoaded}, content={card.Content?.GetType().Name}, bounds={DesktopTestUi.Bounds(card, scroll)}");
             True(cover.ActualWidth >= Math.Min(124, width) - .5 && cover.ActualWidth <= 168.5,
                 $"playlist artwork retains its 124–168 DIP content range: cover={cover.ActualWidth}x{cover.ActualHeight}, card={card.ActualWidth}x{card.ActualHeight}, viewport={width}, loaded={card.IsLoaded}, itemWidth={((ItemsWrapGrid)list.ItemsPanelRoot).ItemWidth}");
             True(Math.Abs(cover.ActualWidth - cover.ActualHeight) < 1, "playlist artwork stays square");

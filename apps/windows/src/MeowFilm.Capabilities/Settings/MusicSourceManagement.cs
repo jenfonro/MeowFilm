@@ -113,6 +113,7 @@ public sealed partial class MusicCapability
         }
         sourcesRevision++;
         SourceBindings();
+        PlaybackSourceBindings();
     }
     private void SourceRowChanged(object? sender, PropertyChangedEventArgs args)
     {
@@ -129,6 +130,7 @@ public sealed partial class MusicCapability
         next.PropertyChanged += SourceRowChanged;
         Sources[index] = next;
         SourceBindings();
+        PlaybackSourceBindings();
     }
 
     private async Task RefreshOfficialSources(CancellationToken token, long generation)

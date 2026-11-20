@@ -43,11 +43,17 @@ internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<s
         Publish(ref duration, module.DurationSeconds, nameof(MusicCapability.DurationSeconds));
         Publish(ref durationText, module.DurationText, nameof(MusicCapability.DurationText));
         Publish(ref volume, module.Volume, nameof(MusicCapability.Volume));
+        Publish(ref rate, module.AcceptedPlaybackRate, nameof(MusicCapability.AcceptedPlaybackRate));
+        RefreshAvailability();
+        RefreshPosition();
+    }
+
+    internal void RefreshAvailability()
+    {
         Publish(ref canSeek, module.CanSeek, nameof(MusicCapability.CanSeek));
         Publish(ref canRate, module.CanChangePlaybackRate, nameof(MusicCapability.CanChangePlaybackRate));
-        Publish(ref rate, module.AcceptedPlaybackRate, nameof(MusicCapability.AcceptedPlaybackRate));
         Publish(ref canToggle, module.CanTogglePlayback, nameof(MusicCapability.CanTogglePlayback));
-        RefreshPosition();
+        module.RefreshLyricPreviewAvailability();
     }
 
     private void Publish<T>(ref T prior, T next, string property)

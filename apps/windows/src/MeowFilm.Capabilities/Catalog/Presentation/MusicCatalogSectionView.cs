@@ -27,8 +27,8 @@ public sealed class MusicCatalogSectionView : UserControl
     private readonly Button refresh = new() { Width = 28, Height = 24, MinHeight = 0, MinWidth = 0,
         Padding = new Thickness(0), Background = MusicVisuals.Brush("#00000000"), BorderThickness = new Thickness(0), Foreground = MusicVisuals.Brush("#8B9096") };
     private readonly ContentControl body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch };
-    private readonly ProgressRing progress = new() { Width = 14, Height = 14, Margin = new Thickness(8, 0, 0, 0) };
-    private readonly MusicCatalogSkeleton skeleton = new();
+    private readonly ProgressRing progress = new() { Width = 14, Height = 14, Margin = new Thickness(8, 0, 0, 0),
+        IsActive = false, Visibility = Visibility.Collapsed };
     private readonly ItemsControl tabs = new() { Margin = new Thickness(0, 0, 0, 12) };
     public MusicCatalogSectionView()
     {
@@ -43,7 +43,7 @@ public sealed class MusicCatalogSectionView : UserControl
         refresh.Click += async (_, _) => { if (owner is not null) await owner.RefreshCatalogAsync(); };
         more.Click += async (_, _) => { if (owner is not null) await owner.OpenSearchTabAsync(observed?.Title == "歌单" ? "playlists" : "songs"); };
         actionButton.Click += async (_, _) => { if (owner is not null && observed?.Action is { CanOpen: true } action) await owner.OpenCatalogCardAsync(action); };
-        stack.Children.Add(heading); stack.Children.Add(tabs); stack.Children.Add(skeleton); stack.Children.Add(body); Content = stack;
+        stack.Children.Add(heading); stack.Children.Add(tabs); stack.Children.Add(body); Content = stack;
         tabs.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:local='using:MeowFilm.Capabilities'><local:MusicWrapPanel/></ItemsPanelTemplate>");
         DataContextChanged += (_, _) => ObserveDisplay();
         Loaded += (_, _) =>
@@ -78,6 +78,7 @@ public sealed class MusicCatalogSectionView : UserControl
     private void SectionChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName is nameof(MusicCatalogSection.Items) or nameof(MusicCatalogSection.SelectedTab)) Refresh();
+        if (e.PropertyName == nameof(MusicCatalogSection.IsLoading)) RefreshStatus();
         if (e.PropertyName == nameof(MusicCatalogSection.HorizontalOffset) && body.Content is Shelf shelf)
             shelf.HorizontalOffset = observed?.HorizontalOffset ?? 0;
     }
@@ -94,7 +95,6 @@ public sealed class MusicCatalogSectionView : UserControl
         if (observed is not { } section || owner is null) return;
         bool loading = section.IsLoading || owner.IsSearchOverview && (section.Title == "单曲" ? owner.SearchSongsLoading : section.Title == "歌单" && owner.SearchPlaylistsLoading);
         progress.IsActive = loading; progress.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
-        skeleton.Visibility = section.Items.Count == 0 && loading ? Visibility.Visible : Visibility.Collapsed;
         refresh.Visibility = owner.IsCatalogHome ? Visibility.Visible : Visibility.Collapsed;
         more.Visibility = owner.IsSearchOverview ? Visibility.Visible : Visibility.Collapsed;
         more.IsEnabled = refresh.IsEnabled = owner.CanCatalogBrowse;

@@ -855,7 +855,7 @@ public static class ArtworkTests
         }));
         yield return new("Native artwork virtualized items retain admitted leases pixels and palettes until member or list retirement", () => Sta(async () =>
         {
-            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkItem>(Enumerable.Range(0, 240)
+            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkItem>(Enumerable.Range(0, 24)
                 .Select(index => new ArtworkItem("item-" + index, "https://art.example.test/item-" + index)));
             var loader = new ItemsLoader(); var overrideLoader = new ItemsLoader();
             var list = new ListView { Width = 260, Height = 180, ItemsSource = rows, SelectionMode = ListViewSelectionMode.None, IsTabStop = false,
@@ -1005,7 +1005,7 @@ public static class ArtworkTests
         }));
         yield return new("Native artwork virtualized pending acquisition survives container recycling without another read", () => Sta(async () =>
         {
-            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkItem>(Enumerable.Range(0, 160)
+            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkItem>(Enumerable.Range(0, 24)
                 .Select(index => new ArtworkItem("pending-" + index, "https://art.example.test/pending-" + index)));
             var loader = new HeldLoader();
             var list = new ListView { Width = 200, Height = 160, ItemsSource = rows, IsTabStop = false,

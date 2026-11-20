@@ -93,18 +93,26 @@ public static partial class MusicUiTests
             unboundLogo.DataContext = null; unboundAvatar.DataContext = null;
             await RenderSettings(view, 840, 360);
             Equal(Visibility.Visible, unboundLogo.Visibility);
-            True(unboundLogo.Source is not null, "an unbound platform mark uses the local default, not account identity");
             Equal(Visibility.Collapsed, unboundAvatar.Visibility);
             unboundLogo.ClearValue(FrameworkElement.DataContextProperty);
             unboundAvatar.ClearValue(FrameworkElement.DataContextProperty);
-            int accountReads = f.Store.AccountReads;
-            var hold = f.Store.HoldNextAccountRead();
+            await RenderSettings(view, 840, 360);
+            True(unboundLogo.Source is not null, "restoring the real platform binding restores its mark");
+            Equal(Visibility.Collapsed, unboundAvatar.Visibility);
+            int reads = f.Store.Reads;
+            var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.Store.BeforeRead = async _ =>
+            {
+                f.Store.BeforeRead = null;
+                arrived.TrySetResult(); await release.Task;
+            };
             var reread = f.Module.ReadAccountsAsync();
             var activation = f.Module.ActivateSettingsAsync();
             try
             {
-                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                Equal(accountReads + 1, f.Store.AccountReads);
+                await arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Equal(reads + 1, f.Store.Reads);
                 await RenderSettings(view, 840, 360);
                 foreach (var row in f.Module.PlatformSettings)
                 {
@@ -112,9 +120,9 @@ public static partial class MusicUiTests
                     True(row.ShowLogin && !row.IsLoggedIn, "a pending reread preserves the last confirmed identity");
                     AssertAccountTableImages(view, row, avatarVisible: false);
                 }
-                hold.Release();
+                release.TrySetResult();
                 await Task.WhenAll(reread, activation).WaitAsync(TimeSpan.FromSeconds(5));
-                Equal(accountReads + 1, f.Store.AccountReads);
+                Equal(reads + 1, f.Store.Reads);
                 await RenderSettings(view, 840, 360);
                 foreach (var row in f.Module.PlatformSettings)
                 {
@@ -124,7 +132,7 @@ public static partial class MusicUiTests
                 }
                 Equal(0, f.Http.Requests.Count); Equal(0, f.Runtime.Calls.Count);
             }
-            finally { hold.Release(); await Task.WhenAll(reread, activation); }
+            finally { f.Store.BeforeRead = null; release.TrySetResult(); await Task.WhenAll(reread, activation); }
         });
         yield return Case("platform account table never substitutes a brand mark for a logged-in user avatar", async () =>
         {
@@ -343,7 +351,7 @@ public static partial class MusicUiTests
         yield return Case("platform account table public catalogs have no native account or action admission", async () =>
         {
             await using var f = await SearchScene.Create();
-            int reads = f.Store.AccountReads;
+            int reads = f.Store.Reads;
             var accounts = f.Module.Accounts.ToArray();
             var selection = f.Module.SelectedAccount;
             var view = new MusicAccountsView { DataContext = f.Module };
@@ -372,18 +380,18 @@ public static partial class MusicUiTests
                     foreach (var button in Visuals(element).OfType<Button>())
                     {
                         True(!button.IsEnabled && button.Tag is null && !DesktopVisual.IsVisible(button), "public catalog has no login or account action");
-                        FilmUiTest.Click(button);
+                        DesktopTestUi.Invoke(button);
                     }
                     foreach (var toggle in Visuals(element).OfType<CheckBox>())
                     {
                         True(!toggle.IsEnabled && toggle.Tag is null && !DesktopVisual.IsVisible(toggle), "public catalog has no sync or feedback consent");
-                        FilmUiTest.Click(toggle);
+                        DesktopTestUi.Invoke(toggle);
                     }
                 }
                 await Drain();
                 True(f.Module.Accounts.SequenceEqual(accounts) && ReferenceEquals(selection, f.Module.SelectedAccount),
                     "public display and stale routed actions do not change native accounts or selection");
-                Equal(reads, f.Store.AccountReads);
+                Equal(reads, f.Store.Reads);
                 Equal(0, f.Http.Requests.Count); Equal(0, f.Runtime.Calls.Count);
             }
             finally { window.Close(); await Drain(); }
@@ -392,7 +400,7 @@ public static partial class MusicUiTests
         {
             await using var first = await SearchScene.Create();
             await using var next = await SearchScene.Create();
-            int firstReads = first.Store.AccountReads, nextReads = next.Store.AccountReads;
+            int firstReads = first.Store.Reads, nextReads = next.Store.Reads;
             var view = new MusicAccountsView { DataContext = first.Module };
             using var mount = new ReplicaMount(view); await Drain();
             await RenderSettings(view, 1104, 600);
@@ -436,11 +444,11 @@ public static partial class MusicUiTests
                 True(view.AccountTableRows.Cast<MusicAccountTableRow>().Where(row => !row.IsPublicCatalog)
                     .Select(row => row.Source).SequenceEqual(next.Module.PlatformSettings), "reload observes current rows once");
                 Equal(5, AccountTableItems(view).Items.Count);
-                Equal(firstReads, first.Store.AccountReads); Equal(nextReads, next.Store.AccountReads);
+                Equal(firstReads, first.Store.Reads); Equal(nextReads, next.Store.Reads);
                 Equal(0, first.Http.Requests.Count); Equal(0, next.Http.Requests.Count);
                 Equal(0, first.Runtime.Calls.Count); Equal(0, next.Runtime.Calls.Count);
             }
-            finally { window.Close(); await Drain(); }
+            finally { window.Content = null; await Drain(); }
         });
         yield return Case("platform account table keeps preview columns independent and horizontal overflow inside its own viewport", async () =>
         {

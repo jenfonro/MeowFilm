@@ -94,7 +94,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             else if (dailyStyleOpen is not null) DailyStylePopup.Hide();
         }
         if (e.PropertyName is nameof(MusicCapability.IsCatalogLanding) or nameof(MusicCapability.IsSearchPage) or
-            nameof(MusicCapability.ShowSearchSkeleton) or nameof(MusicCapability.IsSearchSongs) or nameof(MusicCapability.IsCatalogArtist) or
+            nameof(MusicCapability.ShowSearchLoading) or nameof(MusicCapability.IsSearchSongs) or nameof(MusicCapability.IsCatalogArtist) or
             nameof(MusicCapability.HistoryDate) or nameof(MusicCapability.CanEdit)) Refresh();
         if (e.PropertyName is nameof(MusicCapability.IsCollectionPage) or nameof(MusicCapability.CanDeleteCollection) or
             nameof(MusicCapability.IsLocalLibraryPage) or nameof(MusicCapability.CanEdit))
@@ -110,7 +110,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         PageContent.Margin = projectedSearch ? new Thickness(0) : module.IsCatalogLanding ? new Thickness(0, 12, 0, 0) : new Thickness(40, 16, 24, 20);
         PageContent.MaxWidth = module.IsCatalogLanding ? double.PositiveInfinity : 1490;
         SearchHeading.Visibility = !projectedSearch && module.IsSearchPage ? Visibility.Visible : Visibility.Collapsed;
-        SearchSkeleton.Visibility = module.ShowSearchSkeleton && module.IsSearchSongs ? Visibility.Visible : Visibility.Collapsed;
+        SearchLoading.IsActive = module.ShowSearchLoading && module.IsSearchSongs;
+        SearchLoading.Visibility = SearchLoading.IsActive ? Visibility.Visible : Visibility.Collapsed;
         DetailArtworkFrame.CornerRadius = new CornerRadius(module.IsCatalogArtist ? 76 : 18);
         syncingDate = true; HistoryPicker.SelectedItem = module.HistoryDate; syncingDate = false;
         CreatePlaylistAction.Refresh();

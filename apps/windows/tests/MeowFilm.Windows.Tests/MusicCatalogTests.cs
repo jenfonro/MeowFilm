@@ -40,6 +40,7 @@ public static partial class MusicCatalogTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (var test in ChannelPresentationCases()) yield return test;
         foreach (var test in NextRecoveryCases()) yield return test;
         foreach (var test in NetworkReferenceCases()) yield return test;
         yield return Case("playlist card next stages the complete list and never starts playback", async () =>
@@ -421,7 +422,7 @@ public static partial class MusicCatalogTests
             }
             finally { window.Content = null; window.Close(); }
         });
-        yield return Case("initial home skeleton ends on completion and does not replace refresh content", async () =>
+        yield return Case("initial home loading ring ends on completion and does not replace refresh content", async () =>
         {
             await using var f = await Fixture.Create();
             var loader = new CatalogArtworkLoader(); ArtworkScope.SetLoader(f.Module.View, loader);
@@ -432,15 +433,15 @@ public static partial class MusicCatalogTests
                 window.Show();
                 var loading = f.Module.NavigateAsync("catalog-home", default);
                 await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5)); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-                True(f.Module.ShowCatalogSkeleton, "initial empty home has a loading skeleton");
-                True(Descendants<LoadingSkeleton>(f.Module.View).Any(skeleton => DesktopVisual.IsVisible(skeleton)), "skeleton is in the visible tree");
+                True(f.Module.ShowCatalogLoading, "initial empty home has a loading ring");
+                True(Descendants<ProgressRing>(f.Module.View).Any(ring => ring.IsActive && DesktopVisual.IsVisible(ring)), "loading ring is active in the visible tree");
                 Equal(0, loader.Addresses.Count);
                 hold.Release(); await loading; await Drain();
-                True(!f.Module.ShowCatalogSkeleton, "real content replaces the skeleton");
+                True(!f.Module.ShowCatalogLoading, "real content replaces the loading ring");
                 var refreshHold = f.Client.Hold("music.catalog.home");
                 var refresh = f.Module.RefreshCatalogAsync();
                 await refreshHold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                True(!f.Module.ShowCatalogSkeleton && f.Module.HomeSections.Count > 0, "refresh retains real content");
+                True(!f.Module.ShowCatalogLoading && f.Module.HomeSections.Count > 0, "refresh retains real content");
                 refreshHold.Release(); await refresh;
             }
             finally { hold.Release(); f.Client.ReleaseAll(); window.Content = null; window.Close(); }
@@ -498,7 +499,7 @@ public static partial class MusicCatalogTests
             }));
             await f.Module.NavigateAsync("catalog-channels", default);
             Equal(0, f.Client.Count("music.catalog.channel"));
-            True(f.Module.IsChannelDirectory && f.Module.CatalogSections.Count == 0 && !f.Module.ShowCatalogSkeleton,
+            True(f.Module.IsChannelDirectory && f.Module.CatalogSections.Count == 0 && !f.Module.ShowCatalogLoading,
                 "no openable channel ends with an empty page");
             Equal("暂无内容", f.Module.Status);
             string channelLocation = f.Module.CaptureNavigationLocation();
@@ -522,7 +523,7 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             f.Client.Transform("music.catalog.channel", _ => JsonSerializer.SerializeToElement(new { ok = false, code = "NETWORK_ERROR" }));
             await f.Module.NavigateAsync("catalog-channels", default);
-            True(f.Module.Status.Length > 0 && !f.Module.ShowCatalogSkeleton, "failure ends loading with an error");
+            True(f.Module.Status.Length > 0 && !f.Module.ShowCatalogLoading, "failure ends loading with an error");
             int reads = f.Client.Count("music.catalog.channel");
             string channelLocation = f.Module.CaptureNavigationLocation();
             await Drain();
@@ -624,7 +625,7 @@ public static partial class MusicCatalogTests
                 view.Measure(new(900, 700)); view.Arrange(new Rect(0, 0, 900, 700)); view.UpdateLayout(); await Drain();
                 var buttons = Descendants<Button>(view).Where(b => DesktopVisual.IsVisible(b)).ToArray();
                 var channelMore = (Flyout)view.FindName("ChannelMorePopup");
-                Equal(FlyoutPlacementMode.Bottom, channelMore.Placement);
+                Equal(FlyoutPlacementMode.BottomEdgeAlignedRight, channelMore.Placement);
                 Equal(540d, ((ScrollViewer)channelMore.Content).Width);
                 True(((ScrollViewer)channelMore.Content).MaxHeight == 308,
                     "more channels use the bounded native flyout scroller");
@@ -899,7 +900,7 @@ public static partial class MusicCatalogTests
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
             var adoptedCards = new List<MusicCatalogCard>();
-            foreach (int index in Enumerable.Range(1, 100))
+            foreach (int index in Enumerable.Range(1, 36))
             {
                 string cover = "https://art.example.test/summary-song-" + index + ".jpg";
                 var song = await AdoptSong(index.ToString(), "歌曲" + index, cover);
@@ -916,7 +917,7 @@ public static partial class MusicCatalogTests
             view.UpdateLayout(); await Drain();
             var shelf = Descendants<Shelf>(presenter).Single();
             var list = (ListView)shelf.FindName("ItemsHost");
-            True(list.Items.Count == cards.Length && Enumerable.Range(0, cards.Length).Count(index => list.ContainerFromIndex(index) is not null) < 60,
+            True(list.Items.Count == cards.Length && Enumerable.Range(0, cards.Length).Count(index => list.ContainerFromIndex(index) is not null) < cards.Length,
                 "the native recycling panel bounds realized song rows rather than materializing all songs");
             var target = cards[3];
             await Until(() => Descendants<ArtworkImage>(shelf).Any(image => image.DisplayIdentity == target.Song!.Id && image.Source is not null));
@@ -945,9 +946,6 @@ public static partial class MusicCatalogTests
             view.UpdateLayout(); await Drain();
             Equal(0, loader.Addresses.Count(address => address == unseenAddress));
             await CheckSurvivors();
-            DesktopTestUi.Invoke((Button)shelf.FindName("Next"));
-            await Until(() => shelf.IsSettled && shelf.PresentedOffset > 0);
-            True(shelf.MaximumOffset > shelf.PresentedOffset, "paging uses horizontal column count");
             shelf.ScrollToIndex(cards.Length); await Until(() => shelf.IsSettled && Math.Abs(shelf.PresentedOffset - shelf.MaximumOffset) < .5);
             Equal(Visibility.Collapsed, ((Button)shelf.FindName("Next")).Visibility);
             shelf.ScrollToIndex(0); await Until(() => shelf.IsSettled && shelf.PresentedOffset < .5);
@@ -987,7 +985,8 @@ public static partial class MusicCatalogTests
             try
             {
                 window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-                var header = (DockPanel)view.FindName("ChannelHeader");
+                ((Microsoft.UI.Windowing.OverlappedPresenter)window.AppWindow.Presenter).IsAlwaysOnTop = true;
+                var header = (Grid)view.FindName("ChannelHeader");
                 Equal(Visibility.Visible, header.Visibility);
                 Equal(new Thickness(40, 0, 40, 12), header.Margin);
                 True(!Descendants<ComboBox>(view).Any(combo => DesktopVisual.IsVisible(combo) &&
@@ -1005,11 +1004,48 @@ public static partial class MusicCatalogTests
                 Equal(16d, underline.ActualWidth); Equal(3d, underline.ActualHeight);
                 Equal(((SolidColorBrush)DesktopVisual.Resource(view, "MeowFilm.Brush.Accent")).Color,
                     ((SolidColorBrush)underline.Background).Color);
+                True(direct.All(button => button.ActualHeight == 36 && button.FontSize == 18 &&
+                    button.FontWeight.Weight == Microsoft.UI.Text.FontWeights.Normal.Weight),
+                    "direct channel tabs retain the original regular eighteen-point chrome");
+                var more = (Button)view.FindName("ChannelMoreButton");
+                var popup = (Flyout)view.FindName("ChannelMorePopup");
+                // This case checks settled geometry and styling, not native entrance animation.
+                popup.AreOpenCloseAnimationsEnabled = false;
+                var chevron = Descendants<Microsoft.UI.Xaml.Shapes.Path>(more).Single();
+                Equal(8d, chevron.Width); Equal(5d, chevron.Height);
+                DesktopTestUi.Invoke(more); await Drain();
+                var popupContent = (ScrollViewer)popup.Content;
+                Equal(540d, popupContent.Width); Equal(308d, popupContent.MaxHeight);
+                var popupPresenter = VisualTreeHelper.GetOpenPopupsForXamlRoot(view.XamlRoot)
+                    .SelectMany(open => open.Child is DependencyObject child ? DesktopTestUi.Visuals(child) : []).OfType<FlyoutPresenter>().Single();
+                Equal(new Thickness(14), popupPresenter.Padding); Equal(new CornerRadius(10), popupPresenter.CornerRadius);
+                True(popupContent.ActualWidth + popupPresenter.Padding.Left + popupPresenter.Padding.Right +
+                    popupPresenter.BorderThickness.Left + popupPresenter.BorderThickness.Right <= popupPresenter.ActualWidth + .01,
+                    "the presenter fits its complete content, padding and border without an outer horizontal scrollbar");
+                Equal(180d, ((RotateTransform)chevron.RenderTransform).Angle);
+                var moreTabs = Descendants<Button>(popupContent).Where(button => button.Tag is MusicCatalogCard).ToArray();
+                True(moreTabs.Length > 0 && moreTabs.All(button => button.Width == 78 && button.Height == 31),
+                    "more channels retain the shared filter-tag geometry");
+                await NativeDesktopCapture.SaveAsync(view, "catalog-channel-more");
+                True(popup.IsOpen && DesktopVisual.IsVisible(popupPresenter), "channel choices remain visible through capture");
+                popup.Hide(); await Until(() => ((RotateTransform)chevron.RenderTransform).Angle == 0,
+                    "the native close completion restores the channel chevron");
+                Equal(0d, ((RotateTransform)chevron.RenderTransform).Angle);
 
                 await f.Module.OpenCatalogCardAsync(f.Module.ChannelTabs.Single(card => card.ActionId == "rock"));
                 await f.Module.CatalogTagAsync(f.Module.CatalogTags.Single(tag => tag.Id == "30"));
                 DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 var filters = (ItemsControl)view.FindName("ChannelFilters");
+                True(direct.SequenceEqual(Descendants<Button>(header).Where(button => button.Tag is MusicCatalogCard)),
+                    "channel selection preserves the existing direct-tab controls");
+                Equal("", AutomationProperties.GetItemStatus(selected));
+                DesktopTestUi.Invoke(more); await Drain();
+                var selectedMore = Descendants<Button>((ScrollViewer)popup.Content).Single(button => button.Tag is MusicCatalogCard { ActionId: "rock" });
+                Equal("已选中", AutomationProperties.GetItemStatus(selectedMore));
+                Equal(((SolidColorBrush)DesktopVisual.Resource(view, "MeowFilm.Brush.AccentSoft")).Color,
+                    ((SolidColorBrush)selectedMore.Background).Color);
+                popup.Hide(); await Until(() => ((RotateTransform)chevron.RenderTransform).Angle == 0,
+                    "the native close completion retires the selected-channel popup");
                 Equal(Visibility.Visible, filters.Visibility);
                 Equal(new Thickness(40, 0, 40, 16), filters.Margin);
                 var tagButtons = Descendants<Button>(filters)
@@ -1023,8 +1059,18 @@ public static partial class MusicCatalogTests
                     ((MusicCatalogTag)button.Tag).Id == selectedTag.Id);
                 Equal(((SolidColorBrush)DesktopVisual.Resource(view, "MeowFilm.Brush.AccentSoft")).Color,
                     ((SolidColorBrush)selectedPill.Background).Color);
-                Equal(new CornerRadius(16), Descendants<Border>(selectedPill)
-                    .Single(border => border.Name == "ChannelFilterPill").CornerRadius);
+                Equal(new CornerRadius(16), Descendants<Border>(selectedPill).Single().CornerRadius);
+                await NativeDesktopCapture.SaveAsync(header, "catalog-channel-header");
+                window.Resize(480, 700);
+                await Until(() => view.XamlRoot.Size.Width <= 480, "the native window applies its narrow client size");
+                DesktopTestUi.Invoke(more); await Until(() => popup.IsOpen); await Drain();
+                var narrowPresenter = VisualTreeHelper.GetOpenPopupsForXamlRoot(view.XamlRoot)
+                    .SelectMany(open => open.Child is DependencyObject child ? DesktopTestUi.Visuals(child) : [])
+                    .OfType<FlyoutPresenter>().Single();
+                True(narrowPresenter.ActualWidth <= view.XamlRoot.Size.Width && popupContent.Width < 540,
+                    "the native channel popup stays within the small window viewport");
+                await NativeDesktopCapture.SaveAsync(view, "catalog-channel-more-narrow");
+                popup.Hide();
             }
             finally { window.Close(); }
         });

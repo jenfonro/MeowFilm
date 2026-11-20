@@ -50,7 +50,7 @@ public sealed partial class MusicCapability
     private void UnsubscribeDiscovery() => application.DiscoveryInvalidated -= DiscoveryInvalidated;
     private void DiscoveryBindings()
     {
-        foreach (string name in new[] { nameof(IsDiscovery), nameof(IsCatalogContent), nameof(CanUseDiscovery),
+        foreach (string name in new[] { nameof(CanUseDiscovery),
             nameof(CanRotateDiscovery), nameof(CanCancelDiscovery), nameof(DiscoveryStatus) }) Changed(name);
     }
     private void DiscoveryInvalidated()
@@ -94,11 +94,12 @@ public sealed partial class MusicCapability
         var previous = discoveryTail;
         var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
         discoveryRequest = request; loadCancellation = request;
+        var previousSelection = (location.Route, searchView, CatalogSections);
         location = new("catalog-discovery"); heading = "搜索发现";
         collection = null; selectedSong = null; total = 0; status = "";
         CatalogSections.Clear(); CatalogTags.Clear(); Songs.Clear();
         if (!retainCompleted) ClearDiscovery();
-        discoveryStatus = "加载中"; RefreshBindings();
+        discoveryStatus = "加载中"; PublishContentSelection(previousSelection); RefreshBindings();
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         loadDrains.Add(done.Task);
         return discoveryTail = Read();

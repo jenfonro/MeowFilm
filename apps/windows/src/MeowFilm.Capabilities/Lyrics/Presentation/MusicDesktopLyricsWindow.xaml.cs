@@ -79,25 +79,40 @@ sealed partial class MusicDesktopLyricsWindow : Window
             var bounds = anchor.AppWindow.Position; var size = anchor.AppWindow.Size;
             AppWindow.Move(new(bounds.X + Math.Max(0, (size.Width - AppWindow.Size.Width) / 2), bounds.Y + Math.Max(0, size.Height - AppWindow.Size.Height - (int)(32 * dpi))));
         }
-        LyricsFrame.Loaded += (_, _) => { UpdatePresentation(); ApplyHighContrast(accessibility.HighContrast); StartPointerObserver(); };
+        foreach (var line in new[] { TopLine, BottomLine })
+        {
+            line.RegisterPropertyChangedCallback(MusicDesktopLyricLineView.RowProperty, (_, _) => UpdateContentBounds());
+            line.RegisterPropertyChangedCallback(MusicDesktopLyricLineView.ShowTranslationProperty, (_, _) => UpdateContentBounds());
+        }
+        LyricsFrame.Loaded += (_, _) => { UpdatePresentation(); UpdatePlayback(); ApplyHighContrast(accessibility.HighContrast); StartPointerObserver(); };
     }
     internal Task SynchronizeInputRegionAsync() => inputRegion.SynchronizeAsync();
     private double Dpi => MusicDesktopLyricsNative.GetDpiForWindow(handle) / 96d;
     internal void Show() { AppWindow.Show(false); StartPointerObserver(); }
     private void ModuleChanged(object? sender, PropertyChangedEventArgs e)
-    { if (!closed && !closePending) UpdatePresentation(); }
+    {
+        if (closed || closePending) return;
+        if (e.PropertyName is null or nameof(MusicCapability.IsPlaying)) UpdatePlayback();
+        if (e.PropertyName is null or nameof(MusicCapability.DesktopLyricNormalColor)) UpdateNormalColor();
+        if (e.PropertyName is null or nameof(MusicCapability.DesktopLyricHighlightColor)) UpdateHighlightColor();
+        if (e.PropertyName is null or nameof(MusicCapability.DesktopLyricLayout)) UpdatePresentation();
+    }
+    private void UpdatePlayback() => PlaybackButton.Content = module.IsPlaying ? "\uE769" : "\uE768";
     private void UpdatePresentation()
     {
         bool doubleLine = module.DesktopLyricLayout == "double";
         BottomTrack.Height = doubleLine ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
         BottomLine.Visibility = doubleLine ? Visibility.Visible : Visibility.Collapsed;
         TopLine.HorizontalContentAlignment = doubleLine ? HorizontalAlignment.Left : HorizontalAlignment.Center;
-        ApplyHighContrast(highContrast);
-        PlaybackButton.Content = module.IsPlaying ? "\uE769" : "\uE768";
-        Status.Visibility = module.DesktopLyricTopRow is null && module.DesktopLyricBottomRow is null ? Visibility.Visible : Visibility.Collapsed;
-        double top = 54 + (module.ShowLyricTranslation && !string.IsNullOrWhiteSpace(module.DesktopLyricTopRow?.Translation) ? 30 : 0);
-        double bottom = 62 + (module.ShowLyricTranslation && !string.IsNullOrWhiteSpace(module.DesktopLyricBottomRow?.Translation) ? 30 : 0);
-        minimumHeight = 56 + (doubleLine ? Math.Max(top, bottom) * 2 : top);
+        UpdateContentBounds();
+    }
+    private void UpdateContentBounds()
+    {
+        if (closed || closePending) return;
+        Status.Visibility = TopLine.Row is null && BottomLine.Row is null ? Visibility.Visible : Visibility.Collapsed;
+        double top = 54 + (TopLine.ShowTranslation && !string.IsNullOrWhiteSpace(TopLine.Row?.Translation) ? 30 : 0);
+        double bottom = 62 + (BottomLine.ShowTranslation && !string.IsNullOrWhiteSpace(BottomLine.Row?.Translation) ? 30 : 0);
+        minimumHeight = 56 + (module.DesktopLyricLayout == "double" ? Math.Max(top, bottom) * 2 : top);
         double dpi = Dpi;
         int height = (int)Math.Ceiling(minimumHeight * dpi);
         if (AppWindow.Size.Height < height)
@@ -106,6 +121,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
             AppWindow.MoveAndResize(new(position.X, position.Y - delta, Math.Max(AppWindow.Size.Width, (int)(340 * dpi)), height));
             KeepReachableAndPersist();
         }
+        inputRegion.Refresh();
     }
     private nint WindowMessage(nint hwnd, uint message, nint wParam, nint lParam, nuint id, nuint data)
     {
@@ -185,18 +201,18 @@ sealed partial class MusicDesktopLyricsWindow : Window
     internal void ApplyHighContrast(bool enabled)
     {
         highContrast = enabled;
-        var ui = new UISettings();
         DesktopTheme.SetIsHighContrast(LyricsFrame, enabled);
         unlockWindow?.ApplyHighContrast(enabled);
         if (colorWindow is not null) DesktopTheme.SetIsHighContrast(colorWindow, enabled);
-        HoverSurface.Background = enabled ? new SolidColorBrush(ui.UIElementColor(UIElementType.Window)) : MusicVisuals.Brush("#B3212121");
-        TopLine.Normal = BottomLine.Normal = StatusText.Foreground = enabled
-            ? new SolidColorBrush(ui.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush(module.DesktopLyricNormalColor);
-        TopLine.Highlight = BottomLine.Highlight = enabled
-            ? new SolidColorBrush(ui.UIElementColor(UIElementType.Highlight)) : MusicVisuals.Brush(module.DesktopLyricHighlightColor);
+        HoverSurface.Background = enabled ? new SolidColorBrush(uiSettings.UIElementColor(UIElementType.Window)) : MusicVisuals.Brush("#B3212121");
+        UpdateNormalColor(); UpdateHighlightColor();
         foreach (var button in Toolbar.Children.OfType<Button>())
-            button.Foreground = enabled ? new SolidColorBrush(ui.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush("#F5F5F5");
+            button.Foreground = enabled ? new SolidColorBrush(uiSettings.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush("#F5F5F5");
     }
+    private void UpdateNormalColor() => TopLine.Normal = BottomLine.Normal = StatusText.Foreground = new SolidColorBrush(highContrast
+        ? uiSettings.UIElementColor(UIElementType.WindowText) : MusicVisuals.Brush(module.DesktopLyricNormalColor).Color);
+    private void UpdateHighlightColor() => TopLine.Highlight = BottomLine.Highlight = new SolidColorBrush(highContrast
+        ? uiSettings.UIElementColor(UIElementType.Highlight) : MusicVisuals.Brush(module.DesktopLyricHighlightColor).Color);
     private void StartPointerObserver() { if (closed || locked || !AppWindow.IsVisible) return; ObservePointer(); pointerObserver.Start(); }
     private void ObservePointer() { if (MusicDesktopLyricsNative.GetCursorPos(out var point)) RefreshHover(new(point.X, point.Y)); }
     internal void RefreshHover(Point point)
@@ -207,7 +223,9 @@ sealed partial class MusicDesktopLyricsWindow : Window
     }
     private void ShowHover(bool value)
     {
-        HoverSurface.Visibility = Toolbar.Visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        var visibility = value ? Visibility.Visible : Visibility.Collapsed;
+        if (HoverSurface.Visibility == visibility) return;
+        HoverSurface.Visibility = Toolbar.Visibility = visibility;
         inputRegion.Refresh();
     }
     private void Lyrics_PointerEntered(object sender, PointerRoutedEventArgs e) { if (!locked) ShowHover(true); }
