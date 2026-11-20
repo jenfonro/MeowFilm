@@ -27,10 +27,8 @@ public static class ShellCloseBehaviorTests
         yield return Case("tray failure retains an operable window and Explorer failure restores it", TrayUnavailable);
         yield return Case("save failure keeps the dialog operable without applying the choice", SaveFailure);
         yield return Case("tray exit retires a pending remembered minimize before its save completes", PendingSaveExit);
-        yield return Case("retired save cannot hide a new prompt after failed tray exit is cancelled", PendingSaveAfterCancellation);
-        yield return Case("explicit tray exit bypasses minimize and cancellation restores later close behavior", ExplicitExit);
-        yield return Case("failed exit can cancel and ask again on a fresh close", RetryAfterCancellation);
-        yield return Case("tray exit timeout stays visible and explicit wait observes the same cleanup", Timeout);
+        yield return Case("explicit tray exit bypasses minimize even if release fails", ExplicitExit);
+        yield return Case("tray exit closes immediately and observes one actual owner release", Timeout);
         yield return Case("startup abort retires a pending close choice and releases the tray", Abort);
         yield return Case("session ending bypasses choice without claiming pending cleanup completed", SessionEnding);
         yield return Case("dialog inherits theme and contrast with native PNG previews at three scales", ThemePreviews);
@@ -46,6 +44,8 @@ public static class ShellCloseBehaviorTests
         f.Shell.Close();
         await Until(() => f.Dialog.IsOpen, "default close prompt");
         Check(f.DialogElement<TextBlock>("DialogTitle").Text == "关闭主窗口", "prompt title");
+        Check(ReferenceEquals(DesktopVisual.Focused(f.Dialog), f.DialogElement<Button>("CancelChoice")),
+            "initial close choice focuses Cancel");
         Check(f.Shell.IsVisible && f.ShutdownCalls == 0 && f.Store.Writes == 0 &&
             !f.Shell.ShutdownCompletion.IsCompleted, "asking preserves the application lifecycle");
         f.Remember.IsChecked = true;
@@ -97,13 +97,15 @@ public static class ShellCloseBehaviorTests
             Click(f.DialogElement<Button>("ExitChoice"));
             await Until(() => f.ShutdownCalls == 1, "normal exit started");
             f.Shell.Close(); f.Shell.Close(); await Drain();
-            Check(!f.Dialog.IsOpen && !f.IsClosed && f.ShutdownCalls == 1 && f.Store.Writes == 0 &&
-                f.Tray.DisposeCalls == 0, "duplicate close neither saves nor repeats cleanup");
+            Check(!f.Dialog.IsOpen && f.IsClosed && f.ShutdownCalls == 1 && f.Store.Writes == 0 &&
+                f.Tray.DisposeCalls == 1 && !f.Shell.ShutdownCompletion.IsCompleted,
+                "window and tray close without waiting for owner release; duplicate close repeats neither save nor release");
             release.TrySetResult();
+            await f.Shell.ShutdownCompletion;
             await f.WaitClosed();
             Check(f.Shell.ShutdownSucceeded && f.Shell.CleanupCompleted && f.ShutdownCalls == 1 &&
                 f.Tray.DisposeCalls == 1 && f.Preferences.Behavior == WindowCloseBehavior.Ask,
-                "only actual successful cleanup closes and releases the tray once");
+                "actual successful release is observed after the already closed window");
         }
         finally { release.TrySetResult(); }
     }
@@ -119,7 +121,8 @@ public static class ShellCloseBehaviorTests
         Check(f.Dialog.IsOpen && f.Dialog.IsPending && f.Shell.IsVisible && f.ShutdownCalls == 0 &&
             !f.DialogElement<Button>("CancelChoice").IsEnabled, "accepted persistence settles before the action");
         f.Shell.Close(); await Drain();
-        Check(f.Dialog.IsPending && store.Writes == 0, "repeated close does not start a second save");
+        Check(f.Dialog.IsPending && store.Writes == 1 && f.Preferences.Behavior == WindowCloseBehavior.Ask,
+            "repeated close does not start a second save or publish an uncommitted choice");
         store.Release.TrySetResult();
         await Until(() => !f.Shell.IsVisible, "remembered minimize");
         Check(store.Writes == 1 && f.Preferences.Behavior == WindowCloseBehavior.MinimizeToTray,
@@ -236,27 +239,13 @@ public static class ShellCloseBehaviorTests
 
     private static async Task ExplicitExit()
     {
-        int attempts = 0;
         await using var f = await Fixture.Create(WindowCloseBehavior.MinimizeToTray,
-            shutdown: () => ++attempts == 1 ? Task.FromException(new InvalidOperationException()) : Task.CompletedTask);
-        f.Shell.Close();
-        await Until(() => !f.Shell.IsVisible, "hidden shell");
-        f.Tray.ExitApplication();
-        await Until(() => f.Status == "关闭失败", "explicit tray exit preparation failed");
-        Check(f.ShutdownWasVisible && f.Shell.IsVisible && !f.Dialog.IsOpen && f.ShutdownCalls == 1 &&
-            f.Tray.DisposeCalls == 0, "explicit exit restores the shell and bypasses the minimize preference");
-        f.Tray.ExitApplication(); await Drain();
-        Check(f.ShutdownCalls == 1, "repeated explicit exit shares the active shutdown");
-        Click(f.ShellElement<Button>("CancelShutdownButton"));
-        await Until(() => f.Status == "" && f.ShellElement<Button>("SettingsButton").IsEnabled, "cancel tray exit");
-        f.Shell.Close();
-        await Until(() => !f.Shell.IsVisible, "normal close again honors minimize");
-        Check(f.ShutdownCalls == 1 && f.Preferences.Behavior == WindowCloseBehavior.MinimizeToTray,
-            "an explicit exit does not change the remembered close behavior");
-        f.Tray.ExitApplication();
-        await f.WaitClosed();
-        Check(f.ShutdownCalls == 2 && f.CancelCalls == 1 && f.ShutdownWasVisible && f.Tray.DisposeCalls == 1,
-            "a fresh explicit exit owns one successful cleanup");
+            shutdown: () => Task.FromException(new InvalidOperationException("fixture-release-failure")));
+        f.Shell.Close(); await Until(() => !f.Shell.IsVisible, "hidden shell");
+        f.Tray.ExitApplication(); await f.WaitClosed();
+        Check(f.IsClosed && f.ShutdownCalls == 1 && f.Tray.DisposeCalls == 1 && !f.Shell.CleanupCompleted,
+            "explicit exit bypasses the tray preference and does not fabricate successful release");
+        Check(f.Preferences.Behavior == WindowCloseBehavior.MinimizeToTray, "exit does not rewrite close preference");
     }
 
     private static async Task PendingSaveExit()
@@ -277,7 +266,7 @@ public static class ShellCloseBehaviorTests
             Check(f.ShutdownCalls == 1, "pending preference drain still belongs to one exit attempt");
             store.Release.TrySetResult();
             await Until(() => f.Preferences.Behavior == WindowCloseBehavior.MinimizeToTray, "retired save settled");
-            Check(f.Shell.IsVisible && !f.IsClosed && !f.Dialog.IsOpen && f.ShutdownCalls == 1 && store.Writes == 1,
+            Check(f.IsClosed && !f.Dialog.IsOpen && f.ShutdownCalls == 1 && store.Writes == 1,
                 "a late saved minimize cannot hide the window while explicit exit is still waiting");
             releaseShutdown.TrySetResult();
             await f.WaitClosed();
@@ -286,78 +275,21 @@ public static class ShellCloseBehaviorTests
         finally { releaseShutdown.TrySetResult(); }
     }
 
-    private static async Task PendingSaveAfterCancellation()
-    {
-        int attempts = 0;
-        var store = new QualityFixture.Database { HoldWrites = true};
-        await using var f = await Fixture.Create(store: store,
-            shutdown: () => ++attempts == 1 ? Task.FromException(new InvalidOperationException()) : Task.CompletedTask);
-        await f.OpenChoice();
-        f.Remember.IsChecked = true;
-        Click(f.DialogElement<Button>("MinimizeChoice"));
-        await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
-        f.Tray.ExitApplication();
-        await Until(() => f.Status == "关闭失败", "tray exit failed before the old save settled");
-        Click(f.ShellElement<Button>("CancelShutdownButton"));
-        await Until(() => f.Status == "", "tray exit cancelled");
-        await f.OpenChoice();
-        store.Release.TrySetResult();
-        await Until(() => f.Preferences.Behavior == WindowCloseBehavior.MinimizeToTray, "retired save settled after rollback");
-        Check(f.Shell.IsVisible && f.Dialog.IsOpen && f.Remember.IsChecked == false && !f.Dialog.IsPending &&
-            f.ShutdownCalls == 1 && store.Writes == 1,
-            "the retired selection cannot hide the window or mutate the newly opened dialog");
-        Click(f.DialogElement<Button>("CancelChoice"));
-        f.Shell.Close();
-        await Until(() => !f.Shell.IsVisible, "a new close follows the now-saved preference");
-        f.Tray.ExitApplication();
-        await f.WaitClosed();
-        Check(f.ShutdownCalls == 2 && f.CancelCalls == 1 && f.Tray.DisposeCalls == 1,
-            "after rollback, only a new explicit exit performs cleanup");
-    }
-
-    private static async Task RetryAfterCancellation()
-    {
-        int attempts = 0;
-        await using var f = await Fixture.Create(
-            shutdown: () => ++attempts == 1 ? Task.FromException(new InvalidOperationException()) : Task.CompletedTask);
-        await f.OpenChoice();
-        Click(f.DialogElement<Button>("ExitChoice"));
-        await Until(() => f.Status == "关闭失败", "failed close");
-        Check(f.ShellElement<Button>("CancelShutdownButton").IsEnabled && !f.Dialog.IsOpen,
-            "the existing failed-shutdown decision remains operable");
-        Click(f.ShellElement<Button>("CancelShutdownButton"));
-        await Until(() => f.Status == "" && f.ShellElement<Button>("SettingsButton").IsEnabled, "failed-close rollback");
-        await f.OpenChoice();
-        Click(f.DialogElement<Button>("ExitChoice"));
-        await f.WaitClosed();
-        Check(f.ShutdownCalls == 2 && f.CancelCalls == 1 && f.Store.Writes == 0 && f.Shell.ShutdownSucceeded,
-            "the next close asks and starts a fresh shutdown rather than reusing failure");
-    }
-
     private static async Task Timeout()
     {
         var release = Pending();
         await using var f = await Fixture.Create(WindowCloseBehavior.MinimizeToTray, shutdown: () => release.Task);
         try
         {
-            f.Shell.Close();
-            await Until(() => !f.Shell.IsVisible, "tray hide before timed out exit");
+            f.Shell.Close(); await Until(() => !f.Shell.IsVisible, "tray hide");
             f.Tray.ExitApplication();
-            Check(f.ShutdownWasVisible && f.ShutdownCalls == 1, "tray exit shows the shell before cleanup starts");
-            f.Clock.Expire();
-            await Until(() => f.Status == "关闭超时", "shutdown wait deadline");
-            Check(f.Shell.IsVisible && !f.IsClosed && !f.Dialog.IsOpen && !f.Shell.CleanupCompleted &&
-                f.ShellElement<Button>("WaitForShutdownButton").IsEnabled &&
-                f.ShellElement<Button>("ForceExitButton").IsEnabled && f.Tray.DisposeCalls == 0,
-                "timeout preserves the existing wait/force decision on a visible shell");
-            f.Tray.ExitApplication(); await Drain();
-            Check(f.ShutdownCalls == 1, "explicit exit cannot restart timed out cleanup");
-            release.TrySetResult(); await Drain();
-            Check(!f.IsClosed, "late cleanup needs an explicit wait decision");
-            Click(f.ShellElement<Button>("WaitForShutdownButton"));
-            await f.WaitClosed();
-            Check(f.ShutdownCalls == 1 && f.Shell.CleanupCompleted && f.Tray.DisposeCalls == 1,
-                "the explicit wait observes the original cleanup and closes once");
+            await Until(() => f.IsClosed, "exit has no window wait");
+            Check(!f.Shell.ShutdownCompletion.IsCompleted && f.Tray.DisposeCalls == 1,
+                "window and tray close while the owner still holds its pending local write");
+            f.Clock.Expire(); await Drain();
+            Check(!f.Shell.ShutdownCompletion.IsCompleted, "clock cannot fabricate release");
+            release.TrySetResult(); await f.WaitClosed();
+            Check(f.ShutdownCalls == 1 && f.Shell.CleanupCompleted, "one real release result");
         }
         finally { release.TrySetResult(); }
     }
@@ -367,9 +299,9 @@ public static class ShellCloseBehaviorTests
         await using var f = await Fixture.Create();
         await f.OpenChoice();
         f.Remember.IsChecked = true;
-        await f.Shell.AbortAsync();
+        await f.Shell.CloseAfterReleaseAsync();
         await f.WaitClosed();
-        Check(!f.Dialog.IsOpen && f.Store.Writes == 0 && f.ForceCalls == 1 && f.Tray.DisposeCalls == 1,
+        Check(!f.Dialog.IsOpen && f.Store.Writes == 0 && f.ShutdownCalls == 1 && f.Tray.DisposeCalls == 1,
             "startup abort bypasses the choice without persisting its draft");
     }
 
@@ -472,14 +404,15 @@ public static class ShellCloseBehaviorTests
         internal QualityFixture.Database Store { get; }
         internal AppClosePreferences Preferences { get; }
         internal ShellWindow Shell { get; }
+        private readonly FrameworkElement root;
         internal TrayIcon Tray { get; } = new();
         internal DeadlineClock Clock { get; } = new();
-        internal int TrayCreations, ShutdownCalls, ForceCalls, CancelCalls;
+        internal int TrayCreations, ShutdownCalls;
         internal bool ShutdownWasVisible;
         private readonly TaskCompletionSource closed = Pending();
         internal bool IsClosed => closed.Task.IsCompleted;
         internal string Status => ShellElement<TextBlock>("StatusText").Text;
-        internal CloseWindowDialog Dialog => ShellElement<CloseWindowDialog>("CloseDialog");
+        internal CloseWindowDialog Dialog { get; }
         internal CheckBox Remember => DialogElement<CheckBox>("RememberChoice");
 
         private Fixture(QualityFixture.Database store, AppClosePreferences preferences,
@@ -493,20 +426,14 @@ public static class ShellCloseBehaviorTests
                 ShutdownCalls++; ShutdownWasVisible = Shell!.IsVisible;
                 if (shutdown is not null) await shutdown();
                 await Preferences.PrepareShutdownAsync();
-            }, async () =>
-            {
-                ForceCalls++;
-                await Preferences.AbortAsync();
-            }, async () =>
-            {
-                CancelCalls++;
-                await Preferences.CancelShutdownPreparationAsync();
             }, Clock, appearance, preferences, (_, show, exit, unavailable) =>
             {
                 TrayCreations++;
                 Tray.ShowWindow = show; Tray.ExitApplication = exit; Tray.Unavailable = unavailable;
                 return Tray;
             });
+            root = Shell.Root;
+            Dialog = ShellElement<CloseWindowDialog>("CloseDialog");
             Shell.Closed += (_, _) => closed.TrySetResult();
         }
 
@@ -525,7 +452,7 @@ public static class ShellCloseBehaviorTests
         }
 
         internal T ShellElement<T>(string name) where T : FrameworkElement =>
-            DesktopTestUi.WindowRoot(Shell).FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
+            root.FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
         internal T DialogElement<T>(string name) where T : FrameworkElement =>
             Dialog.FindName(name) as T ?? throw new InvalidOperationException("Missing dialog element: " + name);
         internal bool HasNotice(string message) => Descendants(ShellElement<NoticeStack>("Notices")).OfType<TextBlock>()
@@ -542,7 +469,7 @@ public static class ShellCloseBehaviorTests
         public async ValueTask DisposeAsync()
         {
             Store.Release.TrySetResult();
-            if (!IsClosed) await Shell.AbortAsync();
+            if (!IsClosed) await Shell.CloseAfterReleaseAsync();
             await WaitClosed();
             await Preferences.DisposeAsync();
         }
@@ -564,7 +491,6 @@ public static class ShellCloseBehaviorTests
         public string CaptureNavigationLocation() => "home";
         public Task RestoreNavigationAsync(string location, CancellationToken token) => NavigateAsync(location, token);
         public Task PrepareShutdownAsync() => Task.CompletedTask;
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

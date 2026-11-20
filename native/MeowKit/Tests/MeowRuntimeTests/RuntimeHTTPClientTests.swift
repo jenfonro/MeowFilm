@@ -458,6 +458,8 @@ final class RuntimeHTTPClientTests: XCTestCase {
     func testAppProvidersUseTheirOwnContractsAndClosedErrorCodes() async throws {
         let client = try client()
         for (module, operation, contract, code, foreignCode): (RuntimeModule, String, String, String, String) in [
+            (.cat, "invoke", "cat.script.v2", "PAN_INTERCEPTION_UNSUPPORTED", "NO_MATCH"),
+            (.film, "data.detail", "film.playback.v1", "PAN_INTERCEPTION_UNSUPPORTED", "SOURCE_CLEANUP"),
             (.pan, "providers", "pan.runtime.v1", "LOGIN_EXPIRED", "NO_MATCH"),
             (.tmdb, "settings.get", "tmdb.data.v1", "NETWORK_ERROR", "PAN_FAILURE"),
             (.douban, "settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),

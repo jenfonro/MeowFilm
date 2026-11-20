@@ -1,4 +1,5 @@
 import Foundation
+import XCTest
 import MeowMusicFeature
 import MeowMusicPlatform
 import MeowMusicTestSupport
@@ -103,8 +104,15 @@ final class NativeMusicTestLibrary: MusicNativeLibraryStoring, @unchecked Sendab
         initialized = false; seed = value; revisionOffset = 0
     }
     func snapshot() -> (Data?, Int, Int) {
-        lock.lock(); defer { lock.unlock() }
-        return ((try? read()) ?? seed, reads, writes)
+        do {
+            return try storageTestIO { [self] in
+                lock.lock(); defer { lock.unlock() }
+                return (try read(), reads, writes)
+            }
+        } catch {
+            XCTFail("Fixture database inspection failed: \(error)")
+            return (nil, reads, writes)
+        }
     }
 }
 

@@ -43,6 +43,9 @@ public static partial class MusicCatalogPersonalTests
     {
         yield return Case("home incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(false));
         yield return Case("channel incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(true));
+        yield return Case("channel cache eviction cancels optional reads and removes mounted content before the next receipt", ChannelEvictionRetirement);
+        yield return Case("another platform account invalidation retires hidden channel resources and retains current receipts", () => HiddenChannelAccountRetirement(anotherPlatform: true));
+        yield return Case("account invalidation retires mounted hidden channel resources", () => HiddenChannelAccountRetirement(anotherPlatform: false));
         foreach (var test in ArtworkDemandCases()) yield return test;
         foreach (var homeCase in HomeCases()) yield return homeCase;
         foreach (var test in LocalHeartbeatCases()) yield return test;
@@ -1072,7 +1075,7 @@ public static partial class MusicCatalogPersonalTests
             var open = f.Module.OpenCatalogCardAsync(card);
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Equal(card.Title, f.Module.Heading); Equal(card.Cover, f.Module.DetailArtwork);
-            Equal("", f.Module.DetailCountText); Check(f.Module.ShowDetailSkeleton, "members load independently from summary");
+            Equal("", f.Module.DetailCountText); Check(f.Module.ShowDetailLoading, "members load independently from summary");
             hold.Release(); await open;
             DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
             await SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-playlist.png");
@@ -2748,15 +2751,8 @@ public static partial class MusicCatalogPersonalTests
         public void ReleaseAll() { foreach (var hold in allHolds) hold.Release(); }
         public void FailNext(string method, string code) => failures[method] = code;
         public void TransformNext(string method, Func<JsonElement, JsonElement> action) => transforms[method] = action;
-        private async Task<JsonElement> ReadQualitySettings(CancellationToken token)
-        {
-            var reply = await Library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
-            if (!reply.GetProperty("ok").GetBoolean()) return reply;
-            var result = JsonNode.Parse(reply.GetRawText())!.AsObject();
-            // Keep lyrics disabled in this port fixture without adding a library write.
-            // The real owner's quality policy and signature remain authoritative.
-            return E(result);
-        }
+        private Task<JsonElement> ReadQualitySettings(CancellationToken token) =>
+            Library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
         private static JsonElement ScriptSource() => E(new {
             installationId = "fixture-script", name = "Catalog fixture", version = "1",
             contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
@@ -2842,7 +2838,7 @@ public static partial class MusicCatalogPersonalTests
                 else
                     result = await Catalog.ExecuteAsync(method, p, cancellationToken);
             }
-            else if (method == "music.settings.get") result = E(new { ok = true, settings = new { schema = 3, revision = 0, lyrics = false } });
+            else if (method == "music.settings.get") result = E(new { ok = true, settings = new { schema = 1, revision = 0, lyrics = false } });
             else if (method == "music.quality.settings.get") result = await ReadQualitySettings(cancellationToken);
             else if (method == "music.official.candidates")
             {
@@ -2911,16 +2907,7 @@ public static partial class MusicCatalogPersonalTests
             Catalog.Invalidate();
             await Library.PrepareShutdownAsync(cancellationToken);
         }
-        public override async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-        {
-            await Library.CancelShutdownPreparationAsync(cancellationToken);
-            await search.CancelShutdownPreparationAsync(cancellationToken);
-            if (recommendationPrepared)
-            {
-                recommendations.Resume();
-                recommendationPrepared = false;
-            }
-        }
+
         public override async ValueTask DisposeAsync()
         {
             ReleaseAll();
@@ -2980,6 +2967,7 @@ public static partial class MusicCatalogPersonalTests
     {
         public int Opens, Resumes;
         public bool StartOnOpen;
+        public CancellationToken OpenToken;
         public string? OwnerId { get; private set; }
         public string? Identity { get; private set; }
         public bool HasMedia { get; private set; }
@@ -2993,6 +2981,7 @@ public static partial class MusicCatalogPersonalTests
         public event EventHandler? Failed;
         public Task OpenAsync(string owner, string identity, Uri uri, string title, CancellationToken token)
         {
+            OpenToken = token;
             token.ThrowIfCancellationRequested(); OwnerId = owner; Identity = identity; HasMedia = true;
             IsPlaying = false; PositionSeconds = 0; Opens++;
             PropertyChanged?.Invoke(this, new(nameof(OwnerId)));

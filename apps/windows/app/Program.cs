@@ -137,7 +137,9 @@ internal static class Program
             },
             capabilities => [searchPage = new SearchResultsPage(capabilities.OfType<MusicCapability>().Single(),
                 capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())],
-            runtimeSettings: database => new FilmRuntimeSettings(database));
+            runtimeSettings: database => new FilmRuntimeSettings(database),
+            stopPlayback: () => Task.WhenAll(musicPlayback?.StopAsync() ?? Task.CompletedTask,
+                filmPlayback?.StopAsync() ?? Task.CompletedTask));
     }
     [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
     private static extern int MessageBox(nint window, string text, string caption, uint flags);

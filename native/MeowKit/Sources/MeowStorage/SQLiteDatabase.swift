@@ -623,7 +623,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
     private func scheduleMaintenance() {
-        guard commits >= 64, let db = connection, maintenanceFailure == nil else { return }
+        guard commits >= 64, !admission.withLock({ closing }), let db = connection, maintenanceFailure == nil else { return }
         commits = 0
         do {
             try Self.lock(maintenanceDescriptor, exclusive: true, wait: false)
@@ -647,11 +647,9 @@ public final class SQLiteDatabase: @unchecked Sendable {
             queue.async {
                 continuation.resume(with: Result {
                     if let db = self.connection {
-                        var failure = self.maintenanceFailure
-                        do {
-                            try Self.lock(self.maintenanceDescriptor, exclusive: true)
-                            try Self.maintain(db)
-                        } catch { failure = failure ?? error }
+                        // Accepted transactions have already committed to the WAL.
+                        // Release does not contend with the other owner's maintenance.
+                        var failure: Error?
                         db.releaseStatements()
                         if sqlite3_close_v2(db.handle) != SQLITE_OK { failure = failure ?? SQLiteStorageError.io }
                         self.connection = nil

@@ -24,11 +24,6 @@ public static class MusicSearchConsumerTests
     public static IEnumerable<TestCase> Cases() =>
         MusicUiTests.SearchConsumerCases().Concat(MusicUiTests.SearchPlaylistPresentationCases());
 }
-public static class MusicSyncConsumerLifecycleTests
-{
-    public static IEnumerable<TestCase> Cases() => MusicUiTests.SyncResumeConsumerCases();
-}
-
 public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SearchConsumerCases()
@@ -69,7 +64,7 @@ public static partial class MusicUiTests
             var records = MusicTestStores.For(f.Store);
             var document = await Task.Run(() => records.Root);
             document["areas"]!["native-search-policy"] = JsonSerializer.SerializeToNode(new
-                { schema = 3, revision = 0, songs = kind,
+                { schema = 1, revision = 0, songs = kind,
                     playlists = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = -1, concurrency = 1, cacheMinutes = 60 } });
             records.Seed(document);
             await f.Module.InitializeAsync(default);
@@ -223,30 +218,30 @@ public static partial class MusicUiTests
             }
             Equal(0, f.Http.SearchRequests);
         });
-        yield return Case("search skeletons follow overview sections and dedicated playlist or song layout", async () =>
+        yield return Case("search loading rings follow overview sections and dedicated playlist or song layout", async () =>
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]); f.Http.Hold = true;
             var window = SearchPlaylistWindow(f.Module.View, 1042, 800);
             try
             {
-                window.Show(); await f.Search("骨架");
+                window.Show(); await f.Search("加载");
                 await SearchUntil(() => f.Http.SearchRequests == 2 && f.Module.CatalogSections.Count == 2);
                 DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
                 var catalog = (MusicCatalogView)f.Module.View.FindName("CatalogView");
                 var overview = (ScrollViewer)catalog.FindName("SearchOverviewScroll");
-                var visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => DesktopVisual.IsVisible(s)).ToArray();
-                True(visible.Length > 0, "empty overview has section skeletons");
-                True(visible.All(skeleton => Visuals(overview).Contains(skeleton)), "overview has no global skeleton overlay");
+                var visible = Visuals(f.Module.View).OfType<ProgressRing>().Where(s => s.IsActive && DesktopVisual.IsVisible(s)).ToArray();
+                True(visible.Length > 0, "empty overview has active section loading rings");
+                True(visible.All(ring => Visuals(overview).Contains(ring)), "overview loading belongs to its sections");
                 await f.Module.OpenSearchTabAsync("playlists"); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-                True(Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => DesktopVisual.IsVisible(s)), "playlist page has card skeletons");
+                True(Visuals(f.Module.View).OfType<ProgressRing>().Any(s => s.IsActive && DesktopVisual.IsVisible(s)), "playlist page has an active loading ring");
                 await f.Module.OpenSearchTabAsync("songs"); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-                visible = Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Where(s => DesktopVisual.IsVisible(s)).ToArray();
-                True(visible.Length > 0 && visible.All(s => s.Height == 34), "song page only shows row skeletons");
+                visible = Visuals(f.Module.View).OfType<ProgressRing>().Where(s => s.IsActive && DesktopVisual.IsVisible(s)).ToArray();
+                True(visible.Length == 1 && ReferenceEquals(visible[0], f.Module.View.FindName("SearchLoading")), "song page has its own active loading ring");
                 f.Http.Release.TrySetResult();
                 await SearchUntil(() => !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
                 DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-                True(!Visuals(f.Module.View).OfType<MeowFilm.Desktop.LoadingSkeleton>().Any(s => DesktopVisual.IsVisible(s)), "settled results remove all skeletons");
+                True(!Visuals(f.Module.View).OfType<ProgressRing>().Any(s => s.IsActive && DesktopVisual.IsVisible(s)), "settled results stop visible loading rings");
             }
             finally { f.Http.Release.TrySetResult(); window.Content = null; window.Close(); }
         });
@@ -266,7 +261,6 @@ public static partial class MusicUiTests
         {
             await using var f = await SearchScene.Create();
             await f.Policy(["wy"], ["wy"]);
-            int accountReads = f.Store.AccountReads;
             f.Http.Hold = true;
             await f.Search("原生");
             await SearchUntil(() => f.Http.SearchRequests == 2 && f.Module.CatalogSections.Count == 2);
@@ -290,32 +284,39 @@ public static partial class MusicUiTests
             True(playlist.CanOpen && playlist.Platform == "wy", "public playlist consumer");
             await f.Module.OpenSearchTabAsync("songs");
             Equal(1, f.Module.Songs.Count); Equal(2, f.Http.SearchRequests);
-            Equal(accountReads + 2, f.Store.AccountReads);
             Equal(0, f.Runtime.Calls.Count);
         });
-        yield return Case("duplicate visible search start shares one owner flight and one current account read after startup", async () =>
+        yield return Case("duplicate visible search submissions share kind starts and one physical request after startup", async () =>
         {
-            await using var f = await SearchScene.Create();
-            await f.Policy(["wy"], [], automaticPlaylists: false);
-            int accountReads = f.Store.AccountReads;
-            var hold = f.Store.HoldNextAccountRead();
-            var first = f.Search("单飞");
+            await using var store = ServiceStore();
+            await using var runtime = new NativeMusicScriptTestRuntime();
+            var http = new SearchHttp(); runtime.Platform.OnRequest = http.Read;
+            await using var records = MusicTestStores.For(store);
+            var inner = new MusicNativeApplication(store, records, runtime);
+            var consumer = new SearchStartForwarder(inner);
+            await using var module = new MusicCapability(consumer, store, new PlaybackProbe(), new Dialogs());
+            await module.InitializeAsync(default); await Drain();
+            await SetSearchPolicy(module, ["wy"], []);
+            await module.NavigateAsync("catalog-search", default);
+            var first = module.SearchAsync("单飞", default);
             Task duplicate = Task.CompletedTask;
             try
             {
-                await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
-                duplicate = f.Module.SearchAsync("单飞", default);
+                await consumer.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                duplicate = module.SearchAsync("单飞", default);
                 await Drain();
-                Equal(accountReads + 1, f.Store.AccountReads);
-                Equal(0, f.Http.SearchRequests);
-                hold.Release();
+                Equal(1, consumer.StartedKinds.Count(kind => kind == "songs"));
+                True(!first.IsCompleted && !duplicate.IsCompleted, "both submissions await the same admitted owner start");
+                Equal(0, http.SearchRequests);
+                consumer.Release.TrySetResult();
                 await Task.WhenAll(first, duplicate).WaitAsync(TimeSpan.FromSeconds(5));
-                await SearchUntil(() => f.Module.Songs.Count == 1 &&
-                    !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
-                Equal(1, f.Http.SearchRequests);
-                Equal(accountReads + 1, f.Store.AccountReads);
+                await SearchUntil(() => module.Songs.Count == 1 &&
+                    !module.SearchSongsLoading && !module.SearchPlaylistsLoading);
+                Equal(1, consumer.StartedKinds.Count(kind => kind == "songs"));
+                Equal(1, consumer.StartedKinds.Count(kind => kind == "playlists"));
+                Equal(1, http.SearchRequests);
             }
-            finally { hold.Release(); await Task.WhenAll(first, duplicate); }
+            finally { consumer.Release.TrySetResult(); await Task.WhenAll(first, duplicate); }
         });
         yield return Case("visible search resubmission uses page TTL while navigation only restores results", async () =>
         {
@@ -560,18 +561,24 @@ public static partial class MusicUiTests
             f.Module.Songs.CollectionChanged += (_, e) => events.Add(e.Action);
             var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             f.Http.BeforeSearchReply = _ => gate.Task;
-            int eventCount = events.Count;
+            int eventCount = events.Count, sourceChanges = 0;
+            f.Module.PropertyChanged += (_, args) =>
+            { if (args.PropertyName == nameof(MusicCapability.CatalogSections)) sourceChanges++; };
             try
             {
                 await f.Module.OpenSearchTabAsync("songs");
+                Equal(1, sourceChanges); sourceChanges = 0;
                 await f.Module.MoreSearchAsync();
                 await SearchUntil(() => f.Http.SearchRequests == 3 && f.Module.SearchSongsLoading);
+                Equal(0, sourceChanges);
                 await f.Module.OpenSearchTabAsync("overview");
+                Equal(1, sourceChanges); sourceChanges = 0;
                 var overviewSongSection = f.Module.CatalogSections.Single(section => section.Title == "单曲");
                 var overviewPlaylistSection = f.Module.CatalogSections.Single(section => section.Title == "歌单");
                 gate.TrySetResult();
                 await SearchUntil(() => f.Http.SearchRequests == 3 &&
                     !f.Module.SearchSongsLoading && !f.Module.SearchPlaylistsLoading);
+                Equal(0, sourceChanges);
                 True(f.Module.CatalogSections.SelectMany(section => section.Items).Count() == 12,
                     "the repeated snapshot retains both overview result sets");
                 True(Equals(0, events.Count), "an unchanged songs snapshot does not touch Songs");
@@ -595,7 +602,7 @@ public static partial class MusicUiTests
         yield return Case("same-session search reorder preserves song objects selection and actual table scroll", async () =>
         {
             await using var database = ServiceStore();
-            await using var store = new SearchStore(database);
+            await using var store = new NativeTestDatabase(database);
             await using var runtime = new NativeMusicScriptTestRuntime();
             await using var records = MusicTestStores.For(store);
             var http = new SearchHttp { SearchResult = (count, _) => new { items = SearchSongPage(count).ToArray(), more = false } };
@@ -921,12 +928,12 @@ public static partial class MusicUiTests
             await f.Module.PrepareShutdownAsync();
             var closed = await f.App.ExecuteAsync("music.search.start", new { keyword = "禁止", kind = "songs", platforms = new[] { "wy" } });
             Equal("CLOSED", closed.GetProperty("code").GetString());
-            await f.Module.CancelShutdownPreparationAsync();
             True(!f.Module.HasSearchSession, "old search handles retired on resume");
-            Equal("恢复", (await f.Call("music.search.history.get")).GetProperty("history")
-                .GetProperty("items")[0].GetProperty("text").GetString());
+            await using var reopened = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), f.Runtime);
+            var history = await reopened.ExecuteAsync("music.search.history.get");
+            Equal("恢复", history.GetProperty("history").GetProperty("items")[0].GetProperty("text").GetString());
             await f.Module.SearchAsync("恢复", default);
-            await SearchUntil(() => f.Module.Songs.Count == 1);
+            True(!f.Module.CanEdit, "retired module cannot reopen search");
             Equal(0, f.Runtime.Calls.Count);
         });
         yield return Case("native search disabling providers waits for the admitted physical request", async () =>
@@ -958,38 +965,8 @@ public static partial class MusicUiTests
                 f.Http.Release.TrySetResult(); f.Http.DisposalRelease.TrySetResult();
                 await prepare.WaitAsync(TimeSpan.FromSeconds(5));
                 True(!f.Module.HasCurrent && f.Module.Songs.Count == 0, "no late content or media publication");
-                await f.Module.CancelShutdownPreparationAsync();
-                True(!f.Module.HasSearchSession, "resumed product has no old handles");
+                    True(!f.Module.HasSearchSession, "resumed product has no old handles");
             });
-    }
-
-    internal static IEnumerable<TestCase> SyncResumeConsumerCases()
-    {
-        yield return Case("native sync resume reconciles completion delivered before the module unseals", async () =>
-        {
-            await using var store = ServiceStore();
-            await using var runtime = new NativeMusicScriptTestRuntime();
-            var inner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
-            var consumer = new SyncDuringResume(inner);
-            await using var module = new MusicCapability(consumer, store, new PlaybackProbe(), new Dialogs());
-            await module.InitializeAsync(default);
-            await module.PrepareShutdownAsync();
-            await module.CancelShutdownPreparationAsync();
-            await SearchUntil(() => module.Playlists.Any(p => p.Name == "恢复时已同步"));
-            Equal(1, consumer.EarlyNotifications); Equal(0, runtime.Calls.Count);
-        });
-    }
-    private sealed class SyncDuringResume(MusicNativeApplication inner) : MusicApplicationForwarder(inner)
-    {
-        public override event Action? LibrarySyncChanged;
-        internal int EarlyNotifications;
-        public override async Task CancelShutdownPreparationAsync(CancellationToken token = default)
-        {
-            await inner.CancelShutdownPreparationAsync(token);
-            await ServiceCall(inner, "music.library.create", new { name = "恢复时已同步" });
-            EarlyNotifications++; LibrarySyncChanged?.Invoke();
-            await Drain(); // Deliver it while MusicCapability.stopping is still true.
-        }
     }
 
     private sealed class SearchSnapshotForwarder(MusicNativeApplication inner) : MusicApplicationForwarder(inner)
@@ -1015,6 +992,24 @@ public static partial class MusicUiTests
         }
 
         internal void Publish(JsonElement snapshot) => replayed?.Invoke(snapshot);
+    }
+
+    private sealed class SearchStartForwarder(MusicNativeApplication inner) : MusicApplicationForwarder(inner)
+    {
+        internal readonly TaskCompletionSource Arrived = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly ConcurrentQueue<string> StartedKinds = new();
+        public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
+            CancellationToken cancellationToken = default)
+        {
+            if (method == "music.search.start")
+            {
+                StartedKinds.Enqueue(JsonSerializer.SerializeToElement(parameters).GetProperty("kind").GetString()!);
+                Arrived.TrySetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+            return await Inner.ExecuteAsync(method, parameters, cancellationToken);
+        }
     }
 
     private static JsonElement SearchReorderedSnapshot(JsonElement snapshot)
@@ -1077,7 +1072,7 @@ public static partial class MusicUiTests
     }
     private sealed class SearchScene : IAsyncDisposable
     {
-        internal readonly SearchStore Store = new(ServiceStore());
+        internal readonly NativeTestDatabase Store = new(ServiceStore(), owns: true);
         internal readonly NativeMusicScriptTestRuntime Runtime = new();
         internal readonly SearchHttp Http = new();
         internal readonly MusicNativeApplication App;
@@ -1133,38 +1128,6 @@ public static partial class MusicUiTests
         public override DateTimeOffset GetUtcNow() => new DateTimeOffset(2026, 10, 23, 0, 0, 0, TimeSpan.Zero)
             .AddTicks(Interlocked.Read(ref ticks));
         internal void Advance(TimeSpan duration) => Interlocked.Add(ref ticks, duration.Ticks);
-    }
-    private sealed class SearchStore(IStorageDatabase inner) : NativeTestDatabase(inner)
-    {
-        private AccountReadHold? nextAccountRead;
-        internal int AccountReads;
-        internal AccountReadHold HoldNextAccountRead()
-        {
-            var hold = new AccountReadHold();
-            if (Interlocked.CompareExchange(ref nextAccountRead, hold, null) is not null)
-                throw new InvalidOperationException("Account read already held");
-            return hold;
-        }
-        public override async Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default)
-        {
-            Interlocked.Increment(ref AccountReads);
-            var result = await base.ReadAsync(read, token);
-            var hold = Interlocked.Exchange(ref nextAccountRead, null);
-            if (hold is not null) { hold.Arrived.TrySetResult(); await hold.Released.Task; }
-            return result;
-        }
-        public override async ValueTask DisposeAsync()
-        {
-            Interlocked.Exchange(ref nextAccountRead, null)?.Release(); await base.DisposeAsync();
-        }
-    }
-    private sealed class AccountReadHold
-    {
-        internal TaskCompletionSource Arrived { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal TaskCompletionSource Released { get; } =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal void Release() => Released.TrySetResult();
     }
     private sealed class SearchHttp
     {

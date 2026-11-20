@@ -84,6 +84,7 @@ public static partial class NovelTests
         yield return new("novel cleanup RPC: per-rule budget whole-batch failure and runtime recovery", Budget);
         yield return new("novel rules RPC: whole request snapshot remote errors cancellation drain and shared ownership", RuleConsumer);
         yield return new("novel reset: pending rule and accepted native writes drain before a fresh owner replaces navigation", () => Sta(ResetOwners));
+        yield return new("novel reset: image release failure preserves data until the old owner really releases", () => Sta(ResetImageReleaseFailure));
         yield return new("novel source images: full-size trusted HTTP data and caller cancellation use the unbounded API", SourceImages);
         yield return new("novel reader images: viewport cancellation drains binary image leases", () => Sta(ImageLifecycle));
         yield return new("novel cover viewport: first visibility admits once and lifecycle retirement isolates late pixels", () => Sta(CoverViewport));
@@ -351,6 +352,7 @@ public static partial class NovelTests
             await NovelTestUi.Preview(module.View, "novel-categories-empty", 1000, 700);
             runtime.Records = [Source()]; await sources.RefreshAsync(); await module.LoadDiscoveryAsync(null, null, true);
             await module.NavigateAsync(NovelCapability.HomeRoute, default);
+            module.View.UpdateLayout(); await DesktopTestUi.DrainAsync();
             await NovelTestUi.Preview(module.View, "novel-home-books", 1000, 700);
             Check(Find<TextBlock>(module.View).Any(b => b.Text == "合成小说"));
             await module.NavigateAsync(NovelCapability.CategoriesRoute, default); await NovelTestUi.Preview(module.View, "novel-categories-books", 1000, 700);
@@ -370,7 +372,7 @@ public static partial class NovelTests
             var labels = Find<RadioButton>(module.SettingsView).Select(b => b.Content as string).ToArray(); Check(labels.Contains("书源管理") && labels.Contains("替换净化"));
             Find<RadioButton>(module.SettingsView).Single(b => b.Content as string == "替换净化").IsChecked = true;
             await NovelTestUi.Preview(module.SettingsView, "novel-settings-rules", 1000, 700);
-            await module.PrepareShutdownAsync(); await module.CancelShutdownPreparationAsync();
+            await module.PrepareShutdownAsync();
         }
         finally { host.Close(); }
     }
@@ -431,6 +433,7 @@ public static partial class NovelTests
         internal readonly HashSet<string> ImageReferences = [];
         internal TaskCompletionSource? ImageReadStarted, ImageReadHold;
         internal Func<string, CancellationToken, Task<byte[]>>? ReadImage;
+        internal Func<string, Task>? ReleasingImage;
         internal string Text = "正文段落\n下一段落";
         public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken token = default)
         {
@@ -456,7 +459,10 @@ public static partial class NovelTests
                 case "library.update": Records = [Records[0] with { Enabled = false, Revision = Records[0].Revision + 1 }]; PendingWeb = []; result = Json(new { source = Records[0] }); break;
                 case "library.image":
                     string reference = "/v1/source/images/" + Guid.NewGuid().ToString("N"); ImageReferences.Add(reference); result = Json(new { reference }); break;
-                case "library.releaseImage": Released++; ImageReferences.Remove(payload.GetProperty("reference").GetString()!); result = Json(new { released = true }); break;
+                case "library.releaseImage":
+                    string releasing = payload.GetProperty("reference").GetString()!;
+                    if (ReleasingImage is not null) await ReleasingImage(releasing);
+                    Released++; ImageReferences.Remove(releasing); result = Json(new { released = true }); break;
                 case "library.invoke":
                     var source = Records.Single(s => s.InstallationId == payload.GetProperty("installationId").GetString());
                     string action = payload.GetProperty("action").GetString()!; var input = payload.GetProperty("payload");

@@ -27,8 +27,7 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         guard starting == nil, !closed else { return }
         starting = Task {
             let value = try await connect()
-            // Retain the borrowed connection even if the handshake fails: only
-            // the module's close receipt can confirm its cleanup afterwards.
+            // Retain the borrowed connection; its executor belongs to RuntimeSession.
             connection = value
             try Task.checkCancellation()
             let description = try await value.describe()
@@ -44,24 +43,17 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         }
     }
 
-    /// Stops admission, drains local HTTP work, then asks
-    /// the module for its terminal receipt. The App alone closes the session.
+    /// Retires this borrower and drains its local work. RuntimeSession owns
+    /// module shutdown and confirms the executor's actual exit.
     public func close() async throws {
         if let closing { return try await closing.value }
         closed = true
         starting?.cancel()
         let work = Array(pending.values)
         for item in work { item.cancel() }
-        let task = Task {
+        let task = Task<Void, Error> {
             _ = await starting?.result
             for item in work { await item.drain() }
-            guard let connection else { return }
-            do {
-                let result = try await MusicScriptTransport(connection: connection).call("close")
-                guard result.scriptField("closed") == .bool(true), result.scriptField("cleanupComplete") == .bool(true) else {
-                    throw MusicServiceError.scriptCleanupFailed
-                }
-            } catch { throw MusicServiceError.scriptCleanupFailed }
         }
         closing = task
         // Waiting caller cancellation must not cancel this shared terminal task.

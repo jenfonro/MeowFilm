@@ -203,7 +203,7 @@ test('WY FM actions publish the same five canonical modes from carousel and reco
   assert.equal(f.requests.length, 1); await f.close();
 });
 
-test('WY explicit summaries use 100-ID batches and member recipes do not hydrate embedded display omissions', async t => {
+test('WY explicit summaries use 100-ID batches and selected member locators consume song details', async t => {
   fixedEntropy(t);
   const batches = [];
   const f = fixture(request => {
@@ -215,18 +215,60 @@ test('WY explicit summaries use 100-ID batches and member recipes do not hydrate
     if (path.endsWith('/playlist/detail')) return response({ code: 200, playlist: { id: '1',
       trackIds: [{ id: '11' }, { id: '12' }], tracks: [{ id: '11' }, { name: 'Display only' }] } });
     assert.ok(path.endsWith('/v3/song/detail'));
-    assert.equal(weapi(request).c, '[{"id":12}]');
-    return response({ code: 200, songs: [{ name: 'Partial detail' }] });
+    assert.equal(weapi(request).c, '[{"id":11},{"id":12}]');
+    return response({ code: 200, songs: [wySong('11'), { name: 'Partial detail' }] });
   });
   const ids = Array.from({ length: 201 }, (_, index) => String(index + 1));
   assert.deepEqual((await f.request('wy', 'playlists', { ids })).items.map(row => row.id), ids);
   assert.deepEqual(batches, [100, 100, 1]);
   const list = await f.request('wy', 'playlist.complete', { id: '1' });
-  assert.equal(idOf(list.items[0]), '11'); assert.equal(list.items[0].title, '');
+  assert.equal(idOf(list.items[0]), '11'); assert.equal(list.items[0].title, 'Synthetic (Live)');
+  assert.equal(list.items[0].artist, 'A / B'); assert.equal(list.items[0].duration, 240);
+  assert.equal(list.items[0].cover_url, 'https://images.invalid/song.jpg?size=480');
   assert.deepEqual(list.items.slice(1).map(row => row.title), ['Display only', 'Partial detail']);
   assert.ok(list.items.slice(1).every(row => row.sources.length === 0));
   assert.deepEqual(list.sourcePositions, [0, null, null]);
   assert.equal(f.requests.length, 5); await f.close();
+});
+
+test('WY selected locator details preserve pages and duplicate members without hydrating sparse song records', async t => {
+  fixedEntropy(t);
+  const batches = [], ids = ['11', '12', '11', '13', '14'];
+  const f = fixture(request => {
+    if (new URL(request.url).pathname.endsWith('/playlist/detail')) return response({ code: 200, playlist: {
+      id: '1', trackIds: ids.map(id => ({ id })), tracks: [{ id: '11', v: 1 }, { songData: { id: '12' } },
+        { id: '13', name: '' }, { id: '14', name: 'Sparse song' }] } });
+    const batch = JSON.parse(weapi(request).c).map(row => String(row.id)); batches.push(batch);
+    return response({ code: 200, songs: [...new Set(batch)].reverse().map(id => wySong(id)) });
+  });
+  t.after(() => f.close());
+  const first = await f.request('wy', 'playlist', { id: '1', limit: 2 });
+  assert.deepEqual(first.items.map(idOf), ids.slice(0, 2)); assert.deepEqual(first.sourcePositions, [0, 1]);
+  const second = await f.request('wy', 'playlist', { id: '1', page: 2, limit: 2 });
+  assert.deepEqual(second.items.map(idOf), ids.slice(2, 4)); assert.deepEqual(second.sourcePositions, [2, 3]);
+  assert.equal(second.items[1].title, ''); assert.equal(second.items[1].artist, '');
+  const complete = await f.request('wy', 'playlist.complete', { id: '1' });
+  assert.deepEqual(complete.items.map(idOf), ids); assert.deepEqual(complete.sourcePositions, [0, 1, 2, 3, 4]);
+  assert.equal(complete.items[4].title, 'Sparse song'); assert.equal(complete.items[4].cover_url, '');
+  assert.deepEqual(batches, [['11', '12'], ['11'], ['11', '12', '11']]);
+});
+
+test('WY locator detail omissions and aliases never fabricate a member song', async t => {
+  fixedEntropy(t);
+  for (const songs of [[], [wySong('99')]]) await t.test(songs.length ? 'alias' : 'missing', async t => {
+    const f = fixture(request => {
+      if (new URL(request.url).pathname.endsWith('/playlist/detail')) return response({ code: 200, playlist: {
+        id: '1', trackIds: [{ id: '11' }], tracks: [{ id: '11' }] } });
+      assert.equal(weapi(request).c, '[{"id":11}]');
+      return response({ code: 200, songs });
+    });
+    t.after(() => f.close());
+    const value = await f.request('wy', 'playlist.complete', { id: '1' });
+    assert.deepEqual(value.items.map(idOf), songs.length ? ['99'] : []);
+    assert.deepEqual(value.sourcePositions, songs.length ? [null] : []);
+    assert.deepEqual(value.memberIds, ['11']); assert.equal(value.consumed, 1);
+    assert.equal(f.requests.length, 2);
+  });
 });
 
 test('WY artist activity retains album and song display materials without executable IDs or a next timestamp', async () => {

@@ -22,6 +22,8 @@ internal sealed class MusicLyricOutline
     private CancellationTokenSource? rendering;
     private IDisposable? visibility;
     private RasterKey? key;
+    private (Windows.UI.Color Color, double Opacity)? paintedColor;
+    private Rect? layoutBounds;
     private byte[]? coverage;
     private int width, height;
     private double scaleX, scaleY;
@@ -29,6 +31,7 @@ internal sealed class MusicLyricOutline
         string Language, FlowDirection Direction, double Width, double Height,
         double ScaleX, double ScaleY, double PhaseX, double PhaseY, double Thickness);
     internal Task RenderWork { get; private set; } = Task.CompletedTask;
+    internal event EventHandler? InkChanged;
     internal bool IsCurrent => CurrentKey() is not { } current || !queued && key == current;
     internal Task EnsureCurrentAsync()
     {
@@ -53,6 +56,13 @@ internal sealed class MusicLyricOutline
 
     internal void Update(TextBlock text, FrameworkElement surface, Brush? brush, double strokeThickness)
     {
+        stroke = brush as SolidColorBrush; thickness = strokeThickness;
+        if (stroke is null || thickness <= 0 || string.IsNullOrWhiteSpace(text.Text))
+        {
+            if (source is not null) { source.SizeChanged -= SizeChanged; source.LayoutUpdated -= LayoutChanged; }
+            source = null; captureSurface = null; layoutBounds = null;
+            Clear(); return;
+        }
         if (!ReferenceEquals(source, text))
         {
             if (source is not null) { source.SizeChanged -= SizeChanged; source.LayoutUpdated -= LayoutChanged; }
@@ -60,8 +70,6 @@ internal sealed class MusicLyricOutline
             key = null;
         }
         captureSurface = surface;
-        stroke = brush as SolidColorBrush; thickness = strokeThickness;
-        if (stroke is null || thickness <= 0 || string.IsNullOrWhiteSpace(text.Text)) { Clear(); return; }
         if (key == CurrentKey()) Paint();
         else Queue();
     }
@@ -70,6 +78,12 @@ internal sealed class MusicLyricOutline
     private void LayoutChanged(object? sender, object args)
     {
         if (key != CurrentKey()) Queue();
+        if (InkChanged is null) return;
+        Rect? bounds = captureSurface is { IsLoaded: true } surface
+            ? surface.TransformToVisual(null).TransformBounds(new Rect(0, 0, surface.ActualWidth, surface.ActualHeight)) : null;
+        if (layoutBounds == bounds) return;
+        layoutBounds = bounds;
+        InkChanged?.Invoke(this, EventArgs.Empty);
     }
     private RasterKey? CurrentKey()
     {
@@ -147,11 +161,13 @@ internal sealed class MusicLyricOutline
             inputInk[index] = (byte)(alpha[index] + (coverage[index] * (255 - alpha[index]) + 127) / 255);
         image.Width = width / scaleX; image.Height = height / scaleY;
         Canvas.SetLeft(image, -padX / scaleX); Canvas.SetTop(image, -padY / scaleY);
-        key = next; Paint();
+        key = next; paintedColor = null; Paint();
+        InkChanged?.Invoke(this, EventArgs.Empty);
     }
     private void Paint()
     {
         if (coverage is null || stroke is null || thickness <= 0) return;
+        if (paintedColor == (stroke.Color, stroke.Opacity)) return;
         var color = stroke.Color; var pixels = new byte[coverage.Length * 4];
         for (int i = 0; i < coverage.Length; i++)
         {
@@ -164,6 +180,7 @@ internal sealed class MusicLyricOutline
         var bitmap = new WriteableBitmap(width, height);
         using (var stream = bitmap.PixelBuffer.AsStream()) stream.Write(pixels);
         bitmap.Invalidate(); image.Source = bitmap;
+        paintedColor = (stroke.Color, stroke.Opacity);
     }
     private static byte[] Expand(byte[] alpha, int width, int height, double rx, double ry)
     {
@@ -193,6 +210,9 @@ internal sealed class MusicLyricOutline
     }
     internal void Clear()
     {
-        rendering?.Cancel(); key = null; coverage = inputInk = null; image.Source = null;
+        rendering?.Cancel();
+        bool changed = key is not null || inputInk is not null;
+        key = null; paintedColor = null; coverage = inputInk = null; image.Source = null;
+        if (changed) InkChanged?.Invoke(this, EventArgs.Empty);
     }
 }

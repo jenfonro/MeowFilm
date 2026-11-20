@@ -18,7 +18,6 @@ namespace MeowFilm.Desktop;
 public sealed partial class ShellWindow : DesktopWindow
 {
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);
     private const int HistoryLimit = 64;
 
     private readonly ShellState _state = new();
@@ -29,7 +28,7 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly List<(IDesktopNavigationSource Source, EventHandler<DesktopNavigationRequestEventArgs> Handler)> _navigationSubscriptions = [];
     private readonly List<(IDesktopSidebarSource Source, EventHandler Handler)> _sidebarSubscriptions = [];
     private readonly object _moduleChangesGate = new();
-    private readonly Dictionary<IDesktopModule, (bool Navigation, bool Views)> _moduleChanges = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<IDesktopModule, (bool Navigation, bool Presentation, bool Player)> _moduleChanges = new(ReferenceEqualityComparer.Instance);
     private bool _moduleChangesQueued;
     private TaskCompletionSource _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private ModuleSession? _current, _playerSession;
@@ -44,7 +43,6 @@ public sealed partial class ShellWindow : DesktopWindow
     private bool _isClosing;
     private bool _allowClose;
     private bool _isClosed;
-    private bool _shutdownWaitInProgress;
     private bool _closeQueued;
     private Task? _shutdownTask;
     private int _shutdownStarted;
@@ -62,17 +60,17 @@ public sealed partial class ShellWindow : DesktopWindow
     // Deterministic code tests can advance the existing production deadlines without sleeping.
     // No public timeout override or App configuration is introduced.
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, Func<Task> shutdown, TimeProvider timeProvider)
-        : this(modules, [], shutdown, null, null, timeProvider) { }
+        : this(modules, [], shutdown, timeProvider) { }
 
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
-        Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null,
+        Func<Task> shutdown,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
         IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
-        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance,
+        : this(modules, pages, shutdown, TimeProvider.System, appearance,
             closePreferences, mediaControls: mediaControls, resetUserData: resetUserData) { }
 
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
-        Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
+        Func<Task> shutdown, TimeProvider timeProvider,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
         Func<DesktopWindow, Action, Action, Action, IDesktopTrayIcon>? trayIconFactory = null,
         IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
@@ -94,8 +92,6 @@ public sealed partial class ShellWindow : DesktopWindow
         if (pages.Any(page => page is null || string.IsNullOrWhiteSpace(page.Id) || !ids.Add(page.Id)))
             throw new ArgumentException("Pages must have distinct, non-empty identities.", nameof(pages));
         _pages = pages.Select(page => new PageSession(page)).ToArray();
-        _forceShutdown = forceShutdown;
-        _cancelShutdown = cancelShutdown;
         _shutdown = shutdown;
         _resetUserData = resetUserData;
         MediaControls = mediaControls;
@@ -112,7 +108,7 @@ public sealed partial class ShellWindow : DesktopWindow
         Root.GotFocus += OnGotKeyboardFocus;
         PlayerSurfaceInput.AddDismissRequestedHandler(Root, OnQueueDismissClick);
         ShellWindowStartupSize.ApplyToPrimaryScreen(this, Handle);
-        _nativeCaption = new(this, CaptionDragRegion, PageHeaderHost, CaptionBar, PlayerDetailSurface,
+        _nativeCaption = new(this, CaptionDragRegion, HeaderChrome, BackButton, ForwardButton, SearchInput, PageHeaderHost, CaptionBar, PlayerDetailSurface,
             ChannelDialogHost, CloseDialog, ResetDialog, NotificationOverlay);
         InitializeTrayIcon();
         ChannelDialogHost.Attach(this);
@@ -163,14 +159,11 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly AccessibilitySettings _accessibility = new();
     private readonly UISettings _uiSettings = new();
 
-    /// <summary>
-    /// Completes after the initial shutdown wait succeeds, fails, or reaches five seconds.
-    /// Completion is not permission to exit: on failure/timeout the shell requires an explicit decision.
-    /// </summary>
+    /// <summary>The owner's actual shutdown result; window closure never waits for it.</summary>
     public Task ShutdownCompletion => _shutdownCompletion.Task;
     public IDesktopMediaControlSettings? MediaControls { get; }
 
-    /// <summary>True only after an active wait observes actual successful cleanup, never merely a timeout or forced exit.</summary>
+    /// <summary>Window closure does not imply that owner release succeeded.</summary>
     public bool ShutdownSucceeded { get; private set; }
     public bool CleanupCompleted { get; private set; }
 
@@ -222,11 +215,7 @@ public sealed partial class ShellWindow : DesktopWindow
         // Hide the previous capability before attaching the first-visited surface.
         // Visited surfaces retain their visual tree and owner-managed state.
         ApplyPresentation();
-        _suppressSelection = true;
-        try { NavigationList.SelectedItem = null; }
-        finally { _suppressSelection = false; }
         Mount(session);
-        BindNavigation(session);
         ApplyPresentation();
     }
 
@@ -270,13 +259,11 @@ public sealed partial class ShellWindow : DesktopWindow
     private void BindNavigation(ModuleSession session)
     {
         var navigation = session.Module.Navigation ?? throw new InvalidOperationException();
-        if (!ReferenceEquals(session.Navigation, navigation))
-        {
-            if (session.Navigation is not null) session.Navigation.CollectionChanged -= OnNavigationChanged;
-            session.Navigation = navigation;
-            navigation.CollectionChanged += OnNavigationChanged;
-        }
-        RebuildSidebar();
+        if (ReferenceEquals(session.Navigation, navigation)) return;
+        if (session.Navigation is not null) session.Navigation.CollectionChanged -= OnNavigationChanged;
+        session.Navigation = navigation;
+        navigation.CollectionChanged += OnNavigationChanged;
+        SynchronizeNavigation(session);
     }
 
     private void ApplyPresentation()
@@ -311,7 +298,6 @@ public sealed partial class ShellWindow : DesktopWindow
         SidebarBackground.Visibility = Brand.Visibility = SidebarScroll.Visibility =
             immersive ? Visibility.Collapsed : Visibility.Visible;
         SidebarEdge.Visibility = immersive || _accessibility.HighContrast ? Visibility.Collapsed : Visibility.Visible;
-        if (immersive) PlayerFrame.Visibility = Visibility.Collapsed;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
             current.IsSettingsOpen || _history.Count > 1;
         _state.CanGoForward = !_queueOpen && !_playerDetailOpen &&
@@ -379,7 +365,8 @@ public sealed partial class ShellWindow : DesktopWindow
         else if (PlayerHost.Content is not null)
             PlayerHost.Content = null;
 
-        PlayerFrame.Visibility = !current.IsSettingsOpen && PlayerHost.Content is not null
+        PlayerFrame.Visibility = !current.IsSettingsOpen && PlayerHost.Content is not null &&
+            !(_currentPage is null && current.Module is IDesktopImmersiveSource { IsImmersive: true })
             ? Visibility.Visible
             : Visibility.Collapsed;
     }
@@ -500,7 +487,8 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void OnNavigationChanged(object? sender, NotifyCollectionChangedEventArgs e) => QueueUi(() =>
     {
-        RebuildSidebar();
+        foreach (var session in _sessions.Where(session => ReferenceEquals(session.Navigation, sender)))
+            SynchronizeNavigation(session);
     });
 
     private void OnModulePropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -508,12 +496,19 @@ public sealed partial class ShellWindow : DesktopWindow
         if (sender is not IDesktopModule module || _isClosing ||
             Dispatcher.IsClosing) return;
         var all = string.IsNullOrEmpty(e.PropertyName);
+        bool navigation = all || e.PropertyName == nameof(IDesktopModule.Navigation);
+        bool player = all || e.PropertyName == nameof(IDesktopModule.PlayerView);
+        bool presentation = all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView) or nameof(IDesktopModule.Title) ||
+            module is IDesktopSidebarSource && e.PropertyName == nameof(IDesktopSidebarSource.SidebarView) ||
+            module is IDesktopImmersiveSource && e.PropertyName == nameof(IDesktopImmersiveSource.IsImmersive);
+        if (!navigation && !player && !presentation) return;
         lock (_moduleChangesGate)
         {
             _moduleChanges.TryGetValue(module, out var previous);
             _moduleChanges[module] = (
-                previous.Navigation || all || e.PropertyName == nameof(IDesktopModule.Navigation),
-                previous.Views || all || e.PropertyName is nameof(IDesktopModule.View) or nameof(IDesktopModule.SettingsView));
+                previous.Navigation || navigation,
+                previous.Presentation || presentation,
+                previous.Player || player);
             if (_moduleChangesQueued) return;
             _moduleChangesQueued = true;
         }
@@ -530,26 +525,28 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void ApplyModuleChanges()
     {
-        KeyValuePair<IDesktopModule, (bool Navigation, bool Views)>[] changes;
+        KeyValuePair<IDesktopModule, (bool Navigation, bool Presentation, bool Player)>[] changes;
         lock (_moduleChangesGate)
         {
             changes = _moduleChanges.ToArray();
             _moduleChanges.Clear();
             _moduleChangesQueued = false;
         }
-        // A skipped presentation must still release its batch admission so a cancelled close can resume updates.
+        // Retire queued notifications even when closing suppresses presentation.
         if (_isClosing) return;
         var refreshPresentation = false;
+        var refreshPlayer = false;
         foreach (var change in changes)
         {
             var session = _sessions.FirstOrDefault(item => ReferenceEquals(item.Module, change.Key));
             if (session is null) continue;
             if (change.Value.Navigation) BindNavigation(session);
-            if (change.Value.Views && session.Mounted && ReferenceEquals(session, _current) && _currentPage is null)
-                RefreshSuppliedViews(session);
-            refreshPresentation |= ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession);
+            refreshPresentation |= ReferenceEquals(session, _current) && change.Value.Presentation;
+            refreshPlayer |= change.Value.Player && (ReferenceEquals(session, _current) || ReferenceEquals(session, _playerSession));
         }
         if (refreshPresentation) ApplyPresentation();
+        else if (refreshPlayer && _current is { } current)
+        { ApplyPlayerPresentation(current); ApplyGlobalSurfacePresentation(current); }
     }
 
     private void OnSettingsClick(object sender, RoutedEventArgs e) => RunUiAction(async () =>
@@ -830,7 +827,6 @@ public sealed partial class ShellWindow : DesktopWindow
                 }
             }
             RefreshSuppliedViews(plan.Session);
-            BindNavigation(plan.Session);
             SetStatus();
         }
         catch (OperationCanceledException)
@@ -1025,7 +1021,7 @@ public sealed partial class ShellWindow : DesktopWindow
     private void UpdateCaption() => AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
     private void UpdateStatusPresentation()
     {
-        StatusPanel.Visibility = (_state.HasStatus && !_state.IsBusy) || _state.IsShutdownConfirmationOpen
+        StatusPanel.Visibility = _state.HasStatus && !_state.IsBusy
             ? Visibility.Visible : Visibility.Collapsed;
         StatusPanel.Background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
             _state.IsError ? "MeowFilm.Brush.ErrorSurface" : "MeowFilm.Brush.Surface");
@@ -1059,18 +1055,17 @@ public sealed partial class ShellWindow : DesktopWindow
         _state.IsInteractive = false;
         _retryPlan = null;
         RetireHeaderPresentation();
-        SetStatus("正在关闭…");
         CancelActive();
         CancelPageActivation();
         foreach (var request in _requests.ToArray()) request.Cancel();
         _ = EnsureShutdownAsync();
+        _ = RequestFinalCloseAsync();
     }
 
     private async Task RequestFinalCloseAsync()
     {
         if (_closeQueued || _isClosed || Dispatcher.IsClosing) return;
         _closeQueued = true;
-        _state.SetShutdownConfirmation(_state.IsShutdownConfirmationOpen);
         try
         {
             // Even a synchronously completed callback must not re-enter Close from inside OnClosing.
@@ -1082,7 +1077,6 @@ public sealed partial class ShellWindow : DesktopWindow
             {
                 // A caller can still veto the final Closing event; never restart disposal.
                 _allowClose = false;
-                _state.SetShutdownConfirmation(true, canWait: true, canForce: _forceShutdown is not null);
             }
         }
         catch (OperationCanceledException) { /* Dispatcher teardown can cancel the deferred close. */ }
@@ -1100,79 +1094,35 @@ public sealed partial class ShellWindow : DesktopWindow
                 // no in-process deadline can safely preempt synchronous dispatcher blocking.
                 _shutdownTask = _shutdown() ?? Task.FromException(new InvalidOperationException());
             }
-            catch (Exception) { _shutdownTask = Task.FromException(new InvalidOperationException()); }
+            catch (Exception error) { _shutdownTask = Task.FromException(error); }
             _ = ShellRequest.ObserveAsync(_shutdownTask);
-            _ = CompleteShutdownAsync(initialAttempt: true);
+            _ = CompleteShutdownAsync();
         }
         return _shutdownCompletion.Task;
     }
 
-    private async Task CompleteShutdownAsync(bool initialAttempt)
+    private async Task CompleteShutdownAsync()
     {
-        if (_shutdownWaitInProgress || _shutdownTask is null) return;
-        _shutdownWaitInProgress = true;
-        var succeeded = false;
-        var timedOut = false;
         try
         {
-            // Keep the bounded completion signal independent of dispatcher teardown on forced Closed.
-            await _shutdownTask.WaitAsync(ShutdownTimeout, _timeProvider).ConfigureAwait(false);
-            succeeded = true;
+            await _shutdownTask!;
+            ShutdownSucceeded = CleanupCompleted = true;
         }
-        catch (TimeoutException)
-        {
-            // Distinguish the wait deadline from a callback that itself throws TimeoutException.
-            // A successful completion racing the deadline still requires an explicit new wait.
-            timedOut = !_shutdownTask.IsFaulted && !_shutdownTask.IsCanceled;
-        }
-        catch (Exception) { /* A fault/cancellation is not proof of saved data or released resources. */ }
-        finally
-        {
-            if (initialAttempt) _shutdownCompletion.TrySetResult();
-        }
-        if (Dispatcher.IsClosing) return;
-        try
-        {
-            if (Dispatcher.HasThreadAccess) ApplyShutdownOutcome(succeeded, timedOut);
-            else await Dispatcher.EnqueueAsync(() => ApplyShutdownOutcome(succeeded, timedOut),
-                DispatcherQueuePriority.Normal).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) { /* Dispatcher teardown can reject the UI-only result. */ }
-        catch (InvalidOperationException) { /* An externally forced shutdown already owns exit. */ }
+        catch { /* The App owns shutdown diagnostics; a closed window is not a release receipt. */ }
+        finally { _shutdownCompletion.TrySetResult(); }
     }
 
-    private void ApplyShutdownOutcome(bool succeeded, bool timedOut)
+    /// <summary>Replacement closes the old shell only after its App generation is released.</summary>
+    public async Task CloseAfterReleaseAsync()
     {
-        _shutdownWaitInProgress = false;
-        // Forced exit fences every late result, including a successful callback after the decision.
-        if (_isClosed || _allowClose || _closeQueued || _forceStarted || _sessionEnding) return;
-        if (succeeded)
-        {
-            ShutdownSucceeded = true;
-            CleanupCompleted = true;
-            _ = RequestFinalCloseAsync();
-            return;
-        }
-        SetStatus(timedOut ? "关闭超时" : "关闭失败", error: true);
-        _state.SetShutdownConfirmation(true, canWait: timedOut, canForce: _forceShutdown is not null,
-            canCancel: !timedOut && _cancelShutdown is not null && !_forceStarted);
-        if (timedOut) WaitForShutdownButton.Focus(FocusState.Programmatic);
-        else ShutdownFocusTarget.Focus(FocusState.Programmatic); // Enter must never implicitly choose destructive exit.
-    }
-
-    private void OnWaitForShutdownClick(object sender, RoutedEventArgs e)
-    {
-        if (!_isClosing || _isClosed || _closeQueued || !_state.CanWaitForShutdown || _shutdownWaitInProgress) return;
-        _state.SetShutdownConfirmation(true, canForce: _forceShutdown is not null);
-        SetStatus("正在等待关闭…", busy: true);
-        // A new bounded wait on the same task, not a second shutdown callback. No automatic retries.
-        _ = CompleteShutdownAsync(initialAttempt: false);
-    }
-
-    private void OnForceExitClick(object sender, RoutedEventArgs e)
-    {
-        if (!_isClosing || _isClosed || _closeQueued || !_state.CanForceExit || _forceShutdown is null) return;
-        _ = ForceShutdownAsync();
+        DismissCloseChoice(restoreFocus: false);
+        _isClosing = true;
+        _state.IsInteractive = false;
+        RetireHeaderPresentation();
+        CancelActive(); CancelPageActivation();
+        await EnsureShutdownAsync();
+        await _shutdownTask!;
+        await RequestFinalCloseAsync();
     }
 
     protected override void OnClosed(EventArgs e)

@@ -23,7 +23,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         try await scriptAssertCatAvailable(shared)
         let after = await runtime.metrics()
         XCTAssertEqual(after.connects, 1)
-        XCTAssertEqual(after.calls.filter { $0 == "close" }.count, 1)
+        XCTAssertFalse(after.calls.contains("close"))
         await session.close(); await runtime.close()
     }
     func testImportPutsOneCompleteSourceThenSelectsItsRevisionWithoutNativeStorage() async throws {
@@ -111,7 +111,7 @@ final class NativeMusicScriptServiceTests: XCTestCase {
         await scriptExpectFailure(.scriptRuntimeUnavailable) { try await service.sources() }
         await service.start()
         let connects = await runtime.metrics().connects; XCTAssertEqual(connects, 1)
-        await scriptExpectFailure(.scriptCleanupFailed) { try await service.close() }
+        try await service.close()
     }
     func testDirectoryReadsKeepIdleStartingAndFailedWithoutRunningOrRetryingScripts() async throws {
         for state in [MusicScriptSourceItem.State.idle, .starting, .failed] {

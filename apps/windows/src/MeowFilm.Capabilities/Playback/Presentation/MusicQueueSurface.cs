@@ -78,7 +78,7 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
         {
             case DesktopGlobalSurface.PlayerDetail:
                 Presentation.DeactivatePlayer();
-                playerDetailOpen = true;
+                if (!playerDetailOpen) { playerDetailOpen = true; Changed(nameof(IsLyrics)); }
                 await Presentation.Detail.ActivateAsync(cancellationToken);
                 break;
             case DesktopGlobalSurface.PlayQueue:
@@ -97,7 +97,7 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
         switch (surface)
         {
             case DesktopGlobalSurface.PlayerDetail:
-                playerDetailOpen = false;
+                if (playerDetailOpen) { playerDetailOpen = false; Changed(nameof(IsLyrics)); }
                 Presentation.DeactivateDetail();
                 if (!NeedsLyrics) CancelLyrics();
                 break;

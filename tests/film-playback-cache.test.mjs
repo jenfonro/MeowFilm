@@ -339,7 +339,7 @@ test('E48: cached provider work preserves actionable closed errors without cachi
   const cache = createPlaybackCache();
   t.after(() => cache.close());
   for (const code of ['WEB_INTERACTION_REQUIRED', 'MEDIA_UNAVAILABLE', 'SOURCE_FAILURE', 'CAT_FAILURE',
-    'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STALE_METADATA']) {
+    'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'PAN_INTERCEPTION_UNSUPPORTED', 'STALE_METADATA']) {
     await assert.rejects(cache.load(code, () => {
       throw Object.assign(new Error('private upstream diagnostic'), { code });
     }, options()), error => error.code === code && error.message === code &&

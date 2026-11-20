@@ -123,10 +123,10 @@ public static class MusicQualityConsumerTests
         Check(f.Module.QualityStatus.Length == 0 && f.Module.PlaybackQualityRequest == before &&
             MusicTestStores.For(f.Fixture.Store).Writes == writes + 1,
             "the admitted save commits while its retired page keeps its prior projection");
-        await f.Module.CancelShutdownPreparationAsync();
-        await f.Module.ActivateQualitySettingsAsync();
-        Check(f.Module.PlaybackQualityRequest == "auto" && MusicTestStores.For(f.Fixture.Store).Writes == writes + 1,
-            "a fresh read adopts the committed policy without replaying the save");
+        await using var reopened = new MusicNativeApplication(f.Fixture.Store, MusicTestStores.For(f.Fixture.Store), f.Fixture.Runtime);
+        var saved = await reopened.ExecuteAsync("music.quality.settings.get");
+        Check(saved.GetProperty("settings").GetProperty("request").GetString() == "auto" &&
+            MusicTestStores.For(f.Fixture.Store).Writes == writes + 1, "a fresh owner reads the committed policy without replay");
     }
     private static async Task RealLx()
     {

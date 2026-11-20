@@ -23,7 +23,7 @@ FM 封面需求使用既有 `operation:"fm", params:{preview:true,...}`：规则
 
 `operation:"lyrics"` 保持 `{text,translation,romanization}`；QQ／咪咕附属轨失败时额外返回 `errors`，以 `translation`／`romanization` 为键、有限错误码为值。失败轨为空字符串，健康主轨及兄弟轨继续返回；没有任何可用轨的解析失败仍抛错。取消、超时、会话失效及资源超限不降级为轨道错误。原生可继续消费原三个字段，不能把 `errors` 中的附属失败解释成主轨失败。
 
-网易 `playlist` 先选择当前成员再消费详情，`memberIds`／`consumed` 保持真实成员顺序和重复 occurrence；`sourcePositions` 只对已关联成员给出位置，canonical 别名返回的未知关联仍为 null。`playlist.complete` 消费全集，不借分页清理省略完整成员。
+网易 `playlist` 先选择当前成员再消费详情；`tracks` 中只有定位字段、没有歌曲字段的成员引用不作为已取得的歌曲记录，仍按选中成员执行既有每批 100 个 ID 的详情读取。已包含歌曲字段的稀疏记录保持上游实际值，不因歌手、专辑、封面或时长等可选字段为空补读；详情未返回的成员不伪造为空歌曲。`memberIds`／`consumed` 保持真实成员顺序和重复 occurrence；`sourcePositions` 只对已关联成员给出位置，canonical 别名返回的未知关联仍为 null。`playlist.complete` 消费全集，不借分页清理省略完整成员。
 
 两端 aggregate 按 `music, cat, source, pan, tmdb, douban, film, netease, music-platform` 顺序装配九模块。`connectMusicPlatform` 从已装配 netease 的真实 `netease.token.get` 能力借用 token；不创建第二个 SDK owner。通用 `createRuntime` 默认仍三模块，仅显式 `musicPlatform` 选项连接此模块。
 
@@ -37,7 +37,7 @@ QQ 匿名 prepare 只保存实际请求使用的 q36 与保存时间，不要求
 
 API 缓存复制使用公共 `@meowfilm/runtime-bridge/json`；HTTP 请求中的精确数字定位在音乐实际参数消费处转为字符串或协议整数，不对 rawJSON 使用 `structuredClone`。网易根业务状态仍要求数字整数；配方显式消费 `data` 状态层时检查该层，搜索等读取 `result` 的配方不检查未消费兄弟 `data.code`。已有根／嵌套字段选择的配方跟随实际使用层：仅使用根结果时忽略兄弟状态，使用嵌套字段或没有根结果时保留嵌套失败。真实认证、限流、业务拒绝及写入子回执继续按原错误分类返回，不能用空内容代替失败。
 
-request 将 HTTP `context.signal` 交给 owner。普通目录读取退订与物理工作分别跟踪；媒体／认证等实际取消、session 失效、已派发写回执和 close 由共同 owner 管理。session 更新等待应退休工作物理结算；close 停止新准入、取消未提交工作并等待真实结束，运行器不把 owner 关闭失败伪报成功。原生设置未知提示见[设置回执](../common/music/settings-receipts.md)。
+request 将 HTTP `context.signal` 交给 owner。普通目录读取退订与物理工作分别跟踪；媒体／认证等实际取消、session 失效、已派发写回执和 close 由共同 owner 管理。session 更新等待应退休工作物理结算；整个 owner 的 close 停止新准入并取消所有实际 transport，包括已向上游派发的写请求。派发不等于确认成功，这类中断保留 `unknown` 结果，不谎报回滚；close 等待实际 I/O 结束，不等待远端 ACK 或普通请求超时。原生设置未知提示见[设置回执](../common/music/settings-receipts.md)。
 
 ## 打包与许可
 

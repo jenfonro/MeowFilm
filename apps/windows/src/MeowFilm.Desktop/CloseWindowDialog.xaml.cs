@@ -20,6 +20,7 @@ public partial class CloseWindowDialog : UserControl
         RememberChoice.IsChecked = false;
         SetPending(false);
         Visibility = Visibility.Visible;
+        UpdateLayout();
         CancelChoice.Focus(FocusState.Programmatic);
     }
 

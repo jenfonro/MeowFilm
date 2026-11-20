@@ -37,7 +37,6 @@ public sealed partial class ShellWindow
         _resetFocus = null;
         _isClosing = true;
         _state.IsInteractive = false;
-        _state.SetShutdownConfirmation(false);
         _retryPlan = null;
         Interlocked.Increment(ref _presentationGeneration);
         RetireHeaderPresentation();
@@ -57,25 +56,20 @@ public sealed partial class ShellWindow
         finally { _userDataResetBusy = false; }
     }
 
-    private async void OnUserDataResetExit()
+    private void OnUserDataResetExit()
     {
         if (!_userDataResetStarted || _userDataResetBusy || _isClosed || _sessionEnding || !ResetDialog.IsOpen) return;
-        _userDataResetBusy = true;
-        ResetDialog.SetBusy("正在退出…");
-        try
-        {
-            await AbortAsync();
-            ShowUserDataResetFailure("退出尚未完成，请重试");
-        }
-        catch { ShowUserDataResetFailure("退出未完成，请重试"); }
-        finally { _userDataResetBusy = false; }
+        // The durable reset marker is completed by the next launch. Exit must not
+        // retry a failed in-process reset or require its release result.
+        _userDataResetStarted = false;
+        _ = EnsureShutdownAsync();
+        _ = RequestFinalCloseAsync();
     }
 
     private void ShowUserDataResetFailure(string message)
     {
         if (_isClosed || _sessionEnding) return;
         RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = false;
-        _state.SetShutdownConfirmation(false);
         ResetDialog.ShowFailure(message);
     }
 }

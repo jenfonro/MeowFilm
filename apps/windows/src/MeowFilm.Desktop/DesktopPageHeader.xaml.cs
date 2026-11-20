@@ -77,6 +77,15 @@ public partial class DesktopPageHeader : UserControl
     public event EventHandler? ContributionChanged;
     public event EventHandler? ActionCancelled;
     public event EventHandler? OperationFailed;
+    internal IEnumerable<FrameworkElement> CaptionInteractiveRegions
+    {
+        get
+        {
+            if (LeadingSlot.Content is FrameworkElement leading) yield return leading;
+            if (TrailingSlot.Content is FrameworkElement trailing) yield return trailing;
+            if (actions.Count > 0) yield return HeaderActions;
+        }
+    }
 
     /// <summary>
     /// A heading fallback opts into the leading title layout. Existing slots follow that title;

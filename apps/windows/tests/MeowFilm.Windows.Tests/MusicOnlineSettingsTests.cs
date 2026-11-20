@@ -24,7 +24,7 @@ public static partial class MusicNativeLibraryTests
     }
 
     private static JsonObject CurrentOnlineSettings(bool lyrics = false, long revision = 7) =>
-        O(new { schema = 3, revision, lyrics });
+        O(new { schema = 1, revision, lyrics });
 
     private static async Task<byte[]> OnlineSettingsDocument(JsonObject settings)
     {
@@ -36,7 +36,7 @@ public static partial class MusicNativeLibraryTests
 
     private static void CheckOnlineSettings(JsonElement settings, long revision, bool lyrics)
     {
-        Check(settings.GetProperty("schema").GetDouble() == 3 &&
+        Check(settings.GetProperty("schema").GetDouble() == 1 &&
             settings.GetProperty("revision").GetInt64() == revision &&
             settings.GetProperty("lyrics").GetBoolean() == lyrics);
     }
@@ -117,7 +117,7 @@ public static partial class MusicNativeLibraryTests
         var owner = f.Owner();
         await Error(owner, "music.settings.get", null, code);
         var settings = JsonNode.Parse(bytes)!["areas"]!["online-settings"]!.AsObject();
-        bool replaceable = settings["schema"] is JsonValue schema && schema.ToJsonString() == "3" &&
+        bool replaceable = settings["schema"] is JsonValue schema && schema.ToJsonString() == "1" &&
             settings["revision"] is JsonValue rev && rev.ToJsonString() == "7";
         if (replaceable)
         {
@@ -168,7 +168,7 @@ public static partial class MusicNativeLibraryTests
     {
         foreach (var (field, value) in new (string, JsonNode?)[]
         {
-            ("schema", JsonValue.Create(0)), ("schema", JsonValue.Create(2)), ("schema", JsonValue.Create(4)), ("schema", JsonValue.Create("3")),
+            ("schema", JsonValue.Create(0)), ("schema", JsonValue.Create(2)), ("schema", JsonValue.Create(3)), ("schema", JsonValue.Create("1")),
             ("lyrics", null), ("lyrics", JsonValue.Create("false")),
             ("revision", JsonValue.Create(-1)), ("revision", JsonValue.Create(1.5)), ("revision", JsonValue.Create("7"))
         })
@@ -185,7 +185,7 @@ public static partial class MusicNativeLibraryTests
         }
         await using (var duplicate = new Fixture())
         {
-            duplicate.Store.SetAreaJson("online-settings", "{\"schema\":3,\"revision\":7,\"lyrics\":false,\"lyrics\":false}");
+            duplicate.Store.SetAreaJson("online-settings", "{\"schema\":1,\"revision\":7,\"lyrics\":false,\"lyrics\":false}");
             var owner = duplicate.Owner();
             await Error(owner, "music.settings.get", null, "CORRUPT_STORAGE");
             await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, "CORRUPT_STORAGE");
@@ -193,13 +193,13 @@ public static partial class MusicNativeLibraryTests
             await Error(duplicate.Owner(), "music.settings.get", null, "CORRUPT_STORAGE");
             Check(duplicate.Store.WriteCalls == 0, "ambiguous SQL control JSON must not be rewritten");
         }
-        foreach (string schema in new[] { "3.0", "3e0" })
+        foreach (string schema in new[] { "1.0", "1e0" })
         {
             await using var f = new Fixture();
             var extended = CurrentOnlineSettings(); extended["target"] = null;
             extended["extra"] = new JsonObject { ["nested"] = true };
             f.Store.SetAreaJson("online-settings", extended.ToJsonString()
-                .Replace("\"schema\":3", "\"schema\":" + schema, StringComparison.Ordinal));
+                .Replace("\"schema\":1", "\"schema\":" + schema, StringComparison.Ordinal));
             var owner = f.Owner();
             CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
             Check(f.Store.WriteCalls == 0);
@@ -244,7 +244,7 @@ public static partial class MusicNativeLibraryTests
         await owner.ReconcileAsync();
         await owner.ReconcileAsync();
         Check(f.Store.WriteCalls == 1 && durable.SequenceEqual(f.Store.Bytes!));
-        Check(f.Store.State("online-settings")["schema"]!.GetValue<int>() == 3);
+        Check(f.Store.State("online-settings")["schema"]!.GetValue<long>() == 1);
         Check(f.Store.State("online-settings")["revision"]!.GetValue<long>() == (committed ? 8 : 7));
         Check(f.Store.State("online-settings")["lyrics"]!.GetValue<bool>() == committed);
 

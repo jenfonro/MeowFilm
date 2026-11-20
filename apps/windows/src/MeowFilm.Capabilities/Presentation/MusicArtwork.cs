@@ -52,7 +52,7 @@ public sealed partial class MusicCapability
         bool changedSong = artworkSongId != current?.Id;
         artworkSongId = current?.Id;
         if (changedSong) Changed(nameof(CurrentArtworkIdentity));
-        string next = current?.Cover ?? "";
+        string next = CurrentArtwork;
         if (currentArtwork == next) return;
         currentArtwork = next;
         Changed(nameof(CurrentArtwork));
@@ -98,8 +98,7 @@ public sealed partial class MusicCapability
                     foreach (var row in RecommendationCandidates.Where(row => ids.Contains(row.Song.Id))) row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
                     foreach (var row in DiscoveryCharts.SelectMany(chart => chart.Songs).Where(row => ids.Contains(row.Song.Id)))
                         row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
-                    if (current is not null && ids.Contains(current.Id)) RefreshCurrentArtwork();
-                    RefreshBindings();
+                    Changed(nameof(CollectionArtwork)); Changed(nameof(DetailArtwork));
                 }
                 catch (OperationCanceledException) { }
                 catch (MusicOperationException error) when (stopping && error.Code == "CLOSED") { }

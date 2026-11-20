@@ -118,10 +118,11 @@ public static partial class MusicUiTests
             f.Http.DisposeRelease.TrySetResult(); await Task.WhenAll(read, cancel, close);
             True(!f.Module.CanUseDiscovery, "sealed after full drain");
             int count = f.Http.Requests.Count;
-            await f.Module.CancelShutdownPreparationAsync();
+
             Equal(count, f.Http.Requests.Count); // Unmounted view does not silently issue a new request.
             f.Http.HoldDisposal = false; await f.Open();
-            True(f.Module.CanUseDiscovery, "explicit post-resume navigation works");
+            True(!f.Module.CanUseDiscovery, "navigation cannot reopen a retired owner");
+            Equal(count, f.Http.Requests.Count);
         });
         yield return Case("native discovery invalidation synchronously refuses detached callbacks before UI dispatch", async () =>
         {
@@ -333,7 +334,7 @@ public static partial class MusicUiTests
             Equal(Module.Sources.Single(row => !row.IsBuiltIn).InstallationId, installed.GetProperty("installationId").GetString());
             True(installed.GetProperty("enabled").GetBoolean(), "enabled script participates in discovery playback");
             var saved = (await Call("music.settings.get")).GetProperty("settings");
-            Equal(3, saved.GetProperty("schema").GetInt32());
+            Equal(1, saved.GetProperty("schema").GetInt32());
             Equal(before.GetRawText(), saved.GetRawText());
             True(Module.Status.Length == 0, "script enable accepted");
         }

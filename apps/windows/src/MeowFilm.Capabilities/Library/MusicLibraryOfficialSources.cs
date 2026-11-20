@@ -170,7 +170,7 @@ public sealed partial class MusicLibraryOwner
 
     internal async Task<OfficialSourcesLease> AcquireOfficialSourcesAsync(CancellationToken token)
     {
-        await EnterAsync(token).ConfigureAwait(false);
+        await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             LJ.Require(!closed && !preparing, "CLOSED");

@@ -316,7 +316,7 @@ public sealed partial class MusicCapability
             state.Opening = false;
             state.Opened.TrySetResult();
             if (ReferenceEquals(onlineCancellation, access)) onlineCancellation = null;
-            OnlineBindings();
+            SourceBindings();
         }
     }
     private void ScheduleMusicExpiry(MusicRecovery state)
@@ -592,7 +592,7 @@ public sealed partial class MusicCapability
         state.Media?.Bytes?.Dispose();
         if (state.ObservedBytes is { } bytes && state.CacheProgress is { } progress)
             bytes.ProgressChanged -= progress;
-        Changed(nameof(PlaybackCacheFraction));
+        PlaybackSourceBindings();
         return Drain();
         async Task Drain()
         {

@@ -147,6 +147,51 @@ final class FilmSettingsPlatformTests: XCTestCase {
         await fixture.rules.close(); await fixture.sources.close()
     }
 
+    func testPanInterceptionSwitchesSaveIndependentlyAndRestoreAfterPersistenceFailure() async throws {
+        let fixture = try await makeFixture()
+        _ = try await fixture.catDocument.update { original in
+            var root = try XCTUnwrap(original?.filmObject)
+            root["providers"] = .object(["quark": .bool(false), "external": .bool(true)])
+            root["mappings"] = .array([.object(["provider": .string("quark"), "aliases": .array([.string("自定义线路")])])])
+            return .object(root)
+        }
+        let before = try XCTUnwrap(fixture.catDocument.appStorageTestRead())
+        let page = FilmPanInterceptionViewController(service: fixture.sources, themeProvider: FilmSettingsTheme())
+        let window = try await host(page)
+        defer { unhost(window) }
+        func controls() -> [UISwitch] {
+            page.sections.flatMap(\.rows).compactMap(\.content).flatMap(descendants).compactMap { $0 as? UISwitch }
+        }
+        await eventually { controls().count == 5 && controls().allSatisfy(\.isEnabled) }
+        XCTAssertEqual(controls().map(\.isOn), [true, false, true, true, true])
+        let initialNotifications = fixture.catStorage.notifications.count
+        for provider in PanProviderID.allCases {
+            let control = try XCTUnwrap(controls().first { $0.accessibilityIdentifier == "film.panInterception.\(provider.rawValue).switch" })
+            let next = !control.isOn
+            control.isOn = next; control.sendActions(for: .valueChanged)
+            await eventually { controls().allSatisfy(\.isEnabled) }
+            let saved = try XCTUnwrap(fixture.catDocument.appStorageTestRead())
+            XCTAssertEqual(saved.filmObject?["providers"]?.filmObject?[provider.rawValue], .bool(next))
+            for field in ["scripts", "mappings", "port"] { XCTAssertEqual(saved.filmObject?[field], before.filmObject?[field]) }
+            XCTAssertEqual(saved.filmObject?["providers"]?.filmObject?["external"], .bool(true))
+        }
+        XCTAssertEqual(Array(fixture.catStorage.notifications.dropFirst(initialNotifications)), Array(repeating: "cat.sources", count: 5))
+        let retained = try XCTUnwrap(fixture.catDocument.appStorageTestRead())
+        try fixture.catStorage.blockWrites()
+        defer { try? fixture.catStorage.restoreWrites() }
+        let control = try XCTUnwrap(controls().first)
+        let retainedValue = control.isOn
+        control.isOn.toggle(); control.sendActions(for: .valueChanged)
+        await eventually { controls().allSatisfy(\.isEnabled) }
+        XCTAssertEqual(controls().first?.isOn, retainedValue)
+        XCTAssertEqual(try fixture.catDocument.appStorageTestRead(), retained)
+        XCTAssertEqual(fixture.catStorage.notifications.count, initialNotifications + 5)
+        await eventually { page.presentedViewController is UIAlertController }
+        XCTAssertEqual((page.presentedViewController as? UIAlertController)?.title, "错误")
+        try fixture.catStorage.restoreWrites()
+        await fixture.rules.close(); await fixture.sources.close()
+    }
+
     func testSettingsMenuKeepsRulesAndDataSourcesIndependentWhenPlaybackIsUnavailable() async throws {
         let fixture = try await makeFixture()
         let tmdb = FilmTMDBSettingsModel(service: FilmTMDBService(
@@ -165,11 +210,12 @@ final class FilmSettingsPlatformTests: XCTestCase {
         let rows = try XCTUnwrap(menu.sections.first).rows
         XCTAssertEqual(rows.map(\.id), [
             "film.settings.search", "film.settings.matching", "film.settings.cats", "film.settings.videos",
-            "film.settings.dataSources", "film.settings.pan", "film.settings.preferences",
+            "film.settings.dataSources", "film.settings.pan", "film.settings.panInterception", "film.settings.preferences",
+            "film.settings.player",
         ])
-        XCTAssertTrue(rows.prefix(6).allSatisfy(\.enabled))
-        XCTAssertTrue(rows.dropFirst(6).allSatisfy { !$0.enabled })
-        for index in 6..<rows.count {
+        XCTAssertTrue(rows.filter { $0.id != "film.settings.preferences" }.allSatisfy(\.enabled))
+        XCTAssertFalse(try XCTUnwrap(rows.first { $0.id == "film.settings.preferences" }).enabled)
+        for index in rows.indices where !rows[index].enabled {
             menu.tableView(menu.table, didSelectRowAt: IndexPath(row: index, section: 0))
             XCTAssertTrue(navigation.topViewController === page)
         }
@@ -210,11 +256,11 @@ final class FilmSettingsPlatformTests: XCTestCase {
         page.loadViewIfNeeded()
         let menu = try XCTUnwrap(page.children.compactMap { $0 as? FilmSettingsListController }.first)
         menu.loadViewIfNeeded()
-        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 7)
+        XCTAssertEqual(menu.sections.flatMap(\.rows).count, 9)
         XCTAssertTrue(menu.sections.flatMap(\.rows).allSatisfy(\.enabled))
         for (id, title) in [
             ("search", "搜索净化设置"), ("matching", "智能匹配设置"), ("dataSources", "刮削设置"),
-            ("pan", "网盘账号"), ("preferences", "智能播放设置"),
+            ("pan", "网盘账号"), ("panInterception", "内置网盘接管"), ("preferences", "智能播放设置"),
         ] {
             navigation.setViewControllers([page], animated: false)
             try selectRow(menu, "film.settings.\(id)")
@@ -227,6 +273,7 @@ final class FilmSettingsPlatformTests: XCTestCase {
             case "matching": XCTAssertTrue(destination is FilmSmartMatchingViewController)
             case "dataSources": XCTAssertTrue(destination is FilmDataSourceSettingsViewController)
             case "pan": XCTAssertTrue(destination is PanAccountsViewController)
+            case "panInterception": XCTAssertTrue(destination is FilmPanInterceptionViewController)
             default: XCTAssertTrue(destination is FilmSmartPlaybackSettingsController)
             }
         }

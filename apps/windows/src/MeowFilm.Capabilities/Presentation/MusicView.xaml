@@ -56,7 +56,7 @@
   </StackPanel>
   <StackPanel Grid.Row="1">
    <Button x:Name="DailyStyleButton" Content="{Binding DailyStyleSelectionText}" Click="DailyStyleOpen_Click" HorizontalAlignment="Left" IsEnabled="{Binding CanEditDailyStyle}" Visibility="{Binding IsDailyStyle,Converter={StaticResource Visible}}" Width="Auto" MaxWidth="500" Padding="14,2" Style="{StaticResource Music.FilterTag}" Margin="0,0,0,16"/>
-   <StackPanel Visibility="{Binding ShowDetailSkeleton,Converter={StaticResource Visible}}" IsHitTestVisible="False"><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/></StackPanel>
+   <ProgressRing Width="32" Height="32" Margin="0,16" HorizontalAlignment="Center" IsActive="{Binding ShowDetailLoading}" Visibility="{Binding ShowDetailLoading,Converter={StaticResource Visible}}" IsHitTestVisible="False" AutomationProperties.Name="正在加载歌曲"/>
    <StackPanel Orientation="Horizontal" Margin="0,0,0,10" Visibility="{Binding IsContentDetailPage,Converter={StaticResource Visible}}"><TextBlock Text="{Binding DetailSectionTitle}" FontSize="20"/><TextBlock Text="{Binding DetailCountText}" FontSize="11" Margin="3,1,0,0"/></StackPanel>
    <desktop:NoticeOutlet Message="{Binding Status}"/><desktop:NoticeOutlet Message="{Binding SearchStatus}"/>
   </StackPanel>
@@ -73,7 +73,7 @@
    </Grid>
    <Grid x:Name="SearchSongsPage"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions><ContentControl Content="{Binding}" ContentTemplate="{StaticResource SongHeaderTemplate}" HorizontalContentAlignment="Stretch" IsTabStop="False"/>
     <ListView x:Name="SearchSongsGrid" Grid.Row="1" ItemsSource="{Binding SearchSongsSource}" SelectedItem="{Binding SearchSelectedSong,Mode=TwoWay}" ItemTemplate="{StaticResource SongRowTemplate}" ItemContainerStyle="{StaticResource SongContainer}" ItemsPanel="{StaticResource SongItemsPanel}" SelectionMode="Single" KeyDown="Song_KeyDown" PointerWheelChanged="SongsGrid_Wheel" AutomationProperties.Name="歌曲搜索结果"/>
-    <StackPanel x:Name="SearchSkeleton" Grid.Row="1" VerticalAlignment="Top" IsHitTestVisible="False"><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/><desktop:LoadingSkeleton Height="34" Margin="0,8" IsActive="True"/></StackPanel>
+    <ProgressRing x:Name="SearchLoading" Grid.Row="1" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" IsActive="False" Visibility="Collapsed" IsHitTestVisible="False" AutomationProperties.Name="正在搜索歌曲"/>
    </Grid>
   </Grid>
   <Grid Grid.Row="3" Margin="0,16,0,0" Visibility="{Binding ShowSongPager,Converter={StaticResource Visible}}"><TextBlock Text="{Binding PageText}" VerticalAlignment="Center"/><StackPanel Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="上一页" IsEnabled="{Binding CanPreviousPage}" Click="PreviousPage_Click"/><Button Content="下一页" IsEnabled="{Binding CanNextPage}" Click="NextPage_Click"/></StackPanel></Grid>

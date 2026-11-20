@@ -147,4 +147,4 @@ Task PrepareRecommendationsAsync(CancellationToken ct = default);
 3. application 全局关闭先围住推荐 callback，再失效 Catalog／账号读取并排空其他音乐业务，不能以调用者退订当作底层排空。
 4. 最后准备唯一 `MusicLibraryOwner`。
 
-取消关闭创建新的推荐生命周期，不恢复旧 session、旧 callback 或旧播放意图。最终释放时先 dispose 协调器，再释放它借用的 catalog 和 library。
+进程内退役单向完成，不恢复旧 session、callback 或播放意图；最终释放先 dispose 协调器，再释放它借用的 catalog 和 library。正常整进程退出不以全部推荐任务排空为门禁，见[App生命周期](app-runtime.md)。

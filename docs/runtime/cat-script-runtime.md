@@ -33,7 +33,7 @@ contract: cat.script.v2
 | `invoke` | 定向调用 installation/generation/site/action |
 | `management.describe/sync` | 探测脚本原生管理协议并同步一个明确 provider |
 
-源码一次 `PUT /v1/cat/sources/{installationId}/{sourceRevision}`，body 为 `application/octet-stream`，不需要 basename；仅完整、有效的上传成为候选。`install` 指定 installationId/sourceRevision，config 直接为 object，version 缺省为 0.0.0，新安装 enabled 缺省 true，不增加 Cat revision CAS。`invoke.payload` 和 `management.sync.credentials` 直接为 object，不接受 JSON 字符串替代；invoke 的 generation 可选，payload 缺省空 object。
+源码一次 `PUT /v1/cat/sources/{installationId}/{sourceRevision}`，body 为 `application/octet-stream`，不需要 basename；仅完整、有效的上传成为候选。`install` 指定 installationId/sourceRevision，config 直接为 object，version 缺省为 0.0.0，新安装 enabled 缺省 true，不增加 Cat revision CAS。`invoke.payload` 直接为 object，不接受 JSON 字符串替代；invoke 的 generation 可选，payload 缺省空 object。独立运行器的 `management.sync.credentials` 同样直接消费 object；连接 pan owner 的 App 不消费该字段，由当前账号 owner 提供同步内容。
 
 普通请求一次 JSON POST，成功 `{ok:true,contract:"cat.script.v2",value}`；value 是原业务对象、数组、标量或 null。没有普通 JSON 大小分流、总字节配额、正文压缩或自动加工；旧 stage/control/blob、Base64、分片 token、TTL、offset 和传输 checksum 已删除。HTTP 取消和实际排空见 [公共传输](runtime-bridge.md#取消与清理)。
 
@@ -54,7 +54,7 @@ contract: cat.script.v2
 | `restart` | `installationId` | 一个 instance |
 | `enable` | `installationId,enabled` | 一个 instance |
 | `uninstall` | `installationId` | `{applied,failures:[{installationId,code}]}` |
-| `start/status` | 空对象 | `{aggregate:{origin},instances:[...]}` |
+| `start/status` | 空对象 | `{aggregate:{origin},routing:{providers,mappings},instances:[...]}` |
 
 `config` 为 JSON object，`sourceRevision` 选择同 installation 的完整上传；网络下载使用 `import`。`sourceType` 只允许 `local`、`network`；本地 `sourceUrl` 为 `null`，网络为 HTTP(S) URL 字符串。安装调用可省略可选元数据。新安装缺省名称为 installationId、类型为 local、URL 为 null、config 为 `{}`、version 为 `0.0.0`。
 
@@ -82,11 +82,11 @@ Cat 工厂启动参数提供当前网站／账户协议的默认命名空间：`
 
 Cat 的网关配置、provider 映射和安装事实由运行器 owner 保存在 App 数据根的共享 SQLite typed tables/relations 中；注入模式下可编辑来源意图仍由原生 owner 持有，运行器只保存实际安装事实。Node runtime 与原生 UI 通过受限设置能力与 revision 协作，不再使用 `settings.json` 文件。
 
-`port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。原生设置提交成功后可通知运行器重读当前数据库快照；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖有效快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变实例不重读源码、不重新启动。
+`port=0` 由系统选择聚合端口。独立运行器只有 provider 显式为 `true` 才接管；iOS／Windows App 的原生配置缺省开启五盘接管，显式 `false` 保持关闭。缺省值在读取时生效，不回写配置或迁移原生数据。
 
 无 `configuration` 注入的独立运行器也由 Cat owner 将网关设置、provider 开关、映射、安装管理事实及节点化配置写入 SQLite typed tables/relations。它与注入模式使用不同 owner rows；原生注入模式的来源意图由原生 owner 持有，运行器只保留实际安装状态。没有 JSON 文档文件或整文档 JSON 数据库字段作为内部设置存储。
 
-`port=0` 由系统选择聚合端口。缺省 provider 表示未启用对应拦截。注入模式下原生数据库提交后可通知运行器重读当前快照；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖有效快照。有效设置只对配置变更、新增、移除或失败的目标实例应用，未变实例不重读源码、不重新启动。provider、映射和聚合端口变更通过 owner 的数据库视图发布，不要求全量重读源码。冷启动数据库真实 I/O／schema 错误明确返回存储错误；逐安装 config nodes 不在 ready 中全解码，只在所选实例实际装载时解码，坏配置只使该实例失败。禁用实例不消费 config，无关编辑／刷新沿用未消费配置的原节点，不能把坏值写成空配置。typed 设置根／script 根仅保存声明字段，不承诺任意扩展永久保留；config 内实际 JSON 值保留精确数值。
+注入模式下原生数据库提交后可通知运行器重读当前快照；刷新先校验设置结构，设置损坏时不发布部分状态、不覆盖有效快照。有效设置只对配置变更、新增、移除或失败的目标实例应用。五盘 provider 的有效接管方式改变时，先撤销旧执行代次，再通过既有安装生命周期排空并启动新代次，避免脚本复用另一方式下缓存的占位 token 或详情；不清除脚本私有卷。单纯映射或聚合端口变化有序发布到现有 Worker，不重读源码、不重启；其余未变实例同样保持。冷启动数据库真实 I/O／schema 错误明确返回存储错误；逐安装 config nodes 不在 ready 中全解码，只在所选实例实际装载时解码，坏配置只使该实例失败。禁用实例不消费 config，无关编辑／刷新沿用未消费配置的原节点，不能把坏值写成空配置。typed 设置根／script 根仅保存声明字段，不承诺任意扩展永久保留；config 内实际 JSON 值保留精确数值。
 
 安装管理元数据、启用状态及最后成功的 sites 由运行器 owner 持久化；原生客户端不保存第二份安装权威。客户端视频源开关、排序、检测结果和删除标记由对应原生 owner 负责。普通管理应调用上表方法；`refresh` 只应用当前数据库状态，不下载网络源，也不提供 `update` 的候选失败恢复事务。
 
@@ -107,6 +107,8 @@ App 可注入受信 `configuration:{read,reload}`。`read()` 返回已读取的�
 注入模式下安装事实只记录运行器实际装载的源码身份、版本、私有配置、装载状态与站点投影；来源名称、类型、地址、启用意图仍归原生配置 owner。`loadedIdentity` 绑定实际采用的类型、输入 revision 及 URL／本地摘要，和当前意图分别保存；公开状态增加 `inputRevision`，不公开 `localPath/localHash`。这些事实保存在共享数据库，不生成内部 JSON 文件。
 
 冷启动及 `cat.sources` 通知重读意图。已启用项尚无实际源码、输入身份改变或文件缺失时，由 Node 按当前意图读取本地输入或下载网络来源，再验证并装载；本地切网络不会拿旧本地文件冒充新网络输入。通知发起的实际应用归模块生命周期管理，不因短通知请求结束而取消；迟到结果核对最新输入身份，不能覆盖后保存意图。原生保存成功不代表安装或 ready，客户端清单仅采用匹配当前 `inputRevision` 的 ready 状态。
+
+`cat.sources` 通知只等待设置发布屏障：唯一 owner 完成原生设置及安装事实重读，经 `configureGateway` 发布 `settings.value`、聚合端口，撤销接管方式已变化的旧执行并受理替换，其余 Worker 按序收到设置快照后，才向后续 film owner 确认。film 因而按实际新 routing 撤销旧缓存和在途结果，不会在后台 refresh 尚未发布时误读旧配置。通知不等待后续慢来源下载、安装或 generation 启用；这些任务仍归模块 pending 生命周期。发布前的读取／发布失败使通知失败，关闭取消该屏障，均不留下未决等待。
 
 HTTP `install/import/edit/enable/uninstall` 在注入模式返回 `PERMISSION_DENIED`；`update` 只提取 installationId 并更新当前已保存输入，附加 sourceRevision 不被读取。状态、重启、调用及显式管理同步仍由运行器执行。未注入的独立入口继续使用上述 v1 来源文件及 HTTP 写入，不隐式探测或迁移原生设置。
 
@@ -224,11 +226,19 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 
 成功但没有正文的响应（例如 void `init` 或未提供搜索结果）返回 JSON `null`，不伪造列表；非 JSON 的文本响应保留为字符串，声明 JSON 却返回非空无效 JSON 仍报错。已声明路由返回的 404 属于脚本 HTTP 响应，不冒充宿主缺少 API。Fastify、direct spider 的错误及 HTTP JSON 的明确错误字段按所属请求输出脱敏诊断，只保留固定分类与受限错误码，不输出原异常文本；HTTP 状态、脚本错误与真实网络证据分别保留。
 
-百度、夸克、UC、天翼和移动的开关只控制已识别分享流程的捕获。别名映射辅助识别线路，不单独证明已接管。开关关闭、接口未知、身份不足或不能准确归属时执行脚本原网络路径；不在运行器内实现 provider 登录、列表、转存或直链解析。
+百度、夸克、UC、天翼和移动的开关控制当前调用内的网盘请求接管。只在携带 `panShares` 的 invoke scope 内生效，不拦截管理同步或全局登录流程；非网盘域继续原网络。开关开启时，分享页、token 和目录接口本地返回协议占位，捕获分享码和提取码供输出规整；接口未知、身份不足、解密失败或多分享归属冲突时返回固定 `PAN_INTERCEPTION_UNSUPPORTED` 结构化失败，绝不静默转发真实请求。CatSession 在脚本成功和失败回执处都检查本次拦截失败；空详情、opaque 播放 ID 或同次调用的另一个成功分享不能掩盖失败，客户端收到同一错误码并提示关闭对应接管后重试。开关关闭时才执行原脚本网络。不在捕获层实现 provider SDK、真实目录读取、登录、转存或取址。
 
-播放条目包含本次调用捕获的唯一内部分享标记时，输出规整按该分享的准确 provider／身份生成 `meow.pan.v1` 资源，不以线路名称作为前置条件，也不改写原 `vod_play_from`。标记可直接出现，或在 URI 解码后的单层 Base64 内容中出现；歧义、对应 provider 关闭或脚本自有 `_meow` 冲突时不接管。没有标记的条目仍按现有线路别名与直接分享解析，不能仅因捕获过一个分享就替换普通文件。真实目录、文件和取址由 pan owner 请求，线路标签不作为站点或网盘身份。
+`fetch` 复用受控 HTTP(S) 入口；HTTP2、`net`／`tls` 和 HTTP(S) Agent 的直接连接没有占位协议，在相同 invoke／已启用 provider／网盘域条件下，于创建原生连接之前返回 `PAN_INTERCEPTION_UNSUPPORTED`。先前全局建立的 HTTP2 session 发起 request／ping／settings、其 stream 写入，以及 `net`／`tls`／Agent socket 的 `write/end` 也按资源原目标重新检查本次 scope；关闭开关、全局管理和非盘域保留既有行为。`dgram` 未作为脚本能力导出。
 
-已识别的夸克／UC 列表响应同时提供顶层 `metadata._total` 和 `data.metadata._total`，二者均为当前单个委托根的数量 `1`，与 CatPawRunner 的列表响应契约一致。它不是分享内真实文件总数；后续真实目录仍由 pan owner 请求。token 响应、未知分享与未启用拦截的原网络路径不受影响。
+开启接管的分享按 `provider + shareId` 归并为一个 `meow.pan.v1` 标准入口，`vod_play_from` 使用“平台名-分享码”，不在名称中显示提取码；同一分享的原画／极速线路不重复呈现。内置与配置别名按不区分大小写的包含匹配识别线路（配置别名优先），分享身份以直接分享 URL 或已发出的占位绑定为准。输出规整与拦截器共用同一绑定，可识别文件名标记、token、数值文件／分享 ID，以及播放值中 URL 查询参数、JSON、URI 和 Base64 载体的准确引用；天翼数值 ID 拼成 URL 也替换为标准入口，不同时保留旧脚本播放路径。相互冲突或未知的占位标记返回 `PAN_INTERCEPTION_UNSUPPORTED`，不能按别名给任意 opaque ID 猜一个分享。
+
+本次捕获但尚未归属的分享可为无播放条目的单条详情提供按需入口；存在无法归属的 opaque 播放条目时明确失败。已准确交接的分享可与真正的非网盘条目并存；同一已接管 provider 的别名线路仍残留 opaque ID，或其网盘域 HTTP 播放值无法交接时，返回专码而不保留第二条脚本路径。批量详情只绑定各条目能证明归属的分享，不广播历史捕获。身份解析不消费 URL／JSON 的无关 metadata 字段，不因其中的数值或标记拒绝准确引用。显式空提取码以本次捕获为准，同分享多个直接 URL 优先保留非空提取码；资源坐标对应规整后的线路。未接管线路和无占位污染的脚本自有 `_meow` 保持原协议；占位接管需要增强字段而与脚本自有 `_meow` 冲突时明确失败。拦截和规整都不列盘、转存或取址；真实目录、文件和取址仅由客户端展开／选播或智能播放需求触发 pan owner，线路标签不作为站点或网盘身份。
+
+占位协议覆盖夸克／UC `share/sharepage/token` 与 `detail`、UC 分享页 Cookie、百度分享页的 `yunData`、`share/verify` 的 `BDCLND`、`share/list` 和脚本调用内 `api/loginStatus`、天翼 `getShareInfoByCode.action`／`getShareInfoByCodeV2.action` 与 `listShareDir.action`、移动 `IOutLink/getOutLinkInfoV6` 及旧版 outlink 接口。移动支持嵌套 `getOutLinkInfoReq`，既可明文 JSON，也可原始或 JSON 字符串包装的 AES-128-CBC（IV 前缀）请求；响应保持对应明文／密文格式。
+
+夸克／UC 列表同时提供顶层 `metadata._total` 和 `data.metadata._total`，均为占位文件数 `1`。所有占位文件名携带分享的 `meow_<identity>` 标记；百度和天翼另返回稳定且安全整数范围内的数值 share/file ID。准确绑定由 CatSession 按 site 持有，与该 generation 的脚本执行缓存同寿命，因此后续调用可复用同站点曾收到的 token 或缓存详情。单次 invoke 的 `panShares` 只记录本次实际使用的分享，不把其他调用的全部捕获混入详情；不能跨站点借用绑定，也不用“最后一个”或唯一历史分享推测无身份列表。显式分享码可直接捕获；其他列表须带该站点已发出的绑定身份，冲突则失败。
+
+绑定不持久化，不读取或清理脚本私有卷中的缓存。新 generation 不恢复旧执行快照；无法归属的明确 `meow_<identity>` 标记报错，脚本仅将纯数值占位 ID 单独落盘后跨代复用不在绑定契约内，不凭数字范围猜测真实文件身份。占位名称、大小和时间只用于让脚本完成详情流程，不代表真实媒体质量或目录内容；真实目录和播放直到客户端按需展开或智能选择触发时才由 pan owner 请求。
 
 ## 管理同步与生命周期
 
@@ -239,7 +249,15 @@ TLS 证书链可保留循环引用，缓存的真实 KeyObject 可跨请求使�
 
 website-v1 探测只读取成功响应的列表根，不预检未消费 provider 条目；所选 provider 的 GET 字段和 PUT 持久回执仍按实际协议检查。
 
-同步只面向调用方指定的 installation、generation 和 provider，主线程只向该实例 worker 发送一次管理 RPC，探测、凭据发送和持久写回执等待全部在该 worker 内完成；凭据不写入日志或事件。成功写入还必须收到私有卷持久写回执；不按作者、文件名或源码 hash 猜协议，也不向所有脚本广播账号。
+显式 `management.sync` 面向指定 installation、generation 和 provider，与主动同步共用该实例的管理写队列。连接 pan owner 的 App 在任务实际执行时读取其当前凭据，调用者附带的凭据不作为账号事实；未连接 pan 的独立运行器才消费显式凭据。主线程向该实例 Worker 发送管理 RPC，探测、凭据发送和持久写回执等待全部在该 Worker 内完成；凭据不写入日志或事件。成功写入必须收到私有卷持久写回执；`unsupported` 表示未识别管理协议、字段或实际端点，不按作者、文件名或源码 hash 猜协议。脚本返回失败、跳过、等待登录确认或缺少持久回执均不报告 `saved`。清除账号通过同一管理端点真实写入空字段，等待相同持久回执；缺少某个非空账号所需的字段不会被解释为清除。例如天翼只持 Cookie 而脚本仅支持用户名／密码时返回 `unsupported`，不清掉脚本已有账号。
+
+iOS、Windows 与显式装配 pan 的 aggregate entry 通过 `connectPanAccounts` 连接唯一 pan 账号 owner。账号保存、扫码确认、凭据轮换、刷新成功、清除及原生 `pan.accounts` 重读主动安排同步；各已就绪实例接收当前五盘账号，启用、更新、重启及冷启动的新 generation 也主动安排当前账号同步，与五盘接管开关独立。未配置过的本端账号（revision 为 0）不触碰脚本原有账号；显式退出保留的 revision 使空配置成为清除事实。该连接只在内存中借用即时读取和变更订阅能力，不建立第二份 App 账号存储，也不新增读取凭据的 HTTP 接口。
+
+每个实例按顺序执行管理写入；App 排队时只记录 provider、执行时读取当前 owner，迟到回执不能覆盖新排队状态。`invoke` 等待已经安排的显式及主动同步，不以调用时懒同步代替启动与账号变更通知。排队或 GET 探测阶段取消不再发出 PUT；PUT 已受理后，调用者可结束等待，但写入队列仍等实际持久回执，后继写不能越过它。此时取消不承诺回滚，状态和保存事件仍反映实际完成；多路保存的下一 PUT 受理前再次检查取消。超时或传输错误导致写入完成情况无法确认时，结束并排空旧 Worker，实例明确失败，由显式重启或刷新恢复，不让继任保存与旧执行并发写卷。
+
+普通同步失败保留本地已提交账号，也不阻断仍有效脚本的其他盘或非网盘调用。实例状态新增非敏感 `accountSync:[{provider,revision?,rowRevision?,status,errorCode?}]`，status 为 `pending/saved/unsupported/failed`；失败的固定 code 同时进入现有实例 `error`，执行状态仍可为 `ready`。后续账号变更或新 generation 再安排同步，不后台定时重试。两种入口成功后发布同一 installation／generation／provider 保存事件，film 按实际脚本凭据依赖撤销结果；内置 pan 自有的目录、文件和媒体不因脚本保存而失效。物理排空由独立受控任务等待，避免与等待同步的 invoke 互相等待；关闭同时取消管理请求并排空这些任务。
+
+Cat status 还提供非敏感 `routing:{providers,mappings}`。五盘有效开关变化会替换脚本 generation；别名映射变化保持 generation，但仍按实际配置变化撤销 film 的 Cat 源缓存与在途结果。相同设置或对象键排列变化不触发失效。
 
 更新先停止该 installation 的旧 generation，再装载并启动新 generation，避免两个 generation 并发写同一私有卷。若脚本 stop 返回 Promise，运行器在有界清理时限内等待其完成，以便关闭服务并落盘；超时或失败后仍强制回收实例自有资源。停用、卸载和关闭回收 listener、socket、timer、流、fd、代理身份和 Worker 内存。
 

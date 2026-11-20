@@ -204,7 +204,7 @@ test('an explicitly empty list password overrides only that invocation, without 
 });
 
 for (const [interception, detailId] of [
-  [false, 'bridge-detail'], [true, 'unknown-provider'], [true, 'unknown-share'],
+  [false, 'bridge-detail'], [true, 'unknown-provider'],
 ]) {
   test(`Cat original network fallback: interception=${interception}, detail=${detailId}`, async t => {
     const f = await fixture(t, { interception });
@@ -222,24 +222,34 @@ for (const [interception, detailId] of [
   });
 }
 
+test('enabled interception rejects an unidentifiable share without sending the script request upstream', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.invokeCat('detail', { id: 'unknown-share' }), { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+  await assert.rejects(f.call('film.data.detail', { source: f.source, detailId: 'unknown-share' }),
+    { code: 'PAN_INTERCEPTION_UNSUPPORTED' });
+  assert.equal(f.counters.scriptNetwork, 0);
+  assert.equal(f.counters.interceptorForwards, 0);
+  assert.equal(f.panInputs.length, 0);
+  await waitForBridge(() => f.cat.host.get(f.source.installationId).resources.networkRequests === 0,
+    'blocked response release');
+});
+
 for (const [detailId, invalidShare] of [
   ['known-then-unknown-share', 'bridge-unknown-share'], ['known-then-invalid-share', 'root'],
 ]) {
-  test(`Cat → pan → film retains the valid share after ${detailId} falls back to the original network`, async t => {
+  test(`Cat → film reports ${detailId} even when the same detail has a valid captured share`, async t => {
     const f = await fixture(t);
-    let state = await browse(f, await open(f, { target: await detailTarget(f, detailId) }));
-    assert.equal(state.browsing.error, null);
-    assert.equal(state.browsing.episodes.length, 3);
-    const captured = f.records.find(row => row.layer === 'cat' && row.phase === 'intercepted');
-    assert.deepEqual(captured.responseShape,
-      { complete: true, tokenStatus: 200, listStatus: 200, fallbackStatus: 200 });
-    assert.equal(captured.fallbackFileId, 'script-original-file');
-    assert.deepEqual(captured.resources.map(row => [row.provider, row.shareId, row.passwordPresent]),
-      [['quark', bridgeShare.shareId, true]]);
-    assert.equal(f.counters.scriptNetwork, 1);
-    assert.deepEqual(phases(f, 'script-network'), ['list']);
-    assert.equal(f.records.find(row => row.layer === 'script-network').shareId, invalidShare);
-    assert.equal(f.counters.interceptorForwards, 1);
+    const opened = await open(f, { target: await detailTarget(f, detailId) });
+    const state = await waitForBridge(async () => {
+      const value = await f.snapshot(opened.sessionId);
+      return !value.browsing.loading && value;
+    }, 'rejected initial detail');
+    assert.equal(state.browsing.error, 'PAN_INTERCEPTION_UNSUPPORTED');
+    assert.equal(state.browsing.episodes.length, 0);
+    assert.equal(state.attempt, null);
+    assert.equal(f.counters.scriptNetwork, 0);
+    assert.deepEqual(phases(f, 'script-network'), []);
+    assert.equal(f.counters.interceptorForwards, 0);
     const bodies = intercepted(f, 'body');
     assert.deepEqual(bodies.map(row => row.shareId), [bridgeShare.shareId, bridgeShare.shareId, invalidShare]);
     assert.deepEqual(intercepted(f, 'request').at(-1).knownShares,
@@ -248,26 +258,16 @@ for (const [detailId, invalidShare] of [
       [{ provider: 'quark', shareId: bridgeShare.shareId, passwordPresent: true }]);
     assert.ok(intercepted(f, 'response').every(row => row.status === 200));
     await releasedInterceptions(f, 3);
-    assert.equal(f.panInputs[0].input.share.url, bridgeShare.url);
-    assert.equal(f.panInputs[0].input.share.password, bridgeShare.password);
-    await f.command(state.sessionId, 'play');
-    state = await pending(f, state.sessionId);
-    assert.equal(state.attempt.candidate.episode, 1);
-    assert.equal(state.attempt.candidate.provider, 'quark');
-    assert.deepEqual(f.panInputs.map(row => row.operation), ['list', 'prepare', 'play']);
-    assert.equal(f.panInputs[1].input.file.shareId, bridgeShare.shareId);
-    assert.equal(f.panInputs[1].input.file.fileId, 'episode-1-high');
-    const receipt = await f.call('film.session.attempt', { sessionId: state.sessionId, attemptId: state.attempt.id });
-    assert.equal(receipt.scope.accountProvider, 'quark');
+    assert.deepEqual(f.panInputs, [], 'a partially rejected detail cannot be consumed as a successful handoff');
     assert.equal(f.counters.mediaHead, 0);
     assert.equal(f.counters.mediaBody, 0);
   });
 }
 
 for (const [detailId, lineLabel, title] of [
-  ['bridge-detail', '夸克',
+  ['bridge-detail', `夸克-${bridgeShare.shareId}`,
     'one Cat → Quark list/prepare/play → film HTTP/SSE chain preserves identities, media metadata and header-only routing'],
-  ['unknown-line-label', '原始自定义线路',
+  ['unknown-line-label', `夸克-${bridgeShare.shareId}`,
     'a captured Cat share with a custom line label uses the exact Quark directory, file and film HTTP/SSE receipt'],
 ]) {
   test(title,
@@ -414,7 +414,8 @@ test('one episode across real Quark/UC owners sorts qualities, reselects after f
     let state = await browse(f, await open(f, { target: rawEntry }));
     assert.equal(state.browsing.error, null);
     assert.deepEqual(state.browsing.lines, lineViews(state, [
-      { id: '夸克', label: '夸克', provider: 'quark' }, { id: 'UC', label: 'UC', provider: 'uc' },
+      ...bridgeCrossShares.map(share => ({ id: `${share.provider === 'quark' ? '夸克' : 'UC'}-${share.shareId}`,
+        label: `${share.provider === 'quark' ? '夸克' : 'UC'}-${share.shareId}`, provider: share.provider })),
     ]));
     assert.deepEqual(state.browsing.episodes.map(row => row.quality), ['1080p', '4k_fps'],
       'the upstream deliberately supplies the lower quality first');
@@ -618,7 +619,7 @@ for (const [scenario, code] of [['list-http', 'UPSTREAM_HTTP'], ['list-auth', 'A
     let state = await open(f);
     assert.equal(state.error, code);
     assert.equal(state.browsing.error, code, 'the actual Cat line cannot hide a failed pan expansion');
-    assert.deepEqual(state.browsing.lines, lineViews(state, [{ id: '夸克', label: '夸克', provider: 'quark' }]));
+    assert.deepEqual(state.browsing.lines, lineViews(state, [{ id: `夸克-${bridgeShare.shareId}`, label: `夸克-${bridgeShare.shareId}`, provider: 'quark' }]));
     assert.deepEqual(state.browsing.episodes, [], 'a failed pan list cannot fabricate a file or successful share row');
     assert.equal(state.attempt, null);
     assert.deepEqual(f.panInputs.map(row => row.operation), ['list']);

@@ -2,13 +2,14 @@
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real owner/protocol and Windows DPAPI; only canonical runtime results are synthetic.
+// Real owner/protocol and SQLite; only canonical runtime results are synthetic.
 public static partial class MusicNativeAccountDetailsTests
 {
     private const string UserId = MusicAccountDetailsFixture.UserId;
@@ -338,14 +339,18 @@ public static partial class MusicNativeAccountDetailsTests
     private static async Task LostReceipt()
     {
         await using var f = new MusicAccountDetailsFixture("wy"); await f.Seed();
+        var accountBefore = await f.Wrapper.Inner.ReadAccountsAsync();
         f.CacheBacking.LoseReceipt = true;
         Check((await f.Refresh()).Membership.Vip == true);
         await f.Cache.DrainAsync();
         var read = await f.Owner.ReadDetailsAsync("wy");
-        Check(read.State == "saved" && read.Profile?.DisplayName == "Fresh name" && f.Wrapper.Writes == 0);
+        Check(read.State == "saved" && read.Profile?.DisplayName == "Fresh name");
         Check((await f.Refresh()).Membership.Vip == true && f.Steps.Count == 2);
-        await f.Owner.PrepareReadShutdownAsync(); f.Owner.ResumeReads();
         Check(await f.Owner.AcquireAsync("wy") is not null);
+        var accountAfter = await f.Wrapper.Inner.ReadAccountsAsync();
+        Check(accountBefore.Revision == accountAfter.Revision &&
+            JsonNode.DeepEquals(JsonNode.Parse(accountBefore.Data!), JsonNode.Parse(accountAfter.Data!)),
+            "Display cache writes changed the authoritative account.");
     }
     private static async Task CancelWrite()
     {
@@ -354,17 +359,17 @@ public static partial class MusicNativeAccountDetailsTests
         var result = await f.Refresh().WaitAsync(TimeSpan.FromSeconds(4));
         await Wait(f.CacheBacking.Entered.Task);
         Check(result.Membership.Vip == true && result.State == "saved");
-        var drain = f.Cache.DrainAsync(); await Pending(drain);
-        // The app, not this borrower, drains physical cache I/O at shutdown.
-        await f.Owner.PrepareReadShutdownAsync().WaitAsync(TimeSpan.FromSeconds(4));
-        f.Owner.ResumeReads();
         var logout = await f.Owner.CallAsync("music.accounts.logout", new { platform = "wy" }).WaitAsync(TimeSpan.FromSeconds(4));
-        Check(logout.GetProperty("ok").GetBoolean() && f.Wrapper.Writes == 1);
+        Check(logout.GetProperty("ok").GetBoolean());
         Check((await f.Owner.ReadDetailsAsync("wy")).Profile is null);
-        f.CacheBacking.Release.TrySetResult(); await Wait(drain);
-        Check((await f.Owner.ReadDetailsAsync("wy")).Profile is null);
-        await f.Owner.DisposeAsync();
+        // Stopping readers does not claim that accepted cache write receipts
+        // have settled. Final owner retirement still waits for those receipts.
+        await f.Owner.PrepareReadShutdownAsync().WaitAsync(TimeSpan.FromSeconds(4));
+        var retirement = f.Owner.DisposeAsync().AsTask(); await Pending(retirement);
+        f.CacheBacking.Release.TrySetResult(); await Wait(retirement);
         Check(f.CacheBacking.Disposals == 0 && f.Wrapper.Disposals == 0);
+        await using var reopened = new MusicAccountDetailsFixture("wy", f.Root);
+        Check((await reopened.Owner.ReadDetailsAsync("wy")).Profile is null);
     }
     private static async Task TwoOwners()
     {

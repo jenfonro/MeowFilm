@@ -15,7 +15,7 @@ final class NativeMusicImportModelTests: XCTestCase {
     """#
     private func fixture() throws -> MJ {
         let songs = MJ.obj([("10000000-0000-4000-8000-000000000010", try MJ.parse(Data(expectedLocal.utf8))), ("20000000-0000-4000-8000-000000000002", try MJ.parse(Data(expectedOnline.utf8)))])
-        return .obj([("version", .n(2)), ("ownerId", .string("frozen-owner")), ("revision", .n(7)), ("nextId", .n(3)),
+        return .obj([("version", .n(1)), ("ownerId", .string("frozen-owner")), ("revision", .n(7)), ("nextId", .n(3)),
             ("songs", songs), ("accounts", .obj([("wy", .string("fixture-owner"))])),
             ("collections", try MJ.parse(Data(collectionsJSON.utf8))),
             ("networkReferences", .array([])),
@@ -25,7 +25,7 @@ final class NativeMusicImportModelTests: XCTestCase {
     private func stored(_ library: MJ) -> Data {
         var library = library; library["ownerId"] = .string("device")
         let songs = library["songs"]; library.remove("songs")
-        let area = MJ.obj([("schema", .n(2)), ("scope", .string("device")), ("revision", .n(1)), ("library", library)])
+        let area = MJ.obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(1)), ("library", library)])
         return MJ.obj([("revision", .n(1)), ("areas", .obj([("library", area)])), ("songs", songs)]).bytes
     }
     func testCompactSongCleaningKeepsIDsAndDeclaredQualitiesButDropsUnusedFields() throws {
@@ -49,14 +49,19 @@ final class NativeMusicImportModelTests: XCTestCase {
         XCTAssertEqual(MusicModel.publicURL(.string("https://localhost./cover.jpg")),
                        .string("https://localhost./cover.jpg"))
     }
-    func testCleanSongIgnoresAdditionalSongFieldsWithoutChangingCurrentData() throws {
+    func testCleanSongPreservesNonSecretExtensionsWithoutChangingRecordingFields() throws {
         let current = try fixture()
         for id in ["20000000-0000-4000-8000-000000000002", "10000000-0000-4000-8000-000000000010"] {
             var song = current["songs"][id]
             song["extension"] = .obj([("title", .string("Unrelated title")), ("sources", .strings(["unrelated"]))])
             song["annotation"] = .string("Not part of the recording")
             song["displayOrder"] = .n(42)
-            XCTAssertEqual(try MusicModel.cleanSong(song).stable, current["songs"][id].stable)
+            var cleaned = try MusicModel.cleanSong(song)
+            for key in ["extension", "annotation", "displayOrder"] {
+                XCTAssertEqual(cleaned[key].stable, song[key].stable)
+                cleaned.remove(key)
+            }
+            XCTAssertEqual(cleaned.stable, current["songs"][id].stable)
         }
     }
     func testStoredCurrentLibraryLoadsWithoutRewriteOrVisibleTombstone() async throws {

@@ -26,7 +26,7 @@ public static class MusicNativeScriptTests
         yield return new("Native LX: shutdown cancels owned calls and never disposes borrowed owners", Shutdown);
         yield return new("Native LX: original complete bytes and basename reach the runtime", CompleteSource);
         yield return new("Native LX: failed cancelled and timed out imports never replay or publish a later candidate", ImportFailure);
-        yield return new("Native LX: shutdown drains an admitted source upload before resuming", ImportShutdown);
+        yield return new("Native LX: retirement drains an admitted source upload before replacement", ImportShutdown);
         yield return new("Native LX: native application retains an upload until its actual completion", ApplicationImportShutdown);
         yield return new("Native LX: complete large response values remain ordinary business data", FullValues);
     }
@@ -102,7 +102,7 @@ public static class MusicNativeScriptTests
         Check(update.InstallationId == Installation && update.SourceRevision > upload.SourceRevision);
         Check(f.Runtime.Requests.Last().Method == "music.script.sources.update" &&
             f.Runtime.Requests.Last().Parameters["sourceRevision"]!.GetValue<long>() == update.SourceRevision);
-        Check(f.Store.Writes == 0 && f.Store.Snapshot().Areas.Count == 0 && f.Store.SongIds().Count == 0,
+        Check(f.Store.Writes == 0 && f.Store.Snapshot().Areas.Count == 0 && await Task.Run(() => f.Store.SongIds().Count) == 0,
             "native music records hold no installation facts");
         await Ok(f.Owner, "music.sources.detail", new { installationId = Installation, extra = 1 });
         Check(f.Runtime.Requests.Last().Method == "music.script.sources.detail");
@@ -178,11 +178,7 @@ public static class MusicNativeScriptTests
         await f.Owner.PrepareShutdownAsync();
         Check((await importing).GetProperty("code").GetString() == "CANCELLED" && f.Runtime.Requests.Count == 0);
         Check((await f.Owner.ImportSourceAsync(new byte[] { 1 }, "source.js")).GetProperty("code").GetString() == "CLOSED");
-        await f.Owner.CancelShutdownPreparationAsync();
-        f.Runtime.Upload = null;
-        f.Runtime.Business = (_, p) => new { item = new { installationId = p["installationId"] } };
-        Check((await f.Owner.ImportSourceAsync(new byte[] { 1 }, "source.js")).GetProperty("ok").GetBoolean());
-        Check(f.Runtime.Uploads.Count == 2 && f.Runtime.Uploads[1].SourceRevision > f.Runtime.Uploads[0].SourceRevision);
+        Check(f.Runtime.Uploads.Count == 1, "retirement cannot admit another upload");
     }
     private static async Task ApplicationImportShutdown()
     {
@@ -226,10 +222,8 @@ public static class MusicNativeScriptTests
         Check((await importing).GetProperty("code").GetString() == "CANCELLED" && runtime.Requests.Count == 0);
         Check(source.All(value => value == 0), "caller cleanup runs after the actual upload settles");
         Check((await application.ImportSourceAsync(new byte[] { 1 }, "source.js")).GetProperty("code").GetString() == "CLOSED");
-        await application.CancelShutdownPreparationAsync();
-        runtime.Upload = null;
-        runtime.Business = (_, p) => new { item = new { installationId = p["installationId"] } };
-        Check((await application.ImportSourceAsync(new byte[] { 1 }, "source.js")).GetProperty("ok").GetBoolean());
+        await application.DisposeAsync();
+        Check((await application.ImportSourceAsync(new byte[] { 1 }, "source.js")).GetProperty("code").GetString() == "CLOSED");
     }
     private static async Task FullValues()
     {
@@ -265,7 +259,8 @@ public static class MusicNativeScriptTests
         await Error(f.Owner, "music.sources.list", null, "CLOSED");
         Check(!f.Store.Disposed, "the App owns the store");
         await using var runtime = new AppRuntimeClient(_ => throw new InvalidOperationException("synthetic startup failure"));
-        await using var library = new MusicLibraryOwner(MusicTestStores.For(new Store()));
+        await using var store = new Store();
+        await using var library = new MusicLibraryOwner(store, database: store.Storage);
         await using var owner = new MusicScriptOwner(library, runtime);
         runtime.Start();
         await Error(owner, "music.sources.list", null, "SCRIPT_RUNTIME_UNAVAILABLE");
@@ -454,10 +449,6 @@ public static class MusicNativeScriptTests
         Check(!result.GetProperty("ok").GetBoolean() && result.GetProperty("code").GetString() == "CANCELLED",
             "preparation cancels admitted calls before it completes");
         await Error(f.Owner, "music.sources.list", null, "CLOSED");
-        await f.Owner.CancelShutdownPreparationAsync();
-        f.Runtime.Entered = null;
-        f.Runtime.Business = (_, _) => new { revision = 0, items = Array.Empty<object>() };
-        await Ok(f.Owner, "music.sources.list");
         await f.DisposeAsync();
         Check(!f.Store.Disposed && f.Runtime.Disposals == 0, "store and runtime remain App-owned");
     }

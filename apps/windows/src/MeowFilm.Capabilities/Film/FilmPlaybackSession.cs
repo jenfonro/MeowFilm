@@ -1078,6 +1078,14 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
             {
                 try { await work; } catch (Exception error) { failure ??= error; }
             }
+            async Task ReleaseRuntime(Func<Task> action)
+            {
+                if (connection?.Revoked.IsCancellationRequested == true) return;
+                try { await action(); }
+                catch (Exception error) when (connection?.Revoked.IsCancellationRequested == true &&
+                    Code(error) is "CLOSED" or "CANCELLED") { }
+                catch (Exception error) { failure ??= error; }
+            }
             if (observation is not null) await Drain(observation.CancelAsync());
             if (observing is not null) await Drain(observing);
             await nativeWork.WaitAsync();
@@ -1087,15 +1095,14 @@ internal sealed class FilmPlaybackSession : IAsyncDisposable
                 await control.WaitAsync();
                 try
                 {
-                    bool revoked = connection?.Revoked.IsCancellationRequested == true;
-                    if (!revoked) await Drain(FlushProgressAsync());
+                    await ReleaseRuntime(FlushProgressAsync);
                     if (current is { } retiring) retiring.Retiring = true;
                     if (current?.NativeScope is { } scope && media.Scope == scope) await Drain(media.StopAsync(scope));
                     if (snapshot is { } state && rpc is { } client)
                     {
                         if (pending is { } unaccepted) await Drain(ReleaseInputAsync(unaccepted, client, state.SessionId));
                         if (current is { } accepted) await Drain(ReleaseInputAsync(accepted, client, state.SessionId));
-                        if (!revoked) await Drain(client.ReleaseAsync(state.SessionId));
+                        await ReleaseRuntime(() => client.ReleaseAsync(state.SessionId));
                     }
                     pending = null; current = null; processingId = ""; revokedPublicationId = ""; continuingFrom = "";
                     snapshot = null; rpc = null; connection = null; retainedWindow = null; presenting = false;

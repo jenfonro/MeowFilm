@@ -14,7 +14,7 @@ public static class SystemMediaWindowLifecycleTests
     {
         yield return new("system-media.window-close-prompt-and-cancel-keep-session", () => Sta(CancelClose));
         yield return new("system-media.window-hide-and-restore-keep-session", () => Sta(HideAndRestore));
-        yield return new("system-media.window-failed-preparation-cancel-restores-owner", () => Sta(CancelFailedPreparation));
+        yield return new("system-media.retirement-seals-owner-until-actual-release", () => Sta(CancelFailedPreparation));
         yield return new("system-media.window-actual-disposal-drains-once-and-retires-old-commands", () => Sta(Dispose));
     }
 
@@ -90,70 +90,23 @@ public static class SystemMediaWindowLifecycleTests
     {
         var window = CreateWindow();
         var player = new Player(); var backend = new Backend();
-        var preparation = Pending();
-        var releaseOwner = Pending();
-        var owner = new Owner { Preparation = preparation.Task, Release = releaseOwner.Task };
-        await using var attachment = new SystemMediaWindowAttachment(window, player, backend,
-            [new("audio", Next: owner.Command, Play: owner.Command)]);
-        var shutdown = new AppShutdown([owner],
-            [new(attachment.DisposeAsync), new(() => { player.Dispose(); return ValueTask.CompletedTask; })]);
-        Task? closingWork = null;
-        EventHandler<CancelEventArgs> closing = (_, args) => { args.Cancel = true; closingWork ??= shutdown.CloseAsync(); };
-        window.Closing += closing;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var owner = new Owner { Release = release.Task };
+        var attachment = new SystemMediaWindowAttachment(window, player, backend,
+            [new("audio", owner.Command, owner.Command, Play: owner.Command)]);
+        var shutdown = new AppShutdown([owner], [new(attachment.DisposeAsync),
+            new(() => { player.Dispose(); return ValueTask.CompletedTask; })]);
         try
         {
-            window.Show();
-            backend.Request(SystemPlaybackCommand.Play);
-            await Pump();
-            Check(owner.Commands == 1, "The registered owner handles system Play.");
-            window.Close();
-            Check(closingWork is { IsCompleted: false } && owner.Preparations == 1,
-                "The close waits for the real App shutdown preparation.");
-            backend.Request(SystemPlaybackCommand.Play);
-            backend.Request(SystemPlaybackCommand.Next);
-            backend.Request(SystemPlaybackCommand.Pause);
-            await Pump();
-            Check(owner.Commands == 1 && player.Calls.SequenceEqual(["pause"]),
-                "Owner preparation seals business admission while the App-owned player remains alive.");
-            preparation.TrySetException(new InvalidOperationException("PREPARATION_FIXTURE_FAILURE"));
-            try
-            {
-                await closingWork!;
-                throw new InvalidOperationException("Expected shutdown preparation failure.");
-            }
-            catch (InvalidOperationException error) when (error.Message == "SHUTDOWN_FAILED") { }
-            await shutdown.CancelShutdownPreparationAsync();
-            player.Publish("After failed exit cancellation");
-            backend.Request(SystemPlaybackCommand.Play);
-            backend.Request(SystemPlaybackCommand.Next);
-            await Pump();
-            Check(window.IsVisible && owner.Commands == 3 && owner.Disposals == 0 &&
-                backend.Last?.Title == "After failed exit cancellation" && backend.Disabled == 0 &&
-                backend.Disposals == 0 && backend.Subscribers == 1 && player.Subscribers == 1,
-                "Cancelling failed shutdown restores owner commands on the retained system session.");
-            Check(player.Calls.SequenceEqual(["pause"]), "Owner Play never falls back to the native player.");
-            var exiting = shutdown.ForceReleaseAsync();
-            Check(owner.Disposals == 1 && !exiting.IsCompleted && backend.Disposals == 0 && player.Disposals == 0,
-                "The App retains the attachment and player while the business owner is disposing.");
-            backend.Request(SystemPlaybackCommand.Play);
-            backend.Request(SystemPlaybackCommand.Next);
-            backend.Request(SystemPlaybackCommand.Pause);
-            await Pump();
-            Check(owner.Commands == 3 && player.Calls.SequenceEqual(["pause", "pause"]) &&
-                player.AccessAfterDisposal == 0, "Disposing owners reject business work; direct player commands remain safe.");
-            releaseOwner.TrySetResult();
-            await exiting;
-            Check(shutdown.IsReleased && owner.Disposals == 1 && backend.Disposals == 1 && player.Disposals == 1,
-                "Final shutdown retires the attachment before releasing the App-owned player.");
+            var closing = shutdown.CloseAsync();
+            backend.Request(SystemPlaybackCommand.Play); await Pump();
+            Check(owner.Disposals == 1 && owner.Commands == 0 && !closing.IsCompleted && player.Disposals == 0,
+                "retirement seals new business commands and retains borrowed player until owner release");
+            release.SetResult(); await closing;
+            Check(shutdown.IsReleased && backend.Disposals == 1 && player.Disposals == 1,
+                "attachment releases before its player");
         }
-        finally
-        {
-            preparation.TrySetResult();
-            releaseOwner.TrySetResult();
-            window.Closing -= closing;
-            await shutdown.ForceReleaseAsync();
-            window.Close();
-        }
+        finally { release.TrySetResult(); await shutdown.CloseAsync(); window.Close(); }
     }
 
     private static async Task Dispose()
@@ -218,7 +171,7 @@ public static class SystemMediaWindowLifecycleTests
         finally
         {
             release.TrySetResult();
-            await shutdown.ForceReleaseAsync();
+            await shutdown.CloseAsync();
             window.Closing -= closing;
             window.Close();
         }
@@ -288,7 +241,7 @@ public static class SystemMediaWindowLifecycleTests
         public void Disable() => Disabled++;
         public void Dispose() => Disposals++;
     }
-    private sealed class Owner : IDesktopShutdownParticipant
+    private sealed class Owner : IAsyncDisposable
     {
         private bool stopping;
         public Task Preparation = Task.CompletedTask, Release = Task.CompletedTask;
@@ -301,7 +254,6 @@ public static class SystemMediaWindowLifecycleTests
             return Task.CompletedTask;
         }
         public Task PrepareShutdownAsync() { stopping = true; Preparations++; return Preparation; }
-        public Task CancelShutdownPreparationAsync() { stopping = false; return Task.CompletedTask; }
         public ValueTask DisposeAsync() { stopping = true; Disposals++; return new(Release); }
         public Task AbortAsync() => DisposeAsync().AsTask();
     }

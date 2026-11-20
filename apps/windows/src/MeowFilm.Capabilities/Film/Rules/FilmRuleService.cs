@@ -338,20 +338,6 @@ public sealed class FilmRuleService : IAsyncDisposable
         await work.ConfigureAwait(false);
     }
 
-    /// <summary>Resumes admission only after preparation has drained.</summary>
-    public void Resume()
-    {
-        lock (lifecycle)
-        {
-            ObjectDisposedException.ThrowIf(closed != 0, this);
-            if (preparation is null) return;
-            if (!preparation.IsCompletedSuccessfully) throw new InvalidOperationException("SHUTDOWN_NOT_DRAINED");
-            pending.Dispose();
-            pending = new();
-            drained = null;
-            preparation = null;
-        }
-    }
 
     public ValueTask DisposeAsync()
     {

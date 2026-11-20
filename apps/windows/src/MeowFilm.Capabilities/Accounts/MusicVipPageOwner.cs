@@ -359,23 +359,6 @@ internal sealed class MusicVipPageOwner : IMusicVipPageSource, IAsyncDisposable
         }
     }
 
-    internal async Task CancelShutdownPreparationAsync()
-    {
-        Task? pending;
-        lock (gate)
-        {
-            if (closed) throw new MusicOperationException("CLOSED");
-            pending = preparation;
-        }
-        if (pending is not null)
-            try { await pending.ConfigureAwait(false); } catch { }
-        lock (gate)
-        {
-            if (closed) throw new MusicOperationException("CLOSED");
-            preparation = null;
-            stopping = false;
-        }
-    }
 
     public ValueTask DisposeAsync()
     {

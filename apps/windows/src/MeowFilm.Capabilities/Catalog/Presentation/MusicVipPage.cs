@@ -84,19 +84,6 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
         return preparation = Retire();
     }
 
-    internal async Task CancelShutdownPreparationAsync()
-    {
-        var pending = preparation;
-        if (pending is not null) await pending;
-        if (disposed) throw new InvalidOperationException("CLOSED");
-        preparation = null;
-        stopping = false;
-        if (viewLoaded && vipRoute)
-        {
-            surfaceActive = true;
-            await QueueRead();
-        }
-    }
 
     private Task QueueRead()
     {

@@ -48,7 +48,6 @@ public interface IMusicApplication : IAsyncDisposable
     Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
         string? installationId = null, CancellationToken cancellationToken = default);
     Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
-    Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default);
     Task AbortAsync(CancellationToken cancellationToken = default);
 }
 ```
@@ -86,7 +85,7 @@ public interface IMusicApplication : IAsyncDisposable
 
 - 每个真实平台请求捕获它实际使用的账号 lease。
 - 旧请求返回 `AUTH_REQUIRED` 或 `AUTH_EXPIRED` 时只撤销该旧 lease，不撤销并发登录产生的新账号代次。
-- 账号未知写入回执会封闭依赖账号的推荐和关闭成功路径。
+- 账号未知写入回执会封闭依赖账号的推荐并使保存准备报告失败；不等于资源未释放。
 - 只有显式成功读取当前账号文档，且期间没有更新的未知回执，才解除该 fence。
 - 不通过旧 Cookie、其他客户端数据或回退目录恢复账号。
 - Node publication 由同一 client 管理实际 `session.update` 及物理排空，不保留独立原生客户端文档／未知设备回执路径。
@@ -97,20 +96,18 @@ public interface IMusicApplication : IAsyncDisposable
 - 调用方取消会取消尚未完成的读取和脚本工作；已经进入持久 CAS 的写入必须取得真实结果。
 - 页面、账号、筛选和搜索各自由其 owner 管理 generation；旧结果不能覆盖新状态。
 
-## 两阶段关闭
+## 进程内退役
 
-准备顺序以真实依赖为准：
+入口同步封闭新请求；准备工作随后切到不捕获 UI 上下文的后台执行，与普通命令使用同一线程边界。即使前序排空任务已完成，搜索退休时的歌曲资料投影也不会回到 UI 线程读取仓库。
 
-1. 封闭新请求并取消当前 generation。
-2. 同步围住推荐 callback，并启动账号读取退休；排空推荐、VIP 和账号读取。
-3. 退休目录／歌词／发现／搜索，等待歌词、发现、匹配、目录和同步工作。
-4. 排空已准入 application 请求，再保存可选来源匹配状态。
-5. 准备反馈、脚本和唯一 `MusicLibraryOwner`。
-6. 等待 `MusicPlatformClient.DrainAsync` 与缓存存储排空；已知账号未知回执仍使关闭准备失败。
+1. 封闭新请求并取消当前 generation，同步围住推荐 callback。
+2. 同时停止推荐、账号读取、目录、歌词、发现、搜索、同步、反馈和脚本工作；App 同时停止所拥有的执行端，避免读者等不到生产者结束。
+3. 排空已准入 application 请求、真实本地事务和资源工作，再释放 application 自己拥有的协调器、账号协议与 platform client。
+4. App 最后释放被借用的数据库和播放资源，确认旧代停止后才能清空数据或重新装配。
 
-准备失败不会释放借用的 App store/runtime/playback。取消关闭会恢复原 owners，但不会自动重放写入、登录、远端同步、脚本调用或播放。
+退役不可取消，不复活旧 lease、callback 或播放意图。保存准备的失败仍保留在原回执；Dispose／Abort 报告实际释放失败，不重复把已结算的未知业务回执当作资源仍被占用。未知写不会被重放或描述成回滚。
 
-最终 dispose/abort 才释放 application 自己拥有的协调器、账号协议和 platform client；借用的 App runtime/store 由 App 在能力排空后释放。取消关闭准备使用新生命周期，不复活旧 lease、不重放写入或平台请求；未知持久写入不会被描述成回滚。
+正常整进程退出采用[App生命周期](app-runtime.md)的独立边界，不将全部进程内退役步骤作为退出门禁。
 
 ## 数据格式
 

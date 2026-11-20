@@ -34,33 +34,68 @@ test('current schema, constraints, transactional CAS and restart', () => fixture
   await restarted.close();
 }));
 
+test('process termination without close preserves committed records and rolls back an unfinished transaction', () => fixture(async root => {
+  const module = new URL('../src/database.js', import.meta.url).href;
+  const setup = new URL('../../../tests/storage-test-fixture.mjs', import.meta.url).href;
+  const source = `await import(process.argv[1]); const {openDatabase} = await import(process.argv[2]);
+    const {DatabaseSync} = await import('node:sqlite'); const {join} = await import('node:path');
+    const db = openDatabase(process.argv[3]);
+    await db.execute("INSERT INTO owner_revisions VALUES('durable',1,'committed')");
+    // The production API commits each call; a second connection holds the crash window open.
+    const unfinished = new DatabaseSync(join(process.argv[3], 'storage-v1', 'meowfilm.sqlite3'));
+    unfinished.exec('PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; BEGIN IMMEDIATE');
+    unfinished.exec("UPDATE owner_revisions SET revision=2,receipt='unfinished' WHERE owner='durable'");
+    unfinished.exec("INSERT INTO owner_revisions VALUES('partial',1,'unfinished')");
+    process.send('transaction-open');`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', source, setup, module, root],
+    {stdio:['ignore', 'ignore', 'inherit', 'ipc']});
+  const exited = once(child, 'exit');
+  try {
+    const signal = AbortSignal.timeout(15000);
+    const ready = once(child, 'message', {signal});
+    const message = await Promise.race([ready, exited.then(() => { throw new Error('writer exited before transaction'); })]);
+    assert.equal(message[0], 'transaction-open');
+    assert.ok((await readFile(join(root, 'storage-v1', 'meowfilm.sqlite3-wal'))).length > 0);
+    assert.ok(child.kill('SIGKILL'));
+    await exited;
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited;
+  }
+  const reopened = openDatabase(root, {initialize:false});
+  try {
+    assert.deepEqual(await reopened.query('SELECT owner,revision,receipt FROM owner_revisions'),
+      [{owner:'durable', revision:1, receipt:'committed'}]);
+    assert.equal((await reopened.query('PRAGMA integrity_check'))[0].integrity_check, 'ok');
+    assert.deepEqual(await reopened.query('PRAGMA foreign_key_check'), []);
+  } finally { await reopened.close(); }
+}));
+
 test('mismatched current database schema hash is a fault', () => fixture(async root => {
   const db = openDatabase(root); await db.ready;
   await db.execute('UPDATE storage_identity SET schema_hash=?', ['0'.repeat(64)]);
   await db.close();
   const wrong = openDatabase(root);
   await assert.rejects(wrong.ready, {code:'STORAGE_SCHEMA'});
-  await assert.rejects(wrong.close(), {code:'STORAGE_SCHEMA'});
+  await wrong.close();
 }));
 
-test('ordinary reopen isolates stored relations while new writes keep foreign key enforcement', () => fixture(async root => {
-  const db = openDatabase(root);
+test('opening does not consume unrelated business relations and new writes still enforce foreign keys', () => fixture(async root => {
+  const original = openDatabase(root); await original.ready; await original.close();
+  const { DatabaseSync } = await import('node:sqlite');
+  const external = new DatabaseSync(join(root, 'storage-v1', 'meowfilm.sqlite3'));
+  try {
+    external.exec("PRAGMA foreign_keys=OFF; INSERT INTO cat_mapping_aliases VALUES(7,0,'orphan')");
+  } finally { external.close(); }
+  const db = openDatabase(root, {initialize:false});
   try {
     await db.ready;
-    await db.query('PRAGMA foreign_keys=OFF');
-    await db.execute('INSERT INTO operation_receipts VALUES(?,?,?)', ['missing-owner', 'retained', 1]);
-    await db.query('PRAGMA foreign_keys=ON');
+    await db.execute("INSERT INTO owner_revisions VALUES('unrelated',1,'saved')");
+    assert.equal((await db.query("SELECT receipt FROM owner_revisions WHERE owner='unrelated'"))[0].receipt, 'saved');
+    await assert.rejects(db.execute("INSERT INTO cat_mapping_aliases VALUES(8,0,'new')"), {code:'STORAGE_CONSTRAINT'});
+    // An explicit diagnostic can report corruption without making it a startup preflight.
+    assert.equal((await db.query('PRAGMA foreign_key_check')).length, 1);
   } finally { await db.close(); }
-  const reopened = openDatabase(root);
-  try {
-    await reopened.ready;
-    assert.equal((await reopened.query('PRAGMA foreign_keys'))[0].foreign_keys, 1);
-    await reopened.execute('INSERT INTO owner_revisions VALUES(?,?,?)', ['unrelated', 1, 'saved']);
-    await assert.rejects(reopened.execute('INSERT INTO operation_receipts VALUES(?,?,?)',
-      ['missing-owner', 'rejected', 1]), {code:'STORAGE_CONSTRAINT'});
-    assert.deepEqual(await reopened.query('SELECT operation_id FROM operation_receipts'), [{operation_id:'retained'}]);
-    assert.equal((await reopened.query("SELECT receipt FROM owner_revisions WHERE owner='unrelated'"))[0].receipt, 'saved');
-  } finally { await reopened.close(); }
 }));
 
 test('a changed table cannot pass by retaining the schema hash', () => fixture(async root => {
@@ -69,7 +104,7 @@ test('a changed table cannot pass by retaining the schema hash', () => fixture(a
   await db.close();
   const wrong = openDatabase(root);
   await assert.rejects(wrong.ready, {code:'STORAGE_SCHEMA'});
-  await assert.rejects(wrong.close(), {code:'STORAGE_SCHEMA'});
+  await wrong.close();
 }));
 
 test('a truncated database or orphaned WAL is preserved, never adopted as a fresh install', () => fixture(async root => {
@@ -81,7 +116,7 @@ test('a truncated database or orphaned WAL is preserved, never adopted as a fres
     await writeFile(file, bytes);
     const db = openDatabase(dataRoot);
     await assert.rejects(db.ready, {code:'STORAGE_CORRUPT'});
-    await assert.rejects(db.close(), {code:'STORAGE_CORRUPT'});
+    await db.close();
     assert.deepEqual(await readFile(file), bytes);
     if (suffix) assert.ok(!(await readdir(directory)).includes('meowfilm.sqlite3'));
   }
@@ -90,7 +125,7 @@ test('a truncated database or orphaned WAL is preserved, never adopted as a fres
 test('an attached runtime cannot initialize a missing native store', () => fixture(async root => {
   const db = openDatabase(join(root, 'absent'), { initialize:false });
   await assert.rejects(db.ready, {code:'STORAGE_SCHEMA'});
-  await assert.rejects(db.close(), {code:'STORAGE_SCHEMA'});
+  await db.close();
   assert.deepEqual(await readdir(root), []);
 }));
 

@@ -41,7 +41,7 @@
 - 自动与手动调用继续核对 installation、generation、site 和录音；HTTP 音频升级 HTTPS，不新增 ATS 豁免，实测音质不由请求推断。
 - `MusicNativeLyrics` 通过共同平台 client 消费规范歌词；通用时间轴和呈现仍在原生，脚本 lyric 的既有回退继续经 `NativeMusicScriptService`。专有格式转换和平台 HTTP 不在 Swift 重复实现。
 - App 内嵌 Node Mobile 18.20.4、`MeowScriptHost.framework` 与公共运行器；aggregate 的九模块和方法见[运行器装配](../runtime/music-platform.md)。原生官方平台业务借用同一个 runtime，第三方音乐脚本仍按实际调用／检测执行。
-- 公共运行器启动失败会使平台联网请求及脚本不可用，但不改写原生曲库或凭据；关闭／不可恢复退出后本次运行不自动重启。音乐脚本服务关闭只排空自身调用并确认 `music.script.close`，不关闭共享 HTTP 客户端；平台与账号工作由各自 owner 收束。App 最后关闭运行器 listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。风险及独立诊断工具见[运行底座预检](runtime-preflight.md)。
+- 公共运行器启动失败会使平台联网请求及脚本不可用，但不改写原生曲库或凭据；关闭／不可恢复退出后本次运行不自动重启。音乐脚本服务关闭只取消并排空自身调用，不向共享运行器重复发送模块关闭。App 退役时同时停止运行器与其借用者，运行器统一关闭模块、listener、工作线程及启动通道，并等待 `node_start` 返回；HTTP 成功回执本身不代表 Node 已退出。风险及独立诊断工具见[运行底座预检](runtime-preflight.md)。
 
 ## 曲库与网络歌单
 

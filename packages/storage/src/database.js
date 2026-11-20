@@ -102,11 +102,9 @@ function createOwner(root, options) {
       return disposal ??= (async () => {
         closing = true;
         await tail;
-        let error;
-        try { await ready; } catch (failure) { error = failure; }
-        try { await driver?.close(); } catch (failure) { error ??= failure; }
-        roots.delete(root);
-        if (error) throw error;
+        try { await ready; } catch { /* Open failure is delivered by ready and requests. */ }
+        try { await driver?.close(); }
+        finally { roots.delete(root); }
       })();
     },
   };
@@ -141,7 +139,7 @@ export function openDatabase(dataRoot, options = {}) {
       return disposal ??= (async () => {
         closed = true;
         if (--owner.references === 0) await owner.close();
-        else { await drain; await owner.ready; }
+        else { await drain; }
       })();
     },
   };

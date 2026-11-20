@@ -5,7 +5,6 @@ using Windows.System;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using WindowState = MeowFilm.Desktop.DesktopWindowState;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
@@ -33,6 +32,9 @@ public static partial class MusicCatalogPersonalTests
         foreach (bool replaceDuringPlay in new[] { false, true })
             yield return Case("rebuilt home snapshot allows public play" + (replaceDuringPlay ? " across display replacement" : " during held refresh"),
                 () => RestoredHomePlay(replaceDuringPlay));
+        foreach (bool started in new[] { false, true })
+            yield return Case("catalog navigation during delayed play cleanup " + (started ? "retains accepted audio" : "cancels unstarted audio"),
+                () => CatalogPlaybackHandoff(started));
         yield return Case("rebuilt home snapshot opens public playlist during held refresh", RestoredHomeOpen);
         yield return Case("new public playlist read survives delayed native account cleanup", HomeReadAfterAccountNotification);
         yield return Case("new public home playback survives delayed native account cleanup during prepare receipt", HomePlayAfterAccountNotification);
@@ -44,9 +46,6 @@ public static partial class MusicCatalogPersonalTests
         foreach (string failure in new[] { "read", "write", "slow-write" })
             yield return Case("home optional cache " + failure + " never replaces successful upstream status",
                 () => HomeOptionalCache(failure));
-        foreach (bool cached in new[] { false, true })
-            yield return Case("home replacement fades existing content and releases its visual snapshot cached=" + cached,
-                () => HomeRefreshTransition(cached));
         foreach (bool settings in new[] { false, true })
             yield return Case("home cards survive " + (settings ? "settings activation and return" : "first explicit account read without blocking play"),
                 () => HomeAfterAccountSettings(settings));
@@ -312,7 +311,7 @@ public static partial class MusicCatalogPersonalTests
         await home.Arrived.Task.WaitAsync(HomeGuard);
         var refresh = f.Module.HomeRefresh;
         Equal("歌单 801,歌单 802", HomeTitles(f));
-        Check(!f.Module.ShowCatalogSkeleton, "saved display is visible while its replacement is pending");
+        Check(!f.Module.ShowCatalogLoading, "saved display is visible while its replacement is pending");
         var card = f.Module.HomeSections.SelectMany(section => section.Items).First();
         var preparing = replaceDuringPlay ? f.App.HoldNext("music.catalog.playlist.prepare") : null;
         var play = f.Module.PlayCatalogCardAsync(card);
@@ -343,6 +342,37 @@ public static partial class MusicCatalogPersonalTests
         }
         Equal("歌单 901", HomeTitles(f));
         Equal(1, Calls(f, "music.catalog.home"));
+    }
+
+    private static async Task CatalogPlaybackHandoff(bool started)
+    {
+        await using var f = await Fixture.Create();
+        f.Output.StartOnOpen = started;
+        await f.Module.NavigateAsync("catalog-home", default);
+        await f.Module.HomeInitialization;
+        await f.Module.CatalogEntryInitialization;
+        var card = f.Module.HomeSections.SelectMany(section => section.Items).First(item => item.Kind == "playlist" && item.CanPlay);
+        var cleanup = f.App.HoldNext("music.catalog.playlist.discard");
+        var play = f.Module.PlayCatalogCardAsync(card);
+        try
+        {
+            await cleanup.Arrived.Task.WaitAsync(HomeGuard);
+            Equal(1, f.Output.Opens);
+            Check(!play.IsCompleted && !f.Output.OpenToken.IsCancellationRequested,
+                "the transferred audio input is live while the stage cleanup receipt is delayed");
+            Equal(!started, card.IsPreparing);
+            Equal(!started, f.Module.CanCancelCatalog);
+            await f.Module.NavigateAsync("favorites", default);
+            Equal(!started, f.Output.OpenToken.IsCancellationRequested);
+            Check(!card.IsPreparing, "navigation or accepted audio retires the card preparation owner");
+            if (started)
+                Check(f.Output.IsPlaying, "accepted playback remains active after its catalog page retires");
+            cleanup.Release();
+            await play.WaitAsync(HomeGuard);
+            Equal(!started, f.Output.OpenToken.IsCancellationRequested);
+            Equal(1, f.Output.Opens);
+        }
+        finally { cleanup.Release(); }
     }
 
     private static async Task RetiredRecommendationAccountRead(bool fail)
@@ -501,41 +531,6 @@ public static partial class MusicCatalogPersonalTests
         Equal(1, Calls(f, "music.catalog.home"));
         Equal(1, Calls(f, "music.accounts.list"));
         AssertNoHomeCommit(f);
-    }
-
-    private static async Task HomeRefreshTransition(bool cached)
-    {
-        await using var f = await Fixture.Create(store: cached ? await SavedHome(HomePage("801")) : null);
-        f.App.TransformNext("music.catalog.home", _ => HomePage("901"));
-        var first = f.App.HoldNext("music.catalog.home");
-        var navigation = f.Module.NavigateAsync("catalog-home", default);
-        await first.Arrived.Task.WaitAsync(HomeGuard);
-        using var mount = new HomeNoticeMount(f.Module.View);
-        await Drain();
-        Layout(f.Module.View);
-        var view = Visuals<MusicCatalogView>(f.Module.View).Single();
-        var overlay = (Image)view.FindName("HomeRefreshOverlay");
-        var scroll = (ScrollViewer)view.FindName("HomeScroll");
-        await Until(() => scroll.IsLoaded && scroll.ActualWidth > 0 && scroll.ActualHeight > 0);
-        Check(overlay.Source is null && scroll.Opacity == 1,
-            "initial presentation and a pending background read do not fade or clear existing content");
-        bool observedPublication = false;
-        f.Module.HomeSections.CollectionChanged += (_, _) =>
-        {
-            observedPublication = true;
-            bool animate = cached && MusicVisuals.CanAnimate(view);
-            Check((overlay.Source is RenderTargetBitmap) == animate,
-                "successful replacement retains the previous visible frame only when animation is appropriate");
-            Check(!overlay.IsHitTestVisible, "the transition does not intercept the newly published cards");
-        };
-        first.Release();
-        await navigation.WaitAsync(HomeGuard);
-        await f.Module.HomeRefresh.WaitAsync(HomeGuard);
-        Check(observedPublication && HomeTitles(f) == "歌单 901");
-        await Until(() => overlay.Source is null && scroll.Opacity == 1);
-        Check(overlay.Visibility == Visibility.Collapsed, "completed transitions release the temporary bitmap");
-        f.Module.View.Visibility = Visibility.Collapsed;
-        Check(overlay.Source is null && scroll.Opacity == 1);
     }
 
     private static async Task HomeAfterAccountSettings(bool settings)

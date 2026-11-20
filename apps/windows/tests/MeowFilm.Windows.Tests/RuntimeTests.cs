@@ -90,10 +90,6 @@ public static class RuntimeTests
             var modules = Modules;
             var bundle = RuntimeBundle.Verify(Path.Combine(Bundles, Identity), Identity);
             await using var runtime = await NodeRuntime.StartAsync(Node, bundle, modules, ScriptData());
-            var token = await runtime.CallAsync("netease.token.get", new { unexpected = true });
-            BridgeTests.Equal(false, token.GetProperty("ok").GetBoolean());
-            BridgeTests.Equal("netease.token.v1", token.GetProperty("contract").GetString());
-            BridgeTests.Equal("INVALID_REQUEST", token.GetProperty("code").GetString());
             foreach (var (method, contract) in new[]
             {
                 ("pan.providers", "pan.runtime.v1"), ("tmdb.data.settings.get", "tmdb.data.v1"),
@@ -125,7 +121,7 @@ public static class RuntimeTests
                     id = collectionId, ifRevision = 1,
                     songs = new[] { MusicSongFixture.Local("test:local", "确定性测试") }
                 });
-                BridgeTests.Equal(true, added.GetProperty("ok").GetBoolean());
+                if (!added.GetProperty("ok").GetBoolean()) throw new InvalidOperationException("Add local song: " + added.GetProperty("code").GetString());
                 var queue = await library.ExecuteAsync("music.queue.playCollection", new { id = collectionId, ifRevision = 2, index = 0 });
                 BridgeTests.Equal(true, queue.GetProperty("ok").GetBoolean());
                 var current = await library.ExecuteAsync("music.queue.get", new { offset = 0, limit = 1 });
@@ -198,7 +194,7 @@ public static class RuntimeTests
                     BridgeTests.Equal(false, File.Exists(Path.Combine(nextFixture.Root, "business-entered")));
                     BridgeTests.Equal(false, File.Exists(Path.Combine(nextFixture.Root, "close-entered")));
                     await port.DisposeAsync();
-                    BridgeTests.Equal(true, File.Exists(Path.Combine(nextFixture.Root, "close-entered")));
+                    BridgeTests.Equal(false, File.Exists(Path.Combine(nextFixture.Root, "close-entered")));
                     AssertExited(successor.ProcessId);
                 }
                 finally { await port.DisposeAsync(); }
@@ -262,9 +258,9 @@ public static class RuntimeTests
             });
         foreach (var (mode, code) in new[]
         {
-            ("wrong-protocol", "INVALID_RESPONSE"), ("wrong-endpoint", "INVALID_REQUEST"),
+            ("wrong-protocol", "INVALID_RESPONSE"), ("wrong-endpoint", "INVALID_RESPONSE"),
             ("extra-ready-bytes", "INVALID_RESPONSE"),
-            ("invalid-json", "INVALID_MESSAGE"), ("large-ready", "INVALID_RESPONSE"),
+            ("invalid-json", "INVALID_RESPONSE"), ("large-ready", "INVALID_RESPONSE"),
             ("exit", "CLOSED"), ("timeout", "TIMEOUT")
         })
             yield return new("native-runtime: startup " + mode + " reclaims the real child", async () =>
@@ -299,43 +295,18 @@ public static class RuntimeTests
             await BridgeTests.Expect("CANCELLED", () => startup);
             AssertExited(pid);
         });
-        yield return new("native-runtime: close waits for remote cleanup and the actual process exit", async () =>
-        {
-            var fixture = CreateFixture("drain");
-            var runtime = await NodeRuntime.StartAsync(Node, fixture.Bundle, Modules, ScriptData());
-            var pid = runtime.ProcessId;
-            try
-            {
-                var closing = runtime.DisposeAsync().AsTask();
-                await WaitForFixtureFileAsync(Path.Combine(fixture.Root, "close-entered"));
-                BridgeTests.Equal(false, closing.IsCompleted);
-                BridgeTests.Equal(false, runtime.Completion.IsCompleted);
-                using (var child = Process.GetProcessById(pid)) BridgeTests.Equal(false, child.HasExited);
-                await File.WriteAllTextAsync(Path.Combine(fixture.Root, "release"), "release");
-                await closing.WaitAsync(TimeSpan.FromSeconds(5));
-                await runtime.Completion;
-                AssertExited(pid);
-            }
-            finally
-            {
-                await File.WriteAllTextAsync(Path.Combine(fixture.Root, "release"), "release");
-                await runtime.DisposeAsync();
-            }
-        });
-        foreach (var (mode, code) in new[]
-        {
-            ("incomplete-close", "INVALID_RESPONSE"), ("disconnect-close", "CLOSED"), ("stubborn-close", "CLOSED"),
-            ("extra-during-close", "INVALID_RESPONSE")
-        })
-            yield return new("native-runtime: " + mode + " remains a failure after process reclamation", async () =>
+        foreach (var mode in new[] { "drain", "incomplete-close", "disconnect-close", "stubborn-close", "extra-during-close" })
+            yield return new("native-runtime: retirement ends owned process without a close handshake: " + mode, async () =>
             {
                 var fixture = CreateFixture(mode);
                 var runtime = await NodeRuntime.StartAsync(Node, fixture.Bundle, Modules, ScriptData());
                 var pid = runtime.ProcessId;
-                await BridgeTests.Expect(code, () => runtime.DisposeAsync().AsTask());
-                await BridgeTests.Expect(code, () => runtime.DisposeAsync().AsTask());
-                await runtime.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+                var closing = runtime.DisposeAsync().AsTask();
+                BridgeTests.Equal(true, ReferenceEquals(closing, runtime.DisposeAsync().AsTask()));
+                await closing.WaitAsync(TimeSpan.FromSeconds(2));
+                await runtime.Completion;
                 AssertExited(pid);
+                BridgeTests.Equal(false, File.Exists(Path.Combine(fixture.Root, "close-entered")));
             });
         yield return new("native-runtime: post-ready pipe bytes close the session and reclaim the child", async () =>
         {
@@ -344,7 +315,7 @@ public static class RuntimeTests
             await File.WriteAllTextAsync(Path.Combine(fixture.Root, "extra"), "extra");
             await runtime.Completion.WaitAsync(TimeSpan.FromSeconds(5));
             BridgeTests.Equal(false, runtime.IsConnected);
-            await BridgeTests.Expect("INVALID_RESPONSE", () => runtime.DisposeAsync().AsTask());
+            await runtime.DisposeAsync();
             AssertExited(runtime.ProcessId);
         });
         foreach (var mutation in new[] { "changed", "missing", "additional" })

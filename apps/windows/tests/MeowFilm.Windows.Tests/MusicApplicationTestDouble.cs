@@ -21,7 +21,6 @@ internal abstract class MusicApplicationTestDouble : IMusicApplication
         string? installationId = null, CancellationToken cancellationToken = default) =>
         throw new InvalidOperationException("Source import is not part of this fixture");
     public virtual Task PrepareShutdownAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
-    public virtual Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     public virtual Task AbortAsync(CancellationToken cancellationToken = default) => DisposeAsync().AsTask();
     public virtual ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
@@ -137,8 +136,7 @@ internal abstract class MusicApplicationForwarder(IMusicApplication inner) : Mus
         Inner.ImportSourceAsync(source, basename, installationId, cancellationToken);
     public override Task PrepareShutdownAsync(CancellationToken cancellationToken = default) =>
         Inner.PrepareShutdownAsync(cancellationToken);
-    public override Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default) =>
-        Inner.CancelShutdownPreparationAsync(cancellationToken);
+
     public override Task AbortAsync(CancellationToken cancellationToken = default) =>
         Inner.AbortAsync(cancellationToken);
     public override ValueTask DisposeAsync() => Inner.DisposeAsync();

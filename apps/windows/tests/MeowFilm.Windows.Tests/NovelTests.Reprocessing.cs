@@ -172,7 +172,7 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var runtime = new Runtime { Text = "广告漢語" };
         var sources = NovelTestSources.Create(runtime); await using var engine = new RuleProbe();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(engine));
-        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync);
+        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync());
         shell.Resize(1050, 760);
         try
         {

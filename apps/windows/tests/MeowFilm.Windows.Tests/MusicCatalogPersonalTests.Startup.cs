@@ -55,7 +55,7 @@ public static partial class MusicCatalogPersonalTests
         await using var f = await Fixture.Create(initialize: false);
         await f.Module.PrepareStartupAsync().WaitAsync(HomeGuard);
         var held = f.App.HoldNext("music.library.list", before: false);
-        var shell = new ShellWindow([f.Module], [], () => f.Module.DisposeAsync().AsTask(), f.Module.AbortAsync);
+        var shell = new ShellWindow([f.Module], [], () => f.Module.DisposeAsync().AsTask());
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         shell.Closed += (_, _) => closed.TrySetResult();
         var status = (TextBlock)DesktopTestUi.WindowRoot(shell).FindName("StatusText");
@@ -103,7 +103,7 @@ public static partial class MusicCatalogPersonalTests
         finally
         {
             held.Release();
-            await shell.AbortAsync().WaitAsync(HomeGuard);
+            await shell.CloseAfterReleaseAsync().WaitAsync(HomeGuard);
             await closed.Task.WaitAsync(HomeGuard);
             await Drain();
         }

@@ -277,9 +277,8 @@ public static partial class MusicUiTests
             Equal(1, f.Calls.Count("music.catalogSource.settings.save"));
             var settings = await MusicTestStores.For(f.Store).ReadAsync("local");
             True(settings.Revision.Generation > 0, "the confirmed source receipt is durable");
-            await f.Module.CancelShutdownPreparationAsync();
-            view.Visibility = Visibility.Visible;
-            await Until(() => f.Module.CanEditCatalogSource && f.Module.CatalogSourcePlatform == "kg");
+            view.Visibility = Visibility.Visible; await Drain();
+            True(!f.Module.CanEditCatalogSource, "visibility cannot reopen a retired owner");
             Equal(1, f.Calls.Count("music.catalogSource.settings.save"));
         });
         yield return Case("replica catalog source rejected and unknown saves use notices rollback and authoritative readback", async () =>
@@ -341,7 +340,7 @@ public static partial class MusicUiTests
             var view = (MusicHomeSourceSettingsView)f.Module.HomeSourceSettingsView;
             var film = new SettingsNavigationTests.Module("film", "影视");
             await using var appearance = new MeowFilm.AppHost.AppAppearance(f.Store);
-            var shell = new ShellWindow([f.Module, film], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
+            var shell = new ShellWindow([f.Module, film], [], () => Task.CompletedTask, appearance: appearance)
             {
             };
             try

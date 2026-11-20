@@ -35,7 +35,7 @@ public sealed partial class MusicLibraryOwner
     private JsonObject SearchPolicy(MusicLibraryData doc, string? kind = null)
     {
         var value = (kind is null ? Area(doc, SearchPolicyArea) : doc.Select(SearchPolicyArea, "schema", "revision", kind)) ??
-        LJ.Obj(("schema", 3), ("revision", 0), ("songs", EmptySearchKind()),
+        LJ.Obj(("schema", 1), ("revision", 0), ("songs", EmptySearchKind()),
             ("playlists", EmptySearchKind()));
         try { ValidateSearchPolicy(value, kind); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
@@ -45,7 +45,7 @@ public sealed partial class MusicLibraryOwner
     private JsonObject SearchHistory(MusicLibraryData doc)
     {
         var value = Area(doc, SearchHistoryArea) ??
-        LJ.Obj(("schema", 2), ("revision", 0), ("items", new JsonArray()));
+        LJ.Obj(("schema", 1), ("revision", 0), ("items", new JsonArray()));
         try { ValidateSearchHistory(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
@@ -89,7 +89,7 @@ public sealed partial class MusicLibraryOwner
     private static void ValidateSearchPolicy(JsonObject value, string? kind = null)
     {
         LJ.Fields(value, "schema revision songs playlists", "schema revision");
-        LJ.Require(LJ.I(value["schema"]) == 3);
+        LJ.Require(LJ.I(value["schema"]) == 1);
         _ = Revision(value);
         foreach (string name in kind is null ? new[] { "songs", "playlists" } : new[] { kind })
             ValidateSearchKind(LJ.Object(value[name]));
@@ -98,7 +98,7 @@ public sealed partial class MusicLibraryOwner
     private static void ValidateSearchHistory(JsonObject value)
     {
         LJ.Fields(value, "schema revision items", "schema revision items");
-        LJ.Require(LJ.I(value["schema"]) == 2);
+        LJ.Require(LJ.I(value["schema"]) == 1);
         _ = Revision(value);
         var items = LJ.Array(value["items"]);
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -120,7 +120,7 @@ public sealed partial class MusicLibraryOwner
             string? kind = method == "music.search.settings.get" && p.ContainsKey("kind") ? LJ.Text(p["kind"]) : null;
             LJ.Require(kind is null or "songs" or "playlists");
             var policy = method == "music.search.settings.get" ? SearchPolicy(doc, kind) :
-                OverwriteSettings(doc, SearchPolicyArea, 3, LJ.Obj(("schema", 3), ("revision", 0)));
+                OverwriteSettings(doc, SearchPolicyArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
             if (method == "music.search.settings.get")
             {
                 return (LJ.Obj(("settings", kind is null ? policy : LJ.Obj(("schema", policy["schema"]),
@@ -130,7 +130,7 @@ public sealed partial class MusicLibraryOwner
             LJ.Require(method == "music.search.settings.save", "CAPABILITY_UNAVAILABLE");
             LJ.Fields(p, "ifRevision songs playlists", "ifRevision songs playlists");
             LJ.Require(LJ.I(p["ifRevision"]) == Revision(policy), "REVISION_CONFLICT");
-            var next = LJ.Obj(("schema", 3), ("revision", checked(Revision(policy) + 1)),
+            var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(policy) + 1)),
                 ("songs", SearchKindInput(p["songs"])), ("playlists", SearchKindInput(p["playlists"])));
             ValidateSearchPolicy(next);
             Set(doc, SearchPolicyArea, next, partial: true);

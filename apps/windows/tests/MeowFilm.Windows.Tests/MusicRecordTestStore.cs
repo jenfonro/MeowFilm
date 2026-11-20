@@ -150,7 +150,7 @@ internal class MusicRecordTestStore : IMusicLibraryStore
             var areas = new JsonObject(); var songs = new JsonObject();
             foreach (var pair in saved.Areas) areas[pair.Key] = pair.Value?.DeepClone();
             foreach (string id in Database.SongIds()) songs[id] = Database.ReadSong(id);
-            return new JsonObject { ["schema"] = 3, ["generation"] = saved.Revision.Generation,
+            return new JsonObject { ["schema"] = 1, ["generation"] = saved.Revision.Generation,
                 ["receipt"] = saved.Revision.Receipt, ["areas"] = areas, ["songs"] = songs };
         }).GetAwaiter().GetResult();
     }
@@ -166,7 +166,7 @@ internal class MusicRecordTestStore : IMusicLibraryStore
     internal byte[]? Bytes { get => Data; set => Data = value; }
     internal void Seed(JsonObject snapshot)
     {
-        if (snapshot["schema"]?.GetValue<int>() != 3 || snapshot["areas"] is not JsonObject areas ||
+        if (snapshot["schema"]?.GetValue<int>() != 1 || snapshot["areas"] is not JsonObject areas ||
             snapshot["songs"] is not JsonObject songs) throw new InvalidOperationException("New-format diagnostic snapshot required.");
         if (!initialized) { _ = Snapshot(); initialized = true; }
         Storage.WriteAsync(db =>

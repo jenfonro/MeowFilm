@@ -131,8 +131,11 @@ public actor RuntimeSession {
         for waiter in pending.values { waiter.resume(throwing: RuntimeHTTPError.closed) }
         let launcher = launcher, launch = launch, outcome = outcome
         let stopping = Task {
+            // EOF must reach the embedded executor before waiting for HTTP
+            // settlement; cancelling a waiter alone cannot stop its producer.
+            async let executor: Void = launcher.close()
             if case .success(let client)? = outcome { await client.close() }
-            await launcher.close()
+            await executor
             await launch?.value
             await launcher.waitForExit()
             for notification in notifications { await notification.value }

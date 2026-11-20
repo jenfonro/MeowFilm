@@ -22,6 +22,34 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     internal async Task<IReadOnlyList<CatSourceConfiguration>> ReadAsync(CancellationToken token) =>
         Parse(await document.ReadAsync(token).ConfigureAwait(false) ?? Empty);
 
+    internal async Task<IReadOnlyDictionary<string, bool>> ReadPanInterceptionAsync(CancellationToken token)
+    {
+        var root = await document.ReadAsync(token).ConfigureAwait(false) ?? Empty;
+        return PanInterception(root);
+    }
+
+    internal async Task<IReadOnlyDictionary<string, bool>> SavePanInterceptionAsync(string provider, bool enabled,
+        CancellationToken token)
+    {
+        if (!PanSettingsStore.Providers.Any(value => value.GetProperty("provider").GetString() == provider))
+            throw new FilmSourceException("INVALID_ARGUMENT");
+        var saved = await document.UpdateAsync(current =>
+        {
+            var root = current ?? Empty;
+            var providers = FilmDocument.Set(root.GetProperty("providers"), provider, JsonSerializer.SerializeToElement(enabled));
+            return FilmDocument.Set(root, "providers", providers);
+        }, token).ConfigureAwait(false);
+        return PanInterception(saved);
+    }
+
+    private static IReadOnlyDictionary<string, bool> PanInterception(JsonElement root)
+    {
+        var providers = root.GetProperty("providers");
+        return PanSettingsStore.Providers.Select(value => value.GetProperty("provider").GetString()!)
+            .ToDictionary(provider => provider, provider => !providers.TryGetProperty(provider, out var value) || value.GetBoolean(),
+                StringComparer.Ordinal);
+    }
+
     internal Task<IReadOnlyList<CatSourceConfiguration>> AddAsync(CatSourceConfiguration script, CancellationToken token) =>
         UpdateAsync(script.InstallationId, current => current is not null
             ? throw new FilmSourceException("STORAGE_CONFLICT") : JsonSerializer.SerializeToElement(script, Json), token);

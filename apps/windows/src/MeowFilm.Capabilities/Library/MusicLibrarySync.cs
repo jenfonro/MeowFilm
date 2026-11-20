@@ -31,7 +31,7 @@ public sealed partial class MusicLibraryOwner
     {
         var platforms = new JsonObject();
         foreach (string platform in SyncPlatforms) platforms[platform] = LJ.Obj(("favorites", false), ("playlists", false), ("accountId", ""));
-        return LJ.Obj(("schema", 2), ("revision", 0), ("platforms", platforms), ("pending", null),
+        return LJ.Obj(("schema", 1), ("revision", 0), ("platforms", platforms), ("pending", null),
             ("confirmation", null), ("approved", null), ("status", LJ.Obj(("phase", "idle"), ("code", ""), ("at", 0), ("issues", new JsonArray()))));
     }
     private JsonObject LibrarySync(MusicLibraryData doc)
@@ -44,7 +44,7 @@ public sealed partial class MusicLibraryOwner
         try
         {
             LJ.Fields(s, "schema revision platforms pending confirmation approved status", "schema revision platforms pending confirmation approved status");
-            LJ.Require(LJ.I(s["schema"]) == 2); _ = Revision(s);
+            LJ.Require(LJ.I(s["schema"]) == 1); _ = Revision(s);
             var platforms = LJ.Object(s["platforms"]); LJ.Fields(platforms, "wy tx kg", "wy tx kg");
             foreach (var platform in SyncPlatforms)
             {
@@ -181,7 +181,7 @@ public sealed partial class MusicLibraryOwner
     }
     public async Task<MusicLibrarySyncSnapshot> ReadLibrarySyncAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             LJ.Require(!closed && !preparing, "CLOSED"); LJ.Require(pending is null, pending?.Code ?? "PENDING_WRITE");
@@ -223,13 +223,13 @@ public sealed partial class MusicLibraryOwner
     }
     public async Task CheckLibrarySyncAsync(MusicLibrarySyncSnapshot expected, CancellationToken cancellationToken = default)
     {
-        ArgumentNullException.ThrowIfNull(expected); await EnterAsync(cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(expected); await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try { CheckLibrarySyncLocked(expected); } finally { gate.Release(); }
     }
     internal async Task<MusicLibrarySyncSnapshot> AdoptLibrarySyncSongsAsync(MusicLibrarySyncSnapshot expected,
         IReadOnlyList<(JsonObject Song, bool HasMetadata)> songs, CancellationToken cancellationToken)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             CheckLibrarySyncLocked(expected);
@@ -251,7 +251,7 @@ public sealed partial class MusicLibraryOwner
         ArgumentNullException.ThrowIfNull(expected);
         var nextLibrary = LJ.Object(LJ.Parse(System.Text.Encoding.UTF8.GetBytes(library.GetRawText())));
         var nextState = LJ.Object(LJ.Parse(System.Text.Encoding.UTF8.GetBytes(state.GetRawText())));
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             CheckLibrarySyncLocked(expected);

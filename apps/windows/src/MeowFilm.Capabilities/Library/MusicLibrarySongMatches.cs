@@ -4,7 +4,7 @@ public sealed partial class MusicLibraryOwner
 {
     internal async Task<IReadOnlySet<string>> ReadMatchingSongIdsAsync(IEnumerable<string> ids, CancellationToken cancellationToken)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             LJ.Require(!closed && !preparing, "CLOSED");

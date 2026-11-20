@@ -14,7 +14,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real application/owner/catalog/coordinator/queue lane and temporary DPAPI.
+// Real application/owner/catalog/coordinator/queue lane and temporary SQLite.
 // Only canonical platform results and deliberately uncooperative physical delays are synthetic.
 public static class MusicNativeRecommendationTests
 {
@@ -54,7 +54,7 @@ public static class MusicNativeRecommendationTests
         foreach (int read in new[] { 1, 2 })
         {
             int number = read;
-            yield return Case("narrow-prepare-drains-physical-account-read-" + number + "-then-resumes", () => AccountReadDrain(number));
+            yield return Case("narrow-prepare-drains-physical-account-read-" + number + "-then-stays-closed", () => AccountReadDrain(number));
         }
         yield return Case("cancelled-hydrate-waiter-detaches-from-shared-new-start", CancelHydrate);
         yield return Case("narrow-prepare-http-cancelled-waiter-is-not-physical-drain", HttpDrain);
@@ -72,23 +72,19 @@ public static class MusicNativeRecommendationTests
         foreach (int outcome in new[] { 1, 2 })
         {
             int result = outcome;
-            yield return Case("unknown-settled-cas-" + result + "-prepare-and-dispose-fail-but-abort-releases", () => UnknownAbort(result));
+            yield return Case("unknown-settled-cas-" + result + "-prepare-fails-but-dispose-releases", () => UnknownAbort(result));
         }
         foreach (string boundary in new[] { "http", "cas", "media" })
         {
             string owner = boundary;
             yield return Case("abort-waits-for-noncooperative-" + owner, () => AbortDrain(owner));
         }
-        yield return Case("unknown-applied-cas-full-close-failure-cancel-reconcile-reopens-controls", () => UnknownCloseRecovery(true, 2));
-        yield return Case("unknown-not-applied-cas-narrow-close-failure-cancel-reconcile-reopens-controls", () => UnknownCloseRecovery(false, 1));
-        yield return Case("fresh-narrow-close-fences-late-unknown-reconciliation-resume", ReconcileCloseFence);
-        yield return Case("full-prepare-resume-and-cold-reopen-do-not-revive-live-session", Reopen);
+        yield return Case("full-prepare-and-cold-reopen-do-not-revive-live-session", Reopen);
         foreach (int mode in new[] { 1, 2, 3 })
         {
             int ordinary = mode;
             yield return Case("cold-reopen-retains-ordinary-mode-" + mode + "-without-live-continuation", () => ColdOrdinaryMode(ordinary));
         }
-        yield return Case("immediate-full-prepare-and-resume-settle-without-mutual-wait", ImmediateResume);
         yield return Case("changed-observer-synchronous-close-does-not-wait-own-notification", ObserverClose);
     }
 
@@ -200,11 +196,15 @@ public static class MusicNativeRecommendationTests
                 var result=write(db);
                 owner=account!=db.Revision(MusicAccountOwner.DocumentNamespace)?MusicAccountOwner.DocumentNamespace:
                     preferences!=JsonSerializer.Serialize(FMStorageRecords.Selection.ReadMany(db,[]))?MusicFmPreferences.DocumentNamespace:null;
-                if(owner is not null&&Holds.TryRemove(("write:"+owner,Writes.GetValueOrDefault(owner)+1),out var point))
-                    point.Block(CancellationToken.None).GetAwaiter().GetResult();
                 return result;
             },token,retainedBytes,commit);
-            if(owner is not null)Writes.AddOrUpdate(owner,1,(_,n)=>n+1);return value;
+            if(owner is not null)
+            {
+                int count=Writes.AddOrUpdate(owner,1,(_,n)=>n+1);
+                if(Holds.TryRemove(("write:"+owner,count),out var point))
+                    await point.Block(CancellationToken.None);
+            }
+            return value;
         }
         internal async Task SetAccount(long generation = 1)
         {
@@ -220,7 +220,7 @@ public static class MusicNativeRecommendationTests
             Okay(await owner.CallAsync("music.accounts.import", new {
                 platform = "wy", cookie = "MUSIC_U=synthetic-account-key-" + generation }), "seed current account");
         }
-        internal Task<string> RawLibrary() => Task.FromResult(Records.Root.ToJsonString());
+        internal Task<string> RawLibrary() => Task.Run(() => Records.Root.ToJsonString());
         internal void ReleaseAll() { foreach (var point in Barriers) point.Release.TrySetResult(); }
         public override async ValueTask DisposeAsync()
         {
@@ -497,28 +497,33 @@ public static class MusicNativeRecommendationTests
         Check(f.Handler.Paths.IsEmpty && f.Selections.IsEmpty &&
             f.Store.Writes.GetValueOrDefault(MusicFmPreferences.DocumentNamespace) == 0,
             "retired preference read cannot start HTTP, selection or a preference save");
-        await f.App.CancelShutdownPreparationAsync();
-        Check(B(await f.Start(), "active"));
+
+        Error(await f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }), "CLOSED");
     }
     private static async Task FmPreferenceWriteDrain()
     {
-        await using var f = await Fixture.Create();
-        var hold = f.Store.HoldWrite(MusicFmPreferences.DocumentNamespace);
-        var start = f.Start(new { kind = "fm", platform = "wy", mode = "scene", submode = "ELECTRONIC" });
-        await Wait(hold.Entered.Task);
-        int selections = f.Selections.Count;
-        var preparing = f.Source.PrepareRecommendationsAsync();
-        await Pending(preparing); await Pending(start);
-        Check(!hold.Cancelled.Task.IsCompleted);
-        await f.Call("music.queue.mode", new { mode = 3 });
-        hold.Release.TrySetResult();
-        await Wait(preparing); await start;
-        Check(f.Selections.Count == selections &&
-            f.Store.Writes.GetValueOrDefault(MusicFmPreferences.DocumentNamespace) == 1);
-        await f.App.CancelShutdownPreparationAsync();
-        var restored = await f.Start();
-        Check(S(restored, "mode") == "scene" && S(restored, "submode") == "ELECTRONIC" && N(await f.Queue(), "mode") == 1,
-            "an admitted successful preference CAS remains valid after narrow shutdown resumes");
+        string root;
+        await using (var f = await Fixture.Create())
+        {
+            root = f.Root;
+            var hold = f.Store.HoldWrite(MusicFmPreferences.DocumentNamespace);
+            var start = f.Start(new { kind = "fm", platform = "wy", mode = "scene", submode = "ELECTRONIC" });
+            await Wait(hold.Entered.Task);
+            int selections = f.Selections.Count;
+            var preparing = f.Source.PrepareRecommendationsAsync();
+            await Pending(preparing); await Pending(start);
+            Check(!hold.Cancelled.Task.IsCompleted);
+            await f.Call("music.queue.mode", new { mode = 3 });
+            hold.Release.TrySetResult();
+            await Wait(preparing); await start;
+            Check(f.Selections.Count == selections &&
+                f.Store.Writes.GetValueOrDefault(MusicFmPreferences.DocumentNamespace) == 1);
+        }
+
+        await using var reopened = await Fixture.Create(account: false, root: root);
+        var restored = await reopened.Start();
+        Check(S(restored, "mode") == "scene" && S(restored, "submode") == "ELECTRONIC",
+            "a new owner reads the committed preference");
     }
     private static async Task FmMemory()
     {
@@ -792,6 +797,7 @@ public static class MusicNativeRecommendationTests
             "Saving a network reference must preserve the recommendation, queue and current media selection");
         var stage = await f.Call("music.catalog.playlist.prepare", new { platform = "wy", id = "77" });
         Check(old.IsCurrent() && B(await f.State(), "active"));
+        int writes = f.Store.QueueWrites;
         var hold = f.Store.HoldQueueWrite(); long version = N(await f.Queue(), "version");
         var commit = f.Call("music.catalog.playlist.commit", new { token = S(stage, "token"), action = "play", index = 1, expectedVersion = version });
         try
@@ -800,7 +806,11 @@ public static class MusicNativeRecommendationTests
             Check(!old.IsCurrent(), "Final catalog CAS bypassed queue lane");
         }
         finally { hold.Release.TrySetResult(); }
-        await commit; Check(N(await f.Queue(), "total") == 3 && !B(await f.State(), "active"));
+        await commit;
+        Check(f.Store.QueueWrites == writes + 1, "A catalog commit must write its queue exactly once");
+        var committed = await f.Queue();
+        Check(N(committed, "total") == 3, "A catalog play must replace the queue with all prepared members");
+        Check(!B(await f.State(), "active"), "A catalog play must retire the previous recommendation");
     }
     private static async Task NextDuringRecommendation(bool catalog)
     {
@@ -868,10 +878,10 @@ public static class MusicNativeRecommendationTests
         hold.Release.TrySetResult(); await Wait(preparing);
         var result = await start;
         Check(B(result, "ok") ? !B(result, "active") || S(result, "error").Length > 0 : S(result, "code") == "CANCELLED");
-        await f.App.CancelShutdownPreparationAsync();
+
         Check(f.Handler.Paths.IsEmpty && f.Selections.IsEmpty,
             "both initial observation and FM lease are prelude reads; a retired prelude cannot dispatch HTTP");
-        var next = await f.Start(); Check(B(next, "active") && f.Handler.Paths.Count == 1);
+        Error(await f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }), "CLOSED");
     }
     private static async Task CancelHydrate()
     {
@@ -897,8 +907,8 @@ public static class MusicNativeRecommendationTests
         waiting.Cancel(); await Cancelled(prepare); var physical = f.Source.PrepareRecommendationsAsync();
         await Pending(physical); Check(f.Runtime.Disposals == 0 && f.Store.Disposals == 0);
         hold.Release.TrySetResult(); await Wait(physical); await start;
-        await f.App.CancelShutdownPreparationAsync(); Check(f.Handler.Paths.Count == 1);
-        Check(B(await f.Start(), "active") && f.Handler.Paths.Count == 2);
+        Check(f.Handler.Paths.Count == 1);
+        Error(await f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }), "CLOSED");
     }
     private static async Task ResponseDrain()
     {
@@ -918,7 +928,7 @@ public static class MusicNativeRecommendationTests
         hold.Release.TrySetResult(); await Wait(prepare); await start;
         Check(f.Store.Writes.GetValueOrDefault(MusicFmPreferences.DocumentNamespace) == 0,
             "a retired media callback cannot start saving an FM choice");
-        await f.App.CancelShutdownPreparationAsync(); Check(!selected.IsCurrent() && f.Handler.Paths.Count == 1);
+        Check(!selected.IsCurrent() && f.Handler.Paths.Count == 1);
     }
     private static async Task BindingDisposal()
     {
@@ -1012,7 +1022,7 @@ public static class MusicNativeRecommendationTests
         var start = f.Start(); await Wait(hold.Entered.Task); var prepare = f.App.PrepareShutdownAsync();
         await Pending(prepare); Check(f.Runtime.Disposals == 0 && f.Store.QueueWrites == 1 && !hold.Cancelled.Task.IsCompleted);
         hold.Release.TrySetResult(); await Wait(prepare); await start; Check(f.Selections.IsEmpty);
-        await f.App.CancelShutdownPreparationAsync(); Check(N(await f.Queue(), "total") == 3 && !B(await f.State(), "active"));
+        Check(f.Store.QueueWrites == 1);
     }
     private static async Task UnknownCommit()
     {
@@ -1034,7 +1044,7 @@ public static class MusicNativeRecommendationTests
             Check(B(await f.Start(), "requiresReconcile") && f.Store.QueueWrites == 1);
             int writes = f.Store.Writes[MusicRecordsKey];
             string persisted = await f.Store.RawLibrary();
-            foreach (var close in new Func<Task>[] { () => f.App.PrepareShutdownAsync(), () => f.App.DisposeAsync().AsTask() })
+            foreach (var close in new Func<Task>[] { () => f.App.PrepareShutdownAsync() })
             {
                 try { await Wait(close()); throw new InvalidOperationException("Unknown commit must fail ordinary close"); }
                 catch (Exception error) when (error.Message == "COMMIT_UNKNOWN") { }
@@ -1085,8 +1095,8 @@ public static class MusicNativeRecommendationTests
             root = f.Root; await f.Start(); var old = f.Selections.Last();
             await f.App.PrepareShutdownAsync(); Check(!old.IsCurrent() && f.Source.GetFeedback(old.EntryId) is null);
             Error(await f.App.ExecuteAsync("music.recommendations.get"), "CLOSED");
-            await f.App.CancelShutdownPreparationAsync(); Check(!B(await f.State(), "active") && f.Handler.Paths.Count == 1);
-            Check(N(await f.Queue(), "total") == 3);
+            Check(f.Handler.Paths.Count == 1);
+            Check(f.Store.QueueWrites >= 1);
         }
         await using var reopened = await Fixture.Create(account: false, root: root);
         Check(!B(await reopened.State(), "active") && reopened.Handler.Paths.IsEmpty && N(await reopened.Queue(), "total") == 3);
@@ -1107,71 +1117,7 @@ public static class MusicNativeRecommendationTests
         Check(N(actual, "mode") == mode && actual.GetProperty("entries").GetRawText() == entries &&
             !B(state, "continue") && !B(state, "active") && S(state, "id") == "" && restored.Handler.Paths.IsEmpty);
     }
-    private static async Task UnknownCloseRecovery(bool full, int outcome)
-    {
-        var f = await Fixture.Create(); bool finished = false;
-        try
-        {
-            f.Store.UnknownQueueWrite = outcome;
-            var state = await f.Start(); Check(B(state, "requiresReconcile") && f.Store.QueueWrites == 1);
-            int writes = f.Store.Writes[MusicRecordsKey];
-            try
-            {
-                await (full ? f.App.PrepareShutdownAsync() : f.Source.PrepareRecommendationsAsync());
-                throw new InvalidOperationException("Unknown commit must fail save preparation");
-            }
-            catch (Exception e) when (e.Message == "COMMIT_UNKNOWN") { }
-            try { await f.App.CancelShutdownPreparationAsync(); }
-            catch (Exception e) { throw new InvalidOperationException("Cannot reopen controls for explicit reconciliation", e); }
-            var pending = await f.State();
-            Check(B(pending, "requiresReconcile") && !B(pending, "active") && f.Selections.IsEmpty);
-            Error(await f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }), "COMMIT_UNKNOWN");
-            Check(f.Store.Writes[MusicRecordsKey] == writes && f.Handler.Paths.Count == 1);
-            var reconciled = await f.Call("music.recommendations.reconcile", new { id = S(state, "id") });
-            Check(!B(reconciled, "requiresReconcile") && f.Selections.IsEmpty);
-            Check(N(await f.Queue(), "total") == (outcome == 2 ? 3 : 0) &&
-                f.Store.Writes[MusicRecordsKey] == writes && f.Handler.Paths.Count == 1);
-            Check(B(await f.Start(), "active") && f.Handler.Paths.Count == 2);
-            finished = true;
-        }
-        finally
-        {
-            if (finished) await f.DisposeAsync();
-            else await f.AbortAndDisposeAsync();
-        }
-    }
-    private static async Task ImmediateResume()
-    {
-        await using var f = await Fixture.Create(); var hold = f.Handler.Hold();
-        var start = f.Start(); await Wait(hold.Entered.Task);
-        var prepare = f.App.PrepareShutdownAsync();
-        var resume = f.App.CancelShutdownPreparationAsync();
-        await Wait(hold.Cancelled.Task); await Pending(prepare); await Pending(resume);
-        hold.Release.TrySetResult();
-        await Wait(Task.WhenAll(prepare, resume)); await start;
-        Check(!B(await f.State(), "active") && f.Handler.Paths.Count == 1);
-        Check(B(await f.Start(), "active"));
-    }
-    private static async Task ReconcileCloseFence()
-    {
-        await using var f = await Fixture.Create(); f.Store.UnknownQueueWrite = 2;
-        var state = await f.Start();
-        Check(B(state, "requiresReconcile") && f.Store.QueueWrites == 1 && f.Selections.IsEmpty);
-        try { await f.Source.PrepareRecommendationsAsync(); throw new InvalidOperationException("Expected unknown preparation"); }
-        catch (Exception e) when (e.Message == "COMMIT_UNKNOWN") { }
-        await f.App.CancelShutdownPreparationAsync();
-        var hold = f.Store.HoldRead(MusicRecordsKey,
-            f.Store.Reads.GetValueOrDefault(MusicRecordsKey) + 1);
-        var reconcile = f.Call("music.recommendations.reconcile", new { id = S(state, "id") });
-        await Wait(hold.Entered.Task);
-        var close = f.Source.PrepareRecommendationsAsync();
-        await Pending(close); await Pending(reconcile);
-        hold.Release.TrySetResult(); await reconcile; await Wait(close);
-        Check(f.Selections.IsEmpty && f.Handler.Paths.Count == 1);
-        Error(await f.App.ExecuteAsync("music.recommendations.start", new { kind = "fm", platform = "wy" }), "CLOSED");
-        await f.App.CancelShutdownPreparationAsync();
-        Check(!B(await f.State(), "active") && B(await f.Start(), "active"));
-    }
+
     private static async Task ObserverClose()
     {
         await using var f = await Fixture.Create(); var closed = Signal(); int once = 0;
@@ -1182,8 +1128,8 @@ public static class MusicNativeRecommendationTests
             catch (Exception e) { closed.TrySetException(e); }
         };
         f.Source.Changed += observer;
-        try { await f.Start(); await Wait(closed.Task); await f.App.CancelShutdownPreparationAsync(); }
+        try { await f.Start(); await Wait(closed.Task); }
         finally { f.Source.Changed -= observer; }
-        Check(!B(await f.State(), "active"));
+        Error(await f.App.ExecuteAsync("music.recommendations.get"), "CLOSED");
     }
 }

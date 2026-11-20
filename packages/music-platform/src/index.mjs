@@ -314,7 +314,9 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
     close() {
       return closing ??= (async () => {
         closed = true; invalidate();
-        for (const entry of active) if (!entry.committed || entry.readback) entry.controller.abort(new MusicPlatformError('CLOSED'));
+        // Dispatching an upstream mutation is not a local durable commit. Shutdown
+        // cancels its transport too; the operation preserves its unknown receipt.
+        for (const entry of active) entry.controller.abort(new MusicPlatformError('CLOSED'));
         const clientDrain = clients.close();
         await Promise.allSettled([...active].map(entry => entry.work));
         await clientDrain; accounts.close(); mutations.close();

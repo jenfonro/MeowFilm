@@ -32,7 +32,7 @@ public interface IMusicApplication : IAsyncDisposable,
     Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
         string? installationId = null, CancellationToken cancellationToken = default);
     Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
-    Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default);
+
     Task AbortAsync(CancellationToken cancellationToken = default);
 }
 
@@ -102,7 +102,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
     private readonly object gate = new();
     private CancellationTokenSource lifetime = new();
     private TaskCompletionSource drained = Completed();
-    private Task? preparation, resumption, release, disposal;
+    private Task? preparation, release;
     private int pending;
     private bool stopping, closed, accountReceiptUnknown;
     private long accountReceiptEpoch;
@@ -332,8 +332,6 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         Task task;
         lock (gate)
         {
-            if (resumption is { IsCompleted: false } recovering)
-                return PrepareAfterResumeAsync(recovering, cancellationToken);
             stopping = true;
             task = preparation ??= PrepareCoreAsync(drained.Task);
         }
@@ -342,47 +340,40 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         return cancellationToken.CanBeCanceled ? task.WaitAsync(cancellationToken) : task;
     }
 
-    private async Task PrepareAfterResumeAsync(Task recovering, CancellationToken token)
-    {
-        await recovering.ConfigureAwait(false);
-        await PrepareShutdownAsync(token).ConfigureAwait(false);
-    }
-
     private async Task PrepareCoreAsync(Task pendingOperations)
     {
-        await Task.Yield();
+        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         Exception? failure = null;
         try { lifetime.Cancel(); } catch (Exception e) { failure = e; }
         async Task Attempt(Func<Task> action)
         {
             try { await action().ConfigureAwait(false); } catch (Exception e) { failure ??= e; }
         }
-        // Internal preparation must not wait a concurrent resumption which is
-        // itself waiting for this preparation to finish.
         // Fence recommendation callbacks first, then abort service-owned reads.
         // Waiting for narrow preparation before invalidation would leave an
         // already admitted HTTP/account read running until its normal deadline.
         var recommendationDrain = PrepareRecommendationCoreAsync();
         var accountReadDrain = accounts.PrepareReadShutdownAsync();
         try { nativeCatalog.Invalidate(); } catch (Exception e) { failure ??= e; }
-        await Attempt(() => recommendationDrain).ConfigureAwait(false);
-        await Attempt(vipPage.PrepareShutdownAsync).ConfigureAwait(false);
-        await Attempt(() => accountReadDrain).ConfigureAwait(false);
         try { lyrics.Invalidate(); } catch (Exception e) { failure ??= e; }
-        await Attempt(lyrics.DrainAsync).ConfigureAwait(false);
         lock (gate) issuedDiscoveryGeneration = 0;
         try { discovery.Invalidate(); } catch (Exception e) { failure ??= e; }
-        await Attempt(discovery.CancelAndDrainAsync).ConfigureAwait(false);
-        await Attempt(() => searchCoordinator.PrepareShutdownAsync()).ConfigureAwait(false);
-        await Attempt(songMatcher.DrainAsync).ConfigureAwait(false);
-        await Attempt(catalog.DrainAsync).ConfigureAwait(false);
-        await Attempt(() => librarySync.PrepareShutdownAsync()).ConfigureAwait(false);
+        await Task.WhenAll(
+            Attempt(() => recommendationDrain),
+            Attempt(vipPage.PrepareShutdownAsync),
+            Attempt(() => accountReadDrain),
+            Attempt(lyrics.DrainAsync),
+            Attempt(discovery.CancelAndDrainAsync),
+            Attempt(() => searchCoordinator.PrepareShutdownAsync()),
+            Attempt(songMatcher.DrainAsync),
+            Attempt(catalog.DrainAsync),
+            Attempt(() => librarySync.PrepareShutdownAsync()),
+            Attempt(() => Feedback.PrepareShutdownAsync()),
+            Attempt(() => scripts.PrepareShutdownAsync())).ConfigureAwait(false);
         // Native mutations ignore cancellation after CAS admission. Their receipts
         // must settle before the final library preparation, even on earlier failure.
         await pendingOperations.ConfigureAwait(false);
         await Attempt(() => SaveSongMatchesAsync(CancellationToken.None)).ConfigureAwait(false);
-        await Attempt(() => Feedback.PrepareShutdownAsync()).ConfigureAwait(false);
-        await Attempt(() => scripts.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(() => library.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(platform.DrainAsync).ConfigureAwait(false);
         await Attempt(database.DrainAsync).ConfigureAwait(false);
@@ -393,73 +384,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
-    public Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-    {
-        Task task;
-        lock (gate)
-        {
-            if (closed) return Task.FromException(new InvalidOperationException("CLOSED"));
-            if (preparation is null && resumption is null && !recommendationPreparing) return Task.CompletedTask;
-            task = resumption ??= ResumeCoreAsync(preparation);
-        }
-        return cancellationToken.CanBeCanceled ? task.WaitAsync(cancellationToken) : task;
-    }
-
-    private async Task ResumeCoreAsync(Task? prepare)
-    {
-        await Task.Yield();
-        if (prepare is not null) { try { await prepare.ConfigureAwait(false); } catch { /* Unknown state is not reconciled here. */ } }
-        lock (gate) if (closed) throw new InvalidOperationException("CLOSED");
-        accounts.ResumeReads();
-        // The Module may have sealed only recommendations before it ever reached
-        // whole-app preparation. Cancel and settle that startup/read/callback scope
-        // before restoring any recommendation admission.
-        bool recommendationWasPreparing;
-        lock (gate) recommendationWasPreparing = recommendationPreparing;
-        bool requiresReconciliation = false;
-        if (recommendationWasPreparing)
-        {
-            try { await PrepareRecommendationCoreAsync().ConfigureAwait(false); }
-            catch (RecommendationException error) when (error.Code == "COMMIT_UNKNOWN")
-            {
-                // Coordinator raises this only after its actual work has settled.
-                // Restore controls, not recommendation admission: the sole owner
-                // must retain the nonce until an explicit read reconciliation.
-                requiresReconciliation = true;
-            }
-        }
-        await library.CancelShutdownPreparationAsync().ConfigureAwait(false);
-        await scripts.CancelShutdownPreparationAsync().ConfigureAwait(false);
-        await librarySync.CancelShutdownPreparationAsync().ConfigureAwait(false);
-        await searchCoordinator.CancelShutdownPreparationAsync().ConfigureAwait(false);
-        await vipPage.CancelShutdownPreparationAsync().ConfigureAwait(false);
-        Feedback.CancelShutdownPreparation();
-        // All borrowed owners are usable before the coordinator can admit new work.
-        // Resume clears the old session; it does not restart playback or HTTP.
-        if (!requiresReconciliation) recommendations.Resume();
-        lock (gate)
-        {
-            if (closed) throw new InvalidOperationException("CLOSED");
-            if (!requiresReconciliation)
-            {
-                recommendationLifetime.Dispose(); recommendationLifetime = new();
-                recommendationCancellation = null;
-            }
-            lifetime.Dispose(); lifetime = new();
-            preparation = null; resumption = null; stopping = false;
-            recommendationPreparing = requiresReconciliation;
-            recommendationReconciliationPending = requiresReconciliation;
-        }
-    }
-
-    public ValueTask DisposeAsync()
-    {
-        lock (gate)
-        {
-            var prepare = BeginFinalization();
-            return new(disposal ??= DisposeCoreAsync(prepare, release!));
-        }
-    }
+    public ValueTask DisposeAsync() => new(AbortAsync());
 
     public Task AbortAsync(CancellationToken cancellationToken = default)
     {
@@ -470,28 +395,17 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         }
     }
 
-    // Called under gate. Explicit abort ignores a failed save preparation, but
-    // never ignores actual cleanup/drain failures. Ordinary dispose preserves both.
+    // Called under gate. Business failures remain on their operation receipts.
+    // Release reports only failures that prevent ownership from being relinquished.
     private Task BeginFinalization()
     {
-        var recovering = resumption;
         closed = true; stopping = true;
-        // Do not route through PrepareAfterResume: a concurrent resume is fenced
-        // and may now fail CLOSED. We still must drain the current generation.
         var prepare = preparation ??= PrepareCoreAsync(drained.Task);
-        release ??= ReleaseCoreAsync(prepare, recovering);
+        release ??= ReleaseCoreAsync(prepare);
         return prepare;
     }
 
-    private static async Task DisposeCoreAsync(Task prepare, Task cleanup)
-    {
-        Exception? failure = null;
-        try { await prepare.ConfigureAwait(false); } catch (Exception e) { failure = e; }
-        try { await cleanup.ConfigureAwait(false); } catch (Exception e) { failure ??= e; }
-        if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
-    }
-
-    private async Task ReleaseCoreAsync(Task prepare, Task? recovering)
+    private async Task ReleaseCoreAsync(Task prepare)
     {
         await Task.Yield();
         Exception? failure = null;
@@ -499,8 +413,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
         {
             try { await action().ConfigureAwait(false); } catch (Exception e) { failure ??= e; }
         }
-        try { await prepare.ConfigureAwait(false); } catch { /* Preserve failure in DisposeCore, not the explicit abort receipt. */ }
-        if (recovering is not null) { try { await recovering.ConfigureAwait(false); } catch { } }
+        try { await prepare.ConfigureAwait(false); } catch { /* Business failure does not prevent releasing settled owners. */ }
         await Attempt(recommendations.AbortAsync).ConfigureAwait(false);
         lock (gate)
         {

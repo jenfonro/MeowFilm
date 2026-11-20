@@ -42,7 +42,6 @@ Task<JsonElement> AppendQueueAsync(
 
 Task ReconcileAsync(CancellationToken cancellationToken = default);
 Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
-Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default);
 Task AbortAsync(CancellationToken cancellationToken = default);
 ValueTask DisposeAsync();
 ```
@@ -112,11 +111,11 @@ playback-settings
 
 ## 在线设置当前格式
 
-`online-settings` 的当前格式为 schema 3，消费以下必需字段：
+`online-settings` 的当前格式为 schema 1，消费以下必需字段：
 
 ```json
 {
-  "schema": 3,
+  "schema": 1,
   "revision": 0,
   "lyrics": true
 }
@@ -124,7 +123,7 @@ playback-settings
 
 - 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或写入数据库。
 - `music.settings.save` 必须携带 `ifRevision` 和 `lyrics`，未消费请求字段不影响当前动作；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前动作不消费全局音源选择，已有同名扩展不赋予该设置音源控制权。
-- 已存在该 area 时在实际读取／保存处校验必需字段：schema 必须是数值 3（`3.0`／`3e0` 同值可读），revision 为合法安全整数、lyrics 为布尔值；额外字段不作为拒绝条件，已有扩展随保存保留。未知 schema、重复属性及实际使用的坏字段明确失败，原记录不覆写。
+- 已存在该 area 时在实际读取／保存处校验必需字段：schema 必须是数值 1（`1.0`／`1e0` 同值可读），revision 为合法安全整数、lyrics 为布尔值；额外字段不作为拒绝条件，已有扩展随保存保留。未知 schema、重复属性及实际使用的坏字段明确失败，原记录不覆写。
 - 读取和重启不写入；保存通过 owner gate 和 generation／receipt CAS 写入实际控制变更。未知提交由显式 reconcile 核对实际结果，不重放写入。
 - 在线设置保存未知提交后，后续命令封闭，使用显式 `ReconcileAsync` 读回 Before／After generation／receipt。结算不重放写入，也不替换 pending；第三状态保持冲突。
 - 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。
@@ -172,7 +171,7 @@ wrapper 消费以下必需字段：
 
 ```json
 {
-  "schema": 3,
+  "schema": 1,
   "scope": "local",
   "revision": 0,
   "library": {}
@@ -187,7 +186,7 @@ version ownerId revision nextId collections accounts networkPlaylists
 
 约束：
 
-- wrapper schema 与 library `version` 均为 `3`，`ownerId` 精确等于当前 scope；只解码当前控制格式，不提供旧版本转换。
+- wrapper schema 与 library `version` 均为 `1`，`ownerId` 精确等于当前 scope；只解码当前控制格式，不提供旧版本转换。
 - `nextId` 大于所有现存 `playlist:<正整数>` 的编号。
 - 只有一个收藏集合：`id=favorites`、`kind=favorites`；它没有 `deleted` 或 `locallyCreated` 字段。
 - 普通歌单 ID 必须为 canonical `playlist:<正整数>`。
@@ -209,7 +208,7 @@ id platform remoteId name cover count revision present subscription intent
 
 - `id` 固定为 `network:<platform>:<remoteId>`；`platform` 允许 `wy/tx/kg/kw/mg`。`remoteId` 使用共同平台结果中的非空定位字符串，原生不猜测数字格式、长度、字符集或前缀。
 - `cover` 是清理后的公开 URL；`count` 是非负展示整数，不表示本地成员数量。该类型不消费 `songs/order/bindings` 扩展，也不因此登记成员或获得写权限。
-- `present` 是本地引用可见性。`subscription` 为 `null` 或 `{accountId,present,locator}`；账号必须对应 `library.accounts[platform]`。`locator` 保存共同平台返回的当前不透明定位对象，不保存凭据；字段转换与实际写入配方归 Node，原生不按平台字段白名单再次解析。
+- `present` 是本地引用可见性。`subscription` 为 `null` 或 `{accountId,present,locator}`；账号必须对应 `library.accounts[platform]`。平台适配器将 `locator` 投影为订阅配方实际使用的 `listId/creatorId/creatorListId` 字段，按独立关系列保存，不持久化未消费展示字段或整份 JSON；定位字符串保持原值，额外输入字段不导致拒绝。实际平台写入配方归 Node。
 - `intent` 为 `null` 或 `{accountId,present}`，记录已绑定账号的明确本地操作。即使当时开关关闭也保留意图，但不发请求；重新开启时交给原同步协调器先拉取。未绑定的纯本地引用没有账号意图。
 - 取消后仍需基线、意图或耐久 fence 的记录以 `present=false` 保留；公开列表不显示它。无这些关系的纯本地记录可直接移除。
 
@@ -324,5 +323,5 @@ music.online.song
 - `appearance`、`metadata`、`quality`、桌面歌词设置、浏览数据源、官方音源设置、`queue` 和搜索策略在各自写入回执不确定时，只允许对应的权威 current read 在 owner gate 内读取实际控制与 generation／receipt，核对该次 before／after revision；该读取会结算同职责未知结果，不重放业务命令。桌面歌词通过 `music.lyrics.desktop.settings.get`，浏览数据源与官方音源分别通过 `music.catalogSource.settings.get`、`music.officialSources.settings.get` 结算对应 save。
 - 其他职责以及跨职责命令继续由显式 `ReconcileAsync` 协调；recommendation 使用其 nonce reconcile。一个职责的 current read 不得替另一个职责结算未知写入。
 - 第三状态保持 `STORAGE_CONFLICT`，不提供“丢弃旧数据后继续”的回退入口。
-- `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；取消关闭只恢复当前 owner，不重放写入。
+- `PrepareShutdownAsync` 封闭新业务并要求未知写已结算；退役单向完成，新业务由新 owner 接纳，不重放写入。
 - `AbortAsync` 终止内存生命周期，不宣称未知持久写已经回滚。

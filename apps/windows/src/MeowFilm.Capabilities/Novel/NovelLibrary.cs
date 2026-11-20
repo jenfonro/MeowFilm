@@ -226,5 +226,4 @@ public sealed class NovelLibrary(IStorageDatabase database)
         finally { serial.Release(); }
     }, token);
     public Task PrepareShutdownAsync() => work.PauseAsync();
-    public void Resume() => work.Resume();
 }

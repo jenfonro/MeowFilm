@@ -209,7 +209,6 @@ public static class AppStartupPreparationTests
         public Task RestoreNavigationAsync(string location, CancellationToken cancellationToken) =>
             throw new InvalidOperationException("Preparation must not restore navigation");
         public Task PrepareShutdownAsync() => Task.CompletedTask;
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

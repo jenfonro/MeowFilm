@@ -8,7 +8,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.AppHost;
 
-public sealed class AppMediaControlSettings(IStorageDatabase database) : IDesktopMediaControlSettings, IDesktopShutdownParticipant
+public sealed class AppMediaControlSettings(IStorageDatabase database) : IDesktopMediaControlSettings, IAsyncDisposable
 {
     private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.MediaControls);
     public const string DocumentNamespace = "app.media-controls.v1";
@@ -126,11 +126,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         await gate.WaitAsync();
         gate.Release();
     }
-    public Task CancelShutdownPreparationAsync()
-    {
-        if (!disposed) { stopping = false; StateChanged(); }
-        return Task.CompletedTask;
-    }
+
     public async Task AbortAsync()
     {
         disposed = true;

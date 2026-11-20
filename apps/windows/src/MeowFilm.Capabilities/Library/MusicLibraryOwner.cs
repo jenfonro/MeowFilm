@@ -229,7 +229,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     }
     public async Task ReconcileAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try { LJ.Require(!closed, "CLOSED"); await ReconcileLockedAsync(cancellationToken).ConfigureAwait(false); }
         finally { gate.Release(); }
     }
@@ -304,7 +304,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         method is "music.library.membership" or "music.library.search" or "music.queue.peekNext";
     public async Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             LJ.Require(!closed, "CLOSED");
@@ -315,14 +315,9 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         finally { gate.Release(); }
     }
-    public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-    {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { LJ.Require(!closed, "CLOSED"); lock (repositoryGate) preparing = false; lock (snapshotGate) snapshotSealed = false; } finally { gate.Release(); }
-    }
     public async Task AbortAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             await SealSongSnapshots().ConfigureAwait(false);

@@ -25,8 +25,6 @@ public sealed partial class MusicNativeApplication
     private long recommendationBindingEpoch;
     private int recommendationBindingChanges;
     private bool recommendationPreparing;
-    private bool recommendationReconciliationPending;
-    private long recommendationPreparationEpoch;
     private CancellationTokenSource recommendationLifetime = new();
     private Task? recommendationCancellation;
     private int recommendationPreludes;
@@ -138,19 +136,8 @@ public sealed partial class MusicNativeApplication
     /// <summary>Seal recommendations before waiting a UI command tail; do not prepare the library yet.</summary>
     public Task PrepareRecommendationsAsync(CancellationToken ct = default)
     {
-        lock (gate)
-        {
-            if (resumption is { IsCompleted: false } recovering)
-                return PrepareRecommendationsAfterResumeAsync(recovering, ct);
-        }
         var drain = PrepareRecommendationCoreAsync();
         return ct.CanBeCanceled ? drain.WaitAsync(ct) : drain;
-    }
-
-    private async Task PrepareRecommendationsAfterResumeAsync(Task recovering, CancellationToken token)
-    {
-        await recovering.ConfigureAwait(false);
-        await PrepareRecommendationsAsync(token).ConfigureAwait(false);
     }
 
     private Task PrepareRecommendationCoreAsync()
@@ -159,8 +146,6 @@ public sealed partial class MusicNativeApplication
         lock (gate)
         {
             recommendationPreparing = true;
-            recommendationReconciliationPending = false;
-            recommendationPreparationEpoch++;
             cancel = recommendationCancellation ??= CancelRecommendationLifetimeAsync(recommendationLifetime);
             prelude = recommendationPreludesDrained.Task;
         }
@@ -214,7 +199,7 @@ public sealed partial class MusicNativeApplication
             {
                 if (closed || stopping) return Failed("CLOSED");
                 if (recommendationPreparing)
-                    return Failed(recommendationReconciliationPending ? "COMMIT_UNKNOWN" : "CLOSED");
+                    return Failed("CLOSED");
                 if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
                 if (recommendationBindingChanges != 0) return Failed("BUSY");
                 if (recommendationBinding is null || Volatile.Read(ref recommendationBinding.Revoked) != 0)
@@ -285,9 +270,6 @@ public sealed partial class MusicNativeApplication
         lock (gate)
         {
             if (closed || stopping) return Failed("CLOSED");
-            if (recommendationReconciliationPending &&
-                method is not ("music.recommendations.get" or "music.recommendations.cancel" or "music.recommendations.reconcile"))
-                return Failed("COMMIT_UNKNOWN");
             if (accountReceiptUnknown && method is not ("music.recommendations.get" or "music.recommendations.cancel"))
                 return Failed("COMMIT_UNKNOWN");
         }
@@ -296,7 +278,6 @@ public sealed partial class MusicNativeApplication
         {
             if (result.TryGetProperty("mode", out var mode) && mode.GetString()?.Length > 0)
                 await SaveFmSelectionAsync(null, result, token).ConfigureAwait(false);
-            await ResumeReconciledRecommendationsAsync().ConfigureAwait(false);
         }
         return result;
     }
@@ -319,33 +300,6 @@ public sealed partial class MusicNativeApplication
             await fmPreferences.SaveAsync(account.UserId, snapshot, Current, CancellationToken.None).ConfigureAwait(false);
         }
         finally { lock (gate) if (--recommendationPreludes == 0) recommendationPreludesDrained.TrySetResult(); }
-    }
-
-    private async Task ResumeReconciledRecommendationsAsync()
-    {
-        Task physical;
-        long epoch;
-        lock (gate)
-        {
-            if (!recommendationReconciliationPending || closed || stopping || resumption is not null) return;
-            epoch = recommendationPreparationEpoch;
-            // Retry only the drain, never the uncertain write. Reconciliation has
-            // already read the actual nonce receipt through the sole Library owner.
-            physical = recommendations.PrepareCloseAsync();
-        }
-        try { await physical.ConfigureAwait(false); }
-        catch (RecommendationException error) when (error.Code == "COMMIT_UNKNOWN")
-        { return; } // Other unresolved operations still need explicit user action.
-        lock (gate)
-        {
-            // A fresh narrow/full close wins over a reconciliation completing late.
-            if (!recommendationReconciliationPending || closed || stopping || resumption is not null ||
-                recommendationPreparationEpoch != epoch) return;
-            recommendations.Resume();
-            recommendationLifetime.Dispose(); recommendationLifetime = new();
-            recommendationCancellation = null;
-            recommendationReconciliationPending = false; recommendationPreparing = false;
-        }
     }
 
     private async Task<JsonElement> ReadRecommendationsAsync(MusicRecommendationRequest request, CancellationToken token)

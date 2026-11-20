@@ -17,7 +17,7 @@ public static class MusicLibraryReceiptIntegrationTests
         yield return new("Music library receipt W1 After fences older platform and sync observations", () => Task.Run(ObservationAfter));
         yield return new("Music library receipt W1 Before does not accept newer platform or sync observations", () => Task.Run(ObservationBefore));
         yield return new("Music library receipt W2 Before restores shuffle previous and queue version", () => Task.Run(QueueBefore));
-        yield return new("Music library receipt W3 preparation closes record reads and cancellation restores queries", () => Task.Run(PreparationReads));
+        yield return new("Music library receipt W3 retirement closes record reads and a replacement loads durable songs", () => Task.Run(PreparationReads));
         yield return new("Music library receipt W3 Abort closes record reads without disposing borrowed SQLite", () => Task.Run(AbortReads));
         yield return new("Music library receipt W4 Before permits a fresh failed artwork callback to commit fallback", () => Task.Run(ArtworkBefore));
     }
@@ -223,9 +223,10 @@ public static class MusicLibraryReceiptIntegrationTests
         Error(await owner.ExecuteAsync("music.library.detail", new { id = "favorites" }), "CLOSED");
         Check(!store.Disposed && store.ReadSong(Text(song, "songId")) is not null,
             "Preparation must not close the borrowed SQLite store");
-        await owner.CancelShutdownPreparationAsync();
-        OpenQueries(owner, reads, song);
-        await Ok(owner, "music.library.detail", new { id = "favorites" });
+        await owner.DisposeAsync();
+        await using var reopened = new MusicLibraryOwner(reads, database: store.Storage);
+        await Ok(reopened, "music.library.detail", new { id = "favorites" });
+        OpenQueries(reopened, reads, song);
     }
     private static async Task AbortReads()
     {

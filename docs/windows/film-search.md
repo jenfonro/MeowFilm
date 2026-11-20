@@ -39,7 +39,7 @@ Dispatcher 仅提交仍有效的 revision 及必要字段／集合操作；命�
 
 事件连接失败保留当前显示并报告真实错误，同时显式发送 stop 禁止后续新调度；运行器 epoch 撤权后不向替代 owner 重放旧命令。普通 stop、取消等待及 release 不撤销共享 producer；有限在途内容可按原身份完成并入 Node 缓存。真正运行器关闭／来源撤权由对应 owner 取消并排空。
 
-关闭准备停止准入，等待已接纳 open／command／handoff／release 和本端事件订阅结算；取消关闭后可恢复同词。关闭消费者不接管 App 运行器生命周期，物理进程排空仍由 App owner 负责。
+进程内退役停止准入，等待已接纳 open／command／handoff／release 和本端事件订阅结算；不恢复已退役消费者。关闭消费者不接管 App 运行器生命周期，物理进程排空仍由 App owner 负责。
 
 ## 搜索到真实播放接收
 

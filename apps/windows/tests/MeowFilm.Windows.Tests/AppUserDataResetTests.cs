@@ -31,7 +31,7 @@ public static partial class AppUserDataResetTests
             calls.Add("drain"); entered.SetResult(); await release.Task; calls.Add("released");
         });
         var shutdown = new AppShutdown([participant], [new(() => { calls.Add("store-closed"); return ValueTask.CompletedTask; })]);
-        var reset = new AppUserDataReset(() => calls.Add("request"), shutdown.ForceReleaseAsync,
+        var reset = new AppUserDataReset(() => calls.Add("request"), shutdown.CloseAsync,
             () => { Check(shutdown.IsReleased); calls.Add("delete"); return Task.CompletedTask; },
             () => { calls.Add("new-generation"); return Task.CompletedTask; });
         var first = reset.ResetAsync();
@@ -111,7 +111,7 @@ public static partial class AppUserDataResetTests
         {
             await business.WriteAsync(db => db.CommitRevision("reset-test", StorageRevision.Empty, Guid.NewGuid().ToString("D")));
             writing = cache.UpdateAsync(_ => JsonSerializer.SerializeToElement(new { platform = "wy", pages = new[] {
-                new { platform = "wy", entries = Array.Empty<object>() } } }));
+                new { platform = "wy", sections = Array.Empty<object>() } } }));
             await backing.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             string businessFile = business.DatabasePath!;
             var shutdown = new AppShutdown([], [
@@ -125,7 +125,7 @@ public static partial class AppUserDataResetTests
                 new(() => business.DisposeAsync())
             ]);
             int reopened = 0;
-            var reset = new AppUserDataReset(owner.RequestReset, shutdown.ForceReleaseAsync,
+            var reset = new AppUserDataReset(owner.RequestReset, shutdown.CloseAsync,
                 () =>
                 {
                     Check(shutdown.IsReleased && backing.Committed && backing.Disposed,
@@ -199,11 +199,10 @@ public static partial class AppUserDataResetTests
         public override async ValueTask DisposeAsync() { await base.DisposeAsync(); Disposed = true; }
     }
 
-    private sealed class Participant(Func<Task> abort) : IDesktopShutdownParticipant
+    private sealed class Participant(Func<Task> abort) : IAsyncDisposable
     {
         public Task PrepareShutdownAsync() => throw new InvalidOperationException("reset does not require saving old data");
-        public Task CancelShutdownPreparationAsync() => throw new InvalidOperationException("old generation cannot resume");
-        public ValueTask DisposeAsync() => throw new InvalidOperationException("reset uses explicit abort");
+        public ValueTask DisposeAsync() => new(abort());
         public Task AbortAsync() => abort();
     }
 

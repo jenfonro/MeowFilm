@@ -464,13 +464,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
       }
     }
     if (database) {
-      if (closeReply && !openFailure.empty()) closeReply->code = openFailure;
-      try {
-        if (openFailure.empty()) {
-          AdvisoryLock maintenanceLock(maintenance.value, LOCK_EX);
-          Exec("PRAGMA wal_checkpoint(PASSIVE)");
-        }
-      } catch (const std::exception& error) { if (closeReply) closeReply->code = error.what(); }
+      // Closing releases this connection; committed WAL data needs no checkpoint.
       int code = sqlite3_close(database); database = nullptr;
       if (code != SQLITE_OK && closeReply) closeReply->code = SQLiteError(code);
     }

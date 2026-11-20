@@ -20,6 +20,7 @@ public static partial class FilmSourcesTests
         yield return Case("unknown update display state never retires an otherwise valid source generation", UnknownUpdateState);
         yield return Case("unsupported roots and real source CAS conflicts preserve original storage", SourceDocumentBoundaries);
         yield return Case("native source intent is authoritative and only update restart and detection use Cat RPC", Management);
+        yield return Case("five pan interception switches default on and preserve independent native source fields", PanInterceptionSettings);
         yield return Case("tombstones survive updates type changes and duplicate adds for each parent", Tombstones);
         yield return Case("a deletion while runtime status is pending wins over late metadata", DeleteDuringImport);
         yield return Case("starting failed disabled and missing parents reconcile without empty-list loss", Reconciliation);
@@ -31,7 +32,7 @@ public static partial class FilmSourcesTests
         yield return Case("live resource failures remain stage errors and stale sessions preserve detection", DetectionFailureOwnership);
         yield return Case("detail navigation preserves custom actions payloads and advancing pages", Navigation);
         yield return Case("deleted disabled and replaced generations fence noncooperative late detections", LateResults);
-        yield return Case("shutdown preparation drains and resume admits new work without disposal", PrepareAndResume);
+        yield return Case("retirement drains accepted work and keeps admission closed", PreparationDrain);
         yield return Case("final shutdown drains late work and leaves borrowed dependencies alive", Disposal);
         yield return Case("selected source hashes and large structured values preserve Unicode", SourceAndValues);
         yield return Case("failed local saves do not publish and lost commit receipts reconcile", StorageFailures);
@@ -237,7 +238,7 @@ public static partial class FilmSourcesTests
             await Cancelled(update);
             Check(!service.Cats.Single().CanDetect && service.Cats.Single().Generation == 0 &&
                 service.RuntimeError is not null, "failed coordination invalidates execution but preserves the list");
-            if (shutdown) service.Resume();
+            if (shutdown) { await Code(() => service.RefreshAsync(), "SHUTTING_DOWN"); continue; }
             await Code(() => service.DetectAsync(Key("a")), "NOT_READY");
             runtime.OnCall = null;
             await service.RefreshAsync();
@@ -437,7 +438,7 @@ public static partial class FilmSourcesTests
                 Check(!runtime.Disposed && !store.Disposed && runtime.Calls.Count(call => call.Method == operation) == 1,
                     "shutdown owns its observation, not borrowed dependencies or a management replay");
                 if (outcome == "dispose") continue;
-                if (outcome == "prepare") service.Resume();
+                if (outcome == "prepare") { await Code(() => service.RefreshAsync(), "SHUTTING_DOWN"); continue; }
                 await Code(() => service.DetectAsync(Key("a")), "NOT_READY");
                 runtime.OnCall = null;
                 await service.RefreshAsync();
@@ -889,7 +890,7 @@ public static partial class FilmSourcesTests
         }
     }
 
-    private static async Task PrepareAndResume()
+    private static async Task PreparationDrain()
     {
         var runtime = new Runtime(); runtime.Add("a");
         var store = new Store(runtime);
@@ -901,19 +902,18 @@ public static partial class FilmSourcesTests
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var prepare = service.PrepareShutdownAsync();
         Check(!prepare.IsCompleted, "preparation waits for the actual in-flight operation");
-        bool refused = false;
-        try { service.Resume(); }
-        catch (InvalidOperationException) { refused = true; }
-        Check(refused, "resume cannot reopen admission or dispose cancellation ownership before drain");
         await Code(() => service.RefreshAsync(), "SHUTTING_DOWN");
         release.SetResult(Element(new { }));
         await Cancelled(detection);
         await prepare.WaitAsync(TimeSpan.FromSeconds(5));
         Check(!runtime.Disposed && !store.Disposed, "preparation does not dispose borrowed dependencies");
-        service.Resume();
+        await Code(() => service.RefreshAsync(), "SHUTTING_DOWN");
+        await service.DisposeAsync();
+        await using var reopened = new FilmSourceService(runtime, store);
+        await reopened.RefreshAsync();
         runtime.Invoke = (call, _) => DefaultInvoke(call);
-        var result = await service.DetectAsync(Key("a"));
-        Check(result.Result == "valid", "cancelling app exit restores a usable owner");
+        var result = await reopened.DetectAsync(Key("a"));
+        Check(result.Result == "valid", "new owner can use the retained installation");
     }
 
     private static async Task Disposal()
@@ -1119,11 +1119,12 @@ public static partial class FilmSourcesTests
                     "shutdown preserves the original storage error, user state and borrowed dependencies");
                 if (!dispose)
                 {
-                    service.Resume();
+                    await service.DisposeAsync();
                     runtime.OnCall = null;
-                    await service.RefreshAsync();
-                    Check(service.Cats.Single().CanDetect && service.Videos.Count == 1,
-                        "resumed refresh reconciles the new generation without reviving the deleted site");
+                    await using var reopened = new FilmSourceService(runtime, store);
+                    await reopened.RefreshAsync();
+                    Check(reopened.Cats.Single().CanDetect && reopened.Videos.Count == 1,
+                        "new owner reconciles the current generation without reviving the deleted site");
                 }
             }
             finally { release.TrySetResult(); }

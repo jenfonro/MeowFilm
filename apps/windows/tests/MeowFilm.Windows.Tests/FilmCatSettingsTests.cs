@@ -75,6 +75,12 @@ public static class FilmCatSettingsTests
         Check(JsonElement.DeepEquals(before.GetProperty("scripts")[1], after.GetProperty("scripts")[1]) &&
             service.Cats.Single() is { Name: "已编辑", InputRevision: 2 } && runtime.Calls.Count == 0,
             "a network edit ignores the unused file, preserves bad typed siblings, and advances its real input revision");
+        Check((await service.ReadPanInterceptionAsync()).Values.All(enabled => enabled),
+            "provider reads do not consume source rows, the gateway port, or alias mappings");
+        var switches = await service.SavePanInterceptionAsync("quark", false);
+        Check(!switches["quark"] && switches.Where(pair => pair.Key != "quark").All(pair => pair.Value) &&
+            JsonElement.DeepEquals(after.GetProperty("scripts"), store.Cat.GetProperty("scripts")),
+            "a provider save preserves unconsumed source rows, including damaged siblings");
         await Code(() => service.ImportNetworkAsync("不覆盖坏身份", "https://fixture.invalid/replacement.js", "broken"), "STORAGE_CONFLICT");
         await service.DeleteCatAsync("cat");
         Check(service.Cats.Count == 0 && JsonElement.DeepEquals(before.GetProperty("scripts")[1], store.Cat.GetProperty("scripts").EnumerateArray().Single()),
@@ -330,11 +336,13 @@ public static class FilmCatSettingsTests
             release.TrySetResult();
             await close.WaitAsync(TimeSpan.FromSeconds(5));
             Check(!runtime.Disposed && !store.Disposed, "service owns its work, not the borrowed runtime/store");
-            service.Resume();
+            await service.DisposeAsync();
+            await using var reopened = new FilmSourceService(runtime, store);
             runtime.State = RuntimeConnectionState.Closed;
-            await service.EditCatAsync("cat", "恢复后保存");
-            Check(service.Cats.Single().Name == "恢复后保存" && runtime.Captures == 1,
-                "resumed offline saves do not replay the cancelled notification");
+            await reopened.RefreshAsync();
+            await reopened.EditCatAsync("cat", "重新打开后保存");
+            Check(reopened.Cats.Single().Name == "重新打开后保存" && runtime.Captures == 1,
+                "a new owner's offline save does not replay the cancelled notification");
         }
         finally { release.TrySetResult(); }
     }

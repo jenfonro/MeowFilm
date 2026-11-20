@@ -248,5 +248,4 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
     }
     public void Cancel() { ++generation; request?.Cancel(); Loading = false; }
     public async Task PrepareShutdownAsync() { Cancel(); await work.PauseAsync(); request?.Dispose(); request = null; }
-    public void Resume() => work.Resume();
 }

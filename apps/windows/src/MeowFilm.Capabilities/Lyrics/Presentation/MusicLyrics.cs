@@ -94,6 +94,10 @@ public sealed partial class MusicCapability
             publishedLyricDisplayIndex = display;
             Changed(nameof(LyricDisplayIndex));
         }
+        RefreshLyricPreviewAvailability();
+    }
+    internal void RefreshLyricPreviewAvailability()
+    {
         if (publishedCanConfirmLyric != CanConfirmLyricPreview)
         {
             publishedCanConfirmLyric = CanConfirmLyricPreview;
@@ -172,7 +176,7 @@ public sealed partial class MusicCapability
         lyricCancellation?.Cancel();
         hasLocalLyrics = false; Changed(nameof(CanRemoveLocalLyrics));
         CancelLyricPreview();
-        Lyrics.Clear(); lyricStatus = ""; OnlineBindings(); LyricTimingBindings();
+        Lyrics.Clear(); lyricStatus = ""; OnlineBindings();
     }
     private void NotifyMusicSourcesChanged()
     {
@@ -366,7 +370,7 @@ public sealed partial class MusicCapability
                     lyricLoadingIdentity = null;
                     lyricPublishedIdentity = identity;
                 }
-                Changed(nameof(CanCancelLyrics)); OnlineBindings(); LyricTimingBindings();
+                Changed(nameof(CanCancelLyrics)); OnlineBindings();
             }
             bool CurrentRequest()
             {

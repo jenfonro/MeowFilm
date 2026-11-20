@@ -142,8 +142,8 @@ public static class MusicQqFeedbackIntegrationTests
         yield return Case("shutdown drains terminal and cancelled preparation resumes the same owner without replay", async () => {
             await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted(); await f.Listen();
             await f.App.PrepareShutdownAsync(); int reports = f.Handler.Reports.Count;
-            await f.App.CancelShutdownPreparationAsync(); await f.Drain(); Check(f.Handler.Reports.Count == reports && await f.AccountState() == "verified");
-            await f.Accepted("resumed"); await f.Listen(); await f.Finish(); Check(f.Handler.Reports.Count == reports + 1);
+            await f.App.DisposeAsync();
+            Check(f.Handler.Reports.Count == reports, "release cannot replay terminal feedback");
         });
         yield return Case("cancelled shutdown waiter cannot abandon shared physical release", async () => {
             await using var f = new MusicQqFeedbackIntegrationFixture(); await f.Ready(); await f.Accepted(); var hold = f.Handler.Hold("feedback.release");

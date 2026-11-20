@@ -67,6 +67,8 @@ public static partial class MusicUiTests
             await using var f = await Fixture.Create();
             await f.PlayableCollection(); await f.Module.PlaySelectionAsync(); f.Playback.Start();
             var held = f.Calls.HoldNext("music.history.get");
+            var notifications = new List<string>();
+            f.Module.PropertyChanged += (_, e) => notifications.Add(e.PropertyName ?? "");
             var navigation = f.Module.NavigateAsync("archives", default);
             await held.Arrived.Task;
             try
@@ -77,6 +79,10 @@ public static partial class MusicUiTests
                 Equal(42d, f.Playback.PositionSeconds);
             }
             finally { held.Release(); await navigation; }
+            True(!notifications.Contains(nameof(MusicCapability.CurrentSongId)) &&
+                !notifications.Contains(nameof(MusicCapability.CurrentTitle)) &&
+                !notifications.Contains(nameof(MusicCapability.PlaybackPresentationKey)),
+                "content navigation and seek commands do not republish the unchanged recording or playback occurrence");
         });
         yield return Case("presentation mounts one content body and restores the same page instance", async () =>
         {

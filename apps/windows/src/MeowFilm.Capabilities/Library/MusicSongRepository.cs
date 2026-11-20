@@ -83,7 +83,7 @@ public sealed partial class MusicLibraryOwner
 
     internal async Task ArtworkLoadCompletedAsync(string address, bool succeeded)
     {
-        await EnterAsync(CancellationToken.None).ConfigureAwait(false);
+        await EnterAsync(CancellationToken.None).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             if (closed || preparing) return;
@@ -267,7 +267,7 @@ public sealed partial class MusicLibraryOwner
         var songs = recordings.Select(pair => pair.Recording!).ToArray();
         if (songs.Length == 0) return LJ.Element(output);
         if (authoritative && observation == 0) observation = BeginSongObservation();
-        await EnterAsync(token).ConfigureAwait(false);
+        await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             LJ.Require(!closed && !preparing, "CLOSED");

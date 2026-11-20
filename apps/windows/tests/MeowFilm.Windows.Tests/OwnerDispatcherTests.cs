@@ -9,7 +9,7 @@ public static class OwnerDispatcherTests
     {
         yield return new("owner-dispatcher.STA access async completion and exceptions", Completion);
         yield return new("owner-dispatcher.queued cancellation prevents execution", Cancellation);
-        yield return new("owner-dispatcher.shutdown rejects admission and drains accepted async work", Shutdown);
+        yield return new("owner-dispatcher.shutdown rejects admission without waiting for business work", Shutdown);
         yield return new("owner-dispatcher.timer ticks on owner and stops", Timer);
     }
 
@@ -84,13 +84,11 @@ public static class OwnerDispatcherTests
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var closing = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        bool retired = false;
         await host.Owner.EnqueueAsync(() => host.Queue.ShutdownStarting += (_, _) => closing.TrySetResult());
-        var accepted = host.Owner.EnqueueAsync(async () =>
+        var accepted = host.Owner.EnqueueAsync(() =>
         {
             started.SetResult();
-            try { await release.Task; }
-            finally { Check(host.Owner.HasThreadAccess, "retirement stays on owner"); retired = true; }
+            return release.Task;
         });
         Task shutdown = Task.CompletedTask;
         try
@@ -98,13 +96,13 @@ public static class OwnerDispatcherTests
             await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
             shutdown = host.DisposeAsync().AsTask();
             await closing.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(host.Owner.IsClosing && !accepted.IsCompleted && !shutdown.IsCompleted,
-                "shutdown deferral retains admitted asynchronous work");
+            await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(host.Owner.IsClosing && !accepted.IsCompleted && host.ThreadStopped.IsCompletedSuccessfully,
+                "queue shutdown is independent of business work completion");
             try { await host.Owner.EnqueueAsync(() => { }); throw new Exception("closed queue accepted work"); }
             catch (InvalidOperationException error) when (error.Message == "OWNER_QUEUE_CLOSED") { }
         }
         finally { release.TrySetResult(); await accepted; await shutdown; await host.DisposeAsync(); }
-        Check(retired && host.ThreadStopped.IsCompletedSuccessfully, "shutdown drains work and stops the owner thread");
     }
 
     private static async Task Timer()

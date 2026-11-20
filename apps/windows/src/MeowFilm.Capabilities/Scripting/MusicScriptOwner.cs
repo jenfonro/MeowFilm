@@ -284,13 +284,6 @@ public sealed class MusicScriptOwner : IAsyncDisposable
             return preparation.WaitAsync(cancellationToken);
         }
     }
-    public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-    {
-        Task? task;
-        lock (activityGate) { LJ.Require(!closed, "CLOSED"); task = preparation; }
-        if (task is not null) await task.WaitAsync(cancellationToken).ConfigureAwait(false);
-        lock (activityGate) { LJ.Require(!closed, "CLOSED"); preparation = null; preparing = false; }
-    }
     public ValueTask DisposeAsync()
     {
         lock (activityGate) return new(disposal ??= DisposeCoreAsync());

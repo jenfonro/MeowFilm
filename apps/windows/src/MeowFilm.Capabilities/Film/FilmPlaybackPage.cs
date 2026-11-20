@@ -478,8 +478,8 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                 {
                     var id = FilmJson.Identity(line, "id", required: true);
                     string provider = FilmJson.Text(line, "provider");
-                    return new FilmSelection(FilmJson.String(id), PlayerProviderFamily(provider).Length > 0 ? PlayerPanName(provider) :
-                        FilmJson.Text(line, "label") is { Length: > 0 } label ? label : provider,
+                    return new FilmSelection(FilmJson.String(id), FilmJson.Text(line, "label") is { Length: > 0 } label ? label :
+                        PlayerPanName(provider),
                         WireId: id, Provider: provider.Length > 0 ? provider : null);
                 }).ToArray();
                 if (Lines.Count != lines.Length || !Lines.Zip(lines).All(pair => (pair.First with { WireId = null }) ==

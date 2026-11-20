@@ -112,17 +112,17 @@ public static class MusicLibraryDatabaseTests
             ("pages", 1), ("concurrency", 1), ("cacheMinutes", 60));
         await storage.WriteAsync(db =>
         {
-            search.Replace(db, LJ.Obj(("schema", 3), ("revision", 0), ("songs", kind), ("playlists", kind)), ["local"]);
-            Check(search.Matches(db, ["local"], LJ.Obj(("schema", 3), ("revision", 0), ("songs", kind), ("playlists", kind)), complete: true));
+            search.Replace(db, LJ.Obj(("schema", 1), ("revision", 0), ("songs", kind), ("playlists", kind)), ["local"]);
+            Check(search.Matches(db, ["local"], LJ.Obj(("schema", 1), ("revision", 0), ("songs", kind), ("playlists", kind)), complete: true));
             var withoutCache = kind.DeepClone().AsObject(); withoutCache.Remove("cacheMinutes");
-            var projection = LJ.Obj(("schema", 3), ("revision", 0), ("songs", withoutCache), ("playlists", kind));
+            var projection = LJ.Obj(("schema", 1), ("revision", 0), ("songs", withoutCache), ("playlists", kind));
             Check(search.Matches(db, ["local"], projection) && !search.Matches(db, ["local"], projection, complete: true),
                 "complete replacement compares omitted child fields while partial matching remains bounded");
-            Check(search.Matches(db, ["local"], LJ.Obj(("schema", 3))) &&
-                !search.Matches(db, ["local"], LJ.Obj(("schema", 3)), complete: true));
+            Check(search.Matches(db, ["local"], LJ.Obj(("schema", 1))) &&
+                !search.Matches(db, ["local"], LJ.Obj(("schema", 1)), complete: true));
             foreach (bool explicitNull in new[] { false, true })
             {
-                var replacement = LJ.Obj(("schema", 3), ("revision", 0), ("playlists", kind));
+                var replacement = LJ.Obj(("schema", 1), ("revision", 0), ("playlists", kind));
                 if (explicitNull) replacement["songs"] = null;
                 db.Execute("UPDATE music_windows_search SET shape_mask=$shape,null_mask=$nulls WHERE scope_key='local'",
                     ("$shape", explicitNull ? 15 : 11), ("$nulls", explicitNull ? 4 : 0));
@@ -131,7 +131,7 @@ public static class MusicLibraryDatabaseTests
                 search.Replace(db, replacement, ["local"]);
                 Check(db.Scalar<long>("SELECT count(*) FROM music_windows_search_songs WHERE scope_key='local'") == 0 &&
                     search.Matches(db, ["local"], replacement, complete: true));
-                search.Replace(db, LJ.Obj(("schema", 3), ("revision", 0), ("songs", kind), ("playlists", kind)), ["local"]);
+                search.Replace(db, LJ.Obj(("schema", 1), ("revision", 0), ("songs", kind), ("playlists", kind)), ["local"]);
             }
             // A typed parent claims an object whose row is missing. Opening SQLite remains legal;
             // only consuming this relation fails. No invalid SQLite column type is needed.
@@ -172,7 +172,7 @@ public static class MusicLibraryDatabaseTests
         await using var storage = NativeDatabase.CreateMemory();
         await storage.WriteAsync(db =>
         {
-            MusicStorageRecords.Areas["online-settings"].Replace(db, LJ.Obj(("schema", 3), ("revision", 7)), ["local"]);
+            MusicStorageRecords.Areas["online-settings"].Replace(db, LJ.Obj(("schema", 1), ("revision", 7)), ["local"]);
             MusicStorageRecords.Areas["native-device-settings"].Replace(db, LJ.Obj(("schema", 1), ("revision", 2), ("volume", -1)), ["local"]);
             return true;
         });

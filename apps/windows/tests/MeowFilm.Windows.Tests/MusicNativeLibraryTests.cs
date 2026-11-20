@@ -48,7 +48,7 @@ public static partial class MusicNativeLibraryTests
         yield return new("Native music read failure does not become empty library", ReadFailure);
         yield return new("Native music cancellation before admission cannot mutate state", CancelAdmission);
         yield return new("Native music cancellation after transaction admission observes real result", CancelCommit);
-        yield return new("Native music shutdown pending failure and reversible preparation", Shutdown);
+        yield return new("Native music retirement settles accepted writes and a new owner reads durable state", Shutdown);
         yield return new("Native music online settings revision and exact fields", Settings);
         yield return new("Native music damaged current references and owned areas fail without writes", DamagedDocuments);
         yield return new("Native music damaged song rows fail on record reads without an all-song load or rewrite", DamagedSongRecord);
@@ -465,7 +465,7 @@ public static partial class MusicNativeLibraryTests
             if (area == "songs") songs = value.DeepClone().AsObject();
             else areas[area] = value.DeepClone();
         return JsonSerializer.SerializeToUtf8Bytes(new JsonObject
-            { ["schema"] = 3, ["areas"] = areas, ["songs"] = songs }, PersistedJson);
+            { ["schema"] = 1, ["areas"] = areas, ["songs"] = songs }, PersistedJson);
     }
     private static async Task<(JsonObject Library, JsonObject Queue, JsonObject History, JsonObject Songs)> CurrentDocuments()
     {
@@ -517,16 +517,17 @@ public static partial class MusicNativeLibraryTests
         await using var f = new Fixture(); var o = f.Owner(); f.Store.Failure = 2;
         await Error(o, "music.library.create", new { name = "Unknown" }, "COMMIT_UNKNOWN");
         await Throws("COMMIT_UNKNOWN", () => o.PrepareShutdownAsync()); Check(!f.Store.Disposed);
-        await o.ReconcileAsync(); await o.PrepareShutdownAsync();
-        await Error(o, "music.library.list", null, "CLOSED"); await o.CancelShutdownPreparationAsync();
+        await o.ReconcileAsync();
         Check((await Ok(o, "music.library.list")).GetProperty("total").GetInt32() == 2);
+        await o.PrepareShutdownAsync();
+        await Error(o, "music.library.list", null, "CLOSED");
         await o.DisposeAsync(); Check(!f.Store.Disposed); await Error(o, "music.queue.get", null, "CLOSED");
     }
     private static async Task Settings()
     {
         await using var f = new Fixture(); var o = f.Owner();
         var settings = (await Ok(o, "music.settings.get")).GetProperty("settings");
-        Check(settings.GetProperty("schema").GetInt32() == 3 &&
+        Check(settings.GetProperty("schema").GetInt32() == 1 &&
             settings.GetProperty("revision").GetInt64() == 0 &&
             settings.GetProperty("lyrics").GetBoolean());
         int writes = f.Store.Writes;
@@ -534,7 +535,7 @@ public static partial class MusicNativeLibraryTests
         await Error(o, "music.settings.save", new { lyrics = true }, "INVALID_REQUEST");
         Check(f.Store.Writes == writes);
         var saved = (await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false, quality = "flac", target = new { installationId = "missing", platform = "wy" } })).GetProperty("settings");
-        Check(saved.GetProperty("schema").GetInt32() == 3 && saved.GetProperty("revision").GetInt64() == 1 &&
+        Check(saved.GetProperty("schema").GetInt32() == 1 && saved.GetProperty("revision").GetInt64() == 1 &&
             !saved.GetProperty("lyrics").GetBoolean());
         await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true }, "REVISION_CONFLICT");
         await o.DisposeAsync();
@@ -577,6 +578,8 @@ public static partial class MusicNativeLibraryTests
         }
 
         var current = await CurrentDocuments();
+        Check(current.Library["schema"]!.GetValue<int>() == 1 &&
+            current.Library["library"]!["version"]!.GetValue<int>() == 1);
         var queue = current.Queue;
         foreach (var invalid in new[]
         {
@@ -598,6 +601,8 @@ public static partial class MusicNativeLibraryTests
 
         foreach (var invalid in new[]
         {
+            Changed(library, state => state["schema"] = 2),
+            Changed(library, state => state["library"]!["version"] = 2),
             Changed(library, state => state["library"]!.AsObject().Remove("accounts")),
             Changed(library, state => state["revision"] = 2),
             Changed(library, state => state["library"]!["accounts"]!["kw"] = "account-a"),

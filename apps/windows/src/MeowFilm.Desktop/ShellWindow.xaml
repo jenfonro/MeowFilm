@@ -7,6 +7,13 @@
    <Style x:Key="ShellNavigationItem" TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.NavigationItem}">
     <Setter Property="MinHeight" Value="40"/><Setter Property="Padding" Value="14,6"/>
    </Style>
+   <ControlTemplate x:Key="SearchScopeTemplate" TargetType="local:ShellSearchScope">
+    <Grid Background="Transparent">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="28"/><ColumnDefinition Width="*"/><ColumnDefinition Width="28"/></Grid.ColumnDefinitions>
+     <ContentPresenter x:Name="ContentPresenter" Content="{TemplateBinding Content}" Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" FontWeight="Normal"/>
+     <FontIcon x:Name="DropDownGlyph" Grid.Column="2" Glyph="&#xE70D;" FontSize="10" IsHitTestVisible="False"/>
+    </Grid>
+   </ControlTemplate>
    <DataTemplate x:Key="ShellNavigationTemplate">
     <Grid ColumnSpacing="12">
      <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -60,7 +67,7 @@
       <ContentControl x:Name="SidebarContributionHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Top" IsTabStop="False"/>
      </StackPanel>
     </ScrollViewer>
-    <Grid Grid.Column="1" Margin="34,0,150,0">
+    <Grid x:Name="HeaderChrome" Grid.Column="1" Margin="34,0,150,0" VerticalAlignment="Top" Height="48">
      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <local:DesktopPageHeader x:Name="PageHeaderHost" IsEnabled="{Binding IsInteractive}">
       <local:DesktopPageHeader.Navigation>
@@ -73,9 +80,7 @@
       <local:DesktopPageHeader.Center>
        <Grid x:Name="SearchInput" MaxWidth="430" Height="34" VerticalAlignment="Center">
         <TextBox x:Name="SearchBox" MinWidth="0" Height="34" MinHeight="34" Padding="36,4,52,4" FontSize="12" Style="{StaticResource MeowFilm.TextBox}" TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" TextCompositionStarted="OnSearchCompositionStarted" TextCompositionEnded="OnSearchCompositionEnded" AutomationProperties.Name="搜索" AutomationProperties.AcceleratorKey="Ctrl+K"/>
-        <local:EqualWidthComboBox x:Name="SearchTargetPicker" Width="92" Height="28" MinHeight="0" Padding="28,0,0,0" FontSize="12" Margin="2,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" SelectedValuePath="Id" Visibility="Collapsed" Background="Transparent" BorderThickness="0" AutomationProperties.Name="搜索目标">
-         <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" FontSize="12"/></DataTemplate></ComboBox.ItemTemplate>
-        </local:EqualWidthComboBox>
+        <local:ShellSearchScope x:Name="SearchTargetPicker" Width="92" Height="28" MinHeight="0" Padding="0" Template="{StaticResource SearchScopeTemplate}" FontSize="12" Margin="0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed" Background="Transparent" BorderThickness="0" AutomationProperties.Name="搜索目标"/>
         <FontIcon Glyph="&#xE721;" FontSize="15" Width="28" Margin="2,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False"/>
         <Border x:Name="SearchDivider" Width="1" Height="16" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="94,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed"/>
         <TextBlock Text="Ctrl K" FontSize="11" Foreground="{ThemeResource MeowFilm.Brush.Muted}" Margin="0,0,12,0" HorizontalAlignment="Right" VerticalAlignment="Center" IsHitTestVisible="False"/>
@@ -97,7 +102,9 @@
       <Button x:Name="PlayerDetailBackButton" HorizontalAlignment="Left" VerticalAlignment="Top" Style="{StaticResource MeowFilm.IconButton}" Width="40" Height="40" Margin="20,16,0,0" Foreground="#ECECEE" Click="OnBackClick" Content="&#xE70D;" AutomationProperties.Name="收起播放器"/>
      </Grid>
     </Grid>
-    <Button x:Name="QueueDismissSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="28" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Click="OnQueueDismissClick" AutomationProperties.Name="收起播放列表"/>
+    <Button x:Name="QueueDismissSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="28" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Click="OnQueueDismissClick" AutomationProperties.Name="收起播放列表">
+     <Button.Template><ControlTemplate TargetType="Button"><Border Background="Transparent"><VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups></Border></ControlTemplate></Button.Template>
+    </Button>
     <Border x:Name="QueueSurface" Translation="0,0,16" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="30" Width="386" Margin="0,76,12,16" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="12" Visibility="Collapsed">
      <Border.RenderTransform><TranslateTransform x:Name="QueueTransform"/></Border.RenderTransform>
      <Border.Shadow><ThemeShadow/></Border.Shadow>
@@ -121,16 +128,6 @@
        <Button Content="重试" Click="OnRetryClick" AutomationProperties.Name="重试" Visibility="{Binding CanRetry, Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
        <Button Style="{StaticResource MeowFilm.IconButton}" Content="&#xE711;" Click="OnDismissStatusClick" AutomationProperties.Name="关闭状态" Visibility="{Binding CanDismiss, Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
       </StackPanel>
-      <ContentControl x:Name="ShutdownFocusTarget" Grid.Row="1" Grid.ColumnSpan="2" IsTabStop="True" HorizontalContentAlignment="Stretch" TabFocusNavigation="Cycle" AutomationProperties.Name="退出确认" Visibility="{Binding IsShutdownConfirmationOpen, Converter={StaticResource MeowFilm.BoolToVisibility}}">
-      <StackPanel x:Name="ShutdownConfirmation">
-       <TextBlock Text="保存或清理尚未确认完成。强制退出可能丢失未保存的更改，仍要退出吗？" TextWrapping="Wrap"/>
-       <local:WrapPanel Margin="0,12,0,0">
-        <Button x:Name="WaitForShutdownButton" Content="继续等待" Click="OnWaitForShutdownClick" IsEnabled="{Binding CanWaitForShutdown}" Margin="0,0,8,0" AutomationProperties.Name="继续等待关闭"/>
-        <Button x:Name="ForceExitButton" Content="强制退出" Click="OnForceExitClick" IsEnabled="{Binding CanForceExit}" AutomationProperties.Name="强制退出"/>
-        <Button x:Name="CancelShutdownButton" Content="取消关闭" Click="OnCancelShutdownClick" Margin="8,0,0,0" IsEnabled="{Binding CanCancelShutdown}" AutomationProperties.Name="取消关闭"/>
-       </local:WrapPanel>
-      </StackPanel>
-      </ContentControl>
      </Grid>
     </Border>
     <local:NoticeStack x:Name="Notices"/>

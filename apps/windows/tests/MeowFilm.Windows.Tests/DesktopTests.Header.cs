@@ -24,7 +24,8 @@ public static partial class DesktopTests
         {
             var module = new ProbeModule("search-entry"); var page = new SearchEntryProbe(module);
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
-            var picker = f.Element<ComboBox>("SearchTargetPicker"); var input = f.Search;
+            ((Microsoft.UI.Windowing.OverlappedPresenter)f.Shell.AppWindow.Presenter).IsAlwaysOnTop = true;
+            var picker = f.Element<ShellSearchScope>("SearchTargetPicker"); var input = f.Search;
             input.Text = "  草稿  ";
             True(picker.IsTabStop && input.IsTabStop, "both controls retain keyboard focus");
             Equal("搜索目标", AutomationProperties.GetName(picker), "category accessible name");
@@ -33,13 +34,13 @@ public static partial class DesktopTests
                 "magnifier is not a second search action");
             True(entry.Children.OfType<FontIcon>().Single().IsHitTestVisible == false,
                 "magnifier defers hit testing to the complete combo entry");
-            var expansion = DesktopTestUi.Expansion(picker);
+            var expansion = (IExpandCollapseProvider)FrameworkElementAutomationPeer.CreatePeerForElement(picker).GetPattern(PatternInterface.ExpandCollapse);
             foreach (double width in new[] { 92d, 118d })
             {
                 picker.Width = width; f.Shell.Root.UpdateLayout();
                 foreach (var target in page.Targets.Take(2))
                 {
-                    await DesktopTestUi.SelectAsync(picker, target);
+                    await SelectScopeAsync(picker, target);
                     f.Shell.Root.UpdateLayout();
                     var template = (Grid)VisualTreeHelper.GetChild(picker, 0);
                     var selected = template.Children.OfType<ContentPresenter>()
@@ -53,17 +54,24 @@ public static partial class DesktopTests
                         labelBounds.Bottom <= picker.ActualHeight && glyphBounds.Right <= picker.ActualWidth,
                         $"the full selected category fits between magnifier and native arrow; width={width}, " +
                         $"label={target.Label}, trimmed={label.IsTextTrimmed}, text={labelBounds}, arrow={glyphBounds}");
+                    True(Math.Abs((labelBounds.Left - 28) - (picker.ActualWidth - 28 - labelBounds.Right)) <= 1,
+                        "scope label is centered between equal magnifier and arrow slots");
                 }
                 expansion.Expand(); await UntilAsync(() => picker.IsDropDownOpen, "native category opens");
                 var menu = VisualTreeHelper.GetOpenPopupsForXamlRoot(picker.XamlRoot).Single().Child as FrameworkElement;
                 True(menu is not null, "native popup is realized"); menu!.UpdateLayout();
+                if (width == 92d) await NativeDesktopCapture.SaveAsync(f.Shell.Root, "presentation-search-scope");
+                True(picker.IsDropDownOpen && menu.IsLoaded && DesktopVisual.IsVisible(menu),
+                    "the category menu remains open through capture and geometry inspection");
                 True(Math.Abs(menu.ActualWidth - picker.ActualWidth) <= 1, "dropdown follows whole entry width");
                 True(Math.Abs(NativeDesktopCapture.ScreenPoint(menu, new Point()).X -
                     NativeDesktopCapture.ScreenPoint(picker, new Point()).X) <= 1,
                     "dropdown left edge aligns with the whole category entry");
-                var labels = ChromeVisuals(menu).OfType<TextBlock>().Where(text => text.Text.Contains("小说")).ToArray();
-                True(labels.Length > 0 && labels.All(text => text.TextWrapping == TextWrapping.NoWrap &&
-                    text.TextTrimming == TextTrimming.CharacterEllipsis), "long category labels remain single-line ellipsized");
+                True(NativeDesktopCapture.ScreenPoint(menu, new Point()).Y >=
+                    NativeDesktopCapture.ScreenPoint(input, new Point(0, input.ActualHeight)).Y - 1,
+                    "native scope popup opens below the search field without covering its text");
+                True(ChromeVisuals(menu).OfType<MenuFlyoutItem>().Any(item => item.Text.Contains("小说")),
+                    "native menu retains the complete accessible category label");
                 Equal("  草稿  ", input.Text, "opening categories preserves the draft");
                 Equal(0, page.Submissions.Count, "expansion is not submission");
                 expansion.Collapse(); await DrainAsync();
@@ -77,7 +85,7 @@ public static partial class DesktopTests
             await using var f = new Fixture([module], pages: [page]); await f.LoadAsync();
             f.Search.Text = "   "; f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, false); await DrainAsync();
             Equal(0, page.Submissions.Count, "empty query cannot submit");
-            f.Search.Text = "  草稿  "; await DesktopTestUi.SelectAsync(f.Element<ComboBox>("SearchTargetPicker"), page.Targets[2]);
+            f.Search.Text = "  草稿  "; await SelectScopeAsync(f.Element<ShellSearchScope>("SearchTargetPicker"), page.Targets[2]);
             False(f.Shell.TrySubmitSearch(VirtualKeyModifiers.Control, false), "modified Enter does not submit");
             False(f.Shell.TrySubmitSearch(VirtualKeyModifiers.None, true), "composition does not submit");
             Equal(0, page.Submissions.Count, "composition preserves draft");
@@ -333,6 +341,9 @@ public static partial class DesktopTests
             await UntilAsync(() => f.Status == "" && f.Shell.Title.EndsWith("layout", StringComparison.Ordinal), "header page");
             var search = f.Search;
             var root = f.Shell.Root;
+            AssertShellWindowOwnership(f.Shell);
+            root.UpdateLayout(); await DrainAsync();
+            await NativeDesktopCapture.SaveAsync(root, "presentation-header");
             foreach (var width in new[] { 1110d, 860d, 1440d })
             {
                 root.Width = width; root.Height = 800;
@@ -355,7 +366,10 @@ public static partial class DesktopTests
                     "both real history controls remain mounted");
                 Near(430, input.MaxWidth, "search keeps the design width cap");
                 Near(34, Bounds(search).Height, "search keeps the compact design height");
-                Near(32, Bounds(search).Top + Bounds(search).Height / 2, "search is vertically centered in the caption");
+                double captionCenter = f.Shell.AppWindow.TitleBar.Height / root.XamlRoot.RasterizationScale / 2;
+                foreach (var control in new FrameworkElement[] { search, navigation, caption })
+                    Near(captionCenter, Bounds(control).Top + Bounds(control).Height / 2,
+                        "header controls share the actual native caption button center");
                 Near(Math.Min(430, center.ActualWidth), Bounds(input).Width, "search adapts to the available center width");
                 Near(Bounds(center).Left + Bounds(center).Width / 2,
                     Bounds(input).Left + Bounds(input).Width / 2, "search is centered within the remaining content slot");
@@ -370,6 +384,16 @@ public static partial class DesktopTests
                 True(Bounds(caption).Right <= root.ActualWidth - 138, "client controls leave native caption-button space");
                 Equal(64d, Bounds(f.Element<Grid>("ContentRegion")).Top, "compact content boundary");
                 True(f.Shell.ExtendsContentIntoTitleBar, "system caption integrates the content root");
+                await DrainAsync();
+                var nonClient = Microsoft.UI.Input.InputNonClientPointerSource.GetForWindowId(f.Shell.AppWindow.Id);
+                var passthrough = nonClient.GetRegionRects(Microsoft.UI.Input.NonClientRegionKind.Passthrough);
+                double scale = root.XamlRoot.RasterizationScale;
+                bool IsClient(Point point) => passthrough.Any(region => point.X * scale >= region.X &&
+                    point.X * scale < region.X + region.Width && point.Y * scale >= region.Y && point.Y * scale < region.Y + region.Height);
+                var searchBounds = Bounds(search);
+                True(IsClient(new(searchBounds.Left + searchBounds.Width / 2, captionCenter)), "actual search input remains client-interactive");
+                var navBounds = Bounds(navigation);
+                True(!IsClient(new(navBounds.Right + 2, captionCenter)), "header spacing remains native caption drag territory");
                 Click(slot); Click(button); await DrainAsync();
             }
             Equal(6, executions, "contribution controls and generated actions remain executable across resize");
@@ -512,7 +536,7 @@ public static partial class DesktopTests
                 await pending.Started.Task;
                 if (boundary == "settings") { Click(f.Element<Button>("SettingsButton")); await DrainAsync(); }
                 else if (boundary == "close") { f.Shell.Close(); await f.WaitClosedAsync(); }
-                else { await f.Shell.AbortAsync(); await f.WaitClosedAsync(); }
+                else { await f.Shell.CloseAfterReleaseAsync(); await f.WaitClosedAsync(); }
                 True(pending.Token.IsCancellationRequested, boundary + " cancels header work");
                 Equal(0, page.Subscribers, boundary + " removes header subscriptions");
                 True(ParentOf(slot) is null, boundary + " releases the slot");
@@ -546,6 +570,34 @@ public static partial class DesktopTests
         public void Publish(DesktopHeaderContribution value) { header = value; changed?.Invoke(this, EventArgs.Empty); }
     }
 
+    private static void AssertShellWindowOwnership(ShellWindow shell)
+    {
+        var children = new List<nint>();
+        ShellChildWindow callback = (window, _) => { children.Add(window); return true; };
+        ShellEnumChildWindows(shell.Handle, callback, 0);
+        foreach (var window in children.Append(shell.Handle))
+            True(ShellGetAncestor(window, 2) == shell.Handle, "every content island belongs to the one main top-level window");
+        Equal(shell.AppWindow.Id, rootWindowId(shell.Root), "XAML content island retains the shell AppWindow identity");
+        static Microsoft.UI.WindowId rootWindowId(FrameworkElement root) => root.XamlRoot.ContentIslandEnvironment.AppWindowId;
+    }
+    private delegate bool ShellChildWindow(nint window, nint parameter);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "EnumChildWindows")]
+    private static extern bool ShellEnumChildWindows(nint parent, ShellChildWindow callback, nint parameter);
+    [System.Runtime.InteropServices.DllImport("user32.dll", EntryPoint = "GetAncestor")]
+    private static extern nint ShellGetAncestor(nint window, uint flags);
+    private static async Task SelectScopeAsync(ShellSearchScope picker, DesktopSearchTarget target)
+    {
+        var expansion = (IExpandCollapseProvider)FrameworkElementAutomationPeer.CreatePeerForElement(picker).GetPattern(PatternInterface.ExpandCollapse);
+        expansion.Expand(); await DrainAsync();
+        try
+        {
+            var item = VisualTreeHelper.GetOpenPopupsForXamlRoot(picker.XamlRoot).SelectMany(popup => ChromeVisuals(popup.Child))
+                .OfType<MenuFlyoutItem>().Single(item => ReferenceEquals(item.Tag, target));
+            MusicTestUi.Invoke(item); await DrainAsync();
+            Equal(target.Id, picker.SelectedValue, "native menu selects the exact scope");
+        }
+        finally { expansion.Collapse(); }
+    }
     private sealed class SearchEntryProbe(IDesktopModule owner) : IDesktopSearchPage
     {
         public string Id => "search";

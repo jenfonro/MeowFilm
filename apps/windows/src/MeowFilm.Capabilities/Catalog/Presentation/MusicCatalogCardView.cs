@@ -107,6 +107,7 @@ public sealed class MusicCatalogCardView : UserControl
         if (DataContext is not MusicCatalogCard) { Content = null; return; }
         var body = new Grid();
         var open = new Button { Padding = new Thickness(0), Margin = new Thickness(0), Background = MusicVisuals.Brush("#00000000"), BorderThickness = new Thickness(0), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Stretch };
+        MeowFilm.Desktop.DesktopVisual.UseResource(open, Control.TemplateProperty, "MeowFilm.ContentButtonTemplate");
         open.Click += async (_, _) => { if (Owner is { } owner && DataContext is MusicCatalogCard card) await owner.OpenCatalogCardAsync(card); };
         open.SetBinding(TagProperty, new Binding { Mode = BindingMode.OneWay }); Bind(open, IsEnabledProperty, nameof(MusicCatalogCard.CanOpen));
         Bind(open, AutomationProperties.NameProperty, nameof(MusicCatalogCard.Title));

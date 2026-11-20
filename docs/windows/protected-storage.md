@@ -22,7 +22,7 @@ Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/meowfilm.sqlite3` 
 
 ## 事务与可靠性
 
-`NativeDatabase` 使用受限单 writer I/O lane、bounded operation/byte admission、WAL 与 `synchronous=FULL`，所有连接启用外键及 `trusted_schema=OFF`。业务事务保持短小；缓存更新按查询身份、行和关系增量写入，读取按 owner 索引及窗口分页。关闭先拒绝新操作并排空已接纳事务，再 checkpoint、释放数据库连接和运行器 Worker。SQLite backup API 生成一致全库快照；本地 SQLite 不等同于服务器集群或跨设备多主高可用。
+`NativeDatabase` 使用受限单 writer I/O lane、bounded operation/byte admission、WAL 与 `synchronous=FULL`，所有连接启用外键及 `trusted_schema=OFF`。业务事务保持短小；缓存更新按查询身份、行和关系增量写入，读取按 owner 索引及窗口分页。数据库关闭先拒绝新操作并排空已接纳事务，然后释放连接；不在关闭时执行 checkpoint／vacuum。维护只在运行期间按阈值尝试。SQLite backup API 生成一致全库快照；本地 SQLite 不等同于服务器集群或跨设备多主高可用。
 
 缓存按所属表／记录策略失效，不因图片或 metadata cache 失败删除主数据库。图片、歌词、音频、源码等原始 bytes 不进入数据库。`resources-v1` 是资源文件目录，不是第二份结构化数据库。
 

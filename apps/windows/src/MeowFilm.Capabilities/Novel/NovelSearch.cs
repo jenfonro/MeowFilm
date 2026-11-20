@@ -106,5 +106,4 @@ public sealed class NovelSearch(NovelSourceService sources, NovelRuleProgram rul
         Changed?.Invoke(this, EventArgs.Empty);
     }
     public async Task PrepareShutdownAsync() { Cancel(); await work.PauseAsync(); request?.Dispose(); request = null; }
-    public void Resume() => work.Resume();
 }

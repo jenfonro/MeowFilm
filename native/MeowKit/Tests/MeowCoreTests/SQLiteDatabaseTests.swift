@@ -70,12 +70,16 @@ final class SQLiteDatabaseTests: XCTestCase {
         let enabled = try await reopened.read { try $0.query("PRAGMA foreign_keys").first!.integer("foreign_keys") }
         XCTAssertEqual(enabled, 1)
         try await reopened.transaction { try $0.execute("INSERT INTO owner_revisions VALUES('unrelated',1,'saved')") }
+        let receipt = try await reopened.read { try $0.query("SELECT receipt FROM owner_revisions WHERE owner='unrelated'").first!.text("receipt") }
+        XCTAssertEqual(receipt, "saved")
         do {
             try await reopened.transaction { try $0.execute("INSERT INTO operation_receipts VALUES('missing-owner','rejected',1)") }
             XCTFail("invalid new relation committed")
         } catch { XCTAssertEqual(error as? SQLiteStorageError, .constraint) }
         let receipts = try await reopened.read { try $0.query("SELECT operation_id FROM operation_receipts").map { try $0.text("operation_id") } }
         XCTAssertEqual(receipts, ["retained"])
+        let violations = try await reopened.read { try $0.query("PRAGMA foreign_key_check").count }
+        XCTAssertEqual(violations, 1)
         let destination = root.appendingPathComponent("rejected-backup.sqlite3")
         do { try await reopened.backup(to: destination); XCTFail("invalid whole-database backup accepted") }
         catch { XCTAssertEqual(error as? SQLiteStorageError, .corrupt) }

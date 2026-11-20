@@ -29,7 +29,9 @@ public partial class UserDataResetDialog : UserControl
         ConfirmChoice.IsEnabled = true;
         FailureNotice.Clear();
         Visibility = Visibility.Visible;
-        // Retain the safe initial choice even while the host window is inactive.
+        // The previously collapsed surface must participate in layout before
+        // WinUI can move focus to its safe initial choice.
+        UpdateLayout();
         CancelChoice.Focus(FocusState.Programmatic);
     }
 

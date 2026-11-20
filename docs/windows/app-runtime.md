@@ -28,12 +28,12 @@ App 通过已验证的管道发送一行 UTF-8 JSON `{sessionId,dataRoot,nativeS
 
 App 装配后显式调用 `AppRuntimeClient.Start()`，启动唯一公共宿主；`FilmCapability` 随后恢复已启用猫源。宿主启动不执行音乐音源脚本，停用猫源不执行，不批量检测。原生音乐页面、曲库、共享缓存和播放器不依赖单个音源脚本；官方联网配方、账号认证和平台歌词通过共同 `music-platform` owner 执行，需要该运行器可用，不保留原生 HTTP 回退。影视智能会话、业务数据缓存和新增本地播放资料则由同一 Node 的 film owner 持有，原生媒体消费它的真实 attempt，边界见[影视播放契约](../runtime/film-playback.md)。
 
-正常关闭先请求 `/v1/close` 并核对 `closed`、`cleanupComplete`，再退役 HTTP、管道和进程，等待真实退出；异常或启动失败同样释放已取得的资源。管道断开或取消信号本身不是清理成功回执。CLI 只输出固定 `WINDOWS_RUNTIME_START_FAILED`，不输出来源、凭据或底层异常；不自动重启。
+Windows 宿主关闭直接撤销 HTTP／管道并关闭所属 Job，终止其 Node 进程树；不请求 `/v1/close`，不等待 HTTP 默认时限或额外 grace timer。进程内重置／恢复以子进程实际退出及 I/O 结束为释放事实；旧业务或协议错误不重复作为成功释放后的错误。异常或启动失败同样释放已取得的资源。CLI 只输出固定 `WINDOWS_RUNTIME_START_FAILED`，不输出来源、凭据或底层异常；不自动重启。
 
-`AppRuntimeClient` 与 `AppRuntimeConnectionHost` 通过只读 `IRuntimeLifetime.ShutdownCompletion` 暴露最终关闭的同一物理排空任务：未开始时为 `null`，开始后无论成功或失败均保留原任务，不授予消费者关闭运行器的权限。强制释放先退役共享运行器，再释放原生所有者；音乐平台客户端的最终会话重置、小说图片引用释放此时等待该任务，不再向已关闭的宿主发送 RPC。正常运行时仍要求各自 RPC 回执；关闭竞态中收到 `CLOSED` 也必须取得并等待最终关闭任务，单纯 `Closed` 状态、连接撤权或未确认的传输失败不能充当资源释放成功。
+`AppRuntimeClient` 与 `AppRuntimeConnectionHost` 通过只读 `IRuntimeLifetime.ShutdownCompletion` 暴露最终关闭的同一物理排空任务：未开始时为 `null`，开始后无论成功或失败均保留原任务，不授予消费者关闭运行器的权限。进程内释放同时停止共享运行器和原生所有者；音乐平台客户端的最终会话重置、小说图片引用释放此时等待该任务，不再向已关闭的宿主发送 RPC。正常运行时仍要求各自 RPC 回执；关闭竞态中收到 `CLOSED` 也必须取得并等待最终关闭任务，单纯 `Closed` 状态、连接撤权或未确认的传输失败不能充当资源释放成功。
 
 factory 在交出 session 前负责排空已取得的资源；普通启动失败且清理成功不阻止最终关闭。该清理本身失败时，Node 启动或连接捕获通过脱敏 `RuntimeStartupCleanupException` 明确告知 epoch，最终关闭保留失败，不吞作普通启动错误，也不重复 Dispose 同一 session。
 
-LX/source 使用逐实例原生线程及 QuickJS Runtime，CatNode 使用逐实例 Node Worker；具体边界由[共用核心](../runtime/script-runtime.md)定义。[影视规则](film-settings.md)与搜索由 Node film owner 持有，小说纯规则由 Node source owner 执行；客户端不保留独立规则引擎或嵌入程序。source 的 CatVod 是独立 Spider 输入，不替代 CatNode；原生[小说页面与阅读器](novel.md)消费同一 source 书源仓库，继续持有书架、历史、偏好及净化配置。关闭小说 owner 只取消并排空本 owner 接纳的调用，不关闭共享运行器。管道 PID/Job 及执行隔离不等于恶意脚本安全沙箱。
+LX/source 使用逐实例原生线程及 QuickJS Runtime，CatNode 使用逐实例 Node Worker；具体边界由[共用核心](../runtime/script-runtime.md)定义。[影视规则](film-settings.md)与搜索由 Node film owner 持有，小说纯规则由 Node source owner 执行；客户端不保留独立规则引擎或嵌入程序。source 的 CatVod 是独立 Spider 输入，不替代 CatNode；原生[小说页面与阅读器](novel.md)消费同一 source 书源仓库，继续持有书架、历史、偏好及净化配置。关闭小说 owner 只取消并排空本 owner 接纳的调用，不关闭共享运行器。整进程退出不以这些 owner 的内存排空为门禁；同进程重置／重新装配则须等待实际释放。管道 PID/Job 及执行隔离不等于恶意脚本安全沙箱。
 
 恢复见[显式恢复](runtime-recovery.md)，最终载荷见[打包](runtime-packaging.md)，source 能力见[来源 capability ABI](../runtime/source-capability-abi.md)。

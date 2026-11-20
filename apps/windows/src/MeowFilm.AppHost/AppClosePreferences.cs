@@ -5,7 +5,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.AppHost;
 
-public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClosePreferences, IDesktopShutdownParticipant
+public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClosePreferences, IAsyncDisposable
 {
     private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.Window);
     public const string DocumentNamespace = "app.window.v1";
@@ -104,8 +104,7 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
         await gate.WaitAsync();
         gate.Release();
     }
-    public Task CancelShutdownPreparationAsync()
-    { stopping = false; Changed(); return Task.CompletedTask; }
+
     public Task AbortAsync() => PrepareShutdownAsync();
     public async ValueTask DisposeAsync() => await PrepareShutdownAsync();
 }

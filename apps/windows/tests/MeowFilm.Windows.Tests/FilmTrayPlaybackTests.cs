@@ -30,7 +30,7 @@ public static class FilmTrayPlaybackTests
         yield return Test("tray hiding without accepted output cancels preparation and drains its late result", PendingOutput);
         yield return Test("PiP still retains ordinary leave but explicit exit waits for actual native drain", PipExit);
         yield return Test("typed native clock and commands survive tray and exit joins output then receipt", NativeExit);
-        yield return Test("failed exit preparation remains visible and cancellation keeps the typed Film owner", FailedExit);
+        yield return Test("failed owner release closes the window without fabricating a receipt", FailedExit);
         yield return Test("real system media settings fence disabled Film startup and queued requests across restart", SystemMediaSettings);
         yield return Test("initial system media update failure releases the backend once and detaches the App projection", SystemMediaStartupFailure);
         yield return Test("system media re-enable publishes the current typed native Film clock", NativeSystemMediaClock);
@@ -255,7 +255,7 @@ public static class FilmTrayPlaybackTests
             scene.Rig.Native.Stopping = async () => { entered.TrySetResult(); await finish.Task; };
             scene.Tray.ExitApplication();
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(!scene.IsClosed && !scene.Lifecycle.IsReleased && scene.Backend.Disposals == 0,
+            Check(!scene.Lifecycle.IsReleased && scene.Backend.Disposals == 0,
                 "real exit does not use the PiP retention grant to bypass physical stop");
             finish.TrySetResult();
             await scene.WaitClosed();
@@ -305,7 +305,7 @@ public static class FilmTrayPlaybackTests
             scene.Tray.ExitApplication();
             await outputEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             scene.Shell.Close();
-            Check(scene.Shell.IsVisible && !scene.IsClosed && scene.ShutdownCalls == 1 &&
+            Check(scene.ShutdownCalls == 1 &&
                 scene.Backend.Disabled == 1 && scene.Backend.Disposals == 0 && !receiptEntered.Task.IsCompleted,
                 "tray exit restores an operable window and waits for native drain before releasing its receipt");
             // Shared preparation reversibly disables admission while the actual output and receipt still drain.
@@ -336,24 +336,10 @@ public static class FilmTrayPlaybackTests
     {
         var receipt = new ShutdownReceipt();
         await using var scene = await Scene.Create(receipt);
-        await scene.Play();
-        await scene.HideToTray();
-        scene.Tray.ExitApplication();
-        await Until(() => scene.ShellElement<TextBlock>("StatusText").Text == "关闭失败");
-        Check(scene.ShutdownWork is { IsFaulted: true } && !scene.Shell.ShutdownSucceeded &&
-            !scene.Shell.CleanupCompleted && !scene.IsClosed && scene.Shell.IsVisible &&
-            !scene.Lifecycle.IsReleased && scene.Rig.Session.HasOutput && scene.Backend.Disposals == 0,
-            "a real App preparation failure never reports successful cleanup or retires the typed attachment");
-        Click(scene.ShellElement<Button>("CancelShutdownButton"));
-        await Until(() => scene.CancelCalls == 1 && scene.ShellElement<Button>("SettingsButton").IsEnabled &&
-            scene.ShellElement<TextBlock>("StatusText").Text.Length == 0);
-        scene.Backend.Request(SystemPlaybackCommand.Seek, 81);
-        await Until(() => scene.Rig.Native.Position == 81);
-        Check(scene.Rig.Native.Commits == 1 && scene.Rig.Native.Stops == 0 && scene.Backend.Subscribers == 1 &&
-            scene.Backend.Last is { OwnerId: "film", Identity: "tray-output", PositionSeconds: 81 },
-            "cancelling failed preparation preserves the same actual Film scope and typed commands");
-        await scene.OpenChoice();
-        Click(scene.DialogElement<Button>("CancelChoice"));
+        await scene.Play(); await scene.HideToTray();
+        scene.Tray.ExitApplication(); await scene.WaitClosed();
+        Check(scene.IsClosed && scene.ShutdownCalls == 1 && !scene.Shell.CleanupCompleted &&
+            !scene.Lifecycle.IsReleased, "a failed release does not keep the window or claim resource success");
     }
 
     private static async Task SystemMediaSettings()
@@ -474,7 +460,7 @@ public static class FilmTrayPlaybackTests
         private readonly AppClosePreferences preferences;
         private readonly QualityFixture.Database store;
         private readonly TaskCompletionSource closed = Gate();
-        internal int ShutdownCalls, CancelCalls;
+        internal int ShutdownCalls;
         internal Task? ShutdownWork;
         private string activeOwner = "film";
         internal bool IsClosed => closed.Task.IsCompleted;
@@ -490,8 +476,6 @@ public static class FilmTrayPlaybackTests
             Film = new(new HomeSource(), Rig.Session, Rig.Library);
             Shell = new([Film, new SettingsNavigationTests.Module("other", "其他")], [],
                 () => { ShutdownCalls++; return ShutdownWork = Lifecycle!.CloseAsync(); },
-                () => Lifecycle!.ForceReleaseAsync(),
-                () => { CancelCalls++; return Lifecycle!.CancelShutdownPreparationAsync(); },
                 TimeProvider.System, appearance: null, preferences, (_, show, exit, _) =>
                 {
                     Tray.ShowWindow = show; Tray.ExitApplication = exit; return Tray;
@@ -573,7 +557,7 @@ public static class FilmTrayPlaybackTests
         }
         public async ValueTask DisposeAsync()
         {
-            if (!IsClosed) await Shell.AbortAsync();
+            if (!IsClosed) await Shell.CloseAfterReleaseAsync();
             await WaitClosed();
             await Rig.DisposeAsync();
             await MediaControls.DisposeAsync();
@@ -669,11 +653,10 @@ public static class FilmTrayPlaybackTests
     }
 
     // A failing shared preparation receipt leaves Film alive; it is not a successful empty Film fixture.
-    private sealed class ShutdownReceipt : IDesktopShutdownParticipant
+    private sealed class ShutdownReceipt : IAsyncDisposable
     {
         public Task PrepareShutdownAsync() => Task.FromException(new InvalidOperationException("TRAY_PREPARATION_FAILED"));
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.FromException(new InvalidOperationException("FIXTURE_RELEASE_FAILED"));
     }
 }

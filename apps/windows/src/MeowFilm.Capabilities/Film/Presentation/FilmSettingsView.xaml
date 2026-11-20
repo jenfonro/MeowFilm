@@ -22,6 +22,7 @@
      <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="视频源管理" KeyDown="Section_KeyDown" />
      <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="数据源设置" Visibility="{Binding HasMetadataSettings,Converter={StaticResource Film.Visible}}" KeyDown="Section_KeyDown" />
      <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="网盘账号" KeyDown="Section_KeyDown" />
+     <RadioButton Content="内置网盘接管" Tag="pan-routing" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="内置网盘接管" KeyDown="Section_KeyDown" />
      <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
       <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" KeyDown="Section_KeyDown" />
      </StackPanel>
@@ -105,6 +106,36 @@
   </Grid>
   <Grid x:Name="BusinessPage" Grid.Row="1" Visibility="Collapsed" />
   <local:PanAccountsView x:Name="PanPage" Grid.Row="1" Visibility="Collapsed" />
+  <ScrollViewer x:Name="PanInterceptionPage" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="内置网盘接管设置">
+   <StackPanel>
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{Binding SourcesFailed,Converter={StaticResource Film.Visible}}" IsEnabled="{Binding SourcesIdle}" AutomationProperties.Name="重新读取内置网盘接管设置" />
+    <Border Style="{StaticResource Settings.Section}">
+     <StackPanel>
+      <TextBlock Text="内置网盘接管" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12" />
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+       <TextBlock Text="百度网盘" Width="120" VerticalAlignment="Center" />
+       <CheckBox x:Name="BaiduInterception" Tag="baidu" IsEnabled="{Binding CanEditPanInterception}" Style="{StaticResource Settings.Switch}" Click="PanInterception_Click" AutomationProperties.Name="百度网盘内置接管" />
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+       <TextBlock Text="夸克网盘" Width="120" VerticalAlignment="Center" />
+       <CheckBox x:Name="QuarkInterception" Tag="quark" IsEnabled="{Binding CanEditPanInterception}" Style="{StaticResource Settings.Switch}" Click="PanInterception_Click" AutomationProperties.Name="夸克网盘内置接管" />
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+       <TextBlock Text="UC 网盘" Width="120" VerticalAlignment="Center" />
+       <CheckBox x:Name="UcInterception" Tag="uc" IsEnabled="{Binding CanEditPanInterception}" Style="{StaticResource Settings.Switch}" Click="PanInterception_Click" AutomationProperties.Name="UC 网盘内置接管" />
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+       <TextBlock Text="天翼云盘" Width="120" VerticalAlignment="Center" />
+       <CheckBox x:Name="TianyiInterception" Tag="tianyi" IsEnabled="{Binding CanEditPanInterception}" Style="{StaticResource Settings.Switch}" Click="PanInterception_Click" AutomationProperties.Name="天翼云盘内置接管" />
+      </StackPanel>
+      <StackPanel Orientation="Horizontal">
+       <TextBlock Text="移动云盘" Width="120" VerticalAlignment="Center" />
+       <CheckBox x:Name="YidongInterception" Tag="yidong" IsEnabled="{Binding CanEditPanInterception}" Style="{StaticResource Settings.Switch}" Click="PanInterception_Click" AutomationProperties.Name="移动云盘内置接管" />
+      </StackPanel>
+     </StackPanel>
+    </Border>
+   </StackPanel>
+  </ScrollViewer>
   <Grid x:Name="RulesPage" Grid.Row="1">
    <Grid.RowDefinitions>
     <RowDefinition Height="Auto" />

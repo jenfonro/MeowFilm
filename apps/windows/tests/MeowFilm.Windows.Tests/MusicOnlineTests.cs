@@ -130,8 +130,7 @@ public static partial class MusicUiTests
             Equal(0, f.Playback.Opens.Count); Equal(0, f.Calls.Count("music.history.recordPlayed"));
             held.Release(); await Task.WhenAll(retire, play); await Drain();
             Equal(0, f.Playback.Opens.Count); Equal(0, f.Calls.Count("music.history.recordPlayed"));
-            await f.Module.CancelShutdownPreparationAsync();
-            await f.Module.TogglePlaybackAsync(); Equal(1, f.Playback.Opens.Count);
+            await f.Module.TogglePlaybackAsync(); Equal(0, f.Playback.Opens.Count);
         });
         yield return Case("lyric settings leave in-flight LX audio intact and the caller's cancellation drains it", async () =>
         {
@@ -226,17 +225,7 @@ public static partial class MusicUiTests
             True(!f.Runtime.Calls.Contains("music.script.resolve") && !f.Runtime.Calls.Contains("music.script.sources.enable"),
                 "import and listing never execute a script");
         });
-        yield return Case("two-phase pause replays no source call and explicit resumed play resolves once", async () =>
-        {
-            await using var f = await Fixture.Create(); await SetupOnline(f);
-            await PlayOnlineSong(f.Module); Equal(1, f.Playback.Opens.Count);
-            await f.Module.PrepareShutdownAsync();
-            var resolves = f.Runtime.Calls.Count(m => m == "music.script.resolve");
-            await f.Module.CancelShutdownPreparationAsync();
-            Equal(resolves, f.Runtime.Calls.Count(m => m == "music.script.resolve")); Equal(1, f.Playback.Opens.Count);
-            await PlayOnlineSong(f.Module);
-            Equal(2, f.Playback.Opens.Count); Equal(resolves + 1, f.Runtime.Calls.Count(m => m == "music.script.resolve"));
-        });
+
         yield return Case("playlist loaded-page selection adds through the destination current revision", async () =>
         {
             await using var f = await Fixture.Create();
@@ -300,7 +289,7 @@ public static partial class MusicUiTests
         await f.Module.RefreshSourceManagementAsync(); await Until(() => f.Module.CanEdit);
         var saved = (await f.Rpc("music.settings.get")).GetProperty("settings");
         True(ScriptRow(f).Enabled, "the enabled network source is eligible without a global selection");
-        Equal(3, saved.GetProperty("schema").GetInt32());
+        Equal(1, saved.GetProperty("schema").GetInt32());
         True(!saved.TryGetProperty("quality", out _), "online settings must not duplicate native quality policy");
         True(f.Module.Status.Length == 0, "source activation and native settings refresh succeeded");
     }

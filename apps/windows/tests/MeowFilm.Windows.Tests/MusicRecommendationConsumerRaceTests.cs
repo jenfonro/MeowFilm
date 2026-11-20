@@ -454,8 +454,7 @@ public static partial class MusicUiTests
             await DrainSelections();
         }
         public override Task PrepareShutdownAsync(CancellationToken ct = default) => library.PrepareShutdownAsync(ct);
-        public override Task CancelShutdownPreparationAsync(CancellationToken ct = default) =>
-            library.CancelShutdownPreparationAsync(ct);
+
         public override async ValueTask DisposeAsync()
         {
             if (closed) return;
@@ -482,7 +481,7 @@ public static partial class MusicUiTests
                 RecommendationCalls.Add((method, JsonSerializer.SerializeToElement(parameters ?? new { })));
                 if (coordinator is not null) return await coordinator.ExecuteAsync(method, parameters, cancellationToken);
             }
-            if (method == "music.settings.get") return JsonSerializer.SerializeToElement(new { ok = true, settings = new { schema = 3, revision = 0, lyrics = false } });
+            if (method == "music.settings.get") return JsonSerializer.SerializeToElement(new { ok = true, settings = new { schema = 1, revision = 0, lyrics = false } });
             if (method == "music.quality.settings.get") return await library.ExecuteAsync(method, cancellationToken: cancellationToken);
             if (method == "music.official.candidates")
             {

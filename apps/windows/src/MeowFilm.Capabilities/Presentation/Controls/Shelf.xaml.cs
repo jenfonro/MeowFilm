@@ -1,15 +1,11 @@
 using System.Collections;
 using System.Collections.Specialized;
-using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Markup;
-using Windows.Foundation;
 using Windows.System;
-using Windows.UI.Core;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -55,14 +51,12 @@ public partial class Shelf : UserControl
     private ScrollViewer? rail;
     private MusicCatalogSection? section;
     private int visibleCards = 1;
-    private bool committing, dragging, pendingPointer, restoring;
+    private bool committing, restoring;
     private bool usesSectionItems = true, settingSectionItems;
     private INotifyCollectionChanged? observedItems;
     private double? targetOffset;
     private DesktopWindow? window;
     private IDisposable? visibility;
-    private Point pointerOrigin;
-    private double dragOrigin;
     internal ScrollViewer? ScrollHost => rail;
     internal void SetArtworkItemKeySelector(Func<object, object> selector) =>
         MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemKeySelector(ItemsHost, selector);
@@ -85,7 +79,7 @@ public partial class Shelf : UserControl
                 if (visible) { UpdateLayoutMetrics(); Restore(); }
                 else
                 {
-                    CommitOffset(); CancelPointer();
+                    CommitOffset();
                     rail?.ChangeView(section?.HorizontalOffset ?? HorizontalOffset, null, null, true);
                     targetOffset = null; IsSettled = true; UpdateButtons();
                 }
@@ -93,7 +87,7 @@ public partial class Shelf : UserControl
         };
         Unloaded += (_, _) =>
         {
-            CommitOffset(); CancelPointer();
+            CommitOffset();
             visibility?.Dispose(); visibility = null;
             if (rail is not null) rail.ViewChanged -= Scrolled;
             if (window is not null) window.Deactivated -= Deactivated;
@@ -111,45 +105,16 @@ public partial class Shelf : UserControl
                 try { ItemsSource = section?.Items; }
                 finally { settingSectionItems = false; }
             }
-            CancelPointer(); targetOffset = null;
+            targetOffset = null;
             UpdateLayoutMetrics(); Restore();
         };
         CardMotion.SetEnabled(this, true);
         RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => UpdateArrowOpacity());
-        PointerWheelChanged += (_, e) =>
-        {
-            CancelPointer();
-            if (targetOffset is not null)
-            { targetOffset = null; rail?.ChangeView(PresentedOffset, null, null, true); }
-            if (rail is null || MaximumOffset <= 0 ||
-                (InputKeyboardSource.GetKeyStateForCurrentThread(VirtualKey.Shift) & CoreVirtualKeyStates.Down) == 0) return;
-            e.Handled = true;
-            rail.ChangeView(Math.Clamp(PresentedOffset - e.GetCurrentPoint(this).Properties.MouseWheelDelta, 0, MaximumOffset), null, null, true);
-        };
         KeyDown += (_, e) =>
         {
             if (DesktopVisual.Modifiers != VirtualKeyModifiers.None) return;
             if (Navigate(e.Key)) e.Handled = true;
         };
-        AddHandler(PointerPressedEvent, new PointerEventHandler((_, e) =>
-        {
-            if (e.Pointer.PointerDeviceType != Microsoft.UI.Input.PointerDeviceType.Mouse || !e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
-            pointerOrigin = e.GetCurrentPoint(this).Position; dragOrigin = PresentedOffset; pendingPointer = true;
-        }), true);
-        AddHandler(PointerMovedEvent, new PointerEventHandler((_, e) =>
-        {
-            if (!pendingPointer || rail is null) return;
-            double dx = e.GetCurrentPoint(this).Position.X - pointerOrigin.X;
-            if (!dragging && Math.Abs(dx) < 4) return;
-            if (!dragging && !CapturePointer(e.Pointer)) { pendingPointer = false; return; }
-            targetOffset = null; dragging = true; e.Handled = true; rail.ChangeView(Math.Clamp(dragOrigin - dx, 0, MaximumOffset), null, null, true);
-        }), true);
-        AddHandler(PointerReleasedEvent, new PointerEventHandler((_, e) =>
-        {
-            pendingPointer = false; if (!dragging) return;
-            dragging = false; e.Handled = true; ReleasePointerCapture(e.Pointer); Snap();
-        }), true);
-        PointerCaptureLost += (_, _) => { pendingPointer = dragging = false; Snap(); };
     }
     private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs e)
     {
@@ -200,7 +165,7 @@ public partial class Shelf : UserControl
     private void Scrolled(object? sender, ScrollViewerViewChangedEventArgs e)
     {
         IsSettled = !e.IsIntermediate; UpdateButtons();
-        if (e.IsIntermediate || dragging || restoring) return;
+        if (e.IsIntermediate || restoring) return;
         if (targetOffset is { } target && Math.Abs(PresentedOffset - target) < .5) targetOffset = null;
         if (targetOffset is null) Snap();
     }
@@ -250,12 +215,11 @@ public partial class Shelf : UserControl
         if (key == VirtualKey.End && MaximumOffset - offset > .5) { Move(MaximumOffset); return true; }
         return false;
     }
-    internal void ScrollToIndex(int index) { CancelPointer(); Move((Math.Max(0, index) / RowsPerColumn) * CardWidth); }
-    private void CancelPointer() { pendingPointer = dragging = false; ReleasePointerCaptures(); }
-    private void Deactivated(object? sender, EventArgs e) { CancelPointer(); Snap(); }
+    internal void ScrollToIndex(int index) { Move((Math.Max(0, index) / RowsPerColumn) * CardWidth); }
+    private void Deactivated(object? sender, EventArgs e) => Snap();
     private void CommitOffset()
     {
-        if (rail is null || restoring || dragging || pendingPointer) return;
+        if (rail is null || restoring) return;
         double offset = Math.Clamp(targetOffset ?? NearestOffset(PresentedOffset, MaximumOffset, CardWidth), 0, MaximumOffset);
         if (section is not null) section.HorizontalOffset = offset;
         committing = true; HorizontalOffset = offset; committing = false;

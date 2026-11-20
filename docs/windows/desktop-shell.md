@@ -7,16 +7,18 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 - `DesktopWindow` 继承 `Microsoft.UI.Xaml.Window`；`ShellWindow` 的 `WindowFrame`／`PresentationSurface` 是唯一应用内容根。能力、公共页、页头插槽、侧栏贡献及全局表面均返回 `Microsoft.UI.Xaml.FrameworkElement`。影视页的 `SwapChainPanel`、音乐完整播放器、队列、通知和确认层处于同一 WinUI／Composition 呈现树，遮挡由树内层级决定，不设置视频内容 HWND 或控制条追位窗口。
 - 窗口公开 `Handle`、`Root`、`Resources`、`Title`、`Show`／`Hide`／`Activate`／`Resize`、`WindowState`、可取消的 `Closing`、`Closed`、`Deactivated`、`VisibilityChanged` 及 `SessionEnding`。调用方设置 `Content` 后调用幂等的 `AttachRoot()`，绑定树内 owner 和公共字体；`DesktopWindow.GetWindow(view)` 只沿当前树解析所属窗口。
 - `NativeCaption` 使用 `AppWindow` 系统标题栏按钮和 `InputNonClientPointerSource` 的非客户区准入；布局坐标仅用于声明标题栏可拖动／交互区域，不搬运应用内容。普通 Win32 顶层窗口系统集成通过 `SetWindowSubclass` 接收消息，不保留 WPF `WindowChrome`／`HwndSource` 可视壳。
-- 请求 owner 通过 `MeowFilm.Threading.OwnerDispatcher` 使用同一 Windows App SDK `DispatcherQueue`；调度任务保留完成、异常、排队取消与关闭拒绝语义，计时器由所属队列创建。XAML 窗口、控件、资源、输入和动画由 WinUI 持有。
+- 请求 owner 通过 `MeowFilm.Threading.OwnerDispatcher` 使用同一 Windows App SDK `DispatcherQueue`；调度任务保留完成、异常、排队取消与关闭拒绝语义，计时器由所属队列创建。调度器关闭不等待业务任务；进程内替换由各业务 owner 在关闭队列前完成所需排空。XAML 窗口、控件、资源、输入和动画由 WinUI 持有。
 
 ## 导航、页头与全局表面
 
 - 只有一套统一侧栏、内容入口、设置入口和 App 页头。顶部媒体入口按 App 注册顺序显示音乐、影视、小说，进入各 owner 声明的第一条首页；下方导航及“我的”分组仅展示当前 owner，不重复首页入口。能力仍由原实例持有，媒体选择不重建业务服务。`NavigationItem.IconData` 可提供线框图标；未提供时沿用符号字形。`IDesktopSidebarSource` 可贡献 owner 自有的侧栏内容及有界设置请求，切换时仅挂载当前贡献，设置请求只接受当前 owner，窗口关闭退订；小说据此显示真实启用书源及导入入口。
+- 侧栏条目按 owner 与 route 保留 `ShellNavigationEntry` 身份，实际元数据变化通过属性通知更新；普通导航集合、分组集合及其 `CollectionViewSource` 由壳稳定持有。初次订阅、`Navigation` 源替换及当前源的成员通知只同步对应 owner；普通页面请求开始和完成不触发侧栏内容同步。隐藏 owner 的变化更新其条目，实际切换 owner 时才更新可视投影；成员增删或移动不重建未变化的条目、分组与组头操作，展示切换不临时清空选中项。
 - `ShellWindow` 持有窗口标题、系统按钮、导航／搜索请求及其 owner；`DesktopPageHeader` 是可独立复用的贡献呈现组件，拥有标题、插槽、动作的视觉布局、源订阅及操作生命周期。同一返回／前进控件树进入组件 `Navigation`，同一搜索框进入 `Center`，不复制控件或搜索状态。当前页面通过 `IDesktopHeaderSource` 提供标题、有类型操作和内容插槽，普通能力主视图的搜索准入用于登记全局搜索 owner。
-- 普通页头与窗口 caption 共用 64 DIP 高度；侧栏宽 216 DIP，正文顶距 22 DIP。公共组件按导航、标题、贡献动作测量剩余区域，搜索在其中居中，最高宽 430、高 34 DIP，窄窗口缩小而不覆盖窗口按钮或贡献动作。设置左邻铃铛仅呈现图标，当前不接通知业务／未读状态，现有操作通知保持原样。播放队列和通知仍位于页头下方。
+- 普通页面保留 64 DIP 页头内容边界；独立的 `HeaderChrome` 顶部对齐，其高度由 `NativeCaption` 按 `AppWindow.TitleBar.Height / XamlRoot.RasterizationScale` 更新，使导航、搜索和设置入口使用实际系统 caption 的纵向中心。侧栏宽 216 DIP，正文顶距 22 DIP。公共组件按导航、标题、贡献动作测量剩余区域，搜索在其中居中，最高宽 430、高 34 DIP，窄窗口缩小而不覆盖窗口按钮或贡献动作。设置左邻铃铛仅呈现图标，当前不接通知业务／未读状态，现有操作通知保持原样。播放队列和通知仍位于页头下方。
+- caption 交互区域由 owner 显式提供：Shell 登记返回、前进、搜索字段及自身操作；`DesktopPageHeader.CaptionInteractiveRegions` 仅提供当前前后插槽与动作区。`NativeCaption` 将这些实际可见区域转换为物理像素并登记 passthrough，不递归扫描控件树或将整个页头声明为交互区；控件间空白保留原生拖动。
 - Shell 在首次显示前按主显示器整屏物理像素计算默认窗口：宽为 `screenWidth × 1300/2560`，高为 `screenHeight × 850/1440`，再按该 HWND 的 DPI 换算为 DIP；2560×1440、96 DPI 对应 1300×850 DIP，其他分辨率保持相同整屏占比。现有 860×600 最小尺寸按相同屏幕比例与 DPI 缩放，不能夹大默认值。`Resize` 将 DIP 交回物理窗口尺寸，`DisplayArea.WorkArea` 和 `AppWindow.Move` 完成首次居中；`WM_GETMINMAXINFO` 约束最小跟踪尺寸。
 - 页头贡献绑定组件持有的展示代次和取消边界。切页、设置、关闭或换源时先撤销旧操作准入、订阅与插槽；卸载时释放这些资源，重新加载读取当前贡献并建立新代次。已访问能力的内容树隐藏保留不延长其页头生命周期，壳按展示切换显式退休页头，不等待内容树卸载；通过不透明位置恢复历史同样经过请求的页头代次边界。源事件在 UI dispatcher 上核对源和代次，切走再返回同一源也拒绝旧事件；同源刷新保留同一插槽实例及其编辑／焦点状态，替换的动作项不能再执行。动作触发页面切换后由页面请求自己的生命周期接管，旧页头令牌和迟到完成不能覆盖新标题、操作或状态。
-- 模块属性通知按待派发的 Dispatcher 批次合并外壳失效，导航与视图替换分别保留；每批读取当前事实并集中呈现，不为每个播放／业务属性重复排队重建外壳。同一展示代次、顺序和动作实例的页头刷新保留动作项与按钮，只更新实际变化的启用态；真正替换／重排动作或退休展示时才更新动作集合，执行时仍检查当前准入。
+- 模块属性通知只按壳实际消费的导航、视图、标题及可选侧栏／沉浸属性进入 Dispatcher 批次；导航仅同步成员，播放器替换仅更新播放器与全局表面准入，当前展示变化才重新呈现壳。普通播放进度、歌曲等业务属性由其绑定消费者处理，不触发壳读取；页头贡献通过 `HeaderChanged` 更新，浮层操作通过 `GlobalSurfaceRequested` 接收。同一展示代次、顺序和动作实例的页头刷新保留动作项与按钮，只更新实际变化的启用态；真正替换／重排动作或退休展示时才更新动作集合，执行时仍检查当前准入。
 - 设置页的标题显示在返回按钮右侧，其内容插槽紧随标题，不使用右侧页头操作区；所有普通内容区都直接衔接紧凑页头，不再叠加额外顶距。
 - `DesktopHeaderContribution.Slot` 接受页面自有的 WinUI `FrameworkElement`；`SlotPlacement` 支持 `Automatic`／`Leading`／`Trailing`。自动布局在显示标题时把插槽放在标题后，否则放在右侧动作前。页面可自行组合标签、筛选或多行内容并选择插槽位置，组件不读取页面身份。组件调用方以 `headingFallback` 选择显示标题，普通页面的标题继续只更新窗口及内容无障碍名称，不新增可见标题。设置集成通过 `PageHeaderHost` 访问其标题／插槽，不在窗口保留旧布局名称别名。
 - 搜索框只存在一份。App 装配 `IDesktopSearchPage` 时，壳通过其 `Targets`／`SubmitAsync` 将不透明目标与关键词送到同一公共结果页；页头 `SearchTargetId`／`SearchContextId` 只提供上下文默认值，不含业务分派。仅页面／结果分类变化自动联动目标，普通刷新不覆盖手选；手选不提交、不改输入。未装配公共搜索页的消费者保留原搜索 owner 入口。设置及从设置进入的设置型公共页隐藏并禁用搜索。模块草稿按 owner 与 route/search 隔离；公共搜索页单独保留未提交草稿与 `Query`，播放返回不会把它写入原模块草稿。
@@ -33,7 +35,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 - Shell 发起的初始化、导航和搜索若抛出错误，由 Shell 唯一上报；能力通过 `IDesktopModule.OperationErrorText` 只提供固定、脱敏业务错误文本，不同时发布自身通知。能力控件自行处理并结算的操作仍由其原生通知出口拥有；新的 Shell 请求撤销上一模块操作状态及迟到通知准入。存储格式错误明确失败并保留原始数据。
 - 当前内容以推荐路线 `catalog-home` 开始；初始化恢复 App 必需的侧栏曲库、设置和当前队列。“我的”分组右侧的创建动作打开能力主视图内的歌单浮层，不创建第二个窗口；收藏和自建歌单详情不显示平台账号或录音身份选择。自建歌单的重命名／删除仍由实际详情页向唯一 Shell 页头提供有类型操作，收藏详情不提供页头操作；歌曲添加目标通过歌曲上下文菜单选择。
 - 公共页的受控导航核对实际注册实例、可见状态、route 和操作代次；当前 App 不装配下载管理页面、导航或后台任务。
-- 窗口只观察 AppHost 的真实两阶段关闭结果。超时/失败保留窗口与确认；强制清理不冒称保存成功，取消准备只有实际成功后才恢复业务。首次 `ShutdownCompletion` 不能用来无条件退出。
+- 退出窗口立即关闭，没有 5 秒观察门禁、继续等待／强制清理／取消退出状态机。AppHost 停止播放器及所属运行器并让数据库完成已受理事务；不等待所有业务 reader、网络请求和进程内对象析构。`ShutdownCompletion` 只记录回调结束，不冒充完整业务资源释放。
 - `PrepareForRender()` 只在共享 UI 线程挂载视图，不显示窗口、不触发 Loaded、不初始化业务；真实渲染和桌面像素检查必须另行加载可见 WinUI 窗口。
 
 ## 资源、输入与公共控件
@@ -54,7 +56,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 
 全应用字体默认由 Desktop 的 `Typography.xaml`／`Theme.xaml` 拥有，普通文字使用 WinUI 的 `XamlAutoFontFamily` 和常规 `Normal`，正文默认 14 DIP；代码侧权重使用 `Microsoft.UI.Text.FontWeights.Normal`。标题、按钮、选中态与歌词不加粗，层级只通过字号区分；图标使用线框 Path 或专用符号字体，正文不继承图标字族。`DesktopTypography.Install` 在窗口创建时幂等安装资源，`AttachRoot` 应用根控件默认；阅读器正文的用户字体、字号与加粗仍由阅读器负责。字体光栅化、布局取整和透明表面合成使用 WinUI，不保留 WPF `TextOptions` 或强制 ClearType／灰度策略。
 
-侧栏项保留系统焦点轮廓和绑定到实际 owner／目的地的无障碍名称。搜索输入、图标、类别选择与竖向分隔位于同一字段；`Ctrl+K` 和 `Ctrl+F` 聚焦同一输入，普通 Enter 通过唯一壳入口提交。放大镜为同一 `EqualWidthComboBox` 入口内不接收输入的图形，点击图标或类别均由下拉接收，没有独立搜索按钮；类别选择不提交搜索。`EqualWidthComboBox` 约束原生 Popup 内容宽度，选项单行省略；原生弹层与入口的最终左边缘对齐保留真实坐标断言，不以属性相等冒充桌面结果。
+侧栏项保留系统焦点轮廓和绑定到实际 owner／目的地的无障碍名称。搜索输入、图标、类别选择与竖向分隔位于同一字段；`Ctrl+K` 和 `Ctrl+F` 聚焦同一输入，普通 Enter 通过唯一壳入口提交。类别选择由唯一的 `ShellSearchScope` 持有，使用 `Button` 与原生 `MenuFlyout`；入口宽 92 DIP，标签在左右等宽图标槽之间居中。放大镜是不接收输入的图形，点击图标或类别均打开同一菜单，没有独立搜索按钮；类别选择只更新 `SelectedValue`，不提交搜索或改写输入。菜单宽度跟随入口，使用 `BottomEdgeAlignedLeft` 相对整个搜索字段下置，保留 Invoke／ExpandCollapse 自动化语义；最终下方位置、等宽及左边缘对齐仍需真实坐标断言，不以属性相等冒充桌面结果。
 
 ## 验证边界
 
@@ -67,7 +69,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 ## 通用外观与主题
 
 - AppHost 注入 `IDesktopAppearance`，壳在模块设置类别之前提供“通用”。通用页不伪装成业务模块；业务通过 `IDesktopGeneralSettingsSource` 分别贡献外观、首页数据源、缓存控制内容，壳仅负责区域切换，设置返回仍恢复最初页面且不重放导航。
-- `AppAppearance` 独占原生文档 `app.appearance.v1`，严格字段为 `{schema:1, themeColor:"#RRGGBB"}`。缺失只采用默认、不写盘；损坏或未知版本不覆盖，通知并允许重新读取。保存使用读取指纹 CAS，失败后权威重读、不重放写入；已接受写入在 App 关闭前实际排空，取消关闭可恢复准入。该 namespace 不开放给脚本桥。
+- `AppAppearance` 独占原生文档 `app.appearance.v1`，严格字段为 `{schema:1, themeColor:"#RRGGBB"}`。缺失只采用默认、不写盘；损坏或未知版本不覆盖，通知并允许重新读取。保存使用读取指纹 CAS，失败后权威重读、不重放写入；已受理数据库写入在关闭前完成；同进程重置先封闭 owner 再释放存储。该 namespace 不开放给脚本桥。
 - `MeowFilm.Brush.AppBackground` 只属于壳的普通页面背景。默认纵向渐变为 `#E4F2FC/#EBF5FC/#F5F8FB/#F7F9FC`，位置 `0/.24/.58/1`，从浅蓝过渡到近白，底部不再变深；自定义色按各层固定权重着色，保留浅底与中性过渡，不铺纯色。存储的 `themeColor` 与默认选择标识 `#E6F3FB` 不变，不重置用户已保存的主题。普通页主操作为绿色，错误、删除、收藏心形及平台标识可保留语义红。
 - `SidebarBackdrop` 的 `CompositionVisualSurface.SourceVisual` 只引用独立的整窗 `ApplicationBackground` 背景兄弟层。效果实现依赖 `Microsoft.Graphics.Win2D` 1.4.0；`GaussianBlurEffect`（`BlurAmount=12`、`BorderMode=Hard`、`Optimization=Speed`）编译为 `CompositionEffectBrush`，输入是该专用 surface；先对完整背景模糊，再由侧栏本地 `ContainerVisual` 的 `InsetClip` 限定输出。保留背景原尺寸与树内偏移，不把渐变缩放到侧栏，也不在侧栏边缘截断采样核；不使用会采入前景的 `CompositionBackdropBrush`，不模糊文字、图标或影片。
 - 材质覆盖 40% 白色轻层，保留右侧及分组分隔线，主内容侧用 30 DIP 透明渐隐柔化交界；装饰不接收输入，随侧栏退出沉浸画布。背景颜色由同一源 visual 实时更新，尺寸变化更新 surface／sprite／容器，保留效果实例；Source 更换重绑定，卸载退订源事件并释放 Composition 资源。没有逐帧截图、取样自身祖先、桌面 Acrylic 或窗口坐标追位。高对比初始呈现和后续切换均隐藏模糊、白色轻层与交界渐隐，使用系统窗口背景和系统边界色。
@@ -84,7 +86,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 - 缺失文档只采用默认值，不写盘。读取失败、损坏或未知版本撤销输入及编辑准入，保留原文档并通过 `NoticeOutlet` 通知，允许显式重新读取。保存按上次读取指纹 CAS；失败后权威重读，已接受写入的丢失回执可以恢复为成功，未接受的草稿不发布、不重放。偏好快照不可变；保存成功后才通知输入及系统媒体消费者。
 - 通用页沿用原有 32px 左右边距和设置滚动条。“功能说明／应用内快捷键／全局快捷键”展示八行；按钮可通过键盘及自动化访问，录制在当前 WinUI 根的 `PreviewKeyDown`／`PreviewKeyUp` 消费候选按下、长按与释放，并隔断 Shell 固定导航。纯修饰键不提交；Esc 取消、Tab 离开、Delete／Backspace 清除。候选可即时保存并结束视觉编辑，但同一 `IsRecording` 保持至所消费的候选／控制键全部释放，期间不恢复全局注册；候选保存中保留输入按钮的焦点资格，避免控件禁用导致提前失焦。失焦、隐藏、卸载、窗口停用或显式取消输入会话均可立即释放该状态，保存中同样可清理。内部不同动作跨局部／全局重复、`Ctrl+F`、`Alt+Left`、裸 Esc／Space 均拒绝保存，同一动作共享局部／全局组合允许。冲突就地显示并通过通知反馈，键位始终恢复权威值。
 - `IsRecording` 和 `GlobalErrors` 仅为运行时状态，不持久化。设置 UI 不探测、不推测占用；运行时附件以 `SetGlobalErrors` 发布真实注册结果，行内保留“热键被占用”或其他具体错误。重新检测只通过 `RequestRegistrationRefresh` 事件请求附件，设置未恢复、全局关闭或正在录制时不发出请求。
-- 媒体设置位于 `AppShutdown.sharedParticipants` 首位，其后依次为外观和关闭偏好。真正退出准备先同步令 `IsAvailable=false`，撤销编辑、输入及录制准入，封住全部系统媒体请求（包括 Pause／Stop）和自定义快捷键，再等待已接受保存实际结算；外观或关闭偏好保存未结算不能延后封口。取消准备按逆序恢复，媒体最后按权威开关重新开放；永久 Abort／Dispose 或已关闭的会话不再恢复。关闭询问及隐藏到托盘不进入真正退出准备，继续遵守各自开关。启动失败同样由生命周期所有者排空设置后才释放存储。
+- 媒体设置位于 `AppShutdown.sharedParticipants` 首位，其后依次为外观和关闭偏好。同进程重置先同步令 `IsAvailable=false`，撤销编辑、输入及录制准入，封住全部系统媒体请求（包括 Pause／Stop）和自定义快捷键，再等待已接受保存实际结算；外观或关闭偏好保存未结算不能延后封口。退役是单向过程，失败不重新开放旧代输入；只有新装配的 owner 才重新接收工作。关闭询问及隐藏到托盘不进入真正退出准备，继续遵守各自开关。启动失败同样由生命周期所有者排空设置后才释放存储。
 
 `DialogPlacement.ShowAsync(owner, ContentDialog)` 使用 owner 已有的 `XamlRoot`，所属控件卸载或隐藏时关闭；原生 `ContentDialog` 拥有正常关闭时的焦点恢复，公共机制只在关闭交接期间拒绝已隐藏或被业务 `canRestoreFocus` 判据退休的原焦点，不重复恢复或改写滚动位置。窗口移动由正常呈现树处理，不再为表单注册窗口移动追位。播放器内的 `PlayerDialogHost` 是同一根内的模态 Grid，拥有外部点击／Esc 关闭准入及 owner 退场清理。`ColorSelection`、设置下拉框和栏目间距资源由 Desktop 共用，业务设置页只负责提供选项和提交至各自 owner。
 
@@ -92,11 +94,11 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 
 - Windows App 注入唯一 `IDesktopClosePreferences`。主窗口的标题栏关闭、播放器页关闭和 Alt+F4 使用同一关闭入口；默认询问「最小化到托盘」或「退出」，可勾选「记住我的选择」。取消或 Esc 不保存、不退出；未勾选只执行本次操作。普通最小化按钮仍最小化到任务栏。
 - 通用设置的「窗口行为」提供「每次询问」「最小化到托盘」「退出应用」。设置和关闭提示都提交到同一 owner；设置立即保存，关闭提示记住选择时必须收到保存成功后才执行动作。保存失败保留可操作界面及统一错误通知，不把草稿当成已保存偏好。
-- `AppClosePreferences` 独占 Windows 原生文档 `app.window.v1`，字段为 `{schema:1, closeBehavior:"ask"|"minimizeToTray"|"exit"}`。缺失采用 `ask` 且不写盘；损坏或未知格式不覆盖。保存使用读取指纹 CAS，失败后权威重读；设置页可重新读取。该 namespace 不开放给脚本桥，已接受的写入随 App 两阶段关闭实际排空，取消关闭恢复编辑准入。
+- `AppClosePreferences` 独占 Windows 原生文档 `app.window.v1`，字段为 `{schema:1, closeBehavior:"ask"|"minimizeToTray"|"exit"}`。缺失采用 `ask` 且不写盘；损坏或未知格式不覆盖。保存使用读取指纹 CAS，失败后权威重读；设置页可重新读取。该 namespace 不开放给脚本桥，已受理数据库事务在 App 退出前实际完成；设置更改在运行期间即提交。
 - Shell 拥有托盘实例，在 HWND 可用后注册。Windows App 编译期嵌入 `Desktop/Assets/Meowfilm.ico`（SVG 来源沿用现有绿色 `m` 品牌），托盘复制窗口的原生图标并独立释放，不依赖 `dotnet.exe` 宿主图标。最小化到托盘仅隐藏主窗口，保留播放、系统媒体会话、自定义全局快捷键、运行器和窗口状态；媒体开关仍独立生效，恢复时还原此前正常／最大化状态。隐藏前必须确认图标可用，注册失败保持窗口可见并提示。
-- `ShellWindow.IsHiddenToTray` 只读发布这一次托盘隐藏事实，先于子视图可见性变化置位，恢复显示前复位。Film 仅据此保留已有实际输出、attempt 和媒体通道；准备中无输出不保活，恢复不重新开播。普通页面离开停止原生输出，显式 PiP 可继续保留，真正退出仍排空。
+- `ShellWindow.IsHiddenToTray` 只读发布这一次托盘隐藏事实，先于子视图可见性变化置位，恢复显示前复位。Film 仅据此保留已有实际输出、attempt 和媒体通道；准备中无输出不保活，恢复不重新开播。普通页面离开停止原生输出，显式 PiP 可继续保留；整进程退出请求停止输出，同进程重置仍确认资源释放。
 - 托盘主激活恢复主窗口；「显示主窗口」「退出」使用原生 `HMENU`／`TrackPopupMenuEx`，键盘、外观、高对比、位置和取消由 Windows 系统菜单负责。菜单打开期间创建零尺寸、无 XAML 内容的 Win32 `STATIC` tool-window 作为前台 owner，结束立即销毁；主窗口可保持隐藏，这个系统菜单辅助 HWND 不是第二个应用内容壳。Explorer 重建任务栏后重新注册，恢复失败让主窗口重新可达；真正关闭时移除通知图标并释放句柄、订阅及菜单。
-- 托盘显式退出绕过询问和已记住的最小化偏好，先恢复窗口再执行原有关闭链路。重复请求不重复弹窗或清理；清理失败／超时仍由原有等待、取消与强制清理界面处理。`WM_QUERYENDSESSION` 正常交给系统处理，不异步等待或否决；仅收到 `WM_ENDSESSION` 且 `wParam != 0` 时一次发布 `SessionEnding`。Shell 的 `PrepareForSessionEnding()` 幂等，AppHost 可订阅同一事件登记退出；取消的系统注销不退休应用，不因关闭偏好弹出选择。
+- 托盘显式退出绕过询问和已记住的最小化偏好，直接执行退出。重复请求不重复弹窗或启动收尾；退出不显示清理失败等待界面。`WM_QUERYENDSESSION` 正常交给系统处理，不异步等待或否决；仅收到 `WM_ENDSESSION` 且 `wParam != 0` 时一次发布 `SessionEnding`。Shell 的 `PrepareForSessionEnding()` 幂等，AppHost 可订阅同一事件登记退出；取消的系统注销不退休应用，不因关闭偏好弹出选择。
 - 未注入关闭偏好的独立 Shell 消费者继续直接使用其注入的 shutdown 回调，不生成无 owner 的窗口行为设置。实际 App 始终注入偏好。
 
 
@@ -104,4 +106,4 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 
 设置→通用→缓存控制的“本机数据”提供“清除全部数据”，仅在 App 注入清除回调时显示。确认浮层列明不可撤销的本机范围以及云端/外部原文件保留；默认焦点在取消，Esc 取消，打开或取消都不调用清除。确认后禁止并发提交、关闭选择和旧页面导航；不能通过失败后的取消恢复部分清理的旧代。
 
-清理忙碌、失败、重试和退出留在操作浮层，错误使用统一通知组件。失败可重试清除或等待真实资源释放后退出；成功由 AppHost 关闭退役 Shell 并在同一进程打开初始界面，不显示“需重启”。系统注销/关机仍遵守 OS 会话结束，不阻止系统退出。数据范围和恢复规则见[本机数据清除](protected-storage.md#clear-all-local-user-data)。
+清理忙碌、失败、重试和退出留在操作浮层，错误使用统一通知组件。失败可重试清除或直接退出，待清除标记由下一次冷启动完成；成功由 AppHost 关闭退役 Shell 并在同一进程打开初始界面，不显示“需重启”。系统注销/关机仍遵守 OS 会话结束，不阻止系统退出。数据范围和恢复规则见[本机数据清除](protected-storage.md#clear-all-local-user-data)。

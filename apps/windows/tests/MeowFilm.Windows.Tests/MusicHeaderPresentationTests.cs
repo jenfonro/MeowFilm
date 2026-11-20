@@ -130,8 +130,7 @@ public static partial class MusicUiTests
             finally
             {
                 source.HeaderChanged -= Count;
-                await f.Module.CancelShutdownPreparationAsync();
-                await Until(() => f.Module.CanEdit);
+                await f.Module.DisposeAsync();
             }
 
             void Count(object? sender, EventArgs e) => count++;

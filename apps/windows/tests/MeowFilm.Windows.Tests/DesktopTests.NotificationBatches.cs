@@ -14,7 +14,7 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> NotificationBatchCases()
     {
-        yield return Case("module notification bursts preserve one header presentation and live actions", async () =>
+        yield return Case("module business notifications leave shell unchanged and header events update live actions", async () =>
         {
             var enabled = true;
             var view = new BatchHeaderView(new("before",
@@ -24,25 +24,36 @@ public static partial class DesktopTests
             var actions = f.HeaderElement<ItemsControl>("HeaderActions");
             var original = actions.Items.Cast<DesktopHeaderActionItem>().Single();
             var reads = view.Reads;
+            var navigationReads = module.NavigationReads;
+            for (int i = 0; i < 3; i++)
+            { module.Notify("CurrentTitle"); module.Notify("PositionSeconds"); }
+            await DrainAsync();
+            Equal(reads, view.Reads, "unrelated business properties never reread the shell header");
+            Equal(navigationReads, module.NavigationReads, "business notifications never redo shell navigation presentation");
+            Same(original, actions.Items.Cast<DesktopHeaderActionItem>().Single(), "business notifications retain the live action");
             enabled = false;
             view.Contribution = view.Contribution with { Title = "after" };
-            for (int i = 0; i < 1000; i++) module.Notify("CurrentTitle");
+            view.NotifyHeaderChanged();
             await DrainAsync();
-            Equal(reads + 1, view.Reads, "one source read for the entire UI notification burst");
+            Equal(reads + 1, view.Reads, "the header owner event rereads its contribution");
             Same(original, actions.Items.Cast<DesktopHeaderActionItem>().Single(), "unchanged live action identity");
             False(original.IsEnabled, "the retained action publishes its latest enabled state");
             Equal("meowfilm · after", f.Shell.Title, "the batch reads the latest header state");
 
             reads = view.Reads;
             enabled = true;
-                            Task.Run(() =>
-                {
-                    for (int i = 0; i < 1000; i++) module.Notify("PositionSeconds");
-                }).WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            await Task.Run(view.NotifyHeaderChanged);
             await DrainAsync();
-            Equal(reads + 1, view.Reads, "a background burst also has one source read");
+            Equal(reads + 1, view.Reads, "a background header event is applied on the dispatcher");
             Same(original, actions.Items.Cast<DesktopHeaderActionItem>().Single(), "background refresh retains the action");
             True(original.IsEnabled, "background notifications update enabled state on the dispatcher");
+
+            reads = view.Reads; navigationReads = module.NavigationReads;
+            var replacementPlayer = new Border { Height = 64 };
+            module.ReplacePlayer(replacementPlayer); await DrainAsync();
+            Same(replacementPlayer, f.Element<ContentControl>("PlayerHost").Content, "player replacement reaches its actual host");
+            Equal(reads, view.Reads, "player replacement does not reread the unrelated page header");
+            Equal(navigationReads, module.NavigationReads, "player replacement does not resynchronize navigation");
         });
         yield return Case("combined module invalidations retain navigation views settings and player replacements", async () =>
         {
@@ -89,8 +100,9 @@ public static partial class DesktopTests
                 view.OnRead = null;
                 view.Contribution = new("after");
                 module.ReplacePlayer(player);
+                module.Notify(nameof(IDesktopModule.Title));
             };
-            module.Notify("CurrentTitle");
+            module.Notify(nameof(IDesktopModule.Title));
             await DrainAsync();
             Equal(reads + 2, view.Reads, "a new invalidation is not lost while a batch is being presented");
             Equal("meowfilm · after", f.Shell.Title, "the later batch publishes the later contribution");
@@ -103,29 +115,19 @@ public static partial class DesktopTests
             Equal(reads, view.Reads, "queued and late notifications cannot present after shutdown");
             Equal(0, module.PropertySubscribers, "shutdown retires the module subscription");
         });
-        yield return Case("cancelled shutdown releases a queued module batch and resumes live presentation", async () =>
+        yield return Case("failed owner release still retires queued and late module notifications", async () =>
         {
             var view = new BatchHeaderView(new("before"));
             var module = new ProbeModule("music", view: view);
-            var attempts = 0;
-            await using var f = new Fixture([module],
-                _ => ++attempts == 1 ? Task.FromException(new Exception("save")) : Task.CompletedTask,
-                cancel: _ => Task.CompletedTask);
-            await f.LoadAsync();
-            module.Notify("CurrentTitle");
-            f.Shell.Close();
-            await UntilAsync(() => f.Status == "关闭失败", "shutdown failed");
-            await DrainAsync();
-            Click(f.Element<Button>("CancelShutdownButton"));
-            await UntilAsync(() => f.Status == "" && f.Search.IsEnabled, "shutdown cancellation resumed the UI");
-            await DrainAsync();
+            await using var f = new Fixture([module], _ => Task.FromException(new Exception("release")));
+            await f.LoadAsync(); module.Notify(nameof(IDesktopModule.Title));
+            f.Shell.Close(); await f.WaitClosedAsync();
             var reads = view.Reads;
             view.Contribution = new("after");
-            for (var index = 0; index < 1000; index++) module.Notify("CurrentTitle");
+            module.Notify(nameof(IDesktopModule.Title));
             await DrainAsync();
-            Equal(reads + 1, view.Reads, "discarding a closing batch cannot strand the next live batch");
-            Equal("meowfilm · after", f.Shell.Title, "the resumed shell presents the latest contribution");
-            f.Shell.Close(); await f.WaitClosedAsync();
+            Equal(reads, view.Reads, "closed presentation cannot be revived by late notifications");
+            Equal(0, module.PropertySubscribers, "failed release does not retain the closed window");
         });
     }
 
@@ -138,6 +140,7 @@ public static partial class DesktopTests
         {
             get { Reads++; var current = Contribution; OnRead?.Invoke(); return current; }
         }
-        public event EventHandler? HeaderChanged { add { } remove { } }
+        public event EventHandler? HeaderChanged;
+        public void NotifyHeaderChanged() => HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
 }

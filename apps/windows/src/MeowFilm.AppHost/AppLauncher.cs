@@ -22,11 +22,12 @@ public static class AppLauncher
         Func<ValueTask>? disposeResources = null,
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
-        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null)
+        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
+        Func<Task>? stopPlayback = null)
         => Run(definition, (runtime, store, modules) =>
         {
             foreach (var module in createModules(runtime, store)) modules.Add(module);
-        }, createApplication, disposeResources, attachWindow, createPages, runtimeSettings);
+        }, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback);
 
     /// <summary>
     /// Incremental registration owns each completed constructor even when a
@@ -38,8 +39,9 @@ public static class AppLauncher
         Func<ValueTask>? disposeResources = null,
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
-        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null)
-        => Run(AppDataPaths.Current, definition, createModules, createApplication, disposeResources, attachWindow, createPages, runtimeSettings);
+        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
+        Func<Task>? stopPlayback = null)
+        => Run(AppDataPaths.Current, definition, createModules, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback);
 
     // Isolated App-host tests use the same launcher without touching the user's data.
     internal static void Run(AppDataPaths paths, AppDefinition definition,
@@ -48,7 +50,8 @@ public static class AppLauncher
         Func<ValueTask>? disposeResources = null,
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
-        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null)
+        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
+        Func<Task>? stopPlayback = null)
     {
         var startup = new AppStartup();
         UserDataDirectory? userData = null;
@@ -99,16 +102,15 @@ public static class AppLauncher
         var switched = false;
         var exitRequested = false;
         var allowLaunchClose = false;
-        var exitWait = false;
         Task<StartupOutcome>? starting = null;
         launchWindow.Closing += (_, args) =>
         {
             if (switched || allowLaunchClose) return;
             args.Cancel = true;
             exitRequested = true;
-            _ = ExitStartupAsync();
+            ExitStartup();
         };
-        retry.Click += async (_, _) => { if (exitRequested) await ExitStartupAsync(); else await StartAsync(); };
+        retry.Click += async (_, _) => { if (exitRequested) ExitStartup(); else await StartAsync(); };
         launchWindow.Activate();
         _ = StartAsync();
 
@@ -125,38 +127,19 @@ public static class AppLauncher
             }
             else if (outcome == StartupOutcome.CleanupFailed)
             {
-                label.Text = "启动清理失败";
+                label.Text = "启动失败，请重新打开应用";
                 exitRequested = true;
-                retry.Content = "重试清理";
+                retry.Content = "退出";
                 retry.Visibility = Visibility.Visible;
             }
         }
 
-        async Task ExitStartupAsync()
+        void ExitStartup()
         {
-            if (exitWait) return;
-            exitWait = true;
-            retry.Visibility = Visibility.Collapsed;
-            label.Text = "正在清理";
-            try
-            {
-                if (!await startup.StopAsync() && starting is { IsCompleted: false })
-                    throw new InvalidOperationException("SHUTDOWN_FAILED");
-                // A cancelled startup is not proof of cleanup. The retained owner
-                // remains reachable after a failed attempt and across explicit retries.
-                if (starting is not null) await starting;
-                if (ownedLifecycle is not null) await ownedLifecycle.ForceReleaseAsync();
-                allowLaunchClose = true;
-                launchWindow.Close();
-                application.Exit();
-            }
-            catch
-            {
-                label.Text = "清理尚未完成";
-                retry.Content = "重试清理";
-                retry.Visibility = Visibility.Visible;
-            }
-            finally { exitWait = false; }
+            startup.Dispose();
+            allowLaunchClose = true;
+            launchWindow.Close();
+            application.Exit();
         }
 
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
@@ -173,21 +156,22 @@ public static class AppLauncher
             AppShutdown? shutdown = null;
             var shellClosed = false;
             var replacing = false;
+            Task? exiting = null;
             AppShutdown Lifecycle()
             {
                 // Cleanup must not be prevented by malformed assembly output.
                 // Each successfully constructed object is retired exactly once.
                 return ownedLifecycle = shutdown ??= new AppShutdown(
-                    Enumerable.Distinct<IDesktopShutdownParticipant>(
-                        modules.Cast<IDesktopShutdownParticipant>(), ReferenceEqualityComparer.Instance),
+                    Enumerable.Distinct<IAsyncDisposable>(
+                        modules.Cast<IAsyncDisposable>(), ReferenceEqualityComparer.Instance),
                 [
                     new(() => windowAttachment?.DisposeAsync() ?? ValueTask.CompletedTask),
                     new(() => artwork?.DisposeAsync() ?? ValueTask.CompletedTask),
                     new(() => disposeResources?.Invoke() ?? ValueTask.CompletedTask),
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
                     new(() => store?.DisposeAsync() ?? ValueTask.CompletedTask)
-                ], sharedParticipants: new IDesktopShutdownParticipant?[] { mediaControls, appearance, closePreferences }
-                    .OfType<IDesktopShutdownParticipant>());
+                ], sharedParticipants: new IAsyncDisposable?[] { mediaControls, appearance, closePreferences }
+                    .OfType<IAsyncDisposable>());
             }
             try
             {
@@ -228,7 +212,7 @@ public static class AppLauncher
                 var reset = new AppUserDataReset(userData.RequestReset, ReleaseForResetAsync,
                     () => Task.Run(userData.Clear), ReopenAsync);
                 shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
-                    lifecycle.CloseAsync, lifecycle.ForceReleaseAsync, lifecycle.CancelShutdownPreparationAsync,
+                    () => replacing ? lifecycle.CloseAsync() : exiting ??= CloseProcessAsync(),
                     appearance, closePreferences, mediaControls: mediaControls,
                     resetUserData: reset.ResetAsync) { Title = "meowfilm" };
                 artwork = new ArtworkService(readTrusted: async (reference, token) =>
@@ -251,12 +235,12 @@ public static class AppLauncher
                 ArtworkScope.SetLoader(shell.Root, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();
-                shell.Closed += (_, _) =>
+                shell.Closed += async (_, _) =>
                 {
                     shellClosed = true;
-                    // User-requested closure awaited cleanup; session ending keeps the OS path.
-                    // Never initiate dispatcher shutdown on a failed drain receipt.
-                    if (switched && !replacing && lifecycle.IsReleased) application.Exit();
+                    if (!switched || replacing) return;
+                    await shell.ShutdownCompletion;
+                    application.Exit();
                 };
                 shell.Activate();
                 switched = true;
@@ -264,14 +248,28 @@ public static class AppLauncher
                 launchWindow.Hide();
                 return StartupOutcome.Started;
 
-                async Task ReleaseForResetAsync()
+                Task ReleaseForResetAsync() => lifecycle.CloseAsync();
+
+                async Task CloseProcessAsync()
                 {
-                    // Revoke system media/hotkey input before any asynchronous
-                    // runtime drain. The lifecycle also owns this participant.
-                    var inputDrain = mediaControls.PrepareShutdownAsync();
-                    _ = inputDrain.ContinueWith(done => { _ = done.Exception; }, CancellationToken.None,
-                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                    await lifecycle.ForceReleaseAsync();
+                    // A process exit has no replacement generation. Stop external
+                    // execution/output, but do not drain every in-memory owner.
+                    // The database seals admission and commits its accepted queue.
+                    // Already acknowledged saves never depend on this callback.
+                    Observe(() => stopPlayback?.Invoke() ?? Task.CompletedTask);
+                    Observe(() => runtime.DisposeAsync().AsTask());
+                    try { await store.DisposeAsync(); }
+                    catch { System.Diagnostics.Trace.TraceError("DATABASE_RELEASE_FAILED"); }
+                }
+
+                static void Observe(Func<Task> stop)
+                {
+                    _ = ObserveAsync();
+                    async Task ObserveAsync()
+                    {
+                        try { await stop(); }
+                        catch { System.Diagnostics.Trace.TraceError("APP_STOP_FAILED"); }
+                    }
                 }
 
                 async Task ReopenAsync()
@@ -280,7 +278,7 @@ public static class AppLauncher
                     replacing = true;
                     try
                     {
-                        await shell!.AbortAsync();
+                        await shell!.CloseAfterReleaseAsync();
                         if (!shellClosed) throw new InvalidOperationException("SHUTDOWN_FAILED");
                     }
                     finally { if (!shellClosed) replacing = false; }
@@ -299,8 +297,8 @@ public static class AppLauncher
             {
                 try
                 {
-                    await Lifecycle().ForceReleaseAsync();
-                    if (shell is not null) await shell.AbortAsync();
+                    await Lifecycle().CloseAsync();
+                    if (shell is not null) await shell.CloseAfterReleaseAsync();
                 }
                 catch { return StartupOutcome.CleanupFailed; }
                 return cancellationToken.IsCancellationRequested ? StartupOutcome.Cancelled : StartupOutcome.RetryableFailure;

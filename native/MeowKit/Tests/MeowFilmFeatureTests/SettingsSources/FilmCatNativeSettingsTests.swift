@@ -68,6 +68,48 @@ final class FilmCatNativeSettingsTests: XCTestCase {
         await owner.close()
     }
 
+    func testPanInterceptionDefaultsAndIndependentSavesPreserveSourcesMappingsAndOtherProviders() async throws {
+        let (owner, document, changes, base, store) = try fixture()
+        _ = try await owner.importNetwork(name: "A", sourceURL: "https://example.invalid/a.js", installationId: "a")
+        let mapping = RuntimeValue.object(["provider": .string("quark"), "aliases": .array([.string("自定义线路")])])
+        _ = try await document.update { original in
+            var root = try XCTUnwrap(original?.filmObject)
+            root["port"] = .number(1234)
+            root["providers"] = .object(["quark": .bool(false), "external": .bool(false)])
+            root["mappings"] = .array([mapping])
+            return .object(root)
+        }
+        changes.reset()
+        let before = try XCTUnwrap(document.readForTest())
+        let initial = try await owner.readPanInterception()
+        XCTAssertEqual(initial.count, 5)
+        XCTAssertFalse(try XCTUnwrap(initial[.quark]))
+        XCTAssertTrue(PanProviderID.allCases.filter { $0 != .quark }.allSatisfy { initial[$0] == true })
+        XCTAssertEqual(try document.readForTest(), before, "Reading defaults does not persist them")
+        XCTAssertTrue(changes.values.isEmpty)
+        for provider in PanProviderID.allCases {
+            let previous = try await owner.readPanInterception()
+            let saved = try await owner.savePanInterception(provider, enabled: previous[provider] != true)
+            XCTAssertEqual(saved[provider], previous[provider] != true)
+            for sibling in PanProviderID.allCases where sibling != provider {
+                XCTAssertEqual(saved[sibling], previous[sibling])
+            }
+            let persisted = try XCTUnwrap(document.readForTest())
+            for field in ["scripts", "mappings", "port"] { XCTAssertEqual(persisted.catField(field), before.catField(field)) }
+            XCTAssertEqual(persisted.catField("providers")?.catField("external"), .bool(false))
+            XCTAssertEqual(persisted.catField("providers")?.catField(provider.rawValue), .bool(previous[provider] != true))
+        }
+        XCTAssertEqual(changes.values, Array(repeating: "cat.sources", count: 5))
+        await owner.close()
+        let reopened = FilmSourceService(transport: unavailableCatTransport("UNEXPECTED_RUNTIME"), database: store,
+            settingsDocument: document, runtimeSourceRoot: base.appendingPathComponent("cat"))
+        let restored = try await reopened.readPanInterception()
+        XCTAssertTrue(try XCTUnwrap(restored[.quark]))
+        XCTAssertTrue(PanProviderID.allCases.filter { $0 != .quark }.allSatisfy { restored[$0] == false })
+        XCTAssertEqual(changes.values.count, 5)
+        await reopened.close()
+    }
+
     func testCurrentDisplayRelationsKeepProbeMetadataAndVideoChoicesAcrossIncrementalEdits() async throws {
         let database = try storageTestDatabase(self)
         let repository = FilmSourceRepository(database: database)

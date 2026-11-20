@@ -33,6 +33,8 @@ public final class FilmSettingsViewController: PageViewController {
                 page = FilmDataSourceSettingsViewController(tmdb: model.tmdb, douban: model.douban, themeProvider: themeProvider)
             case .pan:
                 page = PanAccountsViewController(model: model.pan, themeProvider: themeProvider)
+            case .panInterception:
+                page = FilmPanInterceptionViewController(service: model.sources, themeProvider: themeProvider)
             case .preferences:
                 guard let playback = model.playback else { showError("播放设置暂不可用"); return }
                 page = FilmSmartPlaybackSettingsController(owner: playback, themeProvider: themeProvider)
@@ -67,7 +69,7 @@ public final class FilmSettingsViewController: PageViewController {
 }
 
 private enum FilmSettingsDestination: String, CaseIterable {
-    case search, matching, cats, videos, dataSources, pan, preferences, player
+    case search, matching, cats, videos, dataSources, pan, panInterception, preferences, player
     var title: String {
         switch self {
         case .search: return "搜索净化设置"
@@ -76,6 +78,7 @@ private enum FilmSettingsDestination: String, CaseIterable {
         case .videos: return "视频源"
         case .dataSources: return "刮削设置"
         case .pan: return "网盘账号"
+        case .panInterception: return "内置网盘接管"
         case .preferences: return "智能播放设置"
         case .player: return "播放器设置"
         }
@@ -84,6 +87,54 @@ private enum FilmSettingsDestination: String, CaseIterable {
         switch self {
         case .preferences: return true
         default: return false
+        }
+    }
+}
+
+@MainActor
+final class FilmPanInterceptionViewController: FilmSettingsListController {
+    private let service: FilmSourceService
+    private var saved: [PanProviderID: Bool]?
+    private var busy = false
+
+    init(service: FilmSourceService, themeProvider: any PageThemeProviding) {
+        self.service = service
+        super.init(themeProvider: themeProvider)
+        pageTitle = "内置网盘接管"
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        table.accessibilityIdentifier = "film.panInterception"
+        update()
+    }
+
+    override func pageDidBecomeActive() { load() }
+
+    private func load() {
+        guard !busy else { return }
+        perform { [service] in try await service.readPanInterception() }
+    }
+
+    private func update() {
+        sections = [.init(title: "", rows: PanProviderID.allCases.map { provider in
+            filmSwitchRow(provider.title, id: "film.panInterception.\(provider.rawValue)",
+                          isOn: saved?[provider] ?? true, enabled: saved != nil && !busy) { [weak self] enabled in
+                guard let self, !busy else { return }
+                perform { [service] in try await service.savePanInterception(provider, enabled: enabled) }
+            }
+        })]
+        render()
+    }
+
+    private func perform(_ operation: @escaping @Sendable () async throws -> [PanProviderID: Bool]) {
+        guard isPageActive, !busy else { return }
+        busy = true; update()
+        Task { [weak self] in
+            guard let self else { return }
+            defer { busy = false; update() }
+            do { saved = try await operation() }
+            catch { failure(error, retry: { [weak self] in self?.load() }) }
         }
     }
 }

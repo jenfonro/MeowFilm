@@ -92,7 +92,7 @@ public sealed partial class MusicCapability
             bool BelongsToSavedAccount(CatalogPageState page) => page.AccountStamp == saveAccount &&
                 page.Target?.Operation == "daily" && MusicCatalogDto.Text(page.Target.Parameters, "branch") == "style";
             foreach (var key in catalogLocations.Where(pair => pair.Value.Pages.Values.Any(BelongsToSavedAccount))
-                .Select(pair => pair.Key).ToArray()) catalogLocations.Remove(key);
+                .Select(pair => pair.Key).ToArray()) RetireCatalogLocation(key);
             foreach (var page in catalogPages.Where(pair => BelongsToSavedAccount(pair.Value)).ToArray())
                 catalogPages[page.Key] = page.Value with { ExpiresAt = 0 };
         }
@@ -103,7 +103,7 @@ public sealed partial class MusicCapability
             catalogPages.Clear(); catalogAccountStamp = ""; catalogMembersLoaded = false;
             catalogSongs.Clear(); utilitySections.Clear(); selectedSong = null;
             dailyStyleNeedsRead = true;
-            Changed(nameof(SelectedSong)); RefreshBindings(); DailyStyleBindings();
+            Changed(nameof(SelectedSong)); RefreshBindings();
         }
         var previousPage = catalogPages.GetValueOrDefault(catalogPage);
         var selection = new MusicDailyStyleSelection(dailyStyleCategory, dailyStyleDraft.ToArray());
@@ -163,7 +163,7 @@ public sealed partial class MusicCapability
             SettleSavePage();
             if (CanPublishSave()) { dailyStyleNeedsRead = true; status = DailyStyleError(error); Changed(nameof(Status)); }
         }
-        finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); dailyStyleBusy = false; DailyStyleBindings(); CatalogBindings(); }
+        finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); dailyStyleBusy = false; CatalogBindings(); }
     }
 
     private static string DailyStyleError(Exception error) => error is MusicPlatformException platform

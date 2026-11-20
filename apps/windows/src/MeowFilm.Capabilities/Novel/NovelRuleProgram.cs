@@ -65,16 +65,6 @@ public sealed class NovelRuleProgram(IRuntimeClient runtime) : IAsyncDisposable
     {
         lock (lifecycle) return preparation ??= work.PauseAsync();
     }
-    public void Resume()
-    {
-        lock (lifecycle)
-        {
-            ObjectDisposedException.ThrowIf(closed, this);
-            if (preparation is null) return;
-            if (!preparation.IsCompletedSuccessfully) throw new InvalidOperationException("SHUTDOWN_NOT_DRAINED");
-            work.Resume(); preparation = null;
-        }
-    }
     public ValueTask DisposeAsync()
     {
         lock (lifecycle)
