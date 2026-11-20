@@ -350,7 +350,7 @@ public sealed partial class MusicNativeApplication : IMusicApplication
 
     private async Task PrepareCoreAsync(Task pendingOperations)
     {
-        await Task.Yield();
+        await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         Exception? failure = null;
         try { lifetime.Cancel(); } catch (Exception e) { failure = e; }
         async Task Attempt(Func<Task> action)

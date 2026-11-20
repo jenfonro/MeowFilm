@@ -118,7 +118,7 @@ public static class MusicNativeUiRepositoryTests
         });
         yield return Case("background metadata refresh updates current and cached catalog songs and previews", async () =>
         {
-            await using var scene = await Scene.Create();
+            await using var scene = await Scene.Create(seedQueue: true);
             await scene.Module.NavigateAsync("catalog-channel/wy/repository-a", default);
             var cached = scene.Module.CatalogSections.ToArray();
             var cachedSong = cached.Single(section => section.Id == "songs").Items.Single();
@@ -129,6 +129,21 @@ public static class MusicNativeUiRepositoryTests
             var currentRanking = scene.Module.CatalogSections.Single(section => section.Id == "rankings").Items.Single();
             Check(!ReferenceEquals(currentSong, cachedSong), "the second page owns a separate display snapshot");
 
+            var footer = (MusicPlayerView)scene.Module.PlayerView;
+            var detail = (MusicPlayerDetailView)scene.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            var artwork = new RepositoryArtworkLoader();
+            MeowFilm.Desktop.Artwork.ArtworkScope.SetLoader((MusicRecordView)((Button)footer.FindName("ArtworkButton")).Content, artwork);
+            MeowFilm.Desktop.Artwork.ArtworkScope.SetLoader((MusicRecordView)detail.FindName("DetailRecord"), artwork);
+            var players = new Grid();
+            players.RowDefinitions.Add(new() { Height = GridLength.Auto });
+            players.RowDefinitions.Add(new() { Height = new GridLength(1, GridUnitType.Star) });
+            Grid.SetRow(detail, 1); players.Children.Add(footer); players.Children.Add(detail);
+            using var host = new DesktopTestUi.Host(players, 1110, 900);
+            await MusicTestUi.Drain();
+            string track = scene.Module.CurrentTrackIdentity;
+            var notifications = new List<string>();
+            scene.Module.PropertyChanged += (_, e) => notifications.Add(e.PropertyName ?? "");
+
             scene.Song = Scene.UpdatedSong();
             var refresh = await scene.Ok("music.catalog.song", new { platform = "wy", id = "repository-song", refresh = true });
             Check(refresh.GetProperty("song").GetProperty("songId").GetString() == id,
@@ -136,6 +151,14 @@ public static class MusicNativeUiRepositoryTests
             await Until(() => currentSong.Song!.Title == "Updated title" && currentRanking.FirstPreviewCover == Scene.UpdatedCover &&
                 cachedSong.Song!.Title == "Updated title" && cachedRanking.FirstPreviewCover == Scene.UpdatedCover,
                 "the visible and cached songs and previews did not receive the background repository update");
+            await Until(() => ((TextBlock)detail.FindName("DetailTitle")).Text == "Updated title" &&
+                ((TextBlock)((StackPanel)footer.FindName("MetadataText")).Children[0]).Text == "Updated title",
+                "same-recording repository changes must update both mounted player title bindings");
+            Check(scene.Module.CurrentArtist == "Updated artist" && scene.Module.CurrentAlbum == "Updated album" &&
+                scene.Module.CurrentArtwork == Scene.UpdatedCover && scene.Module.CurrentTrackIdentity == track &&
+                !notifications.Contains(nameof(MusicCapability.CurrentSongId)) &&
+                !notifications.Contains(nameof(MusicCapability.PlaybackPresentationKey)),
+                "metadata updates publish player fields without changing recording or playback occurrence");
             CheckUpdated(currentSong, currentRanking, id);
             CheckUpdated(cachedSong, cachedRanking, id);
             int requests = scene.Runtime.Requests.Count;
@@ -150,7 +173,7 @@ public static class MusicNativeUiRepositoryTests
             Check(scene.Module.Status.Length == 0 && scene.Module.OwnedNotices.Count == 0 && scene.Playback.Opens == 0,
                 "background display metadata neither reports a format error nor starts playback");
         });
-        yield return Case("superseded cached navigation keeps the visible page cache and queue intact", async () =>
+        yield return Case("retained navigation bypasses unrelated repository IO", async () =>
         {
             await using var scene = await Scene.Create(seedQueue: true);
             await scene.Module.NavigateAsync("catalog-channel/wy/repository-a", default);
@@ -176,11 +199,11 @@ public static class MusicNativeUiRepositoryTests
             {
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 restore = scene.Module.NavigateAsync("catalog-channel/wy/repository-b", default);
-                await MusicTestUi.Drain();
-                Check(!restore.IsCompleted && scene.Module.CurrentChannelKey == "wy/repository-a" &&
-                    scene.Module.CatalogSections.SequenceEqual(original, ReferenceEqualityComparer.Instance) &&
+                await restore.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(scene.Module.CurrentChannelKey == "wy/repository-b" &&
+                    ReferenceEquals(scene.Module.CatalogSections.Single(section => section.Id == "songs").Items.Single(), otherCard) &&
                     scene.Runtime.Requests.Count == requests,
-                    "cached navigation waits for its real repository read while the previous page remains visible");
+                    "cached navigation restores its retained owner while unrelated repository IO remains blocked");
                 navigate = scene.Module.NavigateAsync("catalog-channel/wy/repository-c", default);
                 release.Set();
                 await Task.WhenAll(blocker, restore, navigate).WaitAsync(TimeSpan.FromSeconds(5));
@@ -198,7 +221,7 @@ public static class MusicNativeUiRepositoryTests
             Check(scene.Module.CurrentChannelKey == "wy/repository-a" &&
                 scene.Module.CatalogSections.SequenceEqual(original, ReferenceEqualityComparer.Instance) &&
                 ReferenceEquals(returned, originalCard) && !ReferenceEquals(returned, otherCard),
-                "a superseded cache restore cannot save the destination page under the still-visible page's route");
+                "later navigation preserves each retained page under its own route");
             Check(scene.Runtime.Requests.Count == requests + 1 && scene.Module.CurrentTrackIdentity == track &&
                 scene.Module.Status.Length == 0 && scene.Module.OwnedNotices.Count == 0 && scene.Playback.Opens == 0,
                 "returning to the intact cache makes no extra request, error, playback or queue selection");
@@ -320,6 +343,20 @@ public static class MusicNativeUiRepositoryTests
 
     private static TestCase Case(string name, Func<Task> run) =>
         new("music-native-ui-repository: " + name, () => TestUiHost.InvokeAsync(run));
+
+    private sealed class RepositoryArtworkLoader : MeowFilm.Desktop.Artwork.IArtworkLoader
+    {
+        public Task<MeowFilm.Desktop.Artwork.IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<MeowFilm.Desktop.Artwork.IArtworkLease>(new RepositoryArtworkLease());
+        }
+    }
+    private sealed class RepositoryArtworkLease : MeowFilm.Desktop.Artwork.IArtworkLease
+    {
+        public MeowFilm.Desktop.Artwork.ArtworkPixels Image { get; } = MusicTestUi.Pixels(2, 2, (_, _) => Microsoft.UI.Colors.Gray);
+        public void Dispose() { }
+    }
 
     private static void Check(bool condition, string message)
     {

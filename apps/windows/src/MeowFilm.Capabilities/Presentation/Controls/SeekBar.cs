@@ -40,16 +40,17 @@ public sealed class SeekBar : Slider
     public double? PlaybackRate { get => (double?)GetValue(PlaybackRateProperty); set => SetValue(PlaybackRateProperty, value); }
     public string PresentationKey { get => (string)GetValue(PresentationKeyProperty); set => SetValue(PresentationKeyProperty, value); }
     private Canvas? surface;
-    private readonly Rectangle rail = new(), cache = new(), played = new(), shade = new(),
+    private readonly Rectangle rail = new(), cache = new(), played = new(), shade = new() { Opacity = 0 },
         lowerHit = new() { Fill = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
-    private readonly Ellipse marker = new() { Width = 4, Height = 4 }, head = new() { Width = 14, Height = 14 };
+    private readonly Ellipse marker = new() { Width = 4, Height = 4 }, head = new() { Width = 14, Height = 14, Opacity = 0 };
     private readonly ScaleTransform scale = new();
     private readonly ScaleTransform railScale = new(), cacheScale = new();
     private readonly TranslateTransform headPosition = new();
-    private Storyboard? progressAnimation, headAnimation, hoverAnimation, previewAnimation;
+    private Storyboard? progressAnimation, headAnimation, hoverAnimation;
     private IDisposable? visibility;
-    private readonly ToolTip preview = new() { Placement = PlacementMode.Top };
-    private readonly DispatcherTimer previewClock = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly TextBlock previewText = new() { FontSize = 12, Foreground = new SolidColorBrush(Microsoft.UI.Colors.Black) };
+    private readonly Border preview = new() { CornerRadius = new CornerRadius(16), Padding = new Thickness(12, 5, 12, 5),
+        Background = new SolidColorBrush(Microsoft.UI.Colors.White), IsHitTestVisible = false, Visibility = Visibility.Collapsed };
     private bool pointerGesture, pointerWithin;
     private bool hoverExpanded, hoverShade;
     private double pointerX;
@@ -71,12 +72,8 @@ public sealed class SeekBar : Slider
         foreach (var rectangle in new[] { rail, cache, played }) rectangle.RenderTransformOrigin = new Point(.5, .5);
         played.RenderTransformOrigin = new Point(0, .5);
         head.RenderTransform = headPosition;
-        ToolTipService.SetToolTip(this, preview);
-        preview.IsHitTestVisible = false;
-        preview.Background = new SolidColorBrush(Microsoft.UI.Colors.White);
-        preview.Foreground = new SolidColorBrush(Microsoft.UI.Colors.Black);
-        previewClock.Tick += (_, _) => preview.Content = Clock(IsScrubbing ? Value : DisplayValue) + " / " + Clock(Maximum);
-        preview.Template = (ControlTemplate)XamlReader.Load("<ControlTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='ToolTip'><Border Background='White' CornerRadius='16' Padding='12,5'><ContentPresenter Content='{TemplateBinding Content}' Foreground='Black'/></Border></ControlTemplate>");
+        preview.Child = previewText; preview.RenderTransform = headPosition;
+        Canvas.SetZIndex(preview, 1);
         head.Stroke = new SolidColorBrush(Color.FromArgb(51, 0, 0, 0)); head.StrokeThickness = 1;
         ValueChanged += (_, _) => Refresh(); SizeChanged += (_, _) => Refresh();
         Loaded += (_, _) =>
@@ -84,16 +81,16 @@ public sealed class SeekBar : Slider
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
-                if (!visible) { pointerWithin = false; CancelScrub(); StopAnimation(); StopHover(); preview.IsOpen = false; }
+                if (!visible) { pointerWithin = false; CancelScrub(); StopAnimation(); StopHover(); ClosePreview(); }
                 Refresh(false);
             });
             Refresh();
         };
         Unloaded += (_, _) =>
-        { visibility?.Dispose(); visibility = null; pointerWithin = false; CancelScrub(); StopAnimation(); StopHover(); preview.IsOpen = false; };
+        { visibility?.Dispose(); visibility = null; pointerWithin = false; CancelScrub(); StopAnimation(); StopHover(); ClosePreview(); };
         RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => { if (!IsEnabled) CancelScrub(); Refresh(); });
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        { if (Visibility != Visibility.Visible) { pointerWithin = false; CancelScrub(); preview.IsOpen = false; } Refresh(); });
+        { if (Visibility != Visibility.Visible) { pointerWithin = false; CancelScrub(); ClosePreview(); } Refresh(); });
         RegisterPropertyChangedCallback(MaximumProperty, (_, _) => Refresh());
         RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Refresh(false));
         ActualThemeChanged += (_, _) => Refresh(false);
@@ -127,15 +124,15 @@ public sealed class SeekBar : Slider
         surface?.Children.Clear();
         base.OnApplyTemplate(); surface = GetTemplateChild("RailCanvas") as Canvas;
         if (surface is null) return;
-        foreach (var element in new FrameworkElement[] { lowerHit, shade, rail, cache, played, marker, head }) surface.Children.Add(element);
+        foreach (var element in new FrameworkElement[] { lowerHit, shade, rail, cache, played, marker, head, preview }) surface.Children.Add(element);
         Refresh();
     }
     private double Fraction(double value) => Maximum <= Minimum ? 0 : Math.Clamp((value - Minimum) / (Maximum - Minimum), 0, 1);
     internal double ValueAt(double x) => Minimum + Math.Clamp(x / Math.Max(1, ActualWidth), 0, 1) * (Maximum - Minimum);
     private void StopAnimation()
     {
-        progressAnimation?.Stop(); headAnimation?.Stop(); previewAnimation?.Stop(); previewClock.Stop();
-        progressAnimation = headAnimation = previewAnimation = null;
+        progressAnimation?.Stop(); headAnimation?.Stop();
+        progressAnimation = headAnimation = null;
     }
     private void StopHover()
     {
@@ -145,7 +142,7 @@ public sealed class SeekBar : Slider
     internal void SetPointerWithin(bool within)
     {
         pointerWithin = within;
-        if (!within && !IsScrubbing) preview.IsOpen = false;
+        if (!within && !IsScrubbing) ClosePreview();
         Refresh(false);
         if (within) UpdatePreview();
     }
@@ -197,11 +194,6 @@ public sealed class SeekBar : Slider
         var duration = TimeSpan.FromSeconds((Maximum - display) / rate);
         progressAnimation = Linear(scale, "ScaleX", Fraction(display), 1, duration);
         headAnimation = Linear(headPosition, "X", headPosition.X, Math.Max(.5, width - 14.5), duration);
-        if (preview.IsOpen)
-        {
-            previewAnimation = Linear(preview, "HorizontalOffset", preview.HorizontalOffset, Math.Max(7.5, width - 7.5) - width / 2, duration);
-            previewClock.Start();
-        }
     }
     private void RefreshHover(bool expanded, bool showShade, bool allowAnimation)
     {
@@ -250,7 +242,7 @@ public sealed class SeekBar : Slider
             VirtualKey.PageDown => Value - LargeChange, _ => Value + LargeChange
         }); UpdatePreview(); return true;
     }
-    internal bool HasActiveAnimation => new[] { progressAnimation, headAnimation, previewAnimation, hoverAnimation }
+    internal bool HasActiveAnimation => new[] { progressAnimation, headAnimation, hoverAnimation }
         .Any(animation => animation?.GetCurrentState() == ClockState.Active);
     private static bool IsSeekKey(VirtualKey key) => key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down or VirtualKey.Home or VirtualKey.End or VirtualKey.PageDown or VirtualKey.PageUp;
     internal void BeginScrub()
@@ -261,16 +253,23 @@ public sealed class SeekBar : Slider
         if (!IsScrubbing) return;
         IsScrubbing = pointerGesture = false; ReleasePointerCaptures();
         if (commit && IsEnabled) ScrubCommitted?.Invoke(this, EventArgs.Empty); else ScrubCancelled?.Invoke(this, EventArgs.Empty);
-        preview.IsOpen = false; Refresh();
+        ClosePreview(); Refresh();
     }
     internal void CancelScrub() => EndScrub(false);
+    private void ClosePreview() => preview.Visibility = Visibility.Collapsed;
     private void UpdatePreview(double? display = null)
     {
-        if (!IsEnabled || !DesktopVisual.IsVisible(this)) { preview.IsOpen = false; previewClock.Stop(); return; }
+        if (!IsEnabled || !DesktopVisual.IsVisible(this) || (!pointerWithin && !IsScrubbing)) { ClosePreview(); return; }
         double value = IsScrubbing ? Value : display ?? DisplayValue;
-        preview.Content = Clock(value) + " / " + Clock(Maximum);
-        preview.HorizontalOffset = Math.Clamp(Fraction(value) * ActualWidth, 7.5, Math.Max(7.5, ActualWidth - 7.5)) - ActualWidth / 2;
-        preview.IsOpen = true;
+        string text = Clock(value) + " / " + Clock(Maximum);
+        if (previewText.Text != text) previewText.Text = text;
+        preview.Visibility = Visibility.Visible;
+        preview.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var size = preview.DesiredSize;
+        double center = Math.Clamp(Fraction(value) * ActualWidth, 7.5, Math.Max(7.5, ActualWidth - 7.5));
+        double left = Math.Clamp(center - size.Width / 2, 0, Math.Max(0, ActualWidth - size.Width));
+        Canvas.SetLeft(preview, left - (center - 7));
+        Canvas.SetTop(preview, RailOrigin - size.Height - 8);
     }
     private static string Clock(double value) { long seconds = Math.Max(0, (long)Math.Floor(value)); return $"{seconds / 60:00}:{seconds % 60:00}"; }
     protected override AutomationPeer OnCreateAutomationPeer() => new SeekPeer(this);

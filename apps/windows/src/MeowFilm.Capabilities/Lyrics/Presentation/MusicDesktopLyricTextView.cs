@@ -9,11 +9,12 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicDesktopLyricTextView : UserControl
 {
     public static readonly DependencyProperty TextProperty = DependencyProperty.Register(nameof(Text), typeof(string),
-        typeof(MusicDesktopLyricTextView), new PropertyMetadata("", (owner, _) => ((MusicDesktopLyricTextView)owner).Refresh()));
+        typeof(MusicDesktopLyricTextView), new PropertyMetadata("", (owner, _) => ((MusicDesktopLyricTextView)owner).RefreshText()));
     public string Text { get => (string)GetValue(TextProperty); set => SetValue(TextProperty, value); }
     private readonly TextBlock text = new();
     private readonly Border textSurface;
     private readonly MusicLyricOutline outline;
+    private MusicDesktopLyricsInputRegion? inputRegion;
     internal MusicLyricOutline Outline => outline;
     public MusicDesktopLyricTextView()
     {
@@ -21,16 +22,29 @@ public sealed class MusicDesktopLyricTextView : UserControl
         textSurface = new Border { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), Child = text };
         grid.Children.Add(textSurface); Content = grid;
         IsTabStop = false; IsHitTestVisible = false;
-        foreach (var property in new[] { FontSizeProperty, FontFamilyProperty, ForegroundProperty, FlowDirectionProperty, LanguageProperty })
-            RegisterPropertyChangedCallback(property, (_, _) => Refresh());
-        Loaded += (_, _) => Refresh();
+        foreach (var property in new[] { FontSizeProperty, FontFamilyProperty, FlowDirectionProperty, LanguageProperty })
+            RegisterPropertyChangedCallback(property, (_, _) => RefreshTypography());
+        RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => text.Foreground = Foreground);
+        Loaded += (_, _) =>
+        {
+            inputRegion = MusicDesktopLyricsInputRegion.Find(this);
+            inputRegion?.Register(this, outline);
+        };
+        Unloaded += (_, _) => { inputRegion?.Unregister(this); inputRegion = null; };
+        RefreshTypography(); text.Foreground = Foreground;
     }
-    private void Refresh()
+    private void RefreshText()
     {
-        text.Text = Text; text.FontFamily = FontFamily; text.FontSize = FontSize;
-        text.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
-        text.Foreground = Foreground; text.FlowDirection = FlowDirection; text.Language = Language;
-        outline.Update(text, textSurface, MusicVisuals.Brush("#E6191919"), 1.1);
+        text.Text = Text;
         AutomationProperties.SetName(this, Text);
+        RefreshOutline();
     }
+    private void RefreshTypography()
+    {
+        text.FontFamily = FontFamily; text.FontSize = FontSize;
+        text.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
+        text.FlowDirection = FlowDirection; text.Language = Language;
+        RefreshOutline();
+    }
+    private void RefreshOutline() => outline.Update(text, textSurface, MusicVisuals.Brush("#E6191919"), 1.1);
 }

@@ -16,9 +16,8 @@ public sealed class MusicQueueRowView : Grid
         Loaded += (_, _) => Observe();
         Unloaded += (_, _) => { if (observed is not null) observed.PropertyChanged -= RowChanged; observed = null; };
         DataContextChanged += (_, _) => Observe();
-        ActualThemeChanged += (_, _) => Refresh();
+        DesktopTheme.Observe(this, Refresh);
         RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => Refresh());
-        RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Refresh());
     }
     private void Observe()
     {

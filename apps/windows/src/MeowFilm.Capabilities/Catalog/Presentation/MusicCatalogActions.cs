@@ -4,8 +4,14 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
-    private CancellationTokenSource? catalogActionCancellation;
-    private (string Platform, long Observation)? catalogActionAuthority;
+    private sealed class CatalogAction(CancellationTokenSource request, string platform, long observation)
+    {
+        internal readonly CancellationTokenSource Request = request;
+        internal readonly string Platform = platform;
+        internal readonly long Observation = observation;
+        internal long? PlaybackEpoch;
+    }
+    private CatalogAction? catalogAction;
     private long catalogActionGeneration;
     private MusicCatalogCard? preparingCatalogCard;
 
@@ -13,12 +19,10 @@ public sealed partial class MusicCapability
     public void InvalidateCatalogAction()
     {
         catalogActionGeneration++;
-        catalogActionAuthority = null;
-        if (catalogActionCancellation is { IsCancellationRequested: false } active)
-        {
-            active.Cancel();
-        }
+        var active = catalogAction; catalogAction = null;
+        if (active?.Request is { IsCancellationRequested: false } request) request.Cancel();
         ClearPreparingCatalogCard();
+        if (active is not null) Changed(nameof(CanCancelCatalog));
     }
     private void ClearPreparingCatalogCard()
     {
@@ -82,7 +86,7 @@ public sealed partial class MusicCapability
                         await ReadQueue(lifetime.Token);
                         if (action == "play" && currentAction())
                         {
-                            await StartCurrent(signal);
+                            await StartCatalogCurrent(signal);
                         }
                     }
                     catch (OperationCanceledException)
@@ -150,7 +154,7 @@ public sealed partial class MusicCapability
                         await ReadQueue(lifetime.Token);
                         if (currentAction())
                         {
-                            await StartCurrent(signal);
+                            await StartCatalogCurrent(signal);
                         }
                     }
                     else
@@ -201,7 +205,7 @@ public sealed partial class MusicCapability
                 await ReadQueue(lifetime.Token);
                 if (current())
                 {
-                    await StartCurrent(signal);
+                    await StartCatalogCurrent(signal);
                 }
             });
         }, card: card);
@@ -241,7 +245,7 @@ public sealed partial class MusicCapability
             await ReadQueue(lifetime.Token);
             if (currentAction() && sourceCurrent())
             {
-                await StartCurrent(signal);
+                await StartCatalogCurrent(signal);
             }
         });
     }, card is null ? "正在加载歌曲" : null, card);
@@ -257,6 +261,22 @@ public sealed partial class MusicCapability
             RecoverHomeAfterAuthenticationFailure();
         }
     }
+    private Task StartCatalogCurrent(CancellationToken token)
+    {
+        var pending = catalogAction;
+        token.ThrowIfCancellationRequested();
+        if (pending is null || pending.Request.Token != token) throw new OperationCanceledException(token);
+        return StartCurrent(token, ownsEpoch: epoch => pending.PlaybackEpoch = epoch);
+    }
+    private void CommitCatalogPlayback()
+    {
+        if (catalogAction is not { } pending || pending.PlaybackEpoch != playbackEpoch) return;
+        // The accepted occurrence now owns its input. Page retirement must not cancel
+        // that input while this action is still draining its stage cleanup receipt.
+        catalogAction = null;
+        ClearPreparingCatalogCard();
+        Changed(nameof(CanCancelCatalog));
+    }
     private Task TrackCatalogAction(Func<CancellationToken, Func<bool>, Task> action, string? loadingStatus = null, MusicCatalogCard? card = null)
     {
         if (stopping) return Task.CompletedTask;
@@ -269,14 +289,14 @@ public sealed partial class MusicCapability
         var observation = CatalogAccountObservation(actionPlatform);
         var playGeneration = playbackEpoch;
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-        catalogActionCancellation = request;
-        catalogActionAuthority = (actionPlatform, observation);
+        var pending = new CatalogAction(request, actionPlatform, observation);
+        catalogAction = pending;
         var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         loadDrains.Add(drained.Task);
         preparingCatalogCard = card;
         if (card is not null) card.IsPreparing = true;
         if (loadingStatus is not null) { status = loadingStatus; Changed(nameof(Status)); }
-        CatalogBindings();
+        Changed(nameof(CanCancelCatalog));
         return Execute();
         bool Current() => !stopping && !request.IsCancellationRequested && generation == catalogActionGeneration &&
             observation == CatalogAccountObservation(actionPlatform) &&
@@ -302,14 +322,13 @@ public sealed partial class MusicCapability
             }
             finally
             {
-                if (ReferenceEquals(catalogActionCancellation, request))
+                if (ReferenceEquals(catalogAction, pending))
                 {
-                    catalogActionCancellation = null;
-                    catalogActionAuthority = null;
+                    catalogAction = null;
                     if (generation == catalogActionGeneration) ClearPreparingCatalogCard();
                 }
                 request.Dispose(); loadDrains.Remove(drained.Task); drained.TrySetResult();
-                if (!disposed) { RefreshBindings(); CatalogBindings(); }
+                if (!disposed) Changed(nameof(CanCancelCatalog));
             }
         }
     }

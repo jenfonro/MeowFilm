@@ -22,6 +22,50 @@ public static partial class DesktopTests
 {
     private static IEnumerable<TestCase> VisualChromeCases()
     {
+        yield return Case("sidebar route receipts retain unchanged entries group header and layout", async () =>
+        {
+            var action = new DesktopNavigationGroupAction("创建歌单", () => { });
+            var module = new ProbeModule("retained-sidebar");
+            module.ReplaceNavigation(new(new NavigationItem[]
+            {
+                new("one", "首页", ""), new("two", "频道", ""),
+                new("favorites", "我的收藏", "", "我的", GroupAction: action)
+            }));
+            var hidden = new ProbeModule("hidden-sidebar");
+            await using var f = new Fixture([module, hidden]); await f.LoadAsync();
+            var plain = f.Navigation; var groups = f.Element<ListView>("CollectionNavigationList");
+            var plainSource = plain.ItemsSource; var groupSource = groups.ItemsSource;
+            var channel = plain.Items[0]; var favorite = groups.Items[0];
+            var channelRow = plain.ContainerFromItem(channel); var favoriteRow = groups.ContainerFromItem(favorite);
+            var create = ChromeVisuals(groups).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "创建歌单");
+            var root = f.Shell.Root; var position = DesktopTestUi.Bounds(create, root);
+            int collectionsChanged = 0, unloaded = 0;
+            ((System.Collections.Specialized.INotifyCollectionChanged)plainSource).CollectionChanged += (_, _) => collectionsChanged++;
+            create.Unloaded += (_, _) => unloaded++;
+            var hiddenReads = hidden.NavigationReads;
+            var routeReads = module.NavigationReads;
+            module.Notify("PositionSeconds"); module.Notify("CurrentTitle"); await DrainAsync();
+            Equal(routeReads, module.NavigationReads, "playback properties do not trigger shell presentation reads");
+            await f.NavigateAsync(module, "two"); await DrainAsync(); root.UpdateLayout();
+            Equal(hiddenReads, hidden.NavigationReads, "route receipts never reread another owner's navigation");
+            Same(plainSource, plain.ItemsSource, "route keeps the ordinary items source");
+            Same(groupSource, groups.ItemsSource, "route keeps the grouped view");
+            Same(channel, plain.Items[0], "route keeps channel entry"); Same(favorite, groups.Items[0], "route keeps collection entry");
+            Same(channelRow, plain.ContainerFromItem(channel), "channel container survives receipt");
+            Same(favoriteRow, groups.ContainerFromItem(favorite), "collection container survives receipt");
+            Same(create, ChromeVisuals(groups).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "创建歌单"),
+                "group header action remains mounted");
+            Equal(0, collectionsChanged, "unchanged route receipt does not change sidebar members");
+            Equal(0, unloaded, "unchanged group header never unloads");
+            Equal(position, DesktopTestUi.Bounds(create, root), "group header retains its geometry");
+            var hiddenSource = hidden.Navigation;
+            var currentReads = module.NavigationReads;
+            hiddenSource.Add(new("hidden-new", "隐藏成员", "")); await DrainAsync();
+            Equal(currentReads, module.NavigationReads, "hidden owner membership changes never reread the visible owner's navigation");
+            Same(channelRow, plain.ContainerFromItem(channel), "hidden changes retain the visible container");
+            Same(create, ChromeVisuals(groups).OfType<Button>().Single(button => AutomationProperties.GetName(button) == "创建歌单"),
+                "hidden changes retain the visible group header");
+        });
         yield return Case("sidebar samples only background and retains blur across resize", async () =>
         {
             await using var f = new Fixture([new ProbeModule("backdrop")]); await f.LoadAsync();
@@ -104,7 +148,7 @@ public static partial class DesktopTests
             Equal(76d, f.Element<StackPanel>("NotificationOverlay").Margin.Top, "notices below header");
             var navigation = f.Navigation; var item = (ListViewItem)navigation.ContainerFromIndex(0);
             True(item.IsTabStop && item.UseSystemFocusVisuals, "navigation rows retain visible keyboard focus");
-            var search = f.Search; var picker = f.Element<ComboBox>("SearchTargetPicker");
+            var search = f.Search; var picker = f.Element<ShellSearchScope>("SearchTargetPicker");
             True(search.IsTabStop && picker.IsTabStop, "search and category are keyboard accessible");
             Equal("搜索", AutomationProperties.GetName(search), "search accessible name");
             Equal(FontWeights.Normal, search.FontWeight, "search stays regular");
@@ -150,6 +194,14 @@ public static partial class DesktopTests
             Equal(1, executions, "bound action executes once");
             enabled = false; action.Refresh(); await DrainAsync();
             False(button.IsEnabled, "group action observes current admission");
+            var replacement = new DesktopNavigationGroupAction("创建歌单", () => executions++);
+            module.Navigation[1] = module.Navigation[1] with { GroupAction = replacement };
+            await DrainAsync();
+            Same(button, ChromeVisuals(root).OfType<Button>().Single(item => AutomationProperties.GetName(item) == "创建歌单"),
+                "group metadata replacement retains the header button");
+            Same(replacement, button.Command, "retained header binds the replacement group action");
+            Click(button); await DrainAsync();
+            Equal(2, executions, "replacement group action executes once");
         });
         yield return Case("sidebar native scroll reaches collections without changing layout width", async () =>
         {
@@ -179,6 +231,7 @@ public static partial class DesktopTests
             var root = f.Shell.Root;
             void Layout()
             {
+                root.Width = 1110; root.Height = 800;
                 root.Measure(new(1110, 800)); root.Arrange(new Rect(0, 0, 1110, 800)); root.UpdateLayout();
             }
             Rect Bounds(FrameworkElement element) => DesktopTestUi.Bounds(element, root);
@@ -196,6 +249,8 @@ public static partial class DesktopTests
                 "player detail opens");
             Layout();
             var playerSurface = f.Element<Grid>("PlayerDetailSurface");
+            await UntilAsync(() => Bounds(playerSurface) == new Rect(0, 0, root.ActualWidth, root.ActualHeight),
+                "player detail entrance completes");
             Equal(new Rect(0, 0, root.ActualWidth, root.ActualHeight), Bounds(playerSurface), "complete player page covers every shell row");
             Equal(KeyboardNavigationMode.Cycle, playerSurface.TabFocusNavigation,
                 "keyboard navigation stays within the complete player page");
@@ -236,9 +291,20 @@ public static partial class DesktopTests
             module.Request(DesktopGlobalSurface.PlayQueue);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Visible,
                 "global queue opens from another capability");
-            f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None);
+            var dismiss = f.Element<Button>("QueueDismissSurface");
+            dismiss.ApplyTemplate();
+            foreach (string state in new[] { "Normal", "PointerOver", "Pressed" })
+            {
+                True(VisualStateManager.GoToState(dismiss, state, false), "queue dismiss supports its native " + state + " state");
+                var dismissFrame = await DesktopTestUi.Render(dismiss);
+                True(dismissFrame.Pixel(4, 4).A == 0 &&
+                    dismissFrame.Pixel(dismiss.ActualWidth / 2, dismiss.ActualHeight / 2).A == 0,
+                    "queue outside-dismiss stays fully transparent in " + state + " state");
+            }
+            await NativeDesktopCapture.SaveAsync(f.Element<Grid>("RootLayout"), "queue-open-without-page-scrim");
+            Click(dismiss);
             await UntilAsync(() => f.Element<Border>("QueueSurface").Visibility == Visibility.Collapsed,
-                "queue closes back to the other capability");
+                "outside-dismiss closes queue back to the other capability");
 
             Click(f.Element<Button>("SettingsButton")); await DrainAsync();
             Equal(Visibility.Visible, f.Element<ScrollViewer>("SidebarScroll").Visibility, "settings restores shell");

@@ -152,6 +152,13 @@ public static partial class MusicLyricDisplayTests
             var row = f.Module.Lyrics[1];
             f.Module.PreviewLyric(row);
             Check(f.Module.HasLyricPreview && f.Module.CanConfirmLyricPreview);
+            var availability = new List<bool>();
+            void PreviewChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+            { if (e.PropertyName == nameof(MusicCapability.CanConfirmLyricPreview)) availability.Add(f.Module.CanConfirmLyricPreview); }
+            f.Module.PropertyChanged += PreviewChanged;
+            await f.Module.RunAsync(() => Task.CompletedTask);
+            f.Module.PropertyChanged -= PreviewChanged;
+            Check(availability.SequenceEqual(new[] { false, true }));
             Equal(0, f.Playback.Seeks); Equal(0, f.Playback.Resumes);
             f.Playback.Position = 1.25;
             Equal(1, f.Module.LyricDisplayIndex); // Preview is not overwritten by the clock.

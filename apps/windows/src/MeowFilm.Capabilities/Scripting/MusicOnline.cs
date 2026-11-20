@@ -72,7 +72,7 @@ public sealed partial class MusicCapability
     }
     private void OnlineBindings()
     {
-        Changed(nameof(IsLyrics)); Changed(nameof(LyricStatus));
+        Changed(nameof(LyricStatus));
         LyricTimingBindings();
         DesktopLyricBindings();
         SourceBindings();
@@ -81,12 +81,12 @@ public sealed partial class MusicCapability
     {
         onlineCancellation?.Cancel();
         var source = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
-        onlineCancellation = source; onlineGeneration++; OnlineBindings(); return source;
+        onlineCancellation = source; onlineGeneration++; SourceBindings(); return source;
     }
     private void EndOnline(CancellationTokenSource source)
     {
         if (ReferenceEquals(onlineCancellation, source)) onlineCancellation = null;
-        source.Dispose(); OnlineBindings();
+        source.Dispose(); SourceBindings();
     }
     private async Task ReadOnlineSettings(CancellationToken token, long? sourceGeneration = null)
     {

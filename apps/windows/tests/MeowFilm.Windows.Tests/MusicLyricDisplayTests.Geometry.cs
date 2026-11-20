@@ -57,6 +57,7 @@ public static partial class MusicLyricDisplayTests
                 }
             }
             await Settle(() => Gap(0) < 1);
+            await MusicTestUi.ContentStatesRetainPixels((ListViewItem)list.ContainerFromIndex(0));
             Check(f.Module.ActiveLyricIndex < 0 && f.Module.LyricDisplayIndex < 0, "prelude centers without singing early");
             Check(Scroll().VerticalOffset < 1, "first row fits at the very top of the scrollable range");
             window.Resize(1000, 740); view.Width = 1000; view.Height = 740; DesktopTestUi.WindowRoot(window).UpdateLayout();
@@ -133,7 +134,7 @@ public static partial class MusicLyricDisplayTests
                 Check(icon.TransformToVisual(action).TransformPoint(new Point()).X < time.TransformToVisual(action).TransformPoint(new Point()).X,
                     "play icon precedes the time within one button");
                 Equal(1, LyricVisuals(frame).OfType<Button>().Count());
-                Check(LyricVisuals(action).OfType<Border>().First().CornerRadius.TopLeft >= capsule.Height / 2,
+                Check(VisualTreeHelper.GetChild(action, 0) is ContentPresenter template && template.CornerRadius.TopLeft >= capsule.Height / 2,
                     "the action has fully rounded ends");
                 Equal(0, f.Playback.Seeks);
                 await SaveLyricFrame(view, $"player-detail-{size.Width:0}x{size.Height:0}.png");
