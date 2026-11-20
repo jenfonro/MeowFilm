@@ -407,9 +407,22 @@ public static partial class NovelTests
         try
         {
             host.Show(); surface.Present(session, new() { Mode = "scroll" }); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
+            Check(runtime.ImageReads == 0, "An unseen chapter image must remain deferred.");
             // The logical midpoint of the image is independent of preceding text height.
             double ratio = (before.Length + .5) / (before.Length + 1 + after.Length);
             surface.Seek(ratio); await UntilMidpoint();
+            int firstReads = runtime.ImageReads, firstReleased = runtime.Released;
+            var references = runtime.ImageReferences.ToArray();
+            surface.Seek(0); await DesktopTestUi.DrainAsync();
+            surface.Seek(1); await DesktopTestUi.DrainAsync();
+            surface.Seek(ratio); await UntilMidpoint();
+            Check(runtime.ImageReads == firstReads && runtime.Released == firstReleased &&
+                references.Order().SequenceEqual(runtime.ImageReferences.Order()),
+                "Scrolling away and back must retain the current chapter image without reading or releasing it.");
+            surface.Visibility = Visibility.Collapsed; await DesktopTestUi.DrainAsync();
+            surface.Visibility = Visibility.Visible; await UntilMidpoint();
+            Check(runtime.ImageReads == firstReads && runtime.Released == firstReleased,
+                "Hiding a retained reader must preserve completed images.");
             var anchor = surface.CaptureAnchor(); Check(anchor.BlockIndex == 1 && Math.Abs(anchor.Ratio - ratio) < .00001);
             surface.Present(session, new() { Mode = "scroll", FontSize = 32, Margin = 48 });
             DesktopTestUi.ResizeWindow(host, 720, DesktopTestUi.WindowSize(host).Height); DesktopTestUi.ResizeWindow(host, DesktopTestUi.WindowSize(host).Width, 560); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();

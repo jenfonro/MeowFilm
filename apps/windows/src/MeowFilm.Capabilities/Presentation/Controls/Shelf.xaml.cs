@@ -1,10 +1,12 @@
 using System.Collections;
+using System.Collections.Specialized;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Markup;
 using Windows.Foundation;
 using Windows.System;
 using Windows.UI.Core;
@@ -12,7 +14,7 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-// Native ItemsStackPanel recycles horizontal cards; the shelf owns only page offsets.
+// Native item panels recycle horizontal columns; the shelf owns only page offsets.
 public partial class Shelf : UserControl
 {
     public static readonly DependencyProperty CardTemplateProperty = DependencyProperty.Register(nameof(CardTemplate), typeof(DataTemplate), typeof(Shelf), new PropertyMetadata(null));
@@ -27,18 +29,46 @@ public partial class Shelf : UserControl
     public double MinimumCardWidth { get => (double)GetValue(MinimumCardWidthProperty); set => SetValue(MinimumCardWidthProperty, value); }
     public Style? NavigationButtonStyle { get => (Style?)GetValue(NavigationButtonStyleProperty); set => SetValue(NavigationButtonStyleProperty, value); }
     public double HorizontalOffset { get => (double)GetValue(HorizontalOffsetProperty); set => SetValue(HorizontalOffsetProperty, value); }
+    private int rowsPerColumn = 1;
+    internal int RowsPerColumn
+    {
+        get => rowsPerColumn;
+        set
+        {
+            if (value is not (1 or 3)) throw new ArgumentOutOfRangeException(nameof(value));
+            if (IsLoaded) throw new InvalidOperationException("Shelf rows must be selected before mounting.");
+            if (rowsPerColumn == value) return;
+            rowsPerColumn = value;
+            if (value == 3)
+            {
+                ItemsHost.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsWrapGrid Orientation='Vertical' MaximumRowsOrColumns='3' ItemHeight='84'/></ItemsPanelTemplate>");
+                ItemsHost.Height = 252;
+            }
+            else
+            {
+                ItemsHost.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsStackPanel Orientation='Horizontal'/></ItemsPanelTemplate>");
+                ItemsHost.ClearValue(HeightProperty);
+            }
+        }
+    }
+    private int ColumnCount => (ItemsHost.Items.Count + RowsPerColumn - 1) / RowsPerColumn;
     private ScrollViewer? rail;
     private MusicCatalogSection? section;
     private int visibleCards = 1;
     private bool committing, dragging, pendingPointer, restoring;
     private bool usesSectionItems = true, settingSectionItems;
+    private INotifyCollectionChanged? observedItems;
     private double? targetOffset;
     private DesktopWindow? window;
     private IDisposable? visibility;
     private Point pointerOrigin;
     private double dragOrigin;
     internal ScrollViewer? ScrollHost => rail;
-    internal double MaximumOffset => Math.Max(0, (ItemsHost.Items.Count - visibleCards) * CardWidth);
+    internal void SetArtworkItemKeySelector(Func<object, object> selector) =>
+        MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemKeySelector(ItemsHost, selector);
+    internal void SetArtworkItemResourcesSelector(Func<object, IEnumerable<MeowFilm.Desktop.Artwork.ArtworkItemResource>> selector) =>
+        MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemResourcesSelector(ItemsHost, selector);
+    internal double MaximumOffset => Math.Max(0, (ColumnCount - visibleCards) * CardWidth);
     internal double PresentedOffset => rail?.HorizontalOffset ?? 0;
     internal bool IsSettled { get; private set; } = true;
     public Shelf()
@@ -73,6 +103,7 @@ public partial class Shelf : UserControl
         ItemsHost.ContainerContentChanging += (_, e) => SizeCard(e.ItemContainer);
         DataContextChanged += (_, _) =>
         {
+            if (ReferenceEquals(section, DataContext)) return;
             CommitOffset(); section = DataContext as MusicCatalogSection;
             if (usesSectionItems && GetBindingExpression(ItemsSourceProperty) is null)
             {
@@ -124,9 +155,17 @@ public partial class Shelf : UserControl
     {
         var shelf = (Shelf)owner; if (shelf.ItemsHost is null || shelf.committing) return;
         if (e.Property == NavigationButtonStyleProperty) { shelf.Previous.Style = shelf.Next.Style = shelf.NavigationButtonStyle; return; }
-        if (e.Property == ItemsSourceProperty && !shelf.settingSectionItems) shelf.usesSectionItems = false;
+        if (e.Property == ItemsSourceProperty)
+        {
+            if (!shelf.settingSectionItems) shelf.usesSectionItems = false;
+            if (shelf.observedItems is not null) shelf.observedItems.CollectionChanged -= shelf.ItemsChanged;
+            shelf.observedItems = shelf.ItemsSource as INotifyCollectionChanged;
+            if (shelf.observedItems is not null) shelf.observedItems.CollectionChanged += shelf.ItemsChanged;
+        }
         shelf.UpdateLayoutMetrics(); shelf.Restore();
     }
+    private void ItemsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    { UpdateLayoutMetrics(); UpdateButtons(); }
     internal (double Target, double Gap) LayoutMetrics() => section is { IsBannerSection: true } ? (260, 20) : section is { IsEntrySection: true } ? (150, 16) : (MinimumCardWidth, 16);
     internal static (int Count, double Width) MeasureCards(double width, double target, double gap, bool banner = false)
     { int count = banner ? 2 : Math.Max(1, (int)Math.Floor((width + gap) / (target + gap))); return (count, Math.Max(1, (width + gap) / count)); }
@@ -135,6 +174,7 @@ public partial class Shelf : UserControl
         if (!IsLoaded || !DesktopVisual.IsVisible(this) || ItemsHost.ActualWidth <= 0) return;
         var (target, gap) = LayoutMetrics(); double previous = CardWidth, oldMaximum = MaximumOffset;
         var (count, pitch) = MeasureCards(ItemsHost.ActualWidth, target, gap, section is { IsBannerSection: true });
+        if (ItemsHost.ItemsPanelRoot is ItemsWrapGrid grid) grid.ItemWidth = pitch;
         if (count == visibleCards && pitch == previous) { UpdateButtons(); return; }
         double old = targetOffset ?? PresentedOffset; visibleCards = count; CardWidth = pitch;
         for (int i = 0; i < ItemsHost.Items.Count; i++) if (ItemsHost.ContainerFromIndex(i) is ListViewItem item) SizeCard(item);
@@ -142,7 +182,15 @@ public partial class Shelf : UserControl
         targetOffset = null;
         rail?.ChangeView(Math.Clamp(next, 0, MaximumOffset), null, null, true); UpdateButtons();
     }
-    private void SizeCard(SelectorItem item) { item.Width = Math.Max(1, CardWidth); item.Padding = new Thickness(0, 0, LayoutMetrics().Gap, 0); }
+    private void SizeCard(SelectorItem item)
+    {
+        item.Width = Math.Max(1, CardWidth); item.Padding = new Thickness(0, 0, LayoutMetrics().Gap, 0);
+        if (RowsPerColumn == 3)
+        {
+            item.Height = 84;
+            if (ItemsHost.ItemsPanelRoot is ItemsWrapGrid grid) grid.ItemWidth = CardWidth;
+        }
+    }
     private void Restore()
     {
         if (rail is null || !DesktopVisual.IsVisible(this)) return;
@@ -202,7 +250,7 @@ public partial class Shelf : UserControl
         if (key == VirtualKey.End && MaximumOffset - offset > .5) { Move(MaximumOffset); return true; }
         return false;
     }
-    internal void ScrollToIndex(int index) { CancelPointer(); Move(Math.Max(0, index) * CardWidth); }
+    internal void ScrollToIndex(int index) { CancelPointer(); Move((Math.Max(0, index) / RowsPerColumn) * CardWidth); }
     private void CancelPointer() { pendingPointer = dragging = false; ReleasePointerCaptures(); }
     private void Deactivated(object? sender, EventArgs e) { CancelPointer(); Snap(); }
     private void CommitOffset()
@@ -219,7 +267,7 @@ public partial class Shelf : UserControl
         Previous.Visibility = PageTarget(-1).HasValue ? Visibility.Visible : Visibility.Collapsed;
         Next.Visibility = PageTarget(1).HasValue ? Visibility.Visible : Visibility.Collapsed;
         UpdateArrowOpacity();
-        PageIndicator.PageCount = (int)Math.Ceiling(ItemsHost.Items.Count / (double)visibleCards);
+        PageIndicator.PageCount = (int)Math.Ceiling(ColumnCount / (double)visibleCards);
         double page = visibleCards * CardWidth, lastStart = (PageIndicator.PageCount - 2) * page;
         PageIndicator.Position = PageIndicator.PageCount > 1 && PresentedOffset > lastStart
             ? PageIndicator.PageCount - 2 + (PresentedOffset - lastStart) / (MaximumOffset - lastStart)

@@ -12,7 +12,12 @@ public partial class FilmShelf : UserControl
     public event EventHandler<FilmCardActivatedEventArgs>? ItemActivated;
     public event EventHandler? RetryRequested;
 
-    public FilmShelf() => InitializeComponent();
+    public FilmShelf()
+    {
+        InitializeComponent();
+        Cards.SetArtworkItemKeySelector(item => ((FilmCardItem)item).Id);
+        Cards.SetArtworkItemResourcesSelector(item => FilmPlaybackPoster.ArtworkResources(((FilmCardItem)item).Poster));
+    }
 
     private void Card_Activated(object? sender, FilmCardActivatedEventArgs e) =>
         ItemActivated?.Invoke(this, e);

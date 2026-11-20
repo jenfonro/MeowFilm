@@ -17,6 +17,7 @@ public partial class EntryCard : UserControl
     public EntryCard()
     {
         InitializeComponent();
+        _ = new MusicCatalogSlot(this);
         DataContextChanged += (_, _) => Observe();
         Loaded += (_, _) => { theme = MeowFilm.Desktop.DesktopTheme.Observe(this, Refresh); Observe(); };
         Unloaded += (_, _) => { theme?.Dispose(); theme = null; if (observed is not null) observed.PropertyChanged -= Changed; observed = null; };
@@ -41,7 +42,9 @@ public partial class EntryCard : UserControl
     {
         if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName == nameof(MusicCatalogCard.PreviewTitles))
             RefreshPreviewRows();
-        Refresh();
+        if (string.IsNullOrEmpty(e.PropertyName) || e.PropertyName is nameof(MusicCatalogCard.HasPreview) or
+            nameof(MusicCatalogCard.HasLabel) or nameof(MusicCatalogCard.HasPlayCount) or nameof(MusicCatalogCard.HasCoverLabel) or
+            nameof(MusicCatalogCard.CanPlay) or nameof(MusicCatalogCard.IsPreviewEntry)) Refresh();
     }
     private void RefreshPreviewRows()
     {

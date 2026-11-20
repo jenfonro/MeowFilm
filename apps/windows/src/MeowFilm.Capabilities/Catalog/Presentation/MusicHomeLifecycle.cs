@@ -213,6 +213,7 @@ public sealed partial class MusicCapability
             homeProjection.Remove(obsolete);
         ReconcileSections(homeDisplaySections, display);
         if (!IsCatalogHome) return;
+        RefreshCatalogDemandMembers();
         var songs = display.SelectMany(section => section.Items).Select(card => card.Song).OfType<SongRow>().ToArray();
         if (!Songs.SequenceEqual(songs, ReferenceEqualityComparer.Instance))
         { Songs.Clear(); foreach (var song in songs) Songs.Add(song); }

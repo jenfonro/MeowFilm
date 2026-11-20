@@ -211,7 +211,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         Changed(nameof(ContentPage));
         playbackPresentation.Refresh();
         foreach (var name in new[] { nameof(CatalogSelectedSong), nameof(SearchSelectedSong), nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
-            nameof(CanEditAppearance), nameof(CanClearPlaybackCache),
+            nameof(CanEditAppearance), nameof(CanEditFixedAppearance), nameof(CanClearPlaybackCache),
             nameof(IsHistory), nameof(IsArchives), nameof(IsSongList), nameof(IsCollectionPage), nameof(IsContentDetailPage), nameof(ShowsSongTable),
             nameof(ShowSongPager), nameof(HistoryDate),
             nameof(HasSelection), nameof(CanRemoveSelection), nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection), nameof(CanEditMetadata),

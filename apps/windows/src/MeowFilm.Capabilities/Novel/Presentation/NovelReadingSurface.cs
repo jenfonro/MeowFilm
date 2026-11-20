@@ -18,7 +18,7 @@ using WinSize = Windows.Foundation.Size;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Native paragraph/UTF-16 layout. Only viewport images retain decoded pixels and runtime leases.</summary>
+/// <summary>Native paragraph/UTF-16 layout. The current chapter retains images admitted by its viewport.</summary>
 public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisposable
 {
     private sealed record Row(int Block, int Offset, double Y, double Height, CanvasTextLayout? Layout = null, double TextY = 0, string Image = "", double Width = 0, double ImageOffset = 0, double ImageHeight = 0);
@@ -40,6 +40,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private readonly HashSet<Task> releasing = [];
     private double[] contentPositions = [0];
     private CancellationTokenSource? backgroundRequest;
+    private string backgroundPath = "";
     private readonly HashSet<Task> backgrounds = [];
     private NovelBookSession? session;
     private NovelAppearance appearance = new();
@@ -85,7 +86,12 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         visibility = new(this, visible =>
         {
             if (disposed) return;
-            if (!visible) { ClearFrame(); ReleaseAllImages(); backgroundRequest?.Cancel(); backgroundImage?.Dispose(); backgroundImage = null; }
+            if (!visible)
+            {
+                ClearFrame();
+                foreach (int index in images.Where(pair => pair.Value.Bitmap is null).Select(pair => pair.Key).ToArray()) ReleaseImage(index);
+                backgroundRequest?.Cancel(); backgroundRequest = null;
+            }
             else { ResumeImages(); InvalidateVisual(); }
         });
         Loaded += (_, _) =>
@@ -95,7 +101,11 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
             if (xamlRoot is not null) xamlRoot.Changed += RootChanged;
             Reflow();
         };
-        Unloaded += (_, _) => DetachRoot();
+        Unloaded += (_, _) =>
+        {
+            DetachRoot(); contentGeneration++; ReleaseAllImages();
+            backgroundRequest?.Cancel(); backgroundRequest = null; backgroundImage?.Dispose(); backgroundImage = null;
+        };
         contrastObservation = DesktopTheme.Observe(this, Reflow);
         uiSettings.ColorValuesChanged += HighContrastChanged;
         SizeChanged += (_, _) =>
@@ -389,7 +399,12 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     }
     private void LoadBackground()
     {
-        backgroundRequest?.Cancel(); backgroundImage?.Dispose(); backgroundImage = null;
+        if (backgroundPath != appearance.BackgroundImage)
+        {
+            backgroundPath = appearance.BackgroundImage;
+            backgroundRequest?.Cancel(); backgroundRequest = null; backgroundImage?.Dispose(); backgroundImage = null;
+        }
+        if (backgroundImage is not null || backgroundRequest is not null) return;
         if (appearance.BackgroundImage.Length == 0 || !DesktopVisual.IsVisible(this) || resourcesPaused || disposed) return;
         string path = appearance.BackgroundImage; var owner = backgroundRequest = new();
         var operation = Load(); backgrounds.Add(operation); _ = Observe();
@@ -417,7 +432,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
             s.Revision == session.Book.Revision)) return;
         var visible = rows.Where(r => r.Image.Length > 0 && r.Y + r.Height >= offset && r.Y < offset + ActualHeight).Select(r => r.Block).ToHashSet();
         int decodeWidth = (int)Math.Ceiling(textWidth * PixelsPerDip);
-        foreach (int index in images.Keys.Where(i => !visible.Contains(i) || images[i].DecodeWidth < decodeWidth).ToArray()) ReleaseImage(index);
+        foreach (int index in visible.Where(i => images.TryGetValue(i, out var image) && image.DecodeWidth < decodeWidth).ToArray()) ReleaseImage(index);
         foreach (int index in visible.Where(i => !images.ContainsKey(i)))
         {
             var lease = new ImageLease { DecodeWidth = decodeWidth }; images.Add(index, lease); long generation = contentGeneration;
@@ -471,7 +486,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private void ReleaseAllImages() { foreach (int index in images.Keys.ToArray()) ReleaseImage(index); }
     public async Task DrainImagesAsync()
     {
-        resourcesPaused = true; ClearFrame(); backgroundRequest?.Cancel(); backgroundImage?.Dispose(); backgroundImage = null; ReleaseAllImages();
+        resourcesPaused = true; ClearFrame(); backgroundRequest?.Cancel(); backgroundRequest = null; backgroundImage?.Dispose(); backgroundImage = null; ReleaseAllImages();
         await Task.WhenAll(releasing.Concat(backgrounds).ToArray());
     }
     internal void ResumeImages() { resourcesPaused = false; LoadBackground(); LoadVisibleImages(); InvalidateVisual(); }

@@ -17,10 +17,7 @@ public partial class MusicAppearanceView : UserControl
         PaletteSelection.Presets = MusicAppearancePalette.Options
             .Select(option => new ColorPreset(option.Key, option.Name, option.Color)).ToArray();
         DataContext = module;
-        Loaded += async (_, _) => await UpdateActivation();
-        Unloaded += (_, _) => { active = false; module.RetireAppearanceSettings(); };
-        RegisterPropertyChangedCallback(VisibilityProperty, async (_, _) => await UpdateActivation());
-        LayoutUpdated += async (_, _) => { if (active != (IsLoaded && DesktopVisual.IsVisible(this))) await UpdateActivation(); };
+        _ = DesktopVisual.ObserveVisibility(this, async _ => await UpdateActivation());
     }
     private async Task UpdateActivation()
     {

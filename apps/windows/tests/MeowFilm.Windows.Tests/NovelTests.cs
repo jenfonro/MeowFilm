@@ -85,7 +85,7 @@ public static partial class NovelTests
         yield return new("novel reset: pending rule and accepted native writes drain before a fresh owner replaces navigation", () => Sta(ResetOwners));
         yield return new("novel source images: full-size trusted HTTP data and caller cancellation use the unbounded API", SourceImages);
         yield return new("novel reader images: viewport cancellation drains binary image leases", () => Sta(ImageLifecycle));
-        yield return new("novel cover viewport: offscreen demand cancellation reacquisition and late pixels stay isolated", () => Sta(CoverViewport));
+        yield return new("novel cover viewport: first visibility admits once and lifecycle retirement isolates late pixels", () => Sta(CoverViewport));
         yield return new("novel reader components: four modes resize UTF16 anchors image release and empty chapters", () => Sta(Layout));
         yield return new("novel reader labels: font resize and late images update pages without saving position", () => Sta(LayoutLabels));
         yield return new("novel shell: immersive reading hides navigation and exit restores retained book", () => Sta(Shell));

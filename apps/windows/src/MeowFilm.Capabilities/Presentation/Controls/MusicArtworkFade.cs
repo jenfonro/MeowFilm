@@ -23,82 +23,74 @@ public sealed class MusicArtworkFade : FrameworkElement
     private CompositionLinearGradientBrush? mask;
     private CompositionMaskBrush? brush;
     private SpriteVisual? visual;
-    private IDisposable? visibility, sourceLease;
+    private IDisposable? sourceLease;
+    private readonly DesktopViewport viewport;
+    private FrameworkElement? sampledSource;
+    private bool maskDecoration, presented;
     private ArtworkImage? preparedSource;
     private CancellationTokenSource? preparation;
     internal CompositionLinearGradientBrush? Mask => mask;
     public MusicArtworkFade()
     {
         IsHitTestVisible = false;
-        Loaded += (_, _) => { visibility = DesktopVisual.ObserveVisibility(this, _ => Refresh()); LayoutUpdated += LayoutChanged; Refresh(); };
+        viewport = new DesktopViewport(this, Refresh);
+        Loaded += (_, _) => Refresh();
         SizeChanged += (_, _) => Refresh();
-        EffectiveViewportChanged += (_, _) => Refresh();
-        Unloaded += (_, _) => { LayoutUpdated -= LayoutChanged; visibility?.Dispose(); visibility = null; Release(); };
+        Unloaded += (_, _) => { presented = false; Release(); };
     }
     private static void SourceChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {
         var fade = (MusicArtworkFade)owner;
-        fade.RetireSource();
+        fade.presented = false; fade.Release();
         if (args.OldValue is FrameworkElement previous) { previous.SizeChanged -= fade.SourceResized; previous.Loaded -= fade.SourceLoaded; }
         if (args.NewValue is FrameworkElement next) { next.SizeChanged += fade.SourceResized; next.Loaded += fade.SourceLoaded; }
         fade.Refresh();
     }
     private void SourceLoaded(object sender, RoutedEventArgs e) => Refresh();
     private void SourceResized(object sender, SizeChangedEventArgs e) => Refresh();
-    private void LayoutChanged(object? sender, object args)
-    {
-        if (InViewport() != (surface is not null)) Refresh();
-    }
-    private bool InViewport()
-    {
-        if (!DesktopVisual.IsVisible(this) || ActualWidth <= 0 || ActualHeight <= 0) return false;
-        try
-        {
-            Rect visible = new(0, 0, ActualWidth, ActualHeight);
-            UIElement child = this;
-            for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null; parent = VisualTreeHelper.GetParent(parent))
-            {
-                if (parent is not UIElement visual) continue;
-                visible = child.TransformToVisual(visual).TransformBounds(visible); child = visual;
-                if (visual is FrameworkElement element && (element.Clip is not null || element is ScrollContentPresenter or ScrollViewer || ReferenceEquals(element, XamlRoot?.Content)))
-                {
-                    visible.Intersect(element.Clip?.Rect ?? new Rect(0, 0, element.ActualWidth, element.ActualHeight));
-                    if (visible.IsEmpty || visible.Width <= 0 || visible.Height <= 0) return false;
-                }
-            }
-            return true;
-        }
-        catch (InvalidOperationException) { return false; }
-    }
     private void Refresh()
     {
-        if (!InViewport() || Source is not { IsLoaded: true } source) { Release(); return; }
+        if (viewport?.IsInViewport == true) presented = true;
+        if (!IsLoaded || Source is not { IsLoaded: true } source) { Release(); return; }
+        if (!presented || viewport?.IsVisible != true) return;
         if (Decoration && source is ArtworkImage artwork)
         {
             if (!ReferenceEquals(preparedSource, artwork)) PrepareSource(artwork);
         }
         else RetireSource();
         var compositor = ElementCompositionPreview.GetElementVisual(this).Compositor;
-        surface ??= compositor.CreateVisualSurface(); surface.SourceVisual = ElementCompositionPreview.GetElementVisual(source);
+        surface ??= compositor.CreateVisualSurface();
+        if (!ReferenceEquals(sampledSource, source))
+        { sampledSource = source; surface.SourceVisual = ElementCompositionPreview.GetElementVisual(source); }
         var offset = TransformToVisual(source).TransformPoint(new Point());
-        surface.SourceOffset = new Vector2((float)offset.X, (float)offset.Y);
-        surface.SourceSize = new Vector2((float)ActualWidth, (float)ActualHeight);
+        var position = new Vector2((float)offset.X, (float)offset.Y);
+        var size = new Vector2((float)ActualWidth, (float)ActualHeight);
+        if (surface.SourceOffset != position) surface.SourceOffset = position;
+        if (surface.SourceSize != size) surface.SourceSize = size;
         sourceBrush ??= compositor.CreateSurfaceBrush(surface);
-        mask ??= compositor.CreateLinearGradientBrush(); mask.StartPoint = Vector2.Zero; mask.EndPoint = new Vector2(0, 1);
-        mask.ColorStops.Clear();
-        foreach (var (at, alpha) in Decoration ? new[] { (0f, (byte)255), (.45f, (byte)255), (1f, (byte)0) }
-            : new[] { (0f, (byte)255), (.1f, (byte)0), (.9f, (byte)0), (1f, (byte)255) })
-            mask.ColorStops.Add(compositor.CreateColorGradientStop(at, Windows.UI.Color.FromArgb(alpha, 0, 0, 0)));
-        brush ??= compositor.CreateMaskBrush(); brush.Source = sourceBrush; brush.Mask = mask;
-        visual ??= compositor.CreateSpriteVisual(); visual.Brush = brush; visual.Size = surface.SourceSize;
-        ElementCompositionPreview.SetElementChildVisual(this, visual);
+        if (mask is null || maskDecoration != Decoration)
+        {
+            mask ??= compositor.CreateLinearGradientBrush(); maskDecoration = Decoration;
+            mask.StartPoint = Vector2.Zero; mask.EndPoint = new Vector2(0, 1);
+            mask.ColorStops.Clear();
+            foreach (var (at, alpha) in Decoration ? new[] { (0f, (byte)255), (.45f, (byte)255), (1f, (byte)0) }
+                : new[] { (0f, (byte)255), (.1f, (byte)0), (.9f, (byte)0), (1f, (byte)255) })
+                mask.ColorStops.Add(compositor.CreateColorGradientStop(at, Windows.UI.Color.FromArgb(alpha, 0, 0, 0)));
+        }
+        if (brush is null) { brush = compositor.CreateMaskBrush(); brush.Source = sourceBrush; brush.Mask = mask; }
+        if (visual is null)
+        {
+            visual = compositor.CreateSpriteVisual(); visual.Brush = brush;
+            ElementCompositionPreview.SetElementChildVisual(this, visual);
+        }
+        if (visual.Size != size) visual.Size = size;
     }
     private void Release()
     {
         RetireSource();
-        ElementCompositionPreview.SetElementChildVisual(this, null);
+        if (visual is not null) ElementCompositionPreview.SetElementChildVisual(this, null);
         visual?.Dispose(); brush?.Dispose(); mask?.Dispose(); sourceBrush?.Dispose(); surface?.Dispose();
-        visual = null; brush = null; mask = null; sourceBrush = null; surface = null;
+        visual = null; brush = null; mask = null; sourceBrush = null; surface = null; sampledSource = null;
     }
     private async void PrepareSource(ArtworkImage artwork)
     {

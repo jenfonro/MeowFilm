@@ -37,6 +37,7 @@ public static partial class MusicOfficialPlaybackScopeTests
         yield return Case("same-song delayed artwork replacement retains pixels while switching songs clears them", SharedArtworkReplacement);
         yield return Case("cached catalog songs and previews restore current repository metadata without requests or queue changes", CachedCatalogMetadata);
         yield return Case("real catalog song template retains successful pixels across repository updates and clears recycled songs", CatalogArtworkReplacement);
+        yield return Case("catalog card snapshots retain controls artwork and current action targets", CatalogSnapshotReplacement);
         yield return Case("actual catalog playlist search queue and recommendation templates bind permanent artwork identities", ArtworkConsumerBindings);
         yield return Case("shared music image and lyric bytes obey the existing total disk budget while displayed leases survive eviction", SharedArtworkBudget);
         yield return Case("shared music resources expire after thirty days and only actual playback renews them", SharedArtworkLifetime);
@@ -719,6 +720,82 @@ public static partial class MusicOfficialPlaybackScopeTests
         finally { window.Content = null; window.Close(); }
     }
 
+    private static async Task CatalogSnapshotReplacement()
+    {
+        await using var f = await ArtworkScene.Create();
+        var song = SongRow.Read(Element(await MusicSongFixture.AdoptAsync(f.App,
+            ArtworkSong("wy", "snapshot", "https://images.example.test/snapshot.png"))));
+        var card = new MusicCatalogCard(song.Id, "Before", "Artist", song.Cover, "song", "wy", song,
+            StableKey: "stable-snapshot", UsesSongDisplay: false);
+        var view = new MusicCatalogView { DataContext = f.Module };
+        var content = new MusicCatalogCardView { Presentation = MusicCatalogCardLayout.Song, DataContext = card };
+        view.Content = content;
+        using var controlled = new ControlledArtwork(); ArtworkScope.SetLoader(view, controlled);
+        var window = DesktopTestUi.CreateWindow(view, 430, 260);
+        try
+        {
+            window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout();
+            await Until(() => controlled.Calls.Count == 1);
+            var tree = content.Content;
+            var image = ArtworkDescendants<ArtworkImage>(content).Single();
+            var open = ArtworkDescendants<Button>(content).Single(button => ReferenceEquals(button.Tag, card));
+            var favorite = ArtworkDescendants<Button>(content).Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "收藏");
+            var lease = new ArtworkTestLease(); controlled.Calls[0].Completion.TrySetResult(lease);
+            await Until(() => image.Source is not null);
+            var pixels = image.Source;
+            var latest = card with { Title = "After", Subtitle = "Current artist", Available = false };
+            content.DataContext = latest; await DesktopTestUi.DrainAsync();
+            Check(ReferenceEquals(content.Content, tree) && ReferenceEquals(ArtworkDescendants<ArtworkImage>(content).Single(), image) &&
+                controlled.Calls.Count == 1 && ReferenceEquals(image.Source, pixels) && !lease.Disposed,
+                "same-key snapshots retain the actual tree, artwork pixels and lease without another read");
+            Check(ArtworkDescendants<TextBlock>(content).Any(text => text.Text == "After") && !open.IsEnabled && !favorite.IsEnabled &&
+                ReferenceEquals(open.Tag, latest), "text and availability follow the current snapshot");
+            var section = new MusicCatalogSection("Snapshot", [latest]); f.Module.DisplayCatalogSections.Add(section);
+            var more = ArtworkDescendants<Button>(content).Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "歌曲操作");
+            MenuFlyout OpenCurrentMenu()
+            {
+                CardMotion.SetProgress((DependencyObject)content.Content, 1); DesktopTestUi.Invoke(more);
+                return (MenuFlyout)typeof(MusicCatalogCardView).GetField("menu", System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.NonPublic)!.GetValue(content)!;
+            }
+            // Invoke the retained control: its old closure would still target the enabled card.
+            var menu = OpenCurrentMenu();
+            await Until(() => menu.IsOpen); Check(!menu.Items[0].IsEnabled); menu.Hide();
+            var available = latest with { Available = true };
+            f.Module.DisplayCatalogSections[f.Module.DisplayCatalogSections.IndexOf(section)] = new("Snapshot", [available]); content.DataContext = available; await DesktopTestUi.DrainAsync();
+            menu = OpenCurrentMenu(); await Until(() => menu.IsOpen);
+            Check(menu.Items[0].IsEnabled && open.IsEnabled && favorite.IsEnabled, "the retained menu button uses the current displayed card and availability"); menu.Hide();
+
+            var replacementSong = SongRow.Read(Element(await MusicSongFixture.AdoptAsync(f.App,
+                ArtworkSong("wy", "snapshot-other", song.Cover))));
+            content.DataContext = available with { Song = replacementSong };
+            await Until(() => controlled.Calls.Count == 2);
+            Check(ReferenceEquals(content.Content, tree) && image.DisplayIdentity == replacementSong.Id && image.Source is null && lease.Disposed,
+                "a changed permanent song identity retires pixels even under the same card key and address");
+            content.DataContext = available with { StableKey = "different-card" }; await DesktopTestUi.DrainAsync();
+            Check(!ReferenceEquals(content.Content, tree), "a different card identity replaces the presentation");
+
+            var playlist = new MusicCatalogCard("p", "Collection", "", "", "playlist", "wy", ActionId: "p", StableKey: "playlist");
+            content.Presentation = MusicCatalogCardLayout.Playlist; content.DataContext = playlist;
+            DesktopTestUi.WindowRoot(window).UpdateLayout();
+            await Until(() => content.Content is FrameworkElement { IsLoaded: true } &&
+                ArtworkDescendants<TextBlock>(content).Any(text => text.FontSize == 18 && text.Text == "Collection"));
+            tree = content.Content;
+            var fallback = ArtworkDescendants<TextBlock>(content).Single(text => text.FontSize == 18 && text.Text == "Collection");
+            var play = ArtworkDescendants<Button>(content).Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "播放");
+            var heart = ArtworkDescendants<Button>(content).Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "心动");
+            Check(fallback.Visibility == Visibility.Visible && play.Visibility == Visibility.Visible && heart.Visibility == Visibility.Collapsed);
+            content.DataContext = playlist with { Cover = song.Cover, DirectPlay = false, IsCloudFavorites = true };
+            await DesktopTestUi.DrainAsync();
+            Check(ReferenceEquals(content.Content, tree) && fallback.Visibility == Visibility.Collapsed && play.Visibility == Visibility.Collapsed &&
+                heart.Visibility == Visibility.Visible && ArtworkDescendants<ArtworkImage>(content).Single().DisplayIdentity == "",
+                "same-key collection updates refresh fallback and action visibility without borrowing a song identity");
+            content.DataContext = playlist; await DesktopTestUi.DrainAsync();
+            Check(fallback.Visibility == Visibility.Visible && play.Visibility == Visibility.Visible && heart.Visibility == Visibility.Collapsed);
+        }
+        finally { window.Content = null; window.Close(); }
+    }
+
     private static async Task ArtworkConsumerBindings()
     {
         await using var f = await ArtworkScene.Create();
@@ -726,14 +803,22 @@ public static partial class MusicOfficialPlaybackScopeTests
             ArtworkSong("wy", "bindings", "https://images.example.test/bindings.png"));
         var row = SongRow.Read(Element(song));
         var card = new MusicCatalogCard(row.Id, row.Title, row.Artist, row.Cover, "song", "wy", row);
-        var catalog = new MusicCatalogView();
         var queue = new MusicQueueView(f.Module);
         var page = (MusicView)f.Module.View;
-        var subjects = new List<(FrameworkElement View, object Data, string Name)>();
-        foreach (string name in new[] { "Catalog.SongRow", "Catalog.PlaylistCard", "Catalog.Banner", "Catalog.Entry" })
-            subjects.Add(((FrameworkElement)((DataTemplate)DesktopVisual.Resource(catalog, name)).LoadContent(), card, name));
+        var subjects = new List<(FrameworkElement View, object Data, string Name)>
+        {
+            (new MusicCatalogCardView { Presentation = MusicCatalogCardLayout.Song }, card, "Catalog.SongRow"),
+            (new MusicCatalogCardView { Presentation = MusicCatalogCardLayout.Playlist }, card, "Catalog.PlaylistCard"),
+            (new MusicCatalogCardView { Presentation = MusicCatalogCardLayout.Banner }, card, "Catalog.Banner"),
+            (new EntryCard(), card, "Catalog.Entry")
+        };
         foreach (string name in new[] { "SongsGrid", "SearchSongsGrid" })
-            subjects.Add(((FrameworkElement)((ListView)page.FindName(name)).ItemTemplate.LoadContent(), row, name));
+        {
+            var list = FilmUiTest.Field<ListView>(page, name);
+            Check(ReferenceEquals(list.ItemTemplate, page.Resources["SongRowTemplate"]),
+                name + " consumes the current shared native song template");
+            subjects.Add(((FrameworkElement)list.ItemTemplate.LoadContent(), row, name));
+        }
         subjects.Add(((FrameworkElement)((ListView)queue.FindName("QueueList")).ItemTemplate.LoadContent(),
             new MusicQueueSurfaceRow(row, false), "QueueList"));
         subjects.Add(((FrameworkElement)((ListView)queue.FindName("RecommendationList")).ItemTemplate.LoadContent(),
@@ -748,14 +833,15 @@ public static partial class MusicOfficialPlaybackScopeTests
             foreach (var (view, data, name) in subjects)
             {
                 view.DataContext = data; host.Content = view; DesktopTestUi.WindowRoot(window).UpdateLayout();
-                await DesktopTestUi.DrainAsync();
+                await TestUiHost.LoadedAsync(view);
+                await Until(() => ArtworkDescendants<ArtworkImage>(view).Any(value => value.Address == row.Cover));
                 var image = ArtworkDescendants<ArtworkImage>(view).Single(value => value.Address == row.Cover);
                 Check(image.DisplayIdentity == row.Id, name + " must use the permanent song, not occurrence or platform ID");
             }
             var rank = new MusicCatalogCard("rank", "Rank", "", "https://images.example.test/collection.png",
                 "playlist", "wy", Preview:
                 [new("", "", "", 1, null, row), new("", "", "", 2, null, row), new("", "", "", 3, null, row)]);
-            var ranking = (FrameworkElement)((DataTemplate)DesktopVisual.Resource(catalog, "Catalog.Ranking")).LoadContent();
+            var ranking = new MusicCatalogCardView { Presentation = MusicCatalogCardLayout.Ranking };
             ranking.DataContext = rank; host.Content = ranking; DesktopTestUi.WindowRoot(window).UpdateLayout();
             await DesktopTestUi.DrainAsync();
             Check(ArtworkDescendants<ArtworkImage>(ranking).Count(image => image.DisplayIdentity == row.Id) == 3);

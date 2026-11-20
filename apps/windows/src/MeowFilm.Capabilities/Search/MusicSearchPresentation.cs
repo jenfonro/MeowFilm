@@ -285,7 +285,7 @@ public sealed partial class MusicCapability
             total = searchView == SearchOverview ? songCards.Length + playlistCards.Length :
                 searchView == "songs" ? songCards.Length : playlistCards.Length;
             if (CatalogTags.Count > 0) CatalogTags.Clear();
-            if (songsChanged) ApplySearchSongs(nextSongs, prefix);
+            if (songsChanged) ReconcileSongRows(Songs, nextSongs);
             if (restore || searchRefresh || songsChanged || sectionsChanged)
             {
                 var restored = Songs.FirstOrDefault(song => song.SelectionKey == selected);
@@ -367,19 +367,6 @@ public sealed partial class MusicCapability
             changed = true;
         }
         return changed;
-    }
-
-    private void ApplySearchSongs(SongRow[] next, bool prefix)
-    {
-        if (prefix)
-        {
-            for (int index = 0; index < Songs.Count; index++)
-                if (!ReferenceEquals(Songs[index], next[index])) Songs[index] = next[index];
-            for (int index = Songs.Count; index < next.Length; index++) Songs.Add(next[index]);
-            return;
-        }
-        Songs.Clear();
-        foreach (var song in next) Songs.Add(song);
     }
 
     private string SearchViewStatus()

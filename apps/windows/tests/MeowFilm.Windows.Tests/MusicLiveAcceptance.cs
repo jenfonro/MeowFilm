@@ -319,7 +319,7 @@ internal static class MusicLiveAcceptance
                         await CaptureCatalogAsync(module, window, report, "wy-" + target);
                         if (target != "playlist-square")
                         {
-                            var slots = Descendants(module.View).OfType<EntryCard>().Where(MusicCatalogView.InCatalogViewport).ToArray();
+                            var slots = Descendants(module.View).OfType<EntryCard>().Where(DesktopTestUi.InViewport).ToArray();
                             Require(slots.Any(slot => slot.DataContext is MusicCatalogCard { Kind: "fm", HasCoverLabel: true }), "NOT_COVERED");
                             var playlists = slots.Where(slot => slot.DataContext is MusicCatalogCard { Kind: "playlist" }).ToArray();
                             Require(playlists.Length > 0 && playlists.All(slot => slot.DataContext is MusicCatalogCard
@@ -358,7 +358,7 @@ internal static class MusicLiveAcceptance
     {
         await RenderAsync(window);
         var images = Descendants(window.Root).OfType<ArtworkImage>().Where(image =>
-            image.Address.Length > 0 && MusicCatalogView.InCatalogViewport(image)).ToArray();
+            image.Address.Length > 0 && DesktopTestUi.InViewport(image)).ToArray();
         Require(images.Length > 0, "NOT_COVERED");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(45));
         var held = new List<IDisposable>();
@@ -596,7 +596,7 @@ internal static class MusicLiveAcceptance
     private static async Task CaptureCatalogAsync(MusicCapability module, DesktopWindow window, Report report, string name)
     {
         var images = Descendants(module.View).OfType<ArtworkImage>()
-            .Where(image => image.Address.Length > 0 && MusicCatalogView.InCatalogViewport(image)).ToArray();
+            .Where(image => image.Address.Length > 0 && DesktopTestUi.InViewport(image)).ToArray();
         var finished = new HashSet<ArtworkImage>();
         var changed = new SemaphoreSlim(0);
         void Completed(object? sender, ArtworkLoadEventArgs _) { if (sender is ArtworkImage image) finished.Add(image); changed.Release(); }

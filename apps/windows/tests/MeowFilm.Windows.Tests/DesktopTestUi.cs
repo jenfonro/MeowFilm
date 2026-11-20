@@ -164,6 +164,18 @@ internal static class DesktopTestUi
     }
     internal static Rect Bounds(FrameworkElement element, UIElement root) =>
         new(element.TransformToVisual(root).TransformPoint(new Point()), new Size(element.ActualWidth, element.ActualHeight));
+    internal static bool InViewport(FrameworkElement element)
+    {
+        if (!DesktopVisual.IsVisible(element) || element.ActualWidth <= 0 || element.ActualHeight <= 0) return false;
+        for (DependencyObject? parent = VisualTreeHelper.GetParent(element); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+            if (parent is FrameworkElement ancestor && (ancestor.Clip is not null || ancestor is ScrollContentPresenter or ScrollViewer))
+            {
+                var bounds = element.TransformToVisual(ancestor).TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+                bounds.Intersect(ancestor.Clip?.Rect ?? new Rect(0, 0, ancestor.ActualWidth, ancestor.ActualHeight));
+                if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0) return false;
+            }
+        return true;
+    }
     internal static DependencyObject? Hit(FrameworkElement root, Point point)
     {
         var host = root.XamlRoot?.Content as UIElement ?? throw new InvalidOperationException("Hit-test root is not mounted");

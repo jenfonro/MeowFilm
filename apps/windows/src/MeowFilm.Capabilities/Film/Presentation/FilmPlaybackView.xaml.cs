@@ -222,7 +222,13 @@ public partial class FilmPlaybackView : UserControl
                 {
                     var root = (FrameworkElement)((DataTemplate)Resources["Film.DirectoryPresentation"]).LoadContent();
                     var shelf = (Shelf)root.FindName("EpisodeShelf");
-                    var list = (ItemsControl)root.FindName("EpisodeList");
+                    var list = (ListView)root.FindName("EpisodeList");
+                    object EpisodeKey(object item) => (selected, ((FilmEpisodeItem)item).Identity);
+                    shelf.SetArtworkItemKeySelector(EpisodeKey);
+                    shelf.SetArtworkItemResourcesSelector(item => FilmPlaybackPoster.ArtworkResources(((FilmEpisodeItem)item).Image));
+                    MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemKeySelector(list, EpisodeKey);
+                    MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemResourcesSelector(list,
+                        item => FilmPlaybackPoster.ArtworkResources(((FilmEpisodeItem)item).Image));
                     var movies = (ItemsControl)root.FindName("MovieCandidates");
                     shelf.SetBinding(Shelf.ItemsSourceProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.Episodes)), Source = selected });
                     shelf.SetBinding(Shelf.HorizontalOffsetProperty, new Binding { Path = new PropertyPath(nameof(FilmEpisodeDirectory.HorizontalOffset)), Source = selected, Mode = BindingMode.TwoWay });

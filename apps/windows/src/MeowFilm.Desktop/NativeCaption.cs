@@ -12,6 +12,9 @@ internal sealed class NativeCaption : IDisposable
     private readonly FrameworkElement titleBar;
     private readonly FrameworkElement[] controls;
     private readonly InputNonClientPointerSource input;
+    private readonly List<IDisposable> visibility = [];
+    private XamlRoot? root;
+    private bool queued, disposed;
     internal NativeCaption(DesktopWindow window, FrameworkElement titleBar, params FrameworkElement[] controls)
     {
         this.window = window; this.titleBar = titleBar; this.controls = controls;
@@ -20,13 +23,29 @@ internal sealed class NativeCaption : IDisposable
         input = InputNonClientPointerSource.GetForWindowId(window.AppWindow.Id);
         titleBar.SizeChanged += Changed;
         titleBar.Loaded += Loaded;
-        foreach (var control in controls) control.LayoutUpdated += Layout;
+        foreach (var control in controls)
+        {
+            control.SizeChanged += Changed;
+            visibility.Add(DesktopVisual.ObserveVisibility(control, _ => QueueUpdate()));
+        }
         window.AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
         Update();
     }
-    private void Loaded(object sender, RoutedEventArgs args) => Update();
-    private void Changed(object sender, SizeChangedEventArgs args) => Update();
-    private void Layout(object? sender, object args) => Update();
+    private void Loaded(object sender, RoutedEventArgs args)
+    {
+        if (root is not null) root.Changed -= RootChanged;
+        root = titleBar.XamlRoot;
+        if (root is not null) root.Changed += RootChanged;
+        QueueUpdate();
+    }
+    private void Changed(object sender, SizeChangedEventArgs args) => QueueUpdate();
+    private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => QueueUpdate();
+    private void QueueUpdate()
+    {
+        if (queued || disposed) return;
+        queued = titleBar.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        { queued = false; if (!disposed) Update(); });
+    }
     private RectInt32[] regions = [];
     private void Update()
     {
@@ -43,8 +62,11 @@ internal sealed class NativeCaption : IDisposable
     }
     public void Dispose()
     {
+        disposed = true;
         titleBar.SizeChanged -= Changed; titleBar.Loaded -= Loaded;
-        foreach (var control in controls) control.LayoutUpdated -= Layout;
+        foreach (var control in controls) control.SizeChanged -= Changed;
+        foreach (var observation in visibility) observation.Dispose();
+        if (root is not null) root.Changed -= RootChanged;
         input.ClearRegionRects(NonClientRegionKind.Passthrough);
     }
 }

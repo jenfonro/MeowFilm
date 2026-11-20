@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 using Windows.UI.ViewManagement;
@@ -18,6 +19,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private readonly DesktopHeaderAction refreshAction, renamePlaylistAction, deletePlaylistAction;
     private readonly UserScrollIntent songScrollIntent;
     private readonly MusicPagePresenter content;
+    private readonly Dictionary<ListView, ScrollViewer> songScrolls = [];
     private bool loadingMoreSongs, syncingDate, projectedSearch;
     private ContentDialog? playlistDialog;
     private MenuFlyout? songMenu;
@@ -46,11 +48,22 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         BodyPages.Children.Add(content); content.Show(module.ContentPage);
         foreach (var list in new[] { SongsGrid, SearchSongsGrid })
         {
+            if (ReferenceEquals(list, SearchSongsGrid)) ArtworkItemsScope.SetItemKeySelector(list, item => ((SongRow)item).Id);
+            ArtworkItemsScope.SetItemResourcesSelector(list, item =>
+            {
+                var song = (SongRow)item;
+                return [new("cover", song.Cover, song.Id)];
+            });
             list.Loaded += (_, _) =>
             {
                 if (MusicVisuals.Descendant<ScrollViewer>(list) is not { } scroll) return;
+                songScrolls[list] = scroll;
                 scroll.ViewChanged -= SongsScrolled; scroll.ViewChanged += SongsScrolled;
                 songScrollIntent.Attach(scroll);
+            };
+            list.Unloaded += (_, _) =>
+            {
+                if (songScrolls.Remove(list, out var scroll)) scroll.ViewChanged -= SongsScrolled;
             };
             list.ContainerContentChanging += (_, e) => RefreshSongRow(e.ItemContainer);
         }
@@ -72,7 +85,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private void ModuleChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MusicCapability.ContentPage)) content.Show(module.ContentPage);
-        if (!module.CanReorderPlaylist) EndDrag();
+        if (e.PropertyName == nameof(MusicCapability.CanReorderPlaylist) && !module.CanReorderPlaylist) EndDrag();
         if (playlistDialog is not null && !playlistDialogSubmitting && e.PropertyName is nameof(MusicCapability.Heading) or nameof(MusicCapability.IsCollectionPage)) playlistDialog.Hide();
         if (e.PropertyName == nameof(MusicCapability.IsDailyStyleEditorOpen))
         {
@@ -80,8 +93,14 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             if (module.IsDailyStyleEditorOpen) _ = ShowDailyStylePopupAsync(request);
             else if (dailyStyleOpen is not null) DailyStylePopup.Hide();
         }
-        Refresh();
-        var state = HeaderState(); if (state != publishedHeaderState) { publishedHeaderState = state; HeaderChanged?.Invoke(this, EventArgs.Empty); }
+        if (e.PropertyName is nameof(MusicCapability.IsCatalogLanding) or nameof(MusicCapability.IsSearchPage) or
+            nameof(MusicCapability.ShowSearchSkeleton) or nameof(MusicCapability.IsSearchSongs) or nameof(MusicCapability.IsCatalogArtist) or
+            nameof(MusicCapability.HistoryDate) or nameof(MusicCapability.CanEdit)) Refresh();
+        if (e.PropertyName is nameof(MusicCapability.IsCollectionPage) or nameof(MusicCapability.CanDeleteCollection) or
+            nameof(MusicCapability.IsLocalLibraryPage) or nameof(MusicCapability.CanEdit))
+        {
+            var state = HeaderState(); if (state != publishedHeaderState) { publishedHeaderState = state; HeaderChanged?.Invoke(this, EventArgs.Empty); }
+        }
         if (e.PropertyName == nameof(MusicCapability.CurrentSongId))
             foreach (var list in new[] { SongsGrid, SearchSongsGrid })
                 for (int i = 0; i < list.Items.Count; i++) if (list.ContainerFromIndex(i) is ListViewItem row) RefreshSongRow(row);
@@ -136,7 +155,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     internal double CaptureScroll() => ActiveScroll()?.VerticalOffset ?? 0;
     internal void RestoreScroll(double offset) { songScrollIntent.Clear(); if (Visibility == Visibility.Visible) UpdateLayout(); ActiveScroll()?.ChangeView(null, offset, null, true); }
     private ScrollViewer? ActiveScroll() => module.ContentPage switch
-    { MusicContentPage.Archives => ArchiveScroll, MusicContentPage.Discovery => MusicVisuals.Descendant<ScrollViewer>(DiscoveryView), MusicContentPage.Catalog => CatalogView.ActiveScroll, _ => MusicVisuals.Descendant<ScrollViewer>(ActiveSongsGrid) };
+    { MusicContentPage.Archives => ArchiveScroll, MusicContentPage.Discovery => MusicVisuals.Descendant<ScrollViewer>(DiscoveryView), MusicContentPage.Catalog => CatalogView.ActiveScroll, _ => songScrolls.GetValueOrDefault(ActiveSongsGrid) };
     private async void NetworkPlaylist_Click(object sender, RoutedEventArgs e) => await module.ToggleNetworkPlaylistAsync();
     private void DailyMore_Click(object sender, RoutedEventArgs e)
     {
@@ -292,7 +311,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private void SongsScrolled(object? sender, ScrollViewerViewChangedEventArgs e) { if (songScrollIntent.Accepts(ActiveSongsGrid, e.IsIntermediate)) LoadMoreSongsNearEnd(); }
     private async void LoadMoreSongsNearEnd()
     {
-        if (loadingMoreSongs || !ActiveSongsGrid.IsLoaded || (!module.CanLoadMoreCollection && !module.CanLoadMoreCatalogPlaylist && !module.CanLoadMoreSearchSongs) || MusicVisuals.Descendant<ScrollViewer>(ActiveSongsGrid) is not { } scroll || scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
+        if (loadingMoreSongs || !ActiveSongsGrid.IsLoaded || (!module.CanLoadMoreCollection && !module.CanLoadMoreCatalogPlaylist && !module.CanLoadMoreSearchSongs) || songScrolls.GetValueOrDefault(ActiveSongsGrid) is not { } scroll || scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
         loadingMoreSongs = true; songScrollIntent.Clear();
         try { if (module.CanLoadMoreCollection) await module.LoadMoreCollectionAsync(); else if (module.CanLoadMoreCatalogPlaylist) await module.LoadMoreCatalogPlaylistAsync(); else if (module.CanLoadMoreSearchSongs) await module.MoreSearchAsync(); }
         finally { loadingMoreSongs = false; songScrollIntent.Clear(); }
@@ -324,7 +343,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             row.BorderThickness = after ? new Thickness(0, 0, 0, 2) : new Thickness(0, 2, 0, 0);
         }
         e.AcceptedOperation = DataPackageOperation.Move; e.Handled = true;
-        if (MusicVisuals.Descendant<ScrollViewer>(SongsGrid) is { } scroll)
+        if (songScrolls.GetValueOrDefault(SongsGrid) is { } scroll)
         {
             double y = e.GetPosition(SongsGrid).Y;
             if (y < 36) scroll.ChangeView(null, Math.Max(0, scroll.VerticalOffset - 12), null, true);

@@ -577,6 +577,92 @@ public static partial class MusicUiTests
             Equal("210", f.Module.QueueSurfaceCountText);
             f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         });
+        yield return Case("queue mutation receipts preserve surviving row and song identities with local collection changes", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Rpc("music.queue.replace", new
+            {
+                songs = new[] { Song("queue:a", "队列 A"), Song("queue:b", "队列 B"), Song("queue:c", "队列 C") }, index = 0
+            });
+            await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+            var rows = f.Module.QueueSurfaceRows.ToArray();
+            var songs = rows.Select(row => row.Song).ToArray();
+            var changes = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+            ((System.Collections.Specialized.INotifyCollectionChanged)f.Module.QueueSurfaceRows).CollectionChanged +=
+                (_, args) => changes.Add(args.Action);
+            await f.Module.RemoveQueueSurfaceItemAsync(rows[1]);
+            await Until(() => f.Module.QueueSurfaceRows.Count == 2 && f.Module.CanLoadMoreQueueSurface == false);
+            True(changes.SequenceEqual([System.Collections.Specialized.NotifyCollectionChangedAction.Remove]),
+                "deleting one occurrence removes only that row without resetting or replacing survivors");
+            True(ReferenceEquals(f.Module.QueueSurfaceRows[0], rows[0]) && ReferenceEquals(rows[0].Song, songs[0]) &&
+                ReferenceEquals(f.Module.QueueSurfaceRows[1], rows[2]) && ReferenceEquals(rows[2].Song, songs[2]),
+                "surviving queue occurrences retain row and permanent song objects");
+
+            changes.Clear();
+            await f.Rpc("music.queue.reorder", new { ids = new[] { rows[2].EntryId, rows[0].EntryId } });
+            await f.Module.ChangeModeAsync(2);
+            await Until(() => ReferenceEquals(f.Module.QueueSurfaceRows[0], rows[2]));
+            True(changes.SequenceEqual([System.Collections.Specialized.NotifyCollectionChangedAction.Move]),
+                "a changed order moves the existing occurrence rather than reconstructing rows");
+
+            changes.Clear();
+            await f.Rpc("music.queue.append", new { songs = new[] { Song("queue:d", "队列 D") } });
+            await f.Module.ChangeModeAsync(1);
+            await Until(() => f.Module.QueueSurfaceRows.Count == 3);
+            True(changes.SequenceEqual([System.Collections.Specialized.NotifyCollectionChangedAction.Add]) &&
+                ReferenceEquals(f.Module.QueueSurfaceRows[0], rows[2]) && ReferenceEquals(f.Module.QueueSurfaceRows[1], rows[0]),
+                "a new occurrence inserts only its row and retains the existing order and references");
+
+            changes.Clear();
+            var properties = new List<string?>();
+            rows[2].PropertyChanged += (_, args) => properties.Add(args.PropertyName);
+            var hold = f.Calls.HoldNext("music.queue.get", p => p.GetProperty("limit").GetInt32() == 100);
+            hold.Transform = reply =>
+            {
+                var updated = JsonNode.Parse(reply.GetRawText())!.AsObject();
+                updated["entries"]![0]!["song"]!["title"] = "队列 C 更新";
+                return JsonSerializer.SerializeToElement(updated);
+            };
+            var refresh = f.Module.ChangeModeAsync(2);
+            await hold.Arrived.Task; hold.Release(); await refresh;
+            await Until(() => rows[2].Title == "队列 C 更新");
+            True(changes.Count == 0 && properties.SequenceEqual([nameof(MusicQueueSurfaceRow.Title)]) &&
+                ReferenceEquals(f.Module.QueueSurfaceRows[0], rows[2]) && ReferenceEquals(rows[2].Song, songs[2]),
+                "a changed receipt updates only its metadata property in place");
+            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
+        });
+        yield return Case("queue current selection updates only affected row properties without replacing rows", async () =>
+        {
+            await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
+            await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, default);
+            var rows = f.Module.QueueSurfaceRows.ToArray();
+            var view = f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayQueue);
+            using var host = new DesktopTestUi.Host(view, 430, 520);
+            await Until(() => Visuals(view).OfType<MusicQueueRowView>().Count(row => row.IsLoaded) == 3);
+            var presented = Visuals(view).OfType<MusicQueueRowView>().Where(row => row.IsLoaded)
+                .ToDictionary(row => ((MusicQueueSurfaceRow)row.DataContext).EntryId);
+            Button PlayButton(MusicQueueRowView row) => row.Children.OfType<Button>().Single(button =>
+                Grid.GetColumn(button) == 0 && AutomationProperties.GetName(button) == ((MusicQueueSurfaceRow)row.DataContext).Title);
+            Equal("正在播放", AutomationProperties.GetItemStatus(PlayButton(presented[rows[0].EntryId])));
+            var notifications = rows.ToDictionary(row => row.EntryId, _ => new List<string?>());
+            foreach (var row in rows) row.PropertyChanged += (_, args) => notifications[row.EntryId].Add(args.PropertyName);
+            var changes = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+            ((System.Collections.Specialized.INotifyCollectionChanged)f.Module.QueueSurfaceRows).CollectionChanged +=
+                (_, args) => changes.Add(args.Action);
+            await f.Module.PlayQueueSurfaceItemAsync(rows[2]);
+            await Until(() => rows[2].IsCurrent && !rows[0].IsCurrent && f.Module.CanLoadMoreQueueSurface == false);
+            True(changes.Count == 0 && rows.Zip(f.Module.QueueSurfaceRows).All(pair => ReferenceEquals(pair.First, pair.Second)),
+                "selection preserves the collection and all occurrence objects");
+            True(notifications[rows[0].EntryId].SequenceEqual([nameof(MusicQueueSurfaceRow.IsCurrent)]) &&
+                notifications[rows[2].EntryId].SequenceEqual([nameof(MusicQueueSurfaceRow.IsCurrent)]) &&
+                notifications[rows[1].EntryId].Count == 0,
+                "only the old and new current occurrences publish one IsCurrent notification");
+            True(presented.Values.All(row => Visuals(view).Contains(row)) &&
+                AutomationProperties.GetItemStatus(PlayButton(presented[rows[0].EntryId])) == "" &&
+                AutomationProperties.GetItemStatus(PlayButton(presented[rows[2].EntryId])) == "正在播放",
+                "the retained native row controls consume IsCurrent without a replacement or layout refresh");
+            f.Module.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
+        });
         yield return Case("queue view paginates only from user scroll intent and retries one failed page", async () =>
         {
             await using var f = await Fixture.Create();
