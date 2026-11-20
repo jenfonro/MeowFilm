@@ -205,14 +205,14 @@ public static partial class MusicNativeLibraryTests
         foreach (string schema in new[] { "1.0", "1e0" })
         {
             await using var f = new Fixture();
-            var extended = CurrentOnlineSettings(); extended["target"] = null;
-            extended["extra"] = new JsonObject { ["nested"] = true };
-            f.Store.SetAreaJson("online-settings", extended.ToJsonString()
+            f.Store.SetAreaJson("online-settings", CurrentOnlineSettings().ToJsonString()
                 .Replace("\"schema\":1", "\"schema\":" + schema, StringComparison.Ordinal));
             var owner = f.Owner();
-            CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
+            CheckOnlineSettings((await Ok(owner, "music.settings.get", new { target = (object?)null, extra = new { nested = true } }))
+                .GetProperty("settings"), 7, false);
             Check(f.Store.WriteCalls == 0);
-            await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true, unused = new { value = 1 } });
+            await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true, target = (object?)null,
+                extra = new { nested = true }, unused = new { value = 1 } });
             var saved = f.Store.State("online-settings");
             CheckOnlineSettings(E(saved), 8, true);
             Check(!saved.ContainsKey("extra") && !saved.ContainsKey("target"),
