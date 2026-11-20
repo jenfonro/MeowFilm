@@ -19,7 +19,7 @@ public static class StorageTests
     {
         var database = new NativeDatabase(root);
         try { await Error(error, () => database.Ready); }
-        finally { await Error(error, () => database.DisposeAsync().AsTask()); }
+        finally { await database.DisposeAsync(); }
     }
     public static IEnumerable<TestCase> Cases()
     {
@@ -59,6 +59,25 @@ public static class StorageTests
                 Check(db.Scalar<long>("SELECT length($value)", ("$value", Array.Empty<byte>())) == 0);
                 return true;
             });
+        });
+        yield return Case("open-does-not-consume-unrelated-relations-and-new-writes-enforce-foreign-keys", async () =>
+        {
+            string root = Root();
+            await using (var database = new NativeDatabase(root)) await database.Ready;
+            using (var external = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+                { DataSource = Path.Combine(root, NativeDatabase.RelativePath), Pooling = false }.ToString()))
+            {
+                external.Open();
+                using var command = external.CreateCommand();
+                command.CommandText = "PRAGMA foreign_keys=OFF; INSERT INTO cat_mapping_aliases VALUES(7,0,'orphan')";
+                command.ExecuteNonQuery();
+            }
+            await using var reopened = new NativeDatabase(root);
+            await reopened.WriteAsync(db => db.CommitRevision("unrelated", StorageRevision.Empty, "saved"));
+            Check(await reopened.RevisionAsync("unrelated") == new StorageRevision(1, "saved"));
+            await Error(DocumentStoreError.Conflict, () => reopened.WriteAsync(db =>
+                db.Execute("INSERT INTO cat_mapping_aliases VALUES(8,0,'new')")));
+            Check(await reopened.ReadAsync(db => db.Query("PRAGMA foreign_key_check", row => row.GetString(0)).Count) == 1);
         });
         yield return Case("independent-connections-serialize-current-row-increments", async () =>
         {
@@ -157,6 +176,30 @@ public static class StorageTests
             Check(executions == 0);
             await database.WriteAsync(_ => ++executions, retainedBytes: 32 * 1024 * 1024);
             Check(executions == 1);
+        });
+        yield return Case("repository-close-preserves-accepted-update-and-is-idempotent-after-database-close", async () =>
+        {
+            var database = new NativeDatabase(Root());
+            var repository = new TypedRecordRepository(database, "appearance-close-test", MeowFilm.AppHost.AppStorageRecords.Appearance);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var blocker = database.WriteAsync(_ => { entered.TrySetResult(); release.Task.GetAwaiter().GetResult(); return true; });
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var update = repository.UpdateAsync(_ => System.Text.Json.JsonSerializer.SerializeToElement(new { schema = 1, themeColor = "#315A7D" }));
+                var closing = repository.DisposeAsync().AsTask();
+                Check(!update.IsCompleted && !closing.IsCompleted);
+                try { await repository.ReadAsync(); throw new InvalidOperationException("Retired repository admitted a read"); }
+                catch (ObjectDisposedException) { }
+                release.TrySetResult();
+                await Task.WhenAll(blocker, update, closing);
+                await database.DisposeAsync();
+                await repository.DisposeAsync();
+                await using var reopened = new NativeDatabase(database.ProductRoot!);
+                Check(await reopened.ReadAsync(db => db.Scalar<string>("SELECT themeColor FROM windows_app_appearance")) == "#315A7D");
+            }
+            finally { release.TrySetResult(); await blocker; await repository.DisposeAsync(); await database.DisposeAsync(); }
         });
         yield return Case("queue-and-retained-input-budgets-are-bounded", async () =>
         {

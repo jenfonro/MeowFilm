@@ -9,7 +9,6 @@ public sealed class OwnerDispatcher
     private static readonly ConditionalWeakTable<DispatcherQueue, OwnerDispatcher> Owners = new();
     private readonly DispatcherQueue queue;
     private readonly CancellationTokenSource shutdown = new();
-    private readonly HashSet<Task> running = [];
     private OwnerDispatcher(DispatcherQueue queue)
     {
         this.queue = queue;
@@ -55,33 +54,17 @@ public sealed class OwnerDispatcher
     }
     public Task EnqueueAsync(Func<Task> action, DispatcherQueuePriority priority = DispatcherQueuePriority.Normal,
         CancellationToken cancellationToken = default) =>
-        EnqueueAsync<Task>(() => Track(action()), priority, cancellationToken).Unwrap();
+        EnqueueAsync<Task>(action, priority, cancellationToken).Unwrap();
     public Task<T> EnqueueAsync<T>(Func<Task<T>> action, DispatcherQueuePriority priority = DispatcherQueuePriority.Normal,
         CancellationToken cancellationToken = default) =>
-        EnqueueAsync<Task<T>>(() => Track(action()), priority, cancellationToken).Unwrap();
+        EnqueueAsync<Task<T>>(action, priority, cancellationToken).Unwrap();
 
-    private async Task Track(Task task)
+    private void ShutdownStarting(DispatcherQueue sender, DispatcherQueueShutdownStartingEventArgs args)
     {
-        running.Add(task);
-        try { await task; }
-        finally { running.Remove(task); }
-    }
-    private async Task<T> Track<T>(Task<T> task)
-    {
-        running.Add(task);
-        try { return await task; }
-        finally { running.Remove(task); }
-    }
-    private async void ShutdownStarting(DispatcherQueue sender, DispatcherQueueShutdownStartingEventArgs args)
-    {
-        var deferral = args.GetDeferral();
-        try
-        {
-            shutdown.Cancel();
-            try { await Task.WhenAll(running.ToArray()); }
-            catch { /* Each accepted operation reports its own failure to its caller. */ }
-        }
-        finally { deferral.Complete(); }
+        // The dispatcher owns admission, not the lifetime of business work.
+        // In-process retirement drains at each resource owner before its queue
+        // shuts down; process exit must not wait for arbitrary network tasks.
+        shutdown.Cancel();
     }
     public static Task YieldAsync(DispatcherQueuePriority priority = DispatcherQueuePriority.Low) =>
         Current.EnqueueAsync(() => { }, priority);

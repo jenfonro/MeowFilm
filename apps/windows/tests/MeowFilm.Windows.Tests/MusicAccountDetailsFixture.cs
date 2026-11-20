@@ -127,12 +127,13 @@ internal sealed class MusicAccountDetailsFixture : IAsyncDisposable
         public override async Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
             int retainedBytes = 0, Action<Action>? commit = null)
         {
+            bool hold = Hold; Hold = false;
             var result = await base.WriteAsync(db =>
             {
-                if (Hold) { Entered.TrySetResult(); Release.Task.GetAwaiter().GetResult(); }
                 if (Conflict) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 return write(db);
             }, token, retainedBytes, commit);
+            if (hold) { Entered.TrySetResult(); await Release.Task; }
             if (LoseReceipt) throw new DocumentStoreException(DocumentStoreError.Storage);
             return result;
         }

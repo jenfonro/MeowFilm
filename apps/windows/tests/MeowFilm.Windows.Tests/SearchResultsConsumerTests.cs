@@ -635,7 +635,7 @@ public static partial class MusicUiTests
                 new NovelRuleProgram(novelRules));
             Page = new(music.Module, Film, Novel);
             Shell = new ShellWindow([Music.Module, Film, Novel], [Page], async () =>
-            { Page.Dispose(); await Novel.DisposeAsync(); await Film.DisposeAsync(); await Music.DisposeAsync(); }, () => Task.CompletedTask);
+            { Page.Dispose(); await Novel.DisposeAsync(); await Film.DisposeAsync(); await Music.DisposeAsync(); });
             Page.NavigationToken = () => Shell.GetPageNavigationToken(Page, Film.Id, FilmCapability.PlaybackRoute);
             Page.NavigateToPlaybackAsync = async (item, token) =>
             {

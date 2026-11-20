@@ -24,11 +24,6 @@ public static class MusicSearchConsumerTests
     public static IEnumerable<TestCase> Cases() =>
         MusicUiTests.SearchConsumerCases().Concat(MusicUiTests.SearchPlaylistPresentationCases());
 }
-public static class MusicSyncConsumerLifecycleTests
-{
-    public static IEnumerable<TestCase> Cases() => MusicUiTests.SyncResumeConsumerCases();
-}
-
 public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SearchConsumerCases()
@@ -69,7 +64,7 @@ public static partial class MusicUiTests
             var records = MusicTestStores.For(f.Store);
             var document = await Task.Run(() => records.Root);
             document["areas"]!["native-search-policy"] = JsonSerializer.SerializeToNode(new
-                { schema = 3, revision = 0, songs = kind,
+                { schema = 1, revision = 0, songs = kind,
                     playlists = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = -1, concurrency = 1, cacheMinutes = 60 } });
             records.Seed(document);
             await f.Module.InitializeAsync(default);
@@ -921,12 +916,12 @@ public static partial class MusicUiTests
             await f.Module.PrepareShutdownAsync();
             var closed = await f.App.ExecuteAsync("music.search.start", new { keyword = "禁止", kind = "songs", platforms = new[] { "wy" } });
             Equal("CLOSED", closed.GetProperty("code").GetString());
-            await f.Module.CancelShutdownPreparationAsync();
             True(!f.Module.HasSearchSession, "old search handles retired on resume");
-            Equal("恢复", (await f.Call("music.search.history.get")).GetProperty("history")
-                .GetProperty("items")[0].GetProperty("text").GetString());
+            await using var reopened = new MusicNativeApplication(f.Store, MusicTestStores.For(f.Store), f.Runtime);
+            var history = await reopened.ExecuteAsync("music.search.history.get");
+            Equal("恢复", history.GetProperty("history").GetProperty("items")[0].GetProperty("text").GetString());
             await f.Module.SearchAsync("恢复", default);
-            await SearchUntil(() => f.Module.Songs.Count == 1);
+            True(!f.Module.CanEdit, "retired module cannot reopen search");
             Equal(0, f.Runtime.Calls.Count);
         });
         yield return Case("native search disabling providers waits for the admitted physical request", async () =>
@@ -958,38 +953,8 @@ public static partial class MusicUiTests
                 f.Http.Release.TrySetResult(); f.Http.DisposalRelease.TrySetResult();
                 await prepare.WaitAsync(TimeSpan.FromSeconds(5));
                 True(!f.Module.HasCurrent && f.Module.Songs.Count == 0, "no late content or media publication");
-                await f.Module.CancelShutdownPreparationAsync();
-                True(!f.Module.HasSearchSession, "resumed product has no old handles");
+                    True(!f.Module.HasSearchSession, "resumed product has no old handles");
             });
-    }
-
-    internal static IEnumerable<TestCase> SyncResumeConsumerCases()
-    {
-        yield return Case("native sync resume reconciles completion delivered before the module unseals", async () =>
-        {
-            await using var store = ServiceStore();
-            await using var runtime = new NativeMusicScriptTestRuntime();
-            var inner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
-            var consumer = new SyncDuringResume(inner);
-            await using var module = new MusicCapability(consumer, store, new PlaybackProbe(), new Dialogs());
-            await module.InitializeAsync(default);
-            await module.PrepareShutdownAsync();
-            await module.CancelShutdownPreparationAsync();
-            await SearchUntil(() => module.Playlists.Any(p => p.Name == "恢复时已同步"));
-            Equal(1, consumer.EarlyNotifications); Equal(0, runtime.Calls.Count);
-        });
-    }
-    private sealed class SyncDuringResume(MusicNativeApplication inner) : MusicApplicationForwarder(inner)
-    {
-        public override event Action? LibrarySyncChanged;
-        internal int EarlyNotifications;
-        public override async Task CancelShutdownPreparationAsync(CancellationToken token = default)
-        {
-            await inner.CancelShutdownPreparationAsync(token);
-            await ServiceCall(inner, "music.library.create", new { name = "恢复时已同步" });
-            EarlyNotifications++; LibrarySyncChanged?.Invoke();
-            await Drain(); // Deliver it while MusicCapability.stopping is still true.
-        }
     }
 
     private sealed class SearchSnapshotForwarder(MusicNativeApplication inner) : MusicApplicationForwarder(inner)

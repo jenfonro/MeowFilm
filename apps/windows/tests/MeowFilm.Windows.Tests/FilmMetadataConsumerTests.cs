@@ -122,24 +122,8 @@ public static partial class MusicUiTests
                 JsonElement.DeepEquals(oldCard.SearchContext.Item, cardSnapshot) &&
                 oldCard.SearchContext.PlaybackRequest.Target == new FilmPlaybackTarget("tmdb:tv:7", "tv", "目标", "tmdb", "7"),
                 "successful save retires the old search during shutdown without clearing its exact successful card and target");
-            await scene.Film.CancelShutdownPreparationAsync();
-            True(scene.Film.Search.Current is null && runtime.SearchOpens == 1, "shutdown cancellation does not restore a revoked search");
-            await scene.Submit("最终关闭", "film"); await SearchFixture.Settle(scene.Film.Search.Current!);
-            await scene.Page.OpenCardAsync(scene.Page.Cards.Single()); var retained = scene.Film.Playback!;
-            string snapshot = retained.Request.Metadata!.Value.GetRawText();
-            var finalReceipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            store.Writing = (_) => finalReceipt.Task;
-            var finalSave = metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["region"] = "JP" });
-            var abort = scene.Film.AbortAsync();
-            try
-            {
-                True(!abort.IsCompleted && !finalSave.IsCompleted, "forced close still waits for its admitted settings write");
-                finalReceipt.SetResult(); await finalSave; await abort;
-                Equal(snapshot, retained.Request.Metadata!.Value.GetRawText());
-                True(scene.Film.Search.TrackedSessions == 0 && retained.SearchContext!.Query == "最终关闭",
-                    "final disposal releases search ownership but preserves retained display data");
-            }
-            finally { finalReceipt.TrySetResult(); }
+            await scene.Film.DisposeAsync();
+            True(scene.Film.Search.TrackedSessions == 0 && runtime.SearchOpens == 1, "release retires search without reopening it");
         }
         finally { receipt.TrySetResult(); }
     }

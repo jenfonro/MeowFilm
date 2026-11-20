@@ -77,7 +77,7 @@ public static partial class MusicUiTests
             True(!prepare.IsCompleted, "real canonical work still physically held");
             f.Peer.Release.TrySetResult(); await Task.WhenAll(refresh, prepare);
             True(row.Membership == "", "closed settings surface retains no private entitlement display");
-            await f.Module.CancelShutdownPreparationAsync();
+
             Equal(1, f.Peer.Requests);
             True(row.Membership == "", "an unmounted settings surface was not silently activated");
             await f.Module.ActivateSettingsAsync();

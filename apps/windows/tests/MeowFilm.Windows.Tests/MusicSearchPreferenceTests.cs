@@ -13,14 +13,15 @@ public static class MusicSearchPreferenceTests
         {
             var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var settings = (await Call(owner, "music.search.settings.get")).GetProperty("settings");
-            Check(settings.GetProperty("schema").GetInt32() == 3 && settings.GetProperty("revision").GetInt64() == 0);
+            Check(settings.GetProperty("schema").GetInt32() == 1 && settings.GetProperty("revision").GetInt64() == 0);
             foreach (var kind in new[] { settings.GetProperty("songs"), settings.GetProperty("playlists") })
                 Check(!kind.TryGetProperty("mode", out _) && !kind.TryGetProperty("platform", out _) &&
                     kind.GetProperty("pages").GetInt32() == 1 && kind.GetProperty("concurrency").GetInt32() == 1 &&
                     kind.GetProperty("cacheMinutes").GetInt32() == 60 &&
                     kind.GetProperty("order").EnumerateArray().Select(x => x.GetString()).SequenceEqual(Platforms) &&
                     kind.GetProperty("enabled").EnumerateArray().Select(x => x.GetString()).SequenceEqual(Platforms));
-            Check((await Call(owner, "music.search.history.get")).GetProperty("history").GetProperty("items").GetArrayLength() == 0);
+            var history = (await Call(owner, "music.search.history.get")).GetProperty("history");
+            Check(history.GetProperty("schema").GetInt32() == 1 && history.GetProperty("items").GetArrayLength() == 0);
             Check(store.Writes == 0);
         });
         yield return Case("all-disabled-is-durable-not-reset-to-default", async () =>

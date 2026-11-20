@@ -2756,7 +2756,7 @@ public static partial class MusicCatalogPersonalTests
             // Keep lyrics disabled in this port fixture without adding a library write.
             // The real owner's quality policy and signature remain authoritative.
             result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 3, revision = 0, lyrics = false });
+                schema = 1, revision = 0, lyrics = false });
             return E(result);
         }
         private static JsonElement ScriptSource() => E(new {
@@ -2912,16 +2912,7 @@ public static partial class MusicCatalogPersonalTests
             Catalog.Invalidate();
             await Library.PrepareShutdownAsync(cancellationToken);
         }
-        public override async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-        {
-            await Library.CancelShutdownPreparationAsync(cancellationToken);
-            await search.CancelShutdownPreparationAsync(cancellationToken);
-            if (recommendationPrepared)
-            {
-                recommendations.Resume();
-                recommendationPrepared = false;
-            }
-        }
+
         public override async ValueTask DisposeAsync()
         {
             ReleaseAll();

@@ -221,7 +221,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     }
     public async Task ReconcileAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try { LJ.Require(!closed, "CLOSED"); await ReconcileLockedAsync(cancellationToken).ConfigureAwait(false); }
         finally { gate.Release(); }
     }
@@ -238,7 +238,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             { throw new MusicLibraryException("INVALID_REQUEST"); }
             // Load shared facts before entering the library gate: persistence acquires them
             // in the other direction while reading local membership.
-            await EnterAsync(token).ConfigureAwait(false); entered = true;
+            await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
             recommendationStage = null;
             LJ.Require(!closed && !preparing, "CLOSED");
             token.ThrowIfCancellationRequested();
@@ -293,7 +293,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         method is "music.library.membership" or "music.library.search" or "music.queue.peekNext";
     public async Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             LJ.Require(!closed, "CLOSED");
@@ -304,14 +304,9 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         finally { gate.Release(); }
     }
-    public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-    {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
-        try { LJ.Require(!closed, "CLOSED"); lock (repositoryGate) preparing = false; lock (snapshotGate) snapshotSealed = false; } finally { gate.Release(); }
-    }
     public async Task AbortAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(false);
+        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             await SealSongSnapshots().ConfigureAwait(false);

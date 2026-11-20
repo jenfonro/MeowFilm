@@ -43,17 +43,29 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
         await checkpointGuard().ConfigureAwait(false); accountGuard();
         return value;
     }
+    private static SyncSubscription Subscription(SyncSubscription value) => value with
+    {
+        // These are the account relation and creation locators actually used by
+        // subscription writes. Provider display fields stay outside the journal.
+        Locator = new JsonObject(value.Locator.Where(pair => pair.Key is "listId" or "creatorId" or "creatorListId")
+            .Select(pair => KeyValuePair.Create(pair.Key, pair.Value?.DeepClone())))
+    };
+    private static SyncDirectory Directory(JsonElement value)
+    {
+        var result = value.Deserialize<SyncDirectory>(Json)!;
+        return result with { Subscriptions = result.Subscriptions.Select(Subscription).ToArray() };
+    }
     internal async Task<SyncDirectory> ReadAsync(string[] kinds) =>
-        (await Read("sync.read", new { kinds }).ConfigureAwait(false)).Deserialize<SyncDirectory>(Json)!;
+        Directory(await Read("sync.read", new { kinds }).ConfigureAwait(false));
     internal async Task<SyncRemote?> ReadCollectionAsync(string id)
     {
         var directory = (await Read("sync.read", new { collectionId = id }).ConfigureAwait(false)).Deserialize<SyncDirectory>(Json)!;
         return directory.Collections.FirstOrDefault();
     }
     internal async Task<SyncDirectory> ReadSubscriptionsAsync() =>
-        (await Read("sync.read", new { subscriptionsOnly = true }).ConfigureAwait(false)).Deserialize<SyncDirectory>(Json)!;
+        Directory(await Read("sync.read", new { subscriptionsOnly = true }).ConfigureAwait(false));
     internal async Task<SyncSubscription> SubscriptionTargetAsync(string id, string name, string cover, long count) =>
-        (await Read("sync.target", new { id, name, cover, count }).ConfigureAwait(false)).Deserialize<SyncSubscription>(Json)!;
+        Subscription((await Read("sync.target", new { id, name, cover, count }).ConfigureAwait(false)).Deserialize<SyncSubscription>(Json)!);
     internal async Task<Func<Task>> PrepareSubscriptionAsync(SyncSubscription target, bool subscribe)
     {
         if (subscribe && Platform == "kg")

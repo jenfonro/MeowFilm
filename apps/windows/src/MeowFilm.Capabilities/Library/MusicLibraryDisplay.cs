@@ -129,7 +129,7 @@ public sealed partial class MusicLibraryOwner
             long cacheEpoch = 0;
             if (save)
             {
-                await EnterAsync(token).ConfigureAwait(false); entered = true;
+                await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
                 LJ.Require(!closed && !preparing, "CLOSED");
                 cacheEpoch = presentations.LyricEpoch;
             }
@@ -140,7 +140,7 @@ public sealed partial class MusicLibraryOwner
                     long version = presentations.LyricVersion;
                     try { saved = key.Length == 0 ? null : await presentations.ReadLyricsAsync(key, token).ConfigureAwait(false); }
                     catch (DocumentStoreException) { saved = null; }
-                    await EnterAsync(token).ConfigureAwait(false); entered = true;
+                    await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
                     // A save completed while this individual read or gate wait
                     // was in flight wins. Re-read only that song, outside the gate.
                     if (key.Length == 0 || version == presentations.LyricVersion) break;

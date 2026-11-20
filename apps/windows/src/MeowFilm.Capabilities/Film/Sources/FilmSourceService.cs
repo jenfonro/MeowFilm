@@ -702,18 +702,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         }
     }
 
-    public void Resume()
-    {
-        lock (lifecycle)
-        {
-            ObjectDisposedException.ThrowIf(closed, this);
-            if (!preparing) return;
-            if (active != 0) throw new InvalidOperationException("Source operations have not drained.");
-            pending.Dispose();
-            pending = new();
-            preparing = false;
-        }
-    }
 
     public ValueTask DisposeAsync()
     {

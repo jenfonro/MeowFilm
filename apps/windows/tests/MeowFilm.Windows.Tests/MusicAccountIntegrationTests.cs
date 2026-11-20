@@ -306,26 +306,13 @@ public static class MusicAccountIntegrationTests
             await Unknown(prepare);
             Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
             Check((await f.Application.ExecuteAsync("music.queue.get")).GetProperty("code").GetString() == "CLOSED");
-            await f.Application.CancelShutdownPreparationAsync();
-            var read = f.Application.ExecuteAsync("music.accounts.list");
-            Check(!read.IsCompleted); // Cancel preparation does not reconcile or replay.
-            f.Store.Release.TrySetResult(); await import;
-            Check(AccountState(await read) == "saved");
-            await f.Application.PrepareShutdownAsync();
+            var releasing = f.Application.DisposeAsync().AsTask();
+            Check(!releasing.IsCompleted, "retirement still waits for the physical accepted CAS");
+            f.Store.Release.TrySetResult(); await import; await releasing;
             Check((await f.Store.ReadAccountsAsync()).Revision != StorageRevision.Empty);
             Check(f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0 && !f.Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal)));
         });
-        yield return Case("recovering preparation keeps real catalog and account owners usable without reimport", async () =>
-        {
-            await using var f = await Fixture.Create();
-            f.Module.SelectedAccount = f.Module.Accounts[0]; await f.Module.ImportAccountAsync("MUSIC_U=SYNTHETIC_SESSION");
-            await f.Module.PrepareShutdownAsync(); await f.Module.CancelShutdownPreparationAsync();
-            await WaitForEditable(f.Module);
-            Check(f.Module.CanEdit && f.Runtime.Disposals == 0 && f.Store.DisposeCalls == 0);
-            await f.Module.ValidateAccountAsync(); Check(f.Module.SelectedAccount!.State == "verified");
-            Check((await f.Application.ExecuteAsync("music.catalog.home", new { platform = "wy" })).GetProperty("ok").GetBoolean());
-            Check(!f.Runtime.Calls.Any(call => !call.Method.StartsWith("music.platform.", StringComparison.Ordinal)));
-        });
+
         yield return Case("explicit abort waits physical unknown CAS and releases native client only after settlement", async () =>
         {
             await using var f = await Fixture.Create();
@@ -781,12 +768,7 @@ public static class MusicAccountIntegrationTests
             release.TrySetResult();
             try { await signing; } finally { await preparing; }
         }
-        await f.Application.CancelShutdownPreparationAsync();
-        var resumed = await f.Application.ReadVipPageAsync();
-        Check(resumed.Generation == known.Generation && resumed.Sign is { SignedToday: false } &&
-            resumed.SignConfirmed && resumed.SignedToday && !resumed.SignUnconfirmed,
-            "retiring a page cannot turn the real confirmed sign receipt into an unknown mutation");
-        await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "ALREADY_SIGNED");
+        await OperationError(() => f.Application.SignVipPageAsync(known.Generation), "CLOSED");
         Check(f.Runtime.Requests.Count(call => call.Operation == "vip.checkIn") == 1 && f.Store.AccountWrites == 1);
     }
     private static async Task VipTypedDrain()
@@ -819,38 +801,8 @@ public static class MusicAccountIntegrationTests
             release.TrySetResult();
             try { await VipClosedRead(reading); } finally { await preparing; }
         }
-        await f.Application.CancelShutdownPreparationAsync();
-        f.Runtime.OnRequest = f.Transport.Respond;
-        Check((await f.Application.ReadVipPageAsync()).Generation > 0);
-
-        var closeEntered = Signal(); var closeRelease = Signal(); var closeCancelled = Signal();
-        f.Runtime.OnRequest = async (call, token) =>
-        {
-            if (call.Operation == "vip.signCard")
-            {
-                using var registration = token.Register(() => closeCancelled.TrySetResult());
-                closeEntered.TrySetResult(); await closeRelease.Task;
-            }
-            return await f.Transport.Respond(call, token);
-        };
-        var lastRead = f.Application.ReadVipPageAsync();
-        Task disposal = Task.CompletedTask;
-        try
-        {
-            await closeEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            disposal = f.Application.DisposeAsync().AsTask();
-            await OperationError(() => f.Application.ReadVipPageAsync(), "CLOSED");
-            await closeCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(!disposal.IsCompleted && f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
-        }
-        finally
-        {
-            closeRelease.TrySetResult();
-            try { await VipClosedRead(lastRead); } finally { await disposal; }
-        }
-        Check(f.Runtime.Requests.Count(call => call.Operation == "vip.signCard") == 3 &&
-            f.Runtime.Requests.All(call => call.Operation != "vip.checkIn") && f.Store.AccountWrites == 1 &&
-            f.Store.DisposeCalls == 0 && f.Runtime.Disposals == 0);
+        await f.Application.DisposeAsync();
+        await OperationError(() => f.Application.ReadVipPageAsync(), "CLOSED");
     }
     private static async Task VipClosedRead(Task reading)
     {

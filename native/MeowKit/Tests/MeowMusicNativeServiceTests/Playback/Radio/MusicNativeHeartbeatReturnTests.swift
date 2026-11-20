@@ -30,15 +30,20 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         var original = try document()
         original.queue["source"]["sourceId"] = .string("900")
         original.queue["entries"] = .array(original.queue["entries"].array.map { row in
-            var row = row; row["context"] = original.queue["source"]; return row
+            var row = row
+            row["context"] = .obj([("sourceType", .string("playlist")), ("sourceId", .string("900")),
+                                   ("sourceTitle", .string("Original")), ("platform", .string("wy"))])
+            return row
         })
         let store = NativeMusicTestLibrary(try original.encode(changed: ["library", "queue", "playback", "history"]))
         let accounts = SimilarModeAccountFixture([[], ["400", "500"]])
         let service = try await NativeMusicFixture.service(store, accounts: accounts)
         let player = HeartbeatReturnPlayer(), model = MusicViewModel(service: service, player: player)
         await model.load()
+        XCTAssertNil(model.error)
+        XCTAssertEqual(model.current?.id, "entry-2")
         await model.startSongRecommendations(occurrenceID: "entry-2", expectedRevision: model.state.revision)
-        let snapshot = try XCTUnwrap(model.similarMode)
+        let snapshot = try XCTUnwrap(model.similarMode, model.error ?? "No recommendation state")
         XCTAssertTrue(snapshot.canRetry)
         XCTAssertEqual(model.state.total, 3)
         model.error = nil
@@ -127,9 +132,9 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         XCTAssertNil(model.error)
         let restored = try MusicDocument(store.snapshot().0, runID: "evidence")
         let expectedRows = [originalRows[0], originalRows[1], retained, originalRows[2]]
-        XCTAssertEqual(restored.queue["entries"].array, expectedRows, "Only E returns, with its complete occurrence row")
+        XCTAssertEqual(restored.queue["entries"].stable, MJ.array(expectedRows).stable, "Only E returns, with its complete occurrence row")
         XCTAssertEqual(restored.queue["currentId"].string, current.id)
-        XCTAssertEqual(restored.queue["source"], original.queue["source"])
+        XCTAssertEqual(restored.queue["source"].stable, original.queue["source"].stable)
         XCTAssertEqual(restored.queue["priority"], original.queue["priority"])
         XCTAssertEqual(restored.queue["similar"], .null)
         XCTAssertEqual(restored.queue["revision"].int, before.queue["revision"].int + 1)
@@ -182,7 +187,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         let result = try await service.exitSimilarMode()
 
         let restored = try MusicDocument(store.snapshot().0, runID: "evidence")
-        XCTAssertEqual(restored.queue["entries"].array, [originalRows[0], originalRows[1], retained, originalRows[2]])
+        XCTAssertEqual(restored.queue["entries"].stable, MJ.array([originalRows[0], originalRows[1], retained, originalRows[2]]).stable)
         XCTAssertEqual(try restored.queue["entries"].array.filter {
             MusicNativeSimilarData.nativeID((try restored.fixtureSong($0["songId"].string))) == "500"
         }.map { $0["id"].string }, [current.id, "entry-3"])
@@ -196,7 +201,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         let rows = saved.queue["entries"].array, returning = MusicNativeSimilarData.queueSnapshot(saved.queue)
         saved.queue["currentId"] = rows[2]["id"]; saved.queue["priority"] = .array([])
         saved.queue["similar"] = .obj([
-            ("schema", .n(2)), ("seedSongId", rows[1]["songId"]), ("seedTitle", .string("")), ("seedEntryId", rows[1]["id"]),
+            ("schema", .n(1)), ("seedSongId", rows[1]["songId"]), ("seedTitle", .string("")), ("seedEntryId", rows[1]["id"]),
             ("returnQueue", returning), ("sourceIds", .strings(["200"])),
             ("fromHome", .bool(false)), ("provider", .string("heartbeat")),
             ("providerContext", .obj([("pid", .string("900")), ("sid", .string("200")), ("count", .n(0))])),
@@ -214,8 +219,8 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         let result = try await service.exitSimilarMode()
 
         let restored = try MusicDocument(store.snapshot().0, runID: "evidence")
-        XCTAssertEqual(restored.queue["entries"].array, rows)
-        XCTAssertEqual(restored.queue["source"], returning["source"])
+        XCTAssertEqual(restored.queue["entries"].stable, MJ.array(rows).stable)
+        XCTAssertEqual(restored.queue["source"].stable, returning["source"].stable)
         XCTAssertEqual(restored.queue["priority"].strings, [])
         XCTAssertEqual(result.state.currentId, "entry-3"); XCTAssertEqual(result.state.position, 43)
         XCTAssertEqual(result.action, .keepCurrent)
@@ -323,7 +328,7 @@ final class MusicNativeHeartbeatReturnTests: XCTestCase {
         catch { XCTAssertEqual(error as? MusicServiceError, .commitUnconfirmed) }
 
         let restored = try MusicDocument(store.snapshot().0, runID: "evidence")
-        XCTAssertEqual(restored.queue["entries"].array, [rows[0], rows[1], retained, rows[2]])
+        XCTAssertEqual(restored.queue["entries"].stable, MJ.array([rows[0], rows[1], retained, rows[2]]).stable)
         XCTAssertEqual(restored.queue["currentId"].string, current.id)
         XCTAssertEqual(restored.queue["similar"], .null)
         let attempt = await service.attempt, active = try await service.similarModeSnapshot()

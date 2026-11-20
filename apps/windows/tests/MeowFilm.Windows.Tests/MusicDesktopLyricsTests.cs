@@ -726,53 +726,6 @@ public static partial class MusicUiTests
                 True(f.Module.IsDesktopLyricsOpen && !f.Module.IsLyrics, "the sole desktop consumer survives song replacement");
             }));
 
-        yield return Case("desktop lyrics preparation closes then cancellation creates a fresh live window", () =>
-            WithDesktopLyrics(async (f, owner) =>
-            {
-                await SaveDesktopLyricFixture(f, translated: false);
-                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleTranslation);
-                var prior = f.Module.DesktopLyricsWindow!;
-                DesktopTestUi.MoveWindow(prior, DesktopTestUi.WindowPosition(prior).X + (29), DesktopTestUi.WindowPosition(prior).Y); DesktopTestUi.MoveWindow(prior, DesktopTestUi.WindowPosition(prior).X, DesktopTestUi.WindowPosition(prior).Y + (17));
-                var priorHandle = WinRT.Interop.WindowNative.GetWindowHandle(prior);
-                True(MusicDesktopLyricsNative.GetWindowRect(priorHandle, out var priorBounds),
-                    "the current desktop lyric HWND has native bounds");
-                DesktopInteractionNative.SendMessage(priorHandle, 0x0231, 0, 0);
-                True(DesktopInteractionNative.SetWindowPos(priorHandle, 0, priorBounds.Left, priorBounds.Top,
-                    priorBounds.Right - priorBounds.Left + 80, priorBounds.Bottom - priorBounds.Top + 40, 0x10),
-                    "the user-sized window receives a native resize");
-                await Drain();
-                DesktopInteractionNative.SendMessage(priorHandle, 0x0232, 0, 0);
-                prior.SetLocked(true); await Drain();
-                var state = prior.CapturePresentationState();
-                True(state.UserSized && state.Width > 760 && state.Height > 144,
-                    "shutdown captures the user's independent width and height");
-                var unlockHandle = WinRT.Interop.WindowNative.GetWindowHandle(prior.UnlockWindow!);
-                int closed = 0; prior.Closed += (_, _) => closed++;
-                await f.Module.PrepareShutdownAsync();
-                Equal(1, closed);
-                Equal(state.Geometry!.Value, f.Module.DesktopLyricGeometry!.Value);
-                True(!f.Module.IsDesktopLyricsOpen && !f.Module.CanToggleDesktopLyrics && DesktopTestUi.WindowRoot(prior).DataContext is null,
-                    "preparation releases the actual window without disposing the playback owner");
-                True(!DesktopLyricNative.IsWindow(unlockHandle) && !prior.IsPointerObserverRunning,
-                    "shutdown preparation also releases independent unlock and pointer observation");
-                await f.Module.ExecuteMediaShortcutAsync(MediaShortcutAction.ToggleDesktopLyrics);
-                True(!f.Module.IsDesktopLyricsOpen, "sealed media admission stays sealed");
-                await f.Module.CancelShutdownPreparationAsync();
-                True(f.Module.IsDesktopLyricsOpen && !ReferenceEquals(prior, f.Module.DesktopLyricsWindow),
-                    "cancel preparation creates a new window rather than reopening the closed resource");
-                True(!f.Module.ShowLyricTranslation, "session display preference survives preparation");
-                await Drain();
-                var restored = f.Module.DesktopLyricsWindow!;
-                Equal(state, restored.CapturePresentationState());
-                True(restored.UnlockWindow is { } unlock && DesktopTestUi.WindowIsVisible(unlock) && !restored.IsPointerObserverRunning,
-                    "cancelled exit restores position and locking with a fresh usable unlock HWND");
-                await f.Module.PrepareShutdownAsync();
-                owner.Close();
-                await f.Module.CancelShutdownPreparationAsync();
-                True(!f.Module.IsDesktopLyricsOpen && !f.Module.CanToggleDesktopLyrics, "a closed owner revokes pending restoration");
-            }));
-
         foreach (bool abort in new[] { false, true })
             yield return Case("desktop lyrics " + (abort ? "abort" : "dispose") + " releases HWND owner events and pending reads", () =>
                 WithDesktopLyrics(async (f, owner) =>
@@ -793,7 +746,7 @@ public static partial class MusicUiTests
                         DesktopTestUi.WindowRoot(window).DataContext is null && !f.Module.CanToggleDesktopLyrics,
                         "shutdown cannot retain a live window or anchor");
                     Equal(0, f.Module.Lyrics.Count);
-                    await Failure(() => f.Module.CancelShutdownPreparationAsync(), "CLOSED");
+                    await f.Module.DisposeAsync();
                     owner.Close(); await Drain();
                     True(!f.Module.IsDesktopLyricsOpen, "a former owner event cannot revive disposed resources");
                 }));

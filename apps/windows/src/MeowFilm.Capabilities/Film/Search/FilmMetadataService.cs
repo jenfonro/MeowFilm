@@ -221,16 +221,6 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
     }
     private static async Task DrainAsync(Task[] operations)
     { try { await Task.WhenAll(operations); } catch { /* Each caller receives its own failure. */ } }
-    public void Resume()
-    {
-        dispatcher.VerifyAccess();
-        if (closed) throw new BridgeException("CLOSED");
-        if (preparation is null) return;
-        // Individual request errors belong to their callers, not the lifecycle receipt.
-        if (!preparation.IsCompleted) throw new InvalidOperationException("SHUTDOWN_NOT_DRAINED");
-        preparation = null; stopping = false;
-        reads.Dispose(); reads = new();
-    }
     public ValueTask DisposeAsync()
     {
         dispatcher.VerifyAccess();

@@ -46,7 +46,7 @@
 
 心动续批沿用共同返回 context 和原账号，以实际尾曲推进；不再验证旧喜欢成员证明。推荐／心动的返回由原生 owner 一次 CAS 恢复 checkpoint，并把当前实际 occurrence 插回原锚点之后且选中它：`ABC/B → E → ABEC`。同 occurrence 不重复插入，同录音不同 occurrence 不合并；保留原上下文、歌曲引用、音频实例、进度和暂停状态，不重新 resolve、play、pause 或 seek，不恢复旧循环值。来源标签读取唯一 `queue.source` 投影，不把 E 的条目上下文冒充队列来源。相似来源没有返回 checkpoint。
 
-`queue.similar` 的 schema 2 包含 provider、sourceIds、providerContext、continue、offset、exhausted、batches、attempted、scope 和可选 returnQueue；缺少必需状态拒绝读取，不保留旧格式 fallback。冷恢复重新获取同 scope lease，不恢复 live 推荐反馈资格。搜索推荐 runtime 不冷恢复，已追加歌曲仍按普通队列持久化。
+`queue.similar` 的 schema 1 包含 provider、sourceIds、providerContext、continue、offset、exhausted、batches、attempted、scope 和可选 returnQueue；缺少必需状态拒绝读取，不保留旧格式 fallback。冷恢复重新获取同 scope lease，不恢复 live 推荐反馈资格。搜索推荐 runtime 不冷恢复，已追加歌曲仍按普通队列持久化。
 
 ## 播放事件、取消与反馈
 

@@ -103,11 +103,10 @@ public static class MusicVipPageTests
             hold.Release.TrySetResult();
             await Task.WhenAll(loading, preparing);
 
-            await page.CancelShutdownPreparationAsync();
-            Equal(2, source.Reads);
+            await page.DisposeAsync();
+            page = new MusicVipPage(source, OwnerDispatcher.Current);
             var closingHold = source.HoldNextRead();
-            source.Invalidate();
-            await Drain();
+            var reopening = page.SetSurfaceAsync(true, true);
             await closingHold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));
             var first = page.DisposeAsync().AsTask();
             var second = page.DisposeAsync().AsTask();
@@ -115,7 +114,7 @@ public static class MusicVipPageTests
                 "one disposal receipt owns the active physical read");
             await closingHold.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
             closingHold.Release.TrySetResult();
-            await Task.WhenAll(first, second);
+            await Task.WhenAll(reopening, first, second);
         });
     }
 

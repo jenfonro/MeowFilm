@@ -97,7 +97,7 @@ struct MusicNativeSyncFence: Codable {
 
 /// Synchronization metadata in the library wrapper, without credentials or media URLs.
 struct MusicNativeSyncLedger: Codable {
-    var schema = 2
+    var schema = 1
     var selections: [MusicLibrarySyncSelection] = []
     var scopes: [String: String] = [:]
     var fences: [MusicNativeSyncFence] = []
@@ -113,7 +113,7 @@ struct MusicNativeSyncLedger: Codable {
         var value: Self
         do { value = try JSONDecoder().decode(Self.self, from: wrapper["sync"].bytes) }
         catch { throw MusicServiceError.corruptDocument }
-        guard value.schema == 2, value.selections.count <= 3,
+        guard value.schema == 1, value.selections.count <= 3,
               Set(value.selections.map(\.platform)).count == value.selections.count,
               value.scopes.count <= 3, value.scopes.keys.allSatisfy({ MusicAccountPlatform(rawValue: $0) != nil }),
               Set(value.fences.map { $0.mutation.id }).count == value.fences.count else { throw MusicServiceError.corruptDocument }

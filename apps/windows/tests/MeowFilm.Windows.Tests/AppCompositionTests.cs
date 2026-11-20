@@ -97,7 +97,7 @@ public static class AppCompositionTests
                 await BridgeTests.Expect("METHOD_UNAVAILABLE", () => runtime.CallAsync(method, new { }));
             await lifecycle.CloseAsync();
         }
-        finally { await lifecycle.ForceReleaseAsync(); }
+        finally { await lifecycle.CloseAsync(); }
     }
     private static async Task Durable()
     {
@@ -136,7 +136,7 @@ public static class AppCompositionTests
             var application = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
             await using var music = new MusicCapability(application, store, playback);
             var lifecycle = new AppShutdown([music], []);
-            var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
+            var shell = new ShellWindow([music], [], lifecycle.CloseAsync);
             var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             shell.Closed += (_, _) => closed.TrySetResult();
             try
@@ -241,7 +241,7 @@ public static class AppCompositionTests
             if (args.PropertyName == nameof(MusicCapability.Status) && music.Status.Length > 0) messages.Add(music.Status);
         };
         var lifecycle = new AppShutdown([music], []);
-        var shell = new ShellWindow([music], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync);
+        var shell = new ShellWindow([music], [], lifecycle.CloseAsync);
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         shell.Closed += (_, _) => closed.TrySetResult();
         try

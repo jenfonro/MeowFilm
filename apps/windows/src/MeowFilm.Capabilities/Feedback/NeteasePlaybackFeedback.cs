@@ -10,7 +10,6 @@ internal interface IMusicFeedbackPendingProtocol
     void AuthorizationChanged(bool accountChanged);
     Task PrepareShutdownAsync();
     Task FlushLocalAsync();
-    void Resume();
     Task DrainAsync(CancellationToken token = default);
 }
 

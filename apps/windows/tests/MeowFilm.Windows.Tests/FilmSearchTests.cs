@@ -139,9 +139,9 @@ public static class FilmSearchTests
         f.Runtime.Respond = null;
         var envelope = f.Runtime.Handle("film.search.open", acceptedInput);
         receipt.SetResult(envelope); await close;
-        f.Service.Resume(); await session.Work;
+        await session.Work;
         Check(f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "stop") &&
-            f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "resume"), "shutdown preparation can resume the same session");
+            !f.Runtime.Calls.Any(call => FilmJson.Text(call.Input, "action") == "resume"), "retirement stops the session without reviving it");
         await f.Service.DisposeAsync();
         Check(f.Service.TrackedSessions == 0 && f.Runtime.Calls.Count(call => call.Method == "film.search.release") == 1 && !f.Runtime.Revoked.IsCancellationRequested,
             "search release drains native observation without closing the borrowed runtime");

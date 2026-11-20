@@ -57,8 +57,11 @@ internal static class Program
         {
             try
             {
-                try { await test.Run(); }
-                finally { await MusicTestStores.ReleaseAsync(); }
+                Exception? failure = null;
+                try { await test.Run(); } catch (Exception error) { failure = error; }
+                try { await MusicTestStores.ReleaseAsync(); }
+                catch (Exception error) { failure = failure is null ? error : new AggregateException(failure, error); }
+                if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
                 Console.WriteLine($"PASS {test.Name}");
             }
             catch (Exception error)
@@ -66,7 +69,7 @@ internal static class Program
                 failed++;
                 Console.WriteLine($"FAIL {test.Name}: {error.GetType().Name}: {error.Message}");
                 Console.WriteLine($"ERROR_HRESULT 0x{error.HResult:X8}");
-                Console.WriteLine(error.StackTrace);
+                Console.WriteLine(error);
             }
         }
         Console.WriteLine($"TOTAL {tests.Length}; PASSED {tests.Length - failed}; FAILED {failed}; SKIPPED 0");

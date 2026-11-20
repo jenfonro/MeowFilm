@@ -25,7 +25,6 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
                     if (value.TryGetProperty("protocol", out _))
                     {
                         if (line.Length > 64 * 1024 || offset != count ||
-                            value.EnumerateObject().Count() != 2 ||
                             BridgeCodec.RequiredProperty(value, "protocol").GetString() != RuntimeHttpProtocol.Name)
                             throw new BridgeException("INVALID_RESPONSE");
                         string endpoint = BridgeCodec.RequiredProperty(value, "baseUrl").GetString()!;

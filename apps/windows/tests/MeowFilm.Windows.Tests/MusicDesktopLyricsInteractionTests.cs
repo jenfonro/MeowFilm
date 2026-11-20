@@ -620,7 +620,7 @@ public static partial class MusicUiTests
                 var shutdown = f.Module.PrepareShutdownAsync();
                 save.Release();
                 await Task.WhenAll(close, shutdown);
-                await f.Module.CancelShutdownPreparationAsync();
+
                 True(!f.Module.IsDesktopLyricsOpen && !DesktopTestUi.WindowIsVisible(window),
                     "cancelling shutdown does not restore a window whose close was already accepted");
                 Equal(geometry, f.Module.DesktopLyricGeometry!.Value);

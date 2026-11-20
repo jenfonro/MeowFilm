@@ -241,12 +241,15 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         try
         {
             // Propagate revocation through linked capabilities before the first await.
-            try { epoch.Cancellation.Cancel(); } catch { failed = true; }
+            Task? cancellation = null;
+            try { cancellation = epoch.Cancellation.CancelAsync(); } catch { failed = true; }
             IRuntimeSession? session = null;
             try { session = await epoch.Start.Task.ConfigureAwait(false); }
             catch { failed |= epoch.StartupCleanupFailed; }
             if (session is not null)
             { try { await session.DisposeAsync().ConfigureAwait(false); } catch { failed = true; } }
+            if (cancellation is not null)
+            { try { await cancellation.ConfigureAwait(false); } catch { failed = true; } }
             if (failed) completion.TrySetException(new BridgeException("INTERNAL"));
             else completion.TrySetResult();
         }

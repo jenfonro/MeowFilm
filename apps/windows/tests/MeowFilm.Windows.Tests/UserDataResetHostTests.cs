@@ -46,6 +46,8 @@ public static class UserDataResetHostTests
             info.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
         info.ArgumentList.Add("--case"); info.ArgumentList.Add(CaseName);
         info.Environment["MEOWFILM_RESET_LAUNCHER_CHILD"] = "1";
+        string parent = TestWorkspace.DataPath("reset-host-" + Guid.NewGuid().ToString("N"));
+        info.Environment["MEOWFILM_RESET_LAUNCHER_ROOT"] = parent;
         using var child = Process.Start(info)!;
         var output = child.StandardOutput.ReadToEndAsync();
         var errors = child.StandardError.ReadToEndAsync();
@@ -54,6 +56,7 @@ public static class UserDataResetHostTests
         var text = await output;
         Check(child.ExitCode == 0 && text.Contains("TOTAL 1; PASSED 1; FAILED 0; SKIPPED 0", StringComparison.Ordinal),
             text + await errors);
+        Directory.Delete(parent, recursive: true);
     }
 
     private static async Task Launch()
@@ -61,7 +64,7 @@ public static class UserDataResetHostTests
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() =>
         {
-            string parent = TestWorkspace.DataPath("reset-host-" + Guid.NewGuid().ToString("N"));
+            string parent = Environment.GetEnvironmentVariable("MEOWFILM_RESET_LAUNCHER_ROOT")!;
             string root = Path.Combine(parent, "aggregate");
             var paths = new AppDataPaths(root);
             Directory.CreateDirectory(parent);
@@ -71,15 +74,11 @@ public static class UserDataResetHostTests
             var shells = new List<ShellWindow>();
             var attachments = new List<Attachment>();
             NativeTestDatabase? cacheStore = null;
-            int disposals = 0, pid = Environment.ProcessId;
+            int disposals = 0, playbackStops = 0, pid = Environment.ProcessId;
+            var playbackStopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var finalExit = new Stopwatch();
             Exception? failure = null;
-            var guard = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromSeconds(35) };
-            guard.Tick += (_, _) =>
-            {
-                failure ??= new InvalidOperationException("launcher reset did not settle");
-                Application.Current.Exit();
-            };
-            guard.Start();
+            Microsoft.UI.Xaml.DispatcherTimer? guard = null;
             try
             {
                 AppLauncher.Run(paths,
@@ -92,7 +91,17 @@ public static class UserDataResetHostTests
                         var module = new ProbeModule(store, runtime, cacheStore, paths.Documents);
                         modules.Add(module); owners.Add(module);
                     },
-                    launch => new TestApplication(launch),
+                    launch => new TestApplication(app =>
+                    {
+                        guard = new Microsoft.UI.Xaml.DispatcherTimer { Interval = TimeSpan.FromSeconds(35) };
+                        guard.Tick += (_, _) =>
+                        {
+                            failure ??= new InvalidOperationException("launcher reset did not settle");
+                            app.Exit();
+                        };
+                        guard.Start();
+                        launch(app);
+                    }),
                     async () =>
                     {
                         if (cacheStore is not null) { await cacheStore.DisposeAsync(); cacheStore = null; }
@@ -118,7 +127,7 @@ public static class UserDataResetHostTests
                                     "New cache owner cannot reuse previous rows.");
                                 Check(await module.Store.ReadAsync(db => db.Revision("reset-probe")) == StorageRevision.Empty,
                                     "Late writes cannot survive reset.");
-                                Check(await module.Store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_music_accounts")) == 0,
+                                Check(await module.Store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_music_account")) == 0,
                                     "Previous account rows were removed.");
                                 var library = await module.Native.ExecuteAsync("music.library.list", new { });
                                 Check(library.GetProperty("ok").GetBoolean() && library.GetProperty("total").GetInt32() == 1,
@@ -138,7 +147,13 @@ public static class UserDataResetHostTests
                                 if (generation == 3)
                                 {
                                     Check(File.ReadAllText(external) == "external original");
-                                    await shell.AbortAsync();
+                                    // Whole-process exit must not wait for business owners.
+                                    module.RejectRelease = true;
+                                    // The test process returns to its runner after Application.Exit.
+                                    // Release its inspection-only borrower before the App database.
+                                    await module.Records.DisposeAsync();
+                                    finalExit.Start();
+                                    await shell.CloseAfterReleaseAsync();
                                     return;
                                 }
                                 var created = await module.Native.ExecuteAsync("music.library.create", new { name = "synthetic playlist" });
@@ -147,7 +162,7 @@ public static class UserDataResetHostTests
                                 Check(appearance.ThemeColor == "#ABCDEF");
                                 await module.Store.WriteAsync(db =>
                                 {
-                                    AccountStorageRecords.Account.Save(db, new JsonObject { ["version"] = 2, ["generation"] = 1 },
+                                    AccountStorageRecords.Account.Save(db, new JsonObject { ["version"] = 1, ["generation"] = 1 },
                                         AccountStorageRecords.Account.Read(db, ["wy"]), ["wy"]);
                                     return true;
                                 });
@@ -168,18 +183,23 @@ public static class UserDataResetHostTests
                             catch (Exception error)
                             {
                                 failure = error;
-                                try { await shell.AbortAsync(); }
+                                try { await shell.CloseAfterReleaseAsync(); }
                                 catch { Application.Current.Exit(); }
                             }
                         };
                         var attachment = new Attachment();
                         attachments.Add(attachment);
                         return attachment;
-                    });
-                guard.Stop();
-                if (failure is not null) throw failure;
-                Check(shells.Count == 3 && modules.All(module => module.Released) && disposals == 3 &&
-                    attachments.All(item => item.Disposals == 1), "two complete resets followed by actual final exit");
+                    }, stopPlayback: () => { playbackStops++; return playbackStopped.Task; });
+                guard?.Stop();
+                if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+                Check(shells.Count == 3 && modules.Take(2).All(module => module.Released) && disposals == 2 &&
+                    attachments.Take(2).All(item => item.Disposals == 1), "two complete resets followed by process exit");
+                Check(!modules[2].Released && attachments[2].Disposals == 0 && finalExit.Elapsed < TimeSpan.FromSeconds(2),
+                    "final exit does not drain in-memory owners or wait for a close timeout");
+                Check(playbackStops == 1 && !playbackStopped.Task.IsCompleted,
+                    "final exit requests playback stop without making output retirement a process-exit gate");
+                playbackStopped.TrySetResult();
                 foreach (var module in modules)
                 {
                     try
@@ -195,10 +215,9 @@ public static class UserDataResetHostTests
                     }
                     catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Closed) { }
                 }
-                Directory.Delete(parent, recursive: true);
                 done.SetResult();
             }
-            catch (Exception error) { guard.Stop(); done.SetException(error); }
+            catch (Exception error) { guard?.Stop(); done.SetException(error); }
         }) { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
@@ -219,6 +238,7 @@ public static class UserDataResetHostTests
         public MusicNativeApplication Native { get; }
         public MusicRecordTestStore Records { get; }
         public bool Released { get; private set; }
+        public bool RejectRelease { get; set; }
         public ProbeModule(IStorageDatabase store, IRuntimeClient runtime, NativeTestDatabase cache, string databaseRoot)
         {
             Store = store; Cache = cache; Records = MusicTestStores.Use(store, databaseRoot);
@@ -238,10 +258,11 @@ public static class UserDataResetHostTests
         public string CaptureNavigationLocation() => "home";
         public Task RestoreNavigationAsync(string location, CancellationToken token) => Task.CompletedTask;
         public Task PrepareShutdownAsync() => Native.PrepareShutdownAsync();
-        public Task CancelShutdownPreparationAsync() => Native.CancelShutdownPreparationAsync();
+
         public ValueTask DisposeAsync() => new(AbortAsync());
         public async Task AbortAsync()
         {
+            if (RejectRelease) throw new InvalidOperationException("Process exit invoked in-memory release");
             if (Released) return;
             await Native.AbortAsync();
             await Store.WriteAsync(db =>

@@ -191,7 +191,7 @@ public static class GeneralCloseSettingsTests
             Check(!preferences.CanEdit && !choices.IsEnabled && preferences.Status.Length > 0 &&
                 DesktopVisual.IsVisible(reload) && reload.IsEnabled && store.Writes == 0,
                 "an unreadable document cannot appear as an editable default");
-            await preferences.PrepareShutdownAsync(); await preferences.CancelShutdownPreparationAsync(); await Drain();
+            await Drain();
             Check(!choices.IsEnabled && store.Writes == 0);
             store.WindowData = null;
             Click(reload);
@@ -230,13 +230,7 @@ public static class GeneralCloseSettingsTests
             store.Release.TrySetResult();
             await closing.WaitAsync(TimeSpan.FromSeconds(3)); await Drain();
             Check(!choices.IsEnabled && Equals(((ComboBoxItem?)choices.SelectedItem)?.Tag, WindowCloseBehavior.MinimizeToTray.ToString()) && store.Writes == 1);
-            await preferences.CancelShutdownPreparationAsync(); await Drain();
-            Check(choices.IsEnabled && Equals(((ComboBoxItem?)choices.SelectedItem)?.Tag, WindowCloseBehavior.MinimizeToTray.ToString()),
-                "cancelling shutdown restores editing in the same view with the saved behavior");
-            choices.SelectedIndex = 0;
-            await Until(() => preferences.CanEdit && preferences.Behavior == WindowCloseBehavior.Ask,
-                () => State(view, appearance, preferences, store));
-            Check(preferences.Behavior == WindowCloseBehavior.Ask && store.Writes == 2);
+            Check(!choices.IsEnabled, "retired settings remain sealed");
         }
         finally
         {
@@ -286,10 +280,10 @@ public static class GeneralCloseSettingsTests
                 Check(choices.Foreground is SolidColorBrush { Color.A: > 0 }, "selector has visible text");
                 Check(choices.Focus(FocusState.Programmatic), "selector accepts native focus");
                 Check(choices.UseSystemFocusVisuals, "selector preserves the native focus visual");
-                await preferences.PrepareShutdownAsync(); await Drain();
+                choices.IsEnabled = false; await Drain();
                 Check(!choices.IsEnabled && choices.Foreground is SolidColorBrush { Color.A: > 0 },
                     "disabled settings remain legible");
-                await preferences.CancelShutdownPreparationAsync(); await Drain();
+                choices.IsEnabled = true; await Drain();
                 Check(choices.IsEnabled);
                 foreach (int width in new[] { 900, 600 })
                 {

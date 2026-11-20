@@ -160,8 +160,10 @@ public static class FilmRulesTests
         foreach (var task in new[] { work, queued }) { try { await task; } catch (OperationCanceledException) { } }
         await close;
         Check(runtime.Calls.Count == 1, "queued calls do not execute after preparation");
-        runtime.Respond = null; service.Resume(); await service.InitializeAsync();
-        Check(service.GetSavedSnapshot().EpisodeRules.Count > 0 && runtime.Calls.Count == 1, "resume accepts native reads without new RPCs");
+        await service.DisposeAsync(); runtime.Respond = null;
+        await using var reopened = new FilmRuleService(runtime, store);
+        await reopened.InitializeAsync();
+        Check(reopened.GetSavedSnapshot().EpisodeRules.Count > 0 && runtime.Calls.Count == 1, "a new owner reads native settings without new RPCs");
     }
     private static async Task Unavailable()
     {
@@ -198,10 +200,11 @@ public static class FilmRulesTests
                 "native admission strips caller cancellation and shutdown waits for the actual receipt");
             receipt.TrySetResult(); await save; await close;
             Check(Same(service.GetSavedSnapshot(), next), "an admitted write still publishes its committed snapshot");
-            service.Resume();
+            await service.DisposeAsync();
+            await using var reopened = new FilmRuleService(runtime, store);
             using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
             int writes = store.Writes;
-            try { await service.SaveAsync(new(), cancelled.Token); throw new Exception("Cancelled edit wrote"); }
+            try { await reopened.SaveAsync(new(), cancelled.Token); throw new Exception("Cancelled edit wrote"); }
             catch (OperationCanceledException) { }
             Check(store.Writes == writes && runtime.Notifications.Count == 1, "pre-admission cancellation never writes or notifies");
         }
@@ -226,8 +229,10 @@ public static class FilmRulesTests
             catch (OperationCanceledException) { }
             await close;
             Check(store.Writes == 0 && runtime.Calls.Count == 0, "cancelled local read never writes or falls back to RPC");
-            store.Reading = null; service.Resume(); await service.InitializeAsync();
-            Check(service.GetSavedSnapshot().EpisodeRules.Count > 0, "resume can read the native defaults after physical drain");
+            await service.DisposeAsync(); store.Reading = null;
+            await using var reopened = new FilmRuleService(runtime, store);
+            await reopened.InitializeAsync();
+            Check(reopened.GetSavedSnapshot().EpisodeRules.Count > 0, "a new owner reads native defaults after physical drain");
         }
         finally { receipt.TrySetResult(); }
     }

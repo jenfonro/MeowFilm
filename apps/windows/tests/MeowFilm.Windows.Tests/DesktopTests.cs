@@ -243,65 +243,6 @@ public static partial class DesktopTests
             True(f.Element<ListView>("PublicNavigationList").SelectedItem is null, "settings leaves public page");
             Equal(Visibility.Visible, Host(module.SettingsView).Visibility, "current domain settings");
         });
-        yield return Case("forced cleanup failure retains shell and explicit retry waits for actual success", async () =>
-        {
-            var fail = true;
-            await using var f = new Fixture([new ProbeModule("domain")], _ => Task.FromException(new Exception("save")),
-                force: _ => fail ? Task.FromException(new Exception("abort")) : Task.CompletedTask);
-            f.Shell.PrepareForRender(); f.Shell.Close(); await UntilAsync(() => f.Status == "关闭失败", "failed prepare");
-            Click(f.Element<Button>("ForceExitButton")); await UntilAsync(() => f.Status == "清理尚未完成", "failed abort");
-            False(f.Closed.Task.IsCompleted, "abort failure is not permission to close"); False(f.Shell.CleanupCompleted, "not drained");
-            fail = false; Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync();
-            True(f.Shell.CleanupCompleted, "real successful callback"); False(f.Shell.ShutdownSucceeded, "not reported saved");
-            Equal(2, f.ForceCalls, "explicit retry only");
-        });
-        yield return Case("forced cleanup deadline does not close and late normal completion cannot overrule it", async () =>
-        {
-            using var normal = new HeldOperation(false); using var abort = new HeldOperation(false);
-            await using var f = new Fixture([new ProbeModule("domain")], _ => normal.RunAsync(default), force: _ => abort.RunAsync(default));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await normal.Started.Task;
-            f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "关闭超时", "normal timeout");
-            Click(f.Element<Button>("ForceExitButton")); await abort.Started.Task;
-            normal.Release(); f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "清理尚未完成", "force timeout");
-            False(f.Closed.Task.IsCompleted, "deadline retains window"); False(f.Shell.CleanupCompleted, "actual cleanup still pending");
-            abort.Release(); await DrainAsync(); False(f.Closed.Task.IsCompleted, "no unsolicited late exit");
-            Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync(); True(f.Shell.CleanupCompleted, "drain confirmed on retry");
-        });
-        yield return Case("cancel failed close resumes UI and next close gets a fresh preparation", async () =>
-        {
-            var attempts = 0; var cancelled = 0;
-            await using var f = new Fixture([new ProbeModule("domain")], _ => ++attempts == 1 ? Task.FromException(new Exception("save")) : Task.CompletedTask,
-                cancel: _ => { cancelled++; return Task.CompletedTask; });
-            await f.LoadAsync(); f.Shell.Close(); await UntilAsync(() => f.Status == "关闭失败", "first failure");
-            Click(f.Element<Button>("CancelShutdownButton")); await UntilAsync(() => f.Status == "" && f.Search.IsEnabled, "resumed");
-            Equal(1, cancelled, "one explicit rollback"); False(f.Closed.Task.IsCompleted, "resume keeps shell");
-            f.Shell.Close(); await f.WaitClosedAsync(); Equal(2, attempts, "new close not cached failure"); True(f.Shell.ShutdownSucceeded, "new preparation saved");
-        });
-        yield return Case("failed cancellation keeps shell sealed and never implicitly forces", async () =>
-        {
-            await using var f = new Fixture([new ProbeModule("domain")], _ => Task.FromException(new Exception("save")),
-                cancel: _ => Task.FromException(new Exception("cannot-resume")));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await UntilAsync(() => f.Status == "关闭失败", "failure");
-            Click(f.Element<Button>("CancelShutdownButton")); await UntilAsync(() => f.Status == "无法取消关闭", "resume refused");
-            False(f.Element<Button>("SettingsButton").IsEnabled, "sealed");
-            Equal(0, f.ForceCalls, "no implicit abort");
-            Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync();
-        });
-        yield return Case("pending close rollback has a bounded observation and explicit retry never resumes early", async () =>
-        {
-            using var rollback = new HeldOperation(false); var cancels = 0;
-            await using var f = new Fixture([new ProbeModule("domain")], _ => Task.FromException(new Exception("save")),
-                cancel: _ => { cancels++; return rollback.RunAsync(default); });
-            f.Shell.PrepareForRender(); f.Shell.Close(); await UntilAsync(() => f.Status == "关闭失败", "prepare failed");
-            Click(f.Element<Button>("CancelShutdownButton")); await rollback.Started.Task;
-            f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "取消关闭尚未完成", "rollback deadline");
-            False(f.Element<Button>("SettingsButton").IsEnabled, "timeout is not resumed");
-            True(f.Element<Button>("ForceExitButton").IsEnabled, "force is not trapped by rollback");
-            rollback.Release(); await DrainAsync();
-            False(f.Element<Button>("SettingsButton").IsEnabled, "late rollback cannot reopen UI unrequested");
-            Click(f.Element<Button>("CancelShutdownButton")); await UntilAsync(() => f.Status == "", "explicit resume");
-            Equal(1, cancels, "same rollback task observed");
-        });
         yield return Case("prepare mounts first supplied module without business calls", async () =>
         {
             var first = new ProbeModule("z-probe"); var second = new ProbeModule("a-probe");
@@ -792,7 +733,7 @@ public static partial class DesktopTests
             var calls = a.Calls.Count; a.Request("two"); a.NotifyAll(); await DrainAsync();
             Equal(calls, a.Calls.Count, "closed shell rejects later events");
         });
-        yield return Case("close cancels work before owner shutdown and waits for completion", async () =>
+        yield return Case("close cancels page work and closes window before owner release completes", async () =>
         {
             var a = new ProbeModule("close-pending"); using var work = new HeldOperation(true);
             using var shutdown = new HeldOperation(false); var observedCancellation = false;
@@ -804,127 +745,23 @@ public static partial class DesktopTests
             a.NavigateHook = (route, token) => route == "slow" ? work.RunAsync(token) : Task.CompletedTask;
             await f.LoadAsync(); f.Select(a, "slow"); await work.Started.Task;
             f.Shell.Close(); f.Shell.Close(); await shutdown.Started.Task; await DrainAsync();
-            True(observedCancellation, "cancel occurs before owner cleanup"); False(f.Closed.Task.IsCompleted, "wait within budget");
+            True(observedCancellation, "cancel occurs before owner cleanup"); True(f.Closed.Task.IsCompleted, "window has no shutdown wait");
+            False(f.Shell.ShutdownCompletion.IsCompleted, "pending release is not reported complete");
             f.Shell.Close(); Equal(1, f.ShutdownCalls, "native repeated close owns one callback only");
             shutdown.Release(); await f.WaitClosedAsync(); True(f.Shell.ShutdownSucceeded, "cooperative cleanup succeeds");
             Equal(1, a.DisposeCount, "owner disposal once");
         });
-        yield return Case("shutdown deadline retains window until explicit force exit and fences late fault", async () =>
-        {
-            var a = new ProbeModule("close-deadline"); using var shutdown = new HeldOperation(false);
-            await using var f = new Fixture([a], _ => shutdown.RunAsync(default));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await shutdown.Started.Task;
-            f.Clock.Advance(TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1)); await DrainAsync();
-            False(f.Shell.ShutdownCompletion.IsCompleted, "deadline must not fire early"); False(f.Closed.Task.IsCompleted, "still waiting");
-            f.Shell.Close(); f.Clock.Advance(TimeSpan.FromTicks(1));
-            await UntilAsync(() => f.Status == "关闭超时", "shutdown deadline exposes risk");
-            False(f.Shell.ShutdownSucceeded, "timeout is not successful cleanup");
-            True(f.Shell.ShutdownCompletion.IsCompleted, "initial wait is bounded");
-            False(f.Closed.Task.IsCompleted, "timeout must not silently exit");
-            Equal(Visibility.Visible, f.Element<StackPanel>("ShutdownConfirmation").Visibility, "visible confirmation");
-            True(f.Element<Button>("WaitForShutdownButton").IsEnabled, "explicit further wait offered");
-            True(f.Element<Button>("ForceExitButton").IsEnabled, "explicit destructive choice offered");
-            f.Shell.Close(); await DrainAsync();
-            Equal(1, f.ShutdownCalls, "repeat Close does not retry cleanup"); Equal(0, f.ClosedCount, "repeat Close is not confirmation");
-            Click(f.Element<Button>("ForceExitButton")); Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync();
-            Equal(1, f.ClosedCount, "explicit force closes once"); False(f.Shell.ShutdownSucceeded, "force is not successful cleanup");
-            shutdown.Fail(); await DrainAsync(); False(f.Shell.ShutdownSucceeded, "late failure cannot change result");
-            Equal(1, f.ClosedCount, "late failure cannot close again"); Equal(0, a.DisposeCount, "shell does not fake disposal");
-        });
-        yield return Case("shutdown synchronous failure requires confirmation before releasing subscriptions", async () =>
-        {
-            var a = new NavigationProbe("close-throw");
-            await using var f = new Fixture([a], _ => throw new InvalidOperationException("private-test-detail"));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await UntilAsync(() => f.Status == "关闭失败", "failure confirmation");
-            False(f.Shell.ShutdownSucceeded, "failure reported accurately"); Equal(1, f.ShutdownCalls, "no retry on failure");
-            False(f.Closed.Task.IsCompleted, "failure cannot silently discard pending changes");
-            Equal(2, a.NavigationSubscribers + a.PropertySubscribers, "ownership retained until actual closure");
-            False(f.Element<Button>("WaitForShutdownButton").IsEnabled, "failed callback cannot be retried");
-            Click(f.Element<Button>("WaitForShutdownButton")); await DrainAsync(); Equal(1, f.ShutdownCalls, "disabled action guarded");
-            False(f.Status.Contains("private-test-detail", StringComparison.Ordinal), "raw detail never in status");
-            Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync();
-            Equal(0, a.NavigationSubscribers + a.PropertySubscribers, "subscriptions released only on explicit exit");
-        });
-        yield return Case("late shutdown success stays open until user explicitly waits on same task", async () =>
-        {
-            using var pending = new HeldOperation(false);
-            await using var f = new Fixture([new ProbeModule("late-cleanup-success")], _ => pending.RunAsync(default));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await pending.Started.Task;
-            f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "关闭超时", "timeout decision");
-            var status = f.Status; pending.Release(); await DrainAsync();
-            False(f.Closed.Task.IsCompleted, "late result alone cannot silently close");
-            False(f.Shell.ShutdownSucceeded, "deadline not rewritten by unrequested continuation");
-            Equal(status, f.Status, "late completion does not duplicate notifications");
-            Click(f.Element<Button>("WaitForShutdownButton")); await f.WaitClosedAsync();
-            True(f.Shell.ShutdownSucceeded, "explicit wait observes actual successful cleanup");
-            Equal(1, f.ShutdownCalls, "completed callback reused, not reinvoked"); Equal(1, f.ClosedCount, "one exit");
-        });
-        yield return Case("continue waiting is bounded again and never repeats shutdown callback", async () =>
-        {
-            using var pending = new HeldOperation(false);
-            await using var f = new Fixture([new ProbeModule("wait-again")], _ => pending.RunAsync(default));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await pending.Started.Task;
-            f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "关闭超时", "first deadline");
-            Click(f.Element<Button>("WaitForShutdownButton")); Click(f.Element<Button>("WaitForShutdownButton")); await DrainAsync();
-            Equal("正在等待关闭…", f.Status, "waiting visible"); False(f.Element<Button>("WaitForShutdownButton").IsEnabled, "no parallel waits");
-            True(f.Element<Button>("ForceExitButton").IsEnabled, "wait does not trap user");
-            f.Clock.Advance(TimeSpan.FromSeconds(5) - TimeSpan.FromTicks(1)); await DrainAsync();
-            Equal("正在等待关闭…", f.Status, "second wait not cut short");
-            f.Clock.Advance(TimeSpan.FromTicks(1)); await UntilAsync(() => f.Status == "关闭超时", "second bounded wait");
-            Equal(1, f.ShutdownCalls, "wait retry is not cleanup retry"); Equal(0, f.ClosedCount, "second timeout cannot exit");
-            Click(f.Element<Button>("WaitForShutdownButton")); pending.Release(); await f.WaitClosedAsync();
-            True(f.Shell.ShutdownSucceeded, "real completion during explicit wait succeeds"); Equal(1, f.ClosedCount, "one close");
-        });
-        yield return Case("force during explicit wait fences late success and all further close actions", async () =>
-        {
-            using var pending = new HeldOperation(false);
-            await using var f = new Fixture([new ProbeModule("force-during-wait")], _ => pending.RunAsync(default));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await pending.Started.Task;
-            f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "关闭超时", "confirmation offered");
-            Click(f.Element<Button>("WaitForShutdownButton")); Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync();
-            var status = f.Status; pending.Release(); await DrainAsync();
-            Click(f.Element<Button>("ForceExitButton")); Click(f.Element<Button>("WaitForShutdownButton")); await DrainAsync();
-            Equal(1, f.ClosedCount, "late completion cannot close twice"); Equal(1, f.ShutdownCalls, "no extra cleanup");
-            False(f.Shell.ShutdownSucceeded, "forced exit remains distinguishable from successful cleanup");
-            Equal(status, f.Status, "late results cannot mutate closed presentation");
-        });
-        yield return Case("cleanup fault during explicit wait reopens decision without automatic exit", async () =>
-        {
-            using var pending = new HeldOperation(false);
-            await using var f = new Fixture([new ProbeModule("wait-fault")], _ => pending.RunAsync(default));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await pending.Started.Task;
-            f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "关闭超时", "confirmation offered");
-            Click(f.Element<Button>("WaitForShutdownButton")); pending.Fail(); await UntilAsync(() => f.Status == "关闭失败", "late fault disclosed");
-            False(f.Shell.ShutdownSucceeded, "fault never reported as cleanup"); False(f.Closed.Task.IsCompleted, "fault retains window");
-            False(f.Element<Button>("WaitForShutdownButton").IsEnabled, "terminal failure cannot be retried");
-            False(f.Status.Contains("private-test-detail", StringComparison.Ordinal), "fixed status only");
-            Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync(); Equal(1, f.ShutdownCalls, "one cleanup");
-        });
-        yield return Case("cancelled shutdown is a failed cleanup requiring force confirmation", async () =>
-        {
-            await using var f = new Fixture([new ProbeModule("cancelled-cleanup")], _ => Task.FromCanceled(new CancellationToken(true)));
-            f.Shell.PrepareForRender(); f.Shell.Close(); await UntilAsync(() => f.Status == "关闭失败", "cancelled callback disclosed");
-            False(f.Closed.Task.IsCompleted, "cleanup cancellation does not authorize exit");
-            False(f.Shell.ShutdownSucceeded, "cancellation is not success");
-            Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync(); Equal(1, f.ShutdownCalls, "one callback");
-        });
-        yield return Case("force exit has no effect before confirmation and frozen shell rejects other actions", async () =>
-        {
-            var a = new NavigationProbe("freeze-probe"); using var pending = new HeldOperation(false);
-            await using var f = new Fixture([a], _ => pending.RunAsync(default)); await f.LoadAsync();
-            Click(f.Element<Button>("ForceExitButton")); await DrainAsync();
-            Equal(0, f.ShutdownCalls, "hidden confirmation action not armed");
-            f.Shell.Close(); await pending.Started.Task; Click(f.Element<Button>("ForceExitButton")); await DrainAsync();
-            False(f.Closed.Task.IsCompleted, "initial wait not bypassed by hidden button");
-            f.Clock.Advance(TimeSpan.FromSeconds(5)); await UntilAsync(() => f.Status == "关闭超时", "confirmation");
-            var calls = a.Calls.Count; a.Request("two"); f.Select(a, "three"); Click(f.Element<Button>("SettingsButton"));
-            True(f.Shell.TryExecuteShortcut(VirtualKey.Escape, VirtualKeyModifiers.None), "active request admits cancellation"); Click(f.Button("关闭状态")); await DrainAsync();
-            Equal(calls, a.Calls.Count, "frozen shell cannot resume partially disposed domain");
-            Equal("关闭超时", f.Status, "unrelated actions cannot erase shutdown risk");
-            False(f.Shell.TryExecuteShortcut(VirtualKey.Enter, VirtualKeyModifiers.None), "force is not an implicit Enter default");
-            False(f.Shell.TryExecuteShortcut(VirtualKey.F, VirtualKeyModifiers.Control), "search shortcut blocked during shutdown");
-            Click(f.Element<Button>("ForceExitButton")); await f.WaitClosedAsync();
-        });
+        foreach (bool cancelled in new[] { false, true })
+            yield return Case($"window closes even when owner release {(cancelled ? "cancels" : "fails")}", async () =>
+            {
+                await using var f = new Fixture([new NavigationProbe("failed-release")], _ => cancelled
+                    ? Task.FromCanceled(new CancellationToken(true))
+                    : Task.FromException(new InvalidOperationException("fixture-release-failure")));
+                f.Shell.PrepareForRender(); f.Shell.Close(); await f.WaitClosedAsync();
+                False(f.Shell.CleanupCompleted, "window closure does not fabricate a release receipt");
+                Equal(1, f.ShutdownCalls, "no implicit retry");
+                Equal(1, f.ClosedCount, "one close");
+            });
         yield return Case("Closing veto does not begin shutdown until close allowed", async () =>
         {
             await using var f = new Fixture([new ProbeModule("close-veto")]); f.Shell.PrepareForRender();
@@ -1030,7 +867,6 @@ public static partial class DesktopTests
         public TaskCompletionSource Closed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int ClosedCount { get; private set; }
         public int ShutdownCalls { get; private set; }
-        public int ForceCalls { get; private set; }
         public ListView Modules => Element<ListView>("ModuleNavigationList");
         public ListView Navigation => Element<ListView>("NavigationList");
         public TextBox Search => Element<TextBox>("SearchBox");
@@ -1043,8 +879,7 @@ public static partial class DesktopTests
         public ProbeModule? SelectedOwner => ((Navigation.SelectedItem as ShellNavigationEntry) ??
             (Element<ListView>("CollectionNavigationList").SelectedItem as ShellNavigationEntry))?.Owner.Module as ProbeModule ??
             (Modules.SelectedItem as ModuleSession)?.Module as ProbeModule;
-        public Fixture(ProbeModule[] modules, Func<Fixture, Task>? shutdown = null, IReadOnlyList<IDesktopPage>? pages = null,
-            Func<Fixture, Task>? force = null, Func<Fixture, Task>? cancel = null)
+        public Fixture(ProbeModule[] modules, Func<Fixture, Task>? shutdown = null, IReadOnlyList<IDesktopPage>? pages = null)
         {
             Probes = modules;
             Shell = new ShellWindow(modules, pages ?? [], async () =>
@@ -1052,8 +887,7 @@ public static partial class DesktopTests
                 ShutdownCalls++;
                 if (shutdown is not null) await shutdown(this);
                 else await DisposeProbesAsync();
-            }, () => { ForceCalls++; return force?.Invoke(this) ?? Task.CompletedTask; },
-                cancel is null ? null : () => cancel(this), Clock);
+            }, Clock);
             root = Shell.Root;
             Shell.Closed += (_, _) => { ClosedCount++; Closed.TrySetResult(); };
         }
@@ -1124,9 +958,7 @@ public static partial class DesktopTests
         {
             if (!Closed.Task.IsCompleted)
             {
-                Shell.Close(); Clock.Advance(TimeSpan.FromSeconds(6)); await DrainAsync();
-                if (!Closed.Task.IsCompleted && Element<Button>("ForceExitButton").IsEnabled)
-                    Click(Element<Button>("ForceExitButton")); // Cleanup guard, not a passing assertion.
+                Shell.Close(); await DrainAsync();
             }
             await WaitClosedAsync();
             // ListView clears recycled template bindings in its deferred build-tree work, after Closed.
@@ -1312,7 +1144,6 @@ public static partial class DesktopTests
         public void Notify(string? property) => _propertyChanged?.Invoke(this, new(property));
         public void NotifyAll() => _propertyChanged?.Invoke(this, new(null));
         public Task PrepareShutdownAsync() => Task.CompletedTask;
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
         public ValueTask DisposeAsync() { DisposeCount++; return ValueTask.CompletedTask; }
     }

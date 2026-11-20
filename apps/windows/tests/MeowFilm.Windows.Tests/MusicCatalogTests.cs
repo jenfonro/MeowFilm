@@ -319,32 +319,7 @@ public static partial class MusicCatalogTests
                 finally { menu.Hide(); await Until(() => !menu.IsOpen); }
             }
         });
-        yield return Case("cancel closing leaves mounted hidden settings and discovery inactive", async () =>
-        {
-            await using var f = await Fixture.Create();
-            f.Client.FailHistory = true; // Keep activation reads observable instead of satisfying them from history cache.
-            var host = new Grid(); host.Children.Add(f.Module.View); host.Children.Add(f.Module.SettingsView);
-            var window = DesktopTestUi.CreateWindow(host, 906, 650);
-            try
-            {
-                window.Show(); await f.Module.ActivateSettingsAsync();
-                await f.Module.NavigateAsync("catalog-discovery", default); await Drain();
-                f.Module.View.Visibility = f.Module.SettingsView.Visibility = Visibility.Collapsed;
-                await Task.WhenAll(f.Module.DeactivateSettingsAsync(), f.Module.DeactivateDiscoveryViewAsync());
-                True(f.Module.View.IsLoaded && f.Module.SettingsView.IsLoaded, "hidden surfaces remain mounted");
-                await f.Module.PrepareShutdownAsync();
-                int reads = f.Client.Count("music.search.history.get");
-                await f.Module.CancelShutdownPreparationAsync(); await Drain();
-                Equal(reads, f.Client.Count("music.search.history.get"));
-                f.Module.SettingsView.Visibility = Visibility.Visible;
-                await f.Module.ActivateSettingsAsync();
-                Equal(reads + 1, f.Client.Count("music.search.history.get"));
-                f.Module.View.Visibility = Visibility.Visible;
-                await f.Module.ActivateDiscoveryViewAsync();
-                True(f.Client.Count("music.search.history.get") > reads + 1, "visible discovery resumes normally");
-            }
-            finally { window.Content = null; window.Close(); }
-        });
+
         yield return Case("retained home keeps scroller containers and decoded artwork across channels", async () =>
         {
             await using var f = await Fixture.Create();
@@ -669,9 +644,6 @@ public static partial class MusicCatalogTests
             try
             {
                 window.Show(); Layout(); await Drain();
-
-
-
 
                 Equal(new FontFamily("XamlAutoFontFamily"), view.FontFamily);
                 Equal(new FontFamily("XamlAutoFontFamily"), entry.FontFamily);
@@ -2804,7 +2776,6 @@ public static partial class MusicCatalogTests
         private readonly List<(string Method, Func<JsonElement, CancellationToken, Task<JsonElement>> Apply)> rules = [];
         private readonly List<Held> holds = [];
         public readonly List<Invocation> Log = [];
-        public bool FailHistory;
         public Func<CancellationToken, Task>? BeforeNextCommit;
         public int Count(string method) => Log.Count(c => c.Method == method);
         public JsonElement Last(string method) => Log.Last(c => c.Method == method).Parameters;
@@ -2823,8 +2794,6 @@ public static partial class MusicCatalogTests
         public override async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
         {
             Log.Add(new(method, JsonSerializer.SerializeToElement(parameters ?? new { })));
-            if (FailHistory && method == "music.search.history.get")
-                return JsonSerializer.SerializeToElement(new { ok = false, code = "STORAGE_ERROR" });
             var index = rules.FindIndex(r => r.Method == method);
             Func<JsonElement, CancellationToken, Task<JsonElement>>? transform = null;
             if (index >= 0) { transform = rules[index].Apply; rules.RemoveAt(index); }

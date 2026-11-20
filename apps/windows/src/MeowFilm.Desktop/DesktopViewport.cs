@@ -33,6 +33,11 @@ public sealed class DesktopViewport : IDisposable
         {
             bool previous = IsVisible;
             IsVisible = value;
+            // The first arrange of a formerly collapsed element can leave its
+            // unchanged Canvas ancestors clean. WinUI needs an ancestor layout
+            // pass to publish that element's first effective viewport.
+            if (value && !previous && !hasViewport)
+                (element.XamlRoot?.Content as UIElement)?.InvalidateArrange();
             Publish(previous != value);
         });
     }

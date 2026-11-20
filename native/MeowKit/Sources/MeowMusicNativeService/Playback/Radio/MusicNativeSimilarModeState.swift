@@ -83,7 +83,7 @@ final class MusicNativeSimilarSession {
         let context = self.context.map {
             MJ.obj([("pid", .string($0.playlistID)), ("sid", .string($0.seedID)), ("count", .n($0.count))])
         } ?? .null
-        return .obj([("schema", .n(2)), ("seedSongId", seed["songId"]), ("seedTitle", .string(seed["songId"].string.isEmpty ? seed["title"].string : "")),
+        return .obj([("schema", .n(1)), ("seedSongId", seed["songId"]), ("seedTitle", .string(seed["songId"].string.isEmpty ? seed["title"].string : "")),
             ("seedEntryId", seedEntryID.map(MJ.string) ?? .null), ("returnQueue", returnQueue),
             ("sourceIds", .strings(sourceIDs)), ("fromHome", .bool(fromHome)),
             ("provider", .string(provider.rawValue)), ("providerContext", context),
@@ -176,7 +176,7 @@ enum MusicNativeSimilarData {
         .obj(["entries", "currentId", "priority", "history", "source"].map { ($0, MusicModel.durable(queue[$0])) })
     }
     static func validateSession(_ saved: MJ, serial: Int, songs: MJ) throws {
-        try musicRequire(saved["schema"] == .n(2) &&
+        try musicRequire(saved["schema"] == .n(1) &&
             (saved["seedSongId"] == .null || songs[saved["seedSongId"].string].isObject) &&
             saved["seedTitle"].isString && saved["batches"].isArray && saved["attempted"].isArray &&
             saved["attempted"].array.allSatisfy(\.isString) && saved["continue"].isBool && saved["fromHome"].isBool &&

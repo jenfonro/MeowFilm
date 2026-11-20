@@ -41,6 +41,37 @@ final class SQLiteDatabaseTests: XCTestCase {
         XCTAssertEqual(try row.text("receipt"), "first")
         try await reopened.close()
     }
+    func testOpenDoesNotConsumeUnrelatedRelationsAndNewWritesEnforceForeignKeys() async throws {
+        let (root, db) = try await fixture()
+        // Model an out-of-band damaged business relation without changing the schema.
+        try await db.read { connection in
+            try connection.execute("PRAGMA foreign_keys=OFF")
+            try connection.execute("INSERT INTO cat_mapping_aliases VALUES(7,0,'orphan')")
+        }
+        try await db.close()
+        let reopened = try await Task.detached { try SQLiteDatabase(dataRoot: root) }.value
+        do {
+            try await reopened.transaction {
+                try $0.execute("INSERT INTO owner_revisions VALUES('unrelated',1,'saved')")
+            }
+            let receipt = try await reopened.read {
+                try $0.query("SELECT receipt FROM owner_revisions WHERE owner='unrelated'").first!.text("receipt")
+            }
+            XCTAssertEqual(receipt, "saved")
+            do {
+                try await reopened.transaction {
+                    try $0.execute("INSERT INTO cat_mapping_aliases VALUES(8,0,'new')")
+                }
+                XCTFail("new orphan relation committed")
+            } catch { XCTAssertEqual(error as? SQLiteStorageError, .constraint) }
+            let violations = try await reopened.read { try $0.query("PRAGMA foreign_key_check").count }
+            XCTAssertEqual(violations, 1)
+            try await reopened.close()
+        } catch {
+            try await reopened.close()
+            throw error
+        }
+    }
     func testIndependentConnectionsSerializeAtomicIncrements() async throws {
         let (root, first) = try await fixture()
         let second = try await Task.detached { try SQLiteDatabase(dataRoot: root) }.value

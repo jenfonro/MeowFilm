@@ -373,11 +373,6 @@ public sealed class MusicFeedbackController : IMusicPlaybackFeedback, IAsyncDisp
         if (settings.RequiresReconciliation) throw new MusicFeedbackException("COMMIT_UNKNOWN");
         lock (sync) if (releaseFaulted) throw new MusicFeedbackException("FEEDBACK_RELEASE_FAILED");
     }
-    public void CancelShutdownPreparation()
-    {
-        lock (sync) if (!closed) preparing = false;
-        (protocol as IMusicFeedbackPendingProtocol)?.Resume();
-    }
     public async Task DrainAsync(CancellationToken token = default)
     {
         await DrainLocalAsync(token).ConfigureAwait(false);

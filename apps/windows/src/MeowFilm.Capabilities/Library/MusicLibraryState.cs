@@ -7,17 +7,17 @@ public sealed partial class MusicLibraryOwner
     private static JsonObject FreshCollection(string id, string name, string kind) =>
         LJ.Obj(("id", id), ("name", name), ("kind", kind), ("order", new JsonArray()), ("revision", 0), ("manualOrder", false),
             ("bindings", new JsonArray()), ("intents", new JsonObject()));
-    private JsonObject EmptyLibrary() => LJ.Obj(("version", 3), ("ownerId", scope), ("revision", 0), ("nextId", 1),
+    private JsonObject EmptyLibrary() => LJ.Obj(("version", 1), ("ownerId", scope), ("revision", 0), ("nextId", 1),
         ("collections", new JsonArray(FreshCollection("favorites", "我的收藏", "favorites"))),
         ("accounts", new JsonObject()), ("networkPlaylists", new JsonArray()));
     private JsonObject LibraryState(MusicLibraryData doc)
     {
         try
         {
-            var state = Area(doc, "library") ?? LJ.Obj(("schema", 3), ("scope", scope), ("revision", 0), ("library", EmptyLibrary()));
+            var state = Area(doc, "library") ?? LJ.Obj(("schema", 1), ("scope", scope), ("revision", 0), ("library", EmptyLibrary()));
             var library = LJ.Object(state["library"], "CORRUPT_LIBRARY");
-            LJ.Require(LJ.I(state["schema"]) == 3 && LJ.S(state["scope"]) == scope &&
-                LJ.I(library["version"]) == 3 && LJ.S(library["ownerId"]) == scope &&
+            LJ.Require(LJ.I(state["schema"]) == 1 && LJ.S(state["scope"]) == scope &&
+                LJ.I(library["version"]) == 1 && LJ.S(library["ownerId"]) == scope &&
                 Revision(state) == Revision(library), "CORRUPT_LIBRARY");
             return state;
         }
@@ -58,7 +58,7 @@ public sealed partial class MusicLibraryOwner
         {
             LJ.Fields(raw, "version ownerId revision nextId collections accounts networkPlaylists",
                 "version ownerId revision nextId collections accounts networkPlaylists");
-            LJ.Require(LJ.I(raw["version"]) == 3 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
+            LJ.Require(LJ.I(raw["version"]) == 1 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
             _ = Revision(raw); long next = LJ.I(raw["nextId"], 1);
             var collections = LJ.Array(raw["collections"]); var accounts = LJ.Object(raw["accounts"]);
             var ids = new HashSet<string>(); var remote = new HashSet<string>();

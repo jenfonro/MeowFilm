@@ -105,8 +105,7 @@ public static class AppClosePreferencesTests
         Check(!owner.CanEdit && owner.Status.Length > 0);
         Check(!await owner.SaveAsync(WindowCloseBehavior.Ask) && store.Writes == 0,
             "a read error is not a writable missing-document default");
-        await owner.PrepareShutdownAsync(); await owner.CancelShutdownPreparationAsync();
-        Check(!owner.CanEdit, "cancelling shutdown cannot turn a failed read into a loaded configuration");
+        Check(!owner.CanEdit, "failed reads cannot enable configuration writes");
         guarded.FailReads = false;
         await owner.LoadAsync();
         Check(owner.CanEdit && owner.Behavior == WindowCloseBehavior.Ask && owner.Status == "");
@@ -157,10 +156,10 @@ public static class AppClosePreferencesTests
         Check(owner.Behavior == WindowCloseBehavior.MinimizeToTray && !owner.CanEdit && store.Writes == 1);
         Check(!await owner.SaveAsync(WindowCloseBehavior.MinimizeToTray),
             "even an unchanged preference cannot claim a save while stopping");
-        await owner.CancelShutdownPreparationAsync();
-        Check(owner.CanEdit);
-        Check(await owner.SaveAsync(WindowCloseBehavior.Exit) && owner.Behavior == WindowCloseBehavior.Exit &&
-            store.Writes == 2 && !store.Disposed, "cancelling shutdown reopens the same owner without losing storage");
+        await owner.DisposeAsync();
+        await using var reopened = new AppClosePreferences(store); await reopened.LoadAsync();
+        Check(reopened.CanEdit && reopened.Behavior == WindowCloseBehavior.MinimizeToTray &&
+            store.Writes == 1 && !store.Disposed, "a new owner reads the acknowledged write without replay");
     }
 
     private static async Task Release()

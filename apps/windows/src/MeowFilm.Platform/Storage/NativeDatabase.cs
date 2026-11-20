@@ -104,7 +104,8 @@ public sealed class NativeDatabase : IStorageDatabase
                 target.Open(); source.Connection.BackupDatabase(target);
                 var snapshot = new DatabaseSession(target);
                 VerifySchema(snapshot, ReadSchema());
-                if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok")
+                if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok" ||
+                    snapshot.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
                     throw new DocumentStoreException(DocumentStoreError.Corrupt);
                 RandomAccess.FlushToDisk(claimed);
                 completed = true;
@@ -159,11 +160,9 @@ public sealed class NativeDatabase : IStorageDatabase
     private void Run()
     {
         Exception? failure = null;
-        bool opened = false;
         try
         {
             Open();
-            opened = true;
             ready.TrySetResult();
             while (operations.Reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
                 while (operations.Reader.TryRead(out var operation))
@@ -179,7 +178,7 @@ public sealed class NativeDatabase : IStorageDatabase
                         catch (Exception error) { operation.Fail(error); }
                     }
                     finally { lock (admission) pendingBytes -= operation.Bytes; }
-                    if (commits >= 64)
+                    if (commits >= 64 && !closing)
                     {
                         commits = 0;
                         Maintain();
@@ -206,28 +205,21 @@ public sealed class NativeDatabase : IStorageDatabase
                 operation.Fail(failure ?? new DocumentStoreException(DocumentStoreError.Closed));
                 lock (admission) pendingBytes -= operation.Bytes;
             }
+            Exception? releaseFailure = null;
             try
             {
-                if (connection is not null)
-                {
-                    if (opened)
-                    {
-                        using var lease = EnterMaintenance(exclusive: true, wait: true);
-                        MaintainLocked();
-                    }
-                    connection.Dispose();
-                }
+                // COMMIT is durable in the WAL. Closing is not a maintenance operation.
+                connection?.Dispose();
             }
             catch (Exception error)
             {
-                failure ??= Translate(error);
-                try { connection?.Dispose(); } catch (Exception closingError) { failure ??= Translate(closingError); }
+                releaseFailure = Translate(error);
             }
             connection = null;
-            try { directory?.Dispose(); } catch (Exception error) { failure ??= Translate(error); }
+            try { directory?.Dispose(); } catch (Exception error) { releaseFailure ??= Translate(error); }
             directory = null;
-            if (failure is null) stopped.TrySetResult();
-            else stopped.TrySetException(failure);
+            if (releaseFailure is null) stopped.TrySetResult();
+            else stopped.TrySetException(releaseFailure);
         }
     }
 
@@ -309,8 +301,6 @@ public sealed class NativeDatabase : IStorageDatabase
             row => string.Join("\n", row.GetString(0), row.GetString(1), row.GetString(2), row.IsDBNull(3) ? "" : row.GetString(3)));
         if (!Structure(actual).SequenceEqual(Structure(expected), StringComparer.Ordinal))
             throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
-        if (actual.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
     }
     private static bool SafeWalVersion(string text) => Version.TryParse(text, out var version) &&
         (version >= new Version(3, 51, 3) ||

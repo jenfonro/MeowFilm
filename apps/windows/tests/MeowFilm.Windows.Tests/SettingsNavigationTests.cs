@@ -60,9 +60,8 @@ public static class SettingsNavigationTests
         await module.PrepareShutdownAsync();
         try { await rules.ProcessAsync(new(FilmRuleSection.Movie, "规则")); throw new Exception("Prepared settings accepted work"); }
         catch (InvalidOperationException) { }
-        await module.CancelShutdownPreparationAsync();
-        await rules.InitializeAsync();
-        Check(starts == 1 && rules.GetSavedSnapshot().MovieRules[0].Pattern == "离线规则");
+        await module.DisposeAsync();
+        Check(starts == 1, "retirement cannot restart the shared runtime");
     }
 
     private static async Task Navigate()
@@ -72,7 +71,7 @@ public static class SettingsNavigationTests
         var novel = new Module("novel", "小说");
         await using var appearance = new AppAppearance(new QualityFixture.Database());
         await appearance.LoadAsync();
-        var shell = new ShellWindow([music, film, novel], [], () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance)
+        var shell = new ShellWindow([music, film, novel], [], () => Task.CompletedTask, appearance: appearance)
         {
         };
         try
@@ -133,7 +132,7 @@ public static class SettingsNavigationTests
         await using var appearance = new AppAppearance(new QualityFixture.Database());
         await appearance.LoadAsync();
         var shell = new ShellWindow([new Module("music", "音乐"), new Module("film", "影视"), novel], [],
-            () => novel.DisposeAsync().AsTask(), () => novel.DisposeAsync().AsTask(), appearance: appearance)
+            () => novel.DisposeAsync().AsTask(), appearance: appearance)
         {
         };
         var root = (FrameworkElement)shell.Content;
@@ -287,7 +286,6 @@ public static class SettingsNavigationTests
         public string CaptureNavigationLocation() => "home";
         public Task RestoreNavigationAsync(string location, CancellationToken token) => Task.CompletedTask;
         public Task PrepareShutdownAsync() => Task.CompletedTask;
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

@@ -81,7 +81,11 @@ final class MeowfilmAssembly: ObservableObject {
         observers.append(center.addObserver(
             forName: UIApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.shutdown() }
+            MainActor.assumeIsolated {
+                // iOS may terminate without this notification. Durable state is
+                // committed during use; only stop immediate media output here.
+                self?.playback.stop(owner: "music")
+            }
         })
         observers.append(center.addObserver(
             forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
@@ -406,6 +410,10 @@ final class MeowfilmAssembly: ObservableObject {
         let filmSearch = filmSearch, films = filmModels, filmMedia = filmMedia, filmBackground = filmBackground
         let novel = novel
         stopping = Task { [weak self] in
+            // Stop the producer before waiting for its borrowers. Only this App
+            // owner confirms embedded Node exit; borrowers drain local work.
+            async let executor: Void? = resources?.scriptSession.close()
+            async let platform: Void? = resources?.musicPlatform.close()
             await model?.close()
             await service?.prepareForClose()
             // Local facts and frozen ends now belong to the feedback owner.
@@ -417,7 +425,7 @@ final class MeowfilmAssembly: ObservableObject {
             await filmBackground?.value
             for film in films {
                 await film.close()
-                if !film.isReleased, self?.shutdownError == nil {
+                if !film.canLeave, self?.shutdownError == nil {
                     self?.shutdownError = (film.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")).localizedDescription
                 }
             }
@@ -437,9 +445,9 @@ final class MeowfilmAssembly: ObservableObject {
                self?.shutdownError == nil {
                 self?.shutdownError = MusicServiceError.commitUnconfirmed.localizedDescription
             }
-            do { try await resources?.musicPlatform.close() }
+            do { try await platform }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
-            await resources?.scriptSession.close()
+            await executor
             await resources?.musicAudioCache?.close()
             await resources?.musicPresentationCache.close()
             await self?.appearance.close()
@@ -474,6 +482,8 @@ final class MeowfilmAssembly: ObservableObject {
     /// Resources produced after cancellation still belong to this start attempt.
     /// No service may survive just because its install was never published.
     private nonisolated static func closeSettings(_ resources: MeowfilmResources) async {
+        async let executor: Void = resources.scriptSession.close()
+        async let platform: Void = resources.musicPlatform.close()
         await resources.novelRules.close()
         try? await resources.novelRuntime.close()
         await resources.novelLibrary.close()
@@ -481,8 +491,8 @@ final class MeowfilmAssembly: ObservableObject {
         await resources.filmSourceSettings.close()
         try? await resources.musicScripts.close()
         await resources.musicAccountGate?.close()
-        try? await resources.musicPlatform.close()
-        await resources.scriptSession.close()
+        try? await platform
+        await executor
         await resources.musicAudioCache?.close()
         await resources.musicPresentationCache.close()
         do { try resources.musicLibrary.close() } catch { NSLog("Music repository shutdown failed") }
@@ -499,6 +509,8 @@ final class MeowfilmAssembly: ObservableObject {
         let closeNovel = closeNovel
         Task { @MainActor in
             if let stopping { await stopping.value; return }
+            async let executor: Void? = resources?.scriptSession.close()
+            async let platform: Void? = resources?.musicPlatform.close()
             await closeMusic?()
             await service?.prepareForClose()
             service?.revokeAccess(generation: musicAccessGeneration)
@@ -511,7 +523,7 @@ final class MeowfilmAssembly: ObservableObject {
             }
             for film in films {
                 await film.close()
-                if !film.isReleased { NSLog("Film session shutdown failed") }
+                if !film.canLeave { NSLog("Film session shutdown failed") }
             }
             do { try await filmMedia?.close() }
             catch { NSLog("Film media shutdown failed") }
@@ -526,9 +538,9 @@ final class MeowfilmAssembly: ObservableObject {
             if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete {
                 NSLog("Music account shutdown incomplete")
             }
-            do { try await resources?.musicPlatform.close() }
+            do { try await platform }
             catch { NSLog("Music platform shutdown failed") }
-            await resources?.scriptSession.close()
+            await executor
             await resources?.musicAudioCache?.close()
             await resources?.musicPresentationCache.close()
             do { try await resources?.database.close() } catch { NSLog("Database shutdown failed") }

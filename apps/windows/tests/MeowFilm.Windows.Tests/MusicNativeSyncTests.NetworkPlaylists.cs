@@ -92,7 +92,8 @@ public static partial class MusicNativeSyncTests
             ifRevision = before.GetProperty("revision").GetInt64(), confirm = true
         }));
     }
-    private static int LocalSongCount(Fixture fixture) => MusicTestStores.For(fixture.Store).SongIds().Count;
+    private static int LocalSongCount(Fixture fixture) => Task.Run(() => MusicTestStores.For(fixture.Store).SongIds().Count)
+        .GetAwaiter().GetResult();
 
     private static async Task NetworkLocalOnly(string platform)
     {
@@ -164,7 +165,7 @@ public static partial class MusicNativeSyncTests
         Check(f.Server.SubscriptionWrites == 1);
         await f.Restart();
         snapshot = await f.Owner.ReadLibrarySyncAsync();
-        Check(snapshot.State.GetProperty("pending").GetRawText() == pending.GetRawText() &&
+        Check(JsonNode.DeepEquals(JsonNode.Parse(snapshot.State.GetProperty("pending").GetRawText()), JsonNode.Parse(pending.GetRawText())) &&
             snapshot.Library.GetProperty("accounts").GetProperty(platform).GetString() == accountId &&
             snapshot.Library.GetProperty("networkPlaylists")[0].GetProperty("intent").GetProperty("accountId").GetString() == accountId);
         f.Server.FailReads = false; f.Server.FailSubscriptionReadback = false;
@@ -182,7 +183,8 @@ public static partial class MusicNativeSyncTests
             JsonNode.DeepEquals(JsonNode.Parse(pending.GetProperty("locator").GetRawText()),
                 JsonNode.Parse(locator.GetRawText())));
         await f.Restart();
-        Check((await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").GetRawText() == pending.GetRawText());
+        Check(JsonNode.DeepEquals(JsonNode.Parse((await f.Owner.ReadLibrarySyncAsync()).State.GetProperty("pending").GetRawText()),
+            JsonNode.Parse(pending.GetRawText())));
         f.Server.FailReads = false; f.Server.FailSubscriptionReadback = false;
         Ok(await f.Run()); Ok(await f.Run());
         Check(f.Server.Operations.SequenceEqual(["subscribe", "unsubscribe"]) &&

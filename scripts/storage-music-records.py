@@ -99,11 +99,15 @@ intents = relation(collections, "intents", "dictionary", "present:b pending:b or
 values(intents, "acknowledged")
 values(lib, "accounts", dictionary=True)
 status(lib, "status")
-for name in ("networkReferences", "networkPlaylists"):
-    refs = relation(lib, name, "array",
-                    "platform:t remoteID:t remoteId:t name:t creator:t artwork:t cover:t count:i revision:i present:b pending:b",
-                    identity="id")
-    relation(refs, "relation", "object", "accountId:t baseline:b relationID:t locator:t")
+refs = relation(lib, "networkReferences", "array",
+                "platform:t remoteID:t remoteId:t name:t creator:t artwork:t cover:t count:i revision:i present:b pending:b",
+                identity="id")
+relation(refs, "relation", "object", "accountId:t baseline:b relationID:t locator:t")
+playlists = relation(lib, "networkPlaylists", "array",
+                     "platform:t remoteId:t name:t cover:t count:i revision:i present:b", identity="id")
+subscription = relation(playlists, "subscription", "object", "accountId:t present:b")
+relation(subscription, "locator", "object", "listId:t creatorId:t creatorListId:t")
+relation(playlists, "intent", "object", "accountId:t present:b")
 
 sync = relation(library, "sync", "object", "schema:i phase:t")
 relation(sync, "selections", "array", "platform:t favorites:b playlists:b")
@@ -199,10 +203,9 @@ pending = relation(windows_sync, "pending", "object",
                    "platform:t accountId:t collectionId:t remoteId:t operation:t beforePresent:b desiredPresent:b name:t")
 for name in ("before", "desired", "ids", "directory"):
     values(pending, name)
-relation(pending, "locator", "object", "relationId:t relationID:t id:t remoteId:t")
+relation(pending, "locator", "object", "listId:t creatorId:t creatorListId:t")
 for name in ("confirmation", "approved"):
-    row = relation(windows_sync, name, "object", "id:t code:t platform:t count:i digest:t signature:t")
-    values(row, "collections")
+    relation(windows_sync, name, "object", "token:t code:t count:i")
 status(windows_sync, "status")
 
 # Native service caches keep explicit, finite display/evidence projections.

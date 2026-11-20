@@ -140,7 +140,7 @@ public static partial class MusicRecommendationTests
         yield return new("Recommendation active recommendation return retains current and latest loop", ReturnPaused);
         yield return new("Recommendation direct catalog commit wrapper retires session", CatalogCommit);
         yield return new("Recommendation account invalidation stops only live owned playback", Account);
-        yield return new("Recommendation cancellation physically drains and reopening never revives", CancelClose);
+        yield return new("Recommendation retirement physically drains without reviving the queue", CancelClose);
         yield return new("Recommendation identical in-flight start reuses one physical request and session", DuplicateStart);
         yield return new("Recommendation new start waits old physical read no overlap", Replacement);
         yield return new("Recommendation commit unknown only explicit reconcile no duplicate write", Unknown);
@@ -166,7 +166,7 @@ public static partial class MusicRecommendationTests
         yield return new("Recommendation overlapping FM switches retain last committed mode after failure", FmSwitchOverlap);
         yield return new("Recommendation same FM id reconciles retired switch ACK into current facts without autoplay", FmSwitchUnknown);
         yield return new("Recommendation FM selection during channel read fences late playback but retains valid batch", FmSwitchEdit);
-        yield return new("Recommendation Dispose admission cannot be reversed by Resume", DisposalAdmission);
+        yield return new("Recommendation Dispose seals admission before physical drain", DisposalAdmission);
     }
     private static async Task<JsonElement> StartSource(Fixture f, string kind)
     {
@@ -1322,7 +1322,7 @@ public static partial class MusicRecommendationTests
         f.Rec.Invalidate("wy"); Check(f.Rec.GetFeedback(entry) is null);
         await stopped.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await f.Rec.PrepareCloseAsync(); Check(f.Selections.Any(s => s.Action == MusicRecommendationPlaybackAction.Stop));
-        f.Rec.Resume(); Check(!(await f.State()).GetProperty("active").GetBoolean());
+        Check(!(await f.State()).GetProperty("active").GetBoolean());
     }
     private static async Task CancelClose()
     {
@@ -1330,9 +1330,9 @@ public static partial class MusicRecommendationTests
         var hold = new Hold(); f.Catalog.Handle = hold.Read;
         var start = f.Start("fm"); await hold.Entered.Task;
         var close = f.Rec.PrepareCloseAsync(); await hold.Cancelled.Task; Check(!close.IsCompleted);
-        try { f.Rec.Resume(); throw new InvalidOperationException("early resume"); } catch (RecommendationException e) { Check(e.Code == "NOT_DRAINED"); }
-        hold.Complete("fm", "99"); await start; await close; f.Rec.Resume();
-        Check(N(await f.Q(), "total") == 1 && f.Selections.IsEmpty && S(await f.State(), "id") == "");
+        Check(S(await f.Start("fm"), "code") == "CLOSED");
+        hold.Complete("fm", "99"); await start; await close;
+        Check(N(await f.Q(), "total") == 1 && f.Selections.IsEmpty && !(await f.State()).GetProperty("active").GetBoolean());
     }
     private static async Task DuplicateStart()
     {
@@ -1507,7 +1507,7 @@ public static partial class MusicRecommendationTests
         catch (RecommendationException e) { Check(e.Code == "COMMIT_UNKNOWN"); }
         var resolved = await f.Rec.ExecuteAsync("music.recommendations.reconcile", new { id = S(start, "id") });
         Check(!resolved.GetProperty("requiresReconcile").GetBoolean());
-        await f.Rec.PrepareCloseAsync(); f.Rec.Resume();
+        await f.Rec.PrepareCloseAsync();
     }
     private static async Task UnknownAbort()
     {
@@ -1630,10 +1630,9 @@ public static partial class MusicRecommendationTests
         var start = f.Start("fm"); await hold.Entered.Task;
         var dispose = f.Rec.DisposeAsync().AsTask(); await hold.Cancelled.Task;
         string code = "";
-        try { f.Rec.Resume(); }
-        catch (RecommendationException error) { code = error.Code; }
+        try { code = S(await f.Start("fm"), "code"); }
         finally { hold.Complete("fm", "10"); await start; await dispose; }
-        Check(code == "CLOSED", "Dispose admission must permanently close Resume, not merely wait for preparation");
+        Check(code == "CLOSED", "Dispose seals new work before its accepted request drains");
     }
     private sealed class Sessions : IMusicPlatformSessionSource
     {

@@ -928,7 +928,7 @@ public static partial class MusicUiTests
                 "a larger total does not discard the actual returned navigation rows");
             Equal("", f.Module.Status);
         });
-        yield return Case("malformed success preserves old page; failed runtime shutdown is asserted", async () =>
+        yield return Case("malformed success preserves old page; failed save does not prevent release", async () =>
         {
             await using (var f = await Fixture.Create())
             {
@@ -942,9 +942,8 @@ public static partial class MusicUiTests
             var runtime = new FailedApplication(); var module = new MusicCapability(runtime, store, native);
             await Failure(() => module.InitializeAsync(default), "STORAGE_UNAVAILABLE");
             Equal(0, module.Playlists.Count); Equal("", module.Status); True(!native.HasMedia, "no phantom media");
-            // A shutdown flush failure is a failure, not an unconditional catch in await using.
-            await Failure(() => module.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE");
-            await Failure(() => module.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE"); Equal(1, runtime.Prepares);
+            await Failure(() => module.PrepareShutdownAsync(), "STORAGE_UNAVAILABLE");
+            await module.DisposeAsync(); await module.DisposeAsync(); Equal(1, runtime.Prepares);
         });
         yield return Case("prepare seals admission, drains accepted writes, then dispose shares one flush", async () =>
         {
@@ -980,7 +979,7 @@ public static partial class MusicUiTests
             Equal(3, await f.SavedMode());
             True((await MusicTestStores.For(f.Store).ReadAsync("local")).Revision.Generation > 0, "product still owns the store");
         });
-        yield return Case("failed prepare preserves runtime/store and final disposal observes its cached failure", async () =>
+        yield return Case("failed prepare keeps its receipt while final disposal releases the sealed owner", async () =>
         {
             var f = await Fixture.Create();
             f.Calls.FailNext("application.prepare", "STORAGE_UNAVAILABLE");
@@ -1003,16 +1002,14 @@ public static partial class MusicUiTests
                 Equal(count, f.Calls.Log.Count);
                 Equal(before, (await MusicTestStores.For(f.Store).ReadAsync("local")).Revision);
                 Equal(2, await f.SavedMode());
-                // The host may now offer explicit force-exit. Final cleanup must
-                // observe the same failed task and still release module resources.
-                await Failure(() => f.Module.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE");
-                await Failure(() => f.Module.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE");
+                await f.Module.DisposeAsync(); await f.Module.DisposeAsync();
+                await Failure(() => preparation, "STORAGE_UNAVAILABLE");
                 True(token.IsCancellationRequested, "failed finalization still cleans up lifetime");
                 Equal(1, f.Calls.Count("application.prepare")); Equal(1, f.Calls.DisposeCalls); Equal(0, f.Runtime.DisposeCalls);
                 Equal(before, (await MusicTestStores.For(f.Store).ReadAsync("local")).Revision);
                 Equal(2, await f.SavedMode());
             }
-            finally { await Failure(() => f.DisposeAsync().AsTask(), "STORAGE_UNAVAILABLE"); }
+            finally { await f.DisposeAsync(); }
         });
         yield return Case("direct dispose cancels late navigation, drains history and flushes only once", async () =>
         {
@@ -1025,34 +1022,8 @@ public static partial class MusicUiTests
             Equal(title, f.Module.Heading); Equal(1, f.Calls.Count("application.prepare"));
             f.Playback.End(); f.Playback.Start(); await Drain(); Equal(0, f.Calls.Count("music.queue.next"));
         });
-        yield return Case("two-phase cancel restores Native application and subscriptions once without replaying accepted writes", async () =>
-        {
-            await using var f = await Fixture.Create();
-            await f.PlayableCollection(); await f.Module.PlaySelectionAsync(); f.Playback.Start();
-            await Until(() => f.Calls.Count("music.history.recordPlayed") == 1);
-            var prepare = f.Module.PrepareShutdownAsync(); await prepare;
-            Equal(0, f.Playback.Subscribers); True(!f.Module.CanEdit, "paused UI");
-            await ResumeAndDrain(f);
-            await f.Module.CancelShutdownPreparationAsync();
-            Equal(4, f.Playback.Subscribers); True(f.Module.CanEdit, "actual UI admission resumed");
-            f.Playback.Start(); await Drain(); Equal(1, f.Calls.Count("music.history.recordPlayed"));
-            await f.Module.ChangeModeAsync(2); Equal(2, f.Module.Mode);
-            var again = f.Module.PrepareShutdownAsync(); True(!ReferenceEquals(prepare, again), "fresh preparation generation");
-            await again; Equal(2, f.Calls.Count("application.prepare")); Equal(0, f.Playback.Subscribers);
-            await ResumeAndDrain(f);
-            Equal(4, f.Playback.Subscribers); Equal(2, await f.SavedMode());
-        });
-        yield return Case("failed UI preparation can resume explicitly without disposing application runtime or store", async () =>
-        {
-            await using var f = await Fixture.Create();
-            f.Calls.FailNext("application.prepare", "STORAGE_UNAVAILABLE");
-            await Failure(() => f.Module.PrepareShutdownAsync(), "STORAGE_UNAVAILABLE");
-            await ResumeAndDrain(f);
-            True(f.Module.CanEdit, "failed product preparation is recoverable");
-            Equal(4, f.Playback.Subscribers); Equal(0, f.Calls.DisposeCalls); Equal(0, f.Runtime.DisposeCalls);
-            await f.Module.ChangeModeAsync(3); Equal(3, f.Module.Mode);
-            await f.Module.PrepareShutdownAsync(); Equal(2, f.Calls.Count("application.prepare"));
-        });
+
+
         yield return Case("local document restart restores library/mode/current without starting media", async () =>
         {
             var root = NewRoot(); string id, title;
@@ -1144,12 +1115,7 @@ public static partial class MusicUiTests
         try { await action(); } catch (Exception error) when (error.Message == code) { return; }
         throw new InvalidOperationException("Expected bounded failure " + code);
     }
-    private static async Task ResumeAndDrain(Fixture fixture)
-    {
-        await fixture.Module.CancelShutdownPreparationAsync();
-        Equal(4, fixture.Playback.Subscribers);
-        await Until(() => fixture.Module.CanEdit);
-    }
+
     private static async Task Until(Func<bool> predicate)
     {
         var watch = Stopwatch.StartNew();
@@ -1275,8 +1241,7 @@ public static partial class MusicUiTests
             }
             await Inner.PrepareShutdownAsync(cancellationToken);
         }
-        public override Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-            => Inner.CancelShutdownPreparationAsync(cancellationToken);
+
         public override async ValueTask DisposeAsync()
         {
             DisposeCalls++;

@@ -32,7 +32,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private readonly MusicPlaybackPresentation playbackPresentation;
     private Task commandTail = Task.CompletedTask;
     private readonly HashSet<Task> eventWrites = [];
-    private Task? preparation, resumption, disposal, abortion;
+    private Task? preparation, abortion;
     private string status = "", heading = "推荐";
     private PlaylistRow? collection;
     private SongRow? current, selectedSong;
@@ -975,14 +975,11 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     }
     public Task PrepareShutdownAsync()
     {
-        if (resumption is { IsCompleted: false } recovering) return PrepareAfterResume(recovering);
         if (preparation is not null) return preparation;
         FinishFeedback("interrupt");
-        MusicDesktopLyricsWindowState? lyricsState = null;
         if (desktopLyricsWindow is { } activeLyrics)
         {
             var state = activeLyrics.CapturePresentationState();
-            if (IsDesktopLyricsOpen) lyricsState = state;
             if (desktopLyricSettingsLoaded && state.Geometry is { } geometry)
                 _ = activeLyrics.SaveGeometryForShutdown(geometry);
         }
@@ -990,7 +987,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         desktopLyricsOpening = false;
         desktopLyricsReopenAfterClose = false;
         stopping = true; // Seal admission synchronously, before yielding to any callback.
-        PrepareDesktopLyricsShutdown(lyricsState);
+        PrepareDesktopLyricsShutdown();
         RetireQueueSurfaceRequest();
         Presentation.DeactivateDetail();
         SealRecommendations();
@@ -1004,8 +1001,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         _ = vipPage.PrepareShutdownAsync();
         return preparation = PrepareCore();
     }
-    private async Task PrepareAfterResume(Task recovering)
-    { await recovering; await PrepareShutdownAsync(); }
+
     private void SubscribePlayback()
     {
         if (playbackSubscribed) return;
@@ -1053,7 +1049,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         await Task.WhenAll(commandTail, accountRead, accountSettlement, Task.WhenAll(eventWrites.ToArray()),
             Task.WhenAll(loadDrains.ToArray()), RetireSearchHistoryAsync());
         // A failure stays cached, sealed and observable. Do not tear down the
-        // lifetime or any App-owned runtime/store/player before forced exit.
+        // lifetime or any App-owned runtime/store/player before final release.
         Exception? failure = accountSaveUncertain ? new MusicOperationException("COMMIT_UNKNOWN") : settingsFailure;
         try { await SaveVolumeCore(lifetime.Token); }
         catch (Exception error) { failure ??= error; }
@@ -1066,51 +1062,11 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         await database.DrainAsync();
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
-    public ValueTask DisposeAsync()
-    {
-        if (abortion is not null) return new(abortion);
-        var prepare = PrepareShutdownAsync();
-        return new(disposal ??= DisposeCore(prepare));
-    }
-    public Task CancelShutdownPreparationAsync()
-    {
-        if (disposed || disposal is not null || abortion is not null) return Task.FromException(new InvalidOperationException("CLOSED"));
-        if (preparation is null && resumption is null) return Task.CompletedTask;
-        return resumption ??= ResumeCore(preparation!);
-    }
-    private async Task ResumeCore(Task prepare)
-    {
-        await Task.Yield();
-        try { await prepare; } catch { /* The owning services retain unresolved receipts. */ }
-        if (disposed || disposal is not null || abortion is not null) throw new InvalidOperationException("CLOSED");
-        await application.CancelShutdownPreparationAsync();
-        if (disposed || disposal is not null || abortion is not null) throw new InvalidOperationException("CLOSED");
-        RetireCatalogSession(); // Never revive private visual cache or a prepared playlist token.
-        SubscribePlayback();
-        preparation = null; resumption = null; stopping = false;
-        try { await EnsureCatalogSourceSettingsAsync(lifetime.Token); }
-        catch { /* The source setting publishes its retry notice without blocking shutdown cancellation. */ }
-        ResumeRecommendations();
-        await RecommendationCommand("music.recommendations.get", new { });
-        if (playback is IMusicPlaybackRate && current is { } surviving && OwnsCurrent && playback.HasMedia)
-        {
-            var epoch = playbackEpoch;
-            // Preparation does not own the App's local-file player. A
-            // physically settled late rate command may have changed that input;
-            // reapply the last accepted intent without opening/resuming media.
-            await RunAsync(() => RestorePlaybackRateAsync(surviving, epoch, lifetime.Token));
-        }
-        LibrarySyncChanged(); // A restarted fast round may have finished while the module was still sealed.
-        if (Presentation.IsSettingsActive) await ActivateSettingsAsync();
-        RefreshBindings();
-        if (Presentation.IsPageActive && IsDiscovery) await ActivateDiscoveryViewAsync();
-        await vipPage.CancelShutdownPreparationAsync();
-        await ResumeDesktopLyricsAsync();
-    }
+    public ValueTask DisposeAsync() => new(AbortAsync());
+
     public Task AbortAsync()
     {
         if (abortion is not null) return abortion;
-        if (disposal is not null) return disposal;
         var prepare = preparation ?? PrepareShutdownAsync();
         return abortion = AbortCore(prepare);
     }
@@ -1121,12 +1077,11 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         stopping = true;
         ReleaseDesktopLyrics();
         try { lifetime.Cancel(); } catch (Exception error) { failure = error; }
-        try { await prepare; } catch { /* Explicit unsaved exit, not a successful save. */ }
-        if (resumption is { } recovering) { try { await recovering; } catch { } }
+        try { await prepare; } catch { /* The save receipt retains its failure; release still retires settled owners. */ }
         try { await DisposeLibrarySyncAsync(); } catch (Exception error) { failure ??= error; }
         try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
         try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-        try { await application.AbortAsync(); } catch (Exception error) { failure ??= error; }
+        try { await application.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         if (application is MusicNativeApplication repositoryOwner)
             repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
         try { await ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
@@ -1136,41 +1091,6 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         UnsubscribeDiscovery();
         ReleaseRecommendations();
         disposed = true; UnsubscribePlayback(); lifetime.Dispose();
-        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
-    }
-    private async Task DisposeCore(Task prepare)
-    {
-        await Task.Yield(); // Cache the finalization task before synchronous completion/re-entry.
-        Exception? failure = null;
-        try { await prepare; } // Observe the same failure; never repeat preparation.
-        catch (Exception error) { failure = error; }
-        finally
-        {
-            disposed = true;
-            ReleaseDesktopLyrics();
-            UnsubscribeSearch();
-            UnsubscribeDiscovery();
-            ReleaseRecommendations();
-            try { lifetime.Cancel(); }
-            catch (Exception error) { failure ??= error; }
-            finally { lifetime.Dispose(); }
-            if (resumption is { } recovering) { try { await recovering; } catch { } }
-            try { await DisposeLibrarySyncAsync(); }
-            catch (Exception error) { failure ??= error; }
-            try { await DisposeAccountDetailsAsync(); }
-            catch (Exception error) { failure ??= error; }
-            try { await vipPage.DisposeAsync(); }
-            catch (Exception error) { failure ??= error; }
-            try { await application.DisposeAsync(); }
-            catch (Exception error) { failure ??= error; }
-            if (application is MusicNativeApplication repositoryOwner)
-                repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
-            try { await ArtworkLoader.DisposeAsync(); }
-            catch (Exception error) { failure ??= error; }
-            if (ownsPresentationCache)
-            try { await presentationCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-            // The capability owns its application. Runtime, store and playback remain App-owned.
-        }
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }

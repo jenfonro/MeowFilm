@@ -8,7 +8,6 @@ public sealed partial class MusicCapability
     private Window? desktopLyricsOwner;
     private Action? activateDesktopLyricsOwner;
     private MusicDesktopLyricsWindow? desktopLyricsWindow;
-    private MusicDesktopLyricsWindowState? restoreDesktopLyrics;
     private bool desktopLyricsOpening, desktopLyricsReopenAfterClose;
     private long desktopLyricsOpenEpoch;
     private bool showLyricTranslation = true;
@@ -144,24 +143,10 @@ public sealed partial class MusicCapability
         Changed(nameof(DesktopLyricTranslation));
     }
 
-    private void PrepareDesktopLyricsShutdown(MusicDesktopLyricsWindowState? state)
+    private void PrepareDesktopLyricsShutdown()
     {
         desktopLyricsReopenAfterClose = false;
-        restoreDesktopLyrics = state;
         desktopLyricsWindow?.CloseForShutdown();
-        Changed(nameof(CanToggleDesktopLyrics));
-    }
-
-    private async Task ResumeDesktopLyricsAsync()
-    {
-        var restore = restoreDesktopLyrics;
-        restoreDesktopLyrics = null;
-        if (stopping || disposed || disposal is not null || abortion is not null) return;
-        if (restore is { } state && CanToggleDesktopLyrics)
-        {
-            await ToggleDesktopLyricsAsync(state);
-        }
-        else if (NeedsLyrics) await RestoreLyricsAsync();
         Changed(nameof(CanToggleDesktopLyrics));
     }
 
@@ -170,7 +155,6 @@ public sealed partial class MusicCapability
         desktopLyricsOpenEpoch++;
         desktopLyricsOpening = false;
         desktopLyricsReopenAfterClose = false;
-        restoreDesktopLyrics = null;
         if (desktopLyricsOwner is not null) desktopLyricsOwner.Closed -= DesktopLyricsOwnerClosed;
         desktopLyricsOwner = null;
         activateDesktopLyricsOwner = null;

@@ -347,7 +347,7 @@ public static partial class FilmPlayerOverlayTests
                 scene.shell = new([scene.Music, scene.Film], [], async () =>
                 {
                     await scene.Film.DisposeAsync(); await scene.Music.DisposeAsync();
-                }, () => Task.CompletedTask, closePreferences: scene.closePreferences);
+                }, closePreferences: scene.closePreferences);
                 scene.Shell.Resize(1120, 820); DesktopTestUi.MoveWindow(scene.Shell, 40, 40);
                 ((Microsoft.UI.Windowing.OverlappedPresenter)scene.Shell.AppWindow.Presenter).IsAlwaysOnTop = true;
                 scene.Shell.Activate();

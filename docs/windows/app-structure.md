@@ -67,7 +67,7 @@ Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器
 
 ## 主窗口启动门槛
 
-`AppLauncher` 通过 WinUI `Application.Start` 建立唯一 UI 线程及其同步上下文，在创建首个启动窗口前安装 Desktop 的唯一排版默认，再完成模块装配、外观和窗口关闭偏好读取，依次等待实现 `IDesktopStartupParticipant` 的模块完成 `PrepareStartupAsync`，随后才构造 `ShellWindow` 并调用 `Activate()`。现有启动窗口承载等待、失败和重试；模块完整的 `InitializeAsync` 仍由桌面壳的选中模块生命周期负责。外观与关闭偏好作为 App 共享参与者加入两阶段关闭；主窗口拥有原生托盘，隐藏到托盘不进入 App 关闭流程，具体行为见[桌面壳](desktop-shell.md#系统托盘与关闭选择)。
+`AppLauncher` 通过 WinUI `Application.Start` 建立唯一 UI 线程及其同步上下文，在创建首个启动窗口前安装 Desktop 的唯一排版默认，再完成模块装配、外观和窗口关闭偏好读取，依次等待实现 `IDesktopStartupParticipant` 的模块完成 `PrepareStartupAsync`，随后才构造 `ShellWindow` 并调用 `Activate()`。现有启动窗口承载等待、失败和重试；模块完整的 `InitializeAsync` 仍由桌面壳的选中模块生命周期负责。外观与关闭偏好作为 App 共享参与者加入同进程退役；主窗口拥有原生托盘，隐藏到托盘不进入 App 关闭流程，具体行为见[桌面壳](desktop-shell.md#系统托盘与关闭选择)。
 
 音乐参与者只完成最小本地准备：通过 `music.accounts.list` 恢复账号状态，读取 `music.catalogSource.settings.get` 和 `music.home.v3`。账号与来源恢复失败不能冒充游客或默认来源；不等待网络登录验证、账号资料或首页 HTTP。快照缺失、不可读取或不能解码为可用展示时均视为未命中，允许正常首载；不把缓存错误变成启动门槛，也不把真实首页请求失败改写为成功空结果。
 
@@ -90,8 +90,10 @@ App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能�
 
 通用设置的清除操作由 `AppLauncher` 注入，不由音乐或影视模块互相清理数据。`UserDataDirectory` 的一次待清理请求同时覆盖 `AppDataPaths.Documents`（`aggregate`）与 `AppDataPaths.Caches`（`aggregate-cache`）；前者包含全部 Node 元数据／媒体／脚本缓存，后者包含全部原生缓存文档、账号展示快照及音频文件，不按命名空间清单筛选。两根仍保留独立存储队列和根锁；普通启动只取得 App 准入，不打开或创建可选缓存根。
 
-`AppUserDataReset` 串行持有一次已确认操作的阶段：记录待清理请求、真实释放旧代、删除两根自有数据、重新装配；失败显式重试只继续未成功的阶段。旧窗口取消导航并锁定交互，媒体设置先封住系统输入，随后使用 `AppShutdown.ForceReleaseAsync` 退役全部所有者，包含共享 SQLite 与可选资源目录的 owner。内存缓存随旧代释放；缓存落盘尚未结算、任一根删除失败或释放超时，都不能放行新代启动。删除前两根均取得排他删除句柄，任一仍有存储占用则不开始删另一根。
+`AppUserDataReset` 串行持有一次已确认操作的阶段：记录待清理请求、真实释放旧代、删除两根自有数据、重新装配；失败显式重试只继续未成功的阶段。旧窗口取消导航并锁定交互，媒体设置先封住系统输入，随后使用单向 `AppShutdown.CloseAsync` 同时停止业务所有者和运行器，包含共享 SQLite 与可选资源目录的 owner。内存缓存随旧代释放；缓存落盘尚未结算、任一根删除失败或实际释放失败，都不能放行新代启动。删除前两根均取得排他删除句柄，任一仍有存储占用则不开始删另一根。
 
-强制释放先确认共享运行器真实退役；原生消费者通过[运行器关闭回执](app-runtime.md#所有权与关闭)完成本地排空，不向退役宿主再次请求会话重置或图片释放，真实关闭失败仍阻断删除与替代代次。清除失败后的托盘退出与浮层退出复用同一单飞 abort 路径；尚未确认、清除中或退出中不接纳竞争动作，也不改走普通保存关闭。
+共享运行器在业务停止开始时立即退役；原生消费者通过[运行器关闭回执](app-runtime.md#所有权与关闭)完成本地排空，不向退役宿主再次请求会话重置或图片释放，真实关闭失败仍阻断删除与替代代次。清除失败后的退出直接走进程退出路径，不重试整套释放；持久重置标记留待冷启动完成。清除进行中不接纳竞争动作。
 
 两根全部清除后才移除 pending，关闭旧 Shell，但不退出 WinUI Application 及其 UI 线程；复用启动/失败重试窗口创建新的 `AppStartup`、store、cache owner、runtime、业务模块、偏好、播放和窗口附件。小说原生写入、规则 RPC 与 Web 交互随旧 owner 取消并排空，搜索页及导航委托一并释放并重新装配，不借用旧 `NovelCapability`。入口装配闭包在资源成功释放后清空，旧 Shell 的 Closed 不会终止替代代次。程序 PID 不变，无需手动重启。中断后的进程启动先继续同一请求，部分删除失败仍不准入业务；完成请求的重试不再删除新代业务或缓存。范围及文件排他边界见[本机数据清除](protected-storage.md#clear-all-local-user-data)。
+
+正常退出与上述同进程重置分别处理：Shell 立即关窗，AppHost 停止播放器和 Node、封闭数据库准入并完成已经接纳的事务，然后结束应用消息循环。正常退出不等待全部业务 owner 的取消、网络 ACK 或资源释放证明。启动窗口关闭也直接取消启动并结束应用，不保留清理超时／重试清理循环。

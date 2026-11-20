@@ -208,3 +208,24 @@ test('default Node HTTP preserves URL, headers and cookies, retains large decode
   }
   peer.check();
 });
+
+test('close aborts a dispatched mutation without waiting for the upstream reply and retains unknown receipt', async t => {
+  const entered = Promise.withResolvers();
+  const peer = await nativeHTTP(t, (_request, _reply) => { entered.resolve(); });
+  const storage = fixture(() => assert.fail('storage fixture must not dispatch'));
+  seedClients(storage); await storage.clientState();
+  const { createMusicPlatform } = await import('../src/index.mjs');
+  const owner = createMusicPlatform({ dataRoot: storage.root });
+  t.after(() => owner.close());
+  await owner.sessionUpdate({ platform: 'wy', session: { scope: 'synthetic', generation: 1, userId: '42',
+    cookie: 'MUSIC_U=synthetic-music-u; __csrf=synthetic-csrf' } });
+  const writing = owner.request({ platform: 'wy', operation: 'vip.checkIn', params: {} });
+  await entered.promise;
+  const deadline = AbortSignal.timeout(2000);
+  await Promise.race([owner.close(), new Promise((_, reject) => deadline.addEventListener('abort',
+    () => reject(new Error('shutdown waited for an upstream response')), { once: true }))]);
+  assert.deepEqual(await writing, { status: 'unknown', errorCode: 'CLOSED' });
+  assert.equal(peer.requests.length, 1);
+  assert.equal(peer.requests[0].closed, true);
+  assert.equal(peer.requests[0].socketClosed, true);
+});

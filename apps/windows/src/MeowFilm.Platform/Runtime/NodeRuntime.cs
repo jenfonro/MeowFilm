@@ -146,8 +146,7 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
                 original is OperationCanceledException ? "TIMEOUT" : "CLOSED";
             if (runtime is not null)
             {
-                try { await runtime.StopAsync(false).ConfigureAwait(false); }
-                catch (BridgeException stopped) when (runtime.Completion.IsCompletedSuccessfully) { failure = stopped.Code; }
+                try { await runtime.StopAsync().ConfigureAwait(false); }
                 catch { failedCleanup = true; }
             }
             else
@@ -202,12 +201,9 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
 
     private async Task MonitorAsync()
     {
-        var first = await Task.WhenAny(pipeEnd, processExit).ConfigureAwait(false);
-        // An exited child or pipe EOF can retire successfully for explicit recovery.
-        // That shared retirement task proves release, not a /v1/close receipt.
-        try { await StopAsync(false, first == pipeEnd && await pipeEnd.ConfigureAwait(false) == "INVALID_RESPONSE"
-            ? "INVALID_RESPONSE" : null).ConfigureAwait(false); }
-        catch { /* DisposeAsync retains the sanitized failure; ownership still converges. */ }
+        await Task.WhenAny(pipeEnd, processExit).ConfigureAwait(false);
+        try { await StopAsync().ConfigureAwait(false); }
+        catch { /* The owner observes actual release failure through Completion. */ }
     }
 
     private static async Task DrainAsync(Stream stream)
@@ -219,75 +215,57 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         catch (ObjectDisposedException) { }
     }
 
-    private static async Task<bool> StopProcessAsync(Process child, OwnedProcessJob? job)
+    private static async Task StopProcessAsync(Process child, OwnedProcessJob? job)
     {
-        var exited = child.WaitForExitAsync();
-        try { await exited.WaitAsync(TimeSpan.FromSeconds(3)).ConfigureAwait(false); return true; }
-        catch (TimeoutException)
+        // The Job is the lifetime boundary. Do not wait for an HTTP close ACK or
+        // a grace timer before stopping arbitrary third-party script execution.
+        if (job is not null) job.Dispose();
+        else
         {
-            // The grace period is not proof of release: the Job and exact child
-            // are terminated, then actual process exit is still awaited.
-            job?.Dispose();
+            // Startup can fail before the child is attached to its Job.
             try { if (!child.HasExited) child.Kill(entireProcessTree: true); }
             catch (InvalidOperationException) { }
-            finally { await exited.ConfigureAwait(false); }
-            return false;
         }
+        await child.WaitForExitAsync().ConfigureAwait(false);
     }
 
-    /// <summary>Releases ownership. A live session first requires a validated close ACK;
-    /// an already-retired session returns its existing release outcome.</summary>
-    public ValueTask DisposeAsync() => new(StopAsync(true));
+    /// <summary>Stops the owned executor and waits only for its actual release.</summary>
+    public ValueTask DisposeAsync() => new(StopAsync());
 
-    private Task StopAsync(bool graceful, string? failure = null)
+    private Task StopAsync()
     {
-        TaskCompletionSource stopped;
         lock (gate)
         {
             if (disposal is not null) return disposal;
-            stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            disposal = stopped.Task;
+            disposal = completion.Task;
         }
-        _ = StopCoreAsync(graceful, failure, stopped);
-        return stopped.Task;
+        _ = StopCoreAsync();
+        return disposal;
     }
 
-    private async Task StopCoreAsync(bool graceful, string? failure, TaskCompletionSource stopped)
+    private async Task StopCoreAsync()
     {
+        Exception? failure = null;
+        async Task Attempt(Func<Task> action)
+        {
+            try { await action().ConfigureAwait(false); }
+            catch (Exception error) { Interlocked.CompareExchange(ref failure, error, null); }
+        }
         try
         {
-            try { await capability.CancelAsync().ConfigureAwait(false); } catch { failure ??= "INTERNAL"; }
-            if (graceful)
-            {
-                try { await client.ShutdownAsync().ConfigureAwait(false); }
-                catch (Exception error) { failure ??= error is BridgeException known ? known.Code : "INTERNAL"; }
-            }
-            try { await client.DisposeAsync().ConfigureAwait(false); } catch { failure ??= "INTERNAL"; }
-            try { pipe.Dispose(); } catch { failure ??= "INTERNAL"; }
-            try
-            {
-                var naturalExit = await StopProcessAsync(process, job).ConfigureAwait(false);
-                if (graceful && !naturalExit) failure ??= "CLOSED";
-            }
-            catch { failure ??= "INTERNAL"; }
-            finally { job.Dispose(); }
-            // Neither a cancelled HTTP await nor Job disposal proves exit.
-            await processExit.ConfigureAwait(false);
-            if (await pipeEnd.ConfigureAwait(false) == "INVALID_RESPONSE") failure ??= "INVALID_RESPONSE";
-            await Task.WhenAll(outputDrain, errorDrain).ConfigureAwait(false);
+            // Start every interrupt before waiting for callbacks or request settlement.
+            var cancellation = Attempt(capability.CancelAsync);
+            var requests = Attempt(() => client.DisposeAsync().AsTask());
+            try { pipe.Dispose(); } catch (Exception error) { Interlocked.CompareExchange(ref failure, error, null); }
+            await StopProcessAsync(process, job).ConfigureAwait(false);
+            await Task.WhenAll(cancellation, requests,
+                Attempt(() => processExit), Attempt(async () => { await pipeEnd.ConfigureAwait(false); }),
+                Attempt(() => outputDrain), Attempt(() => errorDrain)).ConfigureAwait(false);
             process.Dispose();
-            completion.TrySetResult();
+            if (failure is null) completion.TrySetResult();
+            else completion.TrySetException(new BridgeException("INTERNAL"));
         }
-        catch
-        {
-            failure ??= "INTERNAL";
-            completion.TrySetException(new BridgeException(failure));
-        }
-        finally
-        {
-            capability.Dispose();
-            if (failure is null) stopped.TrySetResult();
-            else stopped.TrySetException(new BridgeException(failure));
-        }
+        catch { completion.TrySetException(new BridgeException("INTERNAL")); }
+        finally { capability.Dispose(); }
     }
 }

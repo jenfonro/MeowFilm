@@ -58,6 +58,10 @@ public actor MusicPlatformClient {
 
     public func publish(platform: String, session: RuntimeValue?,
                         authorize: (@Sendable () throws -> Void)? = nil) async throws {
+        if session == nil, closed || connection?.isClosed == true {
+            sessions.removeValue(forKey: platform)
+            return
+        }
         guard !closed, !shuttingDown || session == nil else { throw MusicServiceError.closed }
         try authorize?()
         let order = UUID(), previous = publications[platform]
@@ -189,9 +193,13 @@ public actor MusicPlatformClient {
         var failure: Error?
         for platform in ["wy", "tx", "kg", "kw", "mg"] {
             do { try await publish(platform: platform, session: nil) }
-            catch { if failure == nil { failure = error } }
+            catch {
+                // The App owns executor exit. A closed transport cannot retain
+                // a usable published session in this borrower.
+                if connection?.isClosed != true, failure == nil { failure = error }
+            }
         }
-        if let failure { throw failure }
+        if let failure, connection?.isClosed != true { throw failure }
     }
     public func drain() async throws {
         var failure: Error?
@@ -208,21 +216,27 @@ public actor MusicPlatformClient {
             do { try await publication.task.value }
             catch { if failure == nil { failure = error } }
         }
-        if let failure { throw failure }
+        if let failure, connection?.isClosed != true { throw failure }
     }
     public func close() async throws {
         if let closing { return try await closing.value }
         shuttingDown = true
+        let running = Array(work.values)
+        for entry in running { entry.task.cancel() }
+        for publication in publications.values {
+            publication.authorization.revoke()
+            publication.task.cancel()
+        }
+        connecting?.cancel()
         let task = Task { [self] in
             let result: Result<Void, Error>
             do { try await revoke(); result = .success(()) }
             catch { result = .failure(error) }
             closed = true
             prepareSession = nil
-            let running = Array(work.values)
-            for entry in running where !entry.writing { entry.task.cancel() }
             for entry in running { _ = await entry.task.result }
             for publication in publications.values { _ = await publication.task.result }
+            sessions.removeAll(); publications.removeAll()
             try result.get()
         }
         closing = task

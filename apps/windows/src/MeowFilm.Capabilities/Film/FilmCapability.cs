@@ -45,7 +45,6 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private string favoriteTargetId = "";
     private Task? sourceStartup;
     private Task? preparation;
-    private Task? disposal;
     private Task? abortion;
     private Task? restoringPresentation;
     private CancellationTokenSource? dataRequest;
@@ -814,34 +813,9 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (sourceStartup is not null) await sourceStartup;
     }
 
-    public async Task CancelShutdownPreparationAsync()
-    {
-        if (disposed || disposal is not null || abortion is not null)
-            throw new InvalidOperationException("CLOSED");
-        if (preparation is null) return;
-        await preparation;
-        preparation = null;
-        stopping = false;
-        rules?.Resume();
-        sources?.Resume();
-        metadata?.Resume();
-        search?.Resume();
-        if (settings is FilmSettingsView filmSettings) filmSettings.ResumePlaybackSettings();
-        if (sourceStartup is not null)
-        {
-            sourceStartup = null;
-            _ = StartSourcesAsync();
-        }
-        foreach (var section in Sections.Where(section => section.State == FilmHomeSectionState.Loading))
-            section.Cancel();
-        foreach (var section in DataSections.Where(section => section.State == FilmDataSectionState.Loading))
-            section.Cancel();
-    }
-
     public Task AbortAsync()
     {
         if (abortion is { IsFaulted: false, IsCanceled: false }) return abortion;
-        if (disposal is { IsFaulted: false, IsCanceled: false }) return disposal;
         return abortion = AbortCoreAsync();
     }
 
@@ -851,27 +825,11 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         navigationGeneration++;
         lifetime.Cancel();
         RetireRequests();
-        await DrainOperationsAsync();
-        await ReleaseSettingsAsync();
+        await Task.WhenAll(DrainOperationsAsync(), ReleaseSettingsAsync());
         Release();
     }
 
-    public ValueTask DisposeAsync()
-    {
-        if (abortion is not null) return new(AbortAsync());
-        if (disposal is not null) return new(disposal);
-        var prepare = PrepareShutdownAsync();
-        return new(disposal = DisposeCoreAsync(prepare));
-    }
-
-    private async Task DisposeCoreAsync(Task prepare)
-    {
-        await prepare;
-        lifetime.Cancel();
-        await DrainOperationsAsync();
-        await ReleaseSettingsAsync();
-        Release();
-    }
+    public ValueTask DisposeAsync() => new(AbortAsync());
 
     private async Task ReleaseSettingsAsync()
     {

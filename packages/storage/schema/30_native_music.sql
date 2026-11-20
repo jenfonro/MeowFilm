@@ -718,48 +718,66 @@ CREATE TABLE "music_library_library_networkPlaylists" (
     "scope_key" TEXT NOT NULL,
     "networkPlaylists_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 4095),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 511),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "platform" TEXT,
-    "remoteID" TEXT,
-    "remoteId_camel" TEXT,
+    "remoteId" TEXT,
     "name" TEXT,
-    "creator" TEXT,
-    "artwork" TEXT,
     "cover" TEXT,
     "count" INTEGER,
     "revision" INTEGER,
     "present" INTEGER CHECK("present" IN (0,1)),
-    "pending" INTEGER CHECK("pending" IN (0,1)),
     CHECK(("platform" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
-    CHECK(("remoteID" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
-    CHECK(("remoteId_camel" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
-    CHECK(("name" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
-    CHECK(("creator" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
-    CHECK(("artwork" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
-    CHECK(("cover" IS NULL)=((shape_mask & 64)=0 OR (null_mask & 64)<>0)),
-    CHECK(("count" IS NULL)=((shape_mask & 128)=0 OR (null_mask & 128)<>0)),
-    CHECK(("revision" IS NULL)=((shape_mask & 256)=0 OR (null_mask & 256)<>0)),
-    CHECK(("present" IS NULL)=((shape_mask & 512)=0 OR (null_mask & 512)<>0)),
-    CHECK(("pending" IS NULL)=((shape_mask & 1024)=0 OR (null_mask & 1024)<>0)),
+    CHECK(("remoteId" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("name" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    CHECK(("cover" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
+    CHECK(("count" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
+    CHECK(("revision" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
+    CHECK(("present" IS NULL)=((shape_mask & 64)=0 OR (null_mask & 64)<>0)),
     PRIMARY KEY("scope_key","networkPlaylists_key"),
     FOREIGN KEY("scope_key") REFERENCES "music_library_library"("scope_key") ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE "music_library_library_networkPlaylists_relation" (
+CREATE TABLE "music_library_library_networkPlaylists_subscription" (
     "scope_key" TEXT NOT NULL,
     "networkPlaylists_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 15),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "accountId" TEXT,
-    "baseline" INTEGER CHECK("baseline" IN (0,1)),
-    "relationID" TEXT,
-    "locator" TEXT,
+    "present" INTEGER CHECK("present" IN (0,1)),
     CHECK(("accountId" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
-    CHECK(("baseline" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
-    CHECK(("relationID" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
-    CHECK(("locator" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
+    CHECK(("present" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    PRIMARY KEY("scope_key","networkPlaylists_key"),
+    FOREIGN KEY("scope_key","networkPlaylists_key") REFERENCES "music_library_library_networkPlaylists"("scope_key","networkPlaylists_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_library_library_networkPlaylists_subscription_locator" (
+    "scope_key" TEXT NOT NULL,
+    "networkPlaylists_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "listId" TEXT,
+    "creatorId" TEXT,
+    "creatorListId" TEXT,
+    CHECK(("listId" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("creatorId" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("creatorListId" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
+    PRIMARY KEY("scope_key","networkPlaylists_key"),
+    FOREIGN KEY("scope_key","networkPlaylists_key") REFERENCES "music_library_library_networkPlaylists_subscription"("scope_key","networkPlaylists_key") ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE "music_library_library_networkPlaylists_intent" (
+    "scope_key" TEXT NOT NULL,
+    "networkPlaylists_key" TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 3),
+    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
+    "accountId" TEXT,
+    "present" INTEGER CHECK("present" IN (0,1)),
+    CHECK(("accountId" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("present" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
     PRIMARY KEY("scope_key","networkPlaylists_key"),
     FOREIGN KEY("scope_key","networkPlaylists_key") REFERENCES "music_library_library_networkPlaylists"("scope_key","networkPlaylists_key") ON DELETE CASCADE
 ) STRICT;
@@ -2555,16 +2573,14 @@ CREATE TABLE "music_windows_sync_pending_directory" (
 CREATE TABLE "music_windows_sync_pending_locator" (
     "scope_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 15),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
-    "relationId_camel" TEXT,
-    "relationID" TEXT,
-    "id" TEXT,
-    "remoteId" TEXT,
-    CHECK(("relationId_camel" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
-    CHECK(("relationID" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
-    CHECK(("id" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
-    CHECK(("remoteId" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
+    "listId" TEXT,
+    "creatorId" TEXT,
+    "creatorListId" TEXT,
+    CHECK(("listId" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("creatorId" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
+    CHECK(("creatorListId" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
     PRIMARY KEY("scope_key"),
     FOREIGN KEY("scope_key") REFERENCES "music_windows_sync_pending"("scope_key") ON DELETE CASCADE
 ) STRICT;
@@ -2572,67 +2588,31 @@ CREATE TABLE "music_windows_sync_pending_locator" (
 CREATE TABLE "music_windows_sync_confirmation" (
     "scope_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 127),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
-    "id" TEXT,
+    "token" TEXT,
     "code" TEXT,
-    "platform" TEXT,
     "count" INTEGER,
-    "digest" TEXT,
-    "signature" TEXT,
-    CHECK(("id" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("token" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     CHECK(("code" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
-    CHECK(("platform" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
-    CHECK(("count" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
-    CHECK(("digest" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
-    CHECK(("signature" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
+    CHECK(("count" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
     PRIMARY KEY("scope_key"),
     FOREIGN KEY("scope_key") REFERENCES "music_windows_sync"("scope_key") ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE "music_windows_sync_confirmation_collections" (
-    "scope_key" TEXT NOT NULL,
-    "collections_key" TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 1),
-    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
-    "value" TEXT,
-    CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
-    PRIMARY KEY("scope_key","collections_key"),
-    FOREIGN KEY("scope_key") REFERENCES "music_windows_sync_confirmation"("scope_key") ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE "music_windows_sync_approved" (
     "scope_key" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 127),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
-    "id" TEXT,
+    "token" TEXT,
     "code" TEXT,
-    "platform" TEXT,
     "count" INTEGER,
-    "digest" TEXT,
-    "signature" TEXT,
-    CHECK(("id" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
+    CHECK(("token" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
     CHECK(("code" IS NULL)=((shape_mask & 2)=0 OR (null_mask & 2)<>0)),
-    CHECK(("platform" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
-    CHECK(("count" IS NULL)=((shape_mask & 8)=0 OR (null_mask & 8)<>0)),
-    CHECK(("digest" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
-    CHECK(("signature" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
+    CHECK(("count" IS NULL)=((shape_mask & 4)=0 OR (null_mask & 4)<>0)),
     PRIMARY KEY("scope_key"),
     FOREIGN KEY("scope_key") REFERENCES "music_windows_sync"("scope_key") ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE "music_windows_sync_approved_collections" (
-    "scope_key" TEXT NOT NULL,
-    "collections_key" TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 1),
-    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
-    "value" TEXT,
-    CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
-    PRIMARY KEY("scope_key","collections_key"),
-    FOREIGN KEY("scope_key") REFERENCES "music_windows_sync_approved"("scope_key") ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE "music_windows_sync_status" (

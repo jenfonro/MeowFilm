@@ -42,7 +42,8 @@ public static partial class MusicNativeSyncTests
         await using var f = new Fixture("wy"); f.Server.Prepare = _ => throw new InvalidOperationException("Unexpected preparation");
         await f.Sync.StartAsync(); _ = await f.Sync.ExecuteAsync("music.librarySync.get"); await f.Enable(true, true); Ok(await f.Run());
         await f.AddFavorite(1); Ok(await f.Run()); Check(f.Server.Preparations == 0 && f.Server.Writes == 1 && f.Server.Favorite.Songs.SequenceEqual([1]));
-        await f.Sync.PrepareShutdownAsync(); await f.Sync.CancelShutdownPreparationAsync(); Ok(await f.Run()); Check(f.Server.Preparations == 0);
+        await f.Sync.PrepareShutdownAsync(); Code(await f.Run(), "CLOSED");
+        await f.Restart(); Ok(await f.Run()); Check(f.Server.Preparations == 0);
     }
     private static async Task NeteasePreparationOpaque() {
         await using var f = new Fixture("wy"); NetworkTarget(f); await f.Enable(false, true);
@@ -81,7 +82,8 @@ public static partial class MusicNativeSyncTests
             else { if (reason == "cancel") caller.Cancel(); else if (reason == "disable") control = SetNetworkEnabled(f, false); else control = f.Sync.PrepareShutdownAsync(); await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5)); Check(!saving.IsCompleted); }
         } finally { release.TrySetResult(); }
         await control.WaitAsync(TimeSpan.FromSeconds(5)); await AssertPreparationFailure(f, await saving.WaitAsync(TimeSpan.FromSeconds(5)), reason == "account" ? "STALE_SESSION" : reason == "library" ? "SYNC_SUPERSEDED" : "CANCELLED");
-        if (reason == "account") f.Sessions.Values["wy"] = Sessions.Make("wy", 3, "42"); if (reason == "disable") await SetNetworkEnabled(f, true); if (reason == "close") await f.Sync.CancelShutdownPreparationAsync();
+        if (reason == "account") f.Sessions.Values["wy"] = Sessions.Make("wy", 3, "42"); if (reason == "disable") await SetNetworkEnabled(f, true);
+        if (reason == "close") { Code(await f.Run(), "CLOSED"); await f.Restart(); }
         f.Server.Prepare = null; Ok(await f.Run()); Check(f.Server.Preparations == 2 && f.Server.SubscriptionWrites == 1);
     }
     private static async Task NeteasePreparationReadback() {

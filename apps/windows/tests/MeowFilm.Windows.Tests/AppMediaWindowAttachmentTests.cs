@@ -20,15 +20,15 @@ public static class AppMediaWindowAttachmentTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("initial availability and independent switches", Independent);
-        yield return Case("cancelled native Closing and failed preparation restore both channels", CancelledClosing);
+        yield return Case("cancelled native Closing does not reverse explicit owner retirement", CancelledClosing);
         yield return Case("actual Closed permanently stops both channels", Closed);
         yield return Case("composition waits for accepted shortcut actions before releasing system media", Drain);
-        yield return Case("native release error is retried by host force cleanup", RetryRelease);
+        yield return Case("in-process retirement retries a failed native release", RetryRelease);
         yield return Case("retry retains only resources whose release failed", RetryRemaining);
         yield return Case("late system command completion allows retry after drain timeout", SystemDrainRetry);
         yield return Case("partial startup ownership is released once", PartialStartup);
         yield return Case("real settings save busy and failure preserve the active registration", SaveNotifications);
-        yield return Case("shell asks and hides without stopping; shared save wait seals all commands and cancellation restores", ShellClosePreparation);
+        yield return Case("shell asks and hides without stopping; exit closes immediately and seals media commands", ShellClosePreparation);
     }
 
     private static TestCase Case(string name, Func<Task> action) => new("app-media." + name, () => Sta(action));
@@ -97,26 +97,12 @@ public static class AppMediaWindowAttachmentTests
             Check(pausedBeforeDomain && !settings.IsAvailable, "shared settings pause inputs before domain preparation");
             keys.Post(old); system.Backend.Request(SystemPlaybackCommand.Pause); await Pump();
             Check(keys.Actions.Count == 0 && system.Player.Calls.Count == 0, "preparation invalidates pending commands on both channels");
-            Check(system.Backend.Disposals == 0, "reversible preparation retains ownership");
-            prepare.TrySetException(new InvalidOperationException("synthetic-preparation-failure"));
-            await Fails(closing!, "SHUTDOWN_FAILED");
-            await shutdown.CancelShutdownPreparationAsync();
-            Check(settings.IsAvailable && system.Backend.Enabled && keys.Native.Latest.Success, "cancelled preparation restores both channels");
-            keys.Post(keys.Native.Latest); system.Backend.Request(SystemPlaybackCommand.Pause); await Pump();
-            Check(keys.Actions.Count == 1 && system.Player.Calls.SequenceEqual(["pause"]), "restored native and system requests execute");
-            await settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = false });
-            Check(!system.Backend.Enabled, "cancelled Closing retained the settings subscription");
-            await settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = true });
-            Check(system.Backend.Enabled, "SMTC was not permanently suspended by Closing");
-            await owner.DisposeAsync();
-            int registrations = keys.Native.Calls.Count, updates = system.Backend.Updates;
-            await settings.SaveAsync(settings.Preferences with { GlobalEnabled = false, SystemMediaEnabled = false });
-            await settings.SaveAsync(settings.Preferences with { GlobalEnabled = true, SystemMediaEnabled = true });
-            keys.Native.Foreground = keys.Handle;
-            keys.Post(keys.Native.Latest); system.Backend.Request(SystemPlaybackCommand.Pause); await Pump();
-            Check(keys.Native.Calls.Count == registrations && system.Backend.Updates == updates &&
-                keys.Actions.Count == 1 && system.Player.Calls.Count == 1 && system.Backend.Disposals == 1,
-                "Dispose permanently seals both channels despite later setting changes");
+            Check(system.Backend.Disposals == 0, "pending owner retains its attachment");
+            prepare.TrySetResult(); await closing!;
+            Check(!settings.IsAvailable && system.Backend.Disposals == 1 && shutdown.IsReleased,
+                "retirement is one-way and releases both channels");
+            keys.Post(old); system.Backend.Request(SystemPlaybackCommand.Pause); await Pump();
+            Check(keys.Actions.Count == 0 && system.Player.Calls.Count == 0, "retired commands cannot resume");
         }
         finally
         {
@@ -186,12 +172,12 @@ public static class AppMediaWindowAttachmentTests
         })]);
         try
         {
-            await Fails(shutdown.CloseAsync(), "SHUTDOWN_FAILED");
+            await Fails(shutdown.CloseAsync(), "MEDIA_SHORTCUT_RELEASE_FAILED");
             Check(system.Backend.Disposals == 0 && resourcesReleased == 0, "failed native release retains remaining dependencies");
             await using var competitor = new ShortcutFixture(); competitor.Attach();
             Check(competitor.Settings.GlobalErrors[MediaShortcutAction.TogglePlayback] == "热键被占用", "injected failure retained the real OS registration");
             keys.Native.UnregisterError = null;
-            await shutdown.ForceReleaseAsync();
+            await shutdown.CloseAsync();
             Check(shutdown.IsReleased && resourcesReleased == 1 && system.Backend.Disposals == 1 &&
                 keys.Native.Unregistered.Contains(keys.Native.Latest.Id) && keys.Native.Allocated.SequenceEqual(keys.Native.Released),
                 "host retry performs real unregister and atom retirement before dependent resource release");
@@ -313,8 +299,7 @@ public static class AppMediaWindowAttachmentTests
         var shutdown = new AppShutdown([module, domain], [new(() => owner!.DisposeAsync())],
             sharedParticipants: [settings, appearance, closePreferences]);
         var tray = new TrayIcon();
-        var shell = new ShellWindow([module], [], shutdown.CloseAsync, shutdown.ForceReleaseAsync,
-            shutdown.CancelShutdownPreparationAsync, TimeProvider.System, appearance, closePreferences,
+        var shell = new ShellWindow([module], [], shutdown.CloseAsync, TimeProvider.System, appearance, closePreferences,
             (_, _, _, _) => tray, mediaControls: settings)
         {
         };
@@ -323,14 +308,6 @@ public static class AppMediaWindowAttachmentTests
         var actions = new List<MediaShortcutAction>();
         SystemFixture? system = null;
         Task? saving = null;
-        bool stoppedForPreparation = false, restoredAfterShared = false;
-        void AvailabilityChanged(object? sender, PropertyChangedEventArgs args)
-        {
-            if (args.PropertyName != nameof(IDesktopMediaControlSettings.IsAvailable)) return;
-            if (!settings.IsAvailable) stoppedForPreparation = true;
-            else if (stoppedForPreparation) restoredAfterShared = appearance.CanEdit && closePreferences.CanEdit;
-        }
-        settings.PropertyChanged += AvailabilityChanged;
         var commands = Enum.GetValues<SystemPlaybackCommand>();
         var timeout = TimeSpan.FromSeconds(3);
         try
@@ -343,18 +320,18 @@ public static class AppMediaWindowAttachmentTests
                 actions.Add(action); return Task.CompletedTask;
             }, native);
             owner.OwnShortcuts(shortcutAttachment);
-            shell.Show(); await Pump();
+            shell.Show();
+            await Pump();
             var handle = shell.Handle;
             var dialog = (CloseWindowDialog)DesktopTestUi.WindowRoot(shell).FindName("CloseDialog");
             Check(ReferenceEquals(shell.MediaControls, settings) && native.Latest.Success && system.Backend.Enabled,
                 "the real shell and both attachments share the restored media settings");
             void Post(ShortcutNative.Call registration)
             {
-                var gesture = ShortcutFixture.GlobalGesture;
-                nint packed = (nint)(((int)(gesture.Key) << 16) | (int)gesture.Modifiers);
+                nint packed = (nint)((registration.Key << 16) | (registration.Modifiers & 0x000f));
                 Check(DesktopTestUi.WindowRoot(shell).DispatcherQueue.TryEnqueue(() =>
                 {
-                    object?[] arguments = [handle, MediaShortcutNative.HotKeyMessage, registration.Id, packed, false];
+                    object?[] arguments = [handle, MediaShortcutNative.HotKeyMessage, (nint)registration.Id, packed, false];
                     typeof(MediaShortcutWindowAttachment).GetMethod("Message", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
                         .Invoke(shortcutAttachment, arguments);
                 }), "queued registration parser action");
@@ -396,13 +373,13 @@ public static class AppMediaWindowAttachmentTests
             foreach (var command in commands) system.Backend.Request(command, 30);
             DesktopTestUi.Invoke((Button)dialog.FindName("ExitChoice"));
             Check(!settings.IsAvailable && !system.Backend.Enabled && native.Unregistered.Contains(active.Id) &&
-                !saving.IsCompleted && domainPreparations == 0 && closePreferences.CanEdit,
+                !saving.IsCompleted && domainPreparations == 1 && !closePreferences.CanEdit,
                 "media admission stops synchronously before awaiting appearance and preparing later participants");
             Post(active);
             foreach (var command in commands) system.Backend.Request(command, 30);
             await Pump();
             Check(system.Player.Calls.Count == acceptedSystem && actions.Count == acceptedShortcuts &&
-                system.Backend.Disposals == 0 && !saving.IsCompleted && domainPreparations == 0,
+                system.Backend.Disposals == 0 && !saving.IsCompleted && domainPreparations == 1,
                 "both queued and new Play/Pause/Stop/Next/Previous/Seek and hotkeys are rejected throughout the shared-save wait");
             store.Release.TrySetResult();
             await saving.WaitAsync(timeout);
@@ -410,33 +387,24 @@ public static class AppMediaWindowAttachmentTests
             Check(!settings.IsAvailable && !appearance.CanEdit && !closePreferences.CanEdit &&
                 appearance.ThemeColor == "#315A7D" && store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_app_appearance")).GetAwaiter().GetResult() == 1,
                 "the actual save settles before domain preparation while media admission remains closed");
-            prepare.TrySetException(new InvalidOperationException("synthetic-preparation-failure"));
+            prepare.TrySetResult();
             await shell.ShutdownCompletion.WaitAsync(timeout); await Pump();
-            var cancel = (Button)DesktopTestUi.WindowRoot(shell).FindName("CancelShutdownButton");
-            Check(shell.IsVisible && cancel.IsEnabled && restoredAfterShared,
-                "failed preparation remains cancellable and rollback reopens media only after later shared owners");
-            DesktopTestUi.Invoke(cancel); await Pump();
-            Check(settings.IsAvailable && system.Backend.Enabled && native.Latest.Success &&
-                appearance.CanEdit && closePreferences.CanEdit && closePreferences.Behavior == WindowCloseBehavior.Ask &&
-                ((ContentControl)DesktopTestUi.WindowRoot(shell).FindName("RootInteractionGate")).IsEnabled,
-                "actual shell cancellation restores both channels from unchanged authoritative preferences");
-            await AcceptAll("cancelled preparation");
+            Check(!shell.IsVisible && closed.Task.IsCompleted && !settings.IsAvailable &&
+                !appearance.CanEdit && !closePreferences.CanEdit && shutdown.IsReleased,
+                "window closes immediately while accepted local saves finish before resource release");
         }
         finally
         {
             store.Release.TrySetResult();
             prepare.TrySetResult();
             if (saving is not null) await saving;
-            settings.PropertyChanged -= AvailabilityChanged;
-            await shell.AbortAsync();
+            await shell.CloseAfterReleaseAsync();
             await closed.Task.WaitAsync(timeout);
             if (owner is not null) await owner.DisposeAsync();
         }
         Check(system!.Backend.Disposals == 1 && tray.Disposals == 1 && native.Allocated.SequenceEqual(native.Released),
             "shell cleanup releases its single system attachment, tray and all real hotkey registration identities");
     }
-
-
 
     private static async Task Fails(Task task, string code)
     {
@@ -458,12 +426,11 @@ public static class AppMediaWindowAttachmentTests
         }
     }
 
-    private sealed class Preparation(Func<Task> prepare) : IDesktopShutdownParticipant
+    private sealed class Preparation(Func<Task> prepare) : IAsyncDisposable
     {
         public Task PrepareShutdownAsync() => prepare();
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync() => new(prepare());
     }
 
     private sealed class Resource : IAsyncDisposable

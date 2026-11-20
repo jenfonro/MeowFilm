@@ -689,9 +689,8 @@ public static class FilmHomeTests
         await Task.WhenAll(data, preparation);
         Check(draining.ActiveData.Items.Count == 12,
             "shutdown cancellation fences the settling data response");
-        await draining.CancelShutdownPreparationAsync();
-        Check(draining.ActiveData.PageActionText == "重试" && draining.ActiveData.CanPage,
-            "cancel preparation reopens the retired data range as retryable");
+        await draining.DisposeAsync();
+        Check(drainingSource.Calls.Count == 5, "retirement does not restart retired data ranges");
     }
 
     private static FilmCardItem Card(string key) =>
