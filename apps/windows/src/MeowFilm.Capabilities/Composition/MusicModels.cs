@@ -41,10 +41,15 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null) : System.C
         if (value is not { } next || publication < RepositoryPublication) return false;
         RepositoryPublication = publication;
         if (Raw.GetRawText() == next.GetRawText()) return false;
+        var before = (Title, Artist, Album, Cover, Duration, IsOnline);
         Raw = next.Clone();
-        foreach (var name in new[] { nameof(Raw), nameof(Title), nameof(Artist), nameof(Album),
-            nameof(Cover), nameof(Duration), nameof(IsOnline) })
-            PropertyChanged?.Invoke(this, new(name));
+        PropertyChanged?.Invoke(this, new(nameof(Raw)));
+        if (before.Title != Title) PropertyChanged?.Invoke(this, new(nameof(Title)));
+        if (before.Artist != Artist) PropertyChanged?.Invoke(this, new(nameof(Artist)));
+        if (before.Album != Album) PropertyChanged?.Invoke(this, new(nameof(Album)));
+        if (before.Cover != Cover) PropertyChanged?.Invoke(this, new(nameof(Cover)));
+        if (before.Duration != Duration) PropertyChanged?.Invoke(this, new(nameof(Duration)));
+        if (before.IsOnline != IsOnline) PropertyChanged?.Invoke(this, new(nameof(IsOnline)));
         return true;
     }
     private string Text(string key) => Raw.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";

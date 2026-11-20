@@ -118,13 +118,13 @@ export class WorkerSession {
     }
   }
 
-  async request(method, params, { signal, timeoutMs, phase = null } = {}) {
+  async request(method, params, { signal, timeoutMs, phase = null, awaitCancelled = false } = {}) {
     const linked = this.#linkedSignal(signal);
     try {
       const response = await this.#call(method, {
         installationId: this.installationId, generation: this.generation,
         ...(params ?? {}),
-      }, linked.signal, timeoutMs ?? this.limits.requestTimeoutMs, phase);
+      }, linked.signal, timeoutMs ?? this.limits.requestTimeoutMs, phase, { awaitCancelled });
       return this.#workerResult(method, response);
     } finally {
       linked.release();
@@ -264,7 +264,7 @@ export class WorkerSession {
   }
 
   async #call(method, params, signal, timeoutMs, phase = null,
-    { awaitProbe = false, associationId = null } = {}) {
+    { awaitProbe = false, associationId = null, awaitCancelled = false } = {}) {
     if (!this.worker) throw fault('STALE_SESSION');
     const id = this.nextId++;
     const { entry, pending } = this.#pendingEntry(id, associationId);
@@ -274,6 +274,12 @@ export class WorkerSession {
         const error = signal.reason instanceof ScriptHostError
           ? signal.reason : fault('CANCELLED');
         if (requestSent) this.#sendSafely(cancel(id, safeError(error, 'CANCELLED').code));
+        // Management writes have a real durable-completion boundary in the
+        // Worker. Their owner must not advance merely because its caller left.
+        if (requestSent && awaitCancelled && this.live && !this.stopRequested) {
+          if (phase) this.#probeAfterInterruption(phase, error).catch(() => {});
+          return;
+        }
         pending.settle(error);
         // A blocked Worker cannot receive cancel. Retiring the caller's wait
         // must not also remove the only path to its actual execution cleanup.

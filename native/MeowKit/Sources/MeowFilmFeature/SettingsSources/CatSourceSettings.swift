@@ -46,6 +46,32 @@ struct CatSourceSettings: Sendable {
 
     func read() async throws -> [CatSourceConfiguration] { try await Self.parse(document.read() ?? Self.empty) }
 
+    func readPanInterception() async throws -> [PanProviderID: Bool] {
+        let value = try await document.read() ?? Self.empty
+        _ = try Self.parse(value)
+        return Self.panInterception(value)
+    }
+
+    func savePanInterception(_ provider: PanProviderID, enabled: Bool) async throws -> [PanProviderID: Bool] {
+        let saved = try await document.update { original in
+            let value = original ?? Self.empty
+            _ = try Self.parse(value)
+            guard case .object(var root) = value, case .object(var providers)? = root["providers"] else {
+                throw FilmSourceError(code: "INVALID_DOCUMENT")
+            }
+            providers[provider.rawValue] = .bool(enabled)
+            root["providers"] = .object(providers)
+            return .object(root)
+        }
+        return Self.panInterception(saved)
+    }
+
+    private static func panInterception(_ value: RuntimeValue) -> [PanProviderID: Bool] {
+        Dictionary(uniqueKeysWithValues: PanProviderID.allCases.map { provider in
+            (provider, value.catField("providers")?.catField(provider.rawValue) != .bool(false))
+        })
+    }
+
     func change(_ edit: @escaping @Sendable ([CatSourceConfiguration]) throws -> [CatSourceConfiguration]) async throws -> [CatSourceConfiguration] {
         let saved = try await document.update { original in
             let value = original ?? Self.empty

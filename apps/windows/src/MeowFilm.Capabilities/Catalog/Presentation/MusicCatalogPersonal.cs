@@ -189,7 +189,7 @@ public sealed partial class MusicCapability
         id ??= Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(target.Parameters.GetRawText())));
         var route = "catalog-" + target.Operation + "/" + target.Platform + "/" + Uri.EscapeDataString(id);
         if (!catalogTargets.TryGetValue(route, out var previous) || previous.Parameters.GetRawText() != target.Parameters.GetRawText())
-            catalogLocations.Remove(route + "/" + target.Platform);
+            RetireCatalogLocation(route + "/" + target.Platform);
         catalogTargets.Remove(route); catalogTargets[route] = target;
         while (catalogTargets.Count > 100) catalogTargets.Remove(catalogTargets.Keys.First());
         return route;

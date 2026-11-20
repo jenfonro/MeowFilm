@@ -20,6 +20,7 @@ public static partial class FilmSourcesTests
         yield return Case("unknown update display state never retires an otherwise valid source generation", UnknownUpdateState);
         yield return Case("unsupported roots and real source CAS conflicts preserve original storage", SourceDocumentBoundaries);
         yield return Case("native source intent is authoritative and only update restart and detection use Cat RPC", Management);
+        yield return Case("five pan interception switches default on and preserve independent native source fields", PanInterceptionSettings);
         yield return Case("tombstones survive updates type changes and duplicate adds for each parent", Tombstones);
         yield return Case("a deletion while runtime status is pending wins over late metadata", DeleteDuringImport);
         yield return Case("starting failed disabled and missing parents reconcile without empty-list loss", Reconciliation);

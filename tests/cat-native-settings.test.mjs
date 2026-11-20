@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readCatFacts } from './storage-test-fixture.mjs';
 import { createCatScriptModule } from '../apps/runtime/modules/cat-script.mjs';
+import { CatNativeSettings } from '../packages/script-host/src/cat-native-settings.js';
+import { normalizeCatOutput } from '../packages/script-host/src/cat-output.js';
 
 const temporaryRoot = fileURLToPath(new URL('../tmp/test-results/', import.meta.url));
 const source = value => `module.exports = { home() { return { value: ${JSON.stringify(value)} }; } };`;
@@ -69,6 +71,25 @@ async function server(t, handler) {
 }
 const network = (previous, url, inputRevision) => ({ ...previous, sourceType: 'network', sourceUrl: url,
   localPath: null, localHash: null, inputRevision });
+
+test('App Cat routing defaults to five providers while explicit disabled choices remain authoritative', async t => {
+  const f = fixture(t);
+  const settings = new CatNativeSettings(f.root, { read: () => f.latest, reload: async () => f.latest });
+  try {
+    await settings.ready;
+    assert.deepEqual(settings.inputs().providers, { baidu: true, quark: true, uc: true, tianyi: true, yidong: true });
+    const input = { list: [{ vod_play_from: '夸克原画#01$$$夸克极速#01',
+      vod_play_url: '原画$https://pan.quark.cn/s/app-native-share$$$极速$https://pan.quark.cn/s/app-native-share' }] };
+    const options = { installationId: 'cat', siteId: 'default', settings: settings.inputs() };
+    assert.equal(normalizeCatOutput(input, options)._meow.resources.length, 1);
+    f.latest.providers = { quark: false, future: false };
+    assert.equal(settings.inputs().providers.quark, false);
+    assert.equal(settings.inputs().providers.baidu, true);
+    assert.equal(settings.inputs().providers.future, false);
+    assert.deepEqual(normalizeCatOutput(input, { ...options, settings: settings.inputs() }), input);
+    assert.deepEqual(f.latest.providers, { quark: false, future: false }, 'defaults do not rewrite native saved intent');
+  } finally { await settings.close(); }
+});
 
 test('failed native network update records preparation errors without replacing the accepted worker',
   { timeout: 30000 }, async t => {

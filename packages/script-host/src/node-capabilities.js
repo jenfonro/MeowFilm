@@ -144,6 +144,7 @@ export class NodeCapabilities {
       () => session.scope(), session.limits.cleanupTimeoutMs, () => session.resourceScope());
     this.sources = new Map();
     this.networkResources = new Set();
+    this.networkHosts = new WeakMap();
     this.streams = new NativeResources();
     this.webResources = new NativeResources();
     this.webPipes = new Map();
@@ -433,20 +434,25 @@ export class NodeCapabilities {
       http2: { constants: http2.constants,
         connect: (input, options = {}, callback) => {
           requireValue(!this.services.stopping, 'SERVICE_CLOSED');
-          requireValue(this.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
           if (typeof options === 'function') { callback = options; options = {}; }
           requireValue(!options.createConnection && options.socketPath === undefined &&
             options.fd === undefined && !options.path, 'PERMISSION_DENIED');
-          const local = this.services.mapLocal(String(input)) !== null;
-          const client = http2.connect(this.services.outboundURL(input),
+          const authority = new URL(input), target = this.services.outboundURL(authority);
+          requireValue(this.session.network === undefined, 'CAPABILITY_UNAVAILABLE');
+          const local = this.services.mapLocal(authority.href) !== null;
+          const client = http2.connect(target,
             this.services.tlsOptions(options, { client: true, local }));
           const request = client.request;
-          client.request = (...args) => this.ownNetwork(request.apply(client, args));
+          client.request = (...args) => {
+            this.services.assertDirectConnection(authority.hostname);
+            return this.ownNetwork(request.apply(client, args), authority.hostname);
+          };
           const owner = this;
           for (const name of ['ping', 'settings']) {
             const method = client[name];
             client[name] = function(...args) {
               const index = name === 'ping' && typeof args[0] === 'function' ? 0 : 1;
+              owner.services.assertDirectConnection(authority.hostname);
               if (typeof args[index] === 'function')
                 args[index] = owner.completionCallback(args[index]);
               return Reflect.apply(method, this, args);
@@ -570,6 +576,8 @@ export class NodeCapabilities {
         const index = name === 'end' && typeof args[0] === 'function' ? 0
           : typeof args[1] === 'function' ? 1 : 2;
         const node = owner.deref();
+        const host = node?.networkHosts.get(this);
+        if (host) node.services.assertDirectConnection(host);
         if (node && typeof args[index] === 'function')
           args[index] = node.completionCallback(args[index]);
         return Reflect.apply(method, this, args);
@@ -665,7 +673,10 @@ export class NodeCapabilities {
     }
     return resource;
   }
-  ownNetwork(value) { return this.ownResource(value, this.networkResources); }
+  ownNetwork(value, host) {
+    if (value && host) this.networkHosts.set(value, host);
+    return this.ownResource(value, this.networkResources);
+  }
   ownStream(value) { return this.ownResource(value, this.streams); }
 
   ownCryptoStream(value, terminal) {
@@ -1052,7 +1063,7 @@ export class NodeCapabilities {
         ...(mapped.lookup ? { lookup: mapped.lookup } : {}) };
       const callback = typeof args.at(-1) === 'function' ? args.pop() : null;
       const socket = native === tls ? tls.connect(clean, ...args) : net.connect(clean, ...args);
-      this.ownNetwork(socket);
+      this.ownNetwork(socket, options.host ?? options.hostname ?? 'localhost');
       if (callback) socket.once(native === tls ? 'secureConnect' : 'connect', callback);
       return socket;
     };

@@ -61,6 +61,7 @@ internal static class FilmPlaybackError
         "LIBRARY_UPDATE_FAILED" => "媒体库更新失败",
         "UNSUPPORTED_OPERATION" or "CAPABILITY_UNAVAILABLE" or "METHOD_NOT_FOUND" => "当前操作不可用",
         "PAN_FAILURE" => "网盘请求失败",
+        "PAN_INTERCEPTION_UNSUPPORTED" => "网盘请求未能接管，请关闭对应网盘接管后重试",
         "SOURCE_FAILURE" => "来源请求失败",
         "CAT_FAILURE" or "SCRIPT_FAILURE" => "脚本执行失败",
         "SCRIPT_PROTOCOL_ERROR" => "脚本响应格式错误",

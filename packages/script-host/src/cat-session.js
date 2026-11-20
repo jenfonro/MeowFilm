@@ -10,7 +10,7 @@ import { PanInterceptor } from './pan-interceptor.js';
 import { ResourceScope } from './scope.js';
 import { clone, deferred, fault, requireValue, safeError } from './errors.js';
 import { normalizeCatOutput, decodePanResource, addExtension, mergeExtension,
-  ownedExtension, providerEnabled, parseM3U8Metadata } from './cat-output.js';
+  ownedExtension, extensionKey, providerEnabled, parseM3U8Metadata } from './cat-output.js';
 import { fixedOriginURL } from './cat-proxy.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { describeScriptError } from './script-diagnostic.js';
@@ -709,14 +709,27 @@ export class CatSession {
           installationId: this.installationId, siteId,
         }] });
       }
+      if (operation === 'play' && payload && typeof payload === 'object' &&
+        this.interceptor.reference(scope, payload.id)) throw fault('PAN_INTERCEPTION_UNSUPPORTED');
       const method = this.capabilities[siteId].methods[operation] ?? 'POST';
       const value = await this.contextScope.run(scope,
         () => this.read(site.api + '/' + encodeURIComponent(operation), payload, scope, method));
       scope.assertOpen();
-      const output = normalizeCatOutput(value, { settings,
+      if (this.interceptor.hasFailure(scope.panShares)) throw fault('PAN_INTERCEPTION_UNSUPPORTED');
+      const output = normalizeCatOutput(value, { settings, operation,
         shares: [...scope.panShares.values()], installationId: this.installationId, siteId,
+        resolveReference: (value, label) => this.interceptor.reference(scope, value, label),
         mapUrl: value => this.mapProxy(value, siteOrigin) });
+      if (operation === 'detail' && scope.panShares.size &&
+        !(output?.[ownedExtension] && output[extensionKey]?.resources?.length))
+        throw fault('PAN_INTERCEPTION_UNSUPPORTED');
       return output;
+    } catch (error) {
+      scope.assertOpen();
+      if (this.interceptor.hasFailure(scope.panShares) &&
+        ['UPSTREAM_HTTP_ERROR', 'SCRIPT_EXCEPTION', 'INVALID_JSON', 'SCRIPT_PROTOCOL_ERROR'].includes(error?.code))
+        throw fault('PAN_INTERCEPTION_UNSUPPORTED');
+      throw error;
     } finally {
       try { if (listening) signal.removeEventListener('abort', abort); }
       finally {
@@ -840,6 +853,7 @@ export class CatSession {
     if (this.node.failure) failed(this.node.failure);
     try { this.realm?.close(); }
     catch (error) { failed(error); }
+    this.interceptor.close();
     this.realm = null;
     if (!this.stopNotified) {
       this.stopNotified = true;

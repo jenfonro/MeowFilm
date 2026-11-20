@@ -482,8 +482,10 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
     const affected = [...sessions.values()].filter(session => domain === 'tmdb' ||
       session.cursors.some(({ source }) => domain === 'source' ||
         typeof domain === 'string' && source.key === domain ||
-        object(domain) && domain.kind === 'source' && source.engine === domain.engine &&
-          (domain.installationId === undefined || source.installationId === domain.installationId)));
+        object(domain) && (domain.kind === 'source' || domain.kind === 'script-account') &&
+          source.engine === (domain.kind === 'script-account' ? 'cat' : domain.engine) &&
+          (domain.installationId === undefined || source.installationId === domain.installationId) &&
+          (domain.generation === undefined || source.generation === domain.generation)));
     for (const session of affected) invalidateSession(session);
     await Promise.allSettled(affected.map(session => session.work));
   }

@@ -208,22 +208,18 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
     private void RefreshBindings()
     {
-        Changed(nameof(ContentPage));
-        playbackPresentation.Refresh();
+        playbackPresentation.RefreshAvailability();
         foreach (var name in new[] { nameof(CatalogSelectedSong), nameof(SearchSelectedSong), nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
             nameof(CanEditAppearance), nameof(CanEditFixedAppearance), nameof(CanClearPlaybackCache),
-            nameof(IsHistory), nameof(IsArchives), nameof(IsSongList), nameof(IsCollectionPage), nameof(IsContentDetailPage), nameof(ShowsSongTable),
+            nameof(IsCollectionPage),
             nameof(ShowSongPager), nameof(HistoryDate),
             nameof(HasSelection), nameof(CanRemoveSelection), nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection), nameof(CanEditMetadata),
             nameof(CanImportLocalLyrics), nameof(CanRemoveLocalLyrics), nameof(CanEditFeedback), nameof(CanEditSearchPreferences),
             nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText), nameof(CollectionArtwork),
-            nameof(CanPlayCollection), nameof(DetailArtwork), nameof(DetailCountText),
-            nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(CanPlayContentDetail), nameof(CurrentSongId), nameof(CurrentTitle),
-            nameof(CurrentArtist), nameof(CurrentAlbum), nameof(HasCurrent), nameof(CurrentArtwork), nameof(CanPlay), nameof(Mode), nameof(ModeText),
-            nameof(PlaybackPresentationKey), nameof(CurrentTrackIdentity),
-            nameof(PlaybackRateText), nameof(CanSwitchSource) })
+            nameof(CanPlayCollection), nameof(CanPlay),
+            nameof(CanSwitchSource) })
             Changed(name);
-        OnlineBindings();
+        SourceBindings();
         DesktopLyricSettingsBindings();
         CatalogSourceBindings();
         AccountBindings();
@@ -726,7 +722,12 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         {
             if (value is < 1 or > 3) throw new MusicOperationException("INVALID_REQUEST");
             var reply = await QueueCall("music.queue.mode", new { mode = value });
-            mode = MusicDto.Mode(reply);
+            int next = MusicDto.Mode(reply);
+            if (mode != next)
+            {
+                mode = next;
+                Changed(nameof(Mode)); Changed(nameof(ModeText));
+            }
         });
     }
     public Task SeekAsync(double seconds)
@@ -799,12 +800,37 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (current is not null && state.Current is not null && current.EntryId == state.Current.EntryId &&
             current.Raw.GetRawText() == state.Current.Raw.GetRawText())
             state = state with { Current = current };
+        var before = (CurrentSongId, CurrentTitle, CurrentArtist, CurrentAlbum, HasCurrent,
+            CurrentTrackIdentity, PlaybackPresentationKey, Mode, Saved: queueSaved);
         var changedCurrent = !ReferenceEquals(current, state.Current);
+        if (changedCurrent && current is not null) current.PropertyChanged -= CurrentSongChanged;
         current = state.Current; queueSource = state.Source; mode = state.Mode; queueSaved = state.Saved;
+        if (changedCurrent && current is not null && playbackSubscribed) current.PropertyChanged += CurrentSongChanged;
+        if (before.CurrentSongId != CurrentSongId) Changed(nameof(CurrentSongId));
+        if (before.CurrentTitle != CurrentTitle) Changed(nameof(CurrentTitle));
+        if (before.CurrentArtist != CurrentArtist) Changed(nameof(CurrentArtist));
+        if (before.CurrentAlbum != CurrentAlbum) Changed(nameof(CurrentAlbum));
+        if (before.HasCurrent != HasCurrent) Changed(nameof(HasCurrent));
+        if (before.CurrentTrackIdentity != CurrentTrackIdentity) Changed(nameof(CurrentTrackIdentity));
+        if (before.PlaybackPresentationKey != PlaybackPresentationKey) Changed(nameof(PlaybackPresentationKey));
+        if (before.Mode != Mode) { Changed(nameof(Mode)); Changed(nameof(ModeText)); }
         RefreshCurrentArtwork();
+        if (changedCurrent || before.Saved != queueSaved) playbackPresentation.Refresh();
         currentFeedbackContext = state.FeedbackContext; UpdateFeedbackSelection();
         UpdateRecordingCandidates(); UpdateLyricSources(); RefreshQueueSurfaceCurrent(); RefreshBindings();
         if (changedCurrent) { PublishFavorite(false); _ = RefreshCurrentFavoriteAsync(); }
+    }
+    private void CurrentSongChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (stopping || !ReferenceEquals(sender, current)) return;
+        switch (args.PropertyName)
+        {
+            case nameof(SongRow.Title): Changed(nameof(CurrentTitle)); break;
+            case nameof(SongRow.Artist): Changed(nameof(CurrentArtist)); break;
+            case nameof(SongRow.Album): Changed(nameof(CurrentAlbum)); break;
+            case nameof(SongRow.Cover): RefreshCurrentArtwork(); break;
+            case nameof(SongRow.IsOnline): playbackPresentation.Refresh(); break;
+        }
     }
     private async Task<bool> StopOwnedPlayback(Func<bool>? admission = null)
     {
@@ -823,7 +849,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         onlineCancellation?.Cancel(); onlineGeneration++;
         playbackEpoch++; openedEntry = null; recorded = false; searchRecommendationStart = null;
         Changed(nameof(PlaybackPresentationKey));
+        bool hadInstallation = playbackInstallation is not null;
         playbackInstallation = null; Lyrics.Clear(); lyricStatus = ""; OnlineBindings();
+        if (hadInstallation) PlaybackSourceBindings();
         if (playback.OwnerId == Id) await playback.StopAsync();
         return true;
     }
@@ -915,6 +943,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (state is not null && !CurrentRecovery(state)) return;
         CheckMediaDuration();
         if (state?.PendingFailure == "RECORDING_MISMATCH") return;
+        CommitCatalogPlayback();
         if (recorded)
         {
             if (state is { ConfirmSourceOnStart: true })
@@ -987,6 +1016,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         desktopLyricsOpening = false;
         desktopLyricsReopenAfterClose = false;
         stopping = true; // Seal admission synchronously, before yielding to any callback.
+        RefreshCurrentArtwork();
         PrepareDesktopLyricsShutdown();
         RetireQueueSurfaceRequest();
         Presentation.DeactivateDetail();
@@ -1005,6 +1035,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void SubscribePlayback()
     {
         if (playbackSubscribed) return;
+        if (current is not null) current.PropertyChanged += CurrentSongChanged;
         application.ChorusInvalidated += ChorusAccountChanged;
         application.AccountDetailsInvalidated += OfficialAccountChanged;
         application.AccountDetailsInvalidated += CatalogAccountChanged;
@@ -1015,6 +1046,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private void UnsubscribePlayback()
     {
         if (!playbackSubscribed) return;
+        if (current is not null) current.PropertyChanged -= CurrentSongChanged;
         application.ChorusInvalidated -= ChorusAccountChanged;
         application.AccountDetailsInvalidated -= OfficialAccountChanged;
         application.AccountDetailsInvalidated -= CatalogAccountChanged;
@@ -1028,7 +1060,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         // Publish the cached task before bindings/cancellation can re-enter shutdown.
         await Task.Yield();
         AdvanceLoadGeneration(); playbackEpoch++;
+        Changed(nameof(PlaybackPresentationKey));
         UnsubscribePlayback();
+        playbackPresentation.Refresh();
         loadCancellation?.Cancel(); // Only reads: never cancel admitted mutations/history writes.
         catalogSourceReadCancellation?.Cancel(); // The shared startup source read is independent of its waiters.
         startupCancellation?.Cancel();

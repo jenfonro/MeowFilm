@@ -10,6 +10,7 @@ public sealed partial class ShellWindow
 
     private void InitializeHeaderPresentation()
     {
+        SearchTargetPicker.SearchField = SearchInput;
         _searchPage = _pages.Select(item => item.Page).OfType<IDesktopSearchPage>().SingleOrDefault();
         if (_searchPage is { } searchPage)
         {

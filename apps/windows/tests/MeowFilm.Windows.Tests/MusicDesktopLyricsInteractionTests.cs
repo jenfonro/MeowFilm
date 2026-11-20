@@ -699,6 +699,88 @@ public static partial class MusicUiTests
             window.RefreshHover(new(-100000, -100000)); await Drain();
             await window.SynchronizeInputRegionAsync();
             DesktopInteractionNative.DwmFlush();
+            var root = DesktopTestUi.WindowRoot(window);
+            var lines = Visuals(root).OfType<MusicDesktopLyricLineView>().ToArray();
+            var brushes = lines.Select(line => (line.Normal, line.Highlight)).ToArray();
+            var outlines = Visuals(root).OfType<MusicDesktopLyricTextView>().Select(text => text.Outline)
+                .Concat(Visuals(root).OfType<MusicLyricWordView>().Select(word => word.Outline))
+                .Where(outline => outline.InputInk is not null).ToArray();
+            True(outlines.Length > 0, "the native hit fixture owns actual rasterized lyric ink");
+            var resources = outlines.Select(outline => (outline.Coverage, Ink: outline.InputInk!.Value.Alpha,
+                Source: ((Image)outline.InputInk.Value.Surface).Source)).ToArray();
+            var inkFrame = await DesktopTestUi.Render(root, root.XamlRoot!.RasterizationScale);
+            var transparentFrame = await NativeDesktopCapture.CaptureAsync(root, lower);
+            nint retainedRegion = DesktopInteractionNative.CreateRectRgn(0, 0, 0, 0);
+            True(retainedRegion != 0 && DesktopInteractionNative.GetWindowRgn(hwnd, retainedRegion) > 0,
+                "the transparent lyric HWND has a real native ink region");
+            try
+            {
+                var origin = NativeDesktopCapture.ScreenPoint(root, new());
+                int offsetX = (int)Math.Floor(origin.X) - rect.Left, offsetY = (int)Math.Floor(origin.Y) - rect.Top;
+                int inkPixels = 0;
+                for (int y = 0; y < inkFrame.Height; y++)
+                for (int x = 0; x < inkFrame.Width; x++)
+                {
+                    if (inkFrame.Pixels[(y * inkFrame.Width + x) * 4 + 3] == 0) continue;
+                    inkPixels++;
+                    True(DesktopInteractionNative.PtInRegion(retainedRegion, offsetX + x, offsetY + y),
+                        $"the native region retains every rendered fill and antialias pixel at {x},{y}");
+                }
+                True(inkPixels > 0, "the glyph completeness assertion samples real rendered pixels");
+                f.Playback.Tick(1); await Drain(); await window.SynchronizeInputRegionAsync();
+                CheckResources(); CheckRegion();
+                var position = DesktopTestUi.WindowPosition(window);
+                DesktopTestUi.MoveWindow(window, position.X + 3, position.Y);
+                await Drain(); await window.SynchronizeInputRegionAsync();
+                CheckResources(); CheckRegion();
+                DesktopTestUi.MoveWindow(window, position.X, position.Y);
+                await Drain(); await window.SynchronizeInputRegionAsync();
+                DesktopHover(window); await Drain(); await window.SynchronizeInputRegionAsync();
+                var hoverFrame = await NativeDesktopCapture.CaptureAsync(root);
+                Equal(transparentFrame.Width, hoverFrame.Width); Equal(transparentFrame.Height, hoverFrame.Height);
+                int solidPixels = 0;
+                Equal(inkFrame.Width, transparentFrame.Width); Equal(inkFrame.Height, transparentFrame.Height);
+                for (int y = 1; y < inkFrame.Height - 1; y++)
+                for (int x = 1; x < inkFrame.Width - 1; x++)
+                {
+                    int at = (y * inkFrame.Width + x) * 4;
+                    bool opaqueInterior = true;
+                    for (int dy = -1; dy <= 1 && opaqueInterior; dy++)
+                    for (int dx = -1; dx <= 1; dx++)
+                        if (inkFrame.Pixels[((y + dy) * inkFrame.Width + x + dx) * 4 + 3] != 255)
+                        { opaqueInterior = false; break; }
+                    if (!opaqueInterior) continue;
+                    solidPixels++;
+                    for (int channel = 0; channel < 3; channel++)
+                        True(Math.Abs(transparentFrame.Pixels[at + channel] - hoverFrame.Pixels[at + channel]) <= 2,
+                            "turning off the full hover surface preserves the actual solid lyric fill");
+                }
+                True(solidPixels > 0, "hover comparison includes opaque glyph fill");
+                window.RefreshHover(new(-100000, -100000)); await Drain(); await window.SynchronizeInputRegionAsync();
+
+                void CheckResources()
+                {
+                    True(lines.Select(line => (line.Normal, line.Highlight)).SequenceEqual(brushes),
+                        "position samples and integer window moves retain normal and highlight brushes");
+                    for (int index = 0; index < outlines.Length; index++)
+                        True(ReferenceEquals(resources[index].Coverage, outlines[index].Coverage) &&
+                            ReferenceEquals(resources[index].Ink, outlines[index].InputInk!.Value.Alpha) &&
+                            ReferenceEquals(resources[index].Source, ((Image)outlines[index].InputInk!.Value.Surface).Source),
+                            "position samples and integer window moves retain coverage input ink and displayed raster");
+                }
+                void CheckRegion()
+                {
+                    nint current = DesktopInteractionNative.CreateRectRgn(0, 0, 0, 0);
+                    try
+                    {
+                        True(current != 0 && DesktopInteractionNative.GetWindowRgn(hwnd, current) > 0 &&
+                            DesktopInteractionNative.EqualRgn(retainedRegion, current),
+                            "position samples and integer window moves preserve the native glyph region");
+                    }
+                    finally { if (current != 0) DesktopInteractionNative.DeleteObject(current); }
+                }
+            }
+            finally { DesktopInteractionNative.DeleteObject(retainedRegion); }
             var glyph = await DesktopOpaqueLyricPoint(window);
             var blank = NativeDesktopCapture.ScreenPoint(DesktopTestUi.WindowRoot(window), new(8, DesktopTestUi.WindowRoot(window).ActualHeight - 8));
             await DesktopHit(glyph, hwnd);
@@ -870,5 +952,18 @@ public static partial class MusicUiTests
         internal static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int width, int height, uint flags);
         [DllImport("dwmapi.dll")]
         internal static extern int DwmFlush();
+        [DllImport("user32.dll")]
+        internal static extern int GetWindowRgn(nint window, nint region);
+        [DllImport("gdi32.dll")]
+        internal static extern nint CreateRectRgn(int left, int top, int right, int bottom);
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool PtInRegion(nint region, int x, int y);
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool EqualRgn(nint first, nint second);
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool DeleteObject(nint value);
     }
 }

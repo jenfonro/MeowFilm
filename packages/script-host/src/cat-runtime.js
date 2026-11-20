@@ -17,7 +17,7 @@ import { downloadCatSource } from './cat-source-download.js';
 import { atomicWrite, removePrivateVolume } from './private-volume.js';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
 import { ResourceScope } from './scope.js';
-import { ownedExtension } from './cat-output.js';
+import { ownedExtension, panProviders } from './cat-output.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { closeResource } from './resource-close.js';
 import { CatProxyResources, proxyPlaylistInput, readProxyPlaylist, proxyPlaylistBody, proxyManifestLocation,
@@ -27,6 +27,8 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const same = isDeepStrictEqual;
 const execution = spec => spec && [spec.sourceHash, spec.config, spec.version, spec.enabled, spec.inputIdentity];
 const sameExecution = (a, b) => same(execution(a), execution(b));
+const sameProviders = (a, b) => panProviders.every(provider =>
+  (a?.[provider] === true) === (b?.[provider] === true));
 const hopByHop = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'te', 'trailer', 'transfer-encoding', 'upgrade']);
 export function cleanHopByHop(input) {
@@ -78,6 +80,8 @@ export class CatRuntime {
     this.initialization = null;
     this.applied = new Map();
     this.failures = new Map();
+    this.accountSync = new WeakMap(); this.accountTasks = new Set();
+    this.accountSavedListeners = new Set();
   }
   serverClosure(server, timeoutMs = 3000) {
     let state = this.serverClosures.get(server);
@@ -241,6 +245,140 @@ export class CatRuntime {
     this.registerProxyMappings(candidate, candidate.catSnapshot.endpoints);
     this.candidates.delete(installationId);
     this.sweepProxies();
+    this.scheduleAccountSync(candidate);
+  }
+  connectAccounts(accounts) {
+    requireValue(!this.accounts && typeof accounts?.read === 'function' &&
+      typeof accounts.subscribe === 'function' && Array.isArray(accounts.providers));
+    this.accounts = accounts;
+    this.releaseAccounts = accounts.subscribe(provider => {
+      for (const session of this.sessions.values()) this.scheduleAccountSync(session, [provider]);
+    });
+    for (const session of this.sessions.values()) this.scheduleAccountSync(session);
+  }
+  onAccountSaved(listener) {
+    this.accountSavedListeners.add(listener);
+    return () => this.accountSavedListeners.delete(listener);
+  }
+  scheduleAccountSync(session, providers = this.accounts?.providers) {
+    if (!this.accounts || !providers || this.closed) return;
+    for (const provider of providers)
+      this.queueAccountSync(session, { provider }, { automatic: true }).catch(() => {});
+  }
+  queueAccountSync(session, { provider, credentials }, { signal, automatic = false } = {}) {
+    requireValue(this.accounts || credentials !== null && typeof credentials === 'object' && !Array.isArray(credentials));
+    const input = this.accounts ? null : cloneJSONValue(credentials);
+    provider = provider === '189' ? 'tianyi' : provider === '139' ? 'yidong' : provider;
+    let state = this.accountSync.get(session);
+    if (!state) {
+      state = { tail: Promise.resolve(), records: new Map() };
+      this.accountSync.set(session, state);
+    }
+    const record = { provider, status: 'pending' };
+    state.records.set(provider, record);
+    const scope = new ResourceScope();
+    let started = false;
+    const failed = error => {
+      if (state.records.get(provider) !== record) return;
+      record.status = 'failed'; record.errorCode = safeError(error).code;
+    };
+    if (signal) {
+      const abort = () => scope.close(safeError(signal.reason, 'CANCELLED'));
+      if (signal.aborted) abort();
+      else {
+        signal.addEventListener('abort', abort, { once: true });
+        scope.add(() => signal.removeEventListener('abort', abort));
+      }
+    }
+    const assertCurrent = () => {
+      requireValue(!this.closed, 'HOST_CLOSED');
+      requireValue(session.live && this.sessions.get(session.installationId) === session, 'STALE_SESSION');
+    };
+    const work = state.tail.then(async () => {
+      scope.assertOpen();
+      assertCurrent();
+      let current = input;
+      if (this.accounts) {
+        if (!this.accounts.providers.includes(provider)) {
+          record.status = 'unsupported';
+          return { status: 'unsupported' };
+        }
+        const account = await scope.race(this.accounts.read(provider));
+        scope.assertOpen();
+        assertCurrent();
+        record.revision = account.revision; record.rowRevision = account.rowRevision;
+        // App-connected writes always read the sole account owner at execution
+        // time. Caller credentials cannot become a second account fact.
+        current = account.credentials;
+        if (account.revision === 0) {
+          if (automatic && state.records.get(provider) === record) state.records.delete(provider);
+          else record.status = 'unsupported';
+          return { status: 'unsupported' };
+        }
+      }
+      let value;
+      try {
+        started = true;
+        value = await session.request('management.sync', { input: {
+          provider, credentials: current,
+        } }, { signal: scope.signal, phase: 'invocation', awaitCancelled: true });
+      } catch (error) {
+        // A timed-out transport does not prove that its guest PUT handler has
+        // stopped. End that execution and its volume ownership before a later
+        // queued save can run; ordinary failed receipts remain usable.
+        if (['TIMEOUT', 'NETWORK_ERROR', 'SERVICE_CLOSED', 'SERVICE_ERROR'].includes(error?.code)) {
+          this.failures.set(session.installationId, safeError(error).code);
+          try { await this.stopWorker(session); }
+          finally { this.settled.add(session.installationId); }
+        }
+        throw error;
+      }
+      assertCurrent();
+      if (value.status === 'saved') this.publishAccountSaved(session, state, record);
+      record.status = value.status === 'saved' ? 'saved' : 'unsupported';
+      delete record.errorCode;
+      return value;
+    }).catch(error => {
+      failed(error);
+      throw error;
+    });
+    const result = Promise.resolve().then(() => scope.race(work)).catch(error => {
+      if (!started) failed(error);
+      throw error;
+    });
+    state.tail = work.catch(() => {});
+    this.accountTasks.add(work);
+    work.finally(() => this.accountTasks.delete(work)).catch(() => {});
+    work.finally(() => scope.close()).catch(() => {});
+    return result;
+  }
+  publishAccountSaved(session, state, record) {
+    for (const listener of this.accountSavedListeners) {
+      // Revocation is synchronous; its physical drain can include an invoke
+      // waiting for this tail and therefore has independent lifetime ownership.
+      const drain = Promise.resolve(listener({ installationId: session.installationId,
+        generation: session.generation, provider: record.provider })).catch(error => {
+        if (state.records.get(record.provider) === record) {
+          record.status = 'failed'; record.errorCode = safeError(error).code;
+        }
+      });
+      this.accountTasks.add(drain);
+      drain.finally(() => this.accountTasks.delete(drain)).catch(() => {});
+    }
+  }
+  async waitAccountSync(session, signal) {
+    const scope = new ResourceScope(signal);
+    try {
+      for (;;) {
+        const tail = this.accountSync.get(session)?.tail;
+        if (!tail) return;
+        await scope.race(tail);
+        if (tail === this.accountSync.get(session)?.tail) return;
+      }
+    } catch (error) {
+      if (signal?.aborted) throw fault('CANCELLED');
+      throw error;
+    } finally { scope.close(); }
   }
   registerProxyMappings(session, entries) {
     for (const entry of entries) {
@@ -280,11 +418,26 @@ export class CatRuntime {
   workerSettings(_installationId, next = this.settings.value) {
     return cloneJSONValue({ providers: next.providers, mappings: next.mappings });
   }
+  sessionRoutingMatches(session, next = this.settings.value) {
+    return !!session && sameProviders(session.input.startParams.settings.value.providers, next.providers);
+  }
   publishSettingsSnapshot(next) {
     const aggregate = { port: this.aggregatePort };
     const sessions = new Set([...(this.host?.initializingSessions?.() ?? []),
       ...this.sessions.values(), ...this.candidates.values()]);
     for (const session of sessions) {
+      // Guest caches contain responses produced by this execution mode. Retire
+      // that execution before publishing another mode, rather than changing
+      // the meaning of its cached tokens and file IDs in place.
+      if (!this.sessionRoutingMatches(session, next)) {
+        this.settled.delete(session.installationId);
+        if (!session.stopRequested) {
+          const stopping = session.stop(fault('STALE_SESSION'));
+          this.pending.add(stopping);
+          stopping.finally(() => this.pending.delete(stopping)).catch(() => {});
+        }
+        continue;
+      }
       const snapshot = this.snapshots.get(session.installationId);
       if (snapshot && this.sessions.get(session.installationId) === session)
         snapshot.aggregatePort = aggregate.port;
@@ -364,7 +517,8 @@ export class CatRuntime {
         return;
       }
       if (old && (state ? state.enabled === spec.enabled : !spec.enabled) &&
-        (!spec.enabled || state?.state === 'ready') && sameExecution(old, spec) &&
+        (!spec.enabled || state?.state === 'ready' && this.sessions.get(installationId)?.live &&
+          this.sessionRoutingMatches(this.sessions.get(installationId))) && sameExecution(old, spec) &&
         !this.failures.has(installationId) && state?.state !== 'failed') {
         this.applied.set(installationId, spec);
         return;
@@ -505,7 +659,7 @@ export class CatRuntime {
     requireValue(!this.closed, 'HOST_CLOSED');
     return this.host?.captureInitialization(installationId) ?? (() => {});
   }
-  async refresh({ signal } = {}) {
+  async refresh({ signal, onSettingsPublished } = {}) {
     requireValue(signal === undefined || signal instanceof AbortSignal);
     requireValue(!signal?.aborted, 'CANCELLED');
     await this.start();
@@ -524,16 +678,18 @@ export class CatRuntime {
     }
     // Publishing settings also updates gateway/worker snapshots. It does not
     // establish that a queued installation change has run.
+    await this.configureGateway();
+    requireValue(!signal?.aborted, 'CANCELLED');
     const ids = [...new Set([...this.applied.keys(), ...previousSettings.keys(), ...diskScripts.keys()])]
       .filter(id => {
         const spec = diskScripts.get(id);
         if (!same(this.applied.get(id), spec) || this.failures.has(id)) return true;
         const state = this.hostState(id);
         return state?.state === 'failed' || state && state.enabled !== spec?.enabled ||
-          spec?.enabled && state?.state !== 'ready';
+          spec?.enabled && (state?.state !== 'ready' || !this.sessions.get(id)?.live ||
+            !this.sessionRoutingMatches(this.sessions.get(id)));
       });
-    await this.configureGateway();
-    requireValue(!signal?.aborted, 'CANCELLED');
+    onSettingsPublished?.();
     const results = await Promise.allSettled(ids.map(id => this.manage(id, signal, async task => {
       await this.apply(this.settings.read(), { only: new Set([id]), signal: task.scope.signal });
       task.scope.assertOpen();
@@ -1000,6 +1156,8 @@ export class CatRuntime {
     const spec = this.settings.value.scripts.find(script =>
       script.installationId === installationId);
     if (!spec?.enabled) return false;
+    const session = this.sessions.get(installationId);
+    if (session && (!session.live || !this.sessionRoutingMatches(session))) return true;
     if (this.configuration && spec.loadedIdentity !== spec.inputIdentity) return true;
     if (!this.settled.has(installationId) || !state) return true;
     if (!state.enabled) return false;
@@ -1010,6 +1168,8 @@ export class CatRuntime {
       script.installationId === installationId);
     const state = this.hostState(installationId), snapshot = this.snapshots.get(installationId);
     const failure = this.failures.get(installationId);
+    const sync = this.accountSync.get(this.sessions.get(installationId));
+    const accountSync = sync ? [...sync.records.values()].map(record => ({ ...record })) : null;
     const status = this.replacements.has(installationId) ? 'starting'
       : failure ? 'failed' : spec?.enabled === false ? 'disabled'
       : this.starting(installationId, state, snapshot) ? 'starting'
@@ -1023,7 +1183,8 @@ export class CatRuntime {
       version: status === 'ready' ? state.version : spec?.version ?? state?.version ?? '0.0.0',
       sourceHash: status === 'starting' ? spec?.sourceHash ?? null
         : state?.contentHash ?? spec?.sourceHash ?? null,
-      error: failure ?? state?.lastFailure ?? null,
+      error: failure ?? state?.lastFailure ?? accountSync?.find(record => record.status === 'failed')?.errorCode ?? null,
+      ...(accountSync ? { accountSync } : {}),
       sites: cloneJSONValue(status === 'ready' ? this.hostSites(installationId) : spec?.sites ?? []),
       ...(this.configuration ? { inputRevision: spec?.inputRevision ?? 0 } : {}),
       ...(status === 'ready' && snapshot ? {
@@ -1057,11 +1218,14 @@ export class CatRuntime {
     const signal = options?.signal;
     await this.start();
     const session = this.getSession(target.installationId, target.generation);
+    await this.waitAccountSync(session, signal);
     const assertCurrent = () => {
       requireValue(!signal?.aborted, 'CANCELLED');
       requireValue(!this.closed, 'HOST_CLOSED');
       requireValue(session.live && this.sessions.get(session.installationId) === session, 'STALE_SESSION');
+      requireValue(this.sessionRoutingMatches(session), 'STALE_SESSION');
     };
+    assertCurrent();
     let result;
     // Both successful and failed receipts must still belong to this session.
     try { result = await this.host.invoke(target, options); }
@@ -1093,8 +1257,7 @@ export class CatRuntime {
   }
   async sync(installationId, generation, input, { signal } = {}) {
     await this.start();
-    return this.getSession(installationId, generation).request('management.sync', { input },
-      { signal, phase: 'invocation' });
+    return this.queueAccountSync(this.getSession(installationId, generation), input, { signal });
   }
   async status() {
     await this.start();
@@ -1103,6 +1266,7 @@ export class CatRuntime {
   statusSnapshot() {
     return { aggregate: {
       origin: `http://127.0.0.1:${this.server.address().port}` },
+      routing: this.workerSettings(null),
       instances: [...new Set([...this.settings.value.scripts.map(spec => spec.installationId),
         ...this.replacements])].map(id => this.instance(id)) };
   }
@@ -1405,6 +1569,7 @@ export class CatRuntime {
   async close() {
     if (this.closing) return this.closing;
     this.closed = true;
+    this.releaseAccounts?.();
     this.closing = (async () => {
       let failure;
       const proxyClosing = this.drainProxies().catch(error => { failure ??= error; });
@@ -1421,7 +1586,7 @@ export class CatRuntime {
       );
       // Stop workers before waiting for serialized runtime work that may be
       // waiting on one of those workers to initialize or answer an RPC.
-      await Promise.allSettled([this.initialization, this.gatewayPending, ...this.pending]);
+      await Promise.allSettled([this.initialization, this.gatewayPending, ...this.pending, ...this.accountTasks]);
       try {
         const outcome = await hostClosing;
         if (outcome.error) failure ??= outcome.error;
@@ -1451,6 +1616,7 @@ export class CatRuntime {
       this.proxies.clear();
       this.applied.clear(); this.failures.clear();
       this.settled.clear();
+      this.accountSavedListeners.clear(); this.accounts = null;
       this.transactions.clear(); this.pending.clear();
       this.initialization = null;
       try { await this.settings?.close(); } catch (error) { failure ??= error; }

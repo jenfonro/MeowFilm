@@ -3,9 +3,11 @@ using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities.Library;
+using Windows.Foundation;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,15 +15,15 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicLyricWordView : UserControl
 {
     public static readonly DependencyProperty WordProperty = DependencyProperty.Register(nameof(Word), typeof(MusicLyricWord),
-        typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshText()));
+        typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshWord()));
     public static readonly DependencyProperty PositionProperty = DependencyProperty.Register(nameof(Position), typeof(double),
         typeof(MusicLyricWordView), new PropertyMetadata(0d, (owner, _) => ((MusicLyricWordView)owner).RefreshPosition()));
     public static readonly DependencyProperty HighlightProperty = DependencyProperty.Register(nameof(Highlight), typeof(Brush),
-        typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshText()));
+        typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshHighlightColor()));
     public static readonly DependencyProperty StrokeProperty = DependencyProperty.Register(nameof(Stroke), typeof(Brush),
-        typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshText()));
+        typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshOutline()));
     public static readonly DependencyProperty StrokeThicknessProperty = DependencyProperty.Register(nameof(StrokeThickness), typeof(double),
-        typeof(MusicLyricWordView), new PropertyMetadata(0d, (owner, _) => ((MusicLyricWordView)owner).RefreshText()));
+        typeof(MusicLyricWordView), new PropertyMetadata(0d, (owner, _) => ((MusicLyricWordView)owner).RefreshOutline()));
     public MusicLyricWord? Word { get => (MusicLyricWord?)GetValue(WordProperty); set => SetValue(WordProperty, value); }
     public double Position { get => (double)GetValue(PositionProperty); set => SetValue(PositionProperty, value); }
     public Brush? Highlight { get => (Brush?)GetValue(HighlightProperty); set => SetValue(HighlightProperty, value); }
@@ -32,6 +34,7 @@ public sealed class MusicLyricWordView : UserControl
     private readonly MusicLyricOutline outline;
     private readonly InsetClip highlightClip;
     private MusicLyricList? presenter;
+    private MusicDesktopLyricsInputRegion? inputRegion;
     private double progress, animationSeconds;
     private long animationStart;
     private bool animating;
@@ -49,37 +52,88 @@ public sealed class MusicLyricWordView : UserControl
         grid.Children.Add(textSurface); grid.Children.Add(highlighted); Content = grid;
         var visual = ElementCompositionPreview.GetElementVisual(highlighted);
         highlightClip = visual.Compositor.CreateInsetClip(); visual.Clip = highlightClip;
-        foreach (var property in new[] { FontSizeProperty, FontFamilyProperty, ForegroundProperty, FlowDirectionProperty, LanguageProperty })
-            RegisterPropertyChangedCallback(property, (_, _) => RefreshText());
+        foreach (var property in new[] { FontSizeProperty, FontFamilyProperty, FlowDirectionProperty, LanguageProperty })
+            RegisterPropertyChangedCallback(property, (_, _) => RefreshTypography());
+        RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => RefreshNormalColor());
         Loaded += (_, _) =>
         {
+            inputRegion = MusicDesktopLyricsInputRegion.Find(this);
+            inputRegion?.Register(this, outline);
             for (DependencyObject? node = VisualTreeHelper.GetParent(this); node is not null; node = VisualTreeHelper.GetParent(node))
                 if (node is MusicLyricList list) { presenter = list; list.Register(this); break; }
-            RefreshText(); RefreshPosition();
+            RefreshPosition();
         };
-        Unloaded += (_, _) => { presenter?.Unregister(this); presenter = null; StopHighlight(); };
+        Unloaded += (_, _) =>
+        {
+            inputRegion?.Unregister(this); inputRegion = null;
+            presenter?.Unregister(this); presenter = null; StopHighlight();
+        };
         SizeChanged += (_, _) => { StopHighlight(); presenter?.InvalidateViewport(); RefreshPosition(); };
-        RegisterPropertyChangedCallback(MeowFilm.Desktop.DesktopTheme.IsHighContrastProperty, (_, _) => RefreshText());
+        RegisterPropertyChangedCallback(MeowFilm.Desktop.DesktopTheme.IsHighContrastProperty, (_, _) =>
+        {
+            RefreshNormalColor(); RefreshHighlightColor();
+            if (!MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this)) RefreshOutline();
+            StopHighlight(); RefreshPosition();
+        });
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         { if (Visibility != Visibility.Visible) StopHighlight(); presenter?.InvalidateViewport(); });
+        RefreshTypography(); RefreshNormalColor(); RefreshHighlightColor();
     }
-    private void RefreshText()
+    protected override Size MeasureOverride(Size availableSize)
     {
-        if (normal is null) return;
+        string text = normal.Text;
+        int end = text.Length;
+        while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
+        // TextBlock's desired width excludes trailing whitespace. Its automatic
+        // Run exposes the actual text edges without the container's closing positions.
+        // ContentStart initializes TextBlock's native TextView as well as its
+        // automatic Run. Run pointers alone cannot resolve character geometry.
+        Run? run = null;
+        if (end < text.Length)
+        {
+            _ = normal.ContentStart;
+            run = (Run)normal.Inlines[0];
+        }
+        var size = base.MeasureOverride(availableSize);
+        if (run is null) return size;
+        var suffix = run.ContentEnd.GetPositionAtOffset(end - text.Length, LogicalDirection.Forward)
+            .GetCharacterRect(LogicalDirection.Forward);
+        var last = run.ContentEnd.GetCharacterRect(LogicalDirection.Backward);
+        return new(size.Width + Math.Abs(last.X - suffix.X), size.Height);
+    }
+    private void RefreshWord()
+    {
+        StopHighlight();
+        normal.Text = highlighted.Text = Word?.Text ?? "";
+        AutomationProperties.SetName(this, Word?.Text ?? "");
+        InvalidateMeasure(); RefreshOutline(); RefreshPosition();
+    }
+    private void RefreshTypography()
+    {
         StopHighlight();
         foreach (var text in new[] { normal, highlighted })
         {
-            text.Text = Word?.Text ?? ""; text.FontSize = FontSize; text.FontFamily = FontFamily;
-            text.FontWeight = Microsoft.UI.Text.FontWeights.Normal; text.FlowDirection = FlowDirection; text.Language = Language;
+            text.FontSize = FontSize; text.FontFamily = FontFamily;
+            text.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
+            text.FlowDirection = FlowDirection; text.Language = Language;
         }
-        bool contrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
-        var settings = new Windows.UI.ViewManagement.UISettings();
-        normal.Foreground = contrast ? new SolidColorBrush(settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground)) : Foreground;
-        highlighted.Foreground = contrast ? new SolidColorBrush(settings.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent)) : Highlight ?? MusicVisuals.Brush("#DC143C");
-        outline.Update(normal, textSurface, contrast ? normal.Foreground : Stroke, StrokeThickness);
-        AutomationProperties.SetName(this, Word?.Text ?? "");
-        RefreshPosition();
+        InvalidateMeasure(); RefreshOutline(); RefreshPosition();
     }
+    private void RefreshNormalColor()
+    {
+        bool contrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
+        normal.Foreground = contrast ? new SolidColorBrush(new Windows.UI.ViewManagement.UISettings()
+            .GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground)) : Foreground;
+        if (contrast) RefreshOutline();
+    }
+    private void RefreshHighlightColor()
+    {
+        bool contrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
+        highlighted.Foreground = contrast ? new SolidColorBrush(new Windows.UI.ViewManagement.UISettings()
+            .GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent)) : Highlight ?? MusicVisuals.Brush("#DC143C");
+    }
+    private void RefreshOutline() => outline.Update(normal, textSurface,
+        MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this) ? normal.Foreground : Stroke, StrokeThickness);
     private void RefreshPosition()
     {
         if (presenter is not null) presenter.RefreshWords(); else Present(Position, null, true);

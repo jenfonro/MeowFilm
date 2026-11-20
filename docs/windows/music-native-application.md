@@ -98,6 +98,8 @@ public interface IMusicApplication : IAsyncDisposable
 
 ## 进程内退役
 
+入口同步封闭新请求；准备工作随后切到不捕获 UI 上下文的后台执行，与普通命令使用同一线程边界。即使前序排空任务已完成，搜索退休时的歌曲资料投影也不会回到 UI 线程读取仓库。
+
 1. 封闭新请求并取消当前 generation，同步围住推荐 callback。
 2. 同时停止推荐、账号读取、目录、歌词、发现、搜索、同步、反馈和脚本工作；App 同时停止所拥有的执行端，避免读者等不到生产者结束。
 3. 排空已准入 application 请求、真实本地事务和资源工作，再释放 application 自己拥有的协调器、账号协议与 platform client。

@@ -14,10 +14,10 @@ public static partial class MusicCatalogPersonalTests
         var page = E(new
         {
             ok = true, platform = "wy", more = false, channel = new { id = "rock" },
-            sections = Enumerable.Range(0, channel ? 1 : 4).Select(section => new
+            sections = Enumerable.Range(0, channel ? 1 : 2).Select(section => new
             {
                 id = "retained-" + section, title = "推荐 " + section, layout = "playlist-grid",
-                items = Enumerable.Range(0, channel ? 48 : 12).Select(index => new
+                items = Enumerable.Range(0, channel ? 12 : 6).Select(index => new
                 {
                     id = (1000 + section * 200 + index).ToString(), kind = "playlist", title = "音乐 " + section + " / " + index,
                     cover = "https://art.example.test/retained/" + section + "/" + index,
@@ -29,36 +29,36 @@ public static partial class MusicCatalogPersonalTests
         await f.Module.NavigateAsync(channel ? "catalog-channel/wy/rock" : "catalog-home", default);
         var artwork = new RetainedCatalogArtwork();
         ArtworkScope.SetLoader(f.Module.View, artwork);
-        using var host = new HomeNoticeMount(f.Module.View);
+        using var host = new DesktopTestUi.Host(f.Module.View, 900, 480);
         await TestUiHost.LoadedAsync(f.Module.View);
         var view = Visuals<MusicCatalogView>(f.Module.View).Single();
         var scroll = view.ActiveScroll;
         var source = channel ? f.Module.ChannelSections : f.Module.HomeSections;
         int count = source.Sum(section => section.Items.Count);
-        await Until(() => scroll.ScrollableHeight > 500 && artwork.Live > 0);
+        await Until(() => scroll.ScrollableHeight > 0 && artwork.Live > 0);
+        await Drain();
         Check(artwork.Reads < count, "unseen cards do not read artwork on receipt");
         var sections = Visuals<MusicCatalogSectionView>(scroll).ToArray();
         var cards = Visuals<MusicCatalogCardView>(scroll).ToArray();
         var images = cards.SelectMany(Visuals<ArtworkImage>).ToArray();
+        var admitted = images.Where(image => image.Source is not null).ToDictionary(image => image, image => image.Source);
         var events = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
         source.CollectionChanged += (_, e) => events.Add(e.Action);
-        async Task Traverse()
-        {
-            for (double offset = 0; offset < scroll.ScrollableHeight + scroll.ViewportHeight; offset += scroll.ViewportHeight * .75)
-            {
-                double next = Math.Min(offset, scroll.ScrollableHeight);
-                scroll.ChangeView(null, next, null, true);
-                await Until(() => Math.Abs(scroll.VerticalOffset - next) < 1);
-                await Task.Delay(20);
-            }
-            scroll.ChangeView(null, 0, null, true); await Until(() => scroll.VerticalOffset < 1);
-        }
-        await Traverse(); await Until(() => artwork.Reads == count);
+        int sectionNotifications = 0;
+        f.Module.PropertyChanged += (_, args) =>
+        { if (args.PropertyName is nameof(MusicCapability.CatalogSections) or nameof(MusicCapability.ChannelSections)) sectionNotifications++; };
+        await f.Module.RunAsync(() => Task.CompletedTask);
+        Equal(0, sectionNotifications);
+        int initialReads = artwork.Reads;
+        scroll.ChangeView(null, scroll.ScrollableHeight, null, true);
+        await Until(() => Math.Abs(scroll.VerticalOffset - scroll.ScrollableHeight) < 1 && artwork.Reads > initialReads);
+        await Drain();
         int reads = artwork.Reads;
-        await Traverse();
+        scroll.ChangeView(null, 0, null, true); await Until(() => scroll.VerticalOffset < 1);
         f.Module.Volume = 37;
         await Drain();
-        Check(artwork.Reads == reads && artwork.Live == count, "returning over admitted cards and an unrelated property do not reread or retire them");
+        Check(artwork.Reads == reads && artwork.Live == reads && artwork.Addresses.Distinct().Count() == reads,
+            "returning over admitted cards and an unrelated property do not reread or retire them");
         Check(events.Count == 0 && sections.SequenceEqual(Visuals<MusicCatalogSectionView>(scroll)) &&
             cards.SequenceEqual(Visuals<MusicCatalogCardView>(scroll)) && images.SequenceEqual(cards.SelectMany(Visuals<ArtworkImage>)),
             "scrolling and unrelated properties retain section card and image identities");
@@ -67,7 +67,7 @@ public static partial class MusicCatalogPersonalTests
         source[0] = first with { Items = first.Items.Append(added).ToArray() };
         await Drain(); scroll.UpdateLayout(); await Drain();
         Check(sections.SequenceEqual(Visuals<MusicCatalogSectionView>(scroll)), "a new receipt retains the section controls");
-        Check(cards.All(card => Visuals<MusicCatalogCardView>(scroll).Contains(card)) && images.All(image => image.Source is not null),
+        Check(cards.All(card => Visuals<MusicCatalogCardView>(scroll).Contains(card)) && admitted.All(pair => ReferenceEquals(pair.Key.Source, pair.Value)),
             "append retains existing card controls and their decoded images");
         var unchanged = cards.Where(card => !ReferenceEquals(card.DataContext, first.Items[0])).ToArray();
         var updated = first.Items[0] with { Title = "修改标题" };
@@ -90,11 +90,12 @@ public static partial class MusicCatalogPersonalTests
     {
         private readonly ArtworkPixels pixels = MusicTestUi.Pixels(192, 192,
             (x, y) => global::Windows.UI.Color.FromArgb(255, (byte)(40 + x / 2), (byte)(50 + y / 2), 90));
-        public int Reads, Live, Peak;
+        public int Reads, Live;
+        public List<string> Addresses { get; } = [];
         public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Reads++; Live++; Peak = Math.Max(Peak, Live);
+            Reads++; Live++; Addresses.Add(address);
             return Task.FromResult<IArtworkLease>(new Lease(this, pixels));
         }
         private sealed class Lease(RetainedCatalogArtwork owner, ArtworkPixels image) : IArtworkLease

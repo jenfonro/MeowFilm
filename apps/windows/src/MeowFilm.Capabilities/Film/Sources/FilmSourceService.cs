@@ -77,6 +77,22 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunAsync(token => InStateAsync(LoadAsync, token), cancellationToken);
 
+    public Task<IReadOnlyDictionary<string, bool>> ReadPanInterceptionAsync(CancellationToken cancellationToken = default) =>
+        RunAsync(token => settings.ReadPanInterceptionAsync(token), cancellationToken);
+
+    public Task<IReadOnlyDictionary<string, bool>> SavePanInterceptionAsync(string provider, bool enabled,
+        CancellationToken cancellationToken = default) => RunAsync(async token =>
+    {
+        IReadOnlyDictionary<string, bool> saved = null!;
+        await InStateAsync(async ct =>
+        {
+            saved = await settings.SavePanInterceptionAsync(provider, enabled, ct).ConfigureAwait(false);
+            foreach (var key in probes.Keys.ToArray()) InvalidateProbe(key);
+            ConfigurationChanged();
+        }, token).ConfigureAwait(false);
+        return saved;
+    }, cancellationToken);
+
     public Task RefreshAsync(CancellationToken cancellationToken = default) =>
         RunAsync(async token =>
         {

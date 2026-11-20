@@ -57,9 +57,8 @@ public sealed partial class MusicCapability
     }
     private void SearchBindings()
     {
-        Changed(nameof(ContentPage));
-        foreach (string name in new[] { nameof(IsSearchPage), nameof(IsCatalogBrowsePage), nameof(HasSearchSession),
-            nameof(CatalogSections), nameof(ShowSearchSkeleton), nameof(Songs), nameof(SearchTab), nameof(IsSearchOverview), nameof(IsSearchSongs), nameof(IsSearchPlaylists),
+        foreach (string name in new[] { nameof(HasSearchSession),
+            nameof(ShowSearchLoading),
             nameof(CanSearchMore), nameof(CanLoadMoreSearchSongs), nameof(CanLoadMoreSearchPlaylists),
             nameof(SearchSongsLoading), nameof(SearchPlaylistsLoading), nameof(SearchStatus) })
             Changed(name);
@@ -73,26 +72,20 @@ public sealed partial class MusicCapability
         }
     }
 
-    private Task BeginSearchAsync(string keyword, CancellationToken token, bool refresh = false)
+    private Task BeginSearchAsync(string keyword, CancellationToken token, bool refresh = false, bool overview = false)
     {
         if (stopping) return Task.CompletedTask;
         RememberSearch();
-        if (searchKeyword != keyword)
-        {
-            searchView = SearchOverview;
-            searchKind = "songs";
-            CatalogSearchKind = "歌曲";
-        }
-        string kind = searchView == "playlists" ? "playlists" : "songs";
+        var previousSelection = (location.Route, searchView, CatalogSections);
+        string view = searchKeyword != keyword || overview ? SearchOverview : searchView;
+        string kind = view == "playlists" ? "playlists" : "songs";
         if (!SearchPreferencesLoaded(kind)) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
-        searchKind = kind;
         string[] platforms = SearchDispatchPlatforms(kind);
         var key = SearchStartIdentity(keyword, kind, platforms);
         if (searchKeyword == keyword && searchAccountEpoch == accountEpoch &&
             searchStarts.TryGetValue(kind, out var pending) && pending.Epoch == searchEpoch &&
             pending.Key == key)
         {
-            searchKind = kind;
             return EnsureSearchViewAsync(pending.Work, pending.Epoch, token, kind);
         }
         var previous = searchStartTail;
@@ -107,7 +100,8 @@ public sealed partial class MusicCapability
             searchSongs.Clear(); searchSelectedKey = null; Presentation.ResetSearchPresentation();
         }
         searchStarts.Clear();
-        searchKeyword = keyword; searchKind = kind; searchAccountEpoch = accountEpoch;
+        searchKeyword = keyword; searchView = view; searchKind = kind; searchAccountEpoch = accountEpoch;
+        CatalogSearchKind = kind == "songs" ? "歌曲" : "歌单";
         searchStarting = true; searchRefresh = refresh; SearchStatus = "";
         location = new("catalog-search", keyword); heading = keyword;
         catalogQuery = keyword; catalogLoadedKind = CatalogSearchKind;
@@ -121,7 +115,7 @@ public sealed partial class MusicCapability
         var flight = new SearchStartFlight(key, epoch);
         searchStarts[kind] = flight;
         searchStartTail = flight.Work = Start();
-        RefreshBindings();
+        PublishContentSelection(previousSelection);
         var work = EnsureSearchViewAsync(flight.Work, epoch, token, kind);
         PublishSearchView(restore: false);
         return work;
@@ -207,7 +201,7 @@ public sealed partial class MusicCapability
             if (missing && message.Length > 0)
             {
                 SearchStatus = message;
-                SearchBindings();
+                Changed(nameof(SearchStatus));
             }
         }
         else SearchBindings();
@@ -225,7 +219,7 @@ public sealed partial class MusicCapability
         searchSnapshots[kind] = value.Clone();
         if (IsSearchPage && (searchView == SearchOverview || searchKind == kind))
             PublishSearchView(restore: false);
-        SearchBindings();
+        else SearchBindings();
     }
 
     private MusicCatalogCard[] SearchCards(string kind)
@@ -293,7 +287,6 @@ public sealed partial class MusicCapability
             }
             SearchStatus = SearchViewStatus();
             status = ""; RefreshBindings();
-            if (sectionsChanged) Changed(nameof(CatalogSections));
         }
         finally { publishing = false; }
         if (!restoreScroll) return;
@@ -388,7 +381,9 @@ public sealed partial class MusicCapability
     {
         token.ThrowIfCancellationRequested();
         if (navigate) { AdvanceLoadGeneration(); loadCancellation?.Cancel(); }
+        var previousSelection = (location.Route, searchView, CatalogSections);
         location = new("catalog-search", searchKeyword);
+        PublishContentSelection(previousSelection);
         PublishSearchView(restore: true);
         return Task.CompletedTask;
     }
@@ -402,11 +397,12 @@ public sealed partial class MusicCapability
         if (tab is not (SearchOverview or "songs" or "playlists")) return Task.CompletedTask;
         if (searchView != tab) InvalidateCatalogAction();
         RememberSearch();
+        var previousSelection = (location.Route, searchView, CatalogSections);
         searchView = tab;
         searchKind = tab == "playlists" ? "playlists" : "songs";
         CatalogSearchKind = searchKind == "songs" ? "歌曲" : "歌单";
+        PublishContentSelection(previousSelection);
         PublishSearchView(restore: true);
-        SearchBindings();
         return tab == SearchOverview
             ? EnsureSearchViewAsync(Task.CompletedTask, searchEpoch, lifetime.Token)
             : searchSnapshots.ContainsKey(searchKind)
@@ -494,8 +490,9 @@ public sealed partial class MusicCapability
         foreach (var sections in searchSections.Values) sections.Clear();
         searchSongs.Clear(); searchSelectedKey = null;
         Presentation.ResetSearchPresentation();
+        var previousSelection = (location.Route, searchView, CatalogSections);
         searchView = SearchOverview; searchKind = "songs";
-        SearchBindings();
+        PublishContentSelection(previousSelection); SearchBindings();
         await searchStartTail;
         await CancelSearchIds(ids);
     }

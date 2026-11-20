@@ -19,7 +19,7 @@ const errorCodes = new Set([
   'INVALID_REQUEST', 'UPSTREAM_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'NETWORK_ERROR',
   'TIMEOUT', 'RESOURCE_LIMIT', 'CANCELLED', 'CLOSED', 'STALE_SOURCE', 'STALE_ACCOUNT', 'AUTH_REQUIRED', 'AUTH_FAILED',
   'NOT_CONFIGURED', 'NOT_FOUND', 'LOGIN_EXPIRED', 'CHALLENGE_REQUIRED', 'WEB_INTERACTION_REQUIRED',
-  'CAPABILITY_UNAVAILABLE', 'UNSUPPORTED_OPERATION', 'PAN_FAILURE', 'SOURCE_FAILURE', 'CAT_FAILURE',
+  'CAPABILITY_UNAVAILABLE', 'UNSUPPORTED_OPERATION', 'PAN_FAILURE', 'PAN_INTERCEPTION_UNSUPPORTED', 'SOURCE_FAILURE', 'CAT_FAILURE',
   'SCRIPT_FAILURE', 'SCRIPT_PROTOCOL_ERROR', 'STORAGE_ERROR', 'CORRUPT_STORAGE',
   'MEDIA_UNAVAILABLE', 'INVALID_RULES', 'CACHE_LOAD_FAILED', 'STALE_METADATA',
   'PERMISSION_DENIED', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED', 'COMMIT_UNKNOWN',
@@ -52,6 +52,10 @@ function sourceDependencies(source) {
     generation: source.generation, ...(source.revision === undefined ? {} : { revision: source.revision }),
     sourceRevision: sourceRevision(source) }];
 }
+function scriptDependencies(source) {
+  return [...sourceDependencies(source), ...(source.engine === 'cat' ? [{ kind: 'script-account',
+    installationId: source.installationId, generation: source.generation }] : [])];
+}
 function playbackSource(value) {
   if (value?.engine !== 'pan') return checkSource(value);
   requireValue(object(value) && text(value.key) && isIdentifier(value.detailId));
@@ -60,7 +64,7 @@ function playbackSource(value) {
 function scopeOf(source) {
   return { sourceKey: source.key, sourceRevision: sourceRevision(source),
     ...(source.engine === 'pan' ? {} : {
-      sourceEngine: source.engine, sourceInstallationId: source.installationId,
+      sourceEngine: source.engine, sourceInstallationId: source.installationId, sourceGeneration: source.generation,
     }) };
 }
 function searchPage(raw, page) {
@@ -271,14 +275,14 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     } : {
       installationId: source.installationId, revision: source.revision,
       generation: source.generation, action, payload,
-    }, signal, sourceDependencies(source), checkSchedule,
+    }, signal, scriptDependencies(source), checkSchedule,
     source.engine === 'cat' && action === 'play' && !discoverVariants ? { mediaPurpose: 'receipt' } : undefined);
     return parseSourceValue(value);
   }
   async function catalog(source, action, payload = {}, { signal, canSchedule, refresh = false } = {}) {
     source = checkSource(source);
     requireValue(['home', 'category'].includes(action) && object(payload));
-    const deps = sourceDependencies(source);
+    const deps = scriptDependencies(source);
     return execute(deps, { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
       await liveSource(source, ownedSignal, checkSchedule);
       const entry = await load(sourceRequest(action, source, { payload: clone(payload) }),
@@ -290,7 +294,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   async function search(source, query, page = 1, { signal, canSchedule, refresh = false } = {}) {
     source = checkSource(source);
     requireValue(text(query) && Number.isSafeInteger(page) && page > 0);
-    const deps = sourceDependencies(source);
+    const deps = scriptDependencies(source);
     return execute(deps, { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
       await liveSource(source, ownedSignal, checkSchedule);
       const entry = await load(sourceRequest('search', source, { query, page }), async producerSignal => {
@@ -306,7 +310,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
   async function detailEntry(source, detailId, { signal, canSchedule, refresh = false } = {}) {
     source = checkSource(source);
     requireValue(isIdentifier(detailId));
-    const deps = sourceDependencies(source);
+    const deps = scriptDependencies(source);
     return execute(deps, { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
       await liveSource(source, ownedSignal, checkSchedule);
       const entry = await load(sourceRequest('detail', source, { detailId }), async producerSignal => {
@@ -731,7 +735,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     requireValue(source.engine !== 'pan' && !candidate.share, 'INVALID_REQUEST');
     requireValue(isIdentifier(candidate.playId) && isIdentifier(candidate.flag));
     const discover = source.engine === 'cat' && (discoverVariants || !!candidate.variant);
-    const dependencies = [...sourceDependencies(source),
+    const dependencies = [...scriptDependencies(source),
       { kind: 'address', identity: addressIdentity({ ...candidate, variant: undefined }, source) }];
     const request = sourceRequest('play', source, { flag: candidate.flag, playId: candidate.playId });
     // Discovery enriches the same parent receipt; ordinary readers can reuse it.
@@ -742,11 +746,11 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       { discoverVariants: discover })),
       { ttl: addressTTL, completeness, dependencies, signal, checkSchedule, refresh });
     const entry = await variantEntry(candidate, request, parent,
-      [...sourceDependencies(source), { kind: 'address', identity: addressIdentity(candidate, source) }], signal, checkSchedule);
+      [...scriptDependencies(source), { kind: 'address', identity: addressIdentity(candidate, source) }], signal, checkSchedule);
     return { ...clone(entry.value), resolvedAt: entry.fetchedAt, expiresAt: entry.expiresAt, scope: scopeOf(source) };
   }
   function candidateDependencies(candidate, source) {
-    return [...sourceDependencies(source), ...providers.filter(provider =>
+    return [...(candidate.file ? sourceDependencies(source) : scriptDependencies(source)), ...providers.filter(provider =>
       provider === candidate.file?.provider).map(provider => accountDependency(provider))];
   }
   async function resolve(candidate, { signal, canSchedule, mode, discoverVariants = false } = {}) {
@@ -786,7 +790,7 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     requireValue(object(payload) && text(payload.sessionId) && text(payload.event) &&
       Number.isFinite(payload.positionSeconds) && payload.positionSeconds >= 0 &&
       Number.isFinite(payload.durationSeconds) && payload.durationSeconds >= 0);
-    return execute(sourceDependencies(source), { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
+    return execute(scriptDependencies(source), { signal, canSchedule }, async (ownedSignal, checkSchedule) => {
       await liveSource(source, ownedSignal, checkSchedule);
       const value = await invoke(source, 'report', { id: candidate.playId, flag: candidate.flag,
         sessionId: payload.sessionId, positionSeconds: payload.positionSeconds,
@@ -807,10 +811,10 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     if (input.kind === 'search') requireValue(text(input.query) && Number.isSafeInteger(input.page) && input.page > 0);
     else requireValue(isIdentifier(input.detailId));
     return { request: sourceRequest(input.kind, source, input.kind === 'search'
-      ? { query: input.query, page: input.page } : { detailId: input.detailId }), dependencies: sourceDependencies(source) };
+      ? { query: input.query, page: input.page } : { detailId: input.detailId }), dependencies: scriptDependencies(source) };
   }
   function inputDependencies(input) {
-    return input.kind === 'metadata' ? [{ domain: input.provider }] : sourceDependencies(checkSource(input.source));
+    return input.kind === 'metadata' ? [{ domain: input.provider }] : scriptDependencies(checkSource(input.source));
   }
   async function seedValue(input, signal, checkSchedule, optionalContent = false) {
     requireValue(['partial', 'complete'].includes(input.completeness) && Number.isFinite(input.fetchedAt) &&
@@ -881,6 +885,11 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
     if (typeof scope === 'string') {
       requireValue(text(scope));
       return dep => dep.domain === scope || scope === 'source' && dep.kind === 'source' || scope === 'pan' && dep.kind === 'account';
+    }
+    if (object(scope) && scope.kind === 'script-account') {
+      requireValue(text(scope.installationId) && Number.isSafeInteger(scope.generation));
+      return dep => dep.kind === 'script-account' && dep.installationId === scope.installationId &&
+        dep.generation === scope.generation;
     }
     requireValue(object(scope) && scope.kind === 'source' && ['cat', 'source'].includes(scope.engine) &&
       (scope.installationId === undefined || text(scope.installationId)));

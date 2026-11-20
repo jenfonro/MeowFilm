@@ -10,6 +10,7 @@ const messages = Object.freeze({
   TIMEOUT: 'Operation timed out',
   PERMISSION_DENIED: 'Capability denied',
   CAPABILITY_UNAVAILABLE: 'Capability unavailable',
+  PAN_INTERCEPTION_UNSUPPORTED: 'Pan request cannot be captured',
   UNSUPPORTED_PROTOCOL: 'Unsupported script protocol',
   UNSUPPORTED_ACTION: 'Unsupported source action',
   UNSUPPORTED_RULE: 'Unsupported source rule',

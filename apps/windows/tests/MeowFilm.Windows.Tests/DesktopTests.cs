@@ -477,16 +477,27 @@ public static partial class DesktopTests
             selection.Select();
             await UntilAsync(() => f.SelectedOwner == a && f.SelectedRoute == "added" && f.Status == "", "dynamic navigation selected");
             var before = a.Calls.Count;
+            var previousSource = a.Navigation;
             a.ReplaceNavigation(new(a.Navigation.Select(item => item with { Title = item.Title + "-updated" })));
             await DrainAsync();
             Equal("added", f.SelectedRoute, "new item instance restores by exact route");
             var selected = (ShellNavigationEntry)list.SelectedItem;
+            Same(added, selected, "source replacement retains the existing owner and route entry");
             Same(a.Navigation[^1], selected.Item, "selection refers to new collection item");
             await UntilAsync(() => list.ContainerFromItem(selected) is ListViewItem { IsLoaded: true } container &&
                 AutomationProperties.GetName(container) == selected.Title &&
                 DesktopTestUi.Visuals(container).OfType<TextBlock>().Any(text => text.Text == selected.Title),
                 "recycled navigation rows bind the replacement label and automation name");
             Equal(before, a.Calls.Count, "replacement is not navigation intent");
+            var currentSource = a.Navigation;
+            var reads = a.NavigationReads;
+            previousSource.Add(new("retired", "retired", "", "test-group")); await DrainAsync();
+            Equal(reads, a.NavigationReads, "retired navigation sources no longer trigger synchronization");
+            Same(selected, list.SelectedItem, "retired source changes preserve the current selection");
+            currentSource[currentSource.Count - 1] = currentSource[^1] with { Title = "updated member" };
+            await DrainAsync();
+            Same(selected, list.SelectedItem, "member replacement retains the selected entry");
+            Equal("updated member", selected.Title, "current source member changes publish metadata");
             a.Navigation.RemoveAt(a.Navigation.Count - 1); await DrainAsync();
             True(f.SelectedRoute is null, "removed item no longer selected");
             Equal(before, a.Calls.Count, "removal must not choose another route");
@@ -1058,7 +1069,13 @@ public static partial class DesktopTests
         public string Id { get; }
         public string Title => Id;
         public string Version => "test-only";
-        public ObservableCollection<NavigationItem> Navigation { get; private set; }
+        private ObservableCollection<NavigationItem> navigation = [];
+        public int NavigationReads { get; private set; }
+        public ObservableCollection<NavigationItem> Navigation
+        {
+            get { NavigationReads++; return navigation; }
+            private set => navigation = value;
+        }
         public FrameworkElement View { get; private set; }
         public FrameworkElement SettingsView { get; private set; }
         private FrameworkElement? playerView;

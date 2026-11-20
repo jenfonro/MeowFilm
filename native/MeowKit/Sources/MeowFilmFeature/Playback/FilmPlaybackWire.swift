@@ -802,6 +802,7 @@ public struct FilmPlaybackError: Error, Equatable, Sendable, LocalizedError {
         case "SCRIPT_FAILURE", "CAT_FAILURE": "脚本执行失败"
         case "SCRIPT_PROTOCOL_ERROR": "脚本响应格式错误"
         case "SOURCE_FAILURE": "来源请求失败"
+        case "PAN_INTERCEPTION_UNSUPPORTED": "网盘请求未能接管，请关闭对应网盘接管后重试"
         case "BUSY": "操作尚未完成"
         default: code
         }

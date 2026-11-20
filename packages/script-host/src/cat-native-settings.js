@@ -7,6 +7,7 @@ const factsKeys = ['installationId', 'sourceHash', 'version', 'config', 'loadedI
 const inputKeys = ['installationId', 'name', 'sourceType', 'sourceUrl', 'localPath',
   'localHash', 'enabled', 'inputRevision'];
 const empty = () => ({ version: 1, port: 0, providers: {}, mappings: [], scripts: [] });
+const appProviders = { baidu: true, quark: true, uc: true, tianyi: true, yidong: true };
 const identityPart = value => typeof value === 'string' ? value : stringifyJSONValue(value);
 const identity = script => `${script.sourceType}:${identityPart(script.inputRevision)}:${identityPart(
   script.sourceType === 'network' ? script.sourceUrl : script.localHash)}`;
@@ -25,7 +26,7 @@ export class CatNativeSettings {
   inputs() {
     const value = clone(this.configuration.read() ?? empty());
     requireValue(value?.version === 1 && Array.isArray(value.scripts), 'CORRUPT_STORAGE');
-    return value;
+    return { ...value, providers: { ...appProviders, ...value.providers } };
   }
   facts() {
     return clone(this.storage.value);

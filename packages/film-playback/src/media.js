@@ -80,7 +80,7 @@ function descriptorInput(descriptor, scope) {
   if (descriptor.format !== undefined && typeof descriptor.format !== 'string') throw failure('MEDIA_INVALID_DESCRIPTOR');
   if (scope !== undefined && (!scope || typeof scope !== 'object' || Array.isArray(scope))) throw failure('MEDIA_INVALID_DESCRIPTOR');
   const identity = {};
-  for (const name of ['sourceKey', 'sourceRevision', 'sourceEngine', 'sourceInstallationId',
+  for (const name of ['sourceKey', 'sourceRevision', 'sourceEngine', 'sourceInstallationId', 'sourceGeneration',
     'accountProvider', 'accountRevision', 'fileProvider', 'fileAccountRevision']) {
     const value = scope?.[name];
     if (value !== undefined) {

@@ -63,7 +63,7 @@ public static class FilmCatPanBridgeConsumerTests
             FilmJson.Text(FilmJson.Array(opened, "sources")[0], "key") == FilmJson.Text(scene.Source, "key"),
             "the consumer opens the fixture target and source, not a synthetic media address");
         await scene.Ready(() => page.SourceId == source.Id && !page.ListLoading && page.Episodes.Count == 3);
-        Check(page.SelectedSource?.Label == "Bridge site" && page.SelectedLine is { Label: "夸克", Provider: "quark" } &&
+        Check(page.SelectedSource?.Label == "Bridge site" && page.SelectedLine is { Label: "夸克-bridge-share", Provider: "quark" } &&
             page.Lines.Count == 1 && page.ListError.Length == 0 &&
             page.Episodes.Select(row => row.Quality).SequenceEqual(new[] { "4k_fps", "1080p", "1080p" }) &&
             page.Episodes.Select(row => row.Number).SequenceEqual(new int?[] { 1, 1, 2 }),
@@ -208,7 +208,7 @@ public static class FilmCatPanBridgeConsumerTests
         Check(FilmJson.Text(browse.Input, "sourceId") == source.Id &&
             FilmJson.Text(browse.Input, "sessionId") == scene.SessionId.ToString() &&
             page.SelectedSource?.Label == "Bridge site" && Equals(picker.SelectedItem, page.SelectedSource) &&
-            page.SelectedLine is { Label: "夸克", Provider: "quark" } &&
+            page.SelectedLine is { Label: "夸克-bridge-share", Provider: "quark" } &&
             page.ActiveTarget.MetadataProvider == "tmdb" && page.ActiveTarget.Episode == 1 &&
             page.Episodes.First().Title == "Episode 1" && scene.Native.Inputs.Count == 1,
             "the real source control browses that site without changing the metadata target or restarting native playback");
@@ -305,7 +305,7 @@ public static class FilmCatPanBridgeConsumerTests
         await scene.Page.BrowseSourceAsync(source);
         await scene.Ready(() => !scene.Page.ListLoading && scene.Page.ListError.Length == 0 && scene.Page.Episodes.Count == 3);
         Check(scene.Page.SourceId == source.Id && scene.Page.SelectedSource?.Label == "Bridge site" &&
-            scene.Page.SelectedLine is { Label: "夸克", Provider: "quark" },
+            scene.Page.SelectedLine is { Label: "夸克-bridge-share", Provider: "quark" },
             $"explicit retry keeps its source and typed pan selection; source={scene.Page.SourceId}, " +
             $"selectedSource={scene.Page.SelectedSource?.Label}, line={scene.Page.SelectedLine?.Label}, provider={scene.Page.SelectedLine?.Provider}");
         Check(scene.Traffic.Commands("browse.refresh").Count() == refreshes &&

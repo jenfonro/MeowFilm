@@ -483,7 +483,7 @@ export class ScriptServices {
         const clean = { ...options, host: mapped.host, port: mapped.port,
           ...(secure ? owner.tlsOptions(options, { client: true, local: Boolean(mapped.meowLocal) }) : {}) };
         const socket = connect.call(this, clean, secure ? callback : undefined);
-        owner.session.node?.ownNetwork(socket);
+        owner.session.node?.ownNetwork(socket, options.host ?? options.hostname ?? 'localhost');
         if (!secure && typeof callback === 'function') socket.once('connect', callback);
         return socket;
       };
@@ -605,8 +605,7 @@ export class ScriptServices {
           headers: options.headers, auth: options.auth, timeout: options.timeout, agent: selectedAgent,
         };
         const open = settings => this.openRequest(requested, settings, outbound);
-        const intercepted = !loopback && this.session.interceptor?.request(requested, clean, outbound, open,
-          client => this.ownForward(client, outbound));
+        const intercepted = !loopback && this.session.interceptor?.request(requested, clean, outbound);
         if (intercepted) {
           return this.trackRequest(intercepted, outbound, callback);
         }
@@ -656,47 +655,6 @@ export class ScriptServices {
       if (context.signal.aborted) ended();
     }
     return scope;
-  }
-
-  ownForward(client, context) {
-    const session = this.session;
-    const requests = session.nativeRequests;
-    const cleanups = this.requestCleanup;
-    const failures = this.cleanupState;
-    const state = { active: true, detach: () => {}, detachClosed: null };
-    const release = () => {
-      if (!state.active) return;
-      state.active = false;
-      try { state.detachClosed?.(); } catch (error) { failures.error ??= error; }
-      state.detachClosed = null;
-      try { client.off?.('error', ignoreError); } catch (error) { failures.error ??= error; }
-      const detach = state.detach;
-      state.detach = null;
-      try { detach?.(); } catch (error) { failures.error ??= error; }
-      requests.delete(client);
-      cleanups.delete(client);
-      try { delete client[resourceOwner]; } catch (error) { failures.error ??= error; }
-    };
-    requests.add(client);
-    cleanups.set(client, release);
-    try {
-      client.on?.('error', ignoreError);
-      state.detachClosed = afterCloseDispatch(client, release);
-      Object.defineProperty(client, resourceOwner, {
-        configurable: true, value: this,
-      });
-      state.detach = context.add(() => { if (!client.destroyed) client.destroy(); });
-      context.assertOpen?.();
-      if (client.closed) release();
-    } catch (error) {
-      try { if (!client.destroyed) client.destroy(); } catch {}
-      try { release(); } catch {}
-      try {
-        if (!client.closed) client.on?.('error', ignoreError);
-      } catch {}
-      throw error;
-    }
-    return client;
   }
 
   trackRequest(client, context, callback, scopeToken) {
@@ -810,6 +768,7 @@ export class ScriptServices {
     requireValue(!this.stopping, 'SERVICE_CLOSED');
     const target = new URL(input);
     requireValue(['http:', 'https:'].includes(target.protocol), 'INVALID_ARGUMENT');
+    this.assertDirectConnection(target.hostname);
     if (isLoopbackHost(target.hostname)) {
       const mapped = this.mapLocal(target.href);
       if (mapped) return mapped;
@@ -833,6 +792,7 @@ export class ScriptServices {
     requireValue(!this.stopping, 'SERVICE_CLOSED');
     const host = options.host ?? options.hostname ?? 'localhost';
     requireValue(typeof host === 'string' && !/[\\/\u0000]/.test(host), 'PERMISSION_DENIED');
+    this.assertDirectConnection(host);
     if (!isLoopbackHost(host)) {
       return { ...options, host };
     }
@@ -842,6 +802,10 @@ export class ScriptServices {
     return { ...options, host: '127.0.0.1', port: listener.address().port, meowLocal: true };
   }
   requestScope(request) { return request?.[ownerScope]; }
+
+  assertDirectConnection(host) {
+    this.session.interceptor?.rejectConnection(host, this.session.scope?.());
+  }
   createRequestScope(parent, request, response, transferScope = parent) {
     const failures = this.cleanupState;
     // RPC cancellation terminates the transport. The request's resources live

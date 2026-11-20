@@ -90,7 +90,7 @@ public sealed partial class MusicCapability
         if (publishedHomeState is { } published && homePlatform == catalogSourcePlatform)
         {
             if (!await PublishCatalogAsync("catalog-home", "", homePlatform, "歌曲", homePage, published,
-                initializeEntries: !homeRefreshRequired, token: token, beforePublish: () =>
+                initializeEntries: !homeRefreshRequired, token: token, restore: true, beforePublish: () =>
                 {
                     catalogPages.Clear();
                     catalogCursors.Clear(); catalogCursors.AddRange(homeCursors);
@@ -172,10 +172,11 @@ public sealed partial class MusicCapability
             foreach (var pair in catalogOptionalSnapshots.Where(pair => pair.Value.Platform == platform &&
                 pair.Value.Observation < observation).ToArray())
                 RetireCatalogOptionalReads(pair.Key);
+            RetireChannelAccountPages(platform, observation);
             changedCatalogAccounts.Add(platform);
             // The notification fences authority immediately; delayed UI cleanup
             // must not retire a read or action admitted after that fence.
-            if (catalogActionAuthority is { } action && action.Platform == platform && action.Observation < observation)
+            if (catalogAction is { } action && action.Platform == platform && action.Observation < observation)
                 InvalidateCatalogAction();
             bool currentRead = catalogLoadFlight is { } flight && flight.Request.Key.Platform == platform &&
                 flight.Request.Key.AccountObservation >= observation;
@@ -215,8 +216,7 @@ public sealed partial class MusicCapability
         if (!IsCatalogHome) return;
         RefreshCatalogDemandMembers();
         var songs = display.SelectMany(section => section.Items).Select(card => card.Song).OfType<SongRow>().ToArray();
-        if (!Songs.SequenceEqual(songs, ReferenceEqualityComparer.Instance))
-        { Songs.Clear(); foreach (var song in songs) Songs.Add(song); }
+        ReconcileSongRows(Songs, songs);
         if (status is "" or "暂无内容")
         {
             status = display.Length == 0 ? "暂无内容" : "";

@@ -62,14 +62,16 @@ internal static class NativeDesktopCapture
         bool wasTopmost = presenter?.IsAlwaysOnTop ?? false;
         try
         {
-            if (presenter is not null) presenter.IsAlwaysOnTop = true;
-            // An unchanged XAML tree need not produce a fresh Rendered event.
-            // Sample after the next render pass, then flush the actual compositor and desktop.
+            if (presenter is not null && !wasTopmost) presenter.IsAlwaysOnTop = true;
+            // Rendering precedes XAML submission. The next callback after it
+            // fences that complete pass, including an otherwise unchanged tree.
             var rendering = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            bool priorPass = false;
             EventHandler<object> onRendering = (_, _) =>
             {
                 for (DependencyObject? current = target; current is not null; current = VisualTreeHelper.GetParent(current))
                     if (current is UIElement { Opacity: < 1 }) return;
+                if (!priorPass) { priorPass = true; return; }
                 rendering.TrySetResult();
             };
             CompositionTarget.Rendering += onRendering;
@@ -123,7 +125,7 @@ internal static class NativeDesktopCapture
         }
         finally
         {
-            if (presenter is not null) presenter.IsAlwaysOnTop = wasTopmost;
+            if (presenter is not null && !wasTopmost) presenter.IsAlwaysOnTop = false;
         }
     }
     private static bool BelongsToWindow(nint displayed, nint window)

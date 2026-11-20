@@ -17,6 +17,13 @@ export { createMusicPlatformModule };
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
 
+/** Account ownership stays with pan; Cat receives only a trusted live capability. */
+export function connectPanAccounts(modules) {
+  const cat = modules.find(module => module.id === 'cat');
+  const pan = modules.find(module => module.id === 'pan');
+  if (cat && pan) cat.ready = cat.connectAccounts(pan.accounts);
+}
+
 /** Reuses the existing token owner through its actual local module capability. */
 export function connectMusicPlatform(modules, options) {
   const netease = modules.find(module => module.id === 'netease');
@@ -33,6 +40,7 @@ export function connectMusicPlatform(modules, options) {
 /** Assembly connects invalidation explicitly; provider modules do not import film business. */
 export function connectFilmPlayback(modules, options) {
   const film = createFilmPlaybackModule({ ...options, modules });
+  modules.find(module => module.id === 'cat')?.onAccountSaved?.(input => film.accountSaved(input));
   for (const module of modules) {
     const prefix = { cat: 'cat.script.', source: 'source.runtime.', pan: 'pan.',
       tmdb: 'tmdb.data.', douban: 'douban.data.' }[module.id];
@@ -67,6 +75,7 @@ export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan
       modules.push(createCatScriptModule({ ...cat, dataRoot }));
       modules.push(createSourceRuntimeModule({ ...source, dataRoot }));
       if (pan !== undefined) modules.push(createPanRuntimeModule({ ...pan, dataRoot }));
+      connectPanAccounts(modules);
       if (tmdb !== undefined) modules.push(createTMDBDataModule({ ...tmdb, dataRoot }));
       if (douban !== undefined) modules.push(createDoubanDataModule({ ...douban, dataRoot }));
       if (film !== undefined) connectFilmPlayback(modules, { ...film, dataRoot });
