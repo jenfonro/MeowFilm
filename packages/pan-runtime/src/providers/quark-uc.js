@@ -249,7 +249,8 @@ async function directory(config, ctx, { share, token, parent = '0' } = {}) {
     const next = nextRaw === undefined ? 0 : Number(nextRaw);
     requireValue(Number.isSafeInteger(next) && (!next || next > page), 'UPSTREAM_FORMAT');
     const more = next > page || hasMore === true
-      || (total !== undefined ? BigInt(seen.size) < total : hasMore !== false && data.list.length >= size);
+      || (hasMore !== false && data.list.length > 0
+        && (total !== undefined ? BigInt(seen.size) < total : data.list.length >= size));
     if (!more) return items;
     requireValue(added > 0, 'UPSTREAM_FORMAT');
     page = next > page ? next : page + 1;
