@@ -10,12 +10,15 @@ public sealed class NovelLibrary(IStorageDatabase database)
 {
     public const string DocumentNamespace = "novel.library.v1";
     private sealed record State(NovelEntry[] Entries, NovelAppearance Appearance, NovelRule[] Rules);
-    private State? saved;
+    private NovelEntry[]? entries;
+    private NovelAppearance? appearance;
+    private NovelRule[]? rules;
+    private bool initialized;
     private readonly SemaphoreSlim serial = new(1, 1);
     private readonly NovelWork work = new();
-    public IReadOnlyList<NovelEntry> Entries => saved?.Entries ?? [];
-    public NovelAppearance Appearance => saved?.Appearance ?? new();
-    public IReadOnlyList<NovelRule> Rules => saved?.Rules ?? [];
+    public IReadOnlyList<NovelEntry> Entries => entries ?? [];
+    public NovelAppearance Appearance => appearance ?? new();
+    public IReadOnlyList<NovelRule> Rules => rules ?? [];
     internal JsonElement RuleInputs => NovelJson.Value(Rules);
     public event EventHandler? Changed;
 
@@ -28,8 +31,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
 
     private async Task LoadAsync(CancellationToken token)
     {
-        if (saved is not null) return;
-        saved = await database.ReadAsync(db =>
+        if (initialized) return;
+        var loaded = await database.ReadAsync(db =>
         {
             var value = NovelStorageRecords.Library.Read(db, ["device"]);
             if (value is null)
@@ -51,9 +54,11 @@ public sealed class NovelLibrary(IStorageDatabase database)
             catch (JsonException) { throw Corrupt(); }
             catch (InvalidOperationException) { throw Corrupt(); }
         }, token);
+        entries = loaded.Entries; appearance = loaded.Appearance; rules = loaded.Rules;
+        initialized = true;
     }
 
-    private static void EnsureRoot(DatabaseSession db)
+    private static void EnsureRoot(DatabaseSession db, bool create = true)
     {
         var rows = db.Query("SELECT version,shape_mask,null_mask FROM windows_novel_library WHERE scope_key='device'",
             row => (Version: row.IsDBNull(0) ? 0 : row.GetInt64(0), Shape: row.GetInt64(1), Nulls: row.GetInt64(2)));
@@ -63,6 +68,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
             return;
         }
         if (db.Revision(DocumentNamespace) != StorageRevision.Empty) throw Corrupt();
+        if (!create) return;
         NovelStorageRecords.Library.Save(db, JsonSerializer.SerializeToNode(new
         { version = 1, entries = Array.Empty<NovelEntry>(), appearance = new NovelAppearance(), rules = Array.Empty<NovelRule>() },
             NovelJson.Options)!.AsObject(), null, ["device"]);
@@ -88,20 +94,23 @@ public sealed class NovelLibrary(IStorageDatabase database)
             throw new DocumentStoreException(stored ? DocumentStoreError.Corrupt : DocumentStoreError.InvalidRequest);
     }
 
-    private Task EditEntry(string id, Func<NovelEntry?, NovelEntry?> edit, CancellationToken token) => work.Run(async ct =>
+    private Task EditEntry(string id, Func<NovelEntry?, NovelEntry?> edit, CancellationToken token, bool consumeCurrent = true) => work.Run(async ct =>
     {
         await serial.WaitAsync(ct);
         try
         {
-            await LoadAsync(ct);
             var result = await database.WriteAsync(db =>
             {
+                EnsureRoot(db, create: false);
                 var key = new object?[] { "device", id };
                 var previous = NovelStorageRecords.Entry.Read(db, key);
-                NovelEntry? current;
-                try { current = previous?.Deserialize<NovelEntry>(NovelJson.Options); }
-                catch (JsonException) { throw Corrupt(); }
-                if (current is not null) Validate(current, stored: true);
+                NovelEntry? current = null;
+                if (consumeCurrent)
+                {
+                    try { current = previous?.Deserialize<NovelEntry>(NovelJson.Options); }
+                    catch (JsonException) { throw Corrupt(); }
+                    if (current is not null) Validate(current, stored: true);
+                }
                 var next = edit(current);
                 if (next is not null)
                 {
@@ -120,8 +129,11 @@ public sealed class NovelLibrary(IStorageDatabase database)
             }, ct);
             if (result.Changed)
             {
-                var entries = saved!.Entries.Where(e => e.BookId != id);
-                saved = saved with { Entries = result.Entry is null ? entries.ToArray() : entries.Append(result.Entry).ToArray() };
+                if (entries is not null)
+                {
+                    var remaining = entries.Where(e => e.BookId != id);
+                    entries = result.Entry is null ? remaining.ToArray() : remaining.Append(result.Entry).ToArray();
+                }
                 Changed?.Invoke(this, EventArgs.Empty);
             }
             return true;
@@ -135,7 +147,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
         if (matches.Length > 1) throw new InvalidDataException("AMBIGUOUS_NOVEL_IDENTITY");
         return matches.SingleOrDefault();
     }
-    public Task SaveEntryAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, _ => entry, token);
+    public Task SaveEntryAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, _ => entry, token, consumeCurrent: false);
     public Task RecordReadingAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, current =>
         current is null ? entry : entry with { OnShelf = current.OnShelf, AddedAt = current.AddedAt, PinnedAt = current.PinnedAt }, token);
     public Task SaveMetadataAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, current =>
@@ -163,7 +175,6 @@ public sealed class NovelLibrary(IStorageDatabase database)
         await serial.WaitAsync(ct);
         try
         {
-            await LoadAsync(ct);
             bool changed = await database.WriteAsync(db =>
             {
                 EnsureRoot(db);
@@ -173,7 +184,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
                 return true;
             }, ct);
-            if (changed) { saved = saved! with { Appearance = value }; Changed?.Invoke(this, EventArgs.Empty); }
+            appearance = value;
+            if (changed) Changed?.Invoke(this, EventArgs.Empty);
             return true;
         }
         finally { serial.Release(); }
@@ -185,13 +197,13 @@ public sealed class NovelLibrary(IStorageDatabase database)
         await serial.WaitAsync(ct);
         try
         {
-            await LoadAsync(ct);
             bool changed = await database.WriteAsync(db =>
             {
                 EnsureRoot(db);
                 var previous = NovelStorageRecords.Rule.ReadMany(db, ["device"]);
-                try { ValidateRules(previous.Select(row => row.Deserialize<NovelRule>(NovelJson.Options) ?? throw Corrupt()).ToArray(), stored: true); }
-                catch (JsonException) { throw Corrupt(); }
+                var identities = previous.Select(row => row["id"]?.GetValue<string>()).ToArray();
+                if (identities.Any(string.IsNullOrEmpty) || identities.Distinct(StringComparer.Ordinal).Count() != identities.Length)
+                    throw Corrupt();
                 var before = previous.Select((row, ordinal) => (Row: row, Ordinal: ordinal))
                     .ToDictionary(r => r.Row["id"]!.GetValue<string>(), StringComparer.Ordinal);
                 var ids = values.Select(r => r.Id).ToHashSet(StringComparer.Ordinal); bool any = false;
@@ -207,7 +219,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 if (any) db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
                 return any;
             }, ct);
-            if (changed) { saved = saved! with { Rules = values }; Changed?.Invoke(this, EventArgs.Empty); }
+            this.rules = values;
+            if (changed) Changed?.Invoke(this, EventArgs.Empty);
             return true;
         }
         finally { serial.Release(); }

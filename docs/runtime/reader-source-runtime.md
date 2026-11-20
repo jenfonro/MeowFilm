@@ -36,9 +36,15 @@ Legado 图片规则与轻悦时光 `imagedecrypt` 返回的字节在内部 ABI �
 
 轻悦时光目录以完整结果数组的位置作为 index。坏章（非对象、不可消费的名称／URL，或两者均空）使整份目录报 `SCRIPT_PROTOCOL_ERROR`，不删除后压缩章节；有名称的空 URL 章节和合法空目录仍保留。
 
+Legado／轻悦时光的搜索和发现列表隔离 null、标量及数组等不可消费项，保留健康对象、仅标题或仅 URL 的有效项；真空列表合法，非空全坏返回 `SCRIPT_PROTOCOL_ERROR`，不伪造空书籍／分类或成功空页。此规则不用于有序目录过滤。
+
 Legado 分类按实际 title／name、url 隔离坏项，保留健康分类、仅标题分组和仅 URL 项；合法空列表／空分类文本返回空，非空全坏或不可消费的根报告 `SCRIPT_PROTOCOL_ERROR`。搜索／发现没有 bookList、目录没有 chapterList 时，原始结果必须是 JSON 数组；坏 JSON 或非数组根报同一错误，显式选择器合法无匹配仍返回空。
 
 ## 规则与脚本
+
+Legado 规则块仅在对应动作消费时解析，缺省或空字符串规则沿协议处理；明确提供的坏类型、JSON／literal、Header 或 `@put` 对象报 `UNSUPPORTED_RULE`，不替换为空对象，也不在启动时拒绝未调用的规则兄弟。合法 JSON 与当前 literal 语法均支持。LX HTTP 与来源源码下载仅投影各自实际选项，普通 extra 不参与执行，也不 spread 到真实 Node request；framing Header、HTTP(S)、重定向、已消费字段类型与取消／流排空约束继续生效。
+
+宿主及 SourceSession 仅选择实际使用的预算字段，普通配置／limits 附加成员不参与预算验证；所选预算仍须为正安全整数。
 
 公共层实现 HTML/CSS、XPath、JSONPath、正则、切片、属性、`@put`／`@get`、变量、请求模板、Header、字符集和阶段上下文。正则匹配接替换时使用匹配文本，未替换时保留匹配结构。Legado 外观同步的宿主调用通过 AST 转换为异步 capability 调用；显式 `read().then/catch/finally` 的接收者保持 Promise，不改写为 `(await read()).then/catch/finally`，原显式 await 和同步外观调用继续传播。无法安全传播 `await` 的回调（含命名函数／函数变量传入同步 Array 方法，即使内部使用显式 Promise 链）、构造器或其他结构返回 `UNSUPPORTED_SCRIPT_ASYNC`，不返回 Promise 真值或空值冒充兼容。
 

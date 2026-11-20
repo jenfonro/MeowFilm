@@ -24,7 +24,7 @@
 }
 ```
 
-- 没有搜索模式。每种搜索固定请求 `enabled` 中的平台；`enabled` 按 `order` 排列，顺序即平台优先级。
+- 没有搜索模式。每种搜索固定请求 `enabled` 中的平台；`enabled` 自身顺序即执行平台优先级，与 `order` 的成员和顺序独立。
 - `order` 可只列部分平台；设置页补足未列选项但不补写或启用。`music.search.settings.get` 可按 `kind` 读取对应分支，一类搜索不预检另一类设置。
 - 保存必须提交准确 `ifRevision`，成功后即时生效。保存先封闭并排空两类搜索；保存期间进入的 start 等到保存结束后按最新设置核对，写入未确认时返回 `SEARCH_SETTINGS_UNCONFIRMED`，不会派发旧设置。策略读取与 start 准入在同一策略 lane 内完成，旧查询排空本身不阻塞 `get`、`next`、`cancel`。
 - `music.search.start` 的平台数组必须与刚读取的当前 `enabled` 完全一致（含顺序），否则返回 `SEARCH_SETTINGS_CHANGED`。应用随后把该类型的 `pages`、`concurrency`、`cacheMinutes` 一并交给 Coordinator。

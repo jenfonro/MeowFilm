@@ -34,7 +34,7 @@ public sealed partial class MusicLibraryOwner
 
     private JsonObject SearchPolicy(MusicLibraryData doc, string? kind = null)
     {
-        var value = Area(doc, SearchPolicyArea) ??
+        var value = (kind is null ? Area(doc, SearchPolicyArea) : doc.Select(SearchPolicyArea, "schema", "revision", kind)) ??
         LJ.Obj(("schema", 1), ("revision", 0), ("songs", EmptySearchKind()),
             ("playlists", EmptySearchKind()));
         try { ValidateSearchPolicy(value, kind); }
@@ -65,6 +65,13 @@ public sealed partial class MusicLibraryOwner
         return text;
     }
 
+    private static JsonObject SearchKindInput(JsonNode? value)
+    {
+        var input = LJ.Object(value);
+        return new JsonObject(new[] { "order", "enabled", "pages", "concurrency", "cacheMinutes" }
+            .Where(input.ContainsKey).Select(name => KeyValuePair.Create(name, input[name]?.DeepClone())));
+    }
+
     private static void ValidateSearchKind(JsonObject value)
     {
         LJ.Fields(value, "order enabled pages concurrency cacheMinutes", "order enabled pages concurrency cacheMinutes");
@@ -73,12 +80,10 @@ public sealed partial class MusicLibraryOwner
         _ = MusicSearchSettings.CacheMinutes(value["cacheMinutes"]);
         var order = LJ.Array(value["order"]).Select(item => LJ.Text(item, 2)).ToArray();
         var enabled = LJ.Array(value["enabled"]).Select(item => LJ.Text(item, 2)).ToArray();
-        var enabledSet = enabled.ToHashSet(StringComparer.Ordinal);
         LJ.Require(order.Distinct(StringComparer.Ordinal).Count() == order.Length &&
             order.All(SearchPlatforms.Contains) &&
             enabled.Distinct(StringComparer.Ordinal).Count() == enabled.Length &&
-            enabled.All(order.Contains) &&
-            enabled.SequenceEqual(order.Where(enabledSet.Contains)));
+            enabled.All(SearchPlatforms.Contains));
     }
 
     private static void ValidateSearchPolicy(JsonObject value, string? kind = null)
@@ -114,7 +119,8 @@ public sealed partial class MusicLibraryOwner
         {
             string? kind = method == "music.search.settings.get" && p.ContainsKey("kind") ? LJ.Text(p["kind"]) : null;
             LJ.Require(kind is null or "songs" or "playlists");
-            var policy = SearchPolicy(doc, method == "music.search.settings.get" ? kind : null);
+            var policy = method == "music.search.settings.get" ? SearchPolicy(doc, kind) :
+                OverwriteSettings(doc, SearchPolicyArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
             if (method == "music.search.settings.get")
             {
                 return (LJ.Obj(("settings", kind is null ? policy : LJ.Obj(("schema", policy["schema"]),
@@ -125,11 +131,9 @@ public sealed partial class MusicLibraryOwner
             LJ.Fields(p, "ifRevision songs playlists", "ifRevision songs playlists");
             LJ.Require(LJ.I(p["ifRevision"]) == Revision(policy), "REVISION_CONFLICT");
             var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(policy) + 1)),
-                ("songs", p["songs"]?.DeepClone()), ("playlists", p["playlists"]?.DeepClone()));
+                ("songs", SearchKindInput(p["songs"])), ("playlists", SearchKindInput(p["playlists"])));
             ValidateSearchPolicy(next);
-            foreach (string name in new[] { "songs", "playlists" })
-                next[name] = LJ.Merge(LJ.Object(policy[name]).DeepClone().AsObject(), LJ.Object(next[name]));
-            Set(doc, SearchPolicyArea, next);
+            Set(doc, SearchPolicyArea, next, partial: true);
             return (LJ.Obj(("settings", next)), true);
         }
 

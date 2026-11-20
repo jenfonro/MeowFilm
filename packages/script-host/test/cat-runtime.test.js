@@ -22,6 +22,7 @@ import v8 from 'node:v8';
 import { runInNewContext } from 'node:vm';
 import { createCatRuntime, createNodeNetwork, createScriptHost, SCRIPT_LIMITS } from '../src/index.js';
 import { ScriptHost } from '../src/host.js';
+import { catConfig } from '../src/cat-storage.js';
 import { CatSession } from '../src/cat-session.js';
 import { syncCatManagement } from '../src/cat-management.js';
 import { cleanHopByHop } from '../src/cat-runtime.js';
@@ -8596,7 +8597,7 @@ test('Cat applies JSON config material and preserves long versions across cold r
       map: {},
     });
     const settings = runtime.settings.read();
-    assert.deepEqual(settings.scripts[0].config.jsonValue, result.configValue);
+    assert.deepEqual(catConfig(settings.scripts[0]).jsonValue, result.configValue);
     const version = 'x'.repeat(129);
     await runtime.install({
       installationId: 'long-version', source, config: {},

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { Gunzip, gzipSync, deflateSync, brotliCompressSync } from 'node:zlib';
+import { prepareLXRequest } from '../src/lx-native-request.js';
 import { createNodeNetwork, createScriptHost } from '../src/index.js';
 import { lxScript, target, deferred } from './fixtures.js';
 import { serverFor } from './http-fixture.js';
@@ -304,12 +305,11 @@ test('explicit LX abort physically closes a session-owned real HTTP request sock
   assert.equal(host.stats().networkRequests, 0);
 });
 
-test('transport framing headers and unsupported request options fail before I/O', async t => {
+test('transport framing headers fail before I/O', async t => {
   let contacts = 0;
   const server = await serverFor(t, (_req, res) => { contacts++; res.end('unexpected'); });
   for (const [options, code] of [
     [{ headers: { 'Content-Length': '10' } }, 'PERMISSION_DENIED'],
-    [{ proxy: 'http://other.invalid' }, 'UNSUPPORTED_OPTION'],
   ]) {
     const host = await networkHost(t, [server],
       `async () => ${requestExpression(server.origin, options)}`);
@@ -509,4 +509,33 @@ test('LX callbacks receive the unsupported encoding error without a false decode
   for (const encoding of ['constructor', '__proto__', 'x-unknown'])
     assert.deepEqual(await host.invoke(target('a', 'kw', { encoding })),
       { code: 'UNSUPPORTED_OPTION', response: null, body: null });
+});
+
+
+test('ordinary network extras are ignored and never forwarded to Node transport', async t => {
+  const requests = [];
+  const server = await serverFor(t, (req, res) => { requests.push(req.url); res.end('accepted'); });
+  const transport = http.request;
+  t.mock.method(http, 'request', function(url, options, ...rest) {
+    assert.equal(Object.hasOwn(options, 'socketPath'), false);
+    assert.equal(Object.hasOwn(options, 'proxy'), false);
+    assert.equal(Object.hasOwn(options, 'lookup'), false);
+    return Reflect.apply(transport, this, [url, options, ...rest]);
+  });
+  const network = createNodeNetwork({ unused: { ignored: true } });
+  const response = await network({ url: server.socketOrigin, signal: new AbortController().signal,
+    validateURL: value => value, options: { socketPath: '/unused', proxy: 7, lookup: 'ignored' } });
+  assert.equal(response.body.toString(), 'accepted');
+  const host = await networkHost(t, [server],
+    `async () => ${requestExpression(server.origin, { proxy: 'http://unused.invalid', unused: {} })}`);
+  assert.equal((await host.invoke(target())).body, 'accepted');
+  assert.equal(requests.length, 2);
+});
+
+
+test('LX request preparation projects consumed options before entering the adapter', () => {
+  const options = prepareLXRequest({ method: 'GET', json: true, timeout: 1000,
+    proxy: {}, socketPath: '/unused', extension: { ignored: true } }, Buffer,
+  () => assert.fail('unexpected random bytes'), code => Object.assign(new Error(code), { code }));
+  assert.deepEqual(options, { method: 'GET', timeout: 1000, json: true });
 });

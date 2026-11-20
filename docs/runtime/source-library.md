@@ -39,11 +39,11 @@ native owner 模式下，来源配置由原生 typed tables 持有，Node 仅将
 
 runtime owner 的 URL 导入和预览使用同一 HTTP(S) 下载，初始地址及每次重定向均要求 HTTP(S)，userinfo 交给实际传输处理；不按来源域名设白名单。既定 60 秒下载截止直接取消网络，等待真实交换收口后返回 `TIMEOUT`；取消或关闭不发布候选或写入永久库。iOS 继续使用这个公共 source owner；Windows native owner 的配置导入由原生服务提供，采用相同的地址、取消和保存边界，不调用运行器库导入，见[Windows 小说](../windows/novel.md#书源配置与设置保存)。
 
-`library.get` 返回原协议定义加上当前管理的名称、分组、启停和排序，未改规则与扩展值保留原类型和精确数值；编辑保存不能把列表操作恢复为旧元数据。
+`library.get` 返回原协议定义加上当前管理的名称、分组、启停和排序，未改规则与定义内扩展值保留原类型和精确数值，包括 weight/respondTime 等已知数值字段；无法精确表示的数值沿既有节点保存，管理列表仅按消费需要投影为 Number；编辑保存不能把列表操作恢复为旧元数据。
 
 runtime owner 的 save 先试运行完整候选，随后原子替换仓库；语法、初始化、取消或写盘失败保留原定义及 revision，并恢复可用的旧运行实例。禁用不删除定义或私有状态，重新启用恢复；remove 删除该源及其私有值，撤销 Web、图片和运行任务。该模式下客户端不保存原始定义用来恢复安装；get 仅供编辑，export 仅包含定义和管理字段，不导出 Cookie、缓存和私有变量。
 
-来源定义、属性和有序子行按需增量写入 SQLite 事务；guest private volume 仍由现有脚本文件 capability 管理，使用何种文件格式由第三方脚本自行决定。根解码失败、非空全不可用列表和歧义身份返回 `CORRUPT_STORAGE`，不可读／不可写返回 `STORAGE_ERROR`，均不以空库覆写。逐项投影可用身份，管理展示或未接纳 private 记录不封锁健康来源；实际执行的来源／profile 失败只关闭该源准入。无关保存保留未接纳条目、根与记录封套扩展，仅 RPC、导入/导出和外部定义输入输出使用 JSON 边界；内部持久化字段使用 typed values。运行器关闭前排空已接受的数据库写入和真实宿主资源；仅取消信号不算清理完成。
+来源定义、属性和有序子行按需增量写入 SQLite 事务；guest private volume 仍由现有脚本文件 capability 管理，使用何种文件格式由第三方脚本自行决定。根解码失败、非空全不可用列表和歧义身份返回 `CORRUPT_STORAGE`，不可读／不可写返回 `STORAGE_ERROR`，均不以空库覆写。逐项投影可用身份，管理展示或未接纳 private 记录不封锁健康来源；实际执行的来源／profile 失败只关闭该源准入。开库只建立来源和私有键索引；定义字段在管理展示、get/export 或所选来源执行时解码，私有 KV 仅在读取所选键时解码。禁用来源的未消费坏定义或兄弟坏 KV 不阻断健康来源；实际读取坏材料明确失败，覆盖某个 KV 不先解码其旧值。无关保存复用这些未消费材料的原节点，不用空值替代；typed 根和记录仅持久保存现行声明字段，不提供任意扩展槽。仅 RPC、导入/导出和外部定义输入输出使用 JSON 边界；内部持久化字段使用 typed values。运行器关闭前排空已接受的数据库写入和真实宿主资源；仅取消信号不算清理完成。
 
 ## 小说纯规则
 
@@ -103,7 +103,7 @@ owner 覆盖 `request.cookies` 为当前源 HTTP profile 全部未过期 Cookie�
 
 已有 Cookie 仍可注入受信 `request.headers.Cookie`，不写日志。源显式 Cookie 请求头由 owner 大小写无关地合并到本次临时种子：当前 URL 已匹配的同名同值 Cookie 保持原作用域和属性；同名不同值复用匹配作用域；没有匹配项才生成当前 host-only、URL 默认目录路径的 Cookie，HTTPS 时带 Secure。临时种子不会提前落盘，也不会扩大已有同值 Cookie 的作用域。HTML-first 的 `webview`／`webViewGetSource` 取原 arguments[1] 为 URL，不把 HTML 或后面的脚本误作地址；未定义的 QYSG 方法不推测额外参数布局。
 
-统一结果封套为 `{value:<原ABI结果>,url:<最终HTTP(S)地址>,headers:{"set-cookie":[string]},cookieChanges?:[{url,setCookie:string}]}`。headers 中的 Set-Cookie 仍按响应 URL 处理；cookieChanges 的每条 URL 必须是对应 Cookie 的实际 HTTP(S) origin，跨域 A→B 不得全部写成最终页面域。原生应对注入后基线做差异，未改 Cookie 不回写；删除用 `Max-Age=0`，保留 hostOnly／Path／Secure／HttpOnly／SameSite／有效期，`__Host-` 不添加 Domain。owner 在当前 generation／取消 fence 内用一次持久化事务处理整批有效变化，失败回滚，然后仅把 value 交回脚本，cookieChanges 不进入 guest。
+统一结果封套为 `{value:<原ABI结果>,url:<最终HTTP(S)地址>,headers:{"set-cookie":[string]},cookieChanges?:[{url,setCookie:string}]}`。封套和 Cookie change 的普通附加成员不参与识别或传给 guest。headers 中的 Set-Cookie 仍按响应 URL 处理；cookieChanges 的每条 URL 必须是对应 Cookie 的实际 HTTP(S) origin，跨域 A→B 不得全部写成最终页面域。原生应对注入后基线做差异，未改 Cookie 不回写；删除用 `Max-Age=0`，保留 hostOnly／Path／Secure／HttpOnly／SameSite／有效期，`__Host-` 不添加 Domain。owner 在当前 generation／取消 fence 内用一次持久化事务处理整批有效变化，失败回滚，然后仅把 value 交回脚本，cookieChanges 不进入 guest。
 
 iOS 公开 WebKit／Foundation API 对 SameSite=None 与未声明的投影有损：仅为完整作用域相同的实际 Cookie 延续 seed／baseline 中已知的 None，实际 Lax／Strict 优先，未知 nil 不猜测。新建／撤去或同键重建等不可区分的 SameSite 变化不承诺无损回传；不影响删除、逐 origin、取消与源隔离要求。平台细节见 [iOS 小说](../ios/novel.md)。
 

@@ -54,7 +54,7 @@ export function createMetadataSettings(dataRoot, id, nativeSettings) {
     update(patch) {
       const work = tail.then(async () => {
         if (nativeSettings) throw metadataFailure('PERMISSION_DENIED');
-        if (!object(patch) || isRawJSON(patch) || Object.keys(patch).some(key => !keys.includes(key)))
+        if (!object(patch) || isRawJSON(patch))
           throw metadataFailure('INVALID_REQUEST');
         const current = await read(), value = {...current};
         for (const key of keys) if (Object.hasOwn(patch,key)) {

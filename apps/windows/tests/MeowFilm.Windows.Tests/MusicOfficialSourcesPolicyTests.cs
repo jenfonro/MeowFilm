@@ -50,7 +50,7 @@ public static class MusicOfficialSourcesPolicyTests
             Ok(await owner.ExecuteAsync("music.officialSources.settings.save",
                 new { ifRevision = 0, enabled = new[] { "wy", "kg" } }));
             var entry = store.State("native-official-sources");
-            Equal(1, entry["schema"]!.GetValue<int>());
+            Equal(1L, entry["schema"]!.GetValue<long>());
             await owner.AbortAsync();
             await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
             {
@@ -108,28 +108,45 @@ public static class MusicOfficialSourcesPolicyTests
                 new { ifRevision = 0, enabled = new[] { "wy" } }));
             await owner.AbortAsync();
             byte[] original = store.Data!.ToArray();
-            foreach (string value in new[]
+            foreach (var (value, durable) in new (string, bool)[]
             {
-                "null", "[]",
-                """{"schema":2,"revision":1,"enabled":["wy"]}""",
-                """{"schema":1,"revision":-1,"enabled":["wy"]}""",
-                """{"schema":1,"revision":"1","enabled":["wy"]}""",
-                """{"schema":1,"revision":1,"enabled":["invalid"]}""",
-                """{"schema":1,"revision":1,"enabled":["wy","wy"]}""",
-                """{"schema":1,"revision":1,"enabled":[false]}""",
-                """{"schema":1,"revision":1,"enabled":null}""",
-                """{"schema":1,"revision":1}""",
+                ("""{"schema":2,"revision":1,"enabled":["wy"]}""", true),
+                ("""{"schema":1,"revision":-1,"enabled":["wy"]}""", true),
+                ("""{"schema":1,"revision":"1","enabled":["wy"]}""", false),
+                ("""{"schema":1,"revision":1,"enabled":["invalid"]}""", true),
+                ("""{"schema":1,"revision":1,"enabled":["wy","wy"]}""", true),
+                ("""{"schema":1,"revision":1,"enabled":[false]}""", false),
+                ("""{"schema":1,"revision":1,"enabled":null}""", true),
+                ("""{"schema":1,"revision":1}""", true),
             })
             {
                 var document = JsonNode.Parse(original)!.AsObject();
                 document["areas"]!["native-official-sources"] = JsonNode.Parse(value);
-                // Keep the outer document canonical, so the policy itself is what must fail.
+                if (!durable)
+                {
+                    byte[] before = store.Data!.ToArray();
+                    bool rejected = false;
+                    try { store.Data = LJ.Bytes(document); }
+                    catch (DocumentStoreException error) when (error.Error == DocumentStoreError.InvalidRequest) { rejected = true; }
+                    Equal(true, rejected && before.SequenceEqual(store.Data!));
+                    continue;
+                }
                 store.Data = LJ.Bytes(document);
                 await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
                 Code(await reopened.ExecuteAsync("music.officialSources.settings.get"), "CORRUPT_STORAGE");
-                Code(await reopened.ExecuteAsync("music.officialSources.settings.save",
-                    new { ifRevision = 1, enabled = Platforms }), "CORRUPT_STORAGE");
-                Equal(1, store.Writes);
+                var old = JsonNode.Parse(value) as JsonObject;
+                bool replaceable = old?["schema"]?.ToJsonString() == "1" && old?["revision"]?.ToJsonString() == "1";
+                int writes = store.Writes;
+                if (replaceable)
+                {
+                    Ok(await reopened.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 1, enabled = Platforms }));
+                    Equal(writes + 1, store.Writes);
+                }
+                else
+                {
+                    Code(await reopened.ExecuteAsync("music.officialSources.settings.save", new { ifRevision = 1, enabled = Platforms }), "CORRUPT_STORAGE");
+                    Equal(writes, store.Writes);
+                }
             }
         });
         yield return Case("durable policy extensions survive edits", async (owner, store) =>

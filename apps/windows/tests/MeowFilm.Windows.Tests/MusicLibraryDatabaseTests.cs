@@ -18,16 +18,18 @@ public static class MusicLibraryDatabaseTests
 
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Music SQLite selected relations preserve damaged siblings across replacement and exact deletion", SelectedRelations);
+        yield return new("Music SQLite music settings overwrite old values and quality does not consume lyrics", SelectedSettings);
         yield return new("Music SQLite explicit memory store reads empty controls and indexed records", MemoryRecords);
         yield return new("Music SQLite typed records in the App database reopen durably", Reopen);
         yield return new("Music SQLite records beyond sixteen MiB and two hundred fifty thousand JSON nodes reopen completely", LargeRecords);
         yield return new("Music SQLite native coordinator creates a fresh current root", MissingRoot);
         yield return new("Music SQLite exact generations and receipts reject stale commits", Generations);
-        yield return new("Music SQLite source conflict atomically rolls back songs controls and receipt", AtomicSourceConflict);
+        yield return new("Music SQLite source conflict atomically rolls back songs controls and receipt", () => Task.Run(AtomicSourceConflict));
         yield return new("Music SQLite registered source removal cannot enable later rebinding", SourceRemoval);
         yield return new("Music SQLite unchanged records and sources do not execute update statements", ActualChanges);
         yield return new("Music SQLite candidates use online known recording and fixed duration boundaries", Candidates);
-        yield return new("Music SQLite cancellation before admission and after admission preserve real outcome", Cancellation);
+        yield return new("Music SQLite cancellation before admission and after admission preserve real outcome", () => Task.Run(Cancellation));
         yield return new("Music SQLite dispose drains admitted owned writes and releases file pins", Drain);
         yield return new(RecoveryCase, Recovery);
         yield return new("Music SQLite corrupt existing and empty databases fail without replacement", Corrupt);
@@ -72,8 +74,8 @@ public static class MusicLibraryDatabaseTests
         {
             var oldLibrary = library; var oldStorage = storage;
             library = null; storage = null;
-            try { if (oldLibrary is not null) await oldLibrary.DisposeAsync(); }
-            finally { if (oldStorage is not null) await oldStorage.DisposeAsync(); }
+            try { if (oldLibrary is not null) await oldLibrary.DisposeAsync().ConfigureAwait(false); }
+            finally { if (oldStorage is not null) await oldStorage.DisposeAsync().ConfigureAwait(false); }
         }
         public void Dispose()
         {
@@ -102,10 +104,96 @@ public static class MusicLibraryDatabaseTests
         return memory.ToArray();
     }
 
+    private static async Task SelectedRelations()
+    {
+        await using var storage = NativeDatabase.CreateMemory();
+        var search = MusicStorageRecords.Areas["native-search-policy"];
+        var kind = LJ.Obj(("order", new JsonArray("wy")), ("enabled", new JsonArray("tx")),
+            ("pages", 1), ("concurrency", 1), ("cacheMinutes", 60));
+        await storage.WriteAsync(db =>
+        {
+            search.Replace(db, LJ.Obj(("schema", 1), ("revision", 0), ("songs", kind), ("playlists", kind)), ["local"]);
+            Check(search.Matches(db, ["local"], LJ.Obj(("schema", 1), ("revision", 0), ("songs", kind), ("playlists", kind)), complete: true));
+            var withoutCache = kind.DeepClone().AsObject(); withoutCache.Remove("cacheMinutes");
+            var projection = LJ.Obj(("schema", 1), ("revision", 0), ("songs", withoutCache), ("playlists", kind));
+            Check(search.Matches(db, ["local"], projection) && !search.Matches(db, ["local"], projection, complete: true),
+                "complete replacement compares omitted child fields while partial matching remains bounded");
+            Check(search.Matches(db, ["local"], LJ.Obj(("schema", 1))) &&
+                !search.Matches(db, ["local"], LJ.Obj(("schema", 1)), complete: true));
+            foreach (bool explicitNull in new[] { false, true })
+            {
+                var replacement = LJ.Obj(("schema", 1), ("revision", 0), ("playlists", kind));
+                if (explicitNull) replacement["songs"] = null;
+                db.Execute("UPDATE music_windows_search SET shape_mask=$shape,null_mask=$nulls WHERE scope_key='local'",
+                    ("$shape", explicitNull ? 15 : 11), ("$nulls", explicitNull ? 4 : 0));
+                Check(search.Matches(db, ["local"], replacement) && !search.Matches(db, ["local"], replacement, complete: true),
+                    "complete matching includes cleanup of residual null or absent relation rows");
+                search.Replace(db, replacement, ["local"]);
+                Check(db.Scalar<long>("SELECT count(*) FROM music_windows_search_songs WHERE scope_key='local'") == 0 &&
+                    search.Matches(db, ["local"], replacement, complete: true));
+                search.Replace(db, LJ.Obj(("schema", 1), ("revision", 0), ("songs", kind), ("playlists", kind)), ["local"]);
+            }
+            // A typed parent claims an object whose row is missing. Opening SQLite remains legal;
+            // only consuming this relation fails. No invalid SQLite column type is needed.
+            db.Execute("DELETE FROM music_windows_search_playlists WHERE scope_key='local'");
+            return true;
+        });
+        await using var database = new MusicLibraryDatabase(storage);
+        await using var owner = new MusicLibraryOwner(database);
+        var selected = await owner.ExecuteAsync("music.search.settings.get", new { kind = "songs" });
+        Check(selected.GetProperty("ok").GetBoolean() && selected.GetProperty("settings").GetProperty("songs").GetProperty("enabled")[0].GetString() == "tx");
+        var damaged = await owner.ExecuteAsync("music.search.settings.get", new { kind = "playlists" });
+        Check(!damaged.GetProperty("ok").GetBoolean() && damaged.GetProperty("code").GetString() == "CORRUPT_STORAGE", damaged.GetRawText());
+        await storage.WriteAsync(db =>
+        {
+            search.Patch(db, LJ.Obj(("revision", 1), ("songs", kind)), ["local"]);
+            Check(LJ.I(search.ReadSelected(db, ["local"], "songs")!["songs"]!["pages"]) == 1);
+            Check(db.Scalar<long>("SELECT shape_mask & 8 FROM music_windows_search WHERE scope_key='local'") == 8 &&
+                db.Scalar<long>("SELECT count(*) FROM music_windows_search_playlists") == 0,
+                "partial save must preserve the broken sibling relation, not remove it");
+            var song = Song("wy", "extension-preservation");
+            song["precise"] = JsonNode.Parse("900719925474099312345");
+            MusicStorageRecords.Song.Save(db, song, null, [Id(song)]);
+            MusicStorageRecords.Song.Patch(db, LJ.Obj(("songId", Id(song)), ("title", "updated")), [Id(song)]);
+            Check(MusicStorageRecords.Song.Read(db, [Id(song)])!["precise"]!.ToJsonString() == "900719925474099312345",
+                "partial writes leave existing extension nodes exact");
+            var history = MusicStorageRecords.Areas["history"];
+            history.Replace(db, LJ.Obj(("schema", 1), ("playlists", new JsonArray()), ("days", new JsonArray())), ["local"]);
+            var archive = history.Relation("playlists");
+            archive.Replace(db, LJ.Obj(("id", "damaged"), ("entries", new JsonArray(LJ.Obj(("id", "entry-1"), ("songId", Id(song)))))), ["local", "damaged"]);
+            archive.Delete(db, ["local", "damaged"]);
+            Check(db.Scalar<long>("SELECT count(*) FROM music_history_playlists_entries") == 0);
+            return true;
+        });
+        await Reject(DocumentStoreError.Corrupt, () => storage.ReadAsync(db => search.Read(db, ["local"])));
+    }
+    private static async Task SelectedSettings()
+    {
+        await using var storage = NativeDatabase.CreateMemory();
+        await storage.WriteAsync(db =>
+        {
+            MusicStorageRecords.Areas["online-settings"].Replace(db, LJ.Obj(("schema", 1), ("revision", 7)), ["local"]);
+            MusicStorageRecords.Areas["native-device-settings"].Replace(db, LJ.Obj(("schema", 1), ("revision", 2), ("volume", -1)), ["local"]);
+            return true;
+        });
+        await using var database = new MusicLibraryDatabase(storage);
+        await using var owner = new MusicLibraryOwner(database);
+        Check((await owner.ExecuteAsync("music.quality.settings.get")).GetProperty("ok").GetBoolean());
+        var damaged = await owner.ExecuteAsync("music.settings.get");
+        Check(!damaged.GetProperty("ok").GetBoolean() && damaged.GetProperty("code").GetString() == "CORRUPT_STORAGE", damaged.GetRawText());
+        var volume = await owner.ExecuteAsync("music.device.settings.save", new { ifRevision = 2, volume = 73 });
+        Check(volume.GetProperty("ok").GetBoolean() && volume.GetProperty("settings").GetProperty("volume").GetInt32() == 73, volume.GetRawText());
+        damaged = await owner.ExecuteAsync("music.settings.get");
+        Check(!damaged.GetProperty("ok").GetBoolean() && damaged.GetProperty("code").GetString() == "CORRUPT_STORAGE",
+            "saving healthy projection preserves broken lyrics: " + damaged.GetRawText());
+        var lyrics = await owner.ExecuteAsync("music.settings.save", new { ifRevision = 7, lyrics = false });
+        Check(lyrics.GetProperty("ok").GetBoolean() && lyrics.GetProperty("settings").GetProperty("revision").GetInt64() == 8);
+    }
+
     private static async Task MemoryRecords()
     {
         await using var database = MusicLibraryDatabase.CreateMemory();
-        var before = await database.ReadAsync(Scope);
+        var before = await database.ReadAllAsync(Scope);
         Check(before.Revision == MusicLibraryRevision.Empty && before.Areas.Count == 0 && database.SongIds().Count == 0);
         var song = Song("wy", "123");
         var kg = Song("kg", "123");
@@ -140,10 +228,10 @@ public static class MusicLibraryDatabaseTests
             Check((string)Sql(inspect, "PRAGMA journal_mode")! == "wal");
         }
         var reopened = folder.Library;
-        var snapshot = await reopened.ReadAsync(Scope);
+        var snapshot = await reopened.ReadAllAsync(Scope);
         Check(snapshot.Revision == revision && JsonNode.DeepEquals(reopened.ReadSong(Id(song)), song));
         snapshot.Areas["playback-settings"]!["mode"] = 3;
-        Check(LJ.I((await reopened.ReadAsync(Scope)).Areas["playback-settings"]!["mode"]) == 2);
+        Check(LJ.I((await reopened.ReadAllAsync(Scope)).Areas["playback-settings"]!["mode"]) == 2);
     }
 
     private static async Task LargeRecords()
@@ -157,11 +245,11 @@ public static class MusicLibraryDatabaseTests
         var revision = Next(MusicLibraryRevision.Empty);
         await using (var database = new MusicLibraryDatabase(folder.Storage))
         {
-            await database.ReadAsync(Scope);
+            await database.ReadAllAsync(Scope);
             await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes([song], control));
         }
         await using var reopened = new MusicLibraryDatabase(folder.Storage);
-        var saved = await reopened.ReadAsync(Scope);
+        var saved = await reopened.ReadAllAsync(Scope);
         Check(saved.Revision == revision && JsonNode.DeepEquals(saved.Areas["playback-settings"], control));
         Check(JsonNode.DeepEquals(reopened.ReadSong(Id(song)), song));
     }
@@ -169,15 +257,15 @@ public static class MusicLibraryDatabaseTests
     private static async Task Generations()
     {
         await using var database = MusicLibraryDatabase.CreateMemory();
-        var initial = await database.ReadAsync(Scope);
+        var initial = await database.ReadAllAsync(Scope);
         var revision = Next(initial.Revision);
         await database.CommitAsync(Scope, initial.Revision, revision, Changes([Song("wy", "generation")]));
         await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, initial.Revision, Next(initial.Revision), Changes()));
         await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, revision with { Receipt = Guid.NewGuid().ToString("D") }, Next(revision), Changes()));
         await Reject(DocumentStoreError.InvalidRequest, () => database.CommitAsync(Scope, revision, revision with { Generation = revision.Generation + 1 }, Changes()));
         await Reject(DocumentStoreError.InvalidRequest, () => database.CommitAsync(Scope, revision, new(revision.Generation + 2, "different"), Changes()));
-        await Reject(DocumentStoreError.Conflict, () => database.ReadAsync("wrong-scope"));
-        Check((await database.ReadAsync(Scope)).Revision == revision);
+        await Reject(DocumentStoreError.Conflict, () => database.ReadAllAsync("wrong-scope"));
+        Check((await database.ReadAllAsync(Scope)).Revision == revision);
     }
 
     private static async Task MissingRoot()
@@ -186,7 +274,7 @@ public static class MusicLibraryDatabaseTests
         string root = Path.Combine(folder.Root, "new-root");
         await using var storage = new NativeDatabase(root);
         await using var database = new MusicLibraryDatabase(storage);
-        var snapshot = await database.ReadAsync(Scope);
+        var snapshot = await database.ReadAllAsync(Scope);
         Check(snapshot.Revision == MusicLibraryRevision.Empty && database.SongIds().Count == 0);
         Check(File.Exists(storage.DatabasePath));
     }
@@ -195,7 +283,7 @@ public static class MusicLibraryDatabaseTests
     {
         using var folder = new Folder();
         await using var database = folder.Library;
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         var first = Song("wy", "bound");
         var revision = Next(MusicLibraryRevision.Empty);
         await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision,
@@ -204,21 +292,21 @@ public static class MusicLibraryDatabaseTests
         var conflict = Song("wy", "bound");
         await Reject(DocumentStoreError.Conflict, () => database.CommitAsync(Scope, revision, Next(revision),
             Changes([unrelated, conflict], new JsonObject { ["schema"] = 1, ["mode"] = 2 })));
-        var after = await database.ReadAsync(Scope);
+        var after = await database.ReadAllAsync(Scope);
         Check(after.Revision == revision && LJ.I(after.Areas["playback-settings"]!["mode"]) == 1);
         Check(database.FindSource(Key(first)) == Id(first) && database.FindSource(Key(unrelated)) is null);
         Check(database.ReadSong(Id(unrelated)) is null && database.ReadSong(Id(conflict)) is null && database.SongIds().Count == 1);
         await database.DisposeAsync();
         await folder.CloseAsync();
         await using var reopened = folder.Library;
-        Check((await reopened.ReadAsync(Scope)).Revision == revision && reopened.SongIds().Count == 1 &&
+        Check((await reopened.ReadAllAsync(Scope)).Revision == revision && reopened.SongIds().Count == 1 &&
             reopened.FindSource(Key(first)) == Id(first) && reopened.ReadSong(Id(unrelated)) is null);
     }
 
     private static async Task SourceRemoval()
     {
         await using var database = MusicLibraryDatabase.CreateMemory();
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         var song = Song("wy", "permanent");
         var revision = Next(MusicLibraryRevision.Empty);
         await database.CommitAsync(Scope, MusicLibraryRevision.Empty, revision, Changes([song]));
@@ -231,7 +319,7 @@ public static class MusicLibraryDatabaseTests
     private static async Task Candidates()
     {
         await using var database = MusicLibraryDatabase.CreateMemory();
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         var known = Song("wy", "known", 100);
         known["baselineDuration"] = 100;
         known["duration"] = 200;
@@ -248,7 +336,7 @@ public static class MusicLibraryDatabaseTests
         Check(database.FindCandidates("", 100).Count == 0 && database.FindCandidates(fingerprint, double.NaN).Count == 0);
         Check(database.FindLocalFile("local-file") == Id(local) && database.FindLocalFile("") is null);
         known["cover_url"] = "https://example.invalid/cover";
-        var revision = (await database.ReadAsync(Scope)).Revision;
+        var revision = (await database.ReadAllAsync(Scope)).Revision;
         await database.CommitAsync(Scope, revision, Next(revision), Changes([known]));
         Check(database.FindArtwork("https://example.invalid/cover").SequenceEqual([Id(known)]) && database.FindArtwork("").Count == 0);
     }
@@ -257,7 +345,7 @@ public static class MusicLibraryDatabaseTests
     {
         using var folder = new Folder();
         var database = folder.Library;
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         await folder.Storage.WriteAsync(db => db.Execute("""
             CREATE TEMP TABLE audit(kind TEXT PRIMARY KEY,writes INTEGER NOT NULL);
             INSERT INTO audit VALUES('songs',0),('sources',0);
@@ -286,7 +374,7 @@ public static class MusicLibraryDatabaseTests
     private static async Task Cancellation()
     {
         await using var database = MusicLibraryDatabase.CreateMemory();
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         using var canceled = new CancellationTokenSource();
         canceled.Cancel();
         try
@@ -310,7 +398,7 @@ public static class MusicLibraryDatabaseTests
     {
         using var folder = new Folder();
         var database = folder.Library;
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
@@ -322,7 +410,7 @@ public static class MusicLibraryDatabaseTests
             var commit = database.CommitAsync(Scope, MusicLibraryRevision.Empty, next, Changes([song]));
             var closing = database.DisposeAsync().AsTask();
             Check(!commit.IsCompleted && !closing.IsCompleted);
-            await Reject(DocumentStoreError.Closed, () => database.ReadAsync(Scope));
+            await Reject(DocumentStoreError.Closed, () => database.ReadAllAsync(Scope));
             release.TrySetResult();
             await Task.WhenAll(blocker, commit, closing);
             Check(await folder.Storage.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM music_songs")) == 1,
@@ -340,7 +428,7 @@ public static class MusicLibraryDatabaseTests
             using var folder = new Folder();
             File.WriteAllBytes(folder.Database, bytes);
             var database = folder.Library;
-            await Reject(DocumentStoreError.Corrupt, () => database.ReadAsync(Scope));
+            await Reject(DocumentStoreError.Corrupt, () => database.ReadAllAsync(Scope));
             Check(File.ReadAllBytes(folder.Database).SequenceEqual(bytes));
             await Reject(DocumentStoreError.Corrupt, folder.CloseAsync);
         }
@@ -395,7 +483,7 @@ public static class MusicLibraryDatabaseTests
             using (var inspect = Inspect(folder.Database)) _ = Sql(inspect, change);
             var original = SHA256.HashData(Bytes(folder.Database));
             var reopened = folder.Library;
-            await Reject(DocumentStoreError.UnsupportedVersion, () => reopened.ReadAsync(Scope));
+            await Reject(DocumentStoreError.UnsupportedVersion, () => reopened.ReadAllAsync(Scope));
             Check(SHA256.HashData(Bytes(folder.Database)).SequenceEqual(original));
             await Reject(DocumentStoreError.UnsupportedVersion, folder.CloseAsync);
         }
@@ -410,7 +498,7 @@ public static class MusicLibraryDatabaseTests
             File.WriteAllBytes(target, [1, 2, 3, 4]);
             Check(CreateHardLinkW(folder.Database + suffix, target, IntPtr.Zero), "Unable to prepare hardlink fixture");
             var database = folder.Library;
-            await Reject(DocumentStoreError.UnsafePath, () => database.ReadAsync(Scope));
+            await Reject(DocumentStoreError.UnsafePath, () => database.ReadAllAsync(Scope));
             Check(File.ReadAllBytes(target).SequenceEqual(new byte[] { 1, 2, 3, 4 }));
             await Reject(DocumentStoreError.UnsafePath, folder.CloseAsync);
         }
@@ -420,7 +508,7 @@ public static class MusicLibraryDatabaseTests
     {
         using var folder = new Folder();
         await using var database = folder.Library;
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         var songs = Enumerable.Range(0, 10000).Select(index =>
         {
             var song = Song("wy", "scale-" + index, title: "Recording " + index);
@@ -446,7 +534,7 @@ public static class MusicLibraryDatabaseTests
         watch.Stop();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
         Check(allocated < 64L * 1024 * 1024, "Indexed hot reads allocated a library-scale snapshot");
-        Check((await database.ReadAsync(Scope)).Revision == revision);
+        Check((await database.ReadAllAsync(Scope)).Revision == revision);
         string readPath = Path.Combine(folder.Root, "snapshots", "read", "meowfilm.sqlite3");
         Directory.CreateDirectory(Path.GetDirectoryName(readPath)!);
         await folder.Storage.BackupAsync(readPath);
@@ -476,7 +564,7 @@ public static class MusicLibraryDatabaseTests
     {
         using var folder = new Folder();
         await using var database = folder.Library;
-        await database.ReadAsync(Scope);
+        await database.ReadAllAsync(Scope);
         var songs = Enumerable.Range(0, 10000).Select(index =>
         {
             var song = Song("wy", "owner-scale-" + index, title: "Recording " + index);
@@ -488,7 +576,7 @@ public static class MusicLibraryDatabaseTests
         await database.CommitAsync(Scope, MusicLibraryRevision.Empty, Next(MusicLibraryRevision.Empty), Changes(songs));
         await using (var setup = new MusicLibraryOwner(database, Scope))
             _ = await setup.CreatePlaylistAsync("Scale", []);
-        var saved = await database.ReadAsync(Scope);
+        var saved = await database.ReadAllAsync(Scope);
         var control = saved.Areas["library"]!.DeepClone().AsObject();
         var collection = control["library"]!["collections"]!.AsArray().OfType<JsonObject>()
             .Single(value => value["id"]!.GetValue<string>() == "playlist:1");
@@ -501,10 +589,10 @@ public static class MusicLibraryDatabaseTests
         var incoming = JsonSerializer.SerializeToElement(new { items = songs.Take(10).ToArray() });
         _ = await owner.AdoptPlatformResultAsync(incoming, default);
         measured.Reset();
-        var before = (await database.ReadAsync(Scope)).Revision;
+        var before = (await database.ReadAllAsync(Scope)).Revision;
         _ = await owner.AdoptPlatformResultAsync(incoming, default);
         Check(measured.Commits == 0 && measured.Candidates == 0 && measured.Enumerations == 0 &&
-            (await database.ReadAsync(Scope)).Revision == before, "Repeated source adoption must not write or enumerate");
+            (await database.ReadAllAsync(Scope)).Revision == before, "Repeated source adoption must not write or enumerate");
         measured.Reset();
         var page = await owner.ExecuteAsync("music.library.detail", new { id = "playlist:1", offset = 100, limit = 25 });
         Check(page.GetProperty("ok").GetBoolean() && page.GetProperty("songs").GetArrayLength() == 25 &&
@@ -536,6 +624,11 @@ public static class MusicLibraryDatabaseTests
         internal int SongReads, ReferenceChecks, SourceReads, Candidates, Enumerations, Commits, LastChangedSongs;
         internal void Reset() => SongReads = ReferenceChecks = SourceReads = Candidates = Enumerations = Commits = LastChangedSongs = 0;
         public Task<MusicLibrarySnapshot> ReadAsync(string scope, CancellationToken token = default) => database.ReadAsync(scope, token);
+        public JsonObject? ReadArea(string scope, MusicLibraryRevision revision, string area, string[]? members = null) => database.ReadArea(scope, revision, area, members);
+        public IReadOnlyList<RelationalRecord.SelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] prefix, string[] members) => database.ReadRows(scope, revision, area, relations, prefix, members);
+        public JsonObject? ReadRow(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key) => database.ReadRow(scope, revision, area, relations, key);
+        public bool HasRelation(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, string relation) => database.HasRelation(scope, revision, area, relations, key, relation);
+        public bool Matches(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, JsonObject value) => database.Matches(scope, revision, area, relations, key, value);
         public JsonObject? ReadSong(string id) { SongReads++; return database.ReadSong(id); }
         public bool ContainsSong(string id) { ReferenceChecks++; return database.ContainsSong(id); }
         public string? FindSource(string key) { SourceReads++; return database.FindSource(key); }

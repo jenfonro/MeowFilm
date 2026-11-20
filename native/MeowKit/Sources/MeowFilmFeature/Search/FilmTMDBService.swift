@@ -98,13 +98,11 @@ enum FilmMetadataSettingsDocument {
     static func update(_ document: FilmSettingsDocument, defaults: RuntimeValue, patch: RuntimeObject) async throws -> RuntimeValue {
         let saved = try await document.update { current in
             var values = try settings(current, defaults: defaults).filmRequiredObject()
-            guard Set(patch.keys).isSubset(of: Set(defaults.filmObject!.keys)) else {
-                throw RuntimeHTTPError.remote("INVALID_REQUEST")
-            }
-            for (key, value) in patch {
+            let selected = patch.filter { defaults.filmObject![$0.key] != nil }
+            for (key, value) in selected {
                 values[key] = value
             }
-            let normalized = try normalize(values, defaults: defaults.filmObject!, keys: patch.keys)
+            let normalized = try normalize(values, defaults: defaults.filmObject!, keys: selected.map(\.key))
             return .object(["version": .number(1), "settings": .object(normalized)])
         }
         return saved.filmObject!["settings"]!

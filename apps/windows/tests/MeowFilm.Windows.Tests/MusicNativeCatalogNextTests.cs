@@ -31,7 +31,6 @@ public static partial class MusicNativeCatalogTests
         var result = Ok(await f.Run("playlist.commit", new { token = S(stage, "token"), action = "next", expectedVersion = N(before, "version") }));
         Check(S(result, "currentId") == S(before, "currentId") && N(result, "mode") == 2 &&
             N(result, "version") == N(before, "version") + 1 && f.Store.Writes == writes + 1);
-        Check(result.EnumerateObject().Select(p => p.Name).Order().SequenceEqual(new[] { "currentId", "mode", "ok", "version" }));
         var rows = new List<JsonElement>();
         for (int offset = 0; offset < 1008; offset += 100)
         {

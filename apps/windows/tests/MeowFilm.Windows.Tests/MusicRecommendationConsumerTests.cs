@@ -379,6 +379,7 @@ public static partial class MusicUiTests
         internal async Task EnableScript()
         {
             var before = await Call("music.quality.settings.get");
+            var beforeOnline = (await Call("music.settings.get")).GetProperty("settings");
             Dialog.ScriptPath = Path.Combine(Root, "recommendation-authored-lx.js");
             File.WriteAllText(Dialog.ScriptPath, TestScript(), new UTF8Encoding(false));
             await Module.ImportSourceAsync(); Equal(1, Module.Sources.Count(row => !row.IsBuiltIn));
@@ -398,11 +399,10 @@ public static partial class MusicUiTests
             Equal(before.GetProperty("settings").GetRawText(), saved.GetProperty("settings").GetRawText());
             Equal(before.GetProperty("signature").GetString(), saved.GetProperty("signature").GetString());
             Equal("flac", saved.GetProperty("settings").GetProperty("request").GetString());
-            var online = saved.GetProperty("onlineSettings");
-            Equal(3, online.GetProperty("schema").GetInt32());
-            True(online.EnumerateObject().Select(field => field.Name).ToHashSet()
-                .SetEquals(["schema", "revision", "lyrics"]), "online settings contain only the lyric setting and its version");
-            Equal(before.GetProperty("onlineSettings").GetRawText(), online.GetRawText());
+            var online = (await Call("music.settings.get")).GetProperty("settings");
+            Equal(1, online.GetProperty("schema").GetInt32());
+
+            Equal(beforeOnline.GetRawText(), online.GetRawText());
         }
         public async ValueTask DisposeAsync()
         {

@@ -12,6 +12,7 @@ import { parse } from 'acorn';
 import { ScriptHost } from './host.js';
 import { WorkerSession, workerResult } from './worker-session.js';
 import { CatSettingsStore, normalizeCatConfig, catName, catSourceURL } from './cat-settings.js';
+import { catConfig, catConfigNodes } from './cat-storage.js';
 import { CatNativeSettings } from './cat-native-settings.js';
 import { downloadCatSource } from './cat-source-download.js';
 import { atomicWrite, removePrivateVolume } from './private-volume.js';
@@ -25,7 +26,7 @@ import { CatProxyResources, proxyPlaylistInput, readProxyPlaylist, proxyPlaylist
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const same = isDeepStrictEqual;
-const execution = spec => spec && [spec.sourceHash, spec.config, spec.version, spec.enabled, spec.inputIdentity];
+const execution = spec => spec && [spec.sourceHash, catConfigNodes(spec), spec.version, spec.enabled, spec.inputIdentity];
 const sameExecution = (a, b) => same(execution(a), execution(b));
 const sameProviders = (a, b) => panProviders.every(provider =>
   (a?.[provider] === true) === (b?.[provider] === true));
@@ -570,8 +571,8 @@ export class CatRuntime {
       }
       const source = decodeSource(this.readSource(spec.sourceHash));
       if (existing) await this.host.update(id, { source,
-        config: spec.config, version: spec.version }, { signal });
-      else await this.host.install({ ...spec, source, protocol: 'cat', enabled: false }, { signal });
+        config: catConfig(spec), version: spec.version }, { signal });
+      else await this.host.install({ ...spec, config: catConfig(spec), source, protocol: 'cat', enabled: false }, { signal });
       await this.host.enable(id, { signal });
       const sites = this.hostSites(id);
       if (!same(sites, spec.sites)) {
@@ -836,7 +837,9 @@ export class CatRuntime {
       proposal.version.length > 0);
     requireValue(proposal.sourceType === undefined || ['local', 'network'].includes(proposal.sourceType));
     const spec = { ...previous, installationId: proposal.installationId,
-      config: proposal.config ?? previous?.config ?? {},
+      ...(proposal.config !== undefined ? { config: proposal.config }
+        : previous?.configNodes && previous.config === undefined ? { configNodes: previous.configNodes }
+        : { config: previous?.config ?? {} }),
       version: proposal.version ?? previous?.version ?? '0.0.0',
       enabled: proposal.enabled ?? previous?.enabled ?? true,
       name: catName(proposal.name ?? previous?.name ?? proposal.installationId),
@@ -984,8 +987,8 @@ export class CatRuntime {
       task.scope.assertOpen();
       if (!previous) removePrivateVolume(this.dataRoot, installationId);
       if (this.hostState(installationId)) await this.host.update(installationId, { source,
-        contentHash: spec.sourceHash, config: spec.config, version: spec.version }, { signal: task.scope.signal });
-      else await this.host.install({ ...spec, source, contentHash: spec.sourceHash, protocol: 'cat', enabled: false }, { signal: task.scope.signal });
+        contentHash: spec.sourceHash, config: catConfig(spec), version: spec.version }, { signal: task.scope.signal });
+      else await this.host.install({ ...spec, config: catConfig(spec), source, contentHash: spec.sourceHash, protocol: 'cat', enabled: false }, { signal: task.scope.signal });
       task.scope.assertOpen();
       if (spec.enabled) {
         await this.host.enable(installationId, { signal: task.scope.signal });
@@ -1033,8 +1036,8 @@ export class CatRuntime {
           if (!this.closed && (!this.configuration || task.restore)) {
             if (previous && previousSource !== null) {
               if (this.hostState(installationId)) await this.host.update(installationId, {
-                source: previousSource, config: previous.config, version: previous.version });
-              else await this.host.install({ ...previous, source: previousSource, protocol: 'cat', enabled: false });
+                source: previousSource, config: catConfig(previous), version: previous.version });
+              else await this.host.install({ ...previous, config: catConfig(previous), source: previousSource, protocol: 'cat', enabled: false });
               if (previous.enabled && task.restore) {
                 const recovery = task.recovery = new ResourceScope();
                 try { await this.host.enable(installationId, { signal: recovery.signal }); }

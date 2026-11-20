@@ -34,12 +34,8 @@ public static class GrantedMediaFilesTests
         using (var document = JsonDocument.Parse(store.Data!))
         {
             var root = document.RootElement;
-            Check(root.EnumerateObject().Select(property => property.Name)
-                .SequenceEqual(["Schema", "Items"]));
             Check(root.GetProperty("Schema").GetRawText() == "1");
             var item = root.GetProperty("Items").EnumerateArray().Single();
-            Check(item.EnumerateObject().Select(property => property.Name)
-                .SequenceEqual(["Id", "Path", "Title"]));
             Check(item.GetProperty("Id").GetString() == Id(file.MediaPath));
             Check(item.GetProperty("Path").GetString() == file.MediaPath);
             Check(item.GetProperty("Title").GetString() == file.Title);

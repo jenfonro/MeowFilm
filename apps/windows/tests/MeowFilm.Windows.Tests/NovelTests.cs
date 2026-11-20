@@ -31,6 +31,7 @@ public static partial class NovelTests
         yield return new("novel native rules: typed rules execute after cold open and failures preserve reading", () => Sta(RuleProjectionExecution));
         yield return new("novel native library: relational constraints and corrupt selected records never overwrite healthy siblings", LibraryIsolation);
         yield return new("novel native library: corrupt roots fail and independent field writes preserve external commits", LibraryGuards);
+        yield return new("novel native library: cold field writes preserve bad siblings and full replacements skip discarded semantics", LibraryWriteConsumption);
         yield return new("novel appearance: unknown values fall back only for consumption and unrelated editing preserves raw values", () => Sta(AppearanceRoundTrip));
         yield return new("novel rule management: offline import persists current rules without an execution preflight", () => Sta(OfflineRules));
         yield return new("novel native library: real atomic store reopens and second process restores reading", Durable);

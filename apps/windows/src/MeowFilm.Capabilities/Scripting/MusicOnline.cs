@@ -94,7 +94,10 @@ public sealed partial class MusicCapability
         token.ThrowIfCancellationRequested();
         if (sourceGeneration is { } generation && !SourceManagementCurrent(generation)) return;
         AcceptQuality(reply);
-        PublishOnlineSettings(reply.GetProperty("onlineSettings"));
+        var settings = await Call("music.settings.get", null, token);
+        token.ThrowIfCancellationRequested();
+        if (sourceGeneration is { } current && !SourceManagementCurrent(current)) return;
+        PublishOnlineSettings(settings.GetProperty("settings"));
     }
     private void PublishOnlineSettings(JsonElement value)
     {

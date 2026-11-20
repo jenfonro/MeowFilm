@@ -998,3 +998,62 @@ test('QQ/KG account recommendation families retain actual dynamic results and al
     assert.equal(f.requests.length, 1); await f.close();
   });
 });
+
+
+const vipRecommend = {code:200,data:{songInfoList:[wySong('123')]}};
+const vipRankings = {code:200,data:[{categoryCode:'vip',list:[
+  {toplistCode:'VIP',name:'黑胶VIP 榜',trackRankList:[{trackId:'456',songName:'Current'}]},
+]}]};
+for (const failed of ['recommend','rankings']) {
+  for (const [status,code] of [[301,'AUTH_REQUIRED'],[403,'FORBIDDEN'],[429,'RATE_LIMITED'],[460,'VERIFICATION_REQUIRED']])
+    test(`WY VIP ${failed} ${code} survives a healthy sibling`, async t => {
+      const f = fixture(request => {
+        const branch = new URL(request.url).pathname.endsWith('/toplist/detail/v2') ? 'rankings' : 'recommend';
+        return response(branch === failed ? {code:status} : branch === 'rankings' ? vipRankings : vipRecommend);
+      }); seedClients(f); t.after(() => f.close());
+      await assert.rejects(f.request('wy','channel',{id:'vip'}),{code});
+      assert.equal(f.requests.length,2);
+    });
+  test(`WY VIP ${failed} content error is published beside the healthy section`, async t => {
+    const f = fixture(request => {
+      const branch = new URL(request.url).pathname.endsWith('/toplist/detail/v2') ? 'rankings' : 'recommend';
+      return response(branch === failed ? {code:500} : branch === 'rankings' ? vipRankings : vipRecommend);
+    }); seedClients(f); t.after(() => f.close());
+    const page = await f.request('wy','channel',{id:'vip'});
+    const rejected = page.sections.find(row => row.id.endsWith(':'+failed));
+    assert.equal(rejected.errorCode,'UPSTREAM_ERROR'); assert.deepEqual(rejected.items,[]);
+    const healthy = page.sections.find(row => !row.errorCode);
+    assert.equal(healthy.items.length,1);
+    assert.equal(failed === 'rankings' ? idOf(healthy.items[0]) : healthy.items[0].title,
+      failed === 'rankings' ? '123' : '黑胶VIP 榜');
+    assert.equal(f.requests.length,2);
+  });
+}
+
+test('WY VIP waits for both concurrent branches before reporting authentication failure', async t => {
+  const held = gate(); let settled = false;
+  const f = fixture(async request => {
+    if (new URL(request.url).pathname.endsWith('/toplist/detail/v2')) { await held.wait(); return response(vipRankings); }
+    return response({code:301});
+  }); seedClients(f); t.after(async () => {held.release(); await f.close();});
+  const work = f.request('wy','channel',{id:'vip'}).finally(() => {settled=true;});
+  const check = assert.rejects(work,{code:'AUTH_REQUIRED'});
+  await held.entered; await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled,false); assert.equal(f.requests.length,2);
+  held.release(); await check;
+});
+
+test('WY VIP lifecycle failure cannot become a partial page and close drains the sibling', async t => {
+  const held = gate(); let settled = false;
+  const f = fixture(async request => {
+    if (new URL(request.url).pathname.endsWith('/toplist/detail/v2')) { await held.wait(); return response(vipRankings); }
+    return response(vipRecommend);
+  }); seedClients(f); t.after(async () => {held.release(); await f.close();});
+  const work = f.request('wy','channel',{id:'vip'});
+  const check = assert.rejects(work,{code:'CLOSED'});
+  await held.entered;
+  const closing = f.close().then(() => {settled=true;});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled,false);
+  held.release(); await check; await closing;
+});

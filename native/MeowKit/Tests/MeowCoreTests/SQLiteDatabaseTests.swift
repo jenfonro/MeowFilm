@@ -41,37 +41,6 @@ final class SQLiteDatabaseTests: XCTestCase {
         XCTAssertEqual(try row.text("receipt"), "first")
         try await reopened.close()
     }
-    func testOpenDoesNotConsumeUnrelatedRelationsAndNewWritesEnforceForeignKeys() async throws {
-        let (root, db) = try await fixture()
-        // Model an out-of-band damaged business relation without changing the schema.
-        try await db.read { connection in
-            try connection.execute("PRAGMA foreign_keys=OFF")
-            try connection.execute("INSERT INTO cat_mapping_aliases VALUES(7,0,'orphan')")
-        }
-        try await db.close()
-        let reopened = try await Task.detached { try SQLiteDatabase(dataRoot: root) }.value
-        do {
-            try await reopened.transaction {
-                try $0.execute("INSERT INTO owner_revisions VALUES('unrelated',1,'saved')")
-            }
-            let receipt = try await reopened.read {
-                try $0.query("SELECT receipt FROM owner_revisions WHERE owner='unrelated'").first!.text("receipt")
-            }
-            XCTAssertEqual(receipt, "saved")
-            do {
-                try await reopened.transaction {
-                    try $0.execute("INSERT INTO cat_mapping_aliases VALUES(8,0,'new')")
-                }
-                XCTFail("new orphan relation committed")
-            } catch { XCTAssertEqual(error as? SQLiteStorageError, .constraint) }
-            let violations = try await reopened.read { try $0.query("PRAGMA foreign_key_check").count }
-            XCTAssertEqual(violations, 1)
-            try await reopened.close()
-        } catch {
-            try await reopened.close()
-            throw error
-        }
-    }
     func testIndependentConnectionsSerializeAtomicIncrements() async throws {
         let (root, first) = try await fixture()
         let second = try await Task.detached { try SQLiteDatabase(dataRoot: root) }.value
@@ -87,6 +56,35 @@ final class SQLiteDatabaseTests: XCTestCase {
         let revision = try await first.read { try $0.query("SELECT revision FROM owner_revisions WHERE owner='test'").first!.integer("revision") }
         XCTAssertEqual(revision, 41)
         try await second.close()
+    }
+    func testOrdinaryReopenKeepsRelationsScopedAndWriteConstraintsEnabled() async throws {
+        let (root, db) = try await fixture()
+        try await db.read { connection in
+            try connection.execute("PRAGMA foreign_keys=OFF")
+            try connection.execute("INSERT INTO operation_receipts VALUES('missing-owner','retained',1)")
+            try connection.execute("PRAGMA foreign_keys=ON")
+        }
+        try await db.close()
+        let reopened = try await Task.detached { try SQLiteDatabase(dataRoot: root) }.value
+        addTeardownBlock { try await reopened.close() }
+        let enabled = try await reopened.read { try $0.query("PRAGMA foreign_keys").first!.integer("foreign_keys") }
+        XCTAssertEqual(enabled, 1)
+        try await reopened.transaction { try $0.execute("INSERT INTO owner_revisions VALUES('unrelated',1,'saved')") }
+        let receipt = try await reopened.read { try $0.query("SELECT receipt FROM owner_revisions WHERE owner='unrelated'").first!.text("receipt") }
+        XCTAssertEqual(receipt, "saved")
+        do {
+            try await reopened.transaction { try $0.execute("INSERT INTO operation_receipts VALUES('missing-owner','rejected',1)") }
+            XCTFail("invalid new relation committed")
+        } catch { XCTAssertEqual(error as? SQLiteStorageError, .constraint) }
+        let receipts = try await reopened.read { try $0.query("SELECT operation_id FROM operation_receipts").map { try $0.text("operation_id") } }
+        XCTAssertEqual(receipts, ["retained"])
+        let violations = try await reopened.read { try $0.query("PRAGMA foreign_key_check").count }
+        XCTAssertEqual(violations, 1)
+        let destination = root.appendingPathComponent("rejected-backup.sqlite3")
+        do { try await reopened.backup(to: destination); XCTFail("invalid whole-database backup accepted") }
+        catch { XCTAssertEqual(error as? SQLiteStorageError, .corrupt) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        try await reopened.close()
     }
     func testModifiedStructureIsRejectedWithoutRebuildingTheDatabase() async throws {
         let (root, db) = try await fixture()

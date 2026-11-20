@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using MeowFilm.Platform.Storage;
+using Microsoft.Data.Sqlite;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -60,24 +61,35 @@ public static class StorageTests
                 return true;
             });
         });
-        yield return Case("open-does-not-consume-unrelated-relations-and-new-writes-enforce-foreign-keys", async () =>
+        yield return Case("ordinary-reopen-scopes-stored-relations-and-keeps-write-and-backup-integrity", async () =>
         {
             string root = Root();
-            await using (var database = new NativeDatabase(root)) await database.Ready;
-            using (var external = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
-                { DataSource = Path.Combine(root, NativeDatabase.RelativePath), Pooling = false }.ToString()))
+            await using (var database = new NativeDatabase(root))
+                await database.Ready;
+            using (var inspection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                external.Open();
-                using var command = external.CreateCommand();
-                command.CommandText = "PRAGMA foreign_keys=OFF; INSERT INTO cat_mapping_aliases VALUES(7,0,'orphan')";
+                DataSource = Path.Combine(root, NativeDatabase.RelativePath), Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false, ForeignKeys = false
+            }.ToString()))
+            {
+                inspection.Open();
+                using var command = inspection.CreateCommand();
+                command.CommandText = "INSERT INTO operation_receipts VALUES('missing-owner','retained',1)";
                 command.ExecuteNonQuery();
             }
             await using var reopened = new NativeDatabase(root);
+            await reopened.Ready;
+            Check(await reopened.ReadAsync(db => db.Scalar<long>("PRAGMA foreign_keys")) == 1);
             await reopened.WriteAsync(db => db.CommitRevision("unrelated", StorageRevision.Empty, "saved"));
             Check(await reopened.RevisionAsync("unrelated") == new StorageRevision(1, "saved"));
             await Error(DocumentStoreError.Conflict, () => reopened.WriteAsync(db =>
-                db.Execute("INSERT INTO cat_mapping_aliases VALUES(8,0,'new')")));
-            Check(await reopened.ReadAsync(db => db.Query("PRAGMA foreign_key_check", row => row.GetString(0)).Count) == 1);
+                db.Execute("INSERT INTO operation_receipts VALUES('missing-owner','rejected',1)")));
+            Check(await reopened.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM operation_receipts WHERE owner='missing-owner'")) == 1);
+            Check(await reopened.ReadAsync(db => db.Scalar<string>("SELECT operation_id FROM operation_receipts WHERE owner='missing-owner'")) == "retained");
+            string destination = Path.Combine(Root(), "storage-v1", "meowfilm.sqlite3");
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            await Error(DocumentStoreError.Corrupt, () => reopened.BackupAsync(destination));
+            Check(!File.Exists(destination));
         });
         yield return Case("independent-connections-serialize-current-row-increments", async () =>
         {

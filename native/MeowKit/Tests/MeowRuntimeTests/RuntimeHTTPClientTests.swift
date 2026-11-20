@@ -1092,7 +1092,7 @@ final class RuntimeHTTPClientTests: XCTestCase {
         await client.close()
     }
 
-    func testNeteaseTokenRoutingHasEmptyInputAndSixtySecondBudgetWithOrdinaryRequestBudgetPreserved() async throws {
+    func testNeteaseTokenRoutingPreservesParametersAndSixtySecondBudgetWithOrdinaryRequestBudgetPreserved() async throws {
         let client = try client()
         RuntimeTestURLProtocol.fixture.set { request, transport in
             XCTAssertEqual(request.url?.path, "/v1/netease/get")
@@ -1110,13 +1110,26 @@ final class RuntimeHTTPClientTests: XCTestCase {
             transport.respond(.object(["ok": .bool(true), "contract": .string("music.script.v3"), "value": .null]))
         }
         _ = try await client.call(module: .music, operation: "invoke")
-        RuntimeTestURLProtocol.fixture.set { _, _ in XCTFail("invalid token calls must not reach HTTP") }
-        for (operation, parameters) in [("token.get", RuntimeValue.object([:])),
-                                        ("get", .object(["cookie": .string("synthetic")])),
-                                        ("get", .null)] {
-            do { _ = try await client.call(module: .netease, operation: operation, parameters: parameters); XCTFail("invalid input") }
-            catch { XCTAssertEqual(error as? RuntimeHTTPError, .invalidRequest) }
+        for parameters in [RuntimeValue.object(["cookie": .string("synthetic")]), .null] {
+            let body = try RuntimeJSON.encode(parameters)
+            RuntimeTestURLProtocol.fixture.set { request, transport in
+                XCTAssertEqual(request.url?.path, "/v1/netease/get")
+                XCTAssertEqual(request.timeoutInterval, 60)
+                XCTAssertEqual(transport.body(), body)
+                XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
+                transport.respond(.object(["ok": .bool(true), "contract": .string("netease.token.v1"),
+                                           "value": .object(["token": .string("synthetic-token")])]))
+            }
+            let token = try await client.call(module: .netease, operation: "get", parameters: parameters)
+            XCTAssertEqual(token, .object(["token": .string("synthetic-token")]))
         }
+        RuntimeTestURLProtocol.fixture.set { request, transport in
+            XCTAssertEqual(request.url?.path, "/v1/netease/token.get")
+            transport.respond(.object(["ok": .bool(false), "contract": .string("runtime.http.v1"),
+                                       "code": .string("METHOD_NOT_FOUND")]), status: 404)
+        }
+        do { _ = try await client.call(module: .netease, operation: "token.get"); XCTFail("unknown route") }
+        catch { XCTAssertEqual(error as? RuntimeHTTPError, .remote("METHOD_NOT_FOUND")) }
         await client.close()
     }
 

@@ -162,9 +162,6 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard operation.range(of: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
             throw RuntimeHTTPError.invalidRequest
         }
-        if module == .netease {
-            guard operation == "get", parameters == .object([:]) else { throw RuntimeHTTPError.invalidRequest }
-        }
         let body: Data
         do { body = try RuntimeJSON.encode(parameters) }
         catch { throw RuntimeHTTPError.invalidRequest }

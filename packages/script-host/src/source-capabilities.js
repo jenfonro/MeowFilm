@@ -247,21 +247,26 @@ class ScopedCookieJar {
   }
 }
 
-function memoryStorage() {
+function memoryStorage(readStorage) {
   const profiles = new Map();
   const map = profile => {
     if (!profiles.has(profile)) profiles.set(profile, new Map());
     return profiles.get(profile);
   };
   return {
-    get: ({ profile, key }) => cloneJSONValue(map(profile).get(key) ?? null),
+    get: ({ profile, key }) => {
+      const values = map(profile);
+      return cloneJSONValue(values.has(key) && values.get(key) === undefined
+        ? readStorage({ profile, key }) : values.get(key) ?? null);
+    },
     set: ({ profile, key, value }) => {
       map(profile).set(key, cloneJSONValue(value));
       return true;
     },
     delete: ({ profile, key }) => map(profile).delete(key),
     snapshot: prefix => [...profiles].filter(([name]) => name.startsWith(prefix))
-      .map(([name, values]) => [name.slice(prefix.length), [...values]]),
+      .map(([name, values]) => [name.slice(prefix.length), [...values].map(([key, value]) =>
+        value === undefined ? [key] : [key, value])]),
     restore(prefix, values) {
       this.releaseProfiles(prefix);
       for (const [suffix, entries] of values) profiles.set(prefix + suffix, new Map(cloneJSONValue(entries)));
@@ -312,11 +317,12 @@ function requestDeadline(parent, timeoutMs) {
 export function createNodeSourceCapabilities({
   network = createNodeNetwork(),
   storage,
+  readStorage,
   web,
   onDiagnostic,
   onProfileChange,
 } = {}) {
-  storage ??= memoryStorage();
+  storage ??= memoryStorage(readStorage);
   requireValue(typeof network === 'function');
   requireValue(storage && ['get', 'set', 'delete', 'releaseProfiles']
     .every(name => typeof storage[name] === 'function'));
@@ -471,8 +477,9 @@ export function createNodeSourceCapabilities({
             const result = await web({ ...input, request, signal: activeSignal, scope });
             if (activeSignal.aborted) throw safeError(activeSignal.reason, 'CANCELLED');
             const envelope = result && typeof result === 'object' && Object.hasOwn(result, 'value') &&
-              typeof result.url === 'string' && result.headers &&
-              Object.keys(result).every(key => ['value', 'url', 'headers', 'cookieChanges'].includes(key));
+              Object.hasOwn(result, 'url') && Object.hasOwn(result, 'headers');
+            if (envelope) requireValue(typeof result.url === 'string' && result.headers &&
+              typeof result.headers === 'object' && !Array.isArray(result.headers), 'INVALID_RESPONSE');
             const changes = [];
             if (result && typeof result === 'object' && result.headers) {
               const headers = responseHeaders(result.headers);
@@ -484,8 +491,7 @@ export function createNodeSourceCapabilities({
               requireValue(Array.isArray(result.cookieChanges), 'INVALID_RESPONSE');
               for (const change of result.cookieChanges) {
                 requireValue(change && typeof change === 'object' && !Array.isArray(change) &&
-                  typeof change.url === 'string' && typeof change.setCookie === 'string' &&
-                  Object.keys(change).every(key => ['url', 'setCookie'].includes(key)), 'INVALID_RESPONSE');
+                  typeof change.url === 'string' && typeof change.setCookie === 'string', 'INVALID_RESPONSE');
                 let origin;
                 try { origin = validateURL(change.url); }
                 catch { throw fault('INVALID_RESPONSE'); }

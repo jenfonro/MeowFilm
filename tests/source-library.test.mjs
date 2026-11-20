@@ -725,3 +725,97 @@ test('cancelled preview is drained by shutdown and never writes the permanent re
   held.resolve(); denied(await preview, 'CLOSED');
   const receipt = await closing; assert.equal(receipt.ok, true); assert.equal(receipt.value.cleanupComplete, true);
 });
+
+
+test('typed definition numeric fields keep exact decimals through cold reads and unrelated metadata writes', async t => {
+  const root = temp();
+  const first = setup(t, { dataRoot: root });
+  const text = JSON.stringify({ ...source, enabled: false }).replace(/}$/, ',"weight":9007199254740993,"respondTime":1.0000000000000001,"lastUpdateTime":-9007199254740993,"bookSourceType":1.0000000000000001}');
+  const imported = value(await first.rpc('library.import', { text }));
+  assert.deepEqual(imported.failures, []);
+  const id = imported.sources[0].installationId;
+  await first.module.close();
+  const second = setup(t, { dataRoot: root });
+  let item = value(await second.rpc('library.get', { installationId: id })).source;
+  item = value(await second.rpc('library.update', { installationId: id, expectedRevision: item.revision,
+    patch: { name: 'Changed', group: 'Exact' } })).source;
+  await second.module.close();
+  const third = setup(t, { dataRoot: root });
+  for (const text of [value(await third.rpc('library.get', { installationId: id })).definition,
+    value(await third.rpc('library.export', { installationIds: [id] })).text]) {
+    assert.match(text, /"weight":9007199254740993/);
+    assert.match(text, /"respondTime":1\.0000000000000001/);
+    assert.match(text, /"lastUpdateTime":-9007199254740993/);
+    assert.match(text, /"bookSourceType":1\.0000000000000001/);
+  }
+});
+
+test('source loader isolates disabled bad definition and per-key KV while retaining their original nodes', async t => {
+  const root = temp();
+  const first = setup(t, { dataRoot: root });
+  const healthy = await importSource(first.rpc);
+  const bad = await importSource(first.rpc, { ...source, enabled: false,
+    bookSourceName: 'Bad definition', bookSourceUrl: 'https://bad.invalid/', extension: 'original' });
+  await first.module.close();
+  await withTestDatabase(root, async db => {
+    await db.execute("UPDATE source_definition_nodes SET text_value=NULL WHERE installation_id=? AND field='extension'", [bad.installationId]);
+    await db.execute('INSERT INTO source_private_profiles VALUES(?,?)', [healthy.installationId, 'cache']);
+    await db.execute('INSERT INTO source_private_kv_entries VALUES(?,?,?,?)', [healthy.installationId, 'cache', 'bad', 0]);
+    await db.execute(`INSERT INTO source_private_kv_nodes(installation_id,profile_suffix,entry_key,node_id,kind)
+      VALUES(?,?,?,0,'text')`, [healthy.installationId, 'cache', 'bad']);
+  });
+  const rows = () => withTestDatabase(root, async db => ({
+    definitions: await db.query("SELECT * FROM source_definition_nodes WHERE installation_id=? AND field='extension'", [bad.installationId]),
+    kv: await db.query('SELECT * FROM source_private_kv_nodes WHERE installation_id=?', [healthy.installationId]),
+  }));
+  const before = await rows();
+  const second = setup(t, { dataRoot: root });
+  const list = value(await second.rpc('library.list')).sources;
+  assert.equal(list.length, 2);
+  const current = list.find(item => item.installationId === healthy.installationId);
+  assert.equal(value(await invoke(second.rpc, current, 'search', { keyword: 'one' })).books[0].name, 'Result');
+  value(await second.rpc('library.update', { installationId: healthy.installationId,
+    expectedRevision: current.revision, patch: { name: 'Healthy changed' } }));
+  value(await second.rpc('library.update', { installationId: bad.installationId,
+    expectedRevision: bad.revision, patch: { group: 'Disabled changed' } }));
+  denied(await second.rpc('library.get', { installationId: bad.installationId }), 'CORRUPT_STORAGE');
+  assert.deepEqual(await rows(), before);
+  await second.module.close();
+  const third = setup(t, { dataRoot: root });
+  assert.equal(value(await third.rpc('library.list')).sources.length, 2);
+  denied(await third.rpc('library.get', { installationId: bad.installationId }), 'CORRUPT_STORAGE');
+  assert.deepEqual(await rows(), before);
+});
+
+
+test('source private KV reads only the selected key and permits replacing an unread bad value', async t => {
+  const root = temp();
+  const first = setup(t, { dataRoot: root });
+  const item = await importSource(first.rpc, { ...source, searchUrl: `@js:
+    if (key === 'replace') cache.put('bad', 'repaired');
+    if (key === 'write') cache.put('new', 'written');
+    cache.get(key === 'replace' ? 'bad' : key);
+    'https://books.invalid/search'` });
+  await first.module.close();
+  await withTestDatabase(root, async db => {
+    await db.execute('INSERT INTO source_private_profiles VALUES(?,?)', [item.installationId, 'storage']);
+    for (const [index, key] of ['bad', 'good'].entries()) {
+      await db.execute('INSERT INTO source_private_kv_entries VALUES(?,?,?,?)', [item.installationId, 'storage', key, index]);
+      await db.execute(`INSERT INTO source_private_kv_nodes(installation_id,profile_suffix,entry_key,node_id,kind,text_value)
+        VALUES(?,?,?,0,'text',?)`, [item.installationId, 'storage', key, key === 'good' ? 'healthy' : null]);
+    }
+  });
+  const raw = () => withTestDatabase(root, db => db.query(
+    "SELECT * FROM source_private_kv_nodes WHERE installation_id=? AND entry_key='bad'", [item.installationId]));
+  const before = await raw();
+  const second = setup(t, { dataRoot: root });
+  assert.equal(value(await invoke(second.rpc, item, 'search', { keyword: 'good' })).books.length, 1);
+  denied(await invoke(second.rpc, item, 'search', { keyword: 'bad' }), 'STORAGE_ERROR');
+  assert.equal(value(await invoke(second.rpc, item, 'search', { keyword: 'write' })).books.length, 1);
+  assert.deepEqual(await raw(), before);
+  assert.equal(value(await invoke(second.rpc, item, 'search', { keyword: 'replace' })).books.length, 1);
+  assert.equal((await raw())[0].text_value, 'repaired');
+  await second.module.close();
+  const third = setup(t, { dataRoot: root });
+  assert.equal(value(await invoke(third.rpc, item, 'search', { keyword: 'bad' })).books.length, 1);
+});

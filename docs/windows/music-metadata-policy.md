@@ -20,7 +20,7 @@ native-local-lyrics
 
 区域尚未创建时，owner 使用当前内存默认值，表示用户尚未修改该项。区域一旦存在，在实际消费时必须通过当前 schema、必需字段与关系校验；未消费扩展不阻断其他动作，损坏值不能退化为默认。
 
-不兼容的当前控制记录保持原样并明确失败。
+实际读取的当前控制记录损坏明确失败；完整覆盖设置只消费旧 schema/revision，不解码被覆盖的旧业务字段。
 
 ## 元数据平台偏好
 
@@ -80,7 +80,7 @@ native-local-lyrics
 
 ## 本地歌词区域
 
-`native-local-lyrics` 当前 schema 为 1，items 为 `{songId,contentHash,lines}`；songId 是仓库永久 UUID，contentHash 仅绑定导入文本，不是歌曲身份。本地歌词不设首数、字节、文本或行词数量上限；保存通用时间轴，不保存路径、文件能力、凭据或媒体 URL。`music.lyrics.local.get/save/remove` 按永久引用读取／替换／移除，歌词关闭不删除本地内容。时间轴格式、有限时间值与当前歌曲身份仍须有效。
+`native-local-lyrics` 当前 schema 为 1，items 为 `{songId,contentHash,lines}`；songId 是仓库永久 UUID，contentHash 仅绑定导入文本，不是歌曲身份。本地歌词不设首数、字节、文本或行词数量上限；保存通用时间轴，不保存路径、文件能力、凭据或媒体 URL。`music.lyrics.local.get/save/remove` 按永久引用读取／替换／移除，歌词关闭不删除本地内容。读取只解码所选歌曲时间轴；关闭歌词时只定位所选身份。覆盖与准确删除不先解码旧歌词，未选坏歌词由原关系保留，不降级为 miss。新时间轴格式、有限时间值、当前队列歌曲身份与 TARGET_CHANGED 保护仍须有效。
 
 ## 共享音乐图片与展示缓存
 

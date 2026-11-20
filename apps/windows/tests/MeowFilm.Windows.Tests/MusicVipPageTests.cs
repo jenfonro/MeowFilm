@@ -10,6 +10,17 @@ public static class MusicVipPageTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        foreach (string code in new[] { "NETWORK_ERROR", "UPSTREAM_ERROR" })
+            yield return Case("VIP active sign propagates " + code + " to its operation owner", async () =>
+            {
+                var source = new Source { SignError = code };
+                await using var page = new MusicVipPage(source, OwnerDispatcher.Current);
+                await page.SetSurfaceAsync(true, true);
+                bool reported = false;
+                try { await page.SignAsync(); }
+                catch (MusicOperationException error) when (error.Code == code) { reported = true; }
+                True(reported && source.Signs == 1 && !page.SignedToday, "active failure cannot become successful sign");
+            });
         yield return Case("VIP presentation is dormant off route and publishes successful branches independently", async () =>
         {
             var source = new Source

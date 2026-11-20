@@ -4,7 +4,6 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const shared = new Set(['MeowFilm.Core', 'MeowFilm.Threading', 'MeowFilm.Platform', 'MeowFilm.Desktop', 'MeowFilm.Media', 'MeowFilm.Audio', 'MeowFilm.SystemMedia']);
 const DEFAULT_PROPERTIES = Object.freeze({
   Configuration: 'Release', RuntimeIdentifier: 'win-x64', SelfContained: 'true',
   TargetLatestRuntimePatch: 'true',
@@ -16,7 +15,7 @@ function inside(base, path) {
 }
 function evaluateProject(project, properties) {
   return JSON.parse(execFileSync('dotnet', ['msbuild', project, '-nologo',
-    '-getProperty:MSBuildProjectName,AssemblyName', '-getItem:ProjectReference',
+    '-getProperty:MSBuildProjectName,AssemblyName,UseWinUI', '-getItem:ProjectReference',
     ...Object.entries(properties).map(([name, value]) => `-p:${name}=${value}`)],
   { cwd: dirname(project), windowsHide: true, encoding: 'utf8' }));
 }
@@ -28,6 +27,11 @@ export function verifyWindowsProjects(directory = root, {
 } = {}) {
   directory = realpathSync(directory);
   const graph = new Map(), visiting = new Set();
+  const inScope = (entry, scope) => inside(resolve(directory, 'apps/windows', scope), entry.path);
+  const business = entry => inScope(entry, 'app') || inScope(entry, 'src/MeowFilm.AppHost') ||
+    inScope(entry, 'src/MeowFilm.Capabilities');
+  const dependsOn = (entry, predicate) => entry.dependencies.some(item =>
+    predicate(item) || dependsOn(item, predicate));
   function visit(path) {
     path = realpathSync(path);
     if (!inside(directory, path)) fail('project leaves repository');
@@ -40,19 +44,24 @@ export function verifyWindowsProjects(directory = root, {
     const references = result.Items.ProjectReference.map(item => realpathSync(item.FullPath));
     if (new Set(references).size !== references.length) fail('duplicate project reference');
     const dependencies = references.map(visit);
-    if (shared.has(name) && dependencies.some(item => !shared.has(item.name)))
-      fail('shared project depends on application or business: ' + name);
-    if ((name === 'MeowFilm.Audio' || name === 'MeowFilm.Media') &&
-        dependencies.some(item => !['MeowFilm.Core', 'MeowFilm.Threading'].includes(item.name)))
-      fail('native playback core depends beyond its neutral input boundary: ' + name);
-    if (name === 'MeowFilm.Threading' && dependencies.some(item => item.name !== 'MeowFilm.Core'))
-      fail('owner threading depends beyond its neutral scheduling boundary');
-    const entry = { name, assembly };
+    const entry = { name, assembly, path, dependencies,
+      usesWinUI: result.Properties.UseWinUI?.toLowerCase() === 'true' };
     graph.set(path, entry);
     visiting.delete(path);
     return entry;
   }
   const app = visit(resolve(directory, 'apps/windows/app/MeowFilm.Windows.App.csproj'));
+  for (const entry of graph.values()) {
+    if (!business(entry) && dependsOn(entry, business))
+      fail('shared project depends on application or business: ' + entry.name);
+    const audio = inScope(entry, 'src/MeowFilm.Audio'), media = inScope(entry, 'src/MeowFilm.Media');
+    if ((audio || media) && dependsOn(entry, item => item.usesWinUI ||
+        inScope(item, audio ? 'src/MeowFilm.Media' : 'src/MeowFilm.Audio')))
+      fail('native playback core depends beyond its neutral input boundary: ' + entry.name);
+    if (inScope(entry, 'src/MeowFilm.Threading') && dependsOn(entry, item => item.usesWinUI ||
+        inScope(item, 'src/MeowFilm.Audio') || inScope(item, 'src/MeowFilm.Media')))
+      fail('owner threading depends beyond its neutral scheduling boundary');
+  }
   const assemblies = [...graph.values()].map(item => item.assembly).sort();
   if (new Set(assemblies).size !== assemblies.length) fail('duplicate assembly identity');
   return { projects: graph.size, properties: { ...properties }, application: { name: app.assembly, dataIdentity: 'aggregate',
@@ -72,11 +81,13 @@ export function verifyRuntimeConfiguration(config, selfContained) {
       fail('framework-dependent runtime must declare one framework form');
     frameworks = options?.framework === undefined ? options?.frameworks : [options.framework];
   }
-  if (!Array.isArray(frameworks) || frameworks.length !== 1 ||
-      frameworks[0]?.name !== 'Microsoft.NETCore.App' ||
-      typeof frameworks[0]?.version !== 'string' || !frameworks[0].version.trim())
-    fail('runtime framework closure must contain only a versioned Microsoft.NETCore.App');
-  return frameworks[0].version;
+  if (!Array.isArray(frameworks) || frameworks.some(item =>
+      typeof item?.name !== 'string' || !item.name.trim() ||
+      typeof item?.version !== 'string' || !item.version.trim()))
+    fail('runtime frameworks must declare their names and versions');
+  const runtime = frameworks.find(item => item.name === 'Microsoft.NETCore.App');
+  if (!runtime) fail('runtime frameworks must declare Microsoft.NETCore.App');
+  return runtime.version;
 }
 
 export function verifyPublishedGraph(dataIdentity, deps, filenames, policy, publishItems = []) {
@@ -137,10 +148,11 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       fail('publish verification requires Configuration, RuntimeIdentifier and SelfContained properties');
     const policy = verifyWindowsProjects(root, { properties });
     const config = JSON.parse(readFileSync(resolve(directory, policy.application.name + '.runtimeconfig.json'), 'utf8'));
-    verifyRuntimeConfiguration(config, properties.SelfContained === 'true');
+    const runtimeVersion = verifyRuntimeConfiguration(config, properties.SelfContained === 'true');
     const deps = JSON.parse(readFileSync(resolve(directory, policy.application.name + '.deps.json'), 'utf8'));
     const publishItems = JSON.parse(readFileSync(publishPath, 'utf8')).Items.ResolvedFileToPublish;
     const filenames = readdirSync(directory, { recursive: true }).map(path => path.replaceAll('\\', '/'));
-    console.log(JSON.stringify(verifyPublishedGraph(identity, deps, filenames, policy, publishItems), null, 2));
+    console.log(JSON.stringify({ ...verifyPublishedGraph(identity, deps, filenames, policy, publishItems),
+      runtimeVersion }, null, 2));
   }
 }

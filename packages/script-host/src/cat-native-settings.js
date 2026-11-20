@@ -2,7 +2,7 @@ import { stringifyJSONValue, cloneJSONValue as clone } from '@meowfilm/runtime-b
 import { requireValue } from './errors.js';
 import { CatStorage } from './cat-storage.js';
 
-const factsKeys = ['installationId', 'sourceHash', 'version', 'config', 'loadedIdentity',
+const factsKeys = ['installationId', 'sourceHash', 'version', 'config', 'configNodes', 'loadedIdentity',
   'importedAt', 'updatedAt', 'updateState', 'updateError', 'sites'];
 const inputKeys = ['installationId', 'name', 'sourceType', 'sourceUrl', 'localPath',
   'localHash', 'enabled', 'inputRevision'];
@@ -35,7 +35,7 @@ export class CatNativeSettings {
     const input = this.inputs(), facts = this.facts();
     return { ...input, scripts: input.scripts.map(script => {
       const installed = facts.scripts.find(value => value.installationId === script.installationId);
-      return { sourceHash: null, version: '0.0.0', config: {}, loadedIdentity: null,
+      return { sourceHash: null, version: '0.0.0', loadedIdentity: null,
         importedAt: null, updatedAt: null, updateState: 'idle', updateError: null, sites: [],
         ...installed, ...script, inputIdentity: identity(script) };
     }) };
@@ -51,7 +51,7 @@ export class CatNativeSettings {
       const inputs = this.inputs();
       const current = { ...inputs, scripts: inputs.scripts.map(input => {
         const installed = latest.scripts.find(fact => fact.installationId === input.installationId);
-        return { sourceHash: null, version: '0.0.0', config: {}, loadedIdentity: null,
+        return { sourceHash: null, version: '0.0.0', loadedIdentity: null,
           importedAt: null, updatedAt: null, updateState: 'idle', updateError: null, sites: [],
           ...installed, ...input, inputIdentity: identity(input) };
       }) };
@@ -59,7 +59,7 @@ export class CatNativeSettings {
       requireValue(next.scripts.length === current.scripts.length && next.scripts.every(script =>
         current.scripts.some(input => sameInput(input, script))), 'PERMISSION_DENIED');
       for (const script of next.scripts) {
-        const installed = Object.fromEntries(factsKeys.map(key => [key, script[key]]));
+        const installed = Object.fromEntries(factsKeys.filter(key => script[key] !== undefined).map(key => [key, script[key]]));
         const index = latest.scripts.findIndex(value => value.installationId === script.installationId);
         if (index < 0) latest.scripts.push(installed);
         else latest.scripts[index] = installed;

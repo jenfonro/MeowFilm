@@ -27,6 +27,7 @@ SQLite 写事务序列化物理修改；跨 owner 的 stale-write 防护由 owne
 ## 事务、耐久与故障
 
 - 每个连接启用外键与 `trusted_schema=OFF`，WAL journal、`synchronous=FULL` 和关闭自动 checkpoint。SQLite 是本机事务型数据库；WAL 不意味着多主高可用或跨设备集群。
+- 普通打开只处理当前格式身份、真实结构、连接与文件边界，不执行全库存量外键数据审计；外键约束在写入时生效，所选关系在实际读取时解析。原生与附属运行器不重复审计全库业务内容，见[拒绝条件与数据消费边界](validation-boundaries.md)。显式整库备份的结果检查由备份 owner 承担。
 - 短事务保持同步一致性；单个用户动作涉及的字段、子关系、缓存索引和 revision 一并提交。UI/Node 之外的长计算或网络等待不得持有写事务。请求按读取窗口和查询边界执行，不为单条记录读写强制物化整表。
 - 已确认保存以事务 COMMIT 成功为准，不能只表示进入内存队列。进程被强制终止或 iOS 从后台被清除后，已提交事务由 SQLite 的正常 WAL 恢复保留，未提交事务不成为半份业务记录；正常退出、终止回调、checkpoint 或 vacuum 均不是已提交数据耐久的前提。播放／阅读进度等高频状态可以按业务定义合并保存，但尚未提交的最近变化不承诺在强制终止后保留。SQLite 事务恢复不属于旧 schema／旧数据迁移。
 - 数据库写操作有界准入与内存预算；已受理事务返回真实提交回执，取消不谎报回滚；关闭先拒绝新任务、等待已受理操作完成并释放连接，不额外调度 checkpoint／vacuum 或等待维护锁；应用维护仅在运行中按阈值尝试。原生 driver 禁用 SQLite 关闭时 checkpoint；桌面 Node driver 的连接关闭由 `node:sqlite` 管理，不把其内部行为当作应用保存回执。共享写入口在 iOS SQLite queue 和 Windows/Node worker lane 上串行，跨进程维护使用文件互斥。

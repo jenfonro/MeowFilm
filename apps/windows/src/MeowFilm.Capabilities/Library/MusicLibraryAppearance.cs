@@ -31,7 +31,8 @@ public sealed partial class MusicLibraryOwner
     {
         token.ThrowIfCancellationRequested();
         LJ.Require(pending is null, "PENDING_WRITE");
-        var saved = Appearance(doc);
+        var saved = method == "music.appearance.get" ? Appearance(doc) :
+            OverwriteSettings(doc, AppearanceArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
         if (method == "music.appearance.get")
         {
             return Task.FromResult((LJ.Obj(("settings", saved)), false));
@@ -43,7 +44,7 @@ public sealed partial class MusicLibraryOwner
             ("playlistView", p["playlistView"]), ("playerTheme", p["playerTheme"]),
             ("colorMode", p["colorMode"]), ("colorPalette", p["colorPalette"]));
         ValidateAppearance(next);
-        Set(doc, AppearanceArea, next);
+        Set(doc, AppearanceArea, next, partial: true);
         return Task.FromResult((LJ.Obj(("settings", next)), true));
     }
 }

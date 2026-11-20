@@ -1,10 +1,10 @@
 /** Runs inside the LX thread; the shared Node adapter only handles I/O. */
 export function prepareLXRequest(input, Buffer, randomBytes, fail) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('INVALID_ARGUMENT');
-  const options = { ...input };
+  const options = {};
   for (const key of ['method', 'headers', 'body', 'form', 'formData', 'timeout', 'json', 'encoding',
     'follow_max', 'followRedirect', 'retry']) {
-    if (options[key] === undefined) delete options[key];
+    if (input[key] !== undefined) options[key] = input[key];
   }
   if ([options.body, options.form, options.formData].filter(value => value !== undefined).length > 1)
     throw fail('INVALID_ARGUMENT');

@@ -54,7 +54,7 @@
 
 错源暂停后，普通播放、系统媒体 Play、歌词确认及推荐恢复都不能直接恢复被排除的输入；保持暂停并提示切源或手动解除。解除记录本身不播放，解除后的明确恢复才允许使用该输入。
 
-`music.sourceExclusions.list/add/remove` 持久保存歌曲 songId × provider（installation UUID 或 official）× platform，覆盖所有音质。
+`music.sourceExclusions.list/add/remove` 持久保存歌曲 songId × provider（installation UUID 或 official）× platform，覆盖所有音质。带 songId 的播放读取只解析所选排除身份，设置的完整列表才读取显示字段；准确恢复／删除不预先解码待删显示值，未选坏记录由原表保留。
 多条可累计，不随七天、清缓存、脚本更新或重启解除；仅用户主动恢复，恢复不播放也不启用来源。
 设置提供查看、选择真实队列歌曲及来源/平台添加、恢复；重复添加幂等，写失败不假成功。
 添加排除也会撤销尚未接受的同来源故障恢复媒体；解析完成、文件读取与重新打开之后仍核对最新排除，不能只围住手动切换。无关歌曲、provider 或平台的排除不撤销合法恢复。

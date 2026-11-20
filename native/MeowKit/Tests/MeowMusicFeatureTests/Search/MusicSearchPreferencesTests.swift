@@ -82,7 +82,7 @@ import MeowStorageTestSupport
             storageTestEqual(try await rows(database), saved)
         }
     }
-    func testInvalidStoredKindIsReportedAndNeverOverwritten() async throws {
+    func testInvalidStoredKindIsReportedAndCanBeExplicitlyReplaced() async throws {
         let database = try storageTestDatabase(self), owner = await store(database)
         storageTestTrue(await owner.update(.init(songPlatforms: [.qq], playlistPlatforms: [.kugou])))
         let valid = owner.preferences
@@ -91,8 +91,10 @@ import MeowStorageTestSupport
         await owner.reload()
         XCTAssertNotNil(owner.persistenceError)
         XCTAssertEqual(owner.preferences, valid)
-        storageTestFalse(await owner.update(.init(songPlatforms: [.netease])))
         storageTestEqual(try await rows(database), saved)
+        let replacement = MusicSearchPreferences(songPlatforms: [.netease])
+        storageTestTrue(await owner.update(replacement))
+        storageTestEqual(await store(database).preferences, replacement)
     }
     func testCurrentConstraintsRequireEveryKindField() async throws {
         let database = try storageTestDatabase(self), owner = await store(database)

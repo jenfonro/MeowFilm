@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { availableParallelism } from 'node:os';
 import { access, lstat, mkdir, readFile, writeFile, rename, rm } from 'node:fs/promises';
-import { resolve, basename, dirname, relative, sep } from 'node:path';
+import { isBuiltin } from 'node:module';
+import { resolve, basename, dirname, extname, isAbsolute, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { nativeSourceInputs } from './native-inputs.mjs';
@@ -20,89 +21,102 @@ const loadedIOSInputs = await hashInputs([
   'scripts/quickjs/sqlite-inputs.mjs', 'native/SQLite/sqlite.json', 'scripts/prepare-ios-sqlite.py',
 ]);
 
-async function catWebValueCandidates() {
-  for (const path of ['node_modules', 'node_modules/undici']) {
-    const stat = await lstat(resolve(root, path));
-    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error(`Invalid Cat Web value dependency: ${path}`);
-  }
-  return files('node_modules/undici');
-}
-
-async function buildCatWebValues(directory) {
+export async function buildCatWebValues(directory, projectRoot = root) {
   const captured = new Map();
-  const readInput = async path => {
-    const bytes = await readFile(resolve(root, path));
-    captured.set(path, hash(bytes));
+  const pathOf = path => {
+    const local = relative(projectRoot, resolve(projectRoot, path));
+    if (!local || local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local)) {
+      throw new Error(`Cat Web value input outside the workspace: ${path}`);
+    }
+    return local.split(sep).join('/');
+  };
+  const readInput = async input => {
+    const path = pathOf(input);
+    let current = projectRoot;
+    for (const part of path.split('/')) {
+      current = resolve(current, part);
+      const stat = await lstat(current);
+      if (stat.isSymbolicLink()) throw new Error(`Symbolic link in Cat Web value input: ${path}`);
+    }
+    if (!(await lstat(current)).isFile()) throw new Error(`Not a regular Cat Web value input: ${path}`);
+    const bytes = await readFile(current), sha256 = hash(bytes);
+    if (captured.has(path) && captured.get(path) !== sha256) {
+      throw new Error(`Cat Web value input changed during build: ${path}`);
+    }
+    captured.set(path, sha256);
     return bytes;
   };
   for (const path of ['scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs']) await readInput(path);
   const manifest = JSON.parse(await readInput('package.json'));
   const lock = JSON.parse(await readInput('package-lock.json'));
-  const installed = JSON.parse(await readInput('node_modules/undici/package.json'));
-  const esbuild = JSON.parse(await readInput('node_modules/esbuild/package.json'));
-  const pinned = lock.packages?.['node_modules/undici'];
-  const dependencyFields = ['dependencies', 'optionalDependencies', 'peerDependencies'];
-  if (manifest.devDependencies?.undici !== IOS_CAT_WEB_VALUES.version
-      || lock.packages?.['']?.devDependencies?.undici !== IOS_CAT_WEB_VALUES.version
-      || dependencyFields.some(field => manifest[field]?.undici || lock.packages?.['']?.[field]?.undici)
-      || installed.name !== 'undici' || installed.version !== IOS_CAT_WEB_VALUES.version
-      || installed.license !== 'MIT' || installed.engines?.node !== '>=18.17'
-      || pinned?.version !== IOS_CAT_WEB_VALUES.version || pinned.resolved !== IOS_CAT_WEB_VALUES.resolved
-      || pinned.integrity !== IOS_CAT_WEB_VALUES.integrity || pinned.dev !== true || pinned.link
-      || pinned.license !== 'MIT' || pinned.engines?.node !== '>=18.17'
-      || [installed, pinned].some(value => dependencyFields.some(field => Object.keys(value[field] ?? {}).length))
-      || esbuild.version !== policy.build.esbuild) {
-    throw new Error('Cat Web values require the locked build-only Undici 6.29.1 and esbuild');
+  const mobile = JSON.parse(await readInput('scripts/ios-node-mobile.json'));
+  const packages = new Map();
+  async function checkDependency(path) {
+    const parts = pathOf(path).split('/'), index = parts.lastIndexOf('node_modules');
+    if (index < 0) throw new Error(`Cat Web value dependency is not installed: ${path}`);
+    const location = parts.slice(0, index + (parts[index + 1].startsWith('@') ? 3 : 2)).join('/');
+    if (packages.has(location)) return packages.get(location);
+    const installed = JSON.parse(await readInput(`${location}/package.json`));
+    const pinned = lock.packages?.[location];
+    if (!pinned || pinned.link || installed.version !== pinned.version
+        || pinned.name !== undefined && installed.name !== pinned.name
+        || typeof pinned.resolved !== 'string' || typeof pinned.integrity !== 'string') {
+      throw new Error(`Cat Web value dependency differs from package lock: ${location}`);
+    }
+    packages.set(location, installed);
+    return installed;
+  }
+  const installed = await checkDependency('node_modules/undici/package.json');
+  const esbuild = await checkDependency('node_modules/esbuild/package.json');
+  const declarations = ['dependencies', 'devDependencies', 'optionalDependencies'];
+  if (installed.version !== IOS_CAT_WEB_VALUES.version || esbuild.version !== policy.build.esbuild
+      || !declarations.some(field => manifest[field]?.undici === installed.version)
+      || declarations.some(field => manifest[field]?.undici !== lock.packages?.['']?.[field]?.undici)) {
+    throw new Error('Cat Web values require the version-adapted Undici and locked esbuild');
   }
   const licenseBytes = await readInput(IOS_CAT_WEB_VALUES.license.path);
   if (hash(licenseBytes) !== IOS_CAT_WEB_VALUES.license.sha256) throw new Error('Undici license differs from the locked source');
-  const modulePaths = IOS_CAT_WEB_VALUES.modules.map(path => `node_modules/undici/${path}`);
-  const modules = new Set(modulePaths.map(path => resolve(root, path)));
-  const builtins = new Set(IOS_CAT_WEB_VALUES.builtins);
   const result = await build({
-    absWorkingDir: root,
+    absWorkingDir: projectRoot,
     stdin: {
       // Response initializes BodyInit before Request captures its converter.
       contents: `module.exports = {\n${['Headers', 'Response', 'Request', 'FormData'].map(name =>
         `  ${name}: require('./node_modules/undici/lib/web/fetch/${name.toLowerCase()}.js').${name},`).join('\n')}\n};`,
-      resolveDir: root, loader: 'js',
+      resolveDir: projectRoot, loader: 'js',
     },
-    bundle: true, platform: 'node', format: 'cjs', target: 'node18.20.4',
-    keepNames: true, write: false, metafile: true,
+    bundle: true, platform: 'node', format: 'cjs', target: `node${mobile.version}`,
+    keepNames: true, write: false, metafile: true, preserveSymlinks: true,
     plugins: [{
       name: 'cat-web-value-closure',
       setup(plugin) {
         plugin.onResolve({ filter: /.*/ }, input => {
-          if (builtins.has(input.path)) return { path: input.path, external: true };
-          if (!input.path.startsWith('.')) throw new Error(`Unexpected Cat Web value import: ${input.path}`);
-          const path = resolve(input.resolveDir, input.path.endsWith('.js') ? input.path : `${input.path}.js`);
-          if (!modules.has(path)) throw new Error(`Cat Web value import leaves the pure closure: ${input.path}`);
-          return { path };
+          if (isBuiltin(input.path)) return { path: input.path, external: true };
         });
-        plugin.onLoad({ filter: /.*/, namespace: 'file' }, async input => ({
-          contents: await readInput(relative(root, input.path).split(sep).join('/')),
-          loader: 'js', resolveDir: dirname(input.path),
-        }));
+        plugin.onLoad({ filter: /.*/, namespace: 'file' }, async input => {
+          await checkDependency(input.path);
+          const extension = extname(input.path);
+          if (!['.js', '.cjs', '.mjs', '.json'].includes(extension)) {
+            throw new Error(`Non-JavaScript Cat Web value input: ${input.path}`);
+          }
+          return { contents: await readInput(input.path),
+            loader: extension === '.json' ? 'json' : 'js', resolveDir: dirname(input.path) };
+        });
       },
     }],
   });
-  const actualModules = Object.keys(result.metafile.inputs).filter(path => path !== '<stdin>').sort();
-  // Output imports reflect runtime dependencies; input metadata also contains esbuild's synthetic helpers.
-  const actualBuiltins = [...new Set(Object.values(result.metafile.outputs).flatMap(output =>
-    output.imports.filter(value => value.external).map(value => value.path)))].sort();
-  if (JSON.stringify(actualModules) !== JSON.stringify([...modulePaths].sort())
-      || JSON.stringify(actualBuiltins) !== JSON.stringify([...builtins].sort())
-      || Object.values(result.metafile.outputs).some(output => output.imports.some(input =>
-        !input.external || !builtins.has(input.path)))) {
-    throw new Error('Cat Web value bundle differs from the reviewed pure closure');
+  if (Object.values(result.metafile.outputs).some(output => output.imports.some(input =>
+    !input.external || !isBuiltin(input.path)))) {
+    throw new Error('Cat Web value bundle has an unbundled dependency');
   }
-  const inputs = await hashInputs([...captured.keys()]);
-  for (const input of inputs) {
-    if (input.sha256 !== captured.get(input.path)) throw new Error(`Cat Web value input changed during build: ${input.path}`);
+  const inputs = [];
+  for (const path of [...captured.keys()].sort()) {
+    await readInput(path);
+    inputs.push({ path, sha256: captured.get(path) });
   }
-  const path = relative(root, resolve(directory, 'cat-web-values.cjs')).split(sep).join('/');
+  const path = pathOf(resolve(directory, 'cat-web-values.cjs'));
   const bytes = result.outputFiles[0].contents;
-  await writeFile(resolve(root, path), bytes);
+  await mkdir(directory, { recursive: true });
+  await writeFile(resolve(projectRoot, path), bytes);
   return { path, bytes: bytes.length, sha256: hash(bytes), inputs,
     license: { ...IOS_CAT_WEB_VALUES.license, bytes: licenseBytes.length } };
 }
@@ -135,12 +149,13 @@ export async function buildIOSNative(target) {
       ...await files('packages/script-host/src'), ...await files('packages/source-runtime/src'),
       ...await sdkDependencyInputs(),
     ];
-    const catWebCandidates = await catWebValueCandidates();
+    const catWebValues = await buildCatWebValues(resolve(directory, 'build/Release'));
     const before = await hashInputs([
       'package.json', 'package-lock.json', ...policy.mandatoryInputs,
       'scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs',
       'scripts/quickjs/build-source-sdk.mjs', 'scripts/prepare-ios-runtime.py',
-      'scripts/ios-node-mobile.json', ...nativeInputs, ...sourceInputs, ...sdkCandidates, ...catWebCandidates,
+      'scripts/ios-node-mobile.json', ...nativeInputs, ...sourceInputs, ...sdkCandidates,
+      ...catWebValues.inputs.map(input => input.path),
       ...nativeSourceInputs(policy), ...policy.patches.map(patch => patch.path),
       ...mobile.inputs.map(input => input.path),
       ...sqlite.inputs.map(input => input.path),
@@ -162,7 +177,6 @@ export async function buildIOSNative(target) {
     }
     const sdkPath = sdk.path;
     if (sdkPath !== paths.sdk) throw new Error('Unexpected iOS SDK output');
-    const catWebValues = await buildCatWebValues(resolve(directory, 'build/Release'));
     for (const input of catWebValues.inputs) {
       if (beforeMap.get(input.path) !== input.sha256) throw new Error(`Untracked/changed Cat Web value input: ${input.path}`);
     }
@@ -300,9 +314,8 @@ export async function buildIOSNative(target) {
       ...await sdkDependencyInputs(),
     ];
     if (JSON.stringify(afterNative) !== JSON.stringify(nativeInputs)
-        || JSON.stringify(afterSDK) !== JSON.stringify(sdkCandidates)
-        || JSON.stringify(await catWebValueCandidates()) !== JSON.stringify(catWebCandidates)) {
-      throw new Error('Native/SDK/Cat Web value membership changed during build');
+        || JSON.stringify(afterSDK) !== JSON.stringify(sdkCandidates)) {
+      throw new Error('Native/SDK membership changed during build');
     }
     const finalCatWebValues = await artifact(catWebValues.path);
     if (finalCatWebValues.bytes !== catWebValues.bytes || finalCatWebValues.sha256 !== catWebValues.sha256) {

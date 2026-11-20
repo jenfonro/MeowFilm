@@ -1,5 +1,5 @@
 import '../../../tests/storage-test-fixture.mjs';
-import { readCatFacts } from '../../../tests/storage-test-fixture.mjs';
+import { withTestDatabase, readCatFacts } from '../../../tests/storage-test-fixture.mjs';
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -9,6 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createCatRuntime } from '../src/cat-runtime.js';
+import { catConfig } from '../src/cat-storage.js';
 import { fault } from '../src/errors.js';
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
@@ -150,22 +151,19 @@ test('Cat management persists local identity and only successful changed content
     assert.equal(existsSync(join(runtime.dataRoot, 'sources', installed.sourceHash + '.js')), false);
   });
 
-test('Cat unrelated settings and script extensions survive loading and editing without rounding', { timeout: 30000 }, async t => {
+test('Cat config exact values survive editing and a cold database read', { timeout: 30000 }, async t => {
   const runtime = runtimeFor(t);
-  await runtime.install({ installationId: 'exact-json', source: source('live'), enabled: false });
-  const document = disk(runtime);
   const extension = parseJSONText('{"é":9007199254740993,"é":1.0000000000000001,"large":1e400}');
-  document.extension = extension;
-  document.scripts[0].extension = extension;
-  document.scripts[0].config.extension = extension;
-  await runtime.settings.save(() => document);
+  await runtime.install({ installationId: 'exact-json', source: source('live'), enabled: false,
+    config: { extension } });
   await runtime.setEnabled('exact-json', true);
   assert.equal((await runtime.invoke(target('exact-json'))).value, 'live');
   await runtime.edit({ installationId: 'exact-json', name: 'changed' });
-  const saved = disk(runtime);
-  assert.equal(saved.scripts[0].name, 'changed');
-  for (const value of [saved.extension, saved.scripts[0].extension, saved.scripts[0].config.extension])
-    assert.equal(stringifyJSONValue(value), stringifyJSONValue(extension));
+  await runtime.close();
+  const reopened = runtimeFor(t, { dataRoot: runtime.productRoot });
+  await ready(reopened, 'exact-json');
+  assert.equal(disk(reopened).scripts[0].name, 'changed');
+  assert.equal(stringifyJSONValue(catConfig(disk(reopened).scripts[0]).extension), stringifyJSONValue(extension));
 });
 
 test('Cat failed activation restores old executable source and description and persists a separate update failure',
@@ -1012,7 +1010,7 @@ for (const phase of ['download', 'activation']) {
       await runtime.install({ installationId: 'c', source: source('independent-c'), config: { id: 'C' } });
       assert.equal(done, false, 'independent management must finish before A leaves its I/O barrier');
       const before = disk(runtime).scripts.find(item => item.installationId === 'b');
-      assert.deepEqual(before.config, { id: 'B' });
+      assert.deepEqual(catConfig(before), { id: 'B' });
       assert.deepEqual(before.sites, restarted.sites);
       release.resolve();
       await settled;
@@ -1025,7 +1023,7 @@ for (const phase of ['download', 'activation']) {
       if (phase === 'activation') {
         assert.equal(candidates[0].worker, null);
         assert.equal(runtime.instance('a').sourceHash, a.sourceHash);
-        assert.deepEqual(disk(runtime).scripts.find(item => item.installationId === 'a').config, { id: 'A' });
+        assert.deepEqual(catConfig(disk(runtime).scripts.find(item => item.installationId === 'a')), { id: 'A' });
       }
     });
 }
@@ -1157,4 +1155,34 @@ test('Cat replacement waits for real worker exit and adapter drain while another
     assert.equal(runtime.instance('b').generation, b.generation);
     assert.deepEqual(await runtime.invoke(target('b')), { count: 2 });
     assert.deepEqual(await runtime.invoke(target('a')), { value: 'replacement' });
+  });
+
+
+test('Cat bad sibling config is deferred until enabled and survives unrelated edits and cold reads',
+  { timeout: 30000 }, async t => {
+    const runtime = runtimeFor(t);
+    await runtime.install({ installationId: 'healthy', source: source('healthy') });
+    await runtime.install({ installationId: 'bad-config', source: source('bad'), enabled: false });
+    await runtime.close();
+    const root = runtime.productRoot;
+    const raw = () => withTestDatabase(root, db => db.query(
+      "SELECT * FROM cat_installation_config_nodes WHERE installation_id='bad-config' ORDER BY node_id"));
+    await withTestDatabase(root, db => db.execute(
+      "INSERT INTO cat_installation_config_nodes(mode,installation_id,node_id,kind) VALUES('standalone','bad-config',99,'text')"));
+    const before = await raw();
+    const reopened = runtimeFor(t, { dataRoot: root });
+    await ready(reopened, 'healthy');
+    assert.deepEqual(await reopened.invoke(target('healthy')), { value: 'healthy' });
+    await reopened.edit({ installationId: 'healthy', name: 'changed' });
+    await reopened.edit({ installationId: 'bad-config', name: 'still disabled' });
+    assert.deepEqual(await raw(), before);
+    await assert.rejects(reopened.setEnabled('bad-config', true), { code: 'CORRUPT_STORAGE' });
+    const status = await reopened.status();
+    assert.equal(status.instances.find(item => item.installationId === 'bad-config').error, 'CORRUPT_STORAGE');
+    assert.deepEqual(await reopened.invoke(target('healthy')), { value: 'healthy' });
+    assert.deepEqual(await raw(), before);
+    await reopened.close();
+    const again = runtimeFor(t, { dataRoot: root });
+    await ready(again, 'healthy');
+    assert.deepEqual(await raw(), before);
   });

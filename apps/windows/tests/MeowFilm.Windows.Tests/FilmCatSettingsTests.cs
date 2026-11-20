@@ -16,7 +16,7 @@ public static class FilmCatSettingsTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("offline repeated edits survive a new owner without starting or notifying Node", Offline);
-        yield return Case("source edits preserve gateway and sibling settings and ignore unused network file input", RawInputs);
+        yield return Case("source edits isolate typed bad siblings and ignore unused gateway and network file inputs", TypedInputs);
         yield return Case("file reference hash and revisions describe intent without storing script text", FileIntent);
         yield return Case("duplicate adds and invalid or cancelled selections preserve committed intent", InvalidSelection);
         yield return Case("native CAS conflict failure and bad receipts never notify or publish an uncommitted input", CommitFailures);
@@ -54,15 +54,15 @@ public static class FilmCatSettingsTests
         }
     }
 
-    private static async Task RawInputs()
+    private static async Task TypedInputs()
     {
         var store = new Store();
         store.CatBytes = Encoding.UTF8.GetBytes("""
-            {"version":1,"port":12345,"providers":{"fixture":true},"mappings":[{"provider":"fixture","aliases":["alias"]}],
+            {"version":1,"port":-1,"providers":{"":true},"mappings":[{"provider":"","aliases":["kept"]}],
              "scripts":[{"installationId":"cat","name":"网络","sourceType":"network","sourceUrl":"https://fixture.invalid/old.js",
-              "localPath":null,"localHash":null,"enabled":true,"inputRevision":1},
-              {"installationId":"sibling","name":"其他来源","sourceType":"network","sourceUrl":"https://fixture.invalid/sibling.js",
-              "localPath":null,"localHash":null,"enabled":false,"inputRevision":3}]}
+              "localPath":"missing-unused-file.js","localHash":"unused","enabled":true,"inputRevision":1},
+              {"installationId":"broken","name":"坏本地","sourceType":"local","sourceUrl":null,
+               "localPath":"missing.js","localHash":"invalid","enabled":true,"inputRevision":1}]}
             """);
         var before = store.Cat;
         var runtime = new Runtime(store);
@@ -71,10 +71,27 @@ public static class FilmCatSettingsTests
         await service.EditCatAsync("cat", "已编辑", "network", "https://fixture.invalid/new.js", "missing-unused-file.js");
         var after = store.Cat;
         foreach (string key in new[] { "port", "providers", "mappings" })
-            Check(before.GetProperty(key).GetRawText() == after.GetProperty(key).GetRawText(), "unconsumed gateway settings remain raw");
+            Check(before.GetProperty(key).GetRawText() == after.GetProperty(key).GetRawText(), "unconsumed typed gateway settings remain unchanged");
         Check(JsonElement.DeepEquals(before.GetProperty("scripts")[1], after.GetProperty("scripts")[1]) &&
-            service.Cats.Single(item => item.InstallationId == "cat") is { Name: "已编辑", InputRevision: 2 } && runtime.Calls.Count == 0,
-            "a network edit ignores the unused file, preserves other settings, and advances only its own input revision");
+            service.Cats.Single() is { Name: "已编辑", InputRevision: 2 } && runtime.Calls.Count == 0,
+            "a network edit ignores the unused file, preserves bad typed siblings, and advances its real input revision");
+        Check((await service.ReadPanInterceptionAsync()).Values.All(enabled => enabled),
+            "provider reads do not consume source rows, the gateway port, or alias mappings");
+        var switches = await service.SavePanInterceptionAsync("quark", false);
+        Check(!switches["quark"] && switches.Where(pair => pair.Key != "quark").All(pair => pair.Value) &&
+            JsonElement.DeepEquals(after.GetProperty("scripts"), store.Cat.GetProperty("scripts")),
+            "a provider save preserves unconsumed source rows, including damaged siblings");
+        await Code(() => service.ImportNetworkAsync("不覆盖坏身份", "https://fixture.invalid/replacement.js", "broken"), "STORAGE_CONFLICT");
+        await service.DeleteCatAsync("cat");
+        Check(service.Cats.Count == 0 && JsonElement.DeepEquals(before.GetProperty("scripts")[1], store.Cat.GetProperty("scripts").EnumerateArray().Single()),
+            "deleting a healthy target does not save its isolated list over the bad sibling");
+        await service.EditCatAsync("broken", "改为网络", "network", "https://fixture.invalid/repaired.js", "unused-file.js");
+        Check(service.Cats.Single() is { InstallationId: "broken", InputRevision: 2, SourceType: "network" },
+            "an explicit network replacement does not decode the discarded local hash or path");
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_cat_settings_scripts SET inputRevision=0 WHERE scripts_key='broken'"));
+        await service.DeleteCatAsync("broken");
+        Check(store.Cat.GetProperty("scripts").GetArrayLength() == 0,
+            "explicit deletion uses the unique installation identity without decoding the discarded payload");
     }
 
     private static async Task FileIntent()
@@ -86,8 +103,6 @@ public static class FilmCatSettingsTests
         await using var service = new FilmSourceService(runtime, store);
         await service.ImportLocalAsync("  文件猫  ", first.Path, "cat");
         var script = Input(store);
-        Fields(store.Cat, "version", "port", "providers", "mappings", "scripts");
-        Fields(script, "installationId", "name", "sourceType", "sourceUrl", "localPath", "localHash", "enabled", "inputRevision");
         Check(script.GetProperty("localPath").GetString() == first.Path &&
             script.GetProperty("localHash").GetString() == Hash(first.Path) &&
             script.GetProperty("name").GetString() == "文件猫" && script.GetProperty("sourceUrl").ValueKind == JsonValueKind.Null &&

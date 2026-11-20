@@ -3,7 +3,7 @@ import {
   createScriptHost, createNodeNetwork, createSourceDownload, PrivateSources, ScriptHostError,
 } from '@meowfilm/script-host';
 import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
-import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { contracts } from '../contracts.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createMusicStorage } from './music-storage.mjs';
@@ -45,7 +45,6 @@ const requireValue = (condition, code = 'INVALID_REQUEST') => { if (!condition) 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const hasFields = (value, keys) => object(value) && keys.every(key => Object.hasOwn(value, key));
 const digest = value => createHash('sha256').update(value).digest('hex');
-const encodedLength = value => Buffer.byteLength(stringifyJSONValue(value, -Infinity));
 const scalars = value => [...value].length;
 const control = /[\u0000-\u001f\u007f]/;
 function fields(value, required) {
@@ -118,11 +117,14 @@ function sourceBasename(url) {
   } catch { return 'source.js'; }
 }
 const validCode = value => value === null || typeof value === 'string' && codePattern.test(value);
-function validVersion(value) {
-  return hasFields(value, ['contentHash', 'bytes', 'version', 'author', 'description', 'homepage']) &&
+function validSourceVersion(value) {
+  return hasFields(value, ['contentHash', 'bytes', 'version']) &&
     typeof value.contentHash === 'string' && hashPattern.test(value.contentHash) &&
     Number.isSafeInteger(value.bytes) && value.bytes > 0 &&
-    plainText(value.version, undefined, false) && plainText(value.author) &&
+    plainText(value.version, undefined, false);
+}
+function validVersion(value) {
+  return validSourceVersion(value) && plainText(value.author) &&
     plainText(value.description) && plainText(value.homepage);
 }
 function validOrigin(value) {
@@ -331,9 +333,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     const matches = catalog().installations.filter(entry => entry?.id === id);
     requireValue(matches.length > 0, 'SOURCE_NOT_FOUND');
     requireValue(matches.length === 1, 'CORRUPT_STORAGE');
-    const [item] = matches;
-    requireValue(validInstallation(item), 'CORRUPT_STORAGE');
-    return item;
+    return matches[0];
   }
   /** Serialize catalog changes and publish only after the typed transaction commits. */
   function commit(change) {
@@ -436,7 +436,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       if (operation === 'set') {
         validateJSONValue(input.value);
       }
-      const value = await persistence.kv(operation,input,encodedLength,check);
+      const value = await persistence.kv(operation,input,check);
       return operation === 'get' ? lxValue(value) : null;
     } catch (error) {
       if (error instanceof ScriptHostError) throw error;
@@ -467,6 +467,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   /** Cold startup is lazy; only an explicit management command may retry a failed owner. */
   async function ensureLoaded(item, signal, explicit = false) {
+    requireValue(typeof item.enabled === 'boolean' && validSourceVersion(item.current), 'CORRUPT_STORAGE');
     const current = live(item.id);
     if (current?.state === 'ready' && current.contentHash === item.current.contentHash) return current;
     const failed = failures.get(item.id);
@@ -806,6 +807,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     'music.script.sources.update': business(['installationId', 'sourceRevision'], ['installationId'], (params, signal) => {
       installation(params.installationId);
       const admitted = find(params.installationId);
+      requireValue(['file', 'network'].includes(admitted.origin?.kind), 'CORRUPT_STORAGE');
       if (admitted.origin.kind === 'file') {
         integer(params.sourceRevision, 1);
         sources.peek(params.installationId, params.sourceRevision);
@@ -813,6 +815,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       interrupt(params.installationId);
       return locked(params.installationId, signal, async scoped => {
         const item = find(params.installationId);
+        requireValue(validOrigin(item.origin), 'CORRUPT_STORAGE');
         let input, bytes, prepared, published = false;
         try {
           if (item.origin.kind === 'network') bytes = await fetchSource(item.origin.url, scoped, item.id);

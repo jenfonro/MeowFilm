@@ -276,3 +276,17 @@ test('pre-cancelled source downloads never contact the endpoint and interrupted 
   await assert.rejects(download(request(url)), { code: 'NETWORK_ERROR' });
   assert.equal(hits, 1);
 });
+
+test('source download projects only followRedirect from ordinary extra options', async t => {
+  const server = await serverFor(t, (_req, res) => res.end('source'));
+  const transport = http.request;
+  t.mock.method(http, 'request', function(url, options, ...rest) {
+    assert.equal(Object.hasOwn(options, 'socketPath'), false);
+    assert.equal(Object.hasOwn(options, 'methodOverride'), false);
+    return Reflect.apply(transport, this, [url, options, ...rest]);
+  });
+  const download = createSourceDownload({ unused: false });
+  const reply = await download(request(server.url, { options: {
+    followRedirect: true, socketPath: '/unused', methodOverride: 'DELETE' } }));
+  assert.equal(reply.body.toString(), 'source');
+});

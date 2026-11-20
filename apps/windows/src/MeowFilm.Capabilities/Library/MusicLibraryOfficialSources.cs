@@ -38,7 +38,8 @@ public sealed partial class MusicLibraryOwner
         string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
     {
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-        var settings = OfficialSources(doc);
+        var settings = method == "music.officialSources.settings.get" ? OfficialSources(doc) :
+            OverwriteSettings(doc, OfficialSourcesArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
         if (method == "music.officialSources.settings.get")
         {
             RefreshOfficialSources(doc);
@@ -56,7 +57,7 @@ public sealed partial class MusicLibraryOwner
         token.ThrowIfCancellationRequested();
         // Revoke before CAS admission, including a write whose receipt is later unknown.
         InvalidateOfficialSources();
-        Set(doc, OfficialSourcesArea, next);
+        Set(doc, OfficialSourcesArea, next, partial: true);
         return (LJ.Obj(("settings", next)), true);
     }
 

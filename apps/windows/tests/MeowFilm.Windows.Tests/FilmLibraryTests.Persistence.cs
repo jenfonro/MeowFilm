@@ -38,15 +38,26 @@ public static partial class FilmLibraryTests
         await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_film_library_favorites_playbackContext_target SET kind='invalid'"));
         await Error("CORRUPT_STORAGE", () => library.ReadAsync());
         await library.SetFavoriteAsync(Card(number: 200), true);
-        var revision = await store.RevisionAsync(FilmLibrary.DocumentNamespace);
-        await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(), true));
-        await Error("CORRUPT_STORAGE", () => library.SetFavoriteAsync(Card(), false));
-        Check(await store.RevisionAsync(FilmLibrary.DocumentNamespace) == revision &&
-            await store.ReadAsync(db => db.Scalar<string>("SELECT kind FROM windows_film_library_favorites_playbackContext_target WHERE favorites_key='tmdb:tv:100'")) == "invalid" &&
+        Check(await store.ReadAsync(db => db.Scalar<string>("SELECT kind FROM windows_film_library_favorites_playbackContext_target WHERE favorites_key='tmdb:tv:100'")) == "invalid" &&
             await store.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM windows_film_library_favorites")) == 2,
-            "an unrelated incremental write preserves the damaged row; changing that row fails without reset");
+            "an unrelated incremental write preserves the damaged row");
         await using var reopened = new FilmLibrary(store);
         await Error("CORRUPT_STORAGE", () => reopened.ReadAsync());
+        await store.Inner.WriteAsync(db => db.Execute("DELETE FROM windows_film_library_favorites_playbackContext_target WHERE favorites_key='tmdb:tv:100'"));
+        await library.SetFavoriteAsync(Card(), true);
+        Check((await reopened.ReadAsync()).Count == 2, "a legal complete replacement does not decode the discarded payload");
+        var revision = await store.RevisionAsync(FilmLibrary.DocumentNamespace);
+        await library.SetFavoriteAsync(Card(), true);
+        Check(await store.RevisionAsync(FilmLibrary.DocumentNamespace) == revision,
+            "an identical complete favorite does not advance its owner revision");
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_film_library_favorites_playbackContext_target SET year=2000,shape_mask=shape_mask | 32,null_mask=null_mask & ~32 WHERE favorites_key='tmdb:tv:100'"));
+        await library.SetFavoriteAsync(Card(), true);
+        Check((await reopened.ReadAsync()).Single(row => row.Id == Card().Id).PlaybackContext!.Target.Year is null,
+            "a complete replacement clears the old optional year when the new target has no year");
+        await store.Inner.WriteAsync(db => db.Execute("DELETE FROM windows_film_library_favorites_playbackContext_target WHERE favorites_key='tmdb:tv:100'"));
+        await library.SetFavoriteAsync(Card(), false);
+        Check((await reopened.ReadAsync()).Single().Id == Card(number: 200).Id,
+            "deletion consumes the exact selected key without decoding its old business target");
     }
 
     private static async Task IdentityConstraints()

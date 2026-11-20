@@ -246,8 +246,8 @@ public static partial class MusicCatalogPersonalTests
             .SequenceEqual(new[] { Id("wy", 0), Id("wy", 1) }));
         var commit = f.App.Last("music.catalog.playlist.commit");
         Equal("next", S(commit, "action"));
-        Check(commit.EnumerateObject().Select(p => p.Name).Order()
-            .SequenceEqual(new[] { "action", "expectedVersion", "token" }));
+        Check(commit.GetProperty("token").GetString()!.Length > 0 && commit.GetProperty("expectedVersion").GetInt64() >= 0 &&
+            !commit.TryGetProperty("songs", out _), "next uses a prepared stage and current queue version");
         Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal(requests, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
         Equal(writes + 2, f.Store.LibraryWrites); Equal(opens, f.Output.Opens);
@@ -2751,17 +2751,8 @@ public static partial class MusicCatalogPersonalTests
         public void ReleaseAll() { foreach (var hold in allHolds) hold.Release(); }
         public void FailNext(string method, string code) => failures[method] = code;
         public void TransformNext(string method, Func<JsonElement, JsonElement> action) => transforms[method] = action;
-        private async Task<JsonElement> ReadQualitySettings(CancellationToken token)
-        {
-            var reply = await Library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
-            if (!reply.GetProperty("ok").GetBoolean()) return reply;
-            var result = JsonNode.Parse(reply.GetRawText())!.AsObject();
-            // Keep lyrics disabled in this port fixture without adding a library write.
-            // The real owner's quality policy and signature remain authoritative.
-            result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 1, revision = 0, lyrics = false });
-            return E(result);
-        }
+        private Task<JsonElement> ReadQualitySettings(CancellationToken token) =>
+            Library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
         private static JsonElement ScriptSource() => E(new {
             installationId = "fixture-script", name = "Catalog fixture", version = "1",
             contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
@@ -2847,6 +2838,7 @@ public static partial class MusicCatalogPersonalTests
                 else
                     result = await Catalog.ExecuteAsync(method, p, cancellationToken);
             }
+            else if (method == "music.settings.get") result = E(new { ok = true, settings = new { schema = 1, revision = 0, lyrics = false } });
             else if (method == "music.quality.settings.get") result = await ReadQualitySettings(cancellationToken);
             else if (method == "music.official.candidates")
             {

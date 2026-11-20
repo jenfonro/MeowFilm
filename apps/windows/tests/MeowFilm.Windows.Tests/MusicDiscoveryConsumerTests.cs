@@ -334,7 +334,7 @@ public static partial class MusicUiTests
             Equal(Module.Sources.Single(row => !row.IsBuiltIn).InstallationId, installed.GetProperty("installationId").GetString());
             True(installed.GetProperty("enabled").GetBoolean(), "enabled script participates in discovery playback");
             var saved = (await Call("music.settings.get")).GetProperty("settings");
-            Equal(3, saved.GetProperty("schema").GetInt32());
+            Equal(1, saved.GetProperty("schema").GetInt32());
             Equal(before.GetRawText(), saved.GetRawText());
             True(Module.Status.Length == 0, "script enable accepted");
         }
@@ -343,7 +343,15 @@ public static partial class MusicUiTests
             Http.Release.TrySetResult(); Http.DisposeRelease.TrySetResult();
             if (store is DiscoveryHeldStore held) held.Release.TrySetResult();
             try { await Module.DisposeAsync(); }
-            finally { await Runtime.DisposeAsync(); await store.DisposeAsync(); }
+            finally
+            {
+                try { await Runtime.DisposeAsync(); }
+                finally
+                {
+                    try { await MusicTestStores.ReleaseCompanionAsync(store); }
+                    finally { await store.DisposeAsync(); }
+                }
+            }
         }
     }
     private sealed class DiscoveryHeldStore(IStorageDatabase inner) : NativeTestDatabase(inner)

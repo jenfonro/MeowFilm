@@ -33,6 +33,8 @@ FM 封面需求使用既有 `operation:"fm", params:{preview:true,...}`：规则
 
 QQ 匿名 prepare 只保存实际请求使用的 q36 与保存时间，不要求或保存 q16；UID／SID、时效、保存确认和关闭排空保持原职责。
 
+网易 VIP 页并发读取推荐与榜单，并等待两支全部结算后发布。任一分支的认证、权限、限流、验证或生命周期错误仍使请求失败；可隔离的内容读取错误以对应 section 的 `errorCode` 和空 `items` 返回，健康栏保持可用，两支均失败则报告错误，不发布成功空页。
+
 API 缓存复制使用公共 `@meowfilm/runtime-bridge/json`；HTTP 请求中的精确数字定位在音乐实际参数消费处转为字符串或协议整数，不对 rawJSON 使用 `structuredClone`。网易根业务状态仍要求数字整数；配方显式消费 `data` 状态层时检查该层，搜索等读取 `result` 的配方不检查未消费兄弟 `data.code`。已有根／嵌套字段选择的配方跟随实际使用层：仅使用根结果时忽略兄弟状态，使用嵌套字段或没有根结果时保留嵌套失败。真实认证、限流、业务拒绝及写入子回执继续按原错误分类返回，不能用空内容代替失败。
 
 request 将 HTTP `context.signal` 交给 owner。普通目录读取退订与物理工作分别跟踪；媒体／认证等实际取消、session 失效、已派发写回执和 close 由共同 owner 管理。session 更新等待应退休工作物理结算；整个 owner 的 close 停止新准入并取消所有实际 transport，包括已向上游派发的写请求。派发不等于确认成功，这类中断保留 `unknown` 结果，不谎报回滚；close 等待实际 I/O 结束，不等待远端 ACK 或普通请求超时。原生设置未知提示见[设置回执](../common/music/settings-receipts.md)。

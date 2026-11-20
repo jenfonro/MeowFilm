@@ -50,7 +50,8 @@ export function createSourceLibrary({ dataRoot, storage, host, owner, web, netwo
     const order = Number.isFinite(ordering) ? ordering : 0;
     const actions = Array.isArray(item.actions) ? item.actions.filter(action => typeof action === 'string') : [];
     const state = states.get(installationId);
-    const raw = definitionObject(item.definition);
+    const raw = item.definition === undefined ? disk.definition(item.installationId,
+      ['weight', 'lastUpdateTime', 'respondTime', 'exploreUrl']) : definitionObject(item.definition);
     const number = (key, fallback) => {
       const value = isRawJSON(raw[key]) ? Number(raw[key].rawJSON) : Number(raw[key]);
       return Number.isFinite(value) ? value : fallback;
@@ -95,13 +96,17 @@ export function createSourceLibrary({ dataRoot, storage, host, owner, web, netwo
     if (Array.isArray(value)) [value] = value;
     return object(value) ? value : { html: value };
   }
+  function definitionText(item) {
+    try { return item.definition === undefined ? disk.definition(item.installationId) : item.definition; }
+    catch (error) { throw fail(error.code === 'STORAGE_CORRUPT' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR'); }
+  }
   function managedDefinition(item) {
-    return { ...definitionObject(item.definition, true), bookSourceName: item.name,
+    return { ...definitionObject(definitionText(item), true), bookSourceName: item.name,
       bookSourceUrl: item.sourceUrl, bookSourceGroup: item.group, customOrder: item.order,
       enabled: item.enabled, enabledExplore: item.enabledExplore };
   }
   function runtimeDefinition(item) {
-    const normalized = parseDefinition(item.definition);
+    const normalized = parseDefinition(definitionText(item));
     normalized.source = managedDefinition(item);
     return normalized;
   }
@@ -676,6 +681,12 @@ export function createSourceLibrary({ dataRoot, storage, host, owner, web, netwo
       if (input.variable !== undefined) current.variable = input.variable;
       memoryReaderValues.set(id, current);
       return ++current.revision;
+    },
+    readStorage({ profile: name, key }) {
+      const match = /^source:([^:]+):[1-9][0-9]*:([\s\S]*)$/.exec(name);
+      require(match && disk, 'STORAGE_ERROR');
+      try { return disk.privateValue(match[1], match[2], key); }
+      catch { throw new ScriptHostError('STORAGE_ERROR'); }
     },
     prepareCapability(_name, input, context) {
       const id = context.scope?.installationId, state = states.get(id);

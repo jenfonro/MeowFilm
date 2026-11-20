@@ -88,6 +88,15 @@ internal class MusicRecordTestStore : IMusicLibraryStore
         if (AfterReadAsync is not null) await AfterReadAsync(result, token);
         return result;
     }
+    public JsonObject? ReadArea(string scope, MusicLibraryRevision revision, string area, string[]? members = null)
+    {
+        if (FailRead || ReadFailure is not null) throw new DocumentStoreException(ReadFailure ?? ReadError);
+        return Database.ReadArea(scope, revision, area, members);
+    }
+    public IReadOnlyList<RelationalRecord.SelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] prefix, string[] members) => Database.ReadRows(scope, revision, area, relations, prefix, members);
+    public JsonObject? ReadRow(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key) => Database.ReadRow(scope, revision, area, relations, key);
+    public bool HasRelation(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, string relation) => Database.HasRelation(scope, revision, area, relations, key, relation);
+    public bool Matches(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, JsonObject value) => Database.Matches(scope, revision, area, relations, key, value);
     public JsonObject? ReadSong(string id) => Database.ReadSong(id);
     public bool ContainsSong(string id) => Database.ContainsSong(id);
     public string? FindSource(string key) => Database.FindSource(key);
@@ -128,10 +137,12 @@ internal class MusicRecordTestStore : IMusicLibraryStore
     internal JsonObject State(string area, string? requestedScope = null) =>
         Snapshot(requestedScope).Areas[area]!.DeepClone().AsObject();
     internal MusicLibrarySnapshot Snapshot(string? requestedScope = null) =>
-        Database.ReadAsync(requestedScope ?? scope).GetAwaiter().GetResult();
+        Database.ReadAllAsync(requestedScope ?? scope).GetAwaiter().GetResult();
     // A diagnostic export is not a persistence protocol. Control areas contain no songs.
     internal JsonObject Root
     {
+        // Diagnostic exports also consume synchronous song indexes. Keep this fixture
+        // work off the STA runner without changing how it calls the actual owner.
         get => Task.Run(() =>
         {
             if (!initialized) { _ = Snapshot(); initialized = true; }

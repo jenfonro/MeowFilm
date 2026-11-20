@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -287,6 +288,11 @@ public static class MusicLibraryReceiptIntegrationTests
     {
         internal int RecordReads;
         public Task<MusicLibrarySnapshot> ReadAsync(string scope, CancellationToken token = default) => store.ReadAsync(scope, token);
+        public JsonObject? ReadArea(string scope, MusicLibraryRevision revision, string area, string[]? members = null) => store.ReadArea(scope, revision, area, members);
+        public IReadOnlyList<RelationalRecord.SelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] prefix, string[] members) => store.ReadRows(scope, revision, area, relations, prefix, members);
+        public JsonObject? ReadRow(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key) => store.ReadRow(scope, revision, area, relations, key);
+        public bool HasRelation(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, string relation) => store.HasRelation(scope, revision, area, relations, key, relation);
+        public bool Matches(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, JsonObject value) => store.Matches(scope, revision, area, relations, key, value);
         public JsonObject? ReadSong(string id) { RecordReads++; return store.ReadSong(id); }
         public bool ContainsSong(string id) { RecordReads++; return store.ContainsSong(id); }
         public string? FindSource(string key) { RecordReads++; return store.FindSource(key); }

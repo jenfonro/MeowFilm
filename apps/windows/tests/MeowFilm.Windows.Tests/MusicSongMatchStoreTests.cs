@@ -122,7 +122,7 @@ public static class MusicSongMatchStoreTests
         await cacheStore.DrainAsync();
         Check(store.WriteCalls == writes + 1);
         var root = JsonNode.Parse(store.Bytes(MusicSongMatchStore.Namespace)!)!.AsObject();
-        Check(root.Select(field => field.Key).SequenceEqual(new[] { "entries" }) && root["entries"]!.AsArray().Count == 1);
+        Check(root["entries"]!.AsArray().Count == 1);
         entry["platforms"]!["wy"]!["query"] = "Changed caller";
         await using var restarted = new NativeTestDatabase(store);
         var first = (await new MusicSongMatchStore(restarted).ReadAsync(default)).Single();

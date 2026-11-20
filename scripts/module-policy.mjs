@@ -3,12 +3,6 @@ import { isBuiltin } from 'node:module';
 import { join, resolve } from 'node:path';
 import { parse } from 'acorn';
 
-// These are capability boundaries, not package allowlists. Workspace package
-// imports are admitted only when their package exports the requested entry.
-export const SHARED_RUNTIME_BUILTINS = new Set([
-  'node:buffer', 'node:crypto', 'node:http', 'node:https', 'node:stream', 'node:util',
-]);
-
 const IMPORT_DECLARATIONS = new Set([
   'ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportExpression',
 ]);

@@ -27,6 +27,25 @@ const columns = ['name', 'sourceType', 'sourceUrl', 'localPath', 'localHash', 'e
   'inputRevision', 'sourceHash', 'version', 'loadedIdentity', 'importedAt', 'updatedAt',
   'updateState', 'updateError'];
 
+export function catConfig(script) {
+  if (script.config !== undefined) return script.config;
+  if (!script.configNodes) return {};
+  try {
+    const value = decodeValueNodes(script.configNodes, { rawNumbers: true });
+    if (value === undefined) throw fault('CORRUPT_STORAGE');
+    return value;
+  } catch { throw fault('CORRUPT_STORAGE'); }
+}
+
+export function catConfigNodes(script) {
+  if (script.config === undefined && script.configNodes) return script.configNodes;
+  return encodeValueNodes(script.config ?? {}).map(node => ({
+    node_id: node.nodeId, parent_id: node.parentId, prop_key: node.propKey, item_index: node.itemIndex,
+    kind: node.kind, bool_value: node.boolValue, int_value: node.intValue,
+    real_value: node.realValue, text_value: node.textValue,
+  }));
+}
+
 function project(value, mode) {
   const rows = Object.fromEntries(Object.keys(relations).map(table => [table, []]));
   if (mode === 'standalone') {
@@ -46,9 +65,8 @@ function project(value, mode) {
       const value = script[field] ?? (field === 'version' ? '0.0.0' : field === 'updateState' ? 'idle' : null);
       return field === 'enabled' && value !== null ? Number(value) : value;
     })]);
-    for (const node of encodeValueNodes(script.config ?? {}))
-      rows.cat_installation_config_nodes.push([mode, id, node.nodeId, node.parentId, node.propKey,
-        node.itemIndex, node.kind, node.boolValue, node.intValue, node.realValue, node.textValue]);
+    for (const node of catConfigNodes(script))
+      rows.cat_installation_config_nodes.push([mode, id, ...nodes.map(field => node[field])]);
     for (const [index, site] of (script.sites ?? []).entries()) {
       rows.cat_installation_sites.push([mode, id, index, site.key, site.name, site.api, site.discovery ?? 'opaque-http']);
       for (const [ordinal, action] of (site.actions ?? []).entries())
@@ -105,8 +123,8 @@ export class CatStorage {
         if ((this.mode !== 'native' || index >= 7) &&
           (this.mode !== 'standalone' || !['localPath', 'localHash', 'inputRevision', 'loadedIdentity'].includes(columns[index])))
           script[columns[index]] = field === 'enabled' ? Boolean(row[field]) : row[field];
-      script.config = decodeValueNodes(records.cat_installation_config_nodes.filter(node => node.installation_id === id),
-        { rawNumbers: true });
+      script.configNodes = records.cat_installation_config_nodes.filter(node => node.installation_id === id)
+        .map(node => Object.fromEntries(nodes.map(field => [field, node[field]])));
       for (const site of records.cat_installation_sites.filter(site => site.installation_id === id)
         .sort((a, b) => a.position - b.position)) {
         const match = member => member.installation_id === id && member.site_key === site.site_key;
@@ -147,8 +165,11 @@ export class CatStorage {
         }
         ++this.revision;
         this.rows = next;
-        this.value = value;
-        return value;
+        this.value = { ...value, scripts: value.scripts.map(script => {
+          const { config, configNodes, ...fields } = script;
+          return { ...fields, configNodes: catConfigNodes(script) };
+        }) };
+        return this.value;
       }
     }).finally(() => { --this.pending; });
     this.tail = work.catch(() => {});

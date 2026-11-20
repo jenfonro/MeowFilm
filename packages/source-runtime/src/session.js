@@ -859,7 +859,6 @@ export class SourceSession {
     sourceRequire(typeof preprocess === 'function');
     sourceObject(metadata);
     sourceObject(limits);
-    sourceRequire(Object.keys(limits).every(key => Object.hasOwn(defaults, key)));
     this.installationId = installationId;
     this.generation = generation;
     this.input = sourceClone(source);
@@ -868,7 +867,8 @@ export class SourceSession {
     this.createSandbox = createSandbox;
     this.preprocess = preprocess;
     this.metadata = sourceClone(metadata);
-    this.limits = Object.freeze({ ...defaults, ...limits });
+    this.limits = Object.freeze(Object.fromEntries(Object.entries(defaults)
+      .map(([key, value]) => [key, limits[key] === undefined ? value : limits[key]])));
     for (const value of Object.values(this.limits)) sourceRequire(Number.isSafeInteger(value) && value > 0);
     sourceRequire(onDiagnostic === undefined || typeof onDiagnostic === 'function');
     this.onDiagnostic = onDiagnostic;

@@ -6,10 +6,6 @@ import { pipeline } from 'node:stream/promises';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 import { fault, requireValue, safeError } from './errors.js';
 
-const knownOptions = new Set([
-  'method', 'headers', 'body', 'form', 'formData', 'timeout', 'json', 'encoding', 'follow_max', 'followRedirect', 'retry',
-]);
-// LX request does not consume retry; accept it without replaying user requests.
 const forbiddenHeaders = new Set([
   'content-length', 'transfer-encoding', 'upgrade', 'trailer',
   'proxy-authorization', 'proxy-connection', 'te',
@@ -26,7 +22,7 @@ function buffer(value) {
 }
 
 function prepare(options) {
-  requireValue(Object.keys(options).every(key => knownOptions.has(key)), 'UNSUPPORTED_OPTION');
+  requireValue(options && typeof options === 'object' && !Array.isArray(options));
   const method = String(options.method ?? 'GET').toUpperCase();
   requireValue(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].includes(method));
   const headers = {};
@@ -160,9 +156,8 @@ async function requestOnce(url, { method, headers, body }, signal, follow) {
  * Validate HTTP(S) on every redirect and preserve explicit caller headers.
  */
 export function createNodeNetwork({
-  maxRedirects = 5, ...unsupported
+  maxRedirects = 5
 } = {}) {
-  requireValue(Object.keys(unsupported).length === 0);
   requireValue(Number.isSafeInteger(maxRedirects) && maxRedirects >= 0 && maxRedirects <= 10);
   return async ({ url: input, options = {}, signal, validateURL }) => {
     requireValue(signal && typeof validateURL === 'function');

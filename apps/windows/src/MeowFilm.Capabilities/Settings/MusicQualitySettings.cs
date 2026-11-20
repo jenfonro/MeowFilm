@@ -192,7 +192,9 @@ public sealed partial class MusicCapability
                 var reply = await QualityCall("music.quality.settings.save", request, token);
                 if (!QualityCurrent(generation)) return;
                 AcceptQuality(reply); qualityStatus = "";
-                PublishOnlineSettings(reply.GetProperty("onlineSettings"));
+                var online = await Call("music.settings.get", null, token);
+                if (!QualityCurrent(generation)) return;
+                PublishOnlineSettings(online.GetProperty("settings"));
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
@@ -204,7 +206,9 @@ public sealed partial class MusicCapability
                     var current = await QualityCall("music.quality.settings.get", null, lifetime.Token);
                     if (!QualityCurrent(generation)) return;
                     AcceptQuality(current);
-                    PublishOnlineSettings(current.GetProperty("onlineSettings"));
+                    var online = await Call("music.settings.get", null, lifetime.Token);
+                    if (!QualityCurrent(generation)) return;
+                    PublishOnlineSettings(online.GetProperty("settings"));
                     matches = QualitySettingsMatch(request);
                 }
                 catch
@@ -239,7 +243,6 @@ public sealed partial class MusicCapability
                 if (!QualityCurrent(generation)) return;
                 qualityStatus = error.Code switch
                 {
-                    "QUALITY_REQUIRED" => "请至少保留一种可用音质",
                     "INVALID_REQUEST" => "音质设置无效",
                     "PENDING_WRITE" or "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" => "音质设置保存失败",
                     _ => "音质设置操作失败"

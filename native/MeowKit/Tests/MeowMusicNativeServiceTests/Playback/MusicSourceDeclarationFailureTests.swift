@@ -42,7 +42,7 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
         .permissionDenied, .invalidResponse, .invalidRequest, .storageFailed, .corruptDocument,
         .storageConflict, .targetChanged, .staleRevision, .staleAccess, .accessUnavailable, .closed, .cancelled]
 
-    func testLongVersionAndLargeDeclaredQualityListPreserveMetadataWithoutDroppingDuplicateValidation() async throws {
+    func testLongVersionAndDeclaredQualityMembershipPreserveMetadataAndDuplicates() async throws {
         let service = try await NativeMusicFixture.service()
         let version = String(repeating: "v", count: 129)
         let qualities = ["128k"] + (1...33).map { "quality-\($0)" }
@@ -53,10 +53,9 @@ final class MusicSourceDeclarationFailureTests: XCTestCase {
         }
         let capability = try await service.validate(source(qualities), site: "tx", quality: "128k")
         XCTAssertEqual(capability.qualities, qualities)
-        do {
-            _ = try await service.validate(source(qualities + ["128k"]), site: "tx", quality: "128k")
-            XCTFail("Duplicate qualities accepted")
-        } catch { XCTAssertEqual(error as? MusicServiceError, .invalidResponse) }
+        let repeated = qualities + ["128k"]
+        let duplicateCapability = try await service.validate(source(repeated), site: "tx", quality: "128k")
+        XCTAssertEqual(duplicateCapability.qualities, repeated)
         await service.close()
     }
 

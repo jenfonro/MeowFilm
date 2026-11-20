@@ -48,7 +48,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 具体歌曲、歌词、音乐平台协议保留 `Music` 语义。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`EntryCard`、`Shelf`、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。WinUI 共享资源使用带库身份的 `ms-appx:///` URI，不靠移动后目录的相对搜索回退。
 
-Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。`MeowFilm.Threading` 只封装 Windows App SDK `DispatcherQueue` 的 owner 调度，不依赖 XAML、Desktop 或业务。音视频核心仅依赖 Core 与该调度机制；阅读器的排版与绘制使用 Win2D／DirectWrite，不引用 WPF framework。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
+Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。`MeowFilm.Threading` 只封装 Windows App SDK `DispatcherQueue` 的 owner 调度，不依赖 XAML、Desktop 或业务。音视频核心当前使用 Core 与该调度机制，彼此保持独立 owner；阅读器的排版与绘制使用 Win2D／DirectWrite，不引用 WPF framework。工程边界按实际 MSBuild 求值图、App／AppHost／Capabilities 的职责目录、音视频 owner 及依赖项的 `UseWinUI` 声明核对，覆盖传递依赖；新增中性 helper 无需登记项目名全集。循环、重复引用、仓库逃逸、共享层反依赖业务、音视频交叉依赖及调度／播放核心引入 WinUI 呈现依赖仍拒绝。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
 
 ## 当前身份与唯一数据格式
 

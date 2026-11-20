@@ -1510,3 +1510,67 @@ test('cancel, timeout and close fence logical results while retaining physical c
   await session.drain();
   assert.equal(session.stats().pendingAdapterTasks, 0);
 });
+
+
+test('SourceSession ignores unused limits and validates consumed budgets', async t => {
+  const options = { installationId: 'limits', source: legadoSource, protocol: 'legado', capabilities: capabilitiesFor({}),
+    createSandbox: sandboxFactory(), limits: { unused: { ignored: true }, maximumNodes: 42 } };
+  const session = new SourceSession(options);
+  t.after(() => session.close());
+  assert.equal(session.limits.maximumNodes, 42);
+  assert.equal(Object.hasOwn(session.limits, 'unused'), false);
+  assert.throws(() => new SourceSession({ ...options, limits: { maximumNodes: 0 } }), { code: 'INVALID_ARGUMENT' });
+  await session.start();
+});
+
+test('Legado malformed selected rules, headers and put directives fail without prechecking siblings', async t => {
+  for (const invalid of ['{bad', null, 7, false, [], '[]']) {
+    const session = new SourceSession({ installationId: 'selected-rules', source: { ...legadoSource,
+      ruleSearch: {}, ruleContent: invalid, ruleToc: invalid, ruleBookInfo: invalid },
+      protocol: 'legado', capabilities: capabilitiesFor({ '/search': '[{"name":"One"}]' }),
+      createSandbox: sandboxFactory() });
+    t.after(() => session.close());
+    await session.start(); session.activate();
+    assert.equal((await session.invoke('search', { keyword: 'one' })).books[0].name, 'One');
+    await assert.rejects(session.invoke('content', { chapterUrl: 'https://books.invalid/search' }), { code: 'UNSUPPORTED_RULE' });
+    session.source.ruleSearch = invalid;
+    await assert.rejects(session.invoke('search', { keyword: 'one' }), { code: 'UNSUPPORTED_RULE' });
+    session.source.ruleSearch = {};
+    session.source.header = invalid;
+    await assert.rejects(session.invoke('search', { keyword: 'one' }), { code: 'UNSUPPORTED_RULE' });
+  }
+  const session = new SourceSession({ installationId: 'selected-rules', source: { ...legadoSource, ruleSearch: {
+    bookList: '$', name: '@put:{invalid}$.name' } }, protocol: 'legado',
+    capabilities: capabilitiesFor({ '/search': '[{"name":"One"}]' }), createSandbox: sandboxFactory() });
+  t.after(() => session.close());
+  await session.start(); session.activate();
+  await assert.rejects(session.invoke('search', { keyword: 'one' }), { code: 'UNSUPPORTED_RULE' });
+});
+
+test('Reader search and discovery keep healthy mixed entries and reject nonempty unusable lists', async t => {
+  let data;
+  const legado = new SourceSession({ installationId: 'selected-rules', source: { ...legadoSource, ruleSearch: {}, ruleExplore: {},
+    exploreUrl: 'https://books.invalid/search' }, protocol: 'legado',
+    capabilities: capabilitiesFor({ '/search': () => JSON.stringify(data) }), createSandbox: sandboxFactory() });
+  const qysg = new SourceSession({ installationId: 'selected-rules', source: { html: '<script>function search(){return []}</script>' },
+    protocol: 'qysg', capabilities: capabilitiesFor({}),
+    createSandbox: sandboxFactory({ actions: ['search', 'find', 'getfinds'], invoke: () => data }) });
+  t.after(() => Promise.all([legado.close(), qysg.close()]));
+  for (const session of [legado, qysg]) { await session.start(); session.activate(); }
+  for (const [session, action, key] of [[legado, 'search', 'books'], [legado, 'explore', 'books'],
+    [qysg, 'search', 'books'], [qysg, 'explore', 'books'], [qysg, 'exploreKinds', 'kinds']]) {
+    const invoke = () => session.invoke(action, { keyword: 'one', url: 'https://books.invalid/search' });
+    for (data of [[null], [false, 7, 'bad', []]])
+      await assert.rejects(invoke(), { code: 'SCRIPT_PROTOCOL_ERROR' });
+    data = [null, { name: 'One', url: '/one' }, false, 7];
+    assert.equal((await invoke())[key].length, 1);
+    data = [];
+    assert.deepEqual((await invoke())[key], []);
+    data = [{ url: '/url-only' }];
+    assert.equal((await invoke())[key].length, 1);
+    if (key === 'books') {
+      data = [{}];
+      assert.ok(Array.isArray((await invoke())[key]));
+    }
+  }
+});

@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -8,11 +9,16 @@ public sealed record MusicLibraryRevision(long Generation, string Receipt)
     public static MusicLibraryRevision Empty { get; } = new(0, "");
 }
 
-/// <summary>Caller-owned control records. Songs are read by identity, never embedded here.</summary>
+/// <summary>Owner receipt and any explicitly supplied controls. Ordinary reads select controls on demand.</summary>
 public sealed record MusicLibrarySnapshot(MusicLibraryRevision Revision, IReadOnlyDictionary<string, JsonNode?> Areas);
 
+public sealed record MusicLibraryRowChange(string Area, string[] Relations, object?[] Key, JsonObject? Value, int Ordinal, bool Insert = false);
 public sealed record MusicLibraryChanges(IReadOnlyDictionary<string, JsonObject> Areas,
-    IReadOnlyDictionary<string, JsonObject> Songs);
+    IReadOnlyDictionary<string, JsonObject> Songs)
+{
+    public IReadOnlyList<MusicLibraryRowChange> Rows { get; init; } = [];
+    public IReadOnlySet<string> PartialAreas { get; init; } = new HashSet<string>(StringComparer.Ordinal);
+}
 
 /// <summary>
 /// The native music owner's record store. One commit atomically writes the supplied
@@ -21,6 +27,12 @@ public sealed record MusicLibraryChanges(IReadOnlyDictionary<string, JsonObject>
 public interface IMusicLibraryStore : IAsyncDisposable
 {
     Task<MusicLibrarySnapshot> ReadAsync(string scope, CancellationToken cancellationToken = default);
+    JsonObject? ReadArea(string scope, MusicLibraryRevision revision, string area, string[]? members = null);
+    IReadOnlyList<RelationalRecord.SelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area,
+        string[] relations, object?[] prefix, string[] members);
+    JsonObject? ReadRow(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key);
+    bool HasRelation(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, string relation);
+    bool Matches(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, JsonObject value);
     JsonObject? ReadSong(string id);
     bool ContainsSong(string id);
     string? FindSource(string sourceKey);

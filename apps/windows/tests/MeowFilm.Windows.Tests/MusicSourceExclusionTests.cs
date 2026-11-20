@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Windows.Tests;
@@ -7,6 +8,7 @@ public static class MusicSourceExclusionTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("wrong-source filtered playback reads only selected identities and removal ignores old display", Isolation);
         yield return new("wrong-source storage exact scope idempotency restart and explicit restore", Persist);
         yield return new("wrong-source failed write never returns a successful exclusion receipt", Failure);
     }
@@ -49,6 +51,36 @@ public static class MusicSourceExclusionTests
         var rows = (await Ok(reopened, "music.sourceExclusions.list")).GetProperty("items");
         Check(rows.GetArrayLength() == 4 && rows.EnumerateArray().Any(row => row.GetProperty("provider").GetString() == B));
     }
+    private static async Task Isolation()
+    {
+        var store = new QualityFixture.Database(); var records = MusicTestStores.For(store);
+        string songA, songB;
+        await using (var setup = new MusicLibraryOwner(records, database: records.Storage))
+        {
+            await Ok(setup, "music.queue.replace", new { songs = new[] {
+                MusicSongFixture.Online("wy", "selected", "Track A", "Fixture", duration: 180),
+                MusicSongFixture.Online("wy", "brother", "Track B", "Fixture", duration: 180) }, index = 0 });
+            var queue = await Ok(setup, "music.queue.get");
+            songA = queue.GetProperty("entries")[0].GetProperty("song").GetProperty("songId").GetString()!;
+            songB = queue.GetProperty("entries")[1].GetProperty("song").GetProperty("songId").GetString()!;
+            await Ok(setup, "music.sourceExclusions.add", Entry(songA));
+        }
+        await records.Storage.WriteAsync(db =>
+        {
+            MusicStorageRecords.Areas["native-source-exclusions"].Relation("items").Replace(db,
+                LJ.Obj(("songId", songB), ("provider", B), ("platform", "wy")), ["local", "broken"], 1);
+            return true;
+        });
+        await using var owner = new MusicLibraryOwner(records, database: records.Storage);
+        var selected = await Ok(owner, "music.sourceExclusions.list", new { songId = songA });
+        Check(selected.GetProperty("items").GetArrayLength() == 1 && selected.GetProperty("items")[0].GetProperty("provider").GetString() == A);
+        var damaged = await owner.ExecuteAsync("music.sourceExclusions.list");
+        Check(!damaged.GetProperty("ok").GetBoolean() && damaged.GetProperty("code").GetString() == "CORRUPT_STORAGE");
+        Check(await records.Storage.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM music_windows_exclusions_items WHERE items_key='broken'")) == 1);
+        await Ok(owner, "music.sourceExclusions.remove", new { songId = songB, provider = B, platform = "wy" });
+        Check((await Ok(owner, "music.sourceExclusions.list")).GetProperty("items").GetArrayLength() == 1);
+    }
+
     private static async Task Failure()
     {
         var store = new QualityFixture.Database();

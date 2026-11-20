@@ -43,7 +43,7 @@ export async function detectCatManagement(session, { signal = null } = {}) {
       const data = response.data;
       if (protocol === 'website-v1') {
         const list = Array.isArray(data) ? data : data?.list;
-        if (Array.isArray(list) && list.every(item => object(item) && typeof item.key === 'string'))
+        if (Array.isArray(list))
           return atOrigin({ protocol, fields: {} }, origin);
       } else if (object(data) && Object.values(data).some(item => object(item) &&
         (typeof item.cookie === 'string' || typeof item.account === 'string' ||

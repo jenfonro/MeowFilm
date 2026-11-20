@@ -1,7 +1,6 @@
 import { openDatabase } from '@meowfilm/storage';
 import { reconcile, nodeInserts } from '@meowfilm/storage/statements';
 import { encodeValueNodes, decodeValueNodes } from '@meowfilm/storage/values';
-import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
 const versionKeys = ['contentHash','bytes','version','author','description','homepage'];
 const versionColumns = ['hash','bytes','version','author','description','homepage'];
@@ -108,7 +107,7 @@ export function createMusicStorage(dataRoot) {
     previous = next;
   }
   const queues = new Map();
-  function kv(operation,input,encodedLength,check) {
+  function kv(operation,input,check) {
     const id = input.installationId;
     const work = (queues.get(id) ?? Promise.resolve()).then(async () => {
       check();
@@ -119,15 +118,11 @@ export function createMusicStorage(dataRoot) {
           {signal:input.signal,maxRows:Number.MAX_SAFE_INTEGER});
         check();return decodeValueNodes(nodes,{rawNumbers:true}) ?? null;
       }
-      const existing = await database.query('SELECT site_id,entry_key,encoded_bytes,position FROM music_script_kv_entries WHERE installation_id=?',[id]);
-      const others = existing.filter(row => row.site_id !== input.siteId || row.entry_key !== input.key);
-      const siteRows = others.filter(row => row.site_id === input.siteId);
-      const bytes = operation === 'set' ? encodedLength(input.value) : 0;
       const changes = [{sql:'DELETE FROM music_script_kv_entries WHERE '+where,params:scope}];
       if (operation === 'set') {
-        const position = Math.max(-1,...siteRows.map(row => row.position))+1;
-        changes.push({sql:'INSERT INTO music_script_kv_entries VALUES(?,?,?,?,?)',params:[...scope,position,bytes]},
-          ...nodeInserts('music_script_kv_nodes',['installation_id','site_id','entry_key'],scope,encodeValueNodes(input.value)));
+        changes.push({sql:'INSERT INTO music_script_kv_entries VALUES(?,?,?)',params:scope});
+        for (const statement of nodeInserts('music_script_kv_nodes',['installation_id','site_id','entry_key'],scope,encodeValueNodes(input.value)))
+          changes.push(statement);
       }
       check();await database.transaction(changes,{signal:input.signal});return null;
     });

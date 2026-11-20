@@ -71,8 +71,7 @@ test('process termination without close preserves committed records and rolls ba
   } finally { await reopened.close(); }
 }));
 
-test('new program never reads an old JSON file; mismatched current database is a fault', () => fixture(async root => {
-  await writeFile(join(root, 'accounts.json'), 'not json');
+test('mismatched current database schema hash is a fault', () => fixture(async root => {
   const db = openDatabase(root); await db.ready;
   await db.execute('UPDATE storage_identity SET schema_hash=?', ['0'.repeat(64)]);
   await db.close();

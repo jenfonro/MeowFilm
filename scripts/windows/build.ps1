@@ -78,15 +78,13 @@ try {
     })
     $Manifest | Add-Member -NotePropertyName node -NotePropertyValue $NodeRuntime
     [System.IO.File]::WriteAllText($ManifestPath, ($Manifest | ConvertTo-Json -Depth 50) + "`n", [System.Text.UTF8Encoding]::new($false))
-    & $WindowsNode (Join-Path $PSScriptRoot 'verify-projects.mjs') --build $Output --identity $DataIdentity --publish-items $PublishItems @PublishProperties
+    $ProjectVerification = & $WindowsNode (Join-Path $PSScriptRoot 'verify-projects.mjs') --build $Output --identity $DataIdentity --publish-items $PublishItems @PublishProperties
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not $FrameworkDependent -and
         (-not (Test-Path -LiteralPath (Join-Path $Output 'coreclr.dll')))) {
         throw 'Self-contained .NET runtime is missing.'
     }
-    $RuntimeConfig = Get-Content -LiteralPath (Join-Path $Output 'meowfilm.runtimeconfig.json') -Raw | ConvertFrom-Json
-    $Frameworks = if ($FrameworkDependent) { @($RuntimeConfig.runtimeOptions.frameworks) + @($RuntimeConfig.runtimeOptions.framework) | Where-Object { $_ } } else { $RuntimeConfig.runtimeOptions.includedFrameworks }
-    $RuntimeVersion = @($Frameworks)[0].version
+    $RuntimeVersion = ($ProjectVerification | ConvertFrom-Json).runtimeVersion
     $FinalHash = & $WindowsNode (Join-Path $PSScriptRoot 'input-fingerprint.mjs')
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($FinalHash -ne $InputHash) { throw 'Code inputs changed during this build; output is not a stable candidate.' }

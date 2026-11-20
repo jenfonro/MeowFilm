@@ -120,6 +120,7 @@ export function createSourceRuntimeModule({
   const web = createSourceWebBroker();
   const owner = capabilityOwner ?? createNodeSourceCapabilities({
     network, web: input => web.interact(input),
+    readStorage: input => library.readStorage(input),
     onProfileChange: prefix => library?.profileChanged(prefix),
   });
   const capabilities = createCapabilityClient({

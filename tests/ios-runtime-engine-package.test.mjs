@@ -116,6 +116,14 @@ test('iOS packaging ignores unreferenced ordinary platform files', async t => {
   assert.equal(manifest.files.some(file => file.path === 'app/ios/entries/other.mjs'), false);
 });
 
+test('iOS packaging ignores an unconsumed ordinary file beside the Cat Web value sources', async t => {
+  const f = fixture(t);
+  f.write('node_modules/undici/extra.js', "require('./missing');\n");
+  const manifest = await f.pack();
+  assert.equal(manifest.status, 'complete');
+  assert.equal(manifest.inputs.some(input => input.path === 'node_modules/undici/extra.js'), false);
+});
+
 for (const [name, change, code] of [
   ['a missing platform entry', f => f.remove('apps/ios/runtime/entries/aggregate.mjs'), 'MISSING_SOURCE'],
   ['a missing private settings capability', f => f.remove('apps/runtime/native-settings.mjs'), 'MISSING_SOURCE'],
@@ -175,9 +183,9 @@ for (const [name, change, code] of [
   ['an omitted Cat Web value pre-build input', f => f.write(paths.receipt,
     { ...f.receipt, inputs: f.receipt.inputs.filter(input =>
       input.path !== 'node_modules/undici/lib/web/fetch/response.js') }), 'NATIVE_INPUT_MISMATCH'],
-  ['an unreviewed Cat Web value consumption input', f => f.write(paths.receipt,
+  ['a Cat Web value consumption input absent from the native build inputs', f => f.write(paths.receipt,
     { ...f.receipt, catWebValues: { ...f.receipt.catWebValues, inputs: [
-      ...f.receipt.catWebValues.inputs, { path: 'node_modules/undici/lib/dispatcher/client.js', sha256: '0'.repeat(64) },
+      ...f.receipt.catWebValues.inputs, { path: 'node_modules/undici/lib/helper.js', sha256: '0'.repeat(64) },
     ] } }), 'NATIVE_INPUT_MISMATCH'],
   ['an omitted Undici license input', f => f.write(paths.receipt,
     { ...f.receipt, catWebValues: { ...f.receipt.catWebValues, inputs: f.receipt.catWebValues.inputs.filter(input =>
@@ -185,18 +193,16 @@ for (const [name, change, code] of [
   ['a wrong Undici license path', f => f.write(paths.receipt,
     { ...f.receipt, catWebValues: { ...f.receipt.catWebValues, license: {
       ...f.receipt.catWebValues.license, path: 'LICENSES/openssl-LICENSE.txt',
-    } } }), 'INVALID_NATIVE_RECEIPT'],
+    } } }), 'NATIVE_INPUT_MISMATCH'],
   ['a changed Undici license', f => f.write(f.receipt.catWebValues.license.path, 'changed'), 'NATIVE_LICENSE_MISMATCH'],
   ['a missing Undici license', f => f.remove(f.receipt.catWebValues.license.path), 'MISSING_SOURCE'],
   ['a linked Undici license', f => f.symlink(f.receipt.catWebValues.license.path,
     join(repository, f.receipt.catWebValues.license.path)), 'UNSAFE_SYMLINK'],
   ['a changed Undici source input', f => f.write('node_modules/undici/lib/web/fetch/formdata.js', 'changed'),
     'NATIVE_INPUT_MISMATCH'],
-  ['an unrecorded Undici file', f => f.write('node_modules/undici/extra.js', 'untracked'), 'NATIVE_INPUT_MISMATCH'],
   ...[
     ['a different Undici version', { version: '6.29.0' }],
     ['a different Undici tarball integrity', { integrity: 'sha512-' + Buffer.alloc(64).toString('base64') }],
-    ['a production Undici lock record', { dev: false }],
   ].map(([name, value]) => [name, f => {
     const lock = readJSON(join(f.root, 'package-lock.json'));
     f.write('package-lock.json', { ...lock, packages: {

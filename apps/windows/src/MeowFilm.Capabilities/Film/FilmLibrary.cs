@@ -45,16 +45,23 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
             {
                 CheckRoot(db);
                 var key = new object?[] { "device", context.Target.Id };
-                var previous = FilmStorageRecords.Favorite.Read(db, key);
-                if (previous is not null) _ = Decode(previous);
-                if (JsonNode.DeepEquals(value, previous)) return false;
-                if (previous is null && value is null) return false;
-                if (db.Scalar<long>("SELECT count(*) FROM windows_film_library WHERE scope_key='device'") == 0)
-                    FilmStorageRecords.Favorites.Save(db, new JsonObject { ["version"] = 1, ["favorites"] = new JsonArray() }, null, ["device"]);
-                int ordinal = checked((int)(previous is null
-                    ? db.Scalar<long>("SELECT coalesce(max(ordinal),-1)+1 FROM windows_film_library_favorites WHERE scope_key='device'")
-                    : db.Scalar<long>("SELECT ordinal FROM windows_film_library_favorites WHERE scope_key='device' AND favorites_key=$id", ("$id", context.Target.Id))));
-                FilmStorageRecords.Favorite.Save(db, value, previous, key, ordinal, ordinal);
+                var ordinals = db.Query("SELECT ordinal FROM windows_film_library_favorites WHERE scope_key='device' AND favorites_key=$id",
+                    row => row.GetInt64(0), ("$id", context.Target.Id));
+                if (value is null)
+                {
+                    if (ordinals.Count == 0) return false;
+                    FilmStorageRecords.Favorite.Delete(db, key);
+                }
+                else
+                {
+                    if (FilmStorageRecords.Favorite.Matches(db, key, value, complete: true)) return false;
+                    if (db.Scalar<long>("SELECT count(*) FROM windows_film_library WHERE scope_key='device'") == 0)
+                        FilmStorageRecords.Favorites.Save(db, new JsonObject { ["version"] = 1, ["favorites"] = new JsonArray() }, null, ["device"]);
+                    int ordinal = checked((int)(ordinals.Count == 0
+                        ? db.Scalar<long>("SELECT coalesce(max(ordinal),-1)+1 FROM windows_film_library_favorites WHERE scope_key='device'")
+                        : ordinals[0]));
+                    FilmStorageRecords.Favorite.Replace(db, value, key, ordinal);
+                }
                 db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
                 return true;
             }, CancellationToken.None, value?.ToJsonString().Length * 2 ?? 0).ConfigureAwait(false);
