@@ -431,6 +431,8 @@ public static class RuntimeHttpClientTests
             await using var client = new RuntimeHttpClient(server.BaseUrl);
             foreach (var (method, path, contract, code, foreignCode) in new[]
             {
+                ("cat.script.invoke", "/v1/cat/invoke", "cat.script.v2", "PAN_INTERCEPTION_UNSUPPORTED", "NO_MATCH"),
+                ("film.data.detail", "/v1/film/data.detail", "film.playback.v1", "PAN_INTERCEPTION_UNSUPPORTED", "SOURCE_CLEANUP"),
                 ("pan.providers", "/v1/pan/providers", "pan.runtime.v1", "LOGIN_EXPIRED", "NO_MATCH"),
                 ("tmdb.data.settings.get", "/v1/tmdb/settings.get", "tmdb.data.v1", "NETWORK_ERROR", "PAN_FAILURE"),
                 ("douban.data.settings.get", "/v1/douban/settings.get", "douban.data.v1", "WEB_INTERACTION_REQUIRED", "AUTH_REQUIRED"),

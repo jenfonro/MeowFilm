@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Security.Cryptography;
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
@@ -50,6 +51,7 @@ public static class FilmSettingsUiTests
         yield return Case("native navigation scrolling contrast resources and WinUI snapshots cover both window sizes", Layout);
         yield return Case("empty source pages keep their actions and columns", Empty);
         yield return Case("data sources echo one token and cookie and save proxy options natively and independently", DataSources);
+        yield return Case("five pan interception switches save native values and notify without changing account settings", PanInterception);
         yield return Case("site clean lives under matching and playback uses half-width shared order lists", PlaybackLayout);
         yield return Case("playback management separates counted target groups from bounded source tables and empty states", PlaybackManagement);
         yield return Case("cache controls invalidate exact domains and drain both providers on failure", MetadataCache);
@@ -60,6 +62,46 @@ public static class FilmSettingsUiTests
     private static void Check(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static async Task PanInterception()
+    {
+        await using var scene = await Scene.Create();
+        var root = JsonNode.Parse(scene.Store.Read("film.cat-sources.v1").GetRawText())!.AsObject();
+        root["providers"] = new JsonObject { ["quark"] = false, ["external"] = true };
+        root["mappings"] = new JsonArray(new JsonObject { ["provider"] = "quark", ["aliases"] = new JsonArray("自定义线路") });
+        scene.Store.Seed("film.cat-sources.v1", JsonSerializer.SerializeToElement(root));
+        var before = scene.Store.Read("film.cat-sources.v1");
+        await scene.Select("pan-routing");
+        var names = new[] { "BaiduInterception", "QuarkInterception", "UcInterception", "TianyiInterception", "YidongInterception" };
+        Check(scene.View.CanEditPanInterception && names.Select(scene.Element<CheckBox>).All(box => box.IsChecked == !Equals(box.Tag, "quark")),
+            "five native controls show default enabled values and preserve explicit false");
+        int notifications = scene.Runtime.Notifications.Count;
+        foreach (string name in names)
+        {
+            var box = scene.Element<CheckBox>(name);
+            bool next = box.IsChecked != true;
+            Click(box); await Until(() => !scene.View.SourcesBusy);
+            var saved = scene.Store.Read("film.cat-sources.v1");
+            Check(saved.GetProperty("providers").GetProperty((string)box.Tag).GetBoolean() == next && box.IsChecked == next,
+                "each real toggle saves its provider and retains the committed state");
+            foreach (string field in new[] { "scripts", "mappings", "port" })
+                Check(JsonElement.DeepEquals(saved.GetProperty(field), before.GetProperty(field)), "UI saves preserve other source fields");
+            Check(saved.GetProperty("providers").GetProperty("external").GetBoolean(), "UI saves preserve other providers");
+        }
+        await Until(() => scene.Runtime.Notifications.Count == notifications + 5);
+        Check(scene.Runtime.Notifications.Skip(notifications).All(block => block == "cat.sources"),
+            "each switch uses the existing source-settings notification");
+        scene.Store.FailWrite = true;
+        var baidu = scene.Element<CheckBox>("BaiduInterception");
+        bool retained = baidu.IsChecked == true;
+        Click(baidu); await Until(() => !scene.View.SourcesBusy);
+        Check(baidu.IsChecked == retained && scene.Notices.Any(message => message.Contains("来源操作失败", StringComparison.Ordinal)),
+            "failed persistence restores the confirmed switch and reports through the notice outlet");
+        scene.Store.FailWrite = false;
+        await scene.Select("rules"); await scene.Select("pan-routing");
+        Check(scene.Element<CheckBox>("QuarkInterception").IsChecked == true && baidu.IsChecked == retained,
+            "reopening reads the committed provider values");
     }
 
     private static async Task DraftTesting()

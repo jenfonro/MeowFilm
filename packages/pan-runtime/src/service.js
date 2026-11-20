@@ -85,6 +85,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
   const http = transport ?? createTransport();
   const accounts = new Map([...providers.keys()].map(id => [id, accountValue(document, id)]));
   const pending = new Set(), controllers = new Set(), shared = new Map(), logins = new Map(), loginStarts = new Map();
+  const accountListeners = new Set();
   let closed = false, closing, settingsError, changes = Promise.resolve();
   const ready = Promise.resolve().then(async () => {
     document = readDocument(await store.read());
@@ -93,6 +94,11 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     throw error instanceof PanError ? error : new PanError(error?.code === 'CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
   });
   ready.catch(() => {});
+  function accountChanged(id) {
+    for (const listener of accountListeners) {
+      try { listener(id); } catch { /* Observation cannot undo an already committed account. */ }
+    }
+  }
 
   function assertCurrent(id, account, signal) {
     requireValue(!closed, 'CLOSED');
@@ -138,6 +144,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
         stable(old.credentials) === stable(next.credentials)) continue;
       accounts.set(id, next);
       invalidate(id, old);
+      accountChanged(id);
     }
     document = latest;
   }
@@ -176,6 +183,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       if (current.rowRevision === latest.rowRevision) continue;
       accounts.set(other, latest);
       invalidate(other, current);
+      accountChanged(other);
     }
   }
   function replace(id, credentials, signal, expected, completedLogin) {
@@ -187,6 +195,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       await persist(id, next);
       accounts.set(id, next);
       invalidate(id, old, completedLogin);
+      accountChanged(id);
       return accountStatus(id);
     });
   }
@@ -222,6 +231,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
           await persist(id, { revision: account.revision, credentials });
           account.credentials = credentials;
           account.rowRevision = accountValue(document, id).rowRevision;
+          accountChanged(id);
         });
         assertCurrent(id, account, signal);
       },
@@ -229,9 +239,11 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
         requireValue(typeof provider.refresh === 'function', 'UNSUPPORTED_OPERATION');
         await together(provider, account, 'refresh', signal, async ctx => {
           try {
+            const rowRevision = account.rowRevision;
             await provider.refresh({}, ctx);
             assertCurrent(id, account, ctx.signal);
             account.status = 'signedIn';
+            if (account.rowRevision === rowRevision) accountChanged(id);
           } catch (error) {
             assertCurrent(id, account, ctx.signal);
             if (error?.code === 'AUTH_REQUIRED' || error?.code === 'AUTH_FAILED') account.status = 'expired';
@@ -475,6 +487,24 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
   }
   return Object.freeze({
     ready,
+    // Trusted in-process assembly only; this capability is never an HTTP method.
+    accounts: Object.freeze({
+      providers: Object.freeze([...providers.keys()]),
+      async read(id) {
+        await ready;
+        requireValue(!closed, 'CLOSED');
+        if (settingsError) throw settingsError;
+        const provider = select(id), account = accounts.get(id);
+        accountRevision(account);
+        return { provider: id, revision: account.revision, rowRevision: account.rowRevision,
+          credentials: clone({ ...credentialView(provider, account.credentials) }) };
+      },
+      subscribe(listener) {
+        requireValue(typeof listener === 'function');
+        accountListeners.add(listener);
+        return () => accountListeners.delete(listener);
+      },
+    }),
     settingsChanged: () => ready.then(() => change(reload)),
     invoke(operation, params = {}, { signal } = {}) {
       return track(ready.then(() => {
@@ -485,6 +515,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     close() {
       return closing ??= (async () => {
         closed = true;
+        accountListeners.clear();
         for (const owner of controllers) owner.controller.abort();
         for (const login of logins.values()) cancelLogin(login, 'cancelled');
         const results = await Promise.allSettled([Promise.resolve().then(() => http.close()), ready, ...pending]);

@@ -102,6 +102,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     {
         if (!Active) return;
         if (section == "pan") await panAccounts.ActivateAsync();
+        else if (section == "pan-routing") await LoadPanInterceptionAsync();
         else if (section == "rules")
         {
             if ((!RulesLoaded || rulesReloadPending) && !RulesBusy && !RulesFailed) await LoadRulesAsync();
@@ -147,7 +148,8 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         VideosPage.Visibility = key == "videos" ? Visibility.Visible : Visibility.Collapsed;
         MetadataPage.Visibility = key == "metadata" ? Visibility.Visible : Visibility.Collapsed;
         PanPage.Visibility = key == "pan" ? Visibility.Visible : Visibility.Collapsed;
-        BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "metadata" or "pan" ? Visibility.Collapsed : Visibility.Visible;
+        PanInterceptionPage.Visibility = key == "pan-routing" ? Visibility.Visible : Visibility.Collapsed;
+        BusinessPage.Visibility = key is "rules" or "cats" or "videos" or "metadata" or "pan" or "pan-routing" ? Visibility.Collapsed : Visibility.Visible;
         anchor.Focus(FocusState.Programmatic); anchor.StartBringIntoView();
         await ActivateCurrentAsync();
     }

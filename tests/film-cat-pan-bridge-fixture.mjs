@@ -196,7 +196,7 @@ module.exports.detail = async id => {
       '&stoken=' + encodeURIComponent(token.value.data.stoken));
     return { interceptedShape: { complete: token.complete && list.complete && fallback.complete,
       tokenStatus: token.status, listStatus: list.status, fallbackStatus: fallback.status },
-      fallback: { fid: fallback.value.data.list[0].fid },
+      fallback: { code: fallback.value.error?.code },
       list: [{ vod_id: id, vod_name: ${JSON.stringify(bridgeTitle)},
         vod_play_from: '夸克', vod_play_url: '第一季$' + reference(token, list) }] };
   }
@@ -435,7 +435,7 @@ export async function startCatPanBridgeFixture({ scenario = 'success', intercept
       if (input.operation === 'detail' && result.ok && result.value._meow?.resources) {
         note('cat', 'intercepted', { complete: result.value.interceptedShape?.complete,
           responseShape: result.value.interceptedShape,
-          ...(result.value.fallback ? { fallbackFileId: result.value.fallback.fid } : {}),
+          ...(result.value.fallback ? { fallbackCode: result.value.fallback.code } : {}),
           requests: records.slice(observationStart).filter(row =>
             row.layer === 'pan-interceptor' && row.phase === 'request').map(row => {
             const body = records.slice(observationStart).find(value => value.layer === 'pan-interceptor' &&

@@ -50,7 +50,7 @@ final class FilmCatPanBridgeConsumerTests: XCTestCase {
         }
         let browsing = try XCTUnwrap(model.snapshot?.browsing)
         XCTAssertNil(browsing.error)
-        XCTAssertEqual(browsing.lines.map(\.label), ["夸克"])
+        XCTAssertEqual(browsing.lines.map(\.label), ["夸克-bridge-share"])
         XCTAssertEqual(browsing.lines.map(\.provider), ["quark"])
         XCTAssertEqual(browsing.files.map(\.quality), ["4k_fps", "1080p", "1080p"])
         XCTAssertEqual(browsing.files.map(\.position.episode), [1, 1, 2])
@@ -59,7 +59,7 @@ final class FilmCatPanBridgeConsumerTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(browsing.files.first?.fps), 60_000.0 / 1_001, accuracy: 0.0001)
         try await waitFor {
             (try? self.button("film.detail.source", page).title(for: .normal)) == "Bridge site · Bridge Series" &&
-                (try? self.button("film.detail.line", page).title(for: .normal)) == "夸克"
+                (try? self.button("film.detail.line", page).title(for: .normal)) == "夸克-bridge-share"
         }
         XCTAssertEqual(try button("film.detail.line", page).accessibilityLabel, "网盘源")
         let high = try XCTUnwrap(model.snapshot?.candidates.first { $0.quality == "4k_fps" })
