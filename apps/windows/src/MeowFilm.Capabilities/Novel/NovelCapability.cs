@@ -231,37 +231,34 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     {
         stopping = true; CancelPresentation(); CancelDiscovery(); settings.Cancel();
         Exception? failure = null;
-        try { await view.SaveAndPauseAsync(); } catch (Exception error) { failure = error; }
+        var savingPosition = view.SaveAndPauseAsync();
         foreach (var session in sessions.Values) session.Cancel();
         try
         {
-            await Task.WhenAll(work.PauseAsync(), Search.PrepareShutdownAsync(), Rules.PrepareShutdownAsync(),
-                Task.WhenAll(sessions.Values.Select(s => s.PrepareShutdownAsync())), settings.DrainAsync(), view.DrainSavesAsync());
-            try { await view.DrainImagesAsync(); } catch (Exception error) { failure ??= error; }
-            await Sources.PrepareShutdownAsync();
+            await Task.WhenAll(savingPosition, work.PauseAsync(), Search.PrepareShutdownAsync(), Rules.PrepareShutdownAsync(),
+                Task.WhenAll(sessions.Values.Select(s => s.PrepareShutdownAsync())), settings.DrainAsync(), view.DrainSavesAsync(),
+                view.DrainImagesAsync(), Sources.PrepareShutdownAsync());
         }
         catch (Exception error) { failure ??= error; }
         finally { await Library.PrepareShutdownAsync(); }
         if (failure is not null) throw failure;
     }
-    public async Task CancelShutdownPreparationAsync()
-    {
-        if (preparation is null) return;
-        try { await preparation; } catch { }
-        preparation = null; stopping = false; work.Resume(); Search.Resume(); Sources.Resume(); Rules.Resume(); Library.Resume();
-        foreach (var session in sessions.Values) session.Resume(); settings.Resume(); view.Resume(); Publish();
-    }
+
     public Task AbortAsync() => DisposeAsync().AsTask();
-    public ValueTask DisposeAsync() => new(disposal ??= DisposeCoreAsync());
+    public ValueTask DisposeAsync()
+    {
+        if (disposal is null || disposal.IsFaulted || disposal.IsCanceled) disposal = DisposeCoreAsync();
+        return new(disposal);
+    }
     private async Task DisposeCoreAsync()
     {
         try { await PrepareShutdownAsync(); }
-        finally
-        {
-            disposed = true; presentation.Cancel(); presentation.Dispose(); view.Dispose(); settings.Dispose();
-            Sources.Changed -= SourcesChanged; Sources.ApplyFailed -= SourceApplyFailed; Library.Changed -= LibraryChanged;
-            await Rules.DisposeAsync();
-        }
+        catch { /* Operation failures were reported by their owners; release still proceeds. */ }
+        // A save error is not a release error. Conversely, a failed image lease
+        // release must not authorize deleting a still-owned data root.
+        await Task.WhenAll(view.DrainImagesAsync(), Sources.PrepareShutdownAsync(), Rules.DisposeAsync().AsTask());
+        disposed = true; presentation.Cancel(); presentation.Dispose(); view.Dispose(); settings.Dispose();
+        Sources.Changed -= SourcesChanged; Sources.ApplyFailed -= SourceApplyFailed; Library.Changed -= LibraryChanged;
     }
 }
 public sealed record NovelKind(string Title, string Url)

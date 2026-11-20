@@ -480,11 +480,6 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
             catch { /* Storage failure stays observable and blocks a successful close. */ }
         }
     }
-    internal void Resume()
-    {
-        lock (sync) if (!closed) suspended = false;
-        RequestDrain();
-    }
     public ValueTask DisposeAsync()
     {
         lock (sync)

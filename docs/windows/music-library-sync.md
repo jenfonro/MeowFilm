@@ -54,7 +54,7 @@ status
 
 未消费扩展随当前事务保留。同步读取才核对实际整库引用、账号绑定和 pending／confirmation 关系；无关队列或设置不参与该校验。
 
-当前 schema 为 `2`，同步 contract 为 `1.1.0`。旧 schema 拒绝；本端不建立迁移分支。
+当前 schema 为 `1`，同步 contract 为 `1.1.0`。旧 schema 拒绝；本端不建立迁移分支。
 
 `status.phase` 只允许：
 
@@ -74,7 +74,7 @@ create delete add remove order subscribe unsubscribe
 platform accountId collectionId remoteId operation beforePresent desiredPresent locator name
 ```
 
-`collectionId` 指向 `networkPlaylists`，不能指向自管集合；两个 presence 必须相反且与操作对应。KG subscribe locator 是 `{creatorId,creatorListId}`，unsubscribe locator 是当前账号的 `{listId}`。其它两平台 locator 为空对象。pending、账号、自管 binding 或网络引用须引用一致；错误以 `CORRUPT_SYNC` 失败且原文档不写回。
+`collectionId` 指向 `networkPlaylists`，不能指向自管集合；两个 presence 必须相反且与操作对应。KG subscribe 使用 `creatorId/creatorListId`，unsubscribe 使用当前账号的 `listId`；平台适配器仅将这些实际定位字段投影到独立关系列。其它两平台不需要订阅 locator。pending、账号、自管 binding 或网络引用须引用一致；错误以 `CORRUPT_SYNC` 失败且原文档不写回。确认与批准记录分别保存 `token/code/count`，与本次同步状态同一事务提交。
 
 ## 同步流程
 
@@ -122,7 +122,7 @@ music.librarySync.resetAccount
 - 唯一 pending fence 每轮只恢复一次；恢复未确认即停止，不存在循环读回。
 - 页面隐藏只停用 UI 观察者，不撤销已保存授权，不另建 scheduler。
 - 正常关闭取消 scheduler、等待当前 round 和控制命令物理结束，再进入 library 关闭。
-- 取消关闭只重新启动原协调器；不恢复旧请求、不重放 pending 远端写入。
+- 退役后不恢复原协调器；新 owner 读取已提交的同步意图，不重放 pending 远端写入。
 
 ## 平台订阅请求与实际能力边界
 

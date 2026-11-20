@@ -329,13 +329,12 @@ internal sealed class NovelImage : Grid
         this.sources = sources; this.book = book; Children.Add(image); Width = 96; Height = 136; Stretch = Stretch.UniformToFill;
         AutomationProperties.SetName(this, book.Name + "封面");
         viewport = new DesktopViewport(this, UpdateVisibility);
-        Loaded += (_, _) => { loaded = true; sources.Resumed += OnResumed; UpdateVisibility(); };
-        Unloaded += (_, _) => { loaded = admitted = attempted = false; sources.Resumed -= OnResumed; Stop(); };
+        Loaded += (_, _) => { loaded = true; UpdateVisibility(); };
+        Unloaded += (_, _) => { loaded = admitted = attempted = false; Stop(); };
     }
     protected override Microsoft.UI.Xaml.Automation.Peers.AutomationPeer OnCreateAutomationPeer() =>
         new Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer(this);
     private bool HasDemand => loaded && admitted && viewport.IsVisible;
-    private void OnResumed(object? sender, EventArgs e) { Stop(); attempted = false; UpdateVisibility(); }
     private void UpdateVisibility()
     {
         if (viewport?.IsInViewport == true) admitted = true;

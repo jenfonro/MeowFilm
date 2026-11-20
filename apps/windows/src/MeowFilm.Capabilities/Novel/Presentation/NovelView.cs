@@ -383,7 +383,6 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     }
     private sealed record SourceCandidate(NovelBook Book, string Label) { public override string ToString() => Label; }
     internal async Task DrainSavesAsync() { await automaticOperation; await saves.PauseAsync(); }
-    internal void Resume() { saves.Resume(); surface.ResumeImages(); }
     internal Task DrainImagesAsync() => surface.DrainImagesAsync();
     private void DiscoveryBooksChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) => discoveryBooksChanged = true;
     public void Dispose() { if (disposed) return; disposed = true; module.DiscoverBooks.CollectionChanged -= DiscoveryBooksChanged; visibility.Dispose(); discoveryChannelBar?.Close(); PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }

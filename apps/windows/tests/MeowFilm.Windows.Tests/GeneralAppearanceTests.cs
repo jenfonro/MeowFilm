@@ -105,8 +105,10 @@ public static class GeneralAppearanceTests
         store.Release.TrySetResult();
         await Task.WhenAll(save, shutdown);
         Check(owner.ThemeColor == "#ABCDEF" && !owner.CanEdit);
-        await owner.CancelShutdownPreparationAsync();
-        Check(owner.CanEdit);
+        await owner.DisposeAsync();
+        Check(!owner.CanEdit);
+        await using var reopened = new AppAppearance(store); await reopened.LoadAsync();
+        Check(reopened.ThemeColor == "#ABCDEF" && reopened.CanEdit);
     }
 
     private static async Task Picker()

@@ -32,10 +32,8 @@ public static partial class MusicUiTests
                 () => SettingsRetiredFocusSequence(transition));
         yield return Case("settings keyboard sequence synchronous no-op retains the original handle without saving",
             SettingsNoOpSequence);
-        yield return Case("general source first read cancelled by failed shutdown can recover on the current page without replaying writes",
-            () => SettingsSourceShutdownRecovery(false));
-        yield return Case("general source first read cancelled by failed shutdown exposes Retry after a fresh read failure without blocking shutdown cancellation",
-            () => SettingsSourceShutdownRecovery(true));
+
+
         foreach (bool quality in new[] { false, true })
         {
             bool selected = quality;
@@ -308,134 +306,6 @@ public static partial class MusicUiTests
             "a successful full quality policy write cannot acknowledge metadata fields");
         await f.Module.SetMetadataEnabledAsync(f.Module.MetadataPlatforms.Single(row => row.Platform == "mg"), true);
         Equal(0, f.Module.OwnedNotices.Count);
-    }
-
-    private static async Task SettingsSourceShutdownRecovery(bool failRecoveryRead)
-    {
-        const string get = "music.catalogSource.settings.get";
-        const string save = "music.catalogSource.settings.save";
-        await using var f = new QualityFixture();
-        await f.Ok(save, new { ifRevision = 0, platform = "kg" });
-        var calls = new ObservedApplication(f.App);
-        var module = new MusicCapability(calls, f.Store, new PlaybackProbe(), dialogs: new Dialogs());
-        await using var appearance = new AppAppearance(f.Store);
-        var held = calls.HoldNext(get);
-        var failure = new SourceShutdownFailure();
-        var lifecycle = new AppShutdown([module, failure], [], sharedParticipants: [appearance]);
-        bool acceptedRetiredValue = false;
-        module.PropertyChanged += (_, e) =>
-        {
-            if (e.PropertyName == nameof(MusicCapability.CatalogSourcePlatform) &&
-                module.CatalogSourcePlatform == "kg") acceptedRetiredValue = true;
-        };
-        Task? close = null;
-        try
-        {
-            var general = new GeneralSettingsView(appearance, [module]);
-            var sourceTab = ((Panel)general.FindName("Areas")).Children.OfType<RadioButton>()
-                .Single(tab => Equals(tab.Tag, "sources"));
-            sourceTab.IsChecked = true;
-            using var mount = new ReplicaMount(general);
-            await held.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(8));
-            await Drain();
-            var source = (MusicHomeSourceSettingsView)module.HomeSourceSettingsView;
-            var picker = (ComboBox)source.FindName("CatalogSourcePicker");
-            var retry = (Button)source.FindName("CatalogSourceRetry");
-            True(source.IsLoaded && DesktopVisual.IsVisible(source) && sourceTab.IsChecked == true,
-                "source recovery prerequisite: the real General source page owns the first pending read");
-            Equal(1, calls.Count(get));
-            True(!module.CanEditCatalogSource && !picker.IsEnabled,
-                "source recovery prerequisite: no successful initial source restore has occurred");
-            // The held reply is kg; a fresh authoritative read must now return wy.
-            await f.Ok(save, new { ifRevision = 1, platform = "wy" });
-            int writes = f.Store.Writes;
-            var firstRead = calls.Log.Single(call => call.Method == get);
-            close = lifecycle.CloseAsync();
-            await Until(() => firstRead.Token.IsCancellationRequested);
-            True(!close.IsCompleted, "shutdown must drain the actual held read before reaching the failing participant");
-            Equal(1, calls.Count(get));
-            if (failRecoveryRead) calls.FailNext(get, "STORAGE_UNAVAILABLE");
-            held.Release();
-            try
-            {
-                await close.WaitAsync(TimeSpan.FromSeconds(8));
-                throw new InvalidOperationException("source recovery prerequisite: shutdown unexpectedly succeeded");
-            }
-            catch (InvalidOperationException error) when (error.Message == "SHUTDOWN_FAILED") { }
-            Equal(1, failure.Prepares);
-            Equal(2, calls.Count(get));
-            await lifecycle.CancelShutdownPreparationAsync().WaitAsync(TimeSpan.FromSeconds(8));
-            await Drain();
-            True(!acceptedRetiredValue, "a cancelled first-read reply must never publish its retired kg value");
-            True(DesktopVisual.IsVisible(source) && sourceTab.IsChecked == true,
-                "recovery must retain the current page without a visibility or navigation workaround");
-            Equal(2, calls.Count(get));
-            if (failRecoveryRead)
-            {
-                True(!module.CanEditCatalogSource && !picker.IsEnabled && module.CanReadCatalogSource &&
-                    module.HasCatalogSourceError && DesktopVisual.IsVisible(retry) && retry.IsEnabled,
-                    "a failed fresh read must leave shutdown cancellation successful and the current page retryable");
-            }
-            else
-            {
-                True(module.CanEditCatalogSource,
-                    "shutdown cancellation must automatically restore the unloaded source with a fresh read");
-            }
-            await Until(() => module.CanEditCatalogSource || (DesktopVisual.IsVisible(retry) && retry.IsEnabled));
-            if (!module.CanEditCatalogSource)
-            {
-                FilmUiTest.Click(retry);
-                await Until(() => module.CanEditCatalogSource);
-            }
-            True(calls.Count(get) >= 2 && picker.IsEnabled && Equals(picker.SelectedValue, "wy") &&
-                module.CatalogSourcePlatform == "wy" && module.CatalogSourceStatus.Length == 0,
-                "the current page must recover through a fresh authoritative read, automatically or via its real Retry button");
-            True(!acceptedRetiredValue, "recovery must not revive the old successful-but-cancelled reply");
-            Equal(0, calls.Count(save));
-            Equal(writes, f.Store.Writes);
-            Equal(0, f.Runtime.Calls.Count);
-            Equal(failRecoveryRead ? 3 : 2, calls.Count(get));
-            // A second cancelled close must retain the now-loaded source without another read.
-            int reads = calls.Count(get);
-            close = lifecycle.CloseAsync();
-            try
-            {
-                await close.WaitAsync(TimeSpan.FromSeconds(8));
-                throw new InvalidOperationException("source recovery prerequisite: second shutdown unexpectedly succeeded");
-            }
-            catch (InvalidOperationException error) when (error.Message == "SHUTDOWN_FAILED") { }
-            Equal(2, failure.Prepares);
-            await lifecycle.CancelShutdownPreparationAsync().WaitAsync(TimeSpan.FromSeconds(8));
-            await Drain();
-            Equal(reads, calls.Count(get));
-            True(DesktopVisual.IsVisible(source) && sourceTab.IsChecked == true && picker.IsEnabled &&
-                Equals(picker.SelectedValue, "wy") && module.CatalogSourceStatus.Length == 0,
-                "an already loaded source must remain usable on the current page without extra I/O");
-            True(!acceptedRetiredValue, "later shutdown cancellation must not publish the retired kg value");
-            Equal(0, calls.Count(save));
-            Equal(writes, f.Store.Writes);
-            Equal(0, f.Runtime.Calls.Count);
-        }
-        finally
-        {
-            calls.ReleaseAll();
-            if (close is not null)
-                try { await close; } catch { /* Preserve the original assertion while draining failed preparation. */ }
-            await module.AbortAsync();
-        }
-    }
-
-    private sealed class SourceShutdownFailure : IDesktopShutdownParticipant
-    {
-        internal int Prepares;
-        public Task PrepareShutdownAsync()
-        {
-            Prepares++;
-            return Task.FromException(new InvalidOperationException("SYNTHETIC_SHUTDOWN_FAILURE"));
-        }
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
-        public Task AbortAsync() => Task.CompletedTask;
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static async Task SettingsKeyboardSequence()

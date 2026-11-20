@@ -31,7 +31,7 @@ public static class MusicNativeUiRepositoryTests
             };
             await using var appearance = new AppAppearance(scene.Store);
             await appearance.LoadAsync();
-            var shell = new ShellWindow([scene.Module], [], () => Task.CompletedTask, () => Task.CompletedTask,
+            var shell = new ShellWindow([scene.Module], [], () => Task.CompletedTask,
                 appearance: appearance);
             var root = DesktopTestUi.WindowRoot(shell);
             try

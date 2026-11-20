@@ -3152,8 +3152,8 @@ public static partial class PlaybackRecoveryTests
                 lyrics = false
             }, token);
             Check(online.GetProperty("ok").GetBoolean() &&
-                online.GetProperty("settings").GetProperty("schema").GetInt32() == 3,
-                "native schema 3 online settings fixture setup");
+                online.GetProperty("settings").GetProperty("schema").GetInt32() == 1,
+                "native schema 1 online settings fixture setup");
             if (!official)
             {
                 var current = await inner.ExecuteAsync("music.officialSources.settings.get", cancellationToken: token);

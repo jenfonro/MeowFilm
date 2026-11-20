@@ -432,9 +432,9 @@ public static class MusicAccountTransferTests
                 var result = await application.ImportAccountTransferAsync(plan, MusicAccountTransferPolicy.Overwrite);
                 Check(result.Items.Single().Code == "COMMIT_UNKNOWN" && f.Store.Writes == 1);
                 await Expect("COMMIT_UNKNOWN", () => application.PrepareShutdownAsync());
-                await application.CancelShutdownPreparationAsync(); f.Store.LoseReceipt = false;
-                var observed = await application.ExecuteAsync("music.accounts.list"); Check(observed.GetProperty("ok").GetBoolean());
-                await application.PrepareShutdownAsync(); Check(f.Store.Writes == 1);
+                f.Store.LoseReceipt = false;
+                Check((await application.ExecuteAsync("music.accounts.list")).GetProperty("code").GetString() == "CLOSED");
+                Check(f.Store.Writes == 1);
                 await application.DisposeAsync();
             }
             finally { await application.AbortAsync(); }

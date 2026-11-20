@@ -5,7 +5,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.AppHost;
 
-public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearance, IDesktopShutdownParticipant
+public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearance, IAsyncDisposable
 {
     private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.Appearance);
     public const string DocumentNamespace = "app.appearance.v1";
@@ -85,8 +85,7 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
         await gate.WaitAsync();
         gate.Release();
     }
-    public Task CancelShutdownPreparationAsync()
-    { stopping = false; Changed(); return Task.CompletedTask; }
+
     public Task AbortAsync() => PrepareShutdownAsync();
     public async ValueTask DisposeAsync() => await PrepareShutdownAsync();
 }

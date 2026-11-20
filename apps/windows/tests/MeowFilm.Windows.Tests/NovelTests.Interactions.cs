@@ -362,14 +362,11 @@ public static partial class NovelTests
                 "Ancestor clipping retains an already loaded cover.");
             Canvas.SetTop(inner, 0); DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
             Check(ReferenceEquals(clippedPixels, image.Source) && runtime.ImageReads == 3);
-            string visibleReference = runtime.ImageReferences.Single();
             await sources.PrepareShutdownAsync();
             await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
             Check(runtime.Released == 3 && image.IsLoaded && DesktopVisual.IsVisible(image));
-            sources.Resume();
+            await ReplaceOwner();
             await Until(() => runtime.ImageReads == 4 && image.Source is not null);
-            Check(runtime.ImageReferences.Count == 1 && !runtime.ImageReferences.Contains(visibleReference),
-                "Resuming did not reacquire a fresh lease for the same visible cover without moving or rebuilding it.");
             await sources.PrepareShutdownAsync();
             await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
 
@@ -381,7 +378,7 @@ public static partial class NovelTests
                 shutdownStarted.TrySetResult();
                 return await shutdownPixels.Task;
             };
-            sources.Resume(); await shutdownStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await ReplaceOwner(); await shutdownStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var drain = sources.PrepareShutdownAsync();
             await shutdownCancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Check(!drain.IsCompleted && runtime.ImageReads == 5 && runtime.Released == 4 &&
@@ -390,16 +387,16 @@ public static partial class NovelTests
             await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
             Check(runtime.Released == 5, "Retired shutdown pixels were displayed or their lease was retained.");
             runtime.ReadImage = (_, _) => Task.FromResult(currentPixels);
-            sources.Resume(); await Until(() => runtime.ImageReads == 6 && image.Source is not null);
+            await ReplaceOwner(); await Until(() => runtime.ImageReads == 6 && image.Source is not null);
             Check(runtime.ImageReferences.Count == 1 && !runtime.ImageReferences.Contains(shutdownReference!));
-            current = image.Source as WriteableBitmap ?? throw new InvalidOperationException("Resumed cover has no decoded bitmap.");
+            current = image.Source as WriteableBitmap ?? throw new InvalidOperationException("New cover has no decoded bitmap.");
             pixel = MusicTestUi.Pixels(current)[..4];
-            Check(pixel[0] == 32 && pixel[3] == 255, "A retired shutdown read replaced the resumed cover pixels.");
+            Check(pixel[0] == 32 && pixel[3] == 255, "A retired read replaced the new owner's cover pixels.");
 
             await sources.PrepareShutdownAsync();
             await Until(() => image.Source is null && runtime.ImageReferences.Count == 0);
             runtime.ReadImage = (_, _) => throw new BridgeException("NETWORK_ERROR");
-            sources.Resume(); await Until(() => runtime.ImageReads == 7 && runtime.Released == 7 && runtime.ImageReferences.Count == 0);
+            await ReplaceOwner(); await Until(() => runtime.ImageReads == 7 && runtime.Released == 7 && runtime.ImageReferences.Count == 0);
             int imageCalls = runtime.Calls.Count(call => call.Method == "source.runtime.library.image");
             for (int i = 0; i < 4; i++)
             {
@@ -408,21 +405,33 @@ public static partial class NovelTests
             }
             Check(image.Source is null && runtime.ImageReads == 7 &&
                 runtime.Calls.Count(call => call.Method == "source.runtime.library.image") == imageCalls,
-                "Ordinary layout retried a failed cover request without a new demand or explicit resume.");
+                "Ordinary layout retried a failed cover request without a new demand.");
 
             runtime.ReadImage = (_, _) => Task.FromResult(currentPixels);
-            image.Visibility = Visibility.Collapsed; DesktopTestUi.WindowRoot(host).UpdateLayout();
-            await sources.PrepareShutdownAsync(); sources.Resume();
-            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
+            await sources.PrepareShutdownAsync();
+            await ReplaceOwner(visible: false);
+            await DesktopTestUi.DrainAsync();
             Check(image.Source is null && runtime.ImageReads == 7 && runtime.ImageReferences.Count == 0,
-                "Resume acquired a hidden cover.");
-            image.Visibility = Visibility.Visible; DesktopTestUi.WindowRoot(host).UpdateLayout(); await Until(() => runtime.ImageReads == 8 && image.Source is not null);
+                "A new owner acquired a hidden cover.");
+            image.Visibility = Visibility.Visible; DesktopTestUi.WindowRoot(host).UpdateLayout();
+            await Until(() => runtime.ImageReads == 8 && image.Source is not null);
             inner.Children.Remove(image); DesktopTestUi.WindowRoot(host).UpdateLayout();
             await Until(() => !image.IsLoaded && image.Source is null && runtime.ImageReferences.Count == 0);
-            await sources.PrepareShutdownAsync(); sources.Resume();
-            DesktopTestUi.WindowRoot(host).UpdateLayout(); await DesktopTestUi.DrainAsync();
+            await sources.PrepareShutdownAsync();
+            await DesktopTestUi.DrainAsync();
             Check(runtime.ImageReads == 8 && runtime.Released == 8 && runtime.ImageReferences.Count == 0,
-                "Resume acquired an unloaded cover.");
+                "Retirement acquired an unloaded cover.");
+
+            async Task ReplaceOwner(bool visible = true)
+            {
+                await sources.PrepareShutdownAsync();
+                inner.Children.Remove(image);
+                sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
+                image = new NovelImage(sources, Book() with { CoverUrl = "https://a.invalid/cover.png" })
+                    { Visibility = visible ? Visibility.Visible : Visibility.Collapsed };
+                Canvas.SetTop(image, -100); inner.Children.Add(image);
+                DesktopTestUi.WindowRoot(host).UpdateLayout();
+            }
         }
         finally { oldPixels.TrySetResult(retiredPixels); shutdownPixels.TrySetResult(retiredPixels); host.Close(); await sources.PrepareShutdownAsync(); }
         static byte[] Pixels(byte shade)
@@ -538,7 +547,7 @@ public static partial class NovelTests
         await using var store = new MemoryStore(); var sources = NovelTestSources.Create(new Runtime()); await sources.RefreshAsync();
         await using var ruleRuntime = new NovelRuleRuntimeFixture();
         await using var module = new NovelCapability(sources, new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
-        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync(), () => module.AbortAsync(), module.CancelShutdownPreparationAsync);
+        var shell = new ShellWindow([module], [], () => module.PrepareShutdownAsync());
         shell.Resize(1050, 760);
         try
         {

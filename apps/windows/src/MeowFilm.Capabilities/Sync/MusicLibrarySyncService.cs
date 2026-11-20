@@ -207,27 +207,6 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
         await DrainRound(cancellationToken).ConfigureAwait(false);
         await controls.WaitAsync(cancellationToken).ConfigureAwait(false); controls.Release();
     }
-    public async Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
-    {
-        Task? timer;
-        lock (gate)
-        {
-            LJ.Require(!closed, "CLOSED");
-            if (!stopping) return;
-            timer = scheduler;
-        }
-        await DrainRound(cancellationToken).ConfigureAwait(false);
-        if (timer is not null) await timer.WaitAsync(cancellationToken).ConfigureAwait(false);
-        bool restart;
-        lock (gate)
-        {
-            LJ.Require(!closed, "CLOSED");
-            if (!stopping) return;
-            restart = started; stopping = false; started = false;
-            schedulerCancellation?.Dispose(); schedulerCancellation = null; scheduler = null; generation++;
-        }
-        if (restart) await StartAsync(cancellationToken).ConfigureAwait(false);
-    }
     public async Task AbortAsync(CancellationToken cancellationToken = default)
     {
         await PrepareShutdownAsync(cancellationToken).ConfigureAwait(false);

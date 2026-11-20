@@ -336,6 +336,5 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     public void AuthorizationChanged(bool accountChanged) => wyOutbox?.AuthorizationChanged(accountChanged);
     public Task PrepareShutdownAsync() => wyOutbox?.PrepareShutdownAsync() ?? Task.CompletedTask;
     public Task FlushLocalAsync() => wyOutbox?.FlushLocalAsync() ?? Task.CompletedTask;
-    public void Resume() => wyOutbox?.Resume();
     public Task DrainAsync(CancellationToken token = default) => wyOutbox?.DrainAsync(token) ?? Task.CompletedTask;
 }

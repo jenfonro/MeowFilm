@@ -98,7 +98,7 @@ import MeowRuntime
         XCTAssertEqual(result[music: "status"], .string("notSent"))
         XCTAssertEqual(result[music: "errorCode"], .string("CLOSED"))
         XCTAssertTrue(fixture.requests().isEmpty)
-        await denied(.closed) { try await client.close() }
+        try await client.close()
     }
 
     private func denied(_ expected: MusicServiceError, _ operation: () async throws -> Void) async {

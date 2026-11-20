@@ -28,7 +28,6 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
             .Concat(observations.Select(f => f.Work ?? Task.CompletedTask)))
             try { await task.ConfigureAwait(false); } catch { /* Outcome remains with the owner. */ }
     }
-    internal void ResumeReads() { lock (gate) { AccountRules.Require(!closed, "CLOSED"); readsStopping = false; } }
     private sealed class DetailsFlight(StoredAccount before, StoredAccountDetails? cache,
         MusicPlatformSession session, long epoch, TimeSpan remaining) : IDisposable
     {

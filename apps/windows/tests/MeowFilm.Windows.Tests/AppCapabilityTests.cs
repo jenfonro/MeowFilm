@@ -39,7 +39,6 @@ public static class AppCapabilityTests
             _location = location; return Task.CompletedTask;
         }
         public Task PrepareShutdownAsync() => Task.CompletedTask;
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

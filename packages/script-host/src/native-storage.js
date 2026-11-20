@@ -42,7 +42,10 @@ export function createDesktopStorageDriver(path, identity, initialize) {
       });
     },
     async close() {
-      try { await ready; await this.request({ kind: 'close' }); }
+      try {
+        try { await ready; } catch { return; }
+        if (!stopped) await this.request({ kind: 'close' });
+      }
       finally { if (await exited !== 0) throw storageError('STORAGE_ERROR'); }
     },
   };
@@ -85,7 +88,10 @@ export function createNativeStorageDriver(path, identity, initialize) {
     ready, request,
     close() {
       return disposal ??= (async () => {
-        try { await ready; if (handle) await request({ kind: 'close' }); }
+        try {
+          try { await ready; } catch { return; }
+          if (handle) await request({ kind: 'close' });
+        }
         finally { closed = true; await joined; handle = null; }
       })();
     },

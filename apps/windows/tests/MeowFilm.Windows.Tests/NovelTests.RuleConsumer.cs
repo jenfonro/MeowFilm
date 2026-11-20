@@ -157,6 +157,36 @@ public static partial class NovelTests
         }
     }
 
+    private static async Task ResetImageReleaseFailure()
+    {
+        await using var store = new MemoryStore();
+        var runtime = new Runtime();
+        await using var remote = new RuleReceiptRuntime();
+        await using var old = new NovelCapability(NovelTestSources.Create(runtime), new NovelLibrary(store), new NovelRuleProgram(remote));
+        await old.InitializeAsync(default);
+        await old.Library.SaveEntryAsync(new("old-book", "old-key", Book(), OnShelf: true));
+        string reference = await old.Sources.ImageAsync(old.Sources.Sources.Single(), "https://a.invalid/cover.png", "book", "cover", default);
+        var failure = new IOException("Synthetic image release failure");
+        runtime.ReleasingImage = _ => Task.FromException(failure);
+        var shutdown = new AppShutdown([old], []);
+        bool cleared = false, reopened = false;
+        var reset = new AppUserDataReset(() => { }, shutdown.CloseAsync,
+            () => { store.Bytes = null; cleared = true; return Task.CompletedTask; },
+            () => { reopened = true; return Task.CompletedTask; });
+        try
+        {
+            try { await reset.ResetAsync(); throw new InvalidOperationException("Reset accepted a failed image release"); }
+            catch (IOException error) { Check(ReferenceEquals(error, failure)); }
+            Check(!shutdown.IsReleased && !cleared && !reopened && runtime.ImageReferences.Contains(reference) && store.Bytes is not null,
+                "Failed physical release must retain the old data and prevent replacement");
+            runtime.ReleasingImage = null;
+            await reset.ResetAsync();
+            Check(shutdown.IsReleased && cleared && reopened && runtime.ImageReferences.Count == 0 && runtime.Released == 1 && store.Bytes is null,
+                "An explicit retry deletes data only after the retained lease is released");
+        }
+        finally { runtime.ReleasingImage = null; }
+    }
+
     private static async Task ResetOwners()
     {
         await using var store = new MemoryStore();
@@ -184,7 +214,7 @@ public static partial class NovelTests
         await writeAccepted.Task;
         var shutdown = new AppShutdown([old], []);
         NovelCapability? fresh = null;
-        var reset = new AppUserDataReset(() => { }, shutdown.ForceReleaseAsync,
+        var reset = new AppUserDataReset(() => { }, shutdown.CloseAsync,
             () => { Check(shutdown.IsReleased); store.Bytes = null; return Task.CompletedTask; },
             async () =>
             {

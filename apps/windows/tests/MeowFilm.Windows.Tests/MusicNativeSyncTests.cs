@@ -50,7 +50,7 @@ public static partial class MusicNativeSyncTests
         yield return new("Music sync local edit during pull supersedes the whole plan", ConcurrentEdit);
         yield return new("Music sync account replacement fences delayed read and write", AccountReplacement);
         yield return new("Music sync account reset is explicit local only", ResetAccount);
-        yield return new("Music sync cancellation and reversible close retain singleton owner", Lifecycle);
+        yield return new("Music sync retirement drains work before a replacement owner starts", Lifecycle);
         yield return new("Music sync startup defers network and five minute clock keeps one flight", Scheduling);
         yield return new("Music sync blocked scheduled round does not retry-loop", ScheduledFailure);
         yield return new("Music sync completes every selected collection without a round request quota", RequestBudget);
@@ -556,11 +556,12 @@ public static partial class MusicNativeSyncTests
         var clock = new Clock();
         await using var f = new Fixture(clock: clock);
         await f.Sync.StartAsync();
-        await f.Sync.CancelShutdownPreparationAsync().WaitAsync(TimeSpan.FromSeconds(1));
-        Check(clock.Timers.Count == 1, "UNPREPARED_CANCEL_CHANGED_SCHEDULER");
+        Check(clock.Timers.Count == 1, "one scheduler per owner");
         await f.Enable(); var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); f.Server.Entered = entered; f.Server.Release = new();
         var run = f.Run(); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); Ok(await f.Sync.ExecuteAsync("music.librarySync.cancel")); Code(await run, "CANCELLED");
-        await f.Sync.PrepareShutdownAsync(); Code(await f.Run(), "CLOSED"); await f.Sync.CancelShutdownPreparationAsync(); Ok(await f.Run());
+        await f.Sync.PrepareShutdownAsync(); Code(await f.Run(), "CLOSED");
+        Check(clock.Timers.Count == 0, "retirement stops the scheduler");
+        await f.Restart(); Ok(await f.Run());
     }
     private sealed class Clock : TimeProvider
     {

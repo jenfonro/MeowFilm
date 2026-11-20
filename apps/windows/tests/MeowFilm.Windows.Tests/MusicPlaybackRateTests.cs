@@ -129,11 +129,9 @@ public static partial class MusicUiTests
             await Task.WhenAll(change, prepare);
             Equal(1d, f.Module.PlaybackRate);
             int opens = output.Opens.Count;
-            await f.Module.CancelShutdownPreparationAsync();
-            await Drain(); await Until(() => !f.Module.Busy);
-            Equal(opens, output.Opens.Count); Equal(1d, output.Rate);
-            True(output.HasMedia && f.Module.CanChangePlaybackRate,
-                "surviving product-owned local input reconciles intent without reopening media");
+            await f.Module.DisposeAsync();
+            Equal(opens, output.Opens.Count);
+            True(!f.Module.CanChangePlaybackRate, "retired owners cannot restore input admission");
             Render(f.Module.PlayerView, 860, 105);
         });
         yield return Case("native music rate failure on next song keeps the song and publishes an error", async () =>

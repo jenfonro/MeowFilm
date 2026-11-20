@@ -75,8 +75,8 @@ struct MusicDocument: Sendable {
         }
         try musicRequire(value["revision"].isInteger, .corruptDocument)
         if area == "library" {
-            try musicRequire(library["schema"] == .n(2) && library["scope"].string == "device" &&
-                library["library"]["version"] == .n(2) && library["library"]["ownerId"].string == "device" &&
+            try musicRequire(library["schema"] == .n(1) && library["scope"].string == "device" &&
+                library["library"]["version"] == .n(1) && library["library"]["ownerId"].string == "device" &&
                 library["library"]["revision"].isInteger, .corruptDocument)
         }
     }

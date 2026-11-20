@@ -15,7 +15,7 @@
 
 ```json
 {
-  "schema": 3,
+  "schema": 1,
   "revision": 0,
   "songs": {
     "order": ["wy", "tx", "kw", "kg", "mg"],
@@ -38,13 +38,13 @@
 - `enabled` 可以为空，但必须按 `order` 中的相对顺序排列且不得重复。
 - `pages` 为每轮请求的页数（`int` 范围内的正整数），每页条数由平台适配器决定；`concurrency` 为每个平台同时进行的请求数（`int` 范围内的正整数）；`cacheMinutes` 为搜索结果缓存时长（1–1440 分钟）。
 - 全新文档尚未写入该区域时返回上述当前默认值，不产生写入。
-- 已存在区域按 schema 3 和实际消费分支读取；所选分支损坏明确失败，不转换、不映射、不回退默认，也不预检未请求的兄弟分支。
+- 已存在区域按 schema 1 和实际消费分支读取；所选分支损坏明确失败，不转换、不映射、不回退默认，也不预检未请求的兄弟分支。
 
 ### `native-search-history`
 
 ```json
 {
-  "schema": 2,
+  "schema": 1,
   "revision": 0,
   "items": [
     { "text": "关键词", "kind": "songs" }

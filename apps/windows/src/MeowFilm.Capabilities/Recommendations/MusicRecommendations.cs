@@ -506,14 +506,7 @@ public sealed partial class MusicCapability
         await recommendationPreparation;
         await Task.WhenAll(recommendationWork.ToArray());
     }
-    private void ResumeRecommendations()
-    {
-        recommendationLifetime.Dispose(); recommendationLifetime = new();
-        recommendationSnapshot = null; recommendationFailureNotice = ""; recommendationObservation = null;
-        recommendationCandidateContent = ""; RecommendationCandidates = [];
-        recommendationDisplayedVersion = recommendationDesiredVersion = -1;
-        RecommendationBindings();
-    }
+
     private void ReleaseRecommendations()
     {
         RecommendationSource.Changed -= RecommendationChanged;

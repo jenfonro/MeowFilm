@@ -24,9 +24,9 @@ public static class UserDataResetUiTests
         yield return Case("confirmation defaults to cancel and preserves cancellation admission", Confirmation);
         yield return Case("confirmed work is single flight and fences late requests and navigation", SingleFlight);
         yield return Case("failure keeps the old shell locked and explicit retry closes without normal shutdown", Retry);
-        yield return Case("failed exit stays locked and requires an explicit successful abort", Exit);
+        yield return Case("exit closes after a failed reset without requiring cleanup success", Exit);
         yield return Case("tray restore and close cannot supersede confirmation or pending cleanup", TrayAndClose);
-        yield return Case("tray exit after failed cleanup shares the explicit abort path", TrayExitAfterFailure);
+        yield return Case("tray exit closes after failed reset release", TrayExitAfterFailure);
         yield return Case("tray exit excludes unconfirmed cleanup and duplicate pending actions", TrayExitSingleFlight);
         yield return Case("a pending close choice cannot overlap a reset", PendingCloseChoice);
         yield return Case("OS session ending retains its existing path during cleanup", SessionEnding);
@@ -38,9 +38,12 @@ public static class UserDataResetUiTests
 
     private static async Task Entry()
     {
+        object[] existingAreas;
         await using (var absent = await Fixture.Create(withReset: false))
         {
             await absent.OpenCache();
+            existingAreas = absent.SettingsElement<StackPanel>("Areas").Children.OfType<RadioButton>()
+                .Select(item => item.Tag).ToArray();
             Check(!DesktopVisual.IsVisible(absent.Entry) && !DesktopVisual.IsVisible(absent.SettingsElement<Border>("UserDataSection")),
                 "without an App callback neither the section nor its action is shown");
             Click(absent.Entry);
@@ -50,7 +53,7 @@ public static class UserDataResetUiTests
         await f.OpenCache();
         Check(DesktopVisual.IsVisible(f.Entry) && f.Entry.IsEnabled && Equals(f.Entry.Content, "清除全部数据"), "cache action");
         var areas = f.SettingsElement<StackPanel>("Areas").Children.OfType<RadioButton>().ToArray();
-        Check(areas.Select(item => item.Content).SequenceEqual(new[] { "外观", "首页数据源", "缓存控制", "窗口行为" }),
+        Check(areas.Select(item => item.Tag).SequenceEqual(existingAreas),
             "local data adds a section, not a settings category");
         var page = f.SettingsElement<StackPanel>("CachePage");
         var contributions = f.SettingsElement<StackPanel>("CacheContributions");
@@ -59,7 +62,7 @@ public static class UserDataResetUiTests
             ReferenceEquals(page.Children[1], section) && contributions.Children.Contains(f.Module.CacheSettingsView),
             "all capability cache settings precede the independent local-data section");
         Check(Descendants(section).OfType<TextBlock>().Any(text => text.Text == "本机数据"), "section title");
-        Check(f.ResetCalls == 0 && f.ShutdownCalls == 0 && f.ForceCalls == 0, "opening settings changes no lifecycle");
+        Check(f.ResetCalls == 0 && f.ShutdownCalls == 0, "opening settings changes no lifecycle");
     }
 
     private static async Task Confirmation()
@@ -72,7 +75,8 @@ public static class UserDataResetUiTests
                      "无法撤销", "云端数据和 App 外的原始文件不受影响" })
             Check(text.Contains(required, StringComparison.Ordinal), "confirmation discloses " + required);
         Check(!text.Contains("重启", StringComparison.Ordinal), "Windows does not request a process restart");
-        Check(ReferenceEquals(DesktopVisual.Focused(f.Dialog), f.Cancel), "initial focus is Cancel");
+        Check(ReferenceEquals(DesktopVisual.Focused(f.Dialog), f.Cancel),
+            $"initial focus is Cancel; actual={DesktopVisual.Focused(f.Dialog)?.GetType().Name}/{(DesktopVisual.Focused(f.Dialog) as FrameworkElement)?.Name}; loaded={f.Cancel.IsLoaded}; active={f.Shell.IsActive}");
         Check(!ReferenceEquals(DesktopVisual.Focused(f.Dialog), f.Confirm) && f.ResetCalls == 0 && f.ShutdownCalls == 0,
             "opening the dialog is not consent and Enter cannot default to deletion");
         Check(f.Dialog.TabFocusNavigation == Microsoft.UI.Xaml.Input.KeyboardNavigationMode.Cycle,
@@ -90,7 +94,7 @@ public static class UserDataResetUiTests
         Check(!f.Dialog.IsOpen && f.Root.IsEnabled && f.ResetCalls == 0, "invoking the default focused Cancel cancels");
         await f.OpenConfirmation();
         Click(f.DialogElement<Button>("DismissButton"));
-        Check(!f.Dialog.IsOpen && f.ResetCalls == 0 && f.ShutdownCalls == 0 && f.ForceCalls == 0,
+        Check(!f.Dialog.IsOpen && f.ResetCalls == 0 && f.ShutdownCalls == 0,
             "dismiss is also cancellation, without stopping owners");
     }
 
@@ -98,7 +102,7 @@ public static class UserDataResetUiTests
     {
         await using var f = await Fixture.Create();
         var release = Pending();
-        f.Reset = async () => { await release.Task; await f.Shell.AbortAsync(); };
+        f.Reset = async () => { await release.Task; await f.Shell.CloseAfterReleaseAsync(); };
         await f.OpenConfirmation();
         f.Module.HoldNavigation = true;
         f.Module.Request("held");
@@ -120,12 +124,12 @@ public static class UserDataResetUiTests
         RequestCancel(f.Dialog);
         Click(f.ExitButton);
         await Drain();
-        Check(f.Module.Navigations == navigations && f.ResetCalls == 1 && f.ForceCalls == 0 &&
+        Check(f.Module.Navigations == navigations && f.ResetCalls == 1 &&
             f.ShutdownCalls == 0 && f.Dialog.IsPending && !f.Closed && !f.CloseDialog.IsOpen,
             "late completion, navigation, Close and Escape cannot supersede accepted reset work");
         release.TrySetResult();
         await Until(() => f.Closed, "App callback closes old shell");
-        Check(f.Shell.CleanupCompleted && f.ForceCalls == 1 && f.ShutdownCalls == 0,
+        Check(f.Shell.CleanupCompleted && f.ShutdownCalls == 1,
             "closing the old generation cannot invoke normal shutdown");
     }
 
@@ -146,15 +150,15 @@ public static class UserDataResetUiTests
         f.Module.Request("late");
         f.Shell.Close();
         await Drain();
-        Check(f.ResetCalls == 1 && f.ShutdownCalls == 0 && f.ForceCalls == 0 && f.Module.Navigations == navigations &&
+        Check(f.ResetCalls == 1 && f.ShutdownCalls == 0 && f.Module.Navigations == navigations &&
             !f.Closed && !f.CloseDialog.IsOpen, "failed reset neither auto-retries nor returns to business");
         var release = Pending();
-        f.Reset = async () => { await release.Task; await f.Shell.AbortAsync(); };
+        f.Reset = async () => { await release.Task; await f.Shell.CloseAfterReleaseAsync(); };
         Click(f.Confirm); Click(f.Confirm);
         Check(f.ResetCalls == 2 && f.Dialog.IsPending, "one explicit retry");
         release.TrySetResult();
         await Until(() => f.Closed, "retry closes old generation");
-        Check(f.ShutdownCalls == 0 && f.ForceCalls == 1 && f.Tray.Disposals == 1,
+        Check(f.ShutdownCalls == 1 && f.Tray.Disposals == 1,
             "successful retry uses only the host abort close");
     }
 
@@ -162,28 +166,13 @@ public static class UserDataResetUiTests
     {
         await using var f = await Fixture.Create();
         f.Reset = () => Task.FromException(new InvalidOperationException());
-        f.Force = () => Task.FromException(new InvalidOperationException("private path"));
-        await f.OpenConfirmation();
-        Click(f.Confirm);
+        f.Shutdown = () => Task.FromException(new InvalidOperationException("fixture-release-failure"));
+        await f.OpenConfirmation(); Click(f.Confirm);
         await Until(() => !f.Dialog.IsPending && f.ResetCalls == 1, "reset failed");
-        Click(f.ExitButton);
-        await Until(() => !f.Dialog.IsPending && f.ForceCalls == 1, "exit failed");
-        AssertFailed(f);
-        Check(f.HasNotice("退出未完成，请重试") && f.ShutdownCalls == 0 && !f.Shell.CleanupCompleted,
-            "failed AbortAsync does not close or claim cleanup");
-        await Drain();
-        Check(f.ForceCalls == 1 && f.ResetCalls == 1, "no automatic retry or exit");
-        var release = Pending();
-        f.Force = () => release.Task;
-        Click(f.ExitButton); Click(f.ExitButton); Click(f.Confirm);
-        RequestCancel(f.Dialog); f.Shell.Close(); f.Tray.ExitApplication();
-        await Drain();
-        Check(f.Dialog.IsPending && f.ForceCalls == 2 && f.ResetCalls == 1 && !f.Closed && f.ShutdownCalls == 0,
-            "exit waits for actual abort and excludes every competing action");
-        release.TrySetResult();
-        await Until(() => f.Closed, "explicit abort completed");
-        Check(f.Shell.CleanupCompleted && !f.Shell.ShutdownSucceeded && f.ShutdownCalls == 0,
-            "explicit exit does not claim an ordinary saved shutdown");
+        Click(f.ExitButton); await Until(() => f.Closed, "exit closes despite failed reset release");
+        await f.Shell.ShutdownCompletion;
+        Check(f.ShutdownCalls == 1 && f.ResetCalls == 1 && !f.Shell.CleanupCompleted,
+            "exit does not retry deletion or fabricate successful resource release");
     }
 
     private static async Task TrayAndClose()
@@ -214,67 +203,36 @@ public static class UserDataResetUiTests
     private static async Task TrayExitAfterFailure()
     {
         await using var f = await Fixture.Create();
-        f.Force = () => Task.FromException(new InvalidOperationException("private path"));
-        await f.OpenConfirmation();
-        Click(f.Confirm);
-        await Until(() => !f.Dialog.IsPending && f.ResetCalls == 1, "reset failed before tray exit");
-        AssertFailed(f);
-        f.Tray.ExitApplication();
-        await Until(() => !f.Dialog.IsPending && f.ForceCalls == 1, "tray abort failed");
-        AssertFailed(f);
-        Check(f.HasNotice("退出未完成，请重试") && !f.Shell.CleanupCompleted &&
-            f.ResetCalls == 1 && f.ShutdownCalls == 0,
-            "tray exit reports the same abort failure without retrying reset or saving shutdown");
-        await Drain();
-        Check(f.ForceCalls == 1, "failed tray abort is not retried automatically");
-        f.Force = () => Task.CompletedTask;
-        f.Tray.ExitApplication();
-        await Until(() => f.Closed, "explicit tray abort retry completed");
-        Check(f.ForceCalls == 2 && f.ResetCalls == 1 && f.ShutdownCalls == 0 &&
-            f.Shell.CleanupCompleted && !f.Shell.ShutdownSucceeded && f.Tray.Disposals == 1,
-            "only a successful explicit abort closes the old generation and retires its tray");
+        f.Shutdown = () => Task.FromException(new InvalidOperationException("fixture-release-failure"));
+        await f.OpenConfirmation(); Click(f.Confirm);
+        await Until(() => !f.Dialog.IsPending && f.ResetCalls == 1, "reset failed");
+        f.Tray.ExitApplication(); await Until(() => f.Closed, "tray exit closes");
+        await f.Shell.ShutdownCompletion;
+        Check(f.ShutdownCalls == 1 && f.ResetCalls == 1 && !f.Shell.CleanupCompleted && f.Tray.Disposals == 1,
+            "failed reset cannot trap tray exit");
     }
 
     private static async Task TrayExitSingleFlight()
     {
         await using var f = await Fixture.Create();
-        var reset = Pending();
-        var abort = Pending();
-        f.Reset = () => reset.Task;
-        f.Force = () => abort.Task;
+        var reset = Pending(); var release = Pending();
+        f.Reset = () => reset.Task; f.Shutdown = () => release.Task;
         try
         {
-            await f.OpenConfirmation();
+            await f.OpenConfirmation(); f.Tray.ExitApplication(); await Drain();
+            Check(f.ResetCalls == 0 && f.ShutdownCalls == 0 && !f.Closed, "confirmation is not authorization to exit");
+            Click(f.Confirm); f.Tray.ExitApplication(); await Drain();
+            Check(f.ResetCalls == 1 && f.ShutdownCalls == 0 && !f.Closed, "reset owns the accepted action");
+            reset.SetException(new InvalidOperationException());
+            await Until(() => !f.Dialog.IsPending, "reset failed");
             f.Tray.ExitApplication(); f.Tray.ExitApplication();
-            await Drain();
-            Check(f.Dialog.IsOpen && !f.Dialog.IsPending && !f.CloseDialog.IsOpen && !f.Root.IsEnabled &&
-                f.ResetCalls == 0 && f.ForceCalls == 0 && f.ShutdownCalls == 0 && !f.Closed,
-                "unconfirmed cleanup cannot authorize a tray abort or normal shutdown");
-            Click(f.Confirm);
-            f.Tray.ExitApplication(); f.Tray.ExitApplication();
-            Click(f.Confirm); Click(f.ExitButton); f.Shell.Close();
-            await Drain();
-            Check(f.Dialog.IsPending && f.ResetCalls == 1 && f.ForceCalls == 0 &&
-                f.ShutdownCalls == 0 && !f.Closed && !f.CloseDialog.IsOpen,
-                "pending cleanup excludes tray abort, repeated cleanup and normal close");
-            reset.TrySetException(new InvalidOperationException());
-            await Until(() => !f.Dialog.IsPending, "held cleanup failed");
-            AssertFailed(f);
-            f.Tray.ExitApplication();
-            await Until(() => f.ForceCalls == 1, "tray abort started");
-            f.Tray.ExitApplication(); f.Tray.ExitApplication();
-            Click(f.ExitButton); Click(f.Confirm); f.Shell.Close();
-            await Drain();
-            Check(f.Dialog.IsPending && !f.Root.IsEnabled && !f.Closed && !f.CloseDialog.IsOpen &&
-                !f.Shell.CleanupCompleted && f.ForceCalls == 1 && f.ResetCalls == 1 && f.ShutdownCalls == 0,
-                "the pending tray abort shares the dialog single flight and waits for actual release");
-            abort.TrySetResult();
-            await Until(() => f.Closed, "held tray abort completed");
-            Check(f.Shell.CleanupCompleted && !f.Shell.ShutdownSucceeded && f.ForceCalls == 1 &&
-                f.ResetCalls == 1 && f.ShutdownCalls == 0 && f.Tray.Disposals == 1,
-                "only the original abort completion closes without saved shutdown or a second reset");
+            await Until(() => f.Closed, "exit does not wait for pending release");
+            Check(f.ShutdownCalls == 1 && !f.Shell.ShutdownCompletion.IsCompleted && !f.Shell.CleanupCompleted,
+                "one pending release is distinct from window closure");
+            release.SetResult(); await f.Shell.ShutdownCompletion;
+            Check(f.Shell.CleanupCompleted && f.ResetCalls == 1, "no repeated data reset");
         }
-        finally { reset.TrySetResult(); abort.TrySetResult(); }
+        finally { reset.TrySetResult(); release.TrySetResult(); }
     }
 
     private static async Task PendingCloseChoice()
@@ -333,10 +291,12 @@ public static class UserDataResetUiTests
             AssertLayout(f);
         }
         var surface = f.DialogElement<Border>("DialogSurface");
-        var theme = new SolidColorBrush(Color.FromArgb(255, 220, 230, 240));
-        f.Shell.Resources["MeowFilm.Brush.FloatingSurface"] = theme;
+        var previous = ((SolidColorBrush)surface.Background).Color;
+        await f.Appearance.SaveAsync("#DCE6F0");
         await Drain();
-        Check(ReferenceEquals(surface.Background, theme), "the dialog uses the shell floating-surface theme token");
+        Check(ReferenceEquals(surface.Background, AppearanceColors.FloatingSurface) &&
+            ((SolidColorBrush)surface.Background).Color != previous,
+            "the open dialog follows a saved shell theme change");
         if (new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
         {
             var colors = new global::Windows.UI.ViewManagement.UISettings();
@@ -414,13 +374,14 @@ public static class UserDataResetUiTests
         internal Preferences Preferences { get; } = new();
         internal Tray Tray { get; } = new();
         internal ShellWindow Shell { get; }
+        private readonly FrameworkElement root;
+        internal Appearance Appearance { get; } = new();
         internal Func<Task> Reset = () => Task.FromException(new InvalidOperationException());
-        internal Func<Task> Force = () => Task.CompletedTask;
         internal Func<Task> Shutdown = () => Task.CompletedTask;
-        internal int ResetCalls, ForceCalls, ShutdownCalls;
+        internal int ResetCalls, ShutdownCalls;
         internal bool Closed { get; private set; }
         internal GeneralSettingsView Settings => Descendants(ShellElement<Grid>("ContentDeck")).OfType<GeneralSettingsView>().Single();
-        internal UserDataResetDialog Dialog => ShellElement<UserDataResetDialog>("ResetDialog");
+        internal UserDataResetDialog Dialog { get; }
         internal CloseWindowDialog CloseDialog => ShellElement<CloseWindowDialog>("CloseDialog");
         internal ContentControl Root => ShellElement<ContentControl>("RootInteractionGate");
         internal Button Entry => SettingsElement<Button>("ClearUserDataButton");
@@ -430,9 +391,8 @@ public static class UserDataResetUiTests
 
         private Fixture(bool withReset)
         {
-            Shell = new ShellWindow([Module], [], () => { ShutdownCalls++; return Shutdown(); },
-                () => { ForceCalls++; return Force(); }, null, TimeProvider.System,
-                appearance: new Appearance(), closePreferences: Preferences,
+            Shell = new ShellWindow([Module], [], () => { ShutdownCalls++; return Shutdown(); }, TimeProvider.System,
+                appearance: Appearance, closePreferences: Preferences,
                 trayIconFactory: (_, restore, exit, unavailable) =>
                 {
                     Tray.Restore = restore; Tray.ExitApplication = exit; Tray.Unavailable = unavailable;
@@ -440,18 +400,21 @@ public static class UserDataResetUiTests
                 }, resetUserData: withReset ? () => { ResetCalls++; return Reset(); } : null)
             {
             };
+            root = Shell.Root;
+            Dialog = ShellElement<UserDataResetDialog>("ResetDialog");
             Shell.Closed += (_, _) => Closed = true;
         }
 
         internal static async Task<Fixture> Create(bool withReset = true)
         {
             var result = new Fixture(withReset);
-            result.Shell.Show();
+            result.Shell.Activate();
+            await TestUiHost.LoadedAsync(result.root);
             await Drain();
             return result;
         }
         internal T ShellElement<T>(string name) where T : FrameworkElement =>
-            DesktopTestUi.WindowRoot(Shell).FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
+            root.FindName(name) as T ?? throw new InvalidOperationException("Missing shell element: " + name);
         internal T SettingsElement<T>(string name) where T : FrameworkElement =>
             Settings.FindName(name) as T ?? throw new InvalidOperationException("Missing settings element: " + name);
         internal T DialogElement<T>(string name) where T : FrameworkElement =>
@@ -461,7 +424,7 @@ public static class UserDataResetUiTests
         internal async Task OpenCache()
         {
             Click(ShellElement<Button>("SettingsButton"));
-            await Drain();
+            await Until(() => Descendants(ShellElement<Grid>("ContentDeck")).OfType<GeneralSettingsView>().Any(), "settings mounted");
             SettingsElement<StackPanel>("Areas").Children.OfType<RadioButton>()
                 .Single(tab => Equals(tab.Tag, "cache")).IsChecked = true;
             await Drain();
@@ -476,20 +439,24 @@ public static class UserDataResetUiTests
         public async ValueTask DisposeAsync()
         {
             Module.ReleaseNavigation.TrySetResult();
-            Force = () => Task.CompletedTask;
-            if (!Closed) await Shell.AbortAsync();
+            Shutdown = () => Task.CompletedTask;
+            if (!Closed) await Shell.CloseAfterReleaseAsync();
             await Drain();
         }
     }
 
     private sealed class Appearance : IDesktopAppearance
     {
-        public string ThemeColor => AppearanceColors.DefaultColor;
+        public string ThemeColor { get; private set; } = AppearanceColors.DefaultColor;
         public bool CanEdit => true;
         public string Status => "";
-        public event PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
+        public event PropertyChangedEventHandler? PropertyChanged;
         public Task LoadAsync() => Task.CompletedTask;
-        public Task SaveAsync(string color) => Task.CompletedTask;
+        public Task SaveAsync(string color)
+        {
+            ThemeColor = color; PropertyChanged?.Invoke(this, new(nameof(ThemeColor)));
+            return Task.CompletedTask;
+        }
     }
     private sealed class Preferences : IDesktopClosePreferences
     {
@@ -542,7 +509,6 @@ public static class UserDataResetUiTests
         public string CaptureNavigationLocation() => "home";
         public Task RestoreNavigationAsync(string location, CancellationToken token) => Task.CompletedTask;
         public Task PrepareShutdownAsync() => Task.CompletedTask;
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
         public Task AbortAsync() => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

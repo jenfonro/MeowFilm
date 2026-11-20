@@ -21,7 +21,7 @@ public static class MediaControlSettingsTests
         yield return new("Media control settings: invalid gestures and cross action duplicates are rejected", Validation);
         yield return new("Media control settings: recording errors and refresh are transient runtime state", RuntimeState);
         yield return new("Media control settings: preparation drains accepted writes and cancellation restores admission", Shutdown);
-        yield return new("Media control settings: shared preparation failure resumes settings before resource release", FailedPreparation);
+        yield return new("Media control settings: release failure never reopens settings and retains storage", FailedPreparation);
         yield return new("Media control settings: forced release drains settings before storage disposal", ForceRelease);
     }
 
@@ -222,9 +222,7 @@ public static class MediaControlSettingsTests
         }
         finally { store.Release.TrySetResult(); await save; }
         Check(!owner.Preferences.SystemMediaEnabled && owner.Preferences.GlobalEnabled && store.Writes == 1);
-        await owner.CancelShutdownPreparationAsync();
-        Check(owner.CanEdit && !owner.IsRecording);
-        await owner.DisposeAsync(); await owner.CancelShutdownPreparationAsync(); await owner.LoadAsync();
+        await owner.DisposeAsync(); await owner.LoadAsync();
         Check(!owner.CanEdit && !owner.IsAvailable, "cancellation cannot resurrect a disposed settings owner");
     }
     private static async Task FailedPreparation()
@@ -232,16 +230,14 @@ public static class MediaControlSettingsTests
         var store = new AppSettingsTestDatabase();
         var owner = new AppMediaControlSettings(store);
         await owner.LoadAsync();
-        bool released = false;
-        var lifecycle = new AppShutdown([new FailingParticipant()], [new(() => { released = true; return ValueTask.CompletedTask; })],
+        var failure = new FailingParticipant(); bool released = false;
+        var lifecycle = new AppShutdown([failure], [new(() => { released = true; return ValueTask.CompletedTask; })],
             sharedParticipants: [owner]);
-        try { await lifecycle.CloseAsync(); throw new Exception("failed preparation was accepted"); }
-        catch (InvalidOperationException error) when (error.Message == "SHUTDOWN_FAILED") { }
-        Check(owner.CanEdit && !released);
-        await lifecycle.CancelShutdownPreparationAsync();
-        await owner.SaveAsync(owner.Preferences with { GlobalEnabled = false });
-        Check(!owner.Preferences.GlobalEnabled);
-        await lifecycle.ForceReleaseAsync();
+        try { await lifecycle.CloseAsync(); throw new Exception("Expected release failure"); }
+        catch (InvalidOperationException error) when (error.Message == "fixture-release-failure") { }
+        Check(!owner.CanEdit && !owner.IsAvailable && !released);
+        failure.Fail = false;
+        await lifecycle.CloseAsync();
         Check(released && !owner.IsAvailable);
     }
     private static async Task ForceRelease()
@@ -254,13 +250,13 @@ public static class MediaControlSettingsTests
         try
         {
             await store.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            var release = lifecycle.ForceReleaseAsync();
+            var release = lifecycle.CloseAsync();
             Check(!release.IsCompleted && !owner.IsAvailable && !store.Disposed);
             store.Release.TrySetResult();
             await Task.WhenAll(save, release).WaitAsync(TimeSpan.FromSeconds(5));
             Check(store.Disposed && !owner.Preferences.GlobalEnabled && lifecycle.IsReleased);
         }
-        finally { store.Release.TrySetResult(); await save; await lifecycle.ForceReleaseAsync(); }
+        finally { store.Release.TrySetResult(); await save; await lifecycle.CloseAsync(); }
     }
     internal static MediaControlPreferences Replace(MediaControlPreferences value, MediaShortcutAction action,
         MediaShortcutGesture? gesture, bool global) => value with
@@ -281,11 +277,9 @@ public static class MediaControlSettingsTests
         public override Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) =>
             FailReads ? throw new DocumentStoreException(DocumentStoreError.Storage) : base.ReadAsync(read, token);
     }
-    private sealed class FailingParticipant : IDesktopShutdownParticipant
+    private sealed class FailingParticipant : IAsyncDisposable
     {
-        public Task PrepareShutdownAsync() => Task.FromException(new InvalidOperationException("synthetic preparation failure"));
-        public Task CancelShutdownPreparationAsync() => Task.CompletedTask;
-        public Task AbortAsync() => Task.CompletedTask;
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        internal bool Fail = true;
+        public ValueTask DisposeAsync() => Fail ? ValueTask.FromException(new InvalidOperationException("fixture-release-failure")) : ValueTask.CompletedTask;
     }
 }

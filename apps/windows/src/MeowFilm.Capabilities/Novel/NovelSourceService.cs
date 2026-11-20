@@ -35,7 +35,6 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
     public IReadOnlyList<NovelSource> Sources => sources;
     public event EventHandler? Changed;
     public event EventHandler<string>? ApplyFailed;
-    internal event EventHandler? Resumed;
     public Func<JsonElement, CancellationToken, Task<object?>>? InteractAsync { get; set; }
     private async Task<JsonElement> CallAsync(string operation, object payload, CancellationToken token, bool acceptReceipt = false)
     {
@@ -440,9 +439,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
     public async Task PrepareShutdownAsync()
     {
         foreach (var id in leases.Keys.ToArray()) Retire(id);
-        await visuals.PauseAsync();
-        await applications.PauseAsync();
-        await work.PauseAsync();
+        await Task.WhenAll(visuals.PauseAsync(), applications.PauseAsync(), work.PauseAsync());
         try { await Task.WhenAll(imageReferences.ToArray().Select(ReleaseImageAsync)); }
         finally
         {
@@ -451,5 +448,4 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
             finally { pumpCancellation?.Dispose(); pumpCancellation = null; webPump = null; }
         }
     }
-    public void Resume() { work.Resume(); visuals.Resume(); applications.Resume(); appliedRevision = 0; Resumed?.Invoke(this, EventArgs.Empty); }
 }

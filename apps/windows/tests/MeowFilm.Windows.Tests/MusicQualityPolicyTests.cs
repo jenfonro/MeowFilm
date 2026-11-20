@@ -76,7 +76,7 @@ public static class MusicQualityPolicyTests
         Check(read.GetProperty("settings").GetRawText() == before.GetProperty("settings").GetRawText() &&
             read.GetProperty("signature").GetString() == before.GetProperty("signature").GetString(),
             "saving lyrics must leave the complete quality policy and signature unchanged");
-        Check(read.GetProperty("onlineSettings").GetProperty("schema").GetInt32() == 3 &&
+        Check(read.GetProperty("onlineSettings").GetProperty("schema").GetInt32() == 1 &&
             read.GetProperty("onlineSettings").GetProperty("revision").GetInt64() == 1);
         Check(MusicTestStores.For(f.Store).Writes == 1 && f.Runtime.Calls.Count == 0);
     }
@@ -177,7 +177,7 @@ public static class MusicQualityPolicyTests
         MusicTestStores.For(f.Store).Release?.TrySetResult();
         Check((await saving).GetProperty("ok").GetBoolean());
         await close; Check(MusicTestStores.For(f.Store).Writes == 1 && !f.Store.Disposed);
-        await f.App.CancelShutdownPreparationAsync();
+
     }
     private static async Task Intersection()
     {
@@ -270,7 +270,7 @@ public static class MusicQualityPolicyTests
         await f.Runtime.Cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
         var close = f.App.PrepareShutdownAsync(); Check(!request.IsCompleted && !close.IsCompleted);
         f.Runtime.Release.TrySetResult(); QualityFixture.Code(await request, "CANCELLED");
-        await close; Check(!f.Store.Disposed); await f.App.CancelShutdownPreparationAsync();
+        await close; Check(!f.Store.Disposed);
     }
     private static async Task InternalDeadline()
     {

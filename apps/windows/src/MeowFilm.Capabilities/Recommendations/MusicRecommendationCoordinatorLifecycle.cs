@@ -223,19 +223,6 @@ public sealed partial class MusicRecommendationCoordinator
         await DrainWorkAsync().ConfigureAwait(false);
         lock (gate) Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
     }
-    public void Resume()
-    {
-        lock (gate)
-        {
-            // Dispose admission is irreversible. A completed prior preparation
-            // must not let Resume reopen the owner while disposal is draining.
-            Require(!closed && disposal is null && abortion is null, "CLOSED");
-            if (!stopping) return;
-            Require(preparation is { IsCompletedSuccessfully: true } && work.Count == 0, "NOT_DRAINED");
-            Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
-            session = null; preparation = null; stopping = false; notice = null; PublishLocked();
-        }
-    }
     public ValueTask DisposeAsync()
         => new(FinalizeAsync(discardUnsaved: false));
 

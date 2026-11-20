@@ -78,19 +78,7 @@ public static partial class MusicUiTests
             Equal("CLOSED", sealedReply.GetProperty("code").GetString());
             Equal(0, runtime.Requests.Count);
         });
-        yield return Case("assembled cancelled shutdown restores the same local library and sync routes", async () =>
-        {
-            await using var store = ServiceStore();
-            await using var runtime = new MusicPlatformRuntimeFixture();
-            await using var app = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
-            var created = await ServiceCall(app, "music.library.create", new { name = "接续歌单" });
-            string id = created.GetProperty("collection").GetProperty("id").GetString()!;
-            await app.PrepareShutdownAsync(); await app.CancelShutdownPreparationAsync();
-            await ServiceCall(app, "music.librarySync.get");
-            var library = await ServiceCall(app, "music.library.detail", new { id, offset = 0, limit = 20 });
-            Equal(id, library.GetProperty("collection").GetProperty("id").GetString());
-            Equal(0, runtime.Requests.Count);
-        });
+
         yield return Case("assembled sync refuses enabling without account while preserving native data", async () =>
         {
             await using var store = ServiceStore();

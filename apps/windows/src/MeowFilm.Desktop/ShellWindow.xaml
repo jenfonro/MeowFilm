@@ -128,16 +128,6 @@
        <Button Content="重试" Click="OnRetryClick" AutomationProperties.Name="重试" Visibility="{Binding CanRetry, Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
        <Button Style="{StaticResource MeowFilm.IconButton}" Content="&#xE711;" Click="OnDismissStatusClick" AutomationProperties.Name="关闭状态" Visibility="{Binding CanDismiss, Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
       </StackPanel>
-      <ContentControl x:Name="ShutdownFocusTarget" Grid.Row="1" Grid.ColumnSpan="2" IsTabStop="True" HorizontalContentAlignment="Stretch" TabFocusNavigation="Cycle" AutomationProperties.Name="退出确认" Visibility="{Binding IsShutdownConfirmationOpen, Converter={StaticResource MeowFilm.BoolToVisibility}}">
-      <StackPanel x:Name="ShutdownConfirmation">
-       <TextBlock Text="保存或清理尚未确认完成。强制退出可能丢失未保存的更改，仍要退出吗？" TextWrapping="Wrap"/>
-       <local:WrapPanel Margin="0,12,0,0">
-        <Button x:Name="WaitForShutdownButton" Content="继续等待" Click="OnWaitForShutdownClick" IsEnabled="{Binding CanWaitForShutdown}" Margin="0,0,8,0" AutomationProperties.Name="继续等待关闭"/>
-        <Button x:Name="ForceExitButton" Content="强制退出" Click="OnForceExitClick" IsEnabled="{Binding CanForceExit}" AutomationProperties.Name="强制退出"/>
-        <Button x:Name="CancelShutdownButton" Content="取消关闭" Click="OnCancelShutdownClick" Margin="8,0,0,0" IsEnabled="{Binding CanCancelShutdown}" AutomationProperties.Name="取消关闭"/>
-       </local:WrapPanel>
-      </StackPanel>
-      </ContentControl>
      </Grid>
     </Border>
     <local:NoticeStack x:Name="Notices"/>

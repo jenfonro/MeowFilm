@@ -172,7 +172,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         document.queue["currentId"] = original.last?["id"] ?? .null
         document.queue["serial"] = .n(10_000)
         document.queue["similar"] = .obj([
-            ("schema", .n(2)), ("seedSongId", seed["songId"]), ("seedTitle", .string("")), ("seedEntryId", original[0]["id"]), ("returnQueue", returning),
+            ("schema", .n(1)), ("seedSongId", seed["songId"]), ("seedTitle", .string("")), ("seedEntryId", original[0]["id"]), ("returnQueue", returning),
             ("sourceIds", .strings(["100"])), ("fromHome", .bool(false)), ("provider", .string("queue-recommendations")),
             ("providerContext", .null), ("offset", .n(15)), ("exhausted", .bool(false)), ("continue", .bool(true)), ("scope", .string("synthetic-scope")),
             ("status", .string("ready")),
@@ -376,7 +376,7 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
         var document = try MusicDocument(fixtureDocument(), runID: "fixture")
         let entries = document.queue["entries"].array
         let current = MJ.obj([
-            ("schema", .n(2)), ("seedSongId", entries[0]["songId"]), ("seedTitle", .string("")), ("seedEntryId", entries[0]["id"]),
+            ("schema", .n(1)), ("seedSongId", entries[0]["songId"]), ("seedTitle", .string("")), ("seedEntryId", entries[0]["id"]),
             ("returnQueue", MusicNativeSimilarData.queueSnapshot(document.queue)),
             ("sourceIds", .strings(["100"])), ("fromHome", .bool(false)), ("provider", .string("heartbeat")),
             ("providerContext", .obj([("pid", .string("900")), ("sid", .string("100")), ("count", .n(15))])), ("offset", .n(15)), ("exhausted", .bool(false)), ("continue", .bool(true)), ("scope", .string("synthetic-scope")),
@@ -384,9 +384,10 @@ final class MusicNativeSimilarModeStateTests: XCTestCase {
                 MusicNativeSimilarData.batch("batch", basedOn: (try document.fixtureSong(entries[0]["songId"].string)), provider: .heartbeat, rows: entries)
             ])), ("attempted", .array([]))
         ])
-        for invalid in ["provider", "sourceIds", "batchProvider", "returnSerial", "returnCurrent"] {
+        for invalid in ["schema", "provider", "sourceIds", "batchProvider", "returnSerial", "returnCurrent"] {
             var saved = current
             switch invalid {
+            case "schema": saved["schema"] = .n(2)
             case "provider", "sourceIds": saved.remove(invalid)
             case "batchProvider":
                 var batches = saved["batches"].array; batches[0].remove("provider")

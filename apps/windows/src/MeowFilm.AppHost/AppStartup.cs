@@ -26,25 +26,11 @@ public sealed class AppStartup : IDisposable
         public Attempt() => Token = Source.Token;
     }
 
-    private static readonly TimeSpan MaximumStopTimeout = TimeSpan.FromSeconds(25);
     private static readonly Task<StartupOutcome> NotStarted = Task.FromResult(StartupOutcome.Cancelled);
     private readonly object gate = new();
-    private readonly TimeProvider timeProvider;
-    private readonly TimeSpan stopTimeout;
-    private readonly TaskCompletionSource cancellationObserved = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private Attempt? current;
     private StartupOutcome? outcome;
-    private Task<bool>? stopTask;
-    private bool stopped;
     private bool disposed;
-
-    public AppStartup(TimeProvider? timeProvider = null, TimeSpan? stopTimeout = null)
-    {
-        this.timeProvider = timeProvider ?? TimeProvider.System;
-        this.stopTimeout = stopTimeout ?? MaximumStopTimeout;
-        if (this.stopTimeout <= TimeSpan.Zero || this.stopTimeout > MaximumStopTimeout)
-            throw new ArgumentOutOfRangeException(nameof(stopTimeout));
-    }
 
     /// <summary>
     /// Repeated calls share the accepted attempt's Task. A new attempt is allowed only after
@@ -60,7 +46,7 @@ public sealed class AppStartup : IDisposable
         Attempt? previous;
         lock (gate)
         {
-            if (stopped || disposed) return current?.Completion.Task ?? NotStarted;
+            if (disposed) return current?.Completion.Task ?? NotStarted;
             if (current is not null &&
                 (!current.Completion.Task.IsCompleted || outcome != StartupOutcome.RetryableFailure))
                 return current.Completion.Task;
@@ -112,65 +98,10 @@ public sealed class AppStartup : IDisposable
         lock (gate)
         {
             // Closing wins over a late success/retry request, but never hides cleanup failure.
-            if (stopped && result != StartupOutcome.CleanupFailed) result = StartupOutcome.Cancelled;
+            if (disposed && result != StartupOutcome.CleanupFailed) result = StartupOutcome.Cancelled;
             if (ReferenceEquals(current, attempt)) outcome = result;
         }
         attempt.Completion.TrySetResult(result);
-    }
-
-    /// <summary>
-    /// Cancels first, then observes the accepted startup attempt settling within one deadline.
-    /// Repeated calls return the same Task and cannot extend that deadline. True means settled,
-    /// not saved/cleaned up; false is permanently inconclusive even if the task finishes later.
-    /// The startup cancellation token is deliberately not used to cancel this observation wait.
-    /// </summary>
-    public Task<bool> StopAsync()
-    {
-        Attempt? attempt;
-        TaskCompletionSource<bool> completion;
-        lock (gate)
-        {
-            if (stopTask is not null) return stopTask;
-            stopped = true;
-            attempt = current;
-            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            stopTask = completion.Task;
-        }
-        // CancelAsync marks the token synchronously, but executes arbitrary registrations
-        // asynchronously. A throwing/hung registration must not consume or escape this wait.
-        _ = CancelAsync(attempt);
-        _ = WaitForStopAsync(attempt, completion);
-        return completion.Task;
-    }
-
-    private async Task CancelAsync(Attempt? attempt)
-    {
-        try
-        {
-            if (attempt is not null)
-            {
-                var raw = attempt.Source.CancelAsync();
-                Observe(raw);
-                await raw.ConfigureAwait(false);
-            }
-        }
-        catch (Exception) { /* Registrations are caller-owned; observe faults without claiming cleanup. */ }
-        finally { cancellationObserved.TrySetResult(); }
-    }
-
-    private async Task WaitForStopAsync(Attempt? attempt, TaskCompletionSource<bool> completion)
-    {
-        try
-        {
-            if (attempt is not null)
-                await attempt.Completion.Task.WaitAsync(stopTimeout, timeProvider).ConfigureAwait(false);
-            completion.TrySetResult(true);
-        }
-        catch (Exception)
-        {
-            // Timeout (or a failing time provider) cannot certify that startup settled.
-            completion.TrySetResult(false);
-        }
     }
 
     /// <summary>
@@ -179,21 +110,21 @@ public sealed class AppStartup : IDisposable
     /// </summary>
     public void Dispose()
     {
+        Attempt? attempt;
         lock (gate)
         {
             if (disposed) return;
             disposed = true;
+            attempt = current;
         }
-        _ = StopAsync();
-        Attempt? attempt;
-        lock (gate) attempt = current;
-        if (attempt is not null) _ = ReleaseTokenAsync(attempt);
+        if (attempt is not null) _ = ReleaseTokenAsync(attempt, attempt.Source.CancelAsync());
     }
 
-    private async Task ReleaseTokenAsync(Attempt attempt)
+    private static async Task ReleaseTokenAsync(Attempt attempt, Task cancellation)
     {
+        try { await cancellation.ConfigureAwait(false); }
+        catch { /* A cancellation callback failure is not a resource-release receipt. */ }
         await attempt.Completion.Task.ConfigureAwait(false);
-        await cancellationObserved.Task.ConfigureAwait(false);
         attempt.Source.Dispose();
     }
 

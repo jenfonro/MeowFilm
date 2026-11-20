@@ -15,7 +15,7 @@
 
 ```json
 {
-  "schema": 3,
+  "schema": 1,
   "revision": 0,
   "songs": { "order": ["wy", "tx", "kw", "kg", "mg"], "enabled": ["wy", "tx", "kw", "kg", "mg"],
              "pages": 1, "concurrency": 1, "cacheMinutes": 60 },
@@ -177,7 +177,7 @@ error
 
 ## 搜索历史
 
-`native-search-history` 的当前 schema 为 2，完整保存去重关键词的 `text` 和 `kind`，不按数量截断。页面可以记录搜索及执行一次带确认的“清空搜索历史”。
+`native-search-history` 的当前 schema 为 1，完整保存去重关键词的 `text` 和 `kind`，不按数量截断。页面可以记录搜索及执行一次带确认的“清空搜索历史”。
 
 搜索历史与活跃搜索会话是不同职责：读取或清空历史不得启动平台请求，取消搜索也不得隐式删除历史。
 

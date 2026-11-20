@@ -403,13 +403,16 @@ public static class MusicRecommendationLibraryTests
         var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
         long version = N(await Queue(owner), "version");
         for (int i = 0; i < 8; i++) await Command(owner, "capture", new { nonce = Nonce(), expectedVersion = version });
-        await owner.PrepareShutdownAsync(); await owner.CancelShutdownPreparationAsync();
-        await Command(owner, "capture", new { nonce = Nonce(), expectedVersion = version });
+        await owner.DisposeAsync();
+        await Error(owner, "capture", new { nonce = Nonce(), expectedVersion = version }, "CLOSED");
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
+        version = N(await Queue(reopened), "version");
+        await Command(reopened, "capture", new { nonce = Nonce(), expectedVersion = version });
         store.Failure = 1; string nonce = Nonce();
-        await Error(owner, "enter", new { nonce, expectedVersion = version, songs = new[] { Song("1") } }, "COMMIT_UNKNOWN");
-        try { await owner.PrepareShutdownAsync(); throw new InvalidOperationException("pending close accepted"); }
+        await Error(reopened, "enter", new { nonce, expectedVersion = version, songs = new[] { Song("1") } }, "COMMIT_UNKNOWN");
+        try { await reopened.PrepareShutdownAsync(); throw new InvalidOperationException("pending close accepted"); }
         catch (MusicLibraryException e) { Check(e.Code == "COMMIT_UNKNOWN"); }
-        await Command(owner, "reconcile", new { nonce });
+        await Command(reopened, "reconcile", new { nonce });
     }
     private static async Task SQLiteReopen()
     {

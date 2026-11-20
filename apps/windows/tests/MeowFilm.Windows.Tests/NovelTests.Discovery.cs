@@ -260,9 +260,8 @@ public static partial class NovelTests
             catch (InvalidOperationException error) when (error.Message == "SHUTTING_DOWN") { }
             Check(!module.LoadingDiscovery && module.DiscoveryState == state && runtime.Calls.Count == calls,
                 "Rejected discovery left a phantom loading state.");
-            await module.CancelShutdownPreparationAsync();
-            await module.LoadDiscoveryAsync(module.ExploreSource, null, true);
-            Check(module.DiscoveryState == NovelDiscoveryState.Ready && !module.LoadingDiscovery);
+            await module.DisposeAsync();
+            Check(!module.LoadingDiscovery && runtime.Calls.Count == calls);
         }
         finally { stale.TrySetResult(Json(new { books = Array.Empty<object>() })); }
     }
@@ -643,8 +642,8 @@ public static partial class NovelTests
             Check(Find<TextBlock>(grid).Count(t => t.Text == "暂无封面") == 6 &&
                 Find<Image>(grid).All(image => image.Source is null),
                 "Missing source covers need a truthful, proportioned empty state rather than invented artwork.");
-            Check(Find<TextBlock>(module.View).Any(t => t.Text == "暂无阅读历史") &&
-                !Find<Button>(module.View).Any(b => AutomationProperties.GetName(b) == "接着读"),
+            Check(Find<TextBlock>(module.View).Any(t => t.Text == "暂无阅读历史" && DesktopVisual.IsVisible(t)) &&
+                !Find<Button>(module.View).Any(b => AutomationProperties.GetName(b) == "接着读" && DesktopVisual.IsVisible(b)),
                 "The home invented a continuing book without local reading history.");
             Check(Find<TextBlock>(module.View).Any(t => t.Text.Contains("源作者")) &&
                 Find<TextBlock>(module.View).Any(t => t.Text.Contains("源题材")));

@@ -536,7 +536,7 @@ public static partial class DesktopTests
                 await pending.Started.Task;
                 if (boundary == "settings") { Click(f.Element<Button>("SettingsButton")); await DrainAsync(); }
                 else if (boundary == "close") { f.Shell.Close(); await f.WaitClosedAsync(); }
-                else { await f.Shell.AbortAsync(); await f.WaitClosedAsync(); }
+                else { await f.Shell.CloseAfterReleaseAsync(); await f.WaitClosedAsync(); }
                 True(pending.Token.IsCancellationRequested, boundary + " cancels header work");
                 Equal(0, page.Subscribers, boundary + " removes header subscriptions");
                 True(ParentOf(slot) is null, boundary + " releases the slot");

@@ -426,15 +426,6 @@ public sealed class FilmSearchService : IAsyncDisposable
         await Task.WhenAll(active.Select(session => session.Observing));
         await Task.WhenAll(active.Select(session => session.Releasing ?? Task.CompletedTask));
     }
-    public void Resume()
-    {
-        dispatcher.VerifyAccess();
-        if (closed) throw new InvalidOperationException("CLOSED");
-        if (preparation is null) return;
-        if (!preparation.IsCompletedSuccessfully) throw new InvalidOperationException("SHUTDOWN_NOT_DRAINED");
-        preparation = null; stopping = false;
-        if (Current is { } session) Start(session.Query);
-    }
     public ValueTask DisposeAsync()
     {
         dispatcher.VerifyAccess();

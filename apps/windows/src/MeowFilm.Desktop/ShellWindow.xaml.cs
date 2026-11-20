@@ -18,7 +18,6 @@ namespace MeowFilm.Desktop;
 public sealed partial class ShellWindow : DesktopWindow
 {
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan ShutdownTimeout = TimeSpan.FromSeconds(5);
     private const int HistoryLimit = 64;
 
     private readonly ShellState _state = new();
@@ -44,7 +43,6 @@ public sealed partial class ShellWindow : DesktopWindow
     private bool _isClosing;
     private bool _allowClose;
     private bool _isClosed;
-    private bool _shutdownWaitInProgress;
     private bool _closeQueued;
     private Task? _shutdownTask;
     private int _shutdownStarted;
@@ -62,17 +60,17 @@ public sealed partial class ShellWindow : DesktopWindow
     // Deterministic code tests can advance the existing production deadlines without sleeping.
     // No public timeout override or App configuration is introduced.
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, Func<Task> shutdown, TimeProvider timeProvider)
-        : this(modules, [], shutdown, null, null, timeProvider) { }
+        : this(modules, [], shutdown, timeProvider) { }
 
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
-        Func<Task> shutdown, Func<Task> forceShutdown, Func<Task>? cancelShutdown = null,
+        Func<Task> shutdown,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
         IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
-        : this(modules, pages, shutdown, forceShutdown, cancelShutdown, TimeProvider.System, appearance,
+        : this(modules, pages, shutdown, TimeProvider.System, appearance,
             closePreferences, mediaControls: mediaControls, resetUserData: resetUserData) { }
 
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, IReadOnlyList<IDesktopPage> pages,
-        Func<Task> shutdown, Func<Task>? forceShutdown, Func<Task>? cancelShutdown, TimeProvider timeProvider,
+        Func<Task> shutdown, TimeProvider timeProvider,
         IDesktopAppearance? appearance = null, IDesktopClosePreferences? closePreferences = null,
         Func<DesktopWindow, Action, Action, Action, IDesktopTrayIcon>? trayIconFactory = null,
         IDesktopMediaControlSettings? mediaControls = null, Func<Task>? resetUserData = null)
@@ -94,8 +92,6 @@ public sealed partial class ShellWindow : DesktopWindow
         if (pages.Any(page => page is null || string.IsNullOrWhiteSpace(page.Id) || !ids.Add(page.Id)))
             throw new ArgumentException("Pages must have distinct, non-empty identities.", nameof(pages));
         _pages = pages.Select(page => new PageSession(page)).ToArray();
-        _forceShutdown = forceShutdown;
-        _cancelShutdown = cancelShutdown;
         _shutdown = shutdown;
         _resetUserData = resetUserData;
         MediaControls = mediaControls;
@@ -163,14 +159,11 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly AccessibilitySettings _accessibility = new();
     private readonly UISettings _uiSettings = new();
 
-    /// <summary>
-    /// Completes after the initial shutdown wait succeeds, fails, or reaches five seconds.
-    /// Completion is not permission to exit: on failure/timeout the shell requires an explicit decision.
-    /// </summary>
+    /// <summary>The owner's actual shutdown result; window closure never waits for it.</summary>
     public Task ShutdownCompletion => _shutdownCompletion.Task;
     public IDesktopMediaControlSettings? MediaControls { get; }
 
-    /// <summary>True only after an active wait observes actual successful cleanup, never merely a timeout or forced exit.</summary>
+    /// <summary>Window closure does not imply that owner release succeeded.</summary>
     public bool ShutdownSucceeded { get; private set; }
     public bool CleanupCompleted { get; private set; }
 
@@ -539,7 +532,7 @@ public sealed partial class ShellWindow : DesktopWindow
             _moduleChanges.Clear();
             _moduleChangesQueued = false;
         }
-        // A skipped presentation must still release its batch admission so a cancelled close can resume updates.
+        // Retire queued notifications even when closing suppresses presentation.
         if (_isClosing) return;
         var refreshPresentation = false;
         var refreshPlayer = false;
@@ -1028,7 +1021,7 @@ public sealed partial class ShellWindow : DesktopWindow
     private void UpdateCaption() => AppWindow.TitleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
     private void UpdateStatusPresentation()
     {
-        StatusPanel.Visibility = (_state.HasStatus && !_state.IsBusy) || _state.IsShutdownConfirmationOpen
+        StatusPanel.Visibility = _state.HasStatus && !_state.IsBusy
             ? Visibility.Visible : Visibility.Collapsed;
         StatusPanel.Background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
             _state.IsError ? "MeowFilm.Brush.ErrorSurface" : "MeowFilm.Brush.Surface");
@@ -1062,18 +1055,17 @@ public sealed partial class ShellWindow : DesktopWindow
         _state.IsInteractive = false;
         _retryPlan = null;
         RetireHeaderPresentation();
-        SetStatus("正在关闭…");
         CancelActive();
         CancelPageActivation();
         foreach (var request in _requests.ToArray()) request.Cancel();
         _ = EnsureShutdownAsync();
+        _ = RequestFinalCloseAsync();
     }
 
     private async Task RequestFinalCloseAsync()
     {
         if (_closeQueued || _isClosed || Dispatcher.IsClosing) return;
         _closeQueued = true;
-        _state.SetShutdownConfirmation(_state.IsShutdownConfirmationOpen);
         try
         {
             // Even a synchronously completed callback must not re-enter Close from inside OnClosing.
@@ -1085,7 +1077,6 @@ public sealed partial class ShellWindow : DesktopWindow
             {
                 // A caller can still veto the final Closing event; never restart disposal.
                 _allowClose = false;
-                _state.SetShutdownConfirmation(true, canWait: true, canForce: _forceShutdown is not null);
             }
         }
         catch (OperationCanceledException) { /* Dispatcher teardown can cancel the deferred close. */ }
@@ -1103,79 +1094,35 @@ public sealed partial class ShellWindow : DesktopWindow
                 // no in-process deadline can safely preempt synchronous dispatcher blocking.
                 _shutdownTask = _shutdown() ?? Task.FromException(new InvalidOperationException());
             }
-            catch (Exception) { _shutdownTask = Task.FromException(new InvalidOperationException()); }
+            catch (Exception error) { _shutdownTask = Task.FromException(error); }
             _ = ShellRequest.ObserveAsync(_shutdownTask);
-            _ = CompleteShutdownAsync(initialAttempt: true);
+            _ = CompleteShutdownAsync();
         }
         return _shutdownCompletion.Task;
     }
 
-    private async Task CompleteShutdownAsync(bool initialAttempt)
+    private async Task CompleteShutdownAsync()
     {
-        if (_shutdownWaitInProgress || _shutdownTask is null) return;
-        _shutdownWaitInProgress = true;
-        var succeeded = false;
-        var timedOut = false;
         try
         {
-            // Keep the bounded completion signal independent of dispatcher teardown on forced Closed.
-            await _shutdownTask.WaitAsync(ShutdownTimeout, _timeProvider).ConfigureAwait(false);
-            succeeded = true;
+            await _shutdownTask!;
+            ShutdownSucceeded = CleanupCompleted = true;
         }
-        catch (TimeoutException)
-        {
-            // Distinguish the wait deadline from a callback that itself throws TimeoutException.
-            // A successful completion racing the deadline still requires an explicit new wait.
-            timedOut = !_shutdownTask.IsFaulted && !_shutdownTask.IsCanceled;
-        }
-        catch (Exception) { /* A fault/cancellation is not proof of saved data or released resources. */ }
-        finally
-        {
-            if (initialAttempt) _shutdownCompletion.TrySetResult();
-        }
-        if (Dispatcher.IsClosing) return;
-        try
-        {
-            if (Dispatcher.HasThreadAccess) ApplyShutdownOutcome(succeeded, timedOut);
-            else await Dispatcher.EnqueueAsync(() => ApplyShutdownOutcome(succeeded, timedOut),
-                DispatcherQueuePriority.Normal).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) { /* Dispatcher teardown can reject the UI-only result. */ }
-        catch (InvalidOperationException) { /* An externally forced shutdown already owns exit. */ }
+        catch { /* The App owns shutdown diagnostics; a closed window is not a release receipt. */ }
+        finally { _shutdownCompletion.TrySetResult(); }
     }
 
-    private void ApplyShutdownOutcome(bool succeeded, bool timedOut)
+    /// <summary>Replacement closes the old shell only after its App generation is released.</summary>
+    public async Task CloseAfterReleaseAsync()
     {
-        _shutdownWaitInProgress = false;
-        // Forced exit fences every late result, including a successful callback after the decision.
-        if (_isClosed || _allowClose || _closeQueued || _forceStarted || _sessionEnding) return;
-        if (succeeded)
-        {
-            ShutdownSucceeded = true;
-            CleanupCompleted = true;
-            _ = RequestFinalCloseAsync();
-            return;
-        }
-        SetStatus(timedOut ? "关闭超时" : "关闭失败", error: true);
-        _state.SetShutdownConfirmation(true, canWait: timedOut, canForce: _forceShutdown is not null,
-            canCancel: !timedOut && _cancelShutdown is not null && !_forceStarted);
-        if (timedOut) WaitForShutdownButton.Focus(FocusState.Programmatic);
-        else ShutdownFocusTarget.Focus(FocusState.Programmatic); // Enter must never implicitly choose destructive exit.
-    }
-
-    private void OnWaitForShutdownClick(object sender, RoutedEventArgs e)
-    {
-        if (!_isClosing || _isClosed || _closeQueued || !_state.CanWaitForShutdown || _shutdownWaitInProgress) return;
-        _state.SetShutdownConfirmation(true, canForce: _forceShutdown is not null);
-        SetStatus("正在等待关闭…", busy: true);
-        // A new bounded wait on the same task, not a second shutdown callback. No automatic retries.
-        _ = CompleteShutdownAsync(initialAttempt: false);
-    }
-
-    private void OnForceExitClick(object sender, RoutedEventArgs e)
-    {
-        if (!_isClosing || _isClosed || _closeQueued || !_state.CanForceExit || _forceShutdown is null) return;
-        _ = ForceShutdownAsync();
+        DismissCloseChoice(restoreFocus: false);
+        _isClosing = true;
+        _state.IsInteractive = false;
+        RetireHeaderPresentation();
+        CancelActive(); CancelPageActivation();
+        await EnsureShutdownAsync();
+        await _shutdownTask!;
+        await RequestFinalCloseAsync();
     }
 
     protected override void OnClosed(EventArgs e)

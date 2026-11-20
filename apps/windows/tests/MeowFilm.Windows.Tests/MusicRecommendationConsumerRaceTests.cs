@@ -454,8 +454,7 @@ public static partial class MusicUiTests
             await DrainSelections();
         }
         public override Task PrepareShutdownAsync(CancellationToken ct = default) => library.PrepareShutdownAsync(ct);
-        public override Task CancelShutdownPreparationAsync(CancellationToken ct = default) =>
-            library.CancelShutdownPreparationAsync(ct);
+
         public override async ValueTask DisposeAsync()
         {
             if (closed) return;
@@ -472,7 +471,7 @@ public static partial class MusicUiTests
             // Keep lyrics disabled without adding a library write or replacing
             // the real owner's quality policy signature.
             result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 3, revision = 0, lyrics = false });
+                schema = 1, revision = 0, lyrics = false });
             return JsonSerializer.SerializeToElement(result);
         }
         private static JsonElement ScriptSource() => JsonSerializer.SerializeToElement(new {

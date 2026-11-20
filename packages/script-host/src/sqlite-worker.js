@@ -154,7 +154,6 @@ try {
     if (JSON.stringify(db.prepare(structure).all()) !== JSON.stringify(expected.prepare(structure).all()))
       fail('STORAGE_SCHEMA');
   } finally { expected.close(); }
-  if (db.prepare('PRAGMA foreign_key_check').get()) fail('STORAGE_CORRUPT');
   fileIdentity = lstatSync(path, {bigint:true});
   parentPort.postMessage({ id: 0, value: true });
 } catch (error) {
@@ -164,14 +163,20 @@ try {
 } finally { validating?.release(); initializing?.release(); }
 
 parentPort.on('message', async ({ id, input }) => {
+  if (input.kind === 'close') {
+    try { db.close(); parentPort.postMessage({ id, value: true }); }
+    catch (error) { parentPort.postMessage({ id, code: code(error) }); }
+    finally { parentPort.close(); }
+    return;
+  }
   let lease;
   try {
-    if (maintenanceFailure && input.kind !== 'close') fail(maintenanceFailure);
+    if (maintenanceFailure) fail(maintenanceFailure);
     if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
     for (const suffix of ['', '-wal', '-shm', '-journal']) safeFile(path + suffix, suffix === '');
     const current = lstatSync(path, {bigint:true});
     if (current.ino !== fileIdentity.ino || current.dev !== fileIdentity.dev) fail('UNSAFE_PATH');
-    lease = enter(['checkpoint','backup','close'].includes(input.kind));
+    lease = enter(['checkpoint','backup'].includes(input.kind));
     let result;
     if (input.kind === 'query') result = query(input.sql, input.params, input.maxRows);
     else if (input.kind === 'execute') result = transaction([input])[0];
@@ -199,18 +204,11 @@ parentPort.on('message', async ({ id, input }) => {
         throw error;
       }
     }
-    else if (input.kind === 'close') {
-      query('PRAGMA wal_checkpoint(PASSIVE)');
-      db.close(); result = true;
-      if (maintenanceFailure) fail(maintenanceFailure);
-    }
     else fail('INVALID_REQUEST');
     parentPort.postMessage({ id, value: result });
-    if (input.kind === 'close') parentPort.close();
     if (input.kind === 'execute' || input.kind === 'transaction') ++commits;
   } catch (error) {
     parentPort.postMessage({ id, code: code(error) });
-    if (input.kind === 'close') { try { db.close(); } catch {} parentPort.close(); }
   } finally {
     lease?.release();
     if (commits >= 64) { commits = 0; maintain(); }

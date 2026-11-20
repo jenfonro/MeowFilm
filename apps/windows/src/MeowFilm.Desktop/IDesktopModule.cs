@@ -9,7 +9,7 @@ namespace MeowFilm.Desktop;
 /// Views remain capability-owned; cancellation must fence late business/view mutations.
 /// The App shutdown callback owns disposal, not ShellWindow.
 /// </summary>
-public interface IDesktopModule : INotifyPropertyChanged, IDesktopShutdownParticipant
+public interface IDesktopModule : INotifyPropertyChanged, IAsyncDisposable
 {
     string Id { get; }
     string Title { get; }

@@ -97,16 +97,13 @@ music.catalog.playlist.commit action=play|next
 推荐队列提交若返回 `COMMIT_UNKNOWN`：
 
 - 唯一 library owner 保留未知 nonce 和 CAS fence。
-- 取消关闭可以恢复普通界面控制，但新的推荐读取和提交仍保持封闭。
+- 未知回执保持推荐读取和提交封闭，直到显式核对完成。
 - 只允许读取状态、取消和显式 `music.recommendations.reconcile`。
 - reconcile 只读取真实持久结果；不重放未知队列写入。
 - 全部未知项结算后才恢复推荐 admission。
 
-## 关闭
+## 进程内退役
 
-1. `MusicCapability` 先同步封闭播放器侧入口。
-2. `PrepareRecommendationsAsync` 取消并排空启动读取、推荐 flight、通知和媒体 callback。
-3. application 再排空其他业务，最后准备 library owner。
-4. 取消关闭创建新 recommendation generation，不恢复旧 session 或旧 callback。
-5. 普通 Prepare／Dispose 仍要求未知提交得到核对，未核对时报告 `COMMIT_UNKNOWN`。
-6. application 最终释放时先调用协调器 `AbortAsync`，等待实际启动读取、flight、写入、通知和媒体 callback 排空，再释放它借用的 catalog 和 library。显式丢弃不因已结束但回执未知的提交受阻，也不重放写入或把未知回执视为回滚；普通 application Dispose 仍保留准备阶段的保存失败。
+`MusicCapability` 同步封闭播放器入口，推荐 owner 取消并排空启动读取、flight、通知与媒体 callback。App 同时停止共享执行端；application 等待已准入事务完成后释放协调器及其借用关系。退役单向完成，不恢复旧推荐 generation。
+
+准备阶段仍报告 `COMMIT_UNKNOWN`；Dispose／Abort 只报告实际资源释放失败。已结束但回执未知的事务不阻止释放，也不重放写入或假定回滚。正常整进程退出不等待全部推荐任务，见[App生命周期](app-runtime.md)。

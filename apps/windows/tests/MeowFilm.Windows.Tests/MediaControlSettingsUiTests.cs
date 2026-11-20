@@ -467,9 +467,8 @@ public static class MediaControlSettingsUiTests
         finally { store.Release.TrySetResult(); }
         await Drain();
         Check(!owner.Preferences.GlobalEnabled && !owner.IsRecording);
-        await owner.CancelShutdownPreparationAsync();
         await mount.MountAsync(view);
-        Check(owner.CanEdit && !owner.IsRecording && ((ToggleSwitch)view.FindName("GlobalSwitch")).IsOn == false);
+        Check(!owner.CanEdit && !owner.IsRecording && ((ToggleSwitch)view.FindName("GlobalSwitch")).IsOn == false);
     }
 
     private static async Task ShellInjection()
@@ -479,7 +478,7 @@ public static class MediaControlSettingsUiTests
         await using var closePreferences = new AppClosePreferences(new AppSettingsTestDatabase());
         await owner.LoadAsync(); await appearance.LoadAsync(); await closePreferences.LoadAsync();
         var shell = new ShellWindow([new SettingsNavigationTests.Module("music", "音乐")], [],
-            () => Task.CompletedTask, () => Task.CompletedTask, appearance: appearance,
+            () => Task.CompletedTask, appearance: appearance,
             closePreferences: closePreferences, mediaControls: owner);
         try
         {
@@ -499,7 +498,7 @@ public static class MediaControlSettingsUiTests
             Check(page.Visibility == Visibility.Visible && windowPage.Visibility == Visibility.Collapsed &&
                 page.Content is MediaControlSettingsView restored && ReferenceEquals(restored.DataContext, owner));
         }
-        finally { await shell.AbortAsync(); }
+        finally { await shell.CloseAfterReleaseAsync(); }
     }
 
     private static async Task EditorSettled(AppMediaControlSettings owner, Button editor, string expected)

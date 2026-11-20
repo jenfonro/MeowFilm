@@ -56,8 +56,7 @@ public static partial class MusicUiTests
             True(await preferences.SaveAsync(WindowCloseBehavior.MinimizeToTray), "fixture tray preference");
             var lifecycle = new AppShutdown([f.Module], [], sharedParticipants: [preferences]);
             var tray = new FeedbackTrayProbe();
-            var shell = new ShellWindow([f.Module], [], lifecycle.CloseAsync, lifecycle.ForceReleaseAsync,
-                lifecycle.CancelShutdownPreparationAsync, TimeProvider.System, closePreferences: preferences,
+            var shell = new ShellWindow([f.Module], [], lifecycle.CloseAsync, TimeProvider.System, closePreferences: preferences,
                 trayIconFactory: (_, show, exit, unavailable) =>
                 {
                     tray.Exit = exit;
@@ -98,7 +97,7 @@ public static partial class MusicUiTests
             finally
             {
                 prepare?.Release();
-                if (!closed.Task.IsCompleted) await shell.AbortAsync();
+                if (!closed.Task.IsCompleted) await shell.CloseAfterReleaseAsync();
                 await closed.Task.WaitAsync(TimeSpan.FromSeconds(5));
             }
         });

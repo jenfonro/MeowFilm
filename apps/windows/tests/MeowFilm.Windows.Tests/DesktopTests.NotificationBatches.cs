@@ -115,29 +115,19 @@ public static partial class DesktopTests
             Equal(reads, view.Reads, "queued and late notifications cannot present after shutdown");
             Equal(0, module.PropertySubscribers, "shutdown retires the module subscription");
         });
-        yield return Case("cancelled shutdown releases a queued module batch and resumes live presentation", async () =>
+        yield return Case("failed owner release still retires queued and late module notifications", async () =>
         {
             var view = new BatchHeaderView(new("before"));
             var module = new ProbeModule("music", view: view);
-            var attempts = 0;
-            await using var f = new Fixture([module],
-                _ => ++attempts == 1 ? Task.FromException(new Exception("save")) : Task.CompletedTask,
-                cancel: _ => Task.CompletedTask);
-            await f.LoadAsync();
-            module.Notify(nameof(IDesktopModule.Title));
-            f.Shell.Close();
-            await UntilAsync(() => f.Status == "关闭失败", "shutdown failed");
-            await DrainAsync();
-            Click(f.Element<Button>("CancelShutdownButton"));
-            await UntilAsync(() => f.Status == "" && f.Search.IsEnabled, "shutdown cancellation resumed the UI");
-            await DrainAsync();
+            await using var f = new Fixture([module], _ => Task.FromException(new Exception("release")));
+            await f.LoadAsync(); module.Notify(nameof(IDesktopModule.Title));
+            f.Shell.Close(); await f.WaitClosedAsync();
             var reads = view.Reads;
             view.Contribution = new("after");
             module.Notify(nameof(IDesktopModule.Title));
             await DrainAsync();
-            Equal(reads + 1, view.Reads, "discarding a closing batch cannot strand the next live batch");
-            Equal("meowfilm · after", f.Shell.Title, "the resumed shell presents the latest contribution");
-            f.Shell.Close(); await f.WaitClosedAsync();
+            Equal(reads, view.Reads, "closed presentation cannot be revived by late notifications");
+            Equal(0, module.PropertySubscribers, "failed release does not retain the closed window");
         });
     }
 

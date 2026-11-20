@@ -63,6 +63,21 @@ import MeowRuntime
         await fixture.runtime.close()
     }
 
+    func testExecutorExitRetiresPublishedSessionsWithoutAnotherHTTPHandshake() async throws {
+        let fixture = try MusicPlatformFixture()
+        let client = fixture.makeClient()
+        try await client.publish(platform: "wy", session: session("current"))
+        await fixture.runtime.close()
+        let requests = fixture.requests().count
+        try await client.revoke()
+        try await client.drainPublications()
+        try await client.close()
+        try await client.publish(platform: "wy", session: nil)
+        try await client.drainPublications()
+        XCTAssertEqual(fixture.requests().count, requests)
+        await denied(.closed) { try await client.publish(platform: "wy", session: self.session("late")) }
+    }
+
     func testRequestWaitsForActualPublicationReceiptAndUsesPublishedScope() async throws {
         let gate = MusicAccountQueueOwnerGate("session receipt")
         let fixture = try MusicPlatformFixture(controlHandler: { request in
@@ -244,7 +259,7 @@ import MeowRuntime
         }
     }
 
-    func testRepeatedCloseWaitsForDispatchedWriteEvenWhenSessionResetFails() async throws {
+    func testRepeatedCloseCancelsDispatchedWriteAndReportsUnknownEvenWhenSessionResetFails() async throws {
         let writeGate = MusicAccountQueueOwnerGate("write physical receipt")
         let reset = expectation(description: "all platform resets attempted")
         reset.expectedFulfillmentCount = 5
@@ -267,10 +282,11 @@ import MeowRuntime
         await fulfillment(of: [reset], timeout: 3)
         let second = MusicAccountQueueOwnerCall("second close") { try await client.close() }
         await denied(.closed) { _ = try await client.request(platform: "wy", operation: "home") }
-        XCTAssertNil(first.result); XCTAssertNil(second.result)
+        await fulfillment(of: [first.finished, second.finished, write.finished], timeout: 3)
+        XCTAssertEqual(try write.value()[music: "status"], .string("unknown"))
+        XCTAssertEqual(try write.value()[music: "errorCode"], .string("COMMIT_UNKNOWN"))
         await writeGate.release()
-        await fulfillment(of: [first.finished, second.finished, write.finished, writeGate.departed], timeout: 3)
-        XCTAssertEqual(try write.value()[music: "status"], .string("confirmed"))
+        await fulfillment(of: [writeGate.departed], timeout: 3)
         for call in [first, second] {
             XCTAssertThrowsError(try call.value()) { XCTAssertEqual($0 as? MusicServiceError, .storageFailed) }
         }

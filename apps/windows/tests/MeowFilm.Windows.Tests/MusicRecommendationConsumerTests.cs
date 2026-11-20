@@ -194,11 +194,9 @@ public static partial class MusicUiTests
                 await Task.WhenAll(play, close);
                 True(!f.Http.Cancelled.Task.IsCompleted, "the admitted read settles before global shutdown continues");
                 int calls = f.Http.Batches;
-                await f.Module.CancelShutdownPreparationAsync();
+                await f.Module.DisposeAsync();
                 Equal(calls, f.Http.Batches); Equal(0, f.Playback.Opens.Count);
-                Equal(0, (await f.Queue()).GetProperty("total").GetInt32());
-                True(!f.Runtime.HasStarted && !f.Module.HasActiveRecommendation, "closed recommendation is not restored");
-                await f.Call("music.library.create", new { name = "恢复后的本地歌单" });
+                True(!f.Module.CanEdit, "retired recommendation does not restore business admission");
             }
             finally
             {
@@ -284,39 +282,7 @@ public static partial class MusicUiTests
             Equal(1, f.Playback.Opens.Count);
             await f.Call("music.library.create", new { name = "本地仍可用" });
         });
-        foreach (bool persisted in new[] { false, true })
-            yield return Case("recommendation cancelled close exposes explicit unknown queue reconciliation persisted " + persisted, async () =>
-            {
-                await using var f = await RecommendationScene.Create();
-                await f.Module.NavigateAsync("catalog-fm", default);
-                f.Store.UnknownNextQueueWrite = persisted;
-                await f.Module.PlayCatalogPlaylistAsync();
-                await RecommendationUntil(() => f.Module.CanReconcileRecommendation);
-                Equal(1, f.Store.QueueWrites);
-                int batches = f.Http.Batches, writes = f.Store.LibraryWrites;
-                Exception? closeError = null;
-                try { await f.Module.PrepareShutdownAsync(); } catch (Exception error) { closeError = error; }
-                True(closeError is not null, "an unknown queue write cannot pass close preparation");
-                await f.Module.CancelShutdownPreparationAsync();
-                await RecommendationUntil(() => f.Module.CanReconcileRecommendation);
-                True(f.Module.CanReconcileRecommendation, "unknown receipt remains explicit");
-                Equal(batches, f.Http.Batches); Equal(writes, f.Store.LibraryWrites);
-                Equal(0, f.Playback.Opens.Count);
-                var footer = (MusicPlayerView)f.Module.PlayerView;
-                using var surface = RecommendationPlayerSurface(footer);
-                await Drain();
-                DesktopTestUi.Invoke(((Button)footer.FindName("ModeButton"))); await Drain();
-                var menu = (MenuFlyout)footer.FindName("ModeMenu");
-                var reconcile = menu.Items.OfType<MenuFlyoutItem>().Single(item => AutomationProperties.GetName(item) == "核对保存结果");
-                True(reconcile.IsEnabled, "unified mode menu keeps reconciliation reachable after failed close");
-                MusicTestUi.Invoke(reconcile);
-                await RecommendationUntil(() => !f.Module.CanReconcileRecommendation);
-                Equal(persisted ? 3 : 0, (await f.Queue()).GetProperty("total").GetInt32());
-                Equal(batches, f.Http.Batches); Equal(writes, f.Store.LibraryWrites);
-                Equal(0, f.Playback.Opens.Count);
-                True(!f.Module.HasActiveRecommendation, "reconciliation does not restart recommendation playback");
-                await f.Call("music.library.create", new { name = "核对后本地歌单" });
-            });
+
     }
 
     private static DesktopTestUi.Host RecommendationPlayerSurface(MusicPlayerView footer) => new(footer, 1110, 100);

@@ -86,7 +86,7 @@ public static partial class AppUserDataResetTests
             File.WriteAllText(Path.Combine(paths.Caches, "old-generation"), "synthetic cache");
             await cache.DrainAsync();
             Check(!audio.HasMedia && !video.HasOutput && session is not null && child is not null && !child.HasExited);
-            var reset = new AppUserDataReset(data.RequestReset, shutdown.ForceReleaseAsync,
+            var reset = new AppUserDataReset(data.RequestReset, shutdown.CloseAsync,
                 () =>
                 {
                     Check(shutdown.IsReleased && runtimeClosed && cacheClosed && libraryClosed && storeClosed,
@@ -101,10 +101,11 @@ public static partial class AppUserDataResetTests
                     data.Open();
                     Directory.CreateDirectory(paths.Documents);
                     Directory.CreateDirectory(paths.Caches);
-                    await using var freshLibrary = new MusicLibraryDatabase(store);
+                    await using var freshStore = new NativeDatabase(paths.Documents);
+                    await using var freshLibrary = new MusicLibraryDatabase(freshStore);
                     var fresh = await freshLibrary.ReadAsync("music:native");
                     Check(fresh.Revision == MusicLibraryRevision.Empty && fresh.Areas.Count == 0 &&
-                        freshLibrary.SongIds().Count == 0);
+                        await Task.Run(() => freshLibrary.SongIds().Count) == 0);
                     File.WriteAllText(Path.Combine(paths.Documents, "new-generation"), "new business");
                     File.WriteAllText(Path.Combine(paths.Caches, "new-generation"), "new cache");
                     reopened = true;
@@ -121,8 +122,8 @@ public static partial class AppUserDataResetTests
         catch (Exception error) { errors.Add("reset=" + NativeResetError(error)); }
         finally
         {
-            // Keep the original owner failures visible even when AppShutdown's
-            // fixed SHUTDOWN_FAILED receipt stops before the remaining owners.
+            // Keep the original owner failures visible if retirement stops
+            // before shared resources can be released.
             bool settled = await Cleanup("runtime", CloseRuntime) && runtimeClosed;
             foreach (var participant in participants)
                 settled &= await Cleanup(participant.Id, participant.CleanupAsync);
@@ -143,9 +144,8 @@ public static partial class AppUserDataResetTests
 
         void BeforeAbort()
         {
-            Check(runtimeClosed && runtime.State == RuntimeConnectionState.Closed &&
-                connection?.Revoked.IsCancellationRequested == true && child?.HasExited == true,
-                "Native abort must follow confirmed runtime revocation and actual Node process exit.");
+            Check(!storeClosed && !libraryClosed,
+                "Native owner retirement keeps borrowed storage alive until accepted writes settle.");
         }
         async Task CloseRuntime()
         {
@@ -167,17 +167,15 @@ public static partial class AppUserDataResetTests
         }
     }
 
-    private sealed class NativeResetParticipant(string id, IDesktopShutdownParticipant owner,
-        Action beforeAbort, List<string> errors) : IDesktopShutdownParticipant
+    private sealed class NativeResetParticipant(string id, IAsyncDisposable owner,
+        Action beforeAbort, List<string> errors) : IAsyncDisposable
     {
         internal string Id => id;
-        public Task PrepareShutdownAsync() => owner.PrepareShutdownAsync();
-        public Task CancelShutdownPreparationAsync() => owner.CancelShutdownPreparationAsync();
-        public ValueTask DisposeAsync() => owner.DisposeAsync();
-        internal Task CleanupAsync() => owner.AbortAsync();
+        public ValueTask DisposeAsync() => new(AbortAsync());
+        internal Task CleanupAsync() => owner.DisposeAsync().AsTask();
         public async Task AbortAsync()
         {
-            try { beforeAbort(); await owner.AbortAsync(); }
+            try { beforeAbort(); await owner.DisposeAsync().AsTask(); }
             catch (Exception error)
             {
                 errors.Add(id + ".abort=" + NativeResetError(error));

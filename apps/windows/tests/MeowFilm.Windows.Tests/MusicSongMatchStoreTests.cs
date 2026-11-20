@@ -419,10 +419,10 @@ public static class MusicSongMatchStoreTests
             owner.SongSnapshot(id)!.Value.GetProperty("localFileId").GetString() == "library:admitted");
         await owner.PrepareShutdownAsync();
         await LibraryError("CLOSED", async () => await owner.ReadMatchingSongIdsAsync([id], default));
-        await owner.CancelShutdownPreparationAsync();
-        Check((await owner.ReadMatchingSongIdsAsync([id], default)).SetEquals(accepted));
         await owner.AbortAsync();
         await LibraryError("CLOSED", async () => await owner.ReadMatchingSongIdsAsync([id], default));
+        await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
+        Check((await reopened.ReadMatchingSongIdsAsync([id], default)).SetEquals(accepted));
     }
 
     private static async Task EligibilityPending()

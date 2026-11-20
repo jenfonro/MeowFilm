@@ -12,10 +12,6 @@ internal sealed class ShellState : INotifyPropertyChanged
     private bool _canGoForward;
     private bool _canRetry;
     private bool _isInteractive = true;
-    private bool _isShutdownConfirmationOpen;
-    private bool _canWaitForShutdown;
-    private bool _canForceExit;
-    private bool _canCancelShutdown;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public string Status { get => _status; private set => Set(ref _status, value); }
@@ -28,19 +24,6 @@ internal sealed class ShellState : INotifyPropertyChanged
     public bool IsInteractive { get => _isInteractive; set => Set(ref _isInteractive, value); }
     public bool CanCancel => IsBusy && IsInteractive;
     public bool CanDismiss => HasStatus && !IsBusy && IsInteractive;
-    public bool IsShutdownConfirmationOpen { get => _isShutdownConfirmationOpen; private set => Set(ref _isShutdownConfirmationOpen, value); }
-    public bool CanWaitForShutdown { get => _canWaitForShutdown; private set => Set(ref _canWaitForShutdown, value); }
-    public bool CanForceExit { get => _canForceExit; private set => Set(ref _canForceExit, value); }
-    public bool CanCancelShutdown { get => _canCancelShutdown; private set => Set(ref _canCancelShutdown, value); }
-
-    public void SetShutdownConfirmation(bool open, bool canWait = false, bool canForce = false, bool canCancel = false)
-    {
-        IsShutdownConfirmationOpen = open;
-        CanWaitForShutdown = canWait;
-        CanForceExit = canForce;
-        CanCancelShutdown = canCancel;
-    }
-
     public void SetStatus(string status = "", bool busy = false, bool error = false, bool retry = false)
     {
         Status = status;
