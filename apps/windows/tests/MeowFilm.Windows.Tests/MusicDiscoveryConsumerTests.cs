@@ -343,7 +343,15 @@ public static partial class MusicUiTests
             Http.Release.TrySetResult(); Http.DisposeRelease.TrySetResult();
             if (store is DiscoveryHeldStore held) held.Release.TrySetResult();
             try { await Module.DisposeAsync(); }
-            finally { await Runtime.DisposeAsync(); await store.DisposeAsync(); }
+            finally
+            {
+                try { await Runtime.DisposeAsync(); }
+                finally
+                {
+                    try { await MusicTestStores.ReleaseCompanionAsync(store); }
+                    finally { await store.DisposeAsync(); }
+                }
+            }
         }
     }
     private sealed class DiscoveryHeldStore(IStorageDatabase inner) : NativeTestDatabase(inner)

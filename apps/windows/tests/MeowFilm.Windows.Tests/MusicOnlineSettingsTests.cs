@@ -168,9 +168,8 @@ public static partial class MusicNativeLibraryTests
     {
         foreach (var (field, value) in new (string, JsonNode?)[]
         {
-            ("schema", JsonValue.Create(0)), ("schema", JsonValue.Create(2)), ("schema", JsonValue.Create(3)), ("schema", JsonValue.Create("1")),
-            ("lyrics", null), ("lyrics", JsonValue.Create("false")),
-            ("revision", JsonValue.Create(-1)), ("revision", JsonValue.Create(1.5)), ("revision", JsonValue.Create("7"))
+            ("schema", JsonValue.Create(0)), ("schema", JsonValue.Create(2)), ("schema", JsonValue.Create(3)),
+            ("lyrics", null), ("revision", JsonValue.Create(-1))
         })
         {
             var settings = CurrentOnlineSettings();
@@ -183,15 +182,25 @@ public static partial class MusicNativeLibraryTests
             settings.Remove(field);
             await RejectOnlineSettingsDocument(await OnlineSettingsDocument(settings));
         }
-        await using (var duplicate = new Fixture())
+        foreach (var (field, value) in new (string, JsonNode?)[]
         {
-            duplicate.Store.SetAreaJson("online-settings", "{\"schema\":1,\"revision\":7,\"lyrics\":false,\"lyrics\":false}");
-            var owner = duplicate.Owner();
-            await Error(owner, "music.settings.get", null, "CORRUPT_STORAGE");
-            await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, "CORRUPT_STORAGE");
-            await owner.DisposeAsync();
-            await Error(duplicate.Owner(), "music.settings.get", null, "CORRUPT_STORAGE");
-            Check(duplicate.Store.WriteCalls == 0, "ambiguous SQL control JSON must not be rewritten");
+            ("schema", JsonValue.Create("1")), ("lyrics", JsonValue.Create("false")),
+            ("revision", JsonValue.Create(1.5)), ("revision", JsonValue.Create("7"))
+        })
+        {
+            await using var f = new Fixture();
+            f.Store.Bytes = await OnlineSettingsDocument(CurrentOnlineSettings());
+            var before = f.Store.Bytes!.ToArray();
+            var invalid = CurrentOnlineSettings(); invalid[field] = value;
+            try
+            {
+                f.Store.SetArea("online-settings", invalid);
+                throw new InvalidOperationException("Invalid typed value was committed.");
+            }
+            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.InvalidRequest) { }
+            Check(before.SequenceEqual(f.Store.Bytes!) && f.Store.WriteCalls == 0,
+                "typed storage rejects unrepresentable values without changing committed records");
+            CheckOnlineSettings((await Ok(f.Owner(), "music.settings.get")).GetProperty("settings"), 7, false);
         }
         foreach (string schema in new[] { "1.0", "1e0" })
         {
@@ -204,8 +213,10 @@ public static partial class MusicNativeLibraryTests
             CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 7, false);
             Check(f.Store.WriteCalls == 0);
             await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true, unused = new { value = 1 } });
-            Check(JsonNode.DeepEquals(f.Store.State("online-settings")["extra"], extended["extra"]));
-            Check(f.Store.State("online-settings").ContainsKey("target") && f.Store.State("online-settings")["target"] is null);
+            var saved = f.Store.State("online-settings");
+            CheckOnlineSettings(E(saved), 8, true);
+            Check(!saved.ContainsKey("extra") && !saved.ContainsKey("target"),
+                "unused API fields do not create a second persistent settings shape");
             Check(f.Store.WriteCalls == 1);
         }
     }
