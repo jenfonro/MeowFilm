@@ -195,19 +195,24 @@ public static partial class MusicUiTests
     private static async Task CatalogArtworkVisibility()
     {
         var viewport = new Canvas { Width = 200, Height = 180, Clip = new RectangleGeometry { Rect = new Rect(0, 0, 200, 180) } };
-        var slot = new Border { Width = 152, Height = 152 };
+        var slot = new Border { Width = 152, Height = 152, Background = new SolidColorBrush(Microsoft.UI.Colors.Blue) };
+        using var observed = new MeowFilm.Desktop.DesktopViewport(slot, () => { });
         viewport.Children.Add(slot);
         using var host = new DesktopTestUi.Host(viewport, 320, 400);
         await TestUiHost.LoadedAsync(slot); await Drain();
-        True(MusicCatalogView.InCatalogViewport(slot), "the loaded visible slot creates demand");
-        Canvas.SetTop(slot, 200); viewport.UpdateLayout(); await Drain();
-        True(!MusicCatalogView.InCatalogViewport(slot), "a realized but clipped slot cannot create demand");
-        Canvas.SetTop(slot, 160); viewport.UpdateLayout(); await Drain();
-        True(MusicCatalogView.InCatalogViewport(slot), "partial visibility creates demand");
+        await Until(() => observed.IsInViewport);
+        True(observed.IsInViewport, "the loaded visible slot creates demand");
+        Canvas.SetTop(slot, 200); viewport.InvalidateArrange(); viewport.UpdateLayout(); await Drain();
+        await Until(() => !observed.IsInViewport);
+        True(!observed.IsInViewport, "a realized but clipped slot cannot create demand");
+        Canvas.SetTop(slot, 160); viewport.InvalidateArrange(); viewport.UpdateLayout(); await Drain();
+        await Until(() => observed.IsInViewport);
+        True(observed.IsInViewport, "partial visibility creates demand");
         viewport.Visibility = Visibility.Collapsed; viewport.UpdateLayout(); await Drain();
-        True(!MusicCatalogView.InCatalogViewport(slot), "hidden ancestors stop new demand");
+        True(!observed.IsInViewport, "hidden ancestors stop new demand");
         viewport.Visibility = Visibility.Visible; Canvas.SetTop(slot, 0); viewport.UpdateLayout(); await Drain();
-        True(MusicCatalogView.InCatalogViewport(slot), "redisplay restores visibility without reconstructing the slot");
+        await Until(() => observed.IsInViewport);
+        True(observed.IsInViewport, "redisplay restores visibility without reconstructing the slot");
     }
 
     private sealed class CatalogBannerLease(ArtworkPixels image) : IArtworkLease
@@ -222,7 +227,8 @@ public static partial class MusicUiTests
         var indicator = (ShelfPageIndicator)shelf.FindName("PageIndicator");
         var next = (Button)shelf.FindName("Next"); var previous = (Button)shelf.FindName("Previous");
         var rail = shelf.ScrollHost!; var cards = section.Items;
-        True(Math.Abs(shelf.CardWidth - 423) < .5 && indicator.PageCount == 5 && indicator.Visibility == Visibility.Visible,
+        var items = (ListView)shelf.FindName("ItemsHost");
+        True(Math.Abs(2 * shelf.CardWidth - 20 - items.ActualWidth) < 1 && indicator.PageCount == 5 && indicator.Visibility == Visibility.Visible,
             "two banners form one reachable group, including the final odd banner");
         for (int page = 1; page <= 4; page++)
         {
@@ -232,8 +238,10 @@ public static partial class MusicUiTests
         True(Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 && next.Visibility == Visibility.Collapsed,
             "the last resource is reachable without an empty page");
         True(ReferenceEquals(cards, section.Items), "paging retains resource identity");
+        double oldWidth = items.ActualWidth;
         host.Window.Resize(560, 900);
-        await Until(() => Math.Abs(shelf.CardWidth - 290) < .5 && Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 && previous.IsEnabled);
+        await Until(() => items.ActualWidth < oldWidth && Math.Abs(2 * shelf.CardWidth - 20 - items.ActualWidth) < 1 &&
+            Math.Abs(rail.HorizontalOffset - shelf.MaximumOffset) < .5 && previous.IsEnabled);
         True(Math.Abs(indicator.Position - 4) < .01, "resize retains the final group");
         Click(previous); await Until(() => Math.Abs(indicator.Position - 3) < .01 && Math.Abs(section.HorizontalOffset - rail.HorizontalOffset) < .5);
         shelf.Visibility = Visibility.Collapsed; double saved = section.HorizontalOffset; await Drain();
@@ -246,7 +254,8 @@ public static partial class MusicUiTests
     private static async Task CatalogIndicatorDrawing()
     {
         var dots = new ShelfPageIndicator { PageCount = 9, Position = 3 };
-        using var host = new DesktopTestUi.Host(dots, 72, 12);
+        var root = new Grid(); root.Children.Add(dots);
+        using var host = new DesktopTestUi.Host(root, 320, 180);
         await TestUiHost.LoadedAsync(dots); await Drain();
         async Task<byte[]> Frame() { dots.UpdateLayout(); return await DesktopTestUi.Pixels(dots, 72, 12); }
         static byte Alpha(byte[] pixels, int x, int y) => pixels[(y * 72 + x) * 4 + 3];

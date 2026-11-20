@@ -877,12 +877,104 @@ public static partial class MusicCatalogTests
                 var presenter = new MusicCatalogSectionView { DataContext = current }; view.Content = presenter;
                 view.UpdateLayout(); await Drain();
                 var shelf = Descendants<Shelf>(presenter).Single();
-                Equal(current.SongColumns.Count, shelf.ItemsSource!.Cast<MusicCatalogSongColumn>().Count());
-                var column = Descendants<ItemsControl>(shelf).First(item => item.DataContext is MusicCatalogSongColumn);
-                Equal(252d, column.ActualHeight);
-                True(Descendants<MusicCatalogCardView>(column).All(card => card.ActualHeight == 84), "three source rows retain their complete native hit heights");
+                True(current.Items.SequenceEqual(shelf.ItemsSource!.Cast<MusicCatalogCard>()), "the native list owns songs directly in source order");
+                Equal(3, shelf.RowsPerColumn);
+                var list = (ListView)shelf.FindName("ItemsHost");
+                True(list.ItemsPanelRoot is ItemsWrapGrid { Orientation: Orientation.Vertical, MaximumRowsOrColumns: 3, ItemHeight: 84 },
+                    "the native recycling grid owns three rows in each horizontal column");
+                Equal(252d, list.ActualHeight);
+                var rows = Descendants<MusicCatalogCardView>(shelf).ToArray();
+                True(rows.Length > 0 && rows.All(card => card.ActualHeight == 84), "three source rows retain their complete native hit heights");
+                foreach (var pair in rows.Select(card => (Card: card, Index: Array.IndexOf(current.Items.ToArray(), (MusicCatalogCard)card.DataContext))))
+                {
+                    var position = pair.Card.TransformToVisual(list).TransformPoint(new Point());
+                    True(Math.Abs(position.Y - pair.Index % 3 * 84) < 1, "source order fills each native column from top to bottom");
+                }
                 Equal(Visibility.Collapsed, ((Button)shelf.FindName("Previous")).Visibility);
                 Equal(current.Items.Count == 1 ? Visibility.Collapsed : Visibility.Visible, ((Button)shelf.FindName("Next")).Visibility);
+            }
+        });
+        yield return Case("summary song shelves virtualize individual songs and retain resources when rows change columns", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await f.Module.NavigateAsync("catalog-home", default); await f.Module.HomeInitialization;
+            var adoptedCards = new List<MusicCatalogCard>();
+            foreach (int index in Enumerable.Range(1, 100))
+            {
+                string cover = "https://art.example.test/summary-song-" + index + ".jpg";
+                var song = await AdoptSong(index.ToString(), "歌曲" + index, cover);
+                adoptedCards.Add(new MusicCatalogCard(index.ToString(), song.Title, song.Artist, cover, "song", "wy", song, ActionId: index.ToString()));
+            }
+            var cards = adoptedCards.ToArray();
+            True(cards.All(card => !string.IsNullOrEmpty(card.Song!.Id)) && cards.Select(card => card.Song!.Id).Distinct().Count() == cards.Length,
+                "every source song has its own permanent repository identity");
+            var section = new MusicCatalogSection("歌曲", cards, Layout: "song-columns");
+            var view = new MusicCatalogView { DataContext = f.Module };
+            var loader = new CatalogArtworkLoader(); ArtworkScope.SetLoader(view, loader);
+            using var host = new DesktopTestUi.Host(view, 900, 360);
+            var presenter = new MusicCatalogSectionView { DataContext = section }; view.Content = presenter;
+            view.UpdateLayout(); await Drain();
+            var shelf = Descendants<Shelf>(presenter).Single();
+            var list = (ListView)shelf.FindName("ItemsHost");
+            True(list.Items.Count == cards.Length && Enumerable.Range(0, cards.Length).Count(index => list.ContainerFromIndex(index) is not null) < 60,
+                "the native recycling panel bounds realized song rows rather than materializing all songs");
+            var target = cards[3];
+            await Until(() => Descendants<ArtworkImage>(shelf).Any(image => image.DisplayIdentity == target.Song!.Id && image.Source is not null));
+            await Until(() => Descendants<ArtworkImage>(shelf).Where(image => image.Source is not null).Count() >= 6);
+            var admitted = Descendants<ArtworkImage>(shelf).Where(image => image.Source is not null)
+                .ToDictionary(image => image.DisplayIdentity, image => image.Source);
+            var reads = loader.Addresses.GroupBy(address => address).ToDictionary(group => group.Key, group => group.Count());
+            var surviving = cards.Skip(1).Where(card => admitted.ContainsKey(card.Song!.Id)).ToArray();
+            True(surviving.Length >= 3 && surviving.Any(card => Array.IndexOf(cards, card) >= 3),
+                "the resource check spans admitted songs in multiple native columns");
+            var survivorItems = cards.Skip(1).ToArray();
+            presenter.DataContext = section with { Items = survivorItems };
+            view.UpdateLayout(); await Drain();
+            True(ReferenceEquals(shelf, Descendants<Shelf>(presenter).Single()), "removing one song retains the native list owner");
+            await CheckSurvivors();
+            presenter.DataContext = section; view.UpdateLayout(); await Drain();
+            await CheckSurvivors();
+            string unseenAddress = "https://art.example.test/summary-song-unseen.jpg";
+            var unseenSong = await AdoptSong("unseen", "未见歌曲", unseenAddress);
+            True(cards.All(card => card.Song!.Id != unseenSong.Id) && !string.IsNullOrEmpty(unseenSong.Id),
+                "the unseen song owns another permanent repository identity");
+            var unseen = new MusicCatalogCard("unseen", unseenSong.Title, unseenSong.Artist, unseenAddress,
+                "song", "wy", unseenSong, ActionId: "unseen");
+            // The explicit content change appends a never-visible resource at the far end.
+            presenter.DataContext = section with { Items = cards.Concat([unseen]).ToArray() };
+            view.UpdateLayout(); await Drain();
+            Equal(0, loader.Addresses.Count(address => address == unseenAddress));
+            await CheckSurvivors();
+            DesktopTestUi.Invoke((Button)shelf.FindName("Next"));
+            await Until(() => shelf.IsSettled && shelf.PresentedOffset > 0);
+            True(shelf.MaximumOffset > shelf.PresentedOffset, "paging uses horizontal column count");
+            shelf.ScrollToIndex(cards.Length); await Until(() => shelf.IsSettled && Math.Abs(shelf.PresentedOffset - shelf.MaximumOffset) < .5);
+            Equal(Visibility.Collapsed, ((Button)shelf.FindName("Next")).Visibility);
+            shelf.ScrollToIndex(0); await Until(() => shelf.IsSettled && shelf.PresentedOffset < .5);
+            await CheckSurvivors();
+
+            async Task<SongRow> AdoptSong(string nativeId, string title, string cover)
+            {
+                var receipt = await f.Rpc("music.songs.complete", new
+                {
+                    song = MusicSongFixture.Online("wy", nativeId, title, "歌手", "专辑", 180, cover: cover),
+                    platforms = new[] { "wy" }
+                });
+                return SongRow.Read(receipt.GetProperty("song"));
+            }
+
+            async Task CheckSurvivors()
+            {
+                foreach (var card in surviving)
+                {
+                    var images = Descendants<ArtworkImage>(shelf).Where(image => image.DisplayIdentity == card.Song!.Id).ToArray();
+                    if (images.Length > 0)
+                    {
+                        await Until(() => images[0].Source is not null);
+                        True(ReferenceEquals(admitted[card.Song!.Id], images[0].Source), "surviving song pixels remain owned by the stable item key");
+                    }
+                    Equal(reads[card.Cover], loader.Addresses.Count(address => address == card.Cover));
+                }
             }
         });
         yield return Case("channel chrome owns direct tabs filters and no duplicate platform selector", async () =>
@@ -1956,16 +2048,22 @@ public static partial class MusicCatalogTests
             True(before.SequenceEqual(f.Module.CatalogSections), "failure retains previous successful merged page");
             Equal("第 2 页", f.Module.CatalogPageText);
         });
-        yield return Case("playlist next page appends with actual continuation then refresh resets", async () =>
+        yield return Case("playlist next page appends incrementally and refresh removes only missing members", async () =>
         {
             await using var f = await Fixture.Create();
             await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
             Equal(100, f.Module.Songs.Count);
+            var firstRows = f.Module.Songs.ToArray();
+            var changes = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+            f.Module.Songs.CollectionChanged += (_, args) => changes.Add(args.Action);
             await f.Module.CatalogPageAsync(1);
             var p = f.Client.Last("music.catalog.playlist");
             Equal(2, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
             Equal(100, p.GetProperty("continuation").GetProperty("offset").GetInt32());
             Equal(200, f.Module.Songs.Count);
+            True(firstRows.Zip(f.Module.Songs).All(pair => ReferenceEquals(pair.First, pair.Second)) &&
+                changes.Count == 100 && changes.All(action => action == System.Collections.Specialized.NotifyCollectionChangedAction.Add),
+                "a same-playlist next page inserts only new members and retains the first-page song objects");
             Equal("1001", MusicSongFixture.NativeId(f.Module.Songs[0].Raw));
             Equal("1101", MusicSongFixture.NativeId(f.Module.Songs[100].Raw));
             var calls = f.Client.Count("music.catalog.playlist");
@@ -2000,12 +2098,18 @@ public static partial class MusicCatalogTests
             calls = f.Client.Count("music.catalog.playlist");
             await f.Module.LoadMoreCatalogPlaylistAsync();
             Equal(calls, f.Client.Count("music.catalog.playlist"));
+            var beforeRefresh = f.Module.Songs.ToArray();
+            changes.Clear();
             await f.Configure(new { nextDetail = 0 });
             await f.Module.RefreshCatalogAsync();
             p = f.Client.Last("music.catalog.playlist");
             Equal(1, p.GetProperty("page").GetInt32()); Equal(100, p.GetProperty("limit").GetInt32());
             True(p.GetProperty("refresh").GetBoolean(), "playlist refresh");
             True(!p.TryGetProperty("continuation", out _), "refresh starts from the first page");
+            True(f.Module.Songs.Count == 100 && beforeRefresh.Take(100).Zip(f.Module.Songs)
+                .All(pair => ReferenceEquals(pair.First, pair.Second)) && changes.Count == 105 &&
+                changes.All(action => action == System.Collections.Specialized.NotifyCollectionChangedAction.Remove),
+                "refresh of the same target removes only absent members without resetting surviving rows");
         });
         yield return Case("unused snapshot field does not block the actual next page", async () =>
         {
@@ -2016,6 +2120,25 @@ public static partial class MusicCatalogTests
             await f.Module.CatalogPageAsync(1);
             Equal(first.Id, f.Module.Songs[0].Id);
             Equal(200, f.Module.Songs.Count); Equal("第 2 页", f.Module.CatalogPageText);
+        });
+        yield return Case("same-playlist refresh preserves duplicate song occurrences as separate surviving rows", async () =>
+        {
+            await using var f = await Fixture.Create();
+            JsonElement WithDuplicate(JsonElement value) => Edit(value, node =>
+            {
+                var items = node["items"]!.AsArray();
+                items.Insert(1, items[0]!.DeepClone());
+            });
+            f.Client.Transform("music.catalog.playlist", WithDuplicate);
+            await f.Module.NavigateAsync("catalog-playlist/wy/500", default);
+            var first = f.Module.Songs[0]; var second = f.Module.Songs[1];
+            True(first.Id == second.Id && !ReferenceEquals(first, second), "each repeated member has its own row object");
+            var changes = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+            f.Module.Songs.CollectionChanged += (_, args) => changes.Add(args.Action);
+            f.Client.Transform("music.catalog.playlist", WithDuplicate);
+            await f.Module.RefreshCatalogAsync();
+            True(ReferenceEquals(f.Module.Songs[0], first) && ReferenceEquals(f.Module.Songs[1], second) && changes.Count == 0,
+                "same-target duplicate receipts preserve every occurrence without merging or resetting them");
         });
         yield return Case("rapid tag A B A suppresses old B receipt and restores A selection", async () =>
         {
@@ -2845,7 +2968,12 @@ public static partial class MusicCatalogTests
             try { await Module.DisposeAsync(); }
             finally
             {
-                await runtime.DisposeAsync(); await store.DisposeAsync();
+                try { await runtime.DisposeAsync(); }
+                finally
+                {
+                    try { await MusicTestStores.ReleaseCompanionAsync(store); }
+                    finally { await store.DisposeAsync(); }
+                }
             }
         }
     }

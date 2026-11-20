@@ -321,93 +321,31 @@ internal sealed class NovelImage : Grid
     internal Stretch Stretch { get => image.Stretch; set => image.Stretch = value; }
     private readonly NovelSourceService sources;
     private readonly NovelBook book;
-    private readonly List<FrameworkElement> layoutOwners = [];
-    private readonly List<(DependencyObject Owner, DependencyProperty Property, long Token)> viewportProperties = [];
+    private readonly DesktopViewport viewport;
     private CancellationTokenSource? request;
-    private bool loaded, observingLayout, demanded;
+    private bool loaded, admitted, attempted;
     internal NovelImage(NovelSourceService sources, NovelBook book)
     {
         this.sources = sources; this.book = book; Children.Add(image); Width = 96; Height = 136; Stretch = Stretch.UniformToFill;
         AutomationProperties.SetName(this, book.Name + "封面");
-        Loaded += (_, _) => { loaded = true; UpdateVisibility(); };
-        Unloaded += (_, _) => { loaded = false; UpdateVisibility(); };
-        _ = new NovelPresentation.VisibilityWatch(this, _ => UpdateVisibility());
-        EffectiveViewportChanged += (_, _) => UpdateVisibility();
+        viewport = new DesktopViewport(this, UpdateVisibility);
+        Loaded += (_, _) => { loaded = true; sources.Resumed += OnResumed; UpdateVisibility(); };
+        Unloaded += (_, _) => { loaded = admitted = attempted = false; sources.Resumed -= OnResumed; Stop(); };
     }
     protected override Microsoft.UI.Xaml.Automation.Peers.AutomationPeer OnCreateAutomationPeer() =>
         new Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer(this);
-    private bool InViewport()
-    {
-        if (!loaded || !DesktopVisual.IsVisible(this) || ActualWidth <= 0 || ActualHeight <= 0) return false;
-        try
-        {
-            Rect visible = new(0, 0, ActualWidth, ActualHeight);
-            UIElement child = this;
-            for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null; parent = VisualTreeHelper.GetParent(parent))
-            {
-                if (parent is not UIElement visual) continue;
-                visible = child.TransformToVisual(visual).TransformBounds(visible); child = visual;
-                if (visual is FrameworkElement element && (element.Clip is not null || element is ScrollViewer || ReferenceEquals(element, XamlRoot?.Content)))
-                {
-                    visible.Intersect(element.Clip?.Rect ?? new Rect(0, 0, element.ActualWidth, element.ActualHeight));
-                    if (visible.IsEmpty || visible.Width <= 0 || visible.Height <= 0) return false;
-                }
-            }
-            return true;
-        }
-        catch (InvalidOperationException) { return false; }
-    }
-    private void OnLayout(object? sender, object e) => UpdateVisibility();
-    private void ObserveViewportProperty(DependencyObject owner, DependencyProperty property) =>
-        viewportProperties.Add((owner, property, owner.RegisterPropertyChangedCallback(property, (_, _) =>
-        {
-            // Canvas attached positions invalidate their parent arrange, not the
-            // cover. Resolve that actual layout before testing its clipped bounds.
-            layoutOwners.LastOrDefault()?.UpdateLayout(); UpdateVisibility();
-        })));
-    private void OnResumed(object? sender, EventArgs e) { Stop(); demanded = false; UpdateVisibility(); }
+    private bool HasDemand => loaded && admitted && viewport.IsVisible;
+    private void OnResumed(object? sender, EventArgs e) { Stop(); attempted = false; UpdateVisibility(); }
     private void UpdateVisibility()
     {
-        bool observe = loaded && DesktopVisual.IsVisible(this);
-        if (observe != observingLayout)
-        {
-            if (observe)
-            {
-                // Positioning or clipping an ancestor need not notify the cover's
-                // LayoutUpdated/EffectiveViewportChanged events in WinUI.
-                for (DependencyObject? owner = this; owner is not null; owner = VisualTreeHelper.GetParent(owner))
-                    if (owner is FrameworkElement element)
-                    {
-                        layoutOwners.Add(element); element.SizeChanged += AncestorSizeChanged;
-                        ObserveViewportProperty(element, UIElement.ClipProperty);
-                        if (VisualTreeHelper.GetParent(element) is Canvas)
-                        {
-                            ObserveViewportProperty(element, Canvas.TopProperty);
-                            ObserveViewportProperty(element, Canvas.LeftProperty);
-                        }
-                    }
-                LayoutUpdated += OnLayout;
-                sources.Resumed += OnResumed;
-            }
-            else
-            {
-                LayoutUpdated -= OnLayout;
-                foreach (var owner in layoutOwners) owner.SizeChanged -= AncestorSizeChanged;
-                foreach (var (owner, property, token) in viewportProperties) owner.UnregisterPropertyChangedCallback(property, token);
-                viewportProperties.Clear();
-                layoutOwners.Clear(); sources.Resumed -= OnResumed;
-            }
-            observingLayout = observe;
-        }
-        bool next = InViewport();
-        if (next == demanded) return;
-        demanded = next;
-        if (demanded) Start(); else Stop();
+        if (viewport?.IsInViewport == true) admitted = true;
+        if (HasDemand) Start();
+        else if (Source is null && request is not null) { Stop(); attempted = false; }
     }
-    private void AncestorSizeChanged(object sender, SizeChangedEventArgs args) => UpdateVisibility();
     private void Start()
     {
-        if (request is not null || book.CoverUrl.Length == 0) return;
+        if (attempted || book.CoverUrl.Length == 0) return;
+        attempted = true;
         var owner = request = new();
         _ = Load();
         async Task Load()
@@ -424,9 +362,9 @@ internal sealed class NovelImage : Grid
                         var bytes = await sources.ReadImageAsync(reference, ct);
                         var bitmap = await Task.Run(() => NovelImagePixels.Decode(bytes, 240), ct);
                         ct.ThrowIfCancellationRequested();
-                        if (!ReferenceEquals(request, owner) || !InViewport()) return;
+                        if (!ReferenceEquals(request, owner) || !HasDemand) return;
                         Source = bitmap.CreateSource();
-                        // Keep the lease only while this cover intersects its viewport.
+                        // The mounted page retains an admitted cover across scrolling.
                         await Task.Delay(Timeout.Infinite, ct);
                     }
                     finally { if (reference is not null) await sources.ReleaseImageAsync(reference); }

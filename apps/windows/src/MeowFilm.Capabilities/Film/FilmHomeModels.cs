@@ -224,6 +224,29 @@ public sealed record FilmCardItem(string Id, string Title, string Poster, string
     }
 }
 
+internal static class FilmCardCollection
+{
+    internal static void Present(ObservableCollection<FilmCardItem> current, IReadOnlyList<FilmCardItem> desired)
+    {
+        var identities = desired.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        for (int index = current.Count - 1; index >= 0; index--)
+            if (!identities.Contains(current[index].Id)) current.RemoveAt(index);
+        for (int index = 0; index < desired.Count; index++)
+        {
+            var next = desired[index];
+            if (index >= current.Count || current[index].Id != next.Id)
+            {
+                int previous = -1;
+                for (int candidate = index + 1; candidate < current.Count; candidate++)
+                    if (current[candidate].Id == next.Id) { previous = candidate; break; }
+                if (previous >= 0) current.Move(previous, index);
+                else current.Insert(index, next);
+            }
+            if (!current[index].HasSameContent(next)) current[index] = next;
+        }
+    }
+}
+
 internal enum FilmHomeSectionState
 {
     Pending,
@@ -273,11 +296,7 @@ public sealed class FilmHomeSection : INotifyPropertyChanged
     internal void Complete(IReadOnlyList<FilmCardItem> items)
     {
         ArgumentNullException.ThrowIfNull(items);
-        if (Items.Count != items.Count || Items.Where((item, index) => !item.HasSameContent(items[index])).Any())
-        {
-            Items.Clear();
-            foreach (var item in items) Items.Add(item);
-        }
+        FilmCardCollection.Present(Items, items);
         Cache = (items as FilmHomePage)?.Cache;
         state = FilmHomeSectionState.Ready;
         PublishState();
@@ -431,11 +450,7 @@ public sealed class FilmDataSection : INotifyPropertyChanged
     internal void Replace(IReadOnlyList<FilmCardItem> items, int next, bool more, FilmMetadataCache? cache)
     {
         var unique = items.DistinctBy(item => item.Id).ToArray();
-        if (Items.Count != unique.Length || Items.Where((item, index) => !item.HasSameContent(unique[index])).Any())
-        {
-            Items.Clear();
-            foreach (var item in unique) Items.Add(item);
-        }
+        FilmCardCollection.Present(Items, unique);
         nextStart = next;
         hasMore = more;
         Cache = cache;

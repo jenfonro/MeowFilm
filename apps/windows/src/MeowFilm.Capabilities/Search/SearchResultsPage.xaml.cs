@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Media;
 using System.ComponentModel;
+using System.Collections.Specialized;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -20,13 +21,31 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
     {
         this.page = page;
         InitializeComponent();
+        MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemKeySelector(FilmItems, item => ((FilmSearchCardItem)item).Id);
+        MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemResourcesSelector(FilmItems,
+            item => FilmPlaybackPoster.ArtworkResources(((FilmSearchCardItem)item).Poster));
         DataContext = page;
         Loaded += (_, _) =>
         {
             filmVisibility = DesktopVisual.ObserveVisibility(FilmItems, FilmVisibilityChanged);
             SizeFilmCards();
+            if (page.Novel is { } module)
+            {
+                module.Search.Books.CollectionChanged += NovelBooksChanged;
+                module.Search.States.CollectionChanged += NovelStatesChanged;
+                novelBooksDirty = novelStatesDirty = true; PublishNovel();
+            }
         };
-        Unloaded += (_, _) => { filmVisibility?.Dispose(); filmVisibility = null; hiddenAnchor = null; };
+        Unloaded += (_, _) =>
+        {
+            filmVisibility?.Dispose(); filmVisibility = null; hiddenAnchor = null;
+            if (page.Novel is { } module)
+            {
+                module.Search.Books.CollectionChanged -= NovelBooksChanged;
+                module.Search.States.CollectionChanged -= NovelStatesChanged;
+            }
+            novelBooksDirty = novelStatesDirty = true;
+        };
     }
     private void FilmVisibilityChanged(bool visible)
     {
@@ -118,7 +137,16 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
     private MusicWrapPanel? novelBooks, novelStatus;
     private TextBlock? novelState;
     private Button? novelMore, novelCancel;
-    private NovelBook[] shownNovelBooks = [];
+    private bool novelBooksDirty = true, novelStatesDirty = true;
+    private readonly Dictionary<string, TextBlock> novelStatuses = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, NovelSearchCard> novelCards = new(StringComparer.Ordinal);
+    private void NovelBooksChanged(object? sender, NotifyCollectionChangedEventArgs args) => novelBooksDirty = true;
+    private void NovelStatesChanged(object? sender, NotifyCollectionChangedEventArgs args) => novelStatesDirty = true;
+    private static void PlaceNovelChild(Panel panel, UIElement child, int index)
+    {
+        if (index < panel.Children.Count && ReferenceEquals(panel.Children[index], child)) return;
+        panel.Children.Remove(child); panel.Children.Insert(index, child);
+    }
     internal void PublishNovel()
     {
         if (page.SelectedTab != "novel" || page.Novel is not { } module) return;
@@ -130,21 +158,77 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
             layout.Children.Add(novelStatus); layout.Children.Add(novelBooks); layout.Children.Add(novelState);
             layout.Children.Add(NovelUi.Bar(novelMore, novelCancel)); novelLayout = layout; NovelScroll.Content = layout;
         }
-        novelStatus!.Children.Clear();
-        foreach (var source in module.Search.States) novelStatus.Children.Add(NovelUi.Text(source.Source.Name + " · " + source.Status, 12, true));
-        if (!shownNovelBooks.SequenceEqual(module.Search.Books))
+        if (novelStatesDirty)
         {
-            shownNovelBooks = module.Search.Books.ToArray(); novelBooks!.Children.Clear();
-            foreach (var book in shownNovelBooks)
+            novelStatesDirty = false;
+            var ids = module.Search.States.Select(state => state.Source.InstallationId).ToHashSet(StringComparer.Ordinal);
+            foreach (var id in novelStatuses.Keys.Where(id => !ids.Contains(id)).ToArray())
             {
-                var card = new StackPanel { Width = 148, Margin = new(0, 0, 24, 24) };
-                card.Children.Add(new NovelImage(module.Sources, book) { Width = 148, Height = 200, Margin = new(0, 0, 0, 10) });
-                card.Children.Add(NovelUi.Text(book.Name, 15)); card.Children.Add(NovelUi.Text(book.Author, 12, true));
-                var button = NovelUi.Button(book.Name, () => module.RunUi(() => page.OpenNovelAsync(book)));
-                button.Content = card; button.Padding = new(0); novelBooks.Children.Add(button);
+                novelStatus!.Children.Remove(novelStatuses[id]); novelStatuses.Remove(id);
+            }
+            for (int index = 0; index < module.Search.States.Count; index++)
+            {
+                var source = module.Search.States[index];
+                if (!novelStatuses.TryGetValue(source.Source.InstallationId, out var text))
+                {
+                    text = NovelUi.Text("", 12, true); novelStatuses.Add(source.Source.InstallationId, text);
+                }
+                string value = source.Source.Name + " · " + source.Status;
+                if (text.Text != value) text.Text = value;
+                PlaceNovelChild(novelStatus!, text, index);
+            }
+        }
+        if (novelBooksDirty)
+        {
+            novelBooksDirty = false;
+            var ids = module.Search.Books.Select(book => book.SourceIdentity).ToHashSet(StringComparer.Ordinal);
+            foreach (var id in novelCards.Keys.Where(id => !ids.Contains(id)).ToArray())
+            {
+                novelBooks!.Children.Remove(novelCards[id].Button); novelCards.Remove(id);
+            }
+            for (int index = 0; index < module.Search.Books.Count; index++)
+            {
+                var book = module.Search.Books[index];
+                if (!novelCards.TryGetValue(book.SourceIdentity, out var card))
+                {
+                    card = new(module, page, book); novelCards.Add(book.SourceIdentity, card);
+                }
+                else card.Update(module, book);
+                PlaceNovelChild(novelBooks!, card.Button, index);
             }
         }
         novelState!.Text = module.Search.Status; novelMore!.IsEnabled = module.Search.CanLoadMore; novelCancel!.IsEnabled = module.Search.Loading;
+    }
+    private sealed class NovelSearchCard
+    {
+        internal Button Button { get; }
+        private readonly StackPanel content = new() { Width = 148, Margin = new(0, 0, 24, 24) };
+        private readonly TextBlock title = NovelUi.Text("", 15), author = NovelUi.Text("", 12, true);
+        private NovelImage image;
+        private NovelCapability module;
+        private NovelBook book;
+        internal NovelSearchCard(NovelCapability module, SearchResultsPage page, NovelBook book)
+        {
+            this.module = module; this.book = book;
+            image = Cover(module, book); content.Children.Add(image); content.Children.Add(title); content.Children.Add(author);
+            Button = NovelUi.Button(book.Name, () => this.module.RunUi(() => page.OpenNovelAsync(this.book)));
+            Button.Content = content; Button.Padding = new(0); Update(module, book);
+        }
+        private static NovelImage Cover(NovelCapability module, NovelBook book) => new(module.Sources, book)
+            { Width = 148, Height = 200, Margin = new(0, 0, 0, 10) };
+        private static (string Source, long Revision, string Url, string Cover) CoverIdentity(NovelBook book) =>
+            (book.InstallationId, book.Revision, book.BookUrl, book.CoverUrl);
+        internal void Update(NovelCapability owner, NovelBook next)
+        {
+            if (!ReferenceEquals(module.Sources, owner.Sources) || CoverIdentity(book) != CoverIdentity(next))
+            {
+                content.Children.Remove(image); image = Cover(owner, next); content.Children.Insert(0, image);
+            }
+            module = owner; book = next;
+            if (title.Text != next.Name) title.Text = next.Name;
+            if (author.Text != next.Author) author.Text = next.Author;
+            AutomationProperties.SetName(Button, next.Name); AutomationProperties.SetName(image, next.Name + "封面");
+        }
     }
     internal void ReleaseMusic()
     {

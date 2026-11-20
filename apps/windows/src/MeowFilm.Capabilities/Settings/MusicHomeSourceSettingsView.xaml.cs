@@ -16,10 +16,7 @@ public partial class MusicHomeSourceSettingsView : UserControl
         this.module = module;
         InitializeComponent();
         DataContext = module;
-        Loaded += async (_, _) => await UpdateActivation();
-        Unloaded += async (_, _) => { active = false; activation?.Cancel(); activation = null; await module.DeactivateCatalogSourceSettingsAsync(retirePage: true); };
-        RegisterPropertyChangedCallback(VisibilityProperty, async (_, _) => await UpdateActivation());
-        LayoutUpdated += async (_, _) => { if (active != (IsLoaded && DesktopVisual.IsVisible(this))) await UpdateActivation(); };
+        _ = DesktopVisual.ObserveVisibility(this, async _ => await UpdateActivation());
     }
     private async Task UpdateActivation()
     {

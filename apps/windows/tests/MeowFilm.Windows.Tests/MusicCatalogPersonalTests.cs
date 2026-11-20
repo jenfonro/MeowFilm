@@ -41,6 +41,8 @@ public static partial class MusicCatalogPersonalTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("home incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(false));
+        yield return Case("channel incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(true));
         foreach (var test in ArtworkDemandCases()) yield return test;
         foreach (var homeCase in HomeCases()) yield return homeCase;
         foreach (var test in LocalHeartbeatCases()) yield return test;

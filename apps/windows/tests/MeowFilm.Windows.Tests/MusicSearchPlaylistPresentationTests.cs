@@ -528,12 +528,13 @@ public static partial class MusicUiTests
         {
             var cover = Visuals(card).OfType<ArtworkImage>().Single();
             True(cover.ActualWidth >= Math.Min(124, width) - .5 && cover.ActualWidth <= 168.5,
-                "playlist artwork retains its 124–168 DIP content range");
+                $"playlist artwork retains its 124–168 DIP content range: cover={cover.ActualWidth}x{cover.ActualHeight}, card={card.ActualWidth}x{card.ActualHeight}, viewport={width}, loaded={card.IsLoaded}, itemWidth={((ItemsWrapGrid)list.ItemsPanelRoot).ItemWidth}");
             True(Math.Abs(cover.ActualWidth - cover.ActualHeight) < 1, "playlist artwork stays square");
             var bounds = cover.TransformToVisual(scroll).TransformBounds(new Rect(new Point(), new Size(cover.ActualWidth, cover.ActualHeight)));
             True(bounds.Left >= -1 && bounds.Right <= width + 1,
                 $"whole cards fit the horizontal viewport: bounds={bounds}, viewport={width}, list={list.ActualWidth}, card={new Size(card.ActualWidth, card.ActualHeight)}");
-            var title = Visuals(card).OfType<TextBlock>().Single(text => text.Text == ((MusicCatalogCard)card.DataContext).Title);
+            var title = Visuals(card).OfType<TextBlock>().Single(text => text.Text == ((MusicCatalogCard)card.DataContext).Title &&
+                VisualTreeHelper.GetParent(text) is StackPanel && text.Height == 40);
             Equal(13d, title.FontSize);
             AssertUnscaledMusicText(title, list);
         }

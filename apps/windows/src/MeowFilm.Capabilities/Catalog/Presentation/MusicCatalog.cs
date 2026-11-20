@@ -217,7 +217,7 @@ public sealed partial class MusicCapability
         if (section is null) return;
         section.SelectTab(tab);
         if (IsCatalogHome) RefreshHomeDisplay();
-        visibleCatalogCards.RemoveWhere(card => !ContainsCatalogCard(card));
+        RefreshCatalogDemandMembers();
     }
     public Task OpenCatalogCardAsync(MusicCatalogCard card)
     {
@@ -901,7 +901,7 @@ public sealed partial class MusicCapability
                 IEnumerable<MusicCatalogSection> songSections = IsCatalogHome ? homeDisplaySections : state.Sections;
                 var songs = songSections.SelectMany(s => s.Items).Select(i => i.Song).OfType<SongRow>().ToArray();
                 if (!Songs.SequenceEqual(songs, ReferenceEqualityComparer.Instance))
-                { Songs.Clear(); foreach (var song in songs) Songs.Add(song); }
+                    ReconcileSongRows(Songs, songs);
                 if (!append) selectedSong = null;
                 collection = null; total = state.Total;
                 var visibleCount = IsCatalogHome

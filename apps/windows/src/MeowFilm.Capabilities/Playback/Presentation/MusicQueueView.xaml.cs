@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
@@ -12,20 +13,43 @@ public partial class MusicQueueView : UserControl
     private readonly MusicCapability module;
     private readonly UserScrollIntent scrollIntent;
     private bool loadingMore;
+    private ScrollViewer? queueScroll;
 
     public MusicQueueView(MusicCapability module)
     {
         this.module = module;
         scrollIntent = new();
         InitializeComponent();
+        ArtworkItemsScope.SetItemKeySelector(QueueList, item => ((MusicQueueSurfaceRow)item).EntryId);
+        ArtworkItemsScope.SetItemResourcesSelector(QueueList, item =>
+        {
+            var row = (MusicQueueSurfaceRow)item;
+            return [new("cover", row.Cover, row.Song.Id)];
+        });
+        ArtworkItemsScope.SetItemKeySelector(RecommendationList, item =>
+        {
+            var candidate = (MusicRecommendationCandidate)item;
+            return (candidate.SessionId, candidate.Id);
+        });
+        ArtworkItemsScope.SetItemResourcesSelector(RecommendationList, item =>
+        {
+            var candidate = (MusicRecommendationCandidate)item;
+            return [new("cover", candidate.Cover, candidate.Song.Id)];
+        });
         DataContext = module;
         Loaded += (_, _) =>
         {
             if (Descendant<ScrollViewer>(QueueList) is not { } scroll) return;
+            queueScroll = scroll;
             scroll.ViewChanged -= QueueList_ViewChanged; scroll.ViewChanged += QueueList_ViewChanged;
             scrollIntent.Attach(scroll);
         };
-        Unloaded += (_, _) => scrollIntent.Clear();
+        Unloaded += (_, _) =>
+        {
+            scrollIntent.Clear();
+            if (queueScroll is not null) queueScroll.ViewChanged -= QueueList_ViewChanged;
+            queueScroll = null;
+        };
     }
 
     private void QueueList_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
@@ -51,7 +75,7 @@ public partial class MusicQueueView : UserControl
     private async void LoadMoreNearEnd()
     {
         if (loadingMore || !MeowFilm.Desktop.DesktopVisual.IsVisible(this) || !module.CanLoadMoreQueueSurface ||
-            Descendant<ScrollViewer>(QueueList) is not { } scroll ||
+            queueScroll is not { } scroll ||
             scroll.ExtentHeight <= 0 ||
             scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 80) return;
         loadingMore = true;

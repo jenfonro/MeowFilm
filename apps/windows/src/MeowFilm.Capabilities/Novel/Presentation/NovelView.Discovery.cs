@@ -17,56 +17,34 @@ public sealed partial class NovelView
     private const string StackIcon = "M3,7 L12,3 21,7 12,11 Z M3,12 L12,16 21,12 M3,17 L12,21 21,17";
     private long shownDiscoveryFailure;
     private bool showingDiscoveryFailure, changingDiscoveryShelf;
-    private (string Id, DependencyObject? DisplacedFocus)? discoveryFocus;
     private NovelDiscoveryChannelBar? discoveryChannelBar;
 
+    private Action? updateDiscovery;
+    private bool discoveryBooksChanged = true;
+    private readonly List<(RadioButton Choice, NovelKind[] Kinds)> discoveryChoices = [];
+    private readonly Dictionary<string, DiscoveryBookView> discoveryCards = [];
+    private sealed class DiscoveryBookView(NovelBook book)
+    {
+        internal NovelBook Book = book;
+        internal FrameworkElement Element = null!;
+        internal Action<NovelBook>? Update;
+        internal Action? UpdateShelf;
+        internal void Present(NovelBook next)
+        {
+            if (Book != next) { Book = next; Update?.Invoke(next); }
+        }
+    }
+    private static (string Source, long Revision, string Url, string Cover) CoverIdentity(NovelBook book) =>
+        (book.InstallationId, book.Revision, book.BookUrl, book.CoverUrl);
+    private static void PlaceChild(Panel panel, UIElement child, int index)
+    {
+        if (index < panel.Children.Count && ReferenceEquals(panel.Children[index], child)) return;
+        panel.Children.Remove(child); panel.Children.Insert(index, child);
+    }
+    private void PresentDiscovery() => updateDiscovery?.Invoke();
     private void AddDiscoveryTheme() => Resources.MergedDictionaries.Add(new()
         { Source = new Uri(DiscoveryThemeUri) });
 
-    private string? CaptureDiscoveryFocus()
-    {
-        var focused = DesktopVisual.Focused(this);
-        // WinUI can move focus onto the content owner again while an intermediate page unloads.
-        if (discoveryFocus is { } pending &&
-            (ReferenceEquals(focused, pending.DisplacedFocus) || ReferenceEquals(focused, body))) return pending.Id;
-        for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node))
-        {
-            Control? control = node is ComboBox or RadioButton ? (Control)node :
-                node is ComboBoxItem item ? ItemsControl.ItemsControlFromItemContainer(item) as ComboBox : null;
-            if (control is null || !DesktopVisual.Contains(body, control)) continue;
-            string id = AutomationProperties.GetAutomationId(control);
-            if (!id.StartsWith("novel.discovery.", StringComparison.Ordinal)) continue;
-            return id.EndsWith(".expanded", StringComparison.Ordinal) ? id[..^".expanded".Length] : id;
-        }
-        return null;
-    }
-    private void RestoreDiscoveryFocus(ScrollViewer replacement, string id)
-    {
-        var displaced = DesktopVisual.Focused(this);
-        discoveryFocus = (id, displaced);
-        replacement.Loaded += Mounted;
-        void Mounted(object sender, RoutedEventArgs e)
-        {
-            replacement.Loaded -= Mounted;
-            replacement.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-            {
-                if (!ReferenceEquals(body.Content, replacement) || discoveryFocus is not { } pending) return;
-                discoveryFocus = null;
-                if (!DesktopVisual.IsVisible(replacement) ||
-                    DesktopVisual.Focused(this) is { } focused && !ReferenceEquals(focused, pending.DisplacedFocus) &&
-                    !ReferenceEquals(focused, body)) return;
-                FindDiscoveryFocus(replacement, pending.Id)?.Focus(FocusState.Programmatic);
-            });
-        }
-    }
-    private static Control? FindDiscoveryFocus(DependencyObject parent, string id)
-    {
-        if (parent is Control control && DesktopVisual.IsVisible(control) && control.IsEnabled && AutomationProperties.GetAutomationId(control) == id)
-            return control;
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-            if (FindDiscoveryFocus(VisualTreeHelper.GetChild(parent, i), id) is { } found) return found;
-        return null;
-    }
     private static TextBlock DiscoveryText(string value, double size = 12, bool muted = false)
     {
         var text = NovelUi.Text(value, size, muted);
@@ -148,33 +126,36 @@ public sealed partial class NovelView
         token.ThrowIfCancellationRequested();
         await module.StartReadingAsync(token);
     }
-    private FrameworkElement DiscoveryTools()
+    private FrameworkElement DiscoveryTools(out ComboBox sources, out Action updateLoading)
     {
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Height = 44, VerticalAlignment = VerticalAlignment.Top };
-        var choices = module.Sources.Sources.Where(NovelCapability.CanExplore).ToList();
-        if (module.ExploreSource is { } selected && !choices.Any(s => s.InstallationId == selected.InstallationId))
-            choices.Insert(0, selected);
-        var sources = new ComboBox { ItemsSource = choices, SelectedItem = module.ExploreSource,
-            Width = 154, MaxDropDownHeight = 300, Margin = new(0, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center };
-        sources.UseResource(StyleProperty, "Novel.Discovery.Source");
-        AutomationProperties.SetName(sources, "发现书源"); AutomationProperties.SetAutomationId(sources, "novel.discovery.source");
-        sources.SelectionChanged += (_, _) =>
+        var sourceBox = sources = new ComboBox { Width = 154, MaxDropDownHeight = 300, Margin = new(0, 0, 16, 0), VerticalAlignment = VerticalAlignment.Center };
+        sourceBox.UseResource(StyleProperty, "Novel.Discovery.Source");
+        AutomationProperties.SetName(sourceBox, "发现书源"); AutomationProperties.SetAutomationId(sourceBox, "novel.discovery.source");
+        sourceBox.SelectionChanged += (_, _) =>
         {
-            if (sources.SelectedItem is NovelSource source && source != module.ExploreSource && NovelCapability.CanExplore(source))
+            if (!presentingDiscovery && sourceBox.SelectedItem is NovelSource source && source != module.ExploreSource && NovelCapability.CanExplore(source))
                 module.RunUi(ct => module.LoadDiscoveryAsync(source, null, true, ct));
         };
-        tools.Children.Add(sources);
-        var refresh = DiscoveryButton(module.LoadingDiscovery ? "取消加载" : "刷新", () =>
+        tools.Children.Add(sourceBox);
+        var refresh = DiscoveryButton("刷新", () =>
         {
             if (module.LoadingDiscovery) module.CancelDiscovery();
             else module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true, ct));
         });
-        refresh.Width = 30; refresh.Content = DiscoveryIcon(module.LoadingDiscovery
-            ? "M6,6 L18,18 M6,18 L18,6" : "M20,7 A9,9 0 1 0 21,15 M20,2 L20,7 15,7", 18);
-        ToolTipService.SetToolTip(refresh, module.LoadingDiscovery ? "取消加载" : "刷新");
-        tools.Children.Add(refresh);
-        return tools;
+        refresh.Width = 30;
+        bool? loading = null;
+        updateLoading = () =>
+        {
+            if (loading == module.LoadingDiscovery) return;
+            loading = module.LoadingDiscovery;
+            string name = loading == true ? "取消加载" : "刷新";
+            AutomationProperties.SetName(refresh, name); ToolTipService.SetToolTip(refresh, name);
+            refresh.Content = DiscoveryIcon(loading == true ? "M6,6 L18,18 M6,18 L18,6" : "M20,7 A9,9 0 1 0 21,15 M20,2 L20,7 15,7", 18);
+        };
+        tools.Children.Add(refresh); return tools;
     }
+    private bool presentingDiscovery;
     private FrameworkElement DiscoveryTabs(IEnumerable<NovelKind> kinds)
     {
         var tabs = new List<RadioButton>();
@@ -188,16 +169,18 @@ public sealed partial class NovelView
     private RadioButton DiscoveryTab(string title, NovelKind kind, bool selected, string id)
     {
         var tab = new RadioButton { Content = title, IsChecked = selected, GroupName = "novel.discovery.channels" };
+        discoveryChoices.Add((tab, [kind]));
         tab.UseResource(StyleProperty, "Novel.Discovery.Tab");
         AutomationProperties.SetName(tab, title); AutomationProperties.SetAutomationId(tab, id);
         var route = module.Route;
         var source = module.ExploreSource;
         tab.Checked += (_, _) =>
         {
+            if (presentingDiscovery) return;
             // Finish the checked/overflow gesture before publishing a replacement page.
             tab.DispatcherQueue.TryEnqueue(() =>
             {
-                if (module.Route == route && module.ExploreSource == source && DesktopVisual.Contains(body, tab) &&
+                if (!presentingDiscovery && module.Route == route && module.ExploreSource?.InstallationId == source?.InstallationId && DesktopVisual.Contains(body, tab) &&
                     tab.IsChecked == true && kind.Url != module.ExploreKind?.Url)
                     module.RunUi(ct => module.LoadDiscoveryAsync(source, kind, false, ct));
             });
@@ -217,8 +200,9 @@ public sealed partial class NovelView
                 continue;
             }
             var entry = group.Kinds.FirstOrDefault(kind => kind.Url == module.ExploreKind?.Url) ?? group.Kinds[0];
-            tabs.Add(DiscoveryTab(group.Title, entry, group.Kinds.Any(kind => kind.Url == module.ExploreKind?.Url),
-                "novel.discovery.group:" + group.Kinds[0].Url));
+            var tab = DiscoveryTab(group.Title, entry, group.Kinds.Any(kind => kind.Url == module.ExploreKind?.Url),
+                "novel.discovery.group:" + group.Kinds[0].Url);
+            discoveryChoices[^1] = (tab, group.Kinds.ToArray()); tabs.Add(tab);
         }
         return discoveryChannelBar = new(tabs);
     }
@@ -244,23 +228,19 @@ public sealed partial class NovelView
     }
     private FrameworkElement BuildDiscovery(bool categories)
     {
+        discoveryCards.Clear(); discoveryChoices.Clear(); discoveryBooksChanged = true;
         var panel = new StackPanel { MaxWidth = 1100 };
         AutomationProperties.SetName(panel, categories ? "小说分类" : "小说首页");
-        var groups = NovelDiscoveryKinds.Groups(module.Kinds, rankingsOnly: !categories);
-        bool showBooks = categories || NovelDiscoveryKinds.IsRanking(module.Kinds, module.ExploreKind);
         var heading = new Grid { MinHeight = 44 };
         heading.ColumnDefinitions.Add(new()); heading.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        var tools = DiscoveryTools(); Grid.SetColumn(tools, 1); heading.Children.Add(tools);
-        heading.Children.Add(categories ? DiscoveryChannels(groups) : DiscoveryTabs(groups.SelectMany(group => group.Kinds)));
-        panel.Children.Add(DiscoveryRule(heading));
-        if (categories)
+        var tools = DiscoveryTools(out var sources, out var updateLoading); Grid.SetColumn(tools, 1); heading.Children.Add(tools);
+        var channels = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        heading.Children.Add(channels); panel.Children.Add(DiscoveryRule(heading));
+        var filters = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch }; panel.Children.Add(filters);
+        var feature = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        if (!categories)
         {
-            var current = groups.FirstOrDefault(group => group.Kinds.Any(kind => kind.Url == module.ExploreKind?.Url));
-            if (current is not null && !string.IsNullOrWhiteSpace(current.Title)) panel.Children.Add(DiscoveryFilters(current));
-        }
-        else
-        {
-            if (showBooks && module.DiscoverBooks.Count > 0) panel.Children.Add(DiscoveryFeatureRow());
+            panel.Children.Add(feature);
             var all = DiscoveryButton("全部分类", () => module.Request(NovelCapability.CategoriesRoute));
             var label = new StackPanel { Orientation = Orientation.Horizontal };
             label.Children.Add(new TextBlock { Text = "全部分类", VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 8, 0) });
@@ -268,23 +248,125 @@ public sealed partial class NovelView
             all.Content = label; all.HorizontalAlignment = HorizontalAlignment.Right;
             all.Margin = new(0, 25, 0, 16); panel.Children.Add(all);
         }
-        // 1100 = 6 × 170 + 5 × 16; category rows use 3 × 350⅔ + 2 × 24.
         var books = new NovelBookGrid(categories ? 3 : 6, categories ? 310 : 138, categories ? 24 : 16, 22);
-        AutomationProperties.SetName(books, categories ? "分类结果" : "发现书籍");
-        if (showBooks)
-            foreach (var book in module.DiscoverBooks)
-                books.Children.Add(categories ? DiscoveryCatalogBook(book) : DiscoveryTile(book));
-        panel.Children.Add(books);
-        AddDiscoveryStatus(panel, categories);
-        if (showBooks && module.MoreDiscovery)
+        AutomationProperties.SetName(books, categories ? "分类结果" : "发现书籍"); panel.Children.Add(books);
+        var status = DiscoveryText("", 12, true); status.Margin = new(0, 18, 0, 0);
+        AutomationProperties.SetLiveSetting(status, AutomationLiveSetting.Polite); panel.Children.Add(status);
+        var retry = DiscoveryButton("重试", () => module.RunUi(ShowDiscoveryRetryAsync)); panel.Children.Add(retry);
+        var import = DiscoveryButton("导入书源", () => module.RunUi(ct => module.ImportSourcesAsync(this, ct))); panel.Children.Add(import);
+        var more = DiscoveryButton("加载更多", () => module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false, ct)));
+        more.Margin = new(0, 18, 0, 0); more.HorizontalAlignment = HorizontalAlignment.Center; panel.Children.Add(more);
+        IReadOnlyList<NovelSource>? displayedSources = null;
+        NovelSource? displayedSource = null;
+        NovelKind[]? displayedKinds = null;
+        IReadOnlyList<NovelKind>? displayedKindsInput = null;
+        (string? Id, long? Revision)? channelSource = null;
+        IReadOnlyList<NovelDiscoveryGroup> groups = [];
+        string? displayedFilter = null;
+        string? displayedKind = null;
+        bool showBooks = categories;
+        IReadOnlyList<NovelEntry>? displayedEntries = null;
+        HashSet<string> displayedShelf = [];
+        DiscoveryBookView? featured = null;
+        Action? updateContinuation = null;
+        var featuredOwner = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        if (!categories)
         {
-            var more = DiscoveryButton("加载更多", () => module.RunUi(ct =>
-                module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false, ct)));
-            more.IsEnabled = !module.LoadingDiscovery; more.Margin = new(0, 18, 0, 0);
-            more.HorizontalAlignment = HorizontalAlignment.Center; panel.Children.Add(more);
+            feature.Content = DiscoveryFeatureRow(featuredOwner, DiscoveryContinuation(out updateContinuation));
+            feature.Visibility = Visibility.Collapsed;
         }
+        bool? displayedBooks = null;
         var frame = new Grid { Margin = new(32, 12, 32, 16) }; frame.Children.Add(panel);
         var scroll = NovelUi.Scroll(frame); scroll.HorizontalContentAlignment = HorizontalAlignment.Stretch;
+        updateDiscovery = () =>
+        {
+            presentingDiscovery = true;
+            try
+            {
+                bool sourceChanged = !ReferenceEquals(displayedSources, module.Sources.Sources) || displayedSource != module.ExploreSource;
+                if (sourceChanged)
+                {
+                    displayedSources = module.Sources.Sources; displayedSource = module.ExploreSource;
+                    var choices = module.Sources.Sources.Where(NovelCapability.CanExplore).ToList();
+                    if (module.ExploreSource is { } selected && !choices.Any(s => s.InstallationId == selected.InstallationId)) choices.Insert(0, selected);
+                    sources.ItemsSource = choices; sources.SelectedItem = module.ExploreSource;
+                }
+                bool kindsChanged = displayedKinds is null ||
+                    !ReferenceEquals(displayedKindsInput, module.Kinds) && !displayedKinds.SequenceEqual(module.Kinds) ||
+                    channelSource != (module.ExploreSource?.InstallationId, module.ExploreSource?.Revision);
+                displayedKindsInput = module.Kinds;
+                if (kindsChanged)
+                {
+                    channelSource = (module.ExploreSource?.InstallationId, module.ExploreSource?.Revision);
+                    displayedKinds = module.Kinds.ToArray(); groups = NovelDiscoveryKinds.Groups(module.Kinds, rankingsOnly: !categories);
+                    discoveryChoices.Clear(); discoveryChannelBar?.Close();
+                    channels.Content = categories ? DiscoveryChannels(groups) : DiscoveryTabs(groups.SelectMany(group => group.Kinds));
+                    displayedFilter = null;
+                }
+                if (kindsChanged || displayedKind != module.ExploreKind?.Url)
+                {
+                    displayedKind = module.ExploreKind?.Url;
+                    var current = groups.FirstOrDefault(group => group.Kinds.Any(kind => kind.Url == displayedKind));
+                    string filter = categories && current is not null && !string.IsNullOrWhiteSpace(current.Title) ? current.Kinds[0].Url : "";
+                    if (displayedFilter != filter)
+                    {
+                        discoveryChoices.RemoveAll(choice => choice.Choice.GroupName == "novel.discovery.kinds");
+                        filters.Content = filter.Length > 0 ? DiscoveryFilters(current!) : null; displayedFilter = filter;
+                    }
+                    foreach (var choice in discoveryChoices)
+                    {
+                        bool selected = choice.Kinds.Any(kind => kind.Url == displayedKind);
+                        if (choice.Choice.IsChecked != selected) choice.Choice.IsChecked = selected;
+                    }
+                    showBooks = categories || groups.Any(group => group.Kinds.Any(kind => kind.Url == displayedKind));
+                }
+                if (discoveryBooksChanged || displayedBooks != showBooks || sourceChanged)
+                {
+                    discoveryBooksChanged = false; displayedBooks = showBooks;
+                    var desired = showBooks ? module.DiscoverBooks.ToArray() : [];
+                    var identities = desired.Select(book => book.SourceIdentity).ToHashSet(StringComparer.Ordinal);
+                    foreach (var key in discoveryCards.Keys.Where(key => !identities.Contains(key)).ToArray())
+                    { books.Children.Remove(discoveryCards[key].Element); discoveryCards.Remove(key); }
+                    for (int index = 0; index < desired.Length; index++)
+                    {
+                        var book = desired[index];
+                        if (!discoveryCards.TryGetValue(book.SourceIdentity, out var card))
+                        {
+                            card = categories ? DiscoveryCatalogBook(book) : DiscoveryTile(book);
+                            discoveryCards.Add(book.SourceIdentity, card);
+                        }
+                        card.Present(book); if (sourceChanged) card.Update?.Invoke(book); card.UpdateShelf?.Invoke(); PlaceChild(books, card.Element, index);
+                    }
+                    if (!categories)
+                    {
+                        if (desired.FirstOrDefault() is not { } first)
+                        { featuredOwner.Content = null; featured = null; feature.Visibility = Visibility.Collapsed; }
+                        else if (featured is null || featured.Book.SourceIdentity != first.SourceIdentity)
+                        {
+                            featured = DiscoveryFeaturedBook(first);
+                            featuredOwner.Content = featured.Element; feature.Visibility = Visibility.Visible;
+                        }
+                        else { featured.Present(first); if (sourceChanged) featured.Update?.Invoke(first); }
+                    }
+                }
+                if (!ReferenceEquals(displayedEntries, module.Library.Entries))
+                {
+                    displayedEntries = module.Library.Entries;
+                    var shelf = module.Library.Entries.Where(entry => entry.OnShelf).Select(entry => entry.Book.SourceIdentity).ToHashSet(StringComparer.Ordinal);
+                    var changed = new HashSet<string>(displayedShelf, StringComparer.Ordinal); changed.SymmetricExceptWith(shelf);
+                    foreach (var identity in changed)
+                        if (discoveryCards.TryGetValue(identity, out var card)) card.UpdateShelf?.Invoke();
+                    if (featured is not null && changed.Contains(featured.Book.SourceIdentity)) featured.UpdateShelf?.Invoke();
+                    displayedShelf = shelf; updateContinuation?.Invoke();
+                }
+                updateLoading(); more.IsEnabled = !module.LoadingDiscovery;
+                more.Visibility = showBooks && module.MoreDiscovery ? Visibility.Visible : Visibility.Collapsed;
+                status.Text = DiscoveryStatus(categories); status.Visibility = status.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+                retry.Visibility = module.DiscoveryState == NovelDiscoveryState.Failed ? Visibility.Visible : Visibility.Collapsed;
+                import.Visibility = module.ExploreSource is null && !module.LoadingDiscovery ? Visibility.Visible : Visibility.Collapsed;
+            }
+            finally { presentingDiscovery = false; }
+        };
         return scroll;
     }
     private static Border DiscoveryRule(UIElement child)
@@ -309,12 +391,13 @@ public sealed partial class NovelView
         {
             var choice = new RadioButton { Content = kind.Title, IsChecked = kind.Url == module.ExploreKind?.Url,
                 GroupName = "novel.discovery.kinds" };
+            discoveryChoices.Add((choice, [kind]));
             choice.UseResource(StyleProperty, "Novel.Discovery.Choice");
             AutomationProperties.SetName(choice, kind.Title);
             AutomationProperties.SetAutomationId(choice, "novel.discovery.kind:" + kind.Url);
             choice.Checked += (_, _) =>
             {
-                if (kind.Url != module.ExploreKind?.Url)
+                if (!presentingDiscovery && kind.Url != module.ExploreKind?.Url)
                     module.RunUi(ct => module.LoadDiscoveryAsync(module.ExploreSource, kind, false, ct));
             };
             choice.KeyDown += DiscoveryNavigation_KeyDown;
@@ -326,7 +409,7 @@ public sealed partial class NovelView
         Grid.SetColumn(capsule, 1); row.Children.Add(capsule);
         return row;
     }
-    private FrameworkElement DiscoveryFeatureRow()
+    private FrameworkElement DiscoveryFeatureRow(FrameworkElement featured, FrameworkElement continuation)
     {
         var row = new Grid();
         row.ColumnDefinitions.Add(new() { Width = new(9, GridUnitType.Star) });
@@ -335,7 +418,6 @@ public sealed partial class NovelView
         row.RowDefinitions.Add(new() { Height = GridLength.Auto });
         row.RowDefinitions.Add(new() { Height = new(0) });
         row.RowDefinitions.Add(new() { Height = GridLength.Auto });
-        var featured = DiscoveryFeaturedBook(); var continuation = DiscoveryContinuation();
         row.Children.Add(featured); Grid.SetColumn(continuation, 2); row.Children.Add(continuation);
         bool? stacked = null;
         row.SizeChanged += (_, _) =>
@@ -349,15 +431,40 @@ public sealed partial class NovelView
         };
         return row;
     }
-    private FrameworkElement DiscoveryFeaturedBook()
+    private ContentControl DiscoveryCoverSlot(NovelBook book, double width, double height, out Action<NovelBook> update, bool scale = false)
     {
+        var slot = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        (string Source, long Revision, string Url, string Cover)? displayed = null;
+        update = next =>
+        {
+            var identity = CoverIdentity(next);
+            if (displayed == identity) return;
+            displayed = identity; slot.Content = DiscoveryCover(next, width, height, scale);
+        };
+        update(book); return slot;
+    }
+    private Action DiscoveryShelf(Button button, DiscoveryBookView view, bool featured)
+    {
+        bool? displayed = null;
+        return () =>
+        {
+            bool onShelf = IsOnShelf(view.Book);
+            if (displayed == onShelf) return;
+            displayed = onShelf;
+            string name = onShelf ? "移出书架" : "加入书架";
+            AutomationProperties.SetName(button, name); ToolTipService.SetToolTip(button, name);
+            button.Content = featured ? onShelf ? "✓  已加入书架" : "＋  加入书架" :
+                DiscoveryIcon(onShelf ? "M5,12 L9,16 19,6" : "M12,5 L12,19 M5,12 L19,12");
+        };
+    }
+    private DiscoveryBookView DiscoveryFeaturedBook(NovelBook book)
+    {
+        var view = new DiscoveryBookView(book);
         var card = new Border { Height = 216, Padding = new(30, 22, 30, 22) };
-        card.UseResource(StyleProperty, "Novel.Discovery.Feature");
-        DiscoveryCanvas(card);
+        card.UseResource(StyleProperty, "Novel.Discovery.Feature"); DiscoveryCanvas(card);
         AutomationProperties.SetName(card, "选读");
-        if (module.DiscoverBooks.FirstOrDefault() is not { } book) return card;
         var layout = new Grid(); layout.ColumnDefinitions.Add(new()); layout.ColumnDefinitions.Add(new() { Width = new(149) });
-        var cover = DiscoveryCover(book, 121, 168); cover.HorizontalAlignment = HorizontalAlignment.Right;
+        var cover = DiscoveryCoverSlot(book, 121, 168, out var updateCover); cover.HorizontalAlignment = HorizontalAlignment.Right;
         Grid.SetColumn(cover, 1); layout.Children.Add(cover);
         card.SizeChanged += (_, _) =>
         {
@@ -365,130 +472,139 @@ public sealed partial class NovelView
             cover.Visibility = hideCover ? Visibility.Collapsed : Visibility.Visible;
             layout.ColumnDefinitions[1].Width = new(hideCover ? 0 : 149);
         };
-        var copy = new DockPanel();
-        var actions = new WrapPanel { VerticalAlignment = VerticalAlignment.Bottom };
-        var read = DiscoveryButton("开始阅读", () => module.RunUi(ct => ReadDiscoveryBookAsync(book, ct)), "Novel.Discovery.Primary");
+        var copy = new DockPanel(); var actions = new WrapPanel { VerticalAlignment = VerticalAlignment.Bottom };
+        var read = DiscoveryButton("开始阅读", () => module.RunUi(ct => ReadDiscoveryBookAsync(view.Book, ct)), "Novel.Discovery.Primary");
         read.Content = "开始阅读  →"; actions.Children.Add(read);
-        bool onShelf = IsOnShelf(book);
-        var shelf = DiscoveryButton(onShelf ? "移出书架" : "加入书架", () => module.RunUi(ct => ShelfDiscoveryBookAsync(book, !onShelf, ct)));
-        shelf.Content = onShelf ? "✓  已加入书架" : "＋  加入书架"; shelf.Margin = new(16, 0, 0, 0);
-        actions.Children.Add(shelf); DockPanel.SetDock(actions, Dock.Bottom); copy.Children.Add(actions);
-        var words = new StackPanel();
-        words.Children.Add(DiscoveryText("选读 · " + DiscoverySourceName(book), 11, true));
-        var title = DiscoveryButton(book.Name, () => module.RunUi(ct => module.OpenBookAsync(book, ct)));
-        title.Content = DiscoveryText(book.Name, 28); title.HorizontalContentAlignment = HorizontalAlignment.Left;
+        var shelf = DiscoveryButton("加入书架", () => module.RunUi(ct => ShelfDiscoveryBookAsync(view.Book, !IsOnShelf(view.Book), ct)));
+        shelf.Margin = new(16, 0, 0, 0); actions.Children.Add(shelf);
+        view.UpdateShelf = DiscoveryShelf(shelf, view, true); view.UpdateShelf();
+        DockPanel.SetDock(actions, Dock.Bottom); copy.Children.Add(actions);
+        var words = new StackPanel(); var source = DiscoveryText("", 11, true); words.Children.Add(source);
+        var title = DiscoveryButton(book.Name, () => module.RunUi(ct => module.OpenBookAsync(view.Book, ct)));
+        var name = DiscoveryText(book.Name, 28); title.Content = name; title.HorizontalContentAlignment = HorizontalAlignment.Left;
         title.Height = 43; words.Children.Add(title);
-        words.Children.Add(DiscoveryText(string.Join(" · ", new[] { book.Author, DiscoveryMetadata(book) }.Where(s => s.Length > 0)), 12, true));
+        var metadata = DiscoveryText("", 12, true); words.Children.Add(metadata);
         var intro = DiscoveryText(book.Intro, 13, true); intro.TextWrapping = TextWrapping.Wrap; intro.LineHeight = 23;
         intro.MaxHeight = 46; intro.Margin = new(0, 12, 0, 0); words.Children.Add(intro);
         copy.Children.Add(words); layout.Children.Add(copy); card.Child = layout;
-        return card;
+        view.Element = card;
+        view.Update = next =>
+        {
+            updateCover(next); source.Text = "选读 · " + DiscoverySourceName(next);
+            name.Text = next.Name; AutomationProperties.SetName(title, next.Name);
+            metadata.Text = string.Join(" · ", new[] { next.Author, DiscoveryMetadata(next) }.Where(s => s.Length > 0)); intro.Text = next.Intro;
+        };
+        view.Update(book); return view;
     }
-    private FrameworkElement DiscoveryContinuation()
+    private FrameworkElement DiscoveryContinuation(out Action update)
     {
         var card = new Border { Height = 216, Padding = new(20) };
-        card.UseResource(StyleProperty, "Novel.Discovery.Surface");
-        DiscoveryCanvas(card);
+        card.UseResource(StyleProperty, "Novel.Discovery.Surface"); DiscoveryCanvas(card);
         AutomationProperties.SetName(card, "继续阅读");
         var panel = new DockPanel(); card.Child = panel;
-        var last = module.Library.Entries.Where(e => e.ReadAt is not null).OrderByDescending(e => e.ReadAt).FirstOrDefault();
-        var heading = new Grid();
-        heading.Children.Add(DiscoveryText("继续阅读", 13));
-        if (last?.ReadAt is { } readAt)
-        {
-            int days = (DateTimeOffset.Now.Date - readAt.LocalDateTime.Date).Days;
-            var date = DiscoveryText(days == 0 ? "今天" : days == 1 ? "昨天" : readAt.LocalDateTime.ToString("MM-dd"), 11, true);
-            date.HorizontalAlignment = HorizontalAlignment.Right; heading.Children.Add(date);
-        }
+        var heading = new Grid(); heading.Children.Add(DiscoveryText("继续阅读", 13));
+        var date = DiscoveryText("", 11, true); date.HorizontalAlignment = HorizontalAlignment.Right; heading.Children.Add(date);
         DockPanel.SetDock(heading, Dock.Top); panel.Children.Add(heading);
-        if (last is null)
-        {
-            var empty = DiscoveryText("暂无阅读历史", 12, true); empty.Margin = new(0, 20, 0, 0);
-            panel.Children.Add(empty); return card;
-        }
+        NovelEntry? last = null;
         var bottom = new Grid { Margin = new(0, 12, 0, 0) };
-        var resume = DiscoveryButton("接着读", () => module.RunUi(ct => module.ContinueReadingAsync(last, ct)));
+        var resume = DiscoveryButton("接着读", () => { if (last is { } entry) module.RunUi(ct => module.ContinueReadingAsync(entry, ct)); });
         resume.Content = "接着读 →"; resume.HorizontalAlignment = HorizontalAlignment.Left;
-        resume.UseResource(Control.ForegroundProperty, "MeowFilm.Brush.AccentText");
-        bottom.Children.Add(resume);
-        if (last.Anchor is { } anchor)
-        {
-            var percent = DiscoveryText($"本章 {anchor.Ratio:P0}", 11, true);
-            percent.HorizontalAlignment = HorizontalAlignment.Right; percent.VerticalAlignment = VerticalAlignment.Center;
-            bottom.Children.Add(percent);
-        }
+        resume.UseResource(Control.ForegroundProperty, "MeowFilm.Brush.AccentText"); bottom.Children.Add(resume);
+        var percent = DiscoveryText("", 11, true); percent.HorizontalAlignment = HorizontalAlignment.Right;
+        percent.VerticalAlignment = VerticalAlignment.Center; bottom.Children.Add(percent);
         DockPanel.SetDock(bottom, Dock.Bottom); panel.Children.Add(bottom);
         var content = new StackPanel { Margin = new(0, 17, 0, 0) };
         var book = new Grid(); book.ColumnDefinitions.Add(new() { Width = new(57) }); book.ColumnDefinitions.Add(new());
-        book.Children.Add(DiscoveryCover(last.Book, 45, 61));
+        var cover = new ContentControl(); book.Children.Add(cover);
         var info = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        info.Children.Add(DiscoveryText(last.Book.Name, 14));
-        var author = DiscoveryText(last.Book.Author, 11, true); author.Margin = new(0, 5, 0, 0); info.Children.Add(author);
+        var name = DiscoveryText("", 14); info.Children.Add(name);
+        var author = DiscoveryText("", 11, true); author.Margin = new(0, 5, 0, 0); info.Children.Add(author);
         Grid.SetColumn(info, 1); book.Children.Add(info); content.Children.Add(book);
-        var chapter = DiscoveryText(last.Anchor?.ChapterTitle ?? "", 11, true); chapter.Margin = new(0, 15, 0, 0);
-        content.Children.Add(chapter); panel.Children.Add(content);
-        return card;
+        var chapter = DiscoveryText("", 11, true); chapter.Margin = new(0, 15, 0, 0); content.Children.Add(chapter); panel.Children.Add(content);
+        var empty = DiscoveryText("暂无阅读历史", 12, true); empty.Margin = new(0, 20, 0, 0); panel.Children.Add(empty);
+        update = () =>
+        {
+            var next = module.Library.Entries.Where(e => e.ReadAt is not null).OrderByDescending(e => e.ReadAt).FirstOrDefault();
+            if (next != last)
+            {
+                if (next is null) cover.Content = null;
+                else
+                {
+                    if (last is null || CoverIdentity(last.Book) != CoverIdentity(next.Book)) cover.Content = DiscoveryCover(next.Book, 45, 61);
+                    name.Text = next.Book.Name; author.Text = next.Book.Author; chapter.Text = next.Anchor?.ChapterTitle ?? "";
+                    percent.Text = next.Anchor is { } anchor ? $"本章 {anchor.Ratio:P0}" : "";
+                    if (next.ReadAt is { } readAt)
+                    {
+                        int days = (DateTimeOffset.Now.Date - readAt.LocalDateTime.Date).Days;
+                        date.Text = days == 0 ? "今天" : days == 1 ? "昨天" : readAt.LocalDateTime.ToString("MM-dd");
+                    }
+                }
+                last = next;
+            }
+            empty.Visibility = last is null ? Visibility.Visible : Visibility.Collapsed;
+            content.Visibility = bottom.Visibility = last is null ? Visibility.Collapsed : Visibility.Visible;
+            date.Visibility = last is null ? Visibility.Collapsed : Visibility.Visible;
+        };
+        update(); return card;
     }
-    private FrameworkElement DiscoveryTile(NovelBook book)
+    private DiscoveryBookView DiscoveryTile(NovelBook book)
     {
+        var view = new DiscoveryBookView(book);
         var panel = new StackPanel();
-        panel.Children.Add(DiscoveryCover(book, 170, 170 * 4d / 3, scale: true));
+        panel.Children.Add(DiscoveryCoverSlot(book, 170, 170 * 4d / 3, out var updateCover, scale: true));
         var title = DiscoveryText(book.Name, 14); title.Margin = new(0, 10, 0, 0); panel.Children.Add(title);
-        var author = DiscoveryText(string.Join(" · ", new[] { book.Author, NovelJson.Text(book.Data, "kind") }.Where(s => s.Length > 0)), 11, true);
-        author.Margin = new(0, 3, 0, 0); panel.Children.Add(author);
-        var source = new Grid { Margin = new(0, 7, 0, 0) };
-        source.ColumnDefinitions.Add(new()); source.ColumnDefinitions.Add(new() { Width = new(14) });
-        source.Children.Add(DiscoveryText(DiscoverySourceName(book), 11, true));
+        var author = DiscoveryText("", 11, true); author.Margin = new(0, 3, 0, 0); panel.Children.Add(author);
+        var source = new Grid { Margin = new(0, 7, 0, 0) }; source.ColumnDefinitions.Add(new()); source.ColumnDefinitions.Add(new() { Width = new(14) });
+        var sourceName = DiscoveryText("", 11, true); source.Children.Add(sourceName);
         var icon = DiscoveryIcon(StackIcon, 12); Grid.SetColumn(icon, 1); source.Children.Add(icon); panel.Children.Add(source);
-        var button = DiscoveryButton(book.Name, () => module.RunUi(ct => module.OpenBookAsync(book, ct)), "Novel.Discovery.OpenBook");
-        button.Content = panel; return button;
+        var button = DiscoveryButton(book.Name, () => module.RunUi(ct => module.OpenBookAsync(view.Book, ct)), "Novel.Discovery.OpenBook");
+        button.Content = panel; view.Element = button;
+        view.Update = next =>
+        {
+            updateCover(next); title.Text = next.Name; AutomationProperties.SetName(button, next.Name);
+            author.Text = string.Join(" · ", new[] { next.Author, NovelJson.Text(next.Data, "kind") }.Where(s => s.Length > 0));
+            sourceName.Text = DiscoverySourceName(next);
+        };
+        view.Update(book); return view;
     }
-    private FrameworkElement DiscoveryCatalogBook(NovelBook book)
+    private DiscoveryBookView DiscoveryCatalogBook(NovelBook book)
     {
+        var view = new DiscoveryBookView(book);
         var layout = new Grid(); layout.ColumnDefinitions.Add(new() { Width = new(126) }); layout.ColumnDefinitions.Add(new());
-        var cover = DiscoveryCover(book, 111, 156); cover.HorizontalAlignment = HorizontalAlignment.Left; layout.Children.Add(cover);
+        var cover = DiscoveryCoverSlot(book, 111, 156, out var updateCover); cover.HorizontalAlignment = HorizontalAlignment.Left; layout.Children.Add(cover);
         var info = new DockPanel { Height = 156 };
-        var source = DiscoveryText(DiscoverySourceName(book), 11, true); DockPanel.SetDock(source, Dock.Bottom); info.Children.Add(source);
+        var source = DiscoveryText("", 11, true); DockPanel.SetDock(source, Dock.Bottom); info.Children.Add(source);
         var text = new StackPanel();
         var title = DiscoveryText(book.Name, 15); title.Margin = new(0, 0, 26, 0); text.Children.Add(title);
         var author = DiscoveryText(book.Author, 11, true); author.Margin = new(0, 5, 0, 0); text.Children.Add(author);
-        var metadata = DiscoveryText(DiscoveryMetadata(book), 11, true); metadata.Margin = new(0, 7, 0, 0); text.Children.Add(metadata);
+        var metadata = DiscoveryText("", 11, true); metadata.Margin = new(0, 7, 0, 0); text.Children.Add(metadata);
         var summary = DiscoveryText(book.Intro, 12, true); summary.TextWrapping = TextWrapping.Wrap;
         summary.LineHeight = 21; summary.MaxHeight = 42; summary.Margin = new(0, 9, 0, 0); text.Children.Add(summary);
         info.Children.Add(text); Grid.SetColumn(info, 1); layout.Children.Add(info);
-        var button = DiscoveryButton(book.Name, () => module.RunUi(ct => module.OpenBookAsync(book, ct)), "Novel.Discovery.OpenBook");
+        var button = DiscoveryButton(book.Name, () => module.RunUi(ct => module.OpenBookAsync(view.Book, ct)), "Novel.Discovery.OpenBook");
         button.Content = layout;
         var row = new Grid(); row.Children.Add(button);
-        bool onShelf = IsOnShelf(book);
-        var shelf = DiscoveryButton(onShelf ? "移出书架" : "加入书架", () => module.RunUi(ct => ShelfDiscoveryBookAsync(book, !onShelf, ct)));
-        shelf.Content = DiscoveryIcon(onShelf ? "M5,12 L9,16 19,6" : "M12,5 L12,19 M5,12 L19,12");
-        ToolTipService.SetToolTip(shelf, onShelf ? "移出书架" : "加入书架"); shelf.Width = 24; shelf.Height = 24;
-        shelf.HorizontalAlignment = HorizontalAlignment.Right; shelf.VerticalAlignment = VerticalAlignment.Top; row.Children.Add(shelf);
+        var shelf = DiscoveryButton("加入书架", () => module.RunUi(ct => ShelfDiscoveryBookAsync(view.Book, !IsOnShelf(view.Book), ct)));
+        shelf.Width = 24; shelf.Height = 24; shelf.HorizontalAlignment = HorizontalAlignment.Right; shelf.VerticalAlignment = VerticalAlignment.Top; row.Children.Add(shelf);
+        view.UpdateShelf = DiscoveryShelf(shelf, view, false); view.UpdateShelf();
         var border = new Border { Child = row, Padding = new(0, 0, 0, 22), BorderThickness = new(0, 0, 0, 1) };
-        border.UseResource(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); return border;
-    }
-    private void AddDiscoveryStatus(Panel panel, bool categories)
-    {
-        string text = module.DiscoveryState switch
+        border.UseResource(Border.BorderBrushProperty, "MeowFilm.Brush.SidebarBorder"); view.Element = border;
+        view.Update = next =>
         {
-            NovelDiscoveryState.Loading => "加载中…",
-            NovelDiscoveryState.Cancelling => "正在取消…",
-            NovelDiscoveryState.Cancelled => "已取消",
-            NovelDiscoveryState.Unavailable => module.ExploreSource is null ? "无可用发现书源" : "书源不可用",
-            NovelDiscoveryState.Empty => module.ExploreKind is null ? categories ? "暂无可用分类" : "暂无可用榜单" : "暂无书籍",
-            _ => ""
+            updateCover(next); title.Text = next.Name; AutomationProperties.SetName(button, next.Name);
+            author.Text = next.Author; metadata.Text = DiscoveryMetadata(next); summary.Text = next.Intro; source.Text = DiscoverySourceName(next);
         };
-        if (text.Length > 0)
-        {
-            var status = DiscoveryText(text, 12, true); status.Margin = new(0, 18, 0, 0);
-            AutomationProperties.SetLiveSetting(status, AutomationLiveSetting.Polite);
-            panel.Children.Add(status);
-        }
-        if (module.DiscoveryState == NovelDiscoveryState.Failed)
-            panel.Children.Add(DiscoveryButton("重试", () => module.RunUi(ShowDiscoveryRetryAsync)));
-        if (module.ExploreSource is null && !module.LoadingDiscovery)
-            panel.Children.Add(DiscoveryButton("导入书源", () => module.RunUi(ct => module.ImportSourcesAsync(this, ct))));
+        view.Update(book); return view;
     }
+    private string DiscoveryStatus(bool categories) => module.DiscoveryState switch
+    {
+        NovelDiscoveryState.Loading => "加载中…",
+        NovelDiscoveryState.Cancelling => "正在取消…",
+        NovelDiscoveryState.Cancelled => "已取消",
+        NovelDiscoveryState.Unavailable => module.ExploreSource is null ? "无可用发现书源" : "书源不可用",
+        NovelDiscoveryState.Empty => module.ExploreKind is null ? categories ? "暂无可用分类" : "暂无可用榜单" : "暂无书籍",
+        _ => ""
+    };
     private void PresentDiscoveryFailure()
     {
         if (module.Route is not (NovelCapability.HomeRoute or NovelCapability.CategoriesRoute) ||

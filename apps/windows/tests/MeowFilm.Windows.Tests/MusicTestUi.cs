@@ -24,7 +24,8 @@ internal static class MusicTestUi
         typeof(MusicAccountsView).GetMethod("ShowLogin", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(view, null);
     internal static bool IsDialogOpen(ContentDialog dialog) => dialog.XamlRoot is { } root &&
         Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(root)
-            .Any(popup => popup.Child is DependencyObject child && DesktopTestUi.Visuals(child).Contains(dialog));
+            .Any(popup => popup.Child is DependencyObject child && DesktopTestUi.Visuals(child)
+                .Any(element => ReferenceEquals(element, dialog) || ReferenceEquals(element, dialog.Content)));
     internal static byte[] Pixels(WriteableBitmap bitmap)
     {
         using var stream = bitmap.PixelBuffer.AsStream();

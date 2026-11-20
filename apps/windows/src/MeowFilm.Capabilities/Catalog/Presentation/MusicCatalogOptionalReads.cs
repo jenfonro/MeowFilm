@@ -25,6 +25,7 @@ public sealed partial class MusicCapability
     private readonly SemaphoreSlim catalogPreviewSlots = new(4);
     private readonly Dictionary<string, CatalogOptionalReads> catalogOptionalSnapshots = [];
     private readonly HashSet<MusicCatalogCard> visibleCatalogCards = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<MusicCatalogCard> catalogDisplayCards = new(ReferenceEqualityComparer.Instance);
     private CatalogOptionalReads? activeCatalogReads;
     internal Task CatalogEntryInitialization { get; private set; } = Task.CompletedTask;
 
@@ -76,8 +77,8 @@ public sealed partial class MusicCapability
             key != lastChannelRoute && !catalogLocations.Values.Any(saved => saved.Route == key)).ToArray())
             RetireCatalogOptionalReads(old);
         activeCatalogReads = enabled && OptionalReadsCurrent(scope) ? scope : null;
-        visibleCatalogCards.RemoveWhere(card => !ContainsCatalogCard(card));
-        UpdateCatalogVisibleCards(visibleCatalogCards.ToArray());
+        RefreshCatalogDemandMembers();
+        ProcessVisibleCatalogCards(visibleCatalogCards);
     }
     private bool OptionalReadsCurrent(CatalogOptionalReads scope) => !stopping && !scope.Retired &&
         scope.Platform.Length > 0 && scope.Account == CatalogAccountKey(scope.Platform) &&
@@ -96,14 +97,33 @@ public sealed partial class MusicCapability
             card.IsPreviewEntry && !card.HasLabel && card.PlayCount is null && root?.PlayCount is null;
     }
 
-    // Called with clipped, visible slots by MusicCatalogView. No Loaded/hover-driven API reads.
+    // Rebuild membership only when the business display projection changes.
+    private void RefreshCatalogDemandMembers()
+    {
+        catalogDisplayCards.Clear();
+        foreach (var section in DisplayCatalogSections)
+        {
+            catalogDisplayCards.UnionWith(section.Items);
+            if (section.Action is { } action) catalogDisplayCards.Add(action);
+        }
+        if (HasChannelTabs) catalogDisplayCards.UnionWith(ChannelTabs);
+        visibleCatalogCards.IntersectWith(catalogDisplayCards);
+    }
     internal void UpdateCatalogVisibleCards(IEnumerable<MusicCatalogCard> cards)
     {
-        var current = cards.Where(ContainsCatalogCard).ToArray();
+        var current = new HashSet<MusicCatalogCard>(cards, ReferenceEqualityComparer.Instance);
+        current.IntersectWith(catalogDisplayCards);
+        if (visibleCatalogCards.SetEquals(current)) return;
+        var added = current.Where(card => !visibleCatalogCards.Contains(card)).ToArray();
         visibleCatalogCards.Clear();
-        foreach (var card in current) visibleCatalogCards.Add(card);
+        visibleCatalogCards.UnionWith(current);
+        if (added.Length > 0) ProcessVisibleCatalogCards(added);
+    }
+    private void ProcessVisibleCatalogCards(IEnumerable<MusicCatalogCard> cards)
+    {
         if (activeCatalogReads is not { } scope || !OptionalReadsCurrent(scope)) return;
-        PublishOptionalResults(scope);
+        var current = cards.ToArray();
+        PublishOptionalResults(scope, cards: current);
         foreach (var card in current.Where(card => card.CanRequestPreview && !card.HasPreview || card.CanRequestFMArtwork))
         {
             string key = PreviewReadKey(card);
@@ -218,10 +238,11 @@ public sealed partial class MusicCapability
         OperationCanceledException => "CANCELLED",
         _ => "INVALID_RESPONSE"
     };
-    private void PublishOptionalResults(CatalogOptionalReads scope, CatalogOptionalRead? completing = null)
+    private void PublishOptionalResults(CatalogOptionalReads scope, CatalogOptionalRead? completing = null,
+        IEnumerable<MusicCatalogCard>? cards = null)
     {
         if (!OptionalReadsCurrent(scope) || !ReferenceEquals(activeCatalogReads, scope)) return;
-        foreach (var card in visibleCatalogCards.ToArray())
+        foreach (var card in (cards ?? visibleCatalogCards).ToArray())
         {
             if ((card.IsPreviewEntry || card.CanRequestFMArtwork) && scope.Previews.TryGetValue(PreviewReadKey(card), out var preview) &&
                 (preview.Work.IsCompleted || ReferenceEquals(preview, completing)) && preview.Error.Length == 0)
