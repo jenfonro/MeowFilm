@@ -192,7 +192,6 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
   method('management.sync', ['installationId', 'generation', 'provider', 'credentials'], (input, signal) => {
       identifier(input.installationId); identifier(input.provider);
       if (input.generation !== undefined) integer(input.generation);
-      requireValue(object(input.credentials));
       return get().sync(input.installationId, input.generation,
         { provider: input.provider, credentials: input.credentials }, { signal });
     });
@@ -217,11 +216,29 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
   return { id: 'cat', version: contracts.cat.version, contract: catScriptContract,
     async settingsChanged() {
       if (!configuration || closed) throw new ScriptHostError('HOST_CLOSED');
-      await configuration.reload();
       // Applying a saved input is owned by the module lifetime, not the short notification HTTP request.
-      const work = get().refresh({ signal: lifetime.signal });
+      let published, failed;
+      const publication = new Promise((resolve, reject) => { published = resolve; failed = reject; });
+      const abort = () => failed(new ScriptHostError('CANCELLED'));
+      lifetime.signal.addEventListener('abort', abort, { once: true });
+      const work = get().refresh({ signal: lifetime.signal, onSettingsPublished: published });
       pending.add(work);
       work.finally(() => pending.delete(work)).catch(() => {});
+      work.then(published, failed);
+      // The next owner must observe the actual routing snapshot. Source
+      // downloads and generation activation continue after this local barrier.
+      try { await publication; }
+      finally { lifetime.signal.removeEventListener('abort', abort); }
     },
+    connectAccounts: accounts => {
+      get().connectAccounts(accounts);
+      // Start schedules generation-owned synchronization as each background
+      // initializer publishes, rather than waiting for a later invoke.
+      const work = get().start();
+      pending.add(work);
+      work.finally(() => pending.delete(work)).catch(() => {});
+      return work;
+    },
+    onAccountSaved: listener => get().onAccountSaved(listener),
     methods, upload, close };
 }

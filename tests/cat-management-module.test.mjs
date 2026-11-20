@@ -345,20 +345,20 @@ test('Cat management HTTP sync returns saved only after its one PUT has a durabl
     const inspect = async () => result(call, await call('invoke', {
       installationId: 'managed', siteId: 'default', operation: 'home',
     }));
-    const waiting = await inspect();
-    assert.equal(waiting.gets, 1);
-    assert.equal(waiting.puts, 1);
-    assert.equal(waiting.putFinished, true);
-    assert.equal(waiting.writeCloses, 0);
+    let invoked = false;
+    const waiting = inspect().then(value => { invoked = true; return value; });
     assert.equal(readFileSync(file, 'utf8'), JSON.stringify({ cookie: 'old' }));
     assert.equal(settled, false, 'an HTTP success without a durable write is not saved');
+    assert.equal(invoked, false, 'invoke waits for the same explicit account write owner');
     commit.response.end('allow real write');
     assert.deepEqual(result(call, await pending), { status: 'saved', protocol: 'website-api-v1' });
     assert.equal(savedBytes, JSON.stringify({ cookie: 'new' }));
     assert.equal(readFileSync(file, 'utf8'), savedBytes);
     await Promise.all([probe.closed, commit.closed]);
-    const saved = await inspect();
+    const saved = await waiting;
+    assert.equal(saved.gets, 1);
     assert.equal(saved.puts, 1);
+    assert.equal(saved.putFinished, true);
     assert.equal(saved.writeCloses, 1);
     assert.equal(result(call, await call('status')).instances[0].generation, installed.generation);
   });

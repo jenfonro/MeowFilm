@@ -139,7 +139,7 @@ public static class FilmPlaybackContractTests
                 !sent.TryGetProperty("globalEpisode", out _),
                 "selecting a global-only source episode sends its complete target and opaque candidate identity without inventing local coordinates");
         });
-        yield return Test("site and unknown pan labels keep separate identities and typed line selectors", async () =>
+        yield return Test("site and pan labels keep separate identities and typed line selectors", async () =>
         {
             await using var rig = new FilmPlaybackRig();
             await rig.OpenAsync();
@@ -156,16 +156,18 @@ public static class FilmPlaybackContractTests
                     lines = new object[]
                     {
                         new { id = (object)0, label = "原线路", provider = "quark" },
-                        new { id = (object)"0", label = "未知网盘原标签", provider = "custom-provider" }
+                        new { id = (object)"0", label = "未知网盘原标签", provider = "custom-provider" },
+                        new { id = (object)"share-two", label = "夸克-share-two", provider = "quark" }
                     }, episodes = Array.Empty<object>()
                 }));
             });
-            await Until(() => rig.Page.Lines.Count == 2);
+            await Until(() => rig.Page.Lines.Count == 3);
             Check(rig.Page.SelectedSource?.Label == "真实站点" &&
-                rig.Page.SelectedLine is { Label: "夸克", Provider: "quark" } &&
+                rig.Page.SelectedLine is { Label: "原线路", Provider: "quark" } &&
                 rig.Page.Lines[1] is { Label: "未知网盘原标签", Provider: "custom-provider" } &&
+                rig.Page.Lines[2] is { Label: "夸克-share-two", Provider: "quark" } &&
                 rig.Page.PlayerPanOptions.All(option => option.Value != "custom-provider"),
-                "station names never become pan labels and an unknown line retains its own provider and label");
+                "directory labels retain the runtime's share or script identity, separately from the player provider options");
             await rig.Page.BrowseLineAsync(rig.Page.Lines[1]);
             var command = rig.Runtime.Calls.Last(row => FilmJson.Text(row.Parameters, "action") == "browse").Parameters;
             Check(FilmJson.Text(command, "sourceId") == "exact-site-result" &&

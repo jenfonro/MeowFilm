@@ -3,7 +3,7 @@ import { configureStorage } from '@meowfilm/storage';
 import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
 import { createAppRuntime, createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule,
   createPanRuntimeModule, createTMDBDataModule, createDoubanDataModule, connectFilmPlayback,
-  createNeteaseTokenModule, connectMusicPlatform } from '../../../runtime/entry.mjs';
+  createNeteaseTokenModule, connectMusicPlatform, connectPanAccounts } from '../../../runtime/entry.mjs';
 
 // Current wire identity; one App, not a selectable aggregate product.
 configureStorage({ driver: createDesktopStorageDriver, initialize: false });
@@ -18,6 +18,7 @@ await startWindowsAppRuntime({
       } : {}) }));
       modules.push(createSourceRuntimeModule({ dataRoot, platform: 'windows', configurationOwner: 'native' }));
       modules.push(createPanRuntimeModule({ dataRoot, ...(settings ? { store: settings.accounts('pan.accounts') } : {}) }));
+      connectPanAccounts(modules);
       modules.push(createTMDBDataModule({ dataRoot, nativeSettings: settings }));
       modules.push(createDoubanDataModule({ dataRoot, nativeSettings: settings }));
       connectFilmPlayback(modules, { dataRoot, nativeSettings: settings });

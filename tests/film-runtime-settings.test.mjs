@@ -1,3 +1,4 @@
+import './storage-test-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -37,6 +38,7 @@ async function fixture(t, initialPreferences = {}) {
     sites: [{ key, name: `Site ${key}` }],
   }]));
   let failStatus = false;
+  let routing = { providers: { quark: true, uc: true }, mappings: [] };
   const source = key => ({ key, engine: 'cat', installationId: `install-${key}`,
     siteId: key, generation: instances.get(key).generation, name: instances.get(key).sites[0].name });
   const module = (id, operations) => ({
@@ -56,7 +58,7 @@ async function fixture(t, initialPreferences = {}) {
           failStatus = false;
           throw Object.assign(new Error('STORAGE_ERROR'), { code: 'STORAGE_ERROR' });
         }
-        return { instances: structuredClone([...instances.values()]) };
+        return { instances: structuredClone([...instances.values()]), routing: structuredClone(routing) };
       },
       edit: input => {
         instances.get(input.key).generation++;
@@ -118,6 +120,7 @@ async function fixture(t, initialPreferences = {}) {
     rmSync(root, { recursive: true, force: true });
   });
   return { calls, instances, accounts, film, app, client, rpc, snapshot, command, open,
+    setRouting: value => { routing = structuredClone(value); },
     failNextStatus: () => { failStatus = true; },
     setPreferences: update => { preferences = { ...preferences, ...update }; } };
 }
@@ -224,6 +227,31 @@ test('native source display-only changes keep leases and browsing while updating
   assert.equal(f.calls.length, reads);
   assert.equal(await readable(a.receipt), 200);
 });
+
+for (const routing of [
+  { providers: { quark: false, uc: true }, mappings: [] },
+  { providers: { quark: true, uc: true }, mappings: [{ provider: 'quark', aliases: ['新别名'] }] },
+]) {
+  test(`native Cat routing changes revoke old source results without changing a generation: ${JSON.stringify(routing)}`, async t => {
+    const f = await fixture(t), a = await f.open('a'), b = await f.open('b');
+    await f.command(a.id, 'media.started', { attemptId: a.attempt.id });
+    const instances = structuredClone([...f.instances.values()]);
+    f.setRouting(routing);
+    await f.film.settingsChanged('cat.sources');
+    assert.deepEqual([...f.instances.values()], instances, 'routing is not a source restart');
+    assert.equal((await f.snapshot(a.id)).current, null);
+    assert.equal((await f.snapshot(b.id)).attempt, null);
+    assert.notEqual(await readable(a.receipt), 200);
+    assert.notEqual(await readable(b.receipt), 200);
+    const replacement = await f.open('a'), state = await f.snapshot(replacement.id);
+    const reads = f.calls.length;
+    f.setRouting({ mappings: routing.mappings, providers: { uc: true, quark: routing.providers.quark } });
+    await f.film.settingsChanged('cat.sources');
+    assert.deepEqual(await f.snapshot(replacement.id), state);
+    assert.equal(f.calls.length, reads, 'same routing with reordered JSON members does not reload');
+    assert.equal(await readable(replacement.receipt), 200);
+  });
+}
 
 test('provider mutation receipts and native notifications share the same observed installation state', async t => {
   const f = await fixture(t), a = await f.open('a'), b = await f.open('b');
