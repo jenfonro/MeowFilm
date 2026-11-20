@@ -8,7 +8,8 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using MeowFilm.Desktop;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Media;
@@ -56,7 +57,7 @@ public static class FilmPlaybackNativeIntegrationTests
         int beforeMenu = f.Traffic.BusinessCalls;
         var picker = f.Element<FilmSourcePicker>("SourcePicker");
         picker.IsDropDownOpen = true;
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
         Check(picker.IsDropDownOpen, "the actual WinUI source dropdown opened");
         picker.IsDropDownOpen = false;
         await f.SnapshotAsync(owner.Id); // Real endpoint barriers, not a guessed sleep.

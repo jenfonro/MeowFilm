@@ -209,7 +209,7 @@ public static partial class MusicUiTests
             True(!f.Module.CanUseDiscovery && f.Module.DiscoveryStatus.Length > 0, "failure remains an explicit state");
             Equal(1, f.Http.Requests.Count(p => p == "searchDiscovery"));
         });
-        yield return Case("native discovery WPF controls render business content and route a real button to search", async () =>
+        yield return Case("native discovery WinUI controls render business content and route a real button to search", async () =>
         {
             await using var f = await DiscoveryScene.Create(); await f.Policy(); await f.Open();
             var view = (FrameworkElement)f.Module.View;

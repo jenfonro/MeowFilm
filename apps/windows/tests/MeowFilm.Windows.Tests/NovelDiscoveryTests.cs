@@ -5,7 +5,6 @@ using Windows.System;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using FontWeights = Microsoft.UI.Text.FontWeights;
 using Color = Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
@@ -40,6 +39,10 @@ public static class NovelDiscoveryTests
             () => NovelTests.Sta(ChannelOverflow));
         yield return new("novel discovery notices: import results emit once and do not replay on channel changes or page refresh",
             () => NovelTests.Sta(ImportNotice));
+        yield return new("novel discovery receipts: loading, append and shelf updates retain cards and cover owners",
+            () => NovelTests.Sta(IncrementalReceipts));
+        yield return new("novel book receipts: metadata loading and shelf changes retain the detail cover owner",
+            () => NovelTests.Sta(BookReceipts));
         yield return new("novel discovery response: required web interaction stays a visible failure rather than an empty ranking",
             () => NovelTests.Sta(WebRequired));
     }
@@ -81,7 +84,7 @@ public static class NovelDiscoveryTests
     private static async Task HomeSelection()
     {
         await using var store = new NovelTests.MemoryStore();
-        await using var configurationStore = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
         var runtime = new DiscoveryRuntime(Kinds);
         await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default);
@@ -108,7 +111,7 @@ public static class NovelDiscoveryTests
     private static async Task NoRankings()
     {
         await using var store = new NovelTests.MemoryStore();
-        await using var configurationStore = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
         NovelKind[] ordinary = [new("全部", "https://catalog.invalid/all"), new("完结", "https://catalog.invalid/completed")];
         var runtime = new DiscoveryRuntime(ordinary);
         await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
@@ -136,7 +139,7 @@ public static class NovelDiscoveryTests
     private static async Task CategoryPresentation()
     {
         await using var store = new NovelTests.MemoryStore();
-        await using var configurationStore = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
         var runtime = new DiscoveryRuntime(Kinds);
         await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default); await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
@@ -199,7 +202,7 @@ public static class NovelDiscoveryTests
     private static async Task ChannelOverflow()
     {
         await using var store = new NovelTests.MemoryStore();
-        await using var configurationStore = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
         var kinds = Enumerable.Range(1, 16).Select(index =>
             new NovelKind($"榜{(char)('A' + index - 1)}", $"https://catalog.invalid/rank/{index}")).ToArray();
         var runtime = new DiscoveryRuntime(kinds);
@@ -280,12 +283,113 @@ public static class NovelDiscoveryTests
         finally { window.Close(); }
     }
 
+    private static async Task IncrementalReceipts()
+    {
+        await using var store = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
+        var runtime = new DiscoveryRuntime(Kinds) { IncludeCovers = true };
+        await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
+        await module.InitializeAsync(default); await module.NavigateAsync(NovelCapability.CategoriesRoute, default);
+        var root = new Grid(); root.ColumnDefinitions.Add(new() { Width = new(180) }); root.ColumnDefinitions.Add(new());
+        root.Children.Add(module.SidebarView); Grid.SetColumn(module.View, 1); root.Children.Add(module.View);
+        var window = NovelTestUi.Window(root, 1100, 760); window.Activate();
+        try
+        {
+            await Render(window);
+            var books = NovelTests.Find<NovelBookGrid>(module.View).Single();
+            var first = (FrameworkElement)books.Children[0];
+            var image = NovelTests.Find<NovelImage>(first).Single();
+            await Until(() => image.Source is not null);
+            var pixels = image.Source; int imageReads = runtime.ImageReads;
+            var source = NovelTests.Find<ComboBox>(module.View).Single();
+            var channels = Channels(module);
+            var sidebarRow = NovelTests.Find<Button>(module.SidebarView).Single(button => AutomationProperties.GetName(button) == runtime.Source.Name);
+            int unloaded = 0; image.Unloaded += (_, _) => unloaded++;
+            var initial = module.DiscoverBooks[0];
+            await module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, true); await Render(window);
+            Check(ReferenceEquals(first, books.Children[0]) && ReferenceEquals(image, NovelTests.Find<NovelImage>(first).Single()) &&
+                ReferenceEquals(pixels, image.Source) && runtime.ImageReads == imageReads && unloaded == 0,
+                "A same-target refresh exposed its intermediate clear/add and retired unchanged cards.");
+            runtime.ExploreGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var loading = module.LoadDiscoveryAsync(module.ExploreSource, module.ExploreKind, false);
+            await Until(() => module.LoadingDiscovery); await Render(window);
+            Check(ReferenceEquals(books, NovelTests.Find<NovelBookGrid>(module.View).Single()) &&
+                ReferenceEquals(first, books.Children[0]) && ReferenceEquals(image, NovelTests.Find<NovelImage>(first).Single()) &&
+                ReferenceEquals(pixels, image.Source) && runtime.ImageReads == imageReads &&
+                ReferenceEquals(source, NovelTests.Find<ComboBox>(module.View).Single()) && Channels(module).SequenceEqual(channels) && unloaded == 0,
+                "A loading receipt retired mounted content or navigation.");
+            Check(ReferenceEquals(sidebarRow, NovelTests.Find<Button>(module.SidebarView).Single(button =>
+                AutomationProperties.GetName(button) == runtime.Source.Name)), "A loading receipt rebuilt the source sidebar.");
+            runtime.ExploreGate.SetResult(); await loading; await Render(window);
+            Check(books.Children.Count == 2 && ReferenceEquals(first, books.Children[0]) && unloaded == 0,
+                "Appending a page recreated an existing card.");
+            await Until(() => NovelTests.Find<NovelImage>(books).All(cover => cover.Source is not null));
+            imageReads = runtime.ImageReads;
+            await module.Library.ToggleShelfAsync(new("test-book", "identity", initial)); await Render(window);
+            Check(ReferenceEquals(image, NovelTests.Find<NovelImage>(first).Single()) && ReferenceEquals(pixels, image.Source) &&
+                runtime.ImageReads == imageReads && unloaded == 0 &&
+                NovelTests.Find<Button>(first).Any(button => AutomationProperties.GetName(button) == "移出书架"),
+                "A shelf receipt recreated a cover or failed to update its action.");
+            module.DiscoverBooks[0] = initial with { Name = "更新书名", Intro = "更新简介" };
+            ((NovelView)module.View).Present(); await Render(window);
+            Check(ReferenceEquals(first, books.Children[0]) && ReferenceEquals(image, NovelTests.Find<NovelImage>(first).Single()) &&
+                NovelTests.Find<TextBlock>(first).Any(text => text.Text == "更新书名") && unloaded == 0,
+                "Metadata replaced a stable card or its unchanged cover.");
+            module.DiscoverBooks[0] = module.DiscoverBooks[0] with { CoverUrl = "https://image.invalid/new.png" };
+            ((NovelView)module.View).Present(); await Render(window);
+            var replacement = NovelTests.Find<NovelImage>(first).Single();
+            await Until(() => runtime.ImageReleases == 1);
+            Check(ReferenceEquals(first, books.Children[0]) && !ReferenceEquals(image, replacement) && unloaded == 1,
+                "A changed cover identity did not retire exactly the old image.");
+            await Until(() => replacement.Source is not null);
+            int removed = 0; replacement.Unloaded += (_, _) => removed++;
+            module.DiscoverBooks.RemoveAt(0); ((NovelView)module.View).Present(); await Render(window);
+            await Until(() => runtime.ImageReleases == 2);
+            Check(books.Children.Count == 1 && !books.Children.Contains(first) && removed == 1,
+                "Removing a book did not retire its mounted owner.");
+        }
+        finally { runtime.ExploreGate?.TrySetResult(); window.Close(); }
+    }
+    private static async Task BookReceipts()
+    {
+        await using var store = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
+        await using var ruleRuntime = new NovelRuleRuntimeFixture();
+        var runtime = new DiscoveryRuntime(Kinds);
+        await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(ruleRuntime));
+        await module.InitializeAsync(default);
+        var book = new NovelBook(runtime.Source.InstallationId, runtime.Source.Revision, "https://book.invalid/1", "详情书", CoverUrl: "https://image.invalid/detail.png");
+        await module.ReceiveBookAsync(book, default); await module.NavigateAsync(NovelCapability.BookRoute, default);
+        var window = NovelTestUi.Window(module.View); window.Activate();
+        try
+        {
+            await Render(window);
+            var image = NovelTests.Find<NovelImage>(module.View).Single();
+            await Until(() => image.Source is not null);
+            var pixels = image.Source; int reads = runtime.ImageReads;
+            int unloaded = 0; image.Unloaded += (_, _) => unloaded++;
+            runtime.MetadataGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var loading = module.Session!.LoadMetadataAsync();
+            await Until(() => module.Session.Loading); await Render(window);
+            Check(ReferenceEquals(image, NovelTests.Find<NovelImage>(module.View).Single()) && ReferenceEquals(pixels, image.Source) &&
+                runtime.ImageReads == reads && unloaded == 0,
+                "Metadata loading replaced the detail cover.");
+            runtime.MetadataGate.SetResult(); await loading; await Render(window);
+            await module.Session.ShelfAsync(); await Render(window);
+            Check(ReferenceEquals(image, NovelTests.Find<NovelImage>(module.View).Single()) && ReferenceEquals(pixels, image.Source) &&
+                runtime.ImageReads == reads && unloaded == 0 &&
+                NovelTests.Find<Button>(module.View).Any(button => Equals(button.Content, "移出书架")),
+                "Metadata or shelf completion replaced the detail cover.");
+        }
+        finally { runtime.MetadataGate?.TrySetResult(); window.Close(); }
+    }
+
     private static void Select(RadioButton choice) =>
         ((ISelectionItemProvider)new RadioButtonAutomationPeer(choice).GetPattern(PatternInterface.SelectionItem)).Select();
     private static void Invoke(Button button) =>
         ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
 
-    private static NovelSourceService Sources(DiscoveryRuntime runtime, NovelTests.MemoryStore store)
+    private static NovelSourceService Sources(DiscoveryRuntime runtime, NovelSourceMemoryStore store)
     {
         var source = runtime.Source;
         var definition = NovelJson.Value(new { bookSourceName = source.Name, bookSourceUrl = source.SourceUrl,
@@ -298,7 +402,7 @@ public static class NovelDiscoveryTests
     private static async Task ImportNotice()
     {
         await using var store = new NovelTests.MemoryStore();
-        await using var configurationStore = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
         var runtime = new DiscoveryRuntime(Kinds);
         await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.InitializeAsync(default);
@@ -338,7 +442,7 @@ public static class NovelDiscoveryTests
     private static async Task WebRequired()
     {
         await using var store = new NovelTests.MemoryStore();
-        await using var configurationStore = new NovelTests.MemoryStore();
+        await using var configurationStore = new NovelSourceMemoryStore();
         var runtime = new DiscoveryRuntime(Kinds) { ExploreError = "WEB_INTERACTION_REQUIRED" };
         await using var module = new NovelCapability(Sources(runtime, configurationStore), new NovelLibrary(store), new NovelRuleProgram(runtime));
         await module.LoadDiscoveryAsync(null, null, true);
@@ -358,27 +462,50 @@ public static class NovelDiscoveryTests
         }
         finally { host.Close(); window.Close(); }
     }
-    private sealed class DiscoveryRuntime(NovelKind[] kinds) : IRuntimeClient
+    private sealed class DiscoveryRuntime(NovelKind[] kinds) : IRuntimeClient, IRuntimeImageClient
     {
         internal readonly NovelSource Source = NovelTests.Source();
         internal readonly List<(string Method, JsonElement Payload)> Calls = [];
         internal string? ExploreError;
-        public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken token = default)
+        internal TaskCompletionSource? ExploreGate, MetadataGate;
+        internal bool IncludeCovers;
+        internal int ImageReads, ImageReleases;
+        public async Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken token = default)
         {
             token.ThrowIfCancellationRequested();
             var payload = NovelJson.Value(parameters ?? new { }); Calls.Add((method, payload));
+            if (method == "source.runtime.library.invoke")
+            {
+                string? action = payload.GetProperty("action").GetString();
+                if (action == "explore" && ExploreGate is { } explore) await explore.Task.WaitAsync(token);
+                if (action == "bookInfo" && MetadataGate is { } metadata) await metadata.Task.WaitAsync(token);
+            }
             object value = method switch
             {
                 "source.runtime.library.apply" => new { revision = payload.GetProperty("revision").GetInt64(),
                     sources = NovelJson.Decode<NovelSourceDefinition[]>(payload.GetProperty("sources")).Select(item => item.SourceFromDefinition()).ToArray() },
                 "source.runtime.web.pending" => new { requests = Array.Empty<object>() },
+                "source.runtime.library.image" => new { reference = "discovery-cover:" + payload.GetProperty("url").GetString() },
+                "source.runtime.library.releaseImage" => ReleaseImage(),
                 "source.runtime.library.invoke" when payload.GetProperty("action").GetString() == "exploreKinds" => new { kinds },
+                "source.runtime.library.invoke" when payload.GetProperty("action").GetString() == "bookInfo" =>
+                    new { book = payload.GetProperty("payload").GetProperty("book") },
+                "source.runtime.library.invoke" when payload.GetProperty("action").GetString() == "toc" =>
+                    new { chapters = new[] { new NovelChapter("第一章", "https://book.invalid/chapter", 0) } },
                 "source.runtime.library.invoke" when ExploreError is { } code => throw new BridgeException(code),
                 "source.runtime.library.invoke" => new { books = new[] { new { name = "源书", author = "源作者",
-                    bookUrl = payload.GetProperty("payload").GetProperty("url").GetString() + "/book" } } },
+                    coverUrl = IncludeCovers ? "https://image.invalid/cover.png" : "",
+                    bookUrl = payload.GetProperty("payload").GetProperty("url").GetString() + "/book" +
+                        (payload.GetProperty("payload").GetProperty("page").GetInt32() == 1 ? "" : payload.GetProperty("payload").GetProperty("page").GetInt32().ToString()) } } },
                 _ => throw new InvalidOperationException(method)
             };
-            return Task.FromResult(NovelJson.Value(new { ok = true, contract = "source.runtime.v2", value }));
+            return NovelJson.Value(new { ok = true, contract = "source.runtime.v2", value });
+        }
+        private object ReleaseImage() { ImageReleases++; return new { released = true }; }
+        public Task<byte[]> ReadImageAsync(string reference, CancellationToken token = default)
+        {
+            token.ThrowIfCancellationRequested(); ImageReads++;
+            return Task.FromResult(FixtureImages.Encode(1, 1, [32, 64, 96, 255]));
         }
         public Task<JsonElement> UploadSourceAsync(string module, string installationId, long revision,
             ReadOnlyMemory<byte> source, string? basename = null, CancellationToken token = default) =>

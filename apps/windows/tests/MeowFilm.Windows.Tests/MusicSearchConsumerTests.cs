@@ -12,6 +12,7 @@ using Window = MeowFilm.Desktop.DesktopWindow;
 using WindowState = MeowFilm.Desktop.DesktopWindowState;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -32,6 +33,55 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SearchConsumerCases()
     {
+        yield return Case("settings display completion does not rewrite partial search metadata or quality priorities", async () =>
+        {
+            await using var f = new SearchScene(scriptRuntime: new QualityFixture.ScriptRuntime());
+            var kind = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = 1, concurrency = 1, cacheMinutes = 60 };
+            await f.Call("music.search.settings.save", new { ifRevision = 0, songs = kind, playlists = kind });
+            await f.Call("music.metadata.settings.save", new
+                { ifRevision = 0, platforms = new[] { "wy" }, enabled = new[] { "tx" } });
+            var quality = JsonNode.Parse((await f.Call("music.quality.settings.get")).GetProperty("settings").GetRawText())!.AsObject();
+            quality["ifRevision"] = quality["revision"]!.DeepClone();
+            quality["qualityOrder"] = new JsonArray("lossless");
+            await f.Call("music.quality.settings.save", quality);
+            await f.Module.InitializeAsync(default);
+            await f.Module.SetSearchAdvancedAsync("songs", 2, 1, 60);
+            var search = (await f.Call("music.search.settings.get")).GetProperty("settings");
+            Equal(1, search.GetProperty("songs").GetProperty("order").GetArrayLength());
+            Equal(1, search.GetProperty("playlists").GetProperty("order").GetArrayLength());
+            var row = f.Module.MetadataPlatforms.Single(value => value.Platform == "wy");
+            await f.Module.SetMetadataEnabledAsync(row, true);
+            var metadata = (await f.Call("music.metadata.settings.get")).GetProperty("settings");
+            Equal(1, metadata.GetProperty("platforms").GetArrayLength());
+            True(metadata.GetProperty("enabled").EnumerateArray().Select(value => value.GetString()).SequenceEqual(["tx", "wy"]),
+                "changing another row retains the explicitly enabled unordered source");
+            await f.Module.ActivateQualitySettingsAsync();
+            await f.Module.SetPlaybackQualityRequestAsync("320k");
+            var saved = (await f.Call("music.quality.settings.get")).GetProperty("settings");
+            Equal(1, saved.GetProperty("qualityOrder").GetArrayLength());
+            Equal("lossless", saved.GetProperty("qualityOrder")[0].GetString());
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
+        });
+        yield return Case("selected song search accepts extensions and ignores an unconsumed broken playlist policy", async () =>
+        {
+            await using var f = new SearchScene(scriptRuntime: new QualityFixture.ScriptRuntime());
+            var kind = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = 1, concurrency = 1, cacheMinutes = 60 };
+            var records = MusicTestStores.For(f.Store);
+            var document = await Task.Run(() => records.Root);
+            document["areas"]!["native-search-policy"] = JsonSerializer.SerializeToNode(new
+                { schema = 3, revision = 0, songs = kind,
+                    playlists = new { order = new[] { "wy" }, enabled = new[] { "wy" }, pages = -1, concurrency = 1, cacheMinutes = 60 } });
+            records.Seed(document);
+            await f.Module.InitializeAsync(default);
+            var started = await f.Call("music.search.start", new
+                { keyword = "direct", kind = "songs", platforms = new[] { "wy" }, extra = new { value = true } });
+            await f.Call("music.search.cancel", new { id = started.GetProperty("id").GetString() });
+            await f.Module.SearchOnlineAsync("healthy", default);
+            await SearchUntil(() => f.Module.Songs.Count == 1 && !f.Module.SearchSongsLoading);
+            True(!f.Module.CanEditSearchPreferences, "the broken playlist settings are not editable defaults");
+            Equal(-1L, (await Task.Run(() => records.Root))["areas"]!["native-search-policy"]!["playlists"]!["pages"]!.GetValue<long>());
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
+        });
         yield return Case("search overview second song menu preserves the complete section order and current index", async () =>
         {
             // Exercise the real search/menu/queue path with no available media sources.
@@ -323,6 +373,26 @@ public static partial class MusicUiTests
             True(ReferenceEquals(selected, f.Module.SelectedSong),
                 "same result identity reuses the selected row after refresh");
         });
+        yield return Case("same-query refresh removes missing songs without resetting surviving rows", async () =>
+        {
+            await using var f = await SearchScene.Create();
+            await f.Policy(["wy"], [], automaticPlaylists: false);
+            f.Http.SearchResult = (_, _) => new { items = SearchSongPage(1).ToArray(), more = false };
+            await f.Search("保留歌曲");
+            await f.Module.OpenSearchTabAsync("songs");
+            await SearchUntil(() => f.Module.Songs.Count == 30 && !f.Module.SearchSongsLoading);
+            var retained = f.Module.Songs.ToArray();
+            f.Module.SelectedSong = retained[10];
+            var changes = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+            f.Module.Songs.CollectionChanged += (_, args) => changes.Add(args.Action);
+            f.Http.SearchResult = (_, _) => new { items = SearchSongPage(1).Skip(1).ToArray(), more = false };
+            await f.Module.RefreshCatalogAsync();
+            await SearchUntil(() => f.Module.Songs.Count == 29 && !f.Module.SearchSongsLoading);
+            True(f.Module.Songs.SequenceEqual(retained.Skip(1), ReferenceEqualityComparer.Instance) &&
+                changes.SequenceEqual([System.Collections.Specialized.NotifyCollectionChangedAction.Remove]),
+                "a non-prefix refresh deletes only the missing result and retains every other song object");
+            True(ReferenceEquals(f.Module.SelectedSong, retained[10]), "same-query refresh retains the selected surviving row");
+        });
         yield return Case("resubmitting an active initial search shares physical requests without cancellation", async () =>
         {
             await using var f = await SearchScene.Create();
@@ -411,10 +481,10 @@ public static partial class MusicUiTests
                 True(ReferenceEquals(oldRows[index], f.Module.Songs[index]),
                     "an unchanged row keeps its identity and position");
             Equal(selectedKey, f.Module.Songs[0].SelectionKey);
-            True(!ReferenceEquals(oldRows[0], f.Module.Songs[0]), "a merged row is replaced in place");
+            True(ReferenceEquals(oldRows[0], f.Module.Songs[0]), "a merged row retains its permanent song object");
             Equal(2, f.Module.Songs[0].Raw.GetProperty("sources").GetArrayLength());
             Equal(1, oldSources[0].GetArrayLength());
-            True(!ReferenceEquals(oldRows[1], f.Module.Songs[1]), "the second merged row is replaced in place");
+            True(ReferenceEquals(oldRows[1], f.Module.Songs[1]), "the second merged row retains its permanent song object");
             Equal(2, f.Module.Songs[1].Raw.GetProperty("sources").GetArrayLength());
             for (int index = 0; index < oldRows.Length; index++)
             {
@@ -434,8 +504,7 @@ public static partial class MusicUiTests
             var changedIndexes = events.Where(change =>
                 change.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Replace)
                 .Select(change => change.OldStartingIndex).ToArray();
-            Equal(2, changedIndexes.Length);
-            True(changedIndexes.SequenceEqual([0, 1]), "the two merged rows are replaced in place");
+            Equal(0, changedIndexes.Length);
             var added = events.Where(change =>
                 change.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add)
                 .ToArray();
@@ -523,13 +592,15 @@ public static partial class MusicUiTests
             }
             finally { gate.TrySetResult(); }
         });
-        yield return Case("first search results reset Songs and capture the current song-table scroll", async () =>
+        yield return Case("same-session search reorder preserves song objects selection and actual table scroll", async () =>
         {
-            await using var store = ServiceStore();
+            await using var database = ServiceStore();
+            await using var store = new SearchStore(database);
             await using var runtime = new NativeMusicScriptTestRuntime();
+            await using var records = MusicTestStores.For(store);
             var http = new SearchHttp { SearchResult = (count, _) => new { items = SearchSongPage(count).ToArray(), more = false } };
             runtime.Platform.OnRequest = http.Read;
-            var inner = new MusicNativeApplication(store, MusicTestStores.For(store), runtime);
+            var inner = new MusicNativeApplication(store, records, runtime);
             var forwarder = new SearchSnapshotForwarder(inner);
             await using var module = new MusicCapability(forwarder, store, new PlaybackProbe(), new Dialogs());
             await module.InitializeAsync(default); await Drain();
@@ -542,40 +613,97 @@ public static partial class MusicUiTests
             await module.OpenSearchTabAsync("songs");
             var view = (MusicView)module.View;
             var window = DesktopTestUi.CreateWindow(view, 1042, 700);
+            ScrollViewer? trackedScroll = null;
+            EventHandler<ScrollViewerViewChangedEventArgs>? trackScroll = null;
             try
             {
                 window.Show(); DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
-                var grid = (ListView)view.FindName("SearchSongsGrid");
+                var grid = FilmUiTest.Field<ListView>(view, "SearchSongsGrid");
                 var scroll = Visuals(grid).OfType<ScrollViewer>()
                     .Single(viewScroll => DesktopVisual.IsVisible(viewScroll) && viewScroll.ScrollableHeight > 0);
-                double target = Math.Min(scroll.ScrollableHeight, scroll.ViewportHeight * 1.5);
-                scroll.ChangeView(null, target, null, true); await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
-                module.SelectedSong = module.Songs[15];
-                await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
-                double offset = scroll.VerticalOffset;
-                True(offset > 0, "the song table starts at a real non-top offset");
-                string selected = module.Songs[15].SelectionKey;
-                int resets = 0;
-                double? atReset = null;
-                module.Songs.CollectionChanged += (_, e) =>
+                var scrollEvents = new List<string>();
+                trackScroll = (_, args) => scrollEvents.Add($"{scroll.VerticalOffset:F3}/{args.IsIntermediate}");
+                trackedScroll = scroll; scroll.ViewChanged += trackScroll;
+                async Task RenderScroll()
                 {
-                    if (e.Action != System.Collections.Specialized.NotifyCollectionChangedAction.Reset) return;
-                    resets++;
-                    atReset ??= scroll.VerticalOffset;
-                };
+                    var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    EventHandler<object> rendering = (_, _) => completed.TrySetResult();
+                    CompositionTarget.Rendering += rendering;
+                    try { await completed.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+                    finally { CompositionTarget.Rendering -= rendering; }
+                    await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
+                }
+                double target = Math.Min(scroll.ScrollableHeight, scroll.ViewportHeight * 1.5);
+                bool accepted = scroll.ChangeView(null, target, null, true);
+                try { await SearchUntil(() => Math.Abs(scroll.VerticalOffset - target) < 1); }
+                catch (InvalidOperationException error)
+                {
+                    throw new InvalidOperationException($"Initial native ChangeView did not settle: target={target:F3}; " +
+                        $"accepted={accepted}; actual={scroll.VerticalOffset:F3}; extent={scroll.ExtentHeight:F3}; " +
+                        $"viewport={scroll.ViewportHeight:F3}; events={string.Join(',', scrollEvents)}", error);
+                }
+                await RenderScroll();
+                module.SelectedSong = module.Songs[15];
+                await RenderScroll();
+                double offset = scroll.VerticalOffset;
+                double extent = scroll.ExtentHeight, viewport = scroll.ViewportHeight;
+                void AssertRowGeometry()
+                {
+                    var panel = (ItemsStackPanel)grid.ItemsPanelRoot;
+                    var rows = Enumerable.Range(panel.FirstVisibleIndex, panel.LastVisibleIndex - panel.FirstVisibleIndex + 1)
+                        .Select(index => (Index: index, Row: grid.ContainerFromIndex(index) as ListViewItem))
+                        .Where(item => item.Row is { IsLoaded: true }).ToArray();
+                    True(rows.Length > 1, "the native song panel realizes multiple visible rows");
+                    True(rows.All(item => Math.Abs(item.Row!.ActualHeight - 50) < .01),
+                        "selected and unselected song containers keep the same fixed height: " +
+                        string.Join(',', rows.Select(item => $"{item.Index}:{item.Row!.ActualHeight:F3}")));
+                    if (grid.ContainerFromItem(module.SelectedSong) is ListViewItem selectedRow)
+                        Equal(50d, selectedRow.ActualHeight);
+                    for (int index = 1; index < rows.Length; index++)
+                    {
+                        var previous = rows[index - 1]; var current = rows[index];
+                        double distance = current.Row!.TransformToVisual(previous.Row!).TransformPoint(new Point()).Y;
+                        True(Math.Abs(distance - (current.Index - previous.Index) * 52) < .01,
+                            $"native song row pitch stays fixed across selection and moves: {previous.Index}->{current.Index}={distance:F3}");
+                    }
+                }
+                string ScrollState() => $"target={target:F3}; accepted={accepted}; old={offset:F3}; new={scroll.VerticalOffset:F3}; " +
+                    $"extent={extent:F3}->{scroll.ExtentHeight:F3}; viewport={viewport:F3}->{scroll.ViewportHeight:F3}; " +
+                    $"selected={grid.SelectedIndex}/{module.SelectedSong?.SelectionKey}; " +
+                    $"panel={(grid.ItemsPanelRoot as ItemsStackPanel)?.ItemsUpdatingScrollMode}; events={string.Join(',', scrollEvents)}";
+                True(Math.Abs(offset - target) < 1, "initial native ChangeView settles at the requested offset: " + ScrollState());
+                True(offset > 0, "the song table starts at a real non-top offset");
+                True(grid.ItemsPanelRoot is ItemsStackPanel { ItemsUpdatingScrollMode: ItemsUpdatingScrollMode.KeepScrollOffset },
+                    "the native recycling panel keeps the song table's absolute scroll offset on item updates");
+                AssertRowGeometry();
+                string selected = module.Songs[15].SelectionKey;
+                var retainedRows = module.Songs.ToArray();
+                var changes = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+                module.Songs.CollectionChanged += (_, e) =>
+                    changes.Add(e.Action);
                 var reordered = SearchReorderedSnapshot(initial);
                 forwarder.Publish(reordered);
-                await SearchUntil(() => resets == 1 && module.SelectedSong is not null);
+                await SearchUntil(() => ReferenceEquals(module.Songs[0], retainedRows[^1]) && module.SelectedSong is not null);
                 Equal(selected, module.SelectedSong.SelectionKey);
+                True(module.Songs.SequenceEqual(retainedRows.Reverse(), ReferenceEqualityComparer.Instance) &&
+                    changes.Count > 0 && changes.All(action => action == System.Collections.Specialized.NotifyCollectionChangedAction.Move),
+                    "a same-session reordered receipt moves only existing song objects without a reset");
                 True(module.Songs.Any(song => ReferenceEquals(song, module.SelectedSong)),
                     "the selected row is projected into the current collection");
-                DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
+                await Drain(); DesktopTestUi.WindowRoot(window).UpdateLayout();
+                await RenderScroll(); await RenderScroll();
+                Console.WriteLine("SEARCH_REORDER_SCROLL " + ScrollState());
+                AssertRowGeometry();
+                True(Math.Abs(scroll.ExtentHeight - extent) < 1,
+                    "reordering the same fixed-size songs preserves native extent: " + ScrollState());
                 True(Math.Abs(scroll.VerticalOffset - offset) < 1,
-                    "the reset restores the actual song-table offset");
-                True(atReset.HasValue && Math.Abs(atReset.Value - offset) < 1,
-                    "the reset captures the actual scroll before replacing rows");
+                    "a reordered receipt retains the actual song-table offset: " + ScrollState());
             }
-            finally { window.Content = null; window.Close(); }
+            finally
+            {
+                if (trackedScroll is not null && trackScroll is not null) trackedScroll.ViewChanged -= trackScroll;
+                window.Content = null; window.Close();
+            }
         });
         yield return Case("native search playlist back restores song and playlist tabs without refetch", async () =>
         {
@@ -647,7 +775,7 @@ public static partial class MusicUiTests
         });
         yield return Case("search start draining an old query does not block get next or cancel behind the policy lane", async () =>
         {
-            await using var f = await SearchScene.Create();
+            await using var f = await SearchScene.Create(scriptRuntime: new QualityFixture.ScriptRuntime());
             await f.Policy(["wy"], [], automaticPlaylists: false);
             f.Http.Hold = true;
             await f.Search("旧查询");
@@ -683,10 +811,11 @@ public static partial class MusicUiTests
                 f.App.SearchChanged -= Changed;
                 f.Http.Release.TrySetResult();
             }
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
         });
         yield return Case("search start queued during a settings save cannot dispatch the replaced policy", async () =>
         {
-            await using var f = await SearchScene.Create();
+            await using var f = await SearchScene.Create(scriptRuntime: new QualityFixture.ScriptRuntime());
             await f.Policy(["wy"], [], automaticPlaylists: false);
             f.Http.Hold = true;
             await f.Search("旧策略");
@@ -711,15 +840,16 @@ public static partial class MusicUiTests
                 "the settings save commits");
             Equal("SEARCH_SETTINGS_CHANGED", (await start.WaitAsync(TimeSpan.FromSeconds(5))).GetProperty("code").GetString());
             Equal(1, f.Http.SearchRequests);
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
         });
         yield return Case("unconfirmed search settings block start until the next authoritative read", async () =>
         {
-            await using var f = await SearchScene.Create();
+            await using var f = await SearchScene.Create(scriptRuntime: new QualityFixture.ScriptRuntime());
             await f.Policy(["wy"], [], automaticPlaylists: false);
             var settings = (await f.Call("music.search.settings.get")).GetProperty("settings");
             var songs = JsonNode.Parse(settings.GetProperty("songs").GetRawText())!.AsObject();
             songs["pages"] = 2;
-            f.Store.FailNextWrite = true;
+            MusicTestStores.For(f.Store).FailBeforeWrite = true;
             var save = await f.App.ExecuteAsync("music.search.settings.save", new
             {
                 ifRevision = settings.GetProperty("revision").GetInt64(),
@@ -736,6 +866,7 @@ public static partial class MusicUiTests
             True((await f.Call("music.search.start",
                 new { keyword = "已确认", kind = "songs", platforms = new[] { "wy" } })).GetProperty("ok").GetBoolean(),
                 "start succeeds after the authoritative read");
+            True(!f.Runtime.HasStarted, "this native consumer uses the explicit script runtime fixture");
         });
         yield return Case("native search transient failure is retried by the next round and real native search controls", async () =>
         {
@@ -951,7 +1082,7 @@ public static partial class MusicUiTests
         internal readonly SearchHttp Http = new();
         internal readonly MusicNativeApplication App;
         internal readonly MusicCapability Module;
-        private SearchScene(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
+        internal SearchScene(TimeProvider? clock = null, IRuntimeClient? scriptRuntime = null)
         {
             var platform = scriptRuntime is QualityFixture.ScriptRuntime selected ? selected.Platform : Runtime.Platform;
             platform.OnRequest = Http.Read;
@@ -1007,7 +1138,6 @@ public static partial class MusicUiTests
     {
         private AccountReadHold? nextAccountRead;
         internal int AccountReads;
-        internal bool FailNextWrite;
         internal AccountReadHold HoldNextAccountRead()
         {
             var hold = new AccountReadHold();
@@ -1022,12 +1152,6 @@ public static partial class MusicUiTests
             var hold = Interlocked.Exchange(ref nextAccountRead, null);
             if (hold is not null) { hold.Arrived.TrySetResult(); await hold.Released.Task; }
             return result;
-        }
-        public override Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
-            int retainedBytes = 0, Action<Action>? commit = null)
-        {
-            if (FailNextWrite) { FailNextWrite = false; throw new DocumentStoreException(DocumentStoreError.Storage); }
-            return base.WriteAsync(write, token, retainedBytes, commit);
         }
         public override async ValueTask DisposeAsync()
         {

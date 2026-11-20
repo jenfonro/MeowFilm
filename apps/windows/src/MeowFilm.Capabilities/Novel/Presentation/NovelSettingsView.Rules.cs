@@ -5,8 +5,6 @@ using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Windows.System;
 using Microsoft.UI.Xaml.Controls;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -77,9 +75,8 @@ public sealed partial class NovelSettingsView
     }
     internal static async Task<string> ReadRuleQrAsync(string path, CancellationToken token)
     {
-        var bitmap = new BitmapImage(); bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad; bitmap.CreateOptions = BitmapCreateOptions.IgnoreImageCache; bitmap.UriSource = new Uri(path); bitmap.EndInit(); bitmap.Freeze();
-        var image = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0); image.Freeze();
-        int stride = checked(image.PixelWidth * 4); var pixels = new byte[checked(stride * image.PixelHeight)]; image.CopyPixels(pixels, stride, 0);
+        var image = await Task.Run(() => NovelImagePixels.Decode(File.ReadAllBytes(path), 0), token);
+        var pixels = image.Pixels;
         string text = await Task.Run(() =>
         {
             var reader = new ZXing.BarcodeReaderGeneric { Options = new ZXing.Common.DecodingOptions { PossibleFormats = [ZXing.BarcodeFormat.QR_CODE], TryHarder = true } };

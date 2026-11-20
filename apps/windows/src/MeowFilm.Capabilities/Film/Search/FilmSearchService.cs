@@ -1,5 +1,6 @@
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
@@ -10,7 +11,7 @@ public sealed class FilmSearchService : IAsyncDisposable
     private readonly Func<CancellationToken, Task<RuntimeConnection>> capture;
     private readonly IFilmSearchSources sources;
     private readonly Func<string, string> resolveImage;
-    private readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
+    private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private readonly List<FilmSearchSession> sessions = [];
     private bool stopping, closed;
     private Task? preparation, disposal;
@@ -391,8 +392,8 @@ public sealed class FilmSearchService : IAsyncDisposable
     }
     private void SourcesChanged(object? sender, EventArgs e)
     {
-        if (dispatcher.HasShutdownStarted) return;
-        if (dispatcher.CheckAccess()) Apply(); else _ = dispatcher.InvokeAsync(Apply);
+        if (dispatcher.IsClosing) return;
+        if (dispatcher.HasThreadAccess) Apply(); else _ = dispatcher.EnqueueAsync(Apply);
         void Apply()
         {
             if (!closed && Current is { Id.Length: > 0 } session && !SameSources(session)) Invalidate(session);

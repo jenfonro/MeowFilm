@@ -24,7 +24,8 @@ internal static class MusicTestUi
         typeof(MusicAccountsView).GetMethod("ShowLogin", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(view, null);
     internal static bool IsDialogOpen(ContentDialog dialog) => dialog.XamlRoot is { } root &&
         Microsoft.UI.Xaml.Media.VisualTreeHelper.GetOpenPopupsForXamlRoot(root)
-            .Any(popup => popup.Child is DependencyObject child && DesktopTestUi.Visuals(child).Contains(dialog));
+            .Any(popup => popup.Child is DependencyObject child && DesktopTestUi.Visuals(child)
+                .Any(element => ReferenceEquals(element, dialog) || ReferenceEquals(element, dialog.Content)));
     internal static byte[] Pixels(WriteableBitmap bitmap)
     {
         using var stream = bitmap.PixelBuffer.AsStream();
@@ -61,13 +62,6 @@ internal static class MusicTestUi
     {
         var image = Pixels(width, height, pixel);
         return (WriteableBitmap)image.GetSource(DispatcherQueue.GetForCurrentThread());
-    }
-    // Authored fixture rasters may use the non-presented WPF rasterizer; no WPF view is mounted.
-    internal static ArtworkPixels Pixels(System.Windows.Media.Imaging.BitmapSource raster)
-    {
-        var bytes = new byte[raster.PixelWidth * raster.PixelHeight * 4];
-        raster.CopyPixels(bytes, raster.PixelWidth * 4, 0);
-        return new(raster.PixelWidth, raster.PixelHeight, bytes);
     }
     internal static ArtworkPixels Pixels(int width, int height, Func<int, int, Color> pixel)
     {

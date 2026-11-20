@@ -1,5 +1,6 @@
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -303,10 +304,10 @@ public sealed partial class MusicCapability
                 RefreshBindings();
             }
             finally { publishing = false; }
-            _ = Presentation.Dispatcher.InvokeAsync(() =>
+            _ = Presentation.Dispatcher.EnqueueAsync(() =>
             {
                 if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(target.Scroll);
-            }, DispatcherPriority.Loaded);
+            }, DispatcherQueuePriority.Low);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception error)

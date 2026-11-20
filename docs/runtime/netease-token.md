@@ -4,8 +4,8 @@
 
 ## 契约
 
-- `netease.token.get` → `POST /v1/netease/get`，输入严格为 `{}`。
-- 成功：`{ok:true,contract:"netease.token.v1",value:{token}}`。token 非空且为合法 cookie-octet；不接受 Cookie、账号标识、SDK URL 或脚本输入。
+- `netease.token.get` → `POST /v1/netease/get`，不消费请求数据；额外成员不改变 provider 调用。
+- 成功：`{ok:true,contract:"netease.token.v1",value:{token}}`。token 非空且为合法 cookie-octet；不消费或透传请求中的 Cookie、账号标识、SDK URL 或脚本材料。
 - 失败码：`INVALID_REQUEST`、`CLOSED`、`CANCELLED`、`TIMEOUT`、`NETWORK_ERROR`、`UPSTREAM_HTTP`、`UPSTREAM_FORMAT`、`SDK_FAILURE`、`SDK_CLEANUP`。不返回 SDK 异常文本或原始响应。
 - iOS／Windows App 按 `music,cat,source,pan,tmdb,douban,film,netease,music-platform` 顺序精确装配九模块；`connectFilmPlayback` 完成后追加本模块，再供[音乐平台](music-platform.md)借用 token 能力。通用 `createRuntime()` 默认仍为原三个脚本模块，受信装配可使用导出的 `createNeteaseTokenModule()`；不隐式启用 token，也不接受旧 App 清单回退。
 

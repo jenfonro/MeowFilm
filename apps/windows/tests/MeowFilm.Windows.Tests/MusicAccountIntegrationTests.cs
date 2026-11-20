@@ -10,7 +10,8 @@ using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.AppHost;
@@ -25,7 +26,7 @@ public static class MusicAccountIntegrationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("production Native QR protocol WPF DPAPI verified save and restart remain one account scope", async () =>
+        yield return Case("production Native QR protocol WinUI DPAPI verified save and restart remain one account scope", async () =>
         {
             string data;
             await using (var f = await Fixture.Create())
@@ -1049,7 +1050,7 @@ public static class MusicAccountIntegrationTests
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
     private sealed class Output : IMusicPlayback
     {

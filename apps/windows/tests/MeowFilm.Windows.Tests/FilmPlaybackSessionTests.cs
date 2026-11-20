@@ -1,3 +1,5 @@
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Desktop;
@@ -442,7 +444,7 @@ public static class FilmPlaybackSessionTests
                 Check(!prepareToken.IsCancellationRequested && !rig.Runtime.Released.Contains("old-selection"),
                     "a pending command cannot release an address before its owner decides whether to reuse it");
                 finish.TrySetResult(); await prepared.Task;
-                await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
                 Check(rig.Native.Commits == 0 && !Called(rig, "media.started", "old-selection"),
                     "a ready old input cannot publish while the newer page intent awaits admission");
                 rig.Native.Preparing = null; response.TrySetResult();
@@ -708,7 +710,7 @@ public static class FilmPlaybackSessionTests
                         rig.Native.SettledIdentity == "first" && rig.Native.Paused && rig.Native.Position == 137,
                         "a confirmation awaiting its durable decision cannot revoke an admitted candidate or alter its donor");
                     finish.TrySetResult(); await prepared.Task;
-                    await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                    await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
                     Check(rig.Native.Commits == 1 && !rig.Runtime.Released.Contains("pending-block") &&
                         !Called(rig, "media.started", "pending-block"),
                         "the ready candidate waits at the commit boundary, not by releasing and reacquiring its receipt");
@@ -757,7 +759,7 @@ public static class FilmPlaybackSessionTests
                 await browsing.Task;
                 rig.Runtime.Attempt("queued", Candidate("queued")); await preparing.Task;
                 finish.TrySetResult(); await prepared.Task;
-                await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
                 var block = rig.Page.CommandAsync("block", new { attemptId = "first" });
                 browseReply.TrySetResult();
                 await browse; await Error("STORAGE_ERROR", () => block);

@@ -784,7 +784,7 @@ public static partial class DesktopTests
         yield return Case("synchronous shutdown closes once unsubscribes and does not double dispose", async () =>
         {
             var a = new NavigationProbe("close-sync"); await using var f = new Fixture([a]); await f.LoadAsync();
-            Equal(1, a.NavigationSubscribers, "optional navigation subscribed"); Equal(1, a.PropertySubscribers, "property subscribed");
+            Equal(1, a.NavigationSubscribers, "optional navigation subscribed"); Equal(1, a.PropertySubscribers, "Shell-owned property subscribed");
             f.Shell.Close(); f.Shell.Close(); await f.WaitClosedAsync();
             Equal(1, f.ShutdownCalls, "shutdown exactly once"); Equal(1, f.ClosedCount, "Closed exactly once");
             True(f.Shell.ShutdownSucceeded, "synchronous callback successful"); Equal(1, a.DisposeCount, "caller owns single disposal");
@@ -1135,7 +1135,7 @@ public static partial class DesktopTests
                 "closed WinUI root unload and module template subscription release");
             foreach (var probe in Probes)
             {
-                Equal(0, probe.PropertySubscribers, "fixture released property subscription");
+                Equal(0, probe.PropertySubscribers, "fixture released the Shell-owned property subscription");
                 if (probe is NavigationProbe source) Equal(0, source.NavigationSubscribers, "fixture released navigation subscription");
             }
         }
@@ -1213,11 +1213,15 @@ public static partial class DesktopTests
     private class ProbeModule : IDesktopModule
     {
         private PropertyChangedEventHandler? _propertyChanged;
-        public int PropertySubscribers { get; private set; }
+        // The fixture keeps the closed Shell and visual tree reachable. WinUI's
+        // native binding proxies may therefore remain until that tree retires;
+        // this lifecycle contract measures the Shell's own managed subscription.
+        public int PropertySubscribers => (_propertyChanged?.GetInvocationList() ?? [])
+            .Count(handler => handler.Target is ShellWindow);
         public event PropertyChangedEventHandler? PropertyChanged
         {
-            add { _propertyChanged += value; PropertySubscribers++; }
-            remove { _propertyChanged -= value; PropertySubscribers--; }
+            add { _propertyChanged += value; }
+            remove { _propertyChanged -= value; }
         }
         public string Id { get; }
         public string Title => Id;

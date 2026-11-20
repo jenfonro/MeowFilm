@@ -80,8 +80,32 @@ public static partial class FilmPlayerOverlayTests
             await Until(() => Visible(detailSurface) && scene.ShellElement<ContentControl>("PlayerDetailHost").Content is MusicPlayerDetailView);
             await Until(() => Field<TranslateTransform>(scene.Shell, "PlayerDetailTransform").Y == 0);
             var detail = (MusicPlayerDetailView)scene.ShellElement<ContentControl>("PlayerDetailHost").Content;
+            await Until(() => ((SolidColorBrush)((TextBlock)detail.FindName("DetailTitle")).Foreground).Color ==
+                ((SolidColorBrush)detail.Foreground).Color);
             Check(ReferenceEquals(detail.DataContext, scene.Music) && ReferenceEquals(detail.XamlRoot, scene.Surface.XamlRoot),
                 "the real music full-screen consumer shares the Shell composition root with Film");
+            var detailInk = ((SolidColorBrush)detail.Foreground).Color;
+            Check(detailInk == global::Windows.UI.Color.FromArgb(255, 235, 234, 237),
+                "the normal music detail retains its existing light foreground on the dark artwork backdrop");
+            Check(((SolidColorBrush)((TextBlock)detail.FindName("DetailTitle")).Foreground).Color == detailInk &&
+                ((SolidColorBrush)((TextBlock)detail.FindName("LyricState")).Foreground).Color == detailInk,
+                "the actual detail title and lyric state use the detail foreground above app text styles");
+            foreach (string tabName in new[] { "LyricsTab", "SimilarTab" })
+            {
+                var tab = (RadioButton)detail.FindName(tabName);
+                var label = DesktopTestUi.Visuals(tab).OfType<ContentPresenter>().Single();
+                var expected = tab.IsChecked == true ? global::Windows.UI.Color.FromArgb(255, 243, 241, 244) :
+                    global::Windows.UI.Color.FromArgb(255, 155, 150, 155);
+                Check(((SolidColorBrush)tab.Foreground).Color == expected &&
+                    ((SolidColorBrush)label.Foreground).Color == expected,
+                    "the current detail tab template paints its selected or inactive palette");
+            }
+            var detailFooter = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
+            var transportInk = global::Windows.UI.Color.FromArgb(255, 197, 195, 200);
+            Check(((SolidColorBrush)((Button)detailFooter.FindName("ModeButton")).Foreground).Color == transportInk &&
+                ((SolidColorBrush)((SkipButton)detailFooter.FindName("PreviousButton")).Foreground).Color == transportInk &&
+                ((SolidColorBrush)((StackPanel)detailFooter.FindName("MetadataText")).Children.OfType<TextBlock>().First().Foreground).Color == detailInk,
+                "the current detail footer palette distinguishes readable metadata and transport controls");
             var musicFrame = await scene.Frame(phase + "-music-detail");
             AssertCovered(musicFrame, Intersect(Bounds(detailSurface, scene.Shell.Root), scene.PictureBounds),
                 "music full screen covers the actual picture and its control area");
@@ -112,7 +136,7 @@ public static partial class FilmPlayerOverlayTests
             await Until(() => confirmation.IsOpen);
             var confirmFrame = await scene.Frame(phase + "-confirmation");
             AssertCovered(confirmFrame, Intersect(scene.PictureBounds, Bounds(Named<Border>(confirmation, "DialogSurface"), scene.Shell.Root)),
-                "the actual close confirmation composes above the film without a WPF island");
+                "the actual close confirmation composes above the film in the same XAML tree");
             Check(Visible(scene.Surface) && !scene.Shell.ShutdownCompletion.IsCompleted,
                 "asking for close preserves the actual media and page owners");
             Click(Named<Button>(confirmation, "CancelChoice"));
@@ -158,6 +182,9 @@ public static partial class FilmPlayerOverlayTests
             var scroll = scene.Element<ScrollViewer>("PageScroll");
             scroll.ChangeView(null, frame < 12 ? frame * 5 : (23 - frame) * 5, null, true);
             var capture = await scene.Frame("layout-" + frame.ToString("D2"));
+            var picture = scene.Element<Grid>("VideoPicture");
+            Check(Math.Abs(picture.ActualHeight - picture.ActualWidth * 9 / 16) < 1,
+                "each presented layout frame measures the picture at sixteen-to-nine");
             AssertPicture(capture, scene, output: true);
             Check(scene.Fixture.CurrentAllocation().Matches(allocation) && scene.Fixture.Native.Scope == scope &&
                 Field<nint>(scene.Surface, "swapchain") == swapchain && unloads == 0 &&
@@ -176,6 +203,7 @@ public static partial class FilmPlayerOverlayTests
         var allocation = scene.Fixture.CurrentAllocation(); var scope = scene.Fixture.Native.Scope;
         var frame = scene.Element<Grid>("PlayerFrame"); var overlay = scene.Element<Grid>("PlayerOverlay");
         var directory = scene.Page.EpisodeDirectory; int calls = scene.Fixture.Traffic.BusinessCalls;
+        double offset = scene.Element<ScrollViewer>("PageScroll").VerticalOffset;
         for (int round = 0; round < 2; round++)
             foreach (string action in new[] { "FullscreenButton", "PipButton" })
             {
@@ -193,12 +221,15 @@ public static partial class FilmPlayerOverlayTests
                 AssertVideoPixels(capture, Bounds(scene.Element<Grid>("VideoPicture"), window.Root),
                     "resized full screen/PiP presents pixels, not just a terminal owner state");
                 window.Close();
-                await Until(() => scene.PlayerWindow is null && ReferenceEquals(overlay.XamlRoot, scene.Shell.Root.XamlRoot));
+                await Until(() => scene.PlayerWindow is null && frame.IsLoaded && overlay.IsLoaded && scene.Surface.IsLoaded &&
+                    ReferenceEquals(overlay.XamlRoot, scene.Shell.Root.XamlRoot) && scene.Surface.Describe().Visible == 1);
                 DesktopTestUi.WindowRoot(scene.Shell).UpdateLayout();
                 await Until(() => !Field<bool>(scene.Fixture.Native, "updatingSurface") &&
                     NativeMediaFixtures.Field(scene.Fixture.Native, "presentedSurface") is FilmKernelNative.Surface presented &&
                     presented.Equals(scene.Surface.Describe()));
                 AssertPicture(await scene.Frame(action + "-returned-" + round), scene, output: true);
+                Check(Math.Abs(scene.Element<ScrollViewer>("PageScroll").VerticalOffset - offset) < 1,
+                    "returning from the player window preserves the page viewport with its measured picture slot");
                 Check(scene.Fixture.CurrentAllocation().Matches(allocation) && scene.Fixture.Native.Scope == scope &&
                     ReferenceEquals(scene.Page.EpisodeDirectory, directory) && !scene.Session.CanRetainMedia &&
                     scene.Fixture.Traffic.BusinessCalls == calls,
@@ -317,7 +348,9 @@ public static partial class FilmPlayerOverlayTests
                 {
                     await scene.Film.DisposeAsync(); await scene.Music.DisposeAsync();
                 }, () => Task.CompletedTask, closePreferences: scene.closePreferences);
-                scene.Shell.Resize(1120, 820); DesktopTestUi.MoveWindow(scene.Shell, 40, 40); scene.Shell.Show();
+                scene.Shell.Resize(1120, 820); DesktopTestUi.MoveWindow(scene.Shell, 40, 40);
+                ((Microsoft.UI.Windowing.OverlappedPresenter)scene.Shell.AppWindow.Presenter).IsAlwaysOnTop = true;
+                scene.Shell.Activate();
                 await Until(() => scene.Music.PlayerView.IsLoaded && scene.Shell.Root.IsLoaded);
                 var modules = scene.ShellElement<ListView>("ModuleNavigationList");
                 var filmModule = modules.Items.OfType<ModuleSession>().Single(item => item.Module == scene.Film);
@@ -381,7 +414,13 @@ public static partial class FilmPlayerOverlayTests
         }
         internal async Task<NativeDesktopCapture.Capture> Frame(string name, FrameworkElement? target = null)
         {
-            var image = await NativeDesktopCapture.CaptureAsync(target ?? DesktopTestUi.WindowRoot(Shell));
+            target ??= DesktopTestUi.WindowRoot(Shell);
+            var window = DesktopWindow.GetWindow(target) ?? throw new InvalidOperationException("The captured tree has no window owner.");
+            if (!ReferenceEquals(window, Shell))
+                ((Microsoft.UI.Windowing.OverlappedPresenter)Shell.AppWindow.Presenter).IsAlwaysOnTop = false;
+            Check(SetWindowPos(window.Handle, -1, 0, 0, 0, 0, 0x13),
+                "the test-owned picture window is visible above unrelated desktop windows");
+            var image = await NativeDesktopCapture.CaptureAsync(target);
             string folder = TestWorkspace.DataPath("desktop-shots"); Directory.CreateDirectory(folder);
             string path = Path.Combine(folder, "film-shell-" + name + ".png");
             using (File.Create(path)) { }
@@ -394,6 +433,9 @@ public static partial class FilmPlayerOverlayTests
             Console.WriteLine($"FILM_SHELL_FRAME {path}; submittedPictures={Fixture.Native.Output?.SubmittedPictures ?? 0}; method=actual-desktop; SDR-composition-only");
             return image;
         }
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+        private static extern bool SetWindowPos(nint window, nint after, int x, int y, int width, int height, uint flags);
         public async ValueTask DisposeAsync()
         {
             Media.Release();

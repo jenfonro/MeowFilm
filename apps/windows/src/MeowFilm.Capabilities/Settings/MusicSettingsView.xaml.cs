@@ -42,9 +42,8 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         ExclusionAddButton.RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         { if (!DesktopVisual.IsVisible(ExclusionAddButton)) RetireExclusionPopup(); });
         ExclusionAddButton.Unloaded += (_, _) => RetireExclusionPopup();
-        RegisterPropertyChangedCallback(VisibilityProperty, async (_, _) => await VisibilityChanged());
-        LayoutUpdated += async (_, _) =>
-        { if (active != (IsLoaded && DesktopVisual.IsVisible(this))) await VisibilityChanged(); };
+        _ = DesktopVisual.ObserveVisibility(this, async visible =>
+        { if (active != visible) await VisibilityChanged(); });
     }
 
     public MeowFilm.Desktop.DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
@@ -66,7 +65,9 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private Task UpdateActivation()
     {
-        active = IsLoaded && DesktopVisual.IsVisible(this);
+        bool next = IsLoaded && DesktopVisual.IsVisible(this);
+        if (active == next) return Task.CompletedTask;
+        active = next;
         return active ? module.ActivateSettingsAsync() : module.DeactivateSettingsAsync();
     }
     private async Task VisibilityChanged()
@@ -126,7 +127,6 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         if (sections is null || SettingsScroller.Visibility != Visibility.Visible) return;
         if (scrollOffset != SettingsScroller.VerticalOffset) AccountsPanel.CloseTransientPopups();
         scrollOffset = SettingsScroller.VerticalOffset;
-        UpdateLayoutMetrics();
         int selected = 0;
         for (int index = 0; index < sections.Length; index++)
             if (sections[index].TransformToVisual(SectionsStack).TransformPoint(new Point()).Y <= SettingsScroller.VerticalOffset + 1) selected = index;

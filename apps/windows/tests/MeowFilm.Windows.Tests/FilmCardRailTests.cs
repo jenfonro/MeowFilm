@@ -15,6 +15,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -22,12 +23,77 @@ public static class FilmCardRailTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("film-card-rails: content receipts retain unchanged card pixels and show changed metadata",
+            () => TestUiHost.InvokeAsync(IncrementalCards));
         yield return new("film-card-rails: home scales complete posters and restores aligned pages after resize and hiding",
             () => TestUiHost.InvokeAsync(Home));
         yield return new("film-card-rails: episodes scale complete cards and page beside the rail without business commands",
             () => TestUiHost.InvokeAsync(Playback));
         yield return new("film-card-rails: native grids bound posters at width transitions and keep short rows small",
             () => TestUiHost.InvokeAsync(Grid));
+    }
+
+    private static async Task IncrementalCards()
+    {
+        var section = new FilmHomeSection(FilmSectionDefinition.Home[0]);
+        var first = FilmPlaybackFixture.Card(number: 1, poster: "https://art.invalid/film-1.png");
+        var second = FilmPlaybackFixture.Card(number: 2, poster: "https://art.invalid/film-2.png");
+        var last = FilmPlaybackFixture.Card(number: 3, poster: "https://art.invalid/film-3.png");
+        section.Complete([first, second, last]);
+        var view = new FilmShelf { DataContext = section, Margin = new(32, 16, 32, 16) };
+        var loader = new RetainedArtworkLoader(); ArtworkScope.SetLoader(view, loader);
+        var window = Mount(view);
+        try
+        {
+            await Until(() => Visuals(view).OfType<FilmCard>().Count() == 3);
+            var retained = Visuals(view).OfType<FilmCard>().Single(card => ReferenceEquals(card.DataContext, first));
+            var poster = (FilmPlaybackPoster)retained.FindName("Poster");
+            await Until(() => Visuals(poster).OfType<Image>().Any(image => image.Source is BitmapSource { PixelWidth: > 0 }));
+            var pixels = Visuals(poster).OfType<Image>().Single(image => image.Source is BitmapSource { PixelWidth: > 0 }).Source;
+            int unloaded = 0; retained.Unloaded += (_, _) => unloaded++;
+            section.Begin(); section.Complete([first with { }, second with { }, last with { }]); await Drain();
+            Check(unloaded == 0 && Visuals(view).OfType<FilmCard>().Contains(retained) &&
+                Visuals(poster).OfType<Image>().Any(image => ReferenceEquals(image.Source, pixels)),
+                "loading and equal receipts keep the mounted card and poster pixels");
+            var oldSecond = Visuals(view).OfType<FilmCard>().Single(card => ReferenceEquals(card.DataContext, second));
+            var oldArtwork = Visuals(oldSecond).OfType<ArtworkImage>().Single();
+            await Until(() => oldArtwork.Source is not null);
+            var secondPixels = oldArtwork.Source;
+            await Until(() => Visuals(view).OfType<ArtworkImage>().Count(image => image.Source is not null) == 3);
+            int reads = loader.Reads;
+            var updated = second with { Title = "更新影片", Score = "9.8", Subtitle = "新状态" };
+            section.Complete([first with { }, updated, last with { }]); await Drain();
+            await Until(() => Visuals(view).OfType<FilmCard>().Any(card => ReferenceEquals(card.DataContext, updated) &&
+                Visuals(card).OfType<ArtworkImage>().Any(image => image.Source is not null)));
+            var changed = Visuals(view).OfType<FilmCard>().Single(card => ReferenceEquals(card.DataContext, updated));
+            Check(loader.Reads == reads && Visuals(changed).OfType<ArtworkImage>().Any(image => ReferenceEquals(image.Source, secondPixels)),
+                "same-key metadata replacement borrows the existing cover lease and bitmap without another read");
+            Check(Visuals(changed).OfType<TextBlock>().Any(text => text.Text == "更新影片") &&
+                Visuals(changed).OfType<TextBlock>().Any(text => text.Text == "9.8") &&
+                Visuals(changed).OfType<TextBlock>().Any(text => text.Text == "新状态") &&
+                unloaded == 0 && Visuals(view).OfType<FilmCard>().Contains(retained) &&
+                Visuals(poster).OfType<Image>().Any(image => ReferenceEquals(image.Source, pixels)),
+                "changed metadata reaches only its card while the unrelated poster remains mounted");
+            section.Complete([first with { }, last with { }]); await Drain();
+            Check(unloaded == 0 && Visuals(view).OfType<FilmCard>().Contains(retained),
+                "removing another identity does not retire the surviving card");
+        }
+        finally { window.Content = null; window.Close(); }
+    }
+
+    private sealed class RetainedArtworkLoader : IArtworkLoader
+    {
+        internal int Reads;
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); Reads++;
+            return Task.FromResult<IArtworkLease>(new RetainedArtworkLease());
+        }
+    }
+    private sealed class RetainedArtworkLease : IArtworkLease
+    {
+        public ArtworkPixels Image { get; } = new(1, 1, new byte[] { 32, 64, 96, 255 });
+        public void Dispose() { }
     }
 
     private static Task Grid()

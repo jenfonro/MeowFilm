@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.IO;
 using System.Text.Json.Nodes;
 using Microsoft.UI.Xaml;
@@ -6,12 +7,10 @@ using Windows.System;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using FontWeights = Microsoft.UI.Text.FontWeights;
 using Color = global::Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Media.Imaging;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -26,12 +25,23 @@ public static class NovelManagementTests
         yield return new("novel management theme: live resources input semantics and high-contrast resource mappings", () => NovelTests.Sta(ThemeResources));
         yield return new("novel management components: visible selection inverse native tabs fields and previews", () => NovelTests.Sta(Components));
         yield return new("novel management layout: shared columns virtualized cells selection and reorder reports", () => NovelTests.Sta(ListLayout));
+        yield return new("novel management incremental: stable rows controls selection columns and current actions", () => NovelTests.Sta(IncrementalRows));
         yield return new("novel management native reorder: virtualized scroll reaches distant rows and reports stable order", () => NovelTests.Sta(DragAutoScroll));
         yield return new("novel management native reorder: disabled filtered invalid and detached lists cannot persist changes", () => NovelTests.Sta(DragLifetime));
         yield return new("novel management QR: local image decodes original rule text and rejects invalid images", () => NovelTests.Sta(Qr));
         yield return new("novel management save: accepted revisions remain editable without another list request", () => NovelTests.Sta(SavedRevision));
     }
     private static void Check(bool condition, string message = "Novel management assertion failed") { if (!condition) throw new InvalidOperationException(message); }
+    private static async Task WaitFor(Func<bool> condition, string message)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!condition())
+        {
+            Check(DateTime.UtcNow < deadline, message);
+            await DesktopTestUi.DrainAsync();
+            if (!condition()) await Task.Delay(16);
+        }
+    }
     private static async Task SavedRevision()
     {
         var runtime = new NovelTests.Runtime(); var sources = NovelTestSources.Create(runtime); await sources.RefreshAsync();
@@ -200,7 +210,7 @@ public static class NovelManagementTests
             {
                 root.Width = width; host.Root.UpdateLayout(); await DesktopTestUi.DrainAsync();
                 var header = (Grid)NovelTests.Find<TextBlock>(list).Single(text => text.Text == "名称").Parent;
-                foreach (var row in NovelTests.Find<ManagementRowView>(list))
+                foreach (var row in NovelTests.Find<ManagementRowView>(list).Where(row => row.DataContext is ManagementRowState))
                 {
                     Check(row.ColumnDefinitions.Count == header.ColumnDefinitions.Count);
                     for (int column = 0; column < header.ColumnDefinitions.Count; column++)
@@ -217,8 +227,14 @@ public static class NovelManagementTests
             var firstCheck = NovelTests.Find<CheckBox>(list).Single(check => AutomationProperties.GetName(check) == "选择 来源 1");
             NovelTestUi.Check(firstCheck, true);
             native.ScrollIntoView(native.Items[^1]); host.Root.UpdateLayout(); await DesktopTestUi.DrainAsync();
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (!NovelTests.Find<TextBlock>(list).Any(text => text.Text == "来源 5000"))
+            {
+                Check(DateTime.UtcNow < deadline, "The final management row was not realized.");
+                await Task.Delay(16); host.Root.UpdateLayout();
+            }
             Check(NovelTests.Find<TextBlock>(list).Any(text => text.Text == "来源 5000") && created < 200,
-                "Scrolling must recycle containers without constructing every item.");
+                $"Scrolling must recycle containers without constructing every item (created={created}).");
             Check(list.Selected.SetEquals(["1"]), "Selection must survive row recycling.");
             IReadOnlyList<string>? reported = null; list.OrderChanged += order => reported = order;
             list.ReportOrder("1", "3", true);
@@ -229,6 +245,90 @@ public static class NovelManagementTests
             list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "暂无来源");
             var all = NovelTests.Find<CheckBox>(list).Single(check => AutomationProperties.GetName(check) == "全选");
             NovelTestUi.Check(all, true); Check(list.Selected.Count == rows.Length);
+        }
+        finally { host.Close(); }
+    }
+    private static async Task IncrementalRows()
+    {
+        var list = new ManagementList { ShowToolbar = false };
+        var root = new Border { Child = list, Width = 880, Height = 600 }; NovelUi.Theme(root);
+        var host = NovelTestUi.Window(root);
+        int oldEdits = 0, newEdits = 0, toggles = 0;
+        ManagementRow Row(string id) => new(id, "来源 " + id, "详情", true, () => oldEdits++, _ => { }, new MenuFlyout());
+        var rows = new[] { Row("1"), Row("2"), Row("3") };
+        void Publish(ManagementRow[] value) => list.SetRows(value, value.Length, value.Select(row => row.Id), "暂无来源");
+        try
+        {
+            host.Activate(); Publish(rows); await DesktopTestUi.DrainAsync();
+            var native = NovelTests.Find<ListView>(list).Single();
+            var source = (System.Collections.ObjectModel.ObservableCollection<ManagementRowState>)native.ItemsSource;
+            var changes = new List<NotifyCollectionChangedAction>(); source.CollectionChanged += (_, args) => changes.Add(args.Action);
+            var states = source.ToDictionary(state => state.Row.Id);
+            var views = NovelTests.Find<ManagementRowView>(list).Where(view => view.DataContext is ManagementRowState)
+                .ToDictionary(view => ((ManagementRowState)view.DataContext).Row.Id);
+            var containers = states.Keys.ToDictionary(id => id, id => native.ContainerFromItem(states[id]));
+            var children = views.ToDictionary(pair => pair.Key, pair => pair.Value.Children.ToArray());
+            Check(views.Count == 3, "The identity fixture must realize every row.");
+            void UnchangedControls()
+            {
+                foreach (var id in states.Keys)
+                {
+                    Check(ReferenceEquals(source.Single(state => state.Row.Id == id), states[id]), "Retained IDs keep their row state.");
+                    Check(ReferenceEquals(native.ContainerFromItem(states[id]), containers[id]), "Unchanged rows keep their native container.");
+                    Check(views[id].Children.SequenceEqual(children[id]), "Selection and data receipts cannot rebuild row controls.");
+                }
+            }
+            Publish(rows.Select(row => row with { Menu = new MenuFlyout(), Edit = () => newEdits++, Toggle = _ => toggles++ }).ToArray());
+            await DesktopTestUi.DrainAsync(); Check(changes.Count == 0); UnchangedControls();
+            NovelTestUi.Invoke((Button)children["1"][3]);
+            NovelTestUi.Check((CheckBox)children["1"][2], false);
+            Check(oldEdits == 0 && newEdits == 1 && toggles == 1, "Preserved controls must invoke the latest row actions.");
+            var all = NovelTests.Find<CheckBox>(list).Single(box => AutomationProperties.GetAutomationId(box) == "management.selectAll");
+            NovelTestUi.Check(all, true); await DesktopTestUi.DrainAsync();
+            Check(list.Selected.SetEquals(["1", "2", "3"]) && changes.Count == 0); UnchangedControls();
+            Check(children.Values.All(value => ((CheckBox)value[0]).IsChecked == true));
+            NovelTestUi.Invoke(NovelTests.Find<Button>(list).Single(button => Equals(button.Content, "反选")));
+            Check(list.Selected.Count == 0 && children.Values.All(value => ((CheckBox)value[0]).IsChecked == false));
+            var definitions = views.ToDictionary(pair => pair.Key, pair => pair.Value.ColumnDefinitions.ToArray());
+            list.SetColumns([new("名称", new(1, GridUnitType.Star)), new("启用", new(64)), new("", new(80)), new("", new(64))]);
+            await DesktopTestUi.DrainAsync(); Check(changes.Count == 0); UnchangedControls();
+            Check(views.All(pair => pair.Value.ColumnDefinitions.SequenceEqual(definitions[pair.Key])), "Column width changes update existing geometry definitions.");
+            rows[1] = rows[1] with { Title = "修改来源", Detail = "修改详情", Enabled = false, Failed = true };
+            Publish(rows); await DesktopTestUi.DrainAsync(); Check(changes.Count == 0); UnchangedControls();
+            Check(((StackPanel)children["2"][1]).Children.OfType<TextBlock>().Select(text => text.Text).SequenceEqual(["修改来源", "修改详情"]));
+            Check(((CheckBox)children["2"][2]).IsChecked == false);
+            rows = [rows[0], Row("4"), rows[1], rows[2]]; Publish(rows); await DesktopTestUi.DrainAsync();
+            Check(changes.SequenceEqual([NotifyCollectionChangedAction.Add]));
+            Check(states.All(pair => ReferenceEquals(source.Single(state => state.Row.Id == pair.Key), pair.Value)));
+            changes.Clear(); rows = [rows[0], rows[1], rows[3]]; Publish(rows); await DesktopTestUi.DrainAsync();
+            Check(changes.SequenceEqual([NotifyCollectionChangedAction.Remove]) && source.All(state => state.Row.Id != "2"));
+            changes.Clear(); rows = [rows[2], rows[0], rows[1]]; Publish(rows); await DesktopTestUi.DrainAsync();
+            Check(changes.SequenceEqual([NotifyCollectionChangedAction.Move]) && source.Select(state => state.Row.Id).SequenceEqual(["3", "1", "4"]));
+            Check(ReferenceEquals(source[0], states["3"]) && ReferenceEquals(source[1], states["1"]));
+
+            // Custom cell factories are refreshed delegates; their bound owner is the content identity.
+            int customCreated = 0;
+            var firstOwner = new object(); var secondOwner = new object();
+            list.SetColumns([new("名称", new(1, GridUnitType.Star))]);
+            ManagementRow Custom(string id, object owner) => new(id, id, "", true, () => { }, _ => { }, new MenuFlyout(),
+                Cells: () => { customCreated++; return [new TextBlock { Text = id, DataContext = owner }]; }, CellsIdentity: owner);
+            Publish([Custom("a", firstOwner), Custom("b", secondOwner)]);
+            native.ScrollIntoView(native.Items[0]); host.Root.UpdateLayout();
+            await WaitFor(() => new[] { "a", "b" }.All(id => NovelTests.Find<ManagementRowView>(list)
+                .Any(view => view.IsLoaded && view.DataContext is ManagementRowState state && state.Row.Id == id)),
+                "Replacement custom rows must be realized before checking their controls.");
+            var customViews = NovelTests.Find<ManagementRowView>(list).Where(view => view.DataContext is ManagementRowState)
+                .ToDictionary(view => ((ManagementRowState)view.DataContext).Row.Id);
+            var firstCell = customViews["a"].Children[1]; var secondCell = customViews["b"].Children[1];
+            int created = customCreated; changes.Clear();
+            Publish([Custom("a", firstOwner), Custom("b", secondOwner)]); await DesktopTestUi.DrainAsync();
+            NovelTestUi.Check(all, true); list.SetColumns([new("名称", new(500))]); await DesktopTestUi.DrainAsync();
+            Check(customCreated == created && changes.Count == 0 && ReferenceEquals(customViews["a"].Children[1], firstCell) && ReferenceEquals(customViews["b"].Children[1], secondCell),
+                "Fresh factories, selection and column geometry must retain bound custom cells.");
+            var nextOwner = new object();
+            Publish([Custom("a", nextOwner), Custom("b", secondOwner)]); await DesktopTestUi.DrainAsync();
+            Check(customCreated == created + 1 && !ReferenceEquals(customViews["a"].Children[1], firstCell) && ReferenceEquals(customViews["b"].Children[1], secondCell),
+                "Only a changed custom content owner retires its cells.");
         }
         finally { host.Close(); }
     }
@@ -280,13 +380,17 @@ public static class NovelManagementTests
             void Disabled() => Check(!native.CanDragItems && !native.CanReorderItems, "Retired input cannot retain native reorder admission.");
             Check(native.CanDragItems && native.CanReorderItems);
             list.EnableRowDrag = false; Disabled(); list.ReportOrder("1", "3", true); Check(reports == 0);
-            list.EnableRowDrag = true; list.IsEnabled = false; Disabled(); list.IsEnabled = true;
-            list.Visibility = Visibility.Collapsed; Disabled(); list.Visibility = Visibility.Visible; await DesktopTestUi.DrainAsync();
+            list.EnableRowDrag = true; list.IsEnabled = false;
+            await WaitFor(() => !native.CanDragItems && !native.CanReorderItems, "Disabled input did not retire native reorder admission.");
+            Disabled(); list.ReportOrder("1", "3", true); Check(reports == 0); list.IsEnabled = true;
+            await WaitFor(() => native.CanDragItems && native.CanReorderItems, "Enabled input did not restore native reorder admission.");
+            list.Visibility = Visibility.Collapsed; Disabled(); list.ReportOrder("1", "3", true); Check(reports == 0);
+            list.Visibility = Visibility.Visible; await DesktopTestUi.DrainAsync();
             list.SetRows(rows.Take(10).ToArray(), rows.Length, rows.Select(row => row.Id), "暂无来源"); Disabled();
             list.ReportOrder("1", "3", true); Check(reports == 0, "A filtered list cannot persist a partial order.");
             list.SetRows(rows, rows.Length, rows.Select(row => row.Id), "暂无来源"); await DesktopTestUi.DrainAsync();
             list.ReportOrder("invalid", "3", true); list.ReportOrder("1", "invalid", true); Check(reports == 0);
-            root.Child = null; await DesktopTestUi.DrainAsync(); Disabled();
+            root.Child = null; await DesktopTestUi.DrainAsync(); Disabled(); list.ReportOrder("1", "3", true); Check(reports == 0);
             root.Child = list; await DesktopTestUi.DrainAsync(); Check(native.CanDragItems && native.CanReorderItems);
             host.Close(); await DesktopTestUi.DrainAsync(); Disabled(); Check(reports == 0);
         }
@@ -330,7 +434,8 @@ public static class NovelManagementTests
                 tabs.SelectedIndex = 1; dialog.UpdateLayout(); await DesktopTestUi.DrainAsync();
                 var input = NovelTests.Find<TextBox>(editor).Single(b => AutomationProperties.GetAutomationId(b) == "novel.source.field.ruleSearch.bookList");
                 input.Text = ".edited";
-                Check(JsonNode.Parse(editor.Draft.Definition())!["ruleSearch"]!["bookList"]!.GetValue<string>() == ".edited");
+                await WaitFor(() => JsonNode.Parse(editor.Draft.Definition())!["ruleSearch"]!["bookList"]!.GetValue<string>() == ".edited",
+                    "The source editor must apply the native TextChanged event to its draft.");
                 await CaptureDialog(dialog, "source-search");
                 var searchScroll = (ScrollViewer)((TabViewItem)tabs.TabItems[1]).Content; searchScroll.ChangeView(null, searchScroll.ScrollableHeight, null, true); dialog.UpdateLayout(); await DesktopTestUi.DrainAsync();
                 await CaptureDialog(dialog, "source-search-bottom");
@@ -430,7 +535,7 @@ public static class NovelManagementTests
         Button? cancel = null;
         try
         {
-            await DesktopTestUi.DrainAsync();
+            await NovelTestUi.LoadedAsync(body);
             var panel = NovelTests.Find<Border>(dialogHost).Single(item =>
                 AutomationProperties.GetName(item) == title);
             cancel = NovelTests.Find<Button>(dialogHost).Single(button => Equals(button.Content, "取消"));
@@ -464,15 +569,15 @@ public static class NovelManagementTests
         const int scale = 5, border = 4; int width = (qr.Size + border * 2) * scale; var pixels = new byte[width * width]; Array.Fill(pixels, (byte)255);
         for (int y = 0; y < qr.Size; y++) for (int x = 0; x < qr.Size; x++) if (qr.GetModule(x, y))
             for (int dy = 0; dy < scale; dy++) Array.Fill(pixels, (byte)0, ((y + border) * scale + dy) * width + (x + border) * scale, scale);
-        var bitmap = BitmapSource.Create(width, width, 96, 96, PixelFormats.Gray8, null, pixels, width); bitmap.Freeze();
+        var bgra = pixels.SelectMany(value => new byte[] { value, value, value, 255 }).ToArray();
         string path = TestWorkspace.DataPath("novel-management-qr.png");
         try
         {
-            var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using (var file = File.Create(path)) encoder.Save(file);
+            File.WriteAllBytes(path, FixtureImages.Encode(width, width, bgra));
             Check(await NovelSettingsView.ReadRuleQrAsync(path, default) == text);
             File.WriteAllText(path, "not an image");
             try { await NovelSettingsView.ReadRuleQrAsync(path, default); throw new InvalidOperationException("Invalid QR image accepted"); }
-            catch (Exception error) when (error is NotSupportedException or FileFormatException) { }
+            catch (Exception error) when (error is InvalidDataException) { }
         }
         finally { File.Delete(path); }
     }

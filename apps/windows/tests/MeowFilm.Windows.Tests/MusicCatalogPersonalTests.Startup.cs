@@ -193,8 +193,9 @@ public static partial class MusicCatalogPersonalTests
     {
         foreach (string method in new[] { "music.accounts.list", "music.catalogSource.settings.get",
             "music.metadata.settings.get", "music.queue.get", "music.appearance.get",
-            "music.device.settings.get", "music.search.settings.get" })
+            "music.device.settings.get" })
             Equal(1, Calls(f, method));
+        Equal(2, Calls(f, "music.search.settings.get"));
         Equal(1, f.App.InitializationCalls);
         Check(f.Module.CanEditMetadata && f.Module.CanEditAppearance &&
             f.Module.CanEditFeedback && f.Module.CanEditSearchPreferences,

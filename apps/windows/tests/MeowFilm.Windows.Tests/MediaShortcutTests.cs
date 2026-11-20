@@ -6,9 +6,8 @@ using Windows.Foundation;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Key = System.Windows.Input.Key;
-using ModifierKeys = System.Windows.Input.ModifierKeys;
-using KeyInterop = System.Windows.Input.KeyInterop;
+using Key = Windows.System.VirtualKey;
+using ModifierKeys = Windows.System.VirtualKeyModifiers;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
@@ -18,6 +17,7 @@ public static class MediaShortcutTests
     public static IEnumerable<TestCase> Cases()
     {
         yield return Case("real HWND conflict releases and recovers on explicit refresh", Conflict);
+        yield return Case("native registration and message payload preserve individual modifier bits", ModifierBits);
         yield return Case("disabled recording unavailable and closing release without probing", RegistrationLifetime);
         yield return Case("unchanged state and error notifications preserve queued hotkeys", UnchangedState);
         yield return Case("rebind and disable reopen reject old native messages", StaleMessages);
@@ -32,6 +32,40 @@ public static class MediaShortcutTests
     }
 
     internal static TestCase Case(string name, Func<Task> action) => new("media-shortcut." + name, () => Sta(action));
+
+    private static async Task ModifierBits()
+    {
+        (ModifierKeys Modifiers, uint Native)[] cases =
+        [
+            (ModifierKeys.Control, 0x0002), (ModifierKeys.Menu, 0x0001),
+            (ModifierKeys.Shift, 0x0004), (ModifierKeys.Windows, 0x0008),
+            (ModifierKeys.Control | ModifierKeys.Windows, 0x000a)
+        ];
+        foreach (var (modifiers, native) in cases)
+        {
+            var gesture = new MediaShortcutGesture(Key.F24, modifiers);
+            var preferences = ShortcutFixture.Preferences() with
+            {
+                Bindings = ShortcutFixture.Preferences().Bindings.Select(binding => binding.Action == MediaShortcutAction.TogglePlayback
+                    ? binding with { Global = gesture } : binding).ToArray()
+            };
+            await using var fixture = new ShortcutFixture(preferences);
+            // Windows reserves Win-key combinations. Keep the other cases on
+            // real RegisterHotKey; the controlled boundary verifies Win bits
+            // and WM_HOTKEY matching without assuming OS registration succeeds.
+            fixture.Native.SimulateRegistration = modifiers.HasFlag(ModifierKeys.Windows);
+            await fixture.Ready();
+            fixture.Attach();
+            Check(fixture.Native.Latest.Success && fixture.Native.Latest.Modifiers == (native | 0x4000),
+                "RegisterHotKey receives Win32 MOD values, including MOD_NOREPEAT");
+            // Payloads use literal Win32 bits independently of the production mapper.
+            fixture.PostNative(fixture.Native.Latest, native == 0x0002 ? 0x0001u : 0x0002u);
+            fixture.PostNative(fixture.Native.Latest, native);
+            await Pump();
+            Check(fixture.Actions.SequenceEqual([MediaShortcutAction.TogglePlayback]),
+                "WM_HOTKEY accepts the exact native modifiers and rejects a different gesture");
+        }
+    }
 
     private static async Task Conflict()
     {
@@ -124,6 +158,7 @@ public static class MediaShortcutTests
     private static async Task Overlap()
     {
         await using var fixture = new ShortcutFixture(ShortcutFixture.Preferences(local: ShortcutFixture.GlobalGesture));
+        await fixture.Ready();
         fixture.Native.Foreground = fixture.Handle;
         fixture.Attach();
         var registration = fixture.Native.Latest;
@@ -146,6 +181,7 @@ public static class MediaShortcutTests
     {
         await using var owner = new ShortcutFixture(); owner.Attach();
         await using var fixture = new ShortcutFixture(ShortcutFixture.Preferences(local: ShortcutFixture.GlobalGesture));
+        await fixture.Ready();
         fixture.Native.Foreground = fixture.Handle; fixture.Attach();
         Check(fixture.Settings.GlobalErrors.Count == 1, "real conflict");
         fixture.SendKey(fixture.Button, ShortcutFixture.GlobalGesture);
@@ -157,11 +193,14 @@ public static class MediaShortcutTests
     {
         var gesture = new MediaShortcutGesture(Key.P, ModifierKeys.Control);
         await using var fixture = new ShortcutFixture(ShortcutFixture.Preferences(global: false, local: gesture));
+        await fixture.Ready();
         fixture.Native.Foreground = fixture.Handle; fixture.Attach();
         UIElement[] editors = [new TextBox(), new RichEditBox(), new PasswordBox(), new ComboBox { IsEditable = true }, new MenuFlyoutItem()];
         foreach (var editor in editors)
         {
             fixture.Root.Children.Add(editor);
+            await TestUiHost.LoadedAsync((FrameworkElement)editor);
+            Check(DesktopVisual.Contains(fixture.Root, editor), "protected input is mounted in the actual XAML root");
             Check(!fixture.SendKey(editor, gesture).Handled, "editor and menu input remains unhandled");
             fixture.SendKey(editor, gesture, down: false);
         }
@@ -203,13 +242,16 @@ public static class MediaShortcutTests
 
     private static async Task GlobalInput()
     {
-        await using var fixture = new ShortcutFixture(); fixture.Attach();
+        await using var fixture = new ShortcutFixture();
+        await fixture.Ready(); fixture.Attach();
         var editor = new TextBox(); fixture.Root.Children.Add(editor);
+        await TestUiHost.LoadedAsync(editor);
         fixture.Native.Focus = editor;
         fixture.Native.Foreground = fixture.Handle;
         fixture.Post(fixture.Native.Latest); await Pump();
         Check(fixture.Actions.Count == 0, "own foreground editor protected");
         await using var other = new ShortcutFixture(ShortcutFixture.Preferences(global: false));
+        Check(!fixture.Native.OwnsWindow(fixture.Handle, other.Handle), "an unrelated HWND is not owned by the shortcut window");
         fixture.Native.Foreground = other.Handle;
         fixture.Native.Menu = true;
         fixture.Post(fixture.Native.Latest); await Pump();
@@ -233,6 +275,7 @@ public static class MediaShortcutTests
     private static async Task AllActions()
     {
         await using var fixture = new ShortcutFixture(MediaControlDefaults.Preferences with { GlobalEnabled = false });
+        await fixture.Ready();
         fixture.Native.Foreground = fixture.Handle; fixture.Attach();
         foreach (var binding in fixture.Settings.Preferences.Bindings)
         {
@@ -290,6 +333,7 @@ public static class MediaShortcutTests
             _ => throw new InvalidOperationException("private-native-provider-text"));
         var messages = new List<string>();
         NoticeOutlet.SetReceiver(fixture.Root, args => messages.Add(args.Message));
+        await fixture.Ready();
         fixture.Native.Foreground = fixture.Handle; fixture.Attach();
         fixture.SendKey(fixture.Button, gesture); fixture.SendKey(fixture.Button, gesture, down: false);
         await Pump();
@@ -318,7 +362,7 @@ public static class MediaShortcutTests
 
 internal sealed class ShortcutFixture : IAsyncDisposable
 {
-    internal static readonly MediaShortcutGesture GlobalGesture = new(Key.F24, ModifierKeys.Control | ModifierKeys.Alt | ModifierKeys.Shift);
+    internal static readonly MediaShortcutGesture GlobalGesture = new(Key.F24, ModifierKeys.Control | ModifierKeys.Menu | ModifierKeys.Shift);
     internal readonly Window Window;
     internal readonly Grid Root = new();
     internal readonly Button Button = new() { Content = "fixture" };
@@ -345,6 +389,13 @@ internal sealed class ShortcutFixture : IAsyncDisposable
             new MediaShortcutBinding(binding.Action, binding.Action == MediaShortcutAction.TogglePlayback ? local : null,
                 binding.Action == MediaShortcutAction.TogglePlayback ? GlobalGesture with { Key = key } : null)).ToArray());
 
+    internal async Task Ready()
+    {
+        await TestUiHost.LoadedAsync(Button);
+        Root.UpdateLayout();
+        MediaShortcutTests.Check(DesktopVisual.Contains(Root, Button), "the native XAML input target is mounted in its root");
+    }
+
     internal void Attach(IDesktopMediaControlSettings? settings = null) => Attachment = new(Window, settings ?? Settings, action =>
     {
         Actions.Add(action);
@@ -357,7 +408,7 @@ internal sealed class ShortcutFixture : IAsyncDisposable
     {
         // Exercise the real input owner without synthesizing an OS or XAML input event.
         var modifiers = MediaShortcutInput.Modifiers(gesture.Modifiers.HasFlag(ModifierKeys.Control),
-            gesture.Modifiers.HasFlag(ModifierKeys.Alt), gesture.Modifiers.HasFlag(ModifierKeys.Shift),
+            gesture.Modifiers.HasFlag(ModifierKeys.Menu), gesture.Modifiers.HasFlag(ModifierKeys.Shift),
             gesture.Modifiers.HasFlag(ModifierKeys.Windows) && !rightWindows,
             gesture.Modifiers.HasFlag(ModifierKeys.Windows) && rightWindows);
         MediaShortcutTests.Check(modifiers == gesture.Modifiers, "both Windows keys preserve the modifier projection");
@@ -370,8 +421,17 @@ internal sealed class ShortcutFixture : IAsyncDisposable
 
     internal void Post(ShortcutNative.Call call, MediaShortcutGesture? gesture = null)
     {
-        gesture ??= new(KeyInterop.KeyFromVirtualKey((int)call.Key), (ModifierKeys)(call.Modifiers & 0xf));
-        nint packed = (nint)((KeyInterop.VirtualKeyFromKey(gesture.Key) << 16) | (int)gesture.Modifiers);
+        uint modifiers = gesture is null ? call.Modifiers & 0x000f :
+            (gesture.Modifiers.HasFlag(ModifierKeys.Menu) ? 0x0001u : 0) |
+            (gesture.Modifiers.HasFlag(ModifierKeys.Control) ? 0x0002u : 0) |
+            (gesture.Modifiers.HasFlag(ModifierKeys.Shift) ? 0x0004u : 0) |
+            (gesture.Modifiers.HasFlag(ModifierKeys.Windows) ? 0x0008u : 0);
+        PostNative(call, modifiers, gesture?.Key);
+    }
+
+    internal void PostNative(ShortcutNative.Call call, uint modifiers, Key? key = null)
+    {
+        nint packed = (nint)(((uint)(key ?? (Key)call.Key) << 16) | modifiers);
         MediaShortcutTests.Check(PostMessageW(Handle, MediaShortcutNative.HotKeyMessage, call.Id, packed),
             "the native message queue delivers the payload to the actual window attachment");
     }
@@ -397,6 +457,7 @@ internal sealed class ShortcutNative : MediaShortcutNative
     internal int? RegisterError;
     internal int? AllocateError;
     internal int? UnregisterError;
+    internal bool SimulateRegistration;
     internal nint Foreground;
     internal DependencyObject? Focus;
     internal bool Menu;
@@ -413,17 +474,19 @@ internal sealed class ShortcutNative : MediaShortcutNative
     public override void ReleaseId(int id) { Released.Add(id); base.ReleaseId(id); }
     public override (bool Success, int Error) Register(nint hwnd, int id, uint modifiers, uint key)
     {
-        var result = RegisterError is { } error ? (Success: false, Error: error) : base.Register(hwnd, id, modifiers, key);
+        var result = RegisterError is { } error ? (Success: false, Error: error) :
+            SimulateRegistration ? (Success: true, Error: 0) : base.Register(hwnd, id, modifiers, key);
         Calls.Add(new(id, modifiers, key, result.Success, result.Error));
         Console.WriteLine($"NATIVE shortcut register {WindowEvidence(hwnd)} id=0x{id:X} mod=0x{modifiers:X} vk=0x{key:X} " +
-            $"success={result.Success} error={result.Error} injected={RegisterError.HasValue}");
+            $"success={result.Success} error={result.Error} injected={RegisterError.HasValue || SimulateRegistration}");
         return result;
     }
     public override (bool Success, int Error) Unregister(nint hwnd, int id)
     {
-        var result = UnregisterError is { } error ? (Success: false, Error: error) : base.Unregister(hwnd, id);
+        var result = UnregisterError is { } error ? (Success: false, Error: error) :
+            SimulateRegistration ? (Success: true, Error: 0) : base.Unregister(hwnd, id);
         Console.WriteLine($"NATIVE shortcut unregister {WindowEvidence(hwnd)} id=0x{id:X} " +
-            $"success={result.Success} error={result.Error} injected={UnregisterError.HasValue}");
+            $"success={result.Success} error={result.Error} injected={UnregisterError.HasValue || SimulateRegistration}");
         if (result.Success) Unregistered.Add(id);
         return result;
     }

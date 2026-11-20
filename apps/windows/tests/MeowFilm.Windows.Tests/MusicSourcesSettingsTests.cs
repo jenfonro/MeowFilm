@@ -24,6 +24,36 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> SourcesSettingsCases()
     {
+        yield return Case("late script file picker result cannot import into a retired source settings owner", async () =>
+        {
+            await using var f = await Fixture.Create();
+            var settings = (MusicSettingsView)f.Module.SettingsView;
+            using var mount = new ReplicaMount(settings);
+            ReplicaAnchors(settings)[^1].IsChecked = true;
+            await Until(() => f.Module.Sources.Count > 0 && f.Module.CanEditScripts);
+            await Drain();
+            string path = Path.Combine(f.Root, "retired-picker-source.js");
+            await File.WriteAllTextAsync(path, TestScript(name: "不应安装"), new UTF8Encoding(false));
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var picked = new TaskCompletionSource<string[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.Dialogs.ScriptPicker = owner =>
+            {
+                True(ReferenceEquals(owner, settings), "script picker receives its source settings window owner");
+                entered.TrySetResult();
+                return picked.Task;
+            };
+            var importing = f.Module.ImportSourceAsync();
+            try
+            {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+                ReplicaAnchors(settings)[0].IsChecked = true;
+                await Drain();
+            }
+            finally { picked.TrySetResult([path]); await importing; }
+            Equal(0, (await f.Rpc("music.sources.list")).GetProperty("items").GetArrayLength());
+            True(f.Module.Sources.All(row => row.IsBuiltIn), "retired picker never installs or publishes a script");
+            Equal("", f.Module.Status);
+        });
         yield return Case("wrong-source form reads every queue page and persists an exact manual choice", async () =>
         {
             await using var f = await Fixture.Create();
@@ -279,14 +309,34 @@ public static partial class MusicUiTests
             int writes = f.Calls.Count("music.sources.edit");
             mount.Window.Resize(1000, 820);
             DesktopTestUi.WindowRoot(mount.Window).UpdateLayout(); await Drain();
+            await Until(() => scroll.VerticalOffset < oldOffset);
             True(scroll.VerticalOffset < oldOffset, "growing the viewport actually coerces the old bottom offset");
             True(MusicTestUi.IsDialogOpen(popup) && name.Text == "缩放后保存", "resize and its scroll change retain the open editor and draft");
             Equal(writes, f.Calls.Count("music.sources.edit"));
             var surface = (FrameworkElement)popup.Content;
-            var bounds = DesktopTestUi.Bounds(surface, settings);
-            True(Math.Abs(bounds.X + bounds.Width / 2 - settings.ActualWidth / 2) < 3 &&
-                Math.Abs(bounds.Y + bounds.Height / 2 - settings.ActualHeight / 2) < 3,
-                "the actual native editor remains centered on the shared root after resize");
+            // The native dialog frame is centered; its content has template padding and title space.
+            FrameworkElement? frame = null;
+            for (var node = VisualTreeHelper.GetParent(surface); node is not null; node = VisualTreeHelper.GetParent(node))
+                if (node is FrameworkElement { Name: "BackgroundElement" } background) { frame = background; break; }
+            True(frame is not null, "the actual popup contains the native dialog frame");
+            var root = (FrameworkElement)settings.XamlRoot.Content;
+            Point ActualCenter() => frame!.TransformToVisual(root).TransformPoint(new(frame.ActualWidth / 2, frame.ActualHeight / 2));
+            Point ExpectedCenter() => new(root.ActualWidth / 2, root.ActualHeight / 2);
+            bool Centered() => MusicTestUi.IsDialogOpen(popup) && frame!.ActualWidth > 0 && frame.ActualHeight > 0 &&
+                Math.Abs(ActualCenter().X - ExpectedCenter().X) < 3 && Math.Abs(ActualCenter().Y - ExpectedCenter().Y) < 3;
+            InvalidOperationException? centeringFailure = null;
+            try { await Until(Centered); }
+            catch (TimeoutException error)
+            {
+                FrameworkElement? layout = null;
+                for (var node = VisualTreeHelper.GetParent(frame!); node is not null; node = VisualTreeHelper.GetParent(node))
+                    if (node is FrameworkElement { Name: "LayoutRoot" } nativeRoot) { layout = nativeRoot; break; }
+                centeringFailure = new InvalidOperationException($"the actual native editor remains centered on the shared root after resize: " +
+                    $"frame={frame!.ActualWidth}x{frame.ActualHeight} center={ActualCenter()}; " +
+                    $"root={root.ActualWidth}x{root.ActualHeight} center={ExpectedCenter()}; XamlRoot.Size={settings.XamlRoot.Size}; " +
+                    $"LayoutRoot={layout?.ActualWidth}x{layout?.ActualHeight} " +
+                    $"LayoutRootOrigin={layout?.TransformToVisual(root).TransformPoint(new())}; dialogOpen={MusicTestUi.IsDialogOpen(popup)}", error);
+            }
             Click((Button)view.FindName("EditSave"));
             await Until(() => f.Module.CanEdit && f.Module.Sources.Last().Name == "缩放后保存");
             Equal(writes + 1, f.Calls.Count("music.sources.edit"));
@@ -301,13 +351,26 @@ public static partial class MusicUiTests
             mount.Window.Content = null; await Drain();
             True(!MusicTestUi.IsDialogOpen(popup), "unloading the source page closes the editor");
             Equal(writes + 1, f.Calls.Count("music.sources.edit"));
+            if (centeringFailure is not null) throw centeringFailure;
 
             async Task OpenLast()
             {
-                scroll.ChangeView(null, scroll.ScrollableHeight, null, true); view.UpdateLayout(); await Drain();
+                scroll.ChangeView(null, scroll.ScrollableHeight, null, true); view.UpdateLayout();
+                await Until(() => Math.Abs(scroll.VerticalOffset - scroll.ScrollableHeight) < 1);
                 var row = f.Module.Sources.Last();
-                Click(Visuals(view).OfType<Button>().Single(button => ReferenceEquals(button.DataContext, row) && Equals(button.Content, "编辑")));
-                await Drain(); True(MusicTestUi.IsDialogOpen(popup), "the real source edit action opens its editor");
+                await Until(() => Visuals(view).OfType<Button>().Any(button => button.IsLoaded &&
+                    ReferenceEquals(button.DataContext, row) && Equals(button.Content, "编辑")));
+                var button = Visuals(view).OfType<Button>().Single(button => button.IsLoaded &&
+                    ReferenceEquals(button.DataContext, row) && Equals(button.Content, "编辑"));
+                Click(button);
+                try { await Until(() => MusicTestUi.IsDialogOpen(popup)); }
+                catch (TimeoutException error)
+                {
+                    throw new InvalidOperationException($"source editor did not open: button loaded={button.IsLoaded} " +
+                        $"visible={DesktopVisual.IsVisible(button)} enabled={button.IsEnabled}; CanEdit={f.Module.CanEdit} " +
+                        $"rowCurrent={f.Module.Sources.Contains(row)} contentLoaded={(popup.Content as FrameworkElement)?.IsLoaded}", error);
+                }
+                True(MusicTestUi.IsDialogOpen(popup), "the real source edit action opens its editor");
             }
         });
 
@@ -380,7 +443,9 @@ public static partial class MusicUiTests
             var first = f.Module.Sources[0];
             var check = Visuals(management).OfType<CheckBox>().Single(box =>
                 Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(box) == "选择 " + first.Name);
-            check.IsChecked = true; FilmUiTest.Click(check);
+            True(check.IsChecked != true && !first.Selected, "the built-in source starts unselected");
+            FilmUiTest.Click(check);
+            await Until(() => first.Selected);
             True(first.Selected && f.Module.CanCheckSelectedSources && !f.Module.CanRemoveSelectedSources,
                 "shared selection reaches the existing batch owner without making built-in sources deletable");
             await f.Module.RefreshSourceManagementAsync(); await Drain();

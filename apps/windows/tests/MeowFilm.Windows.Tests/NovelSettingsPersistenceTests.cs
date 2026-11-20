@@ -8,7 +8,6 @@ using Windows.System;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using FontWeights = Microsoft.UI.Text.FontWeights;
 using Color = Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;

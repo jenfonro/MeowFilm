@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 [assembly: InternalsVisibleTo("MeowFilm.Windows.Tests")]
 
@@ -30,7 +31,7 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
         try
         {
             if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("SYSTEM_MEDIA_THREAD_ACCESS");
-            return new SystemMediaSession(playback, backend, owners, Dispatcher.CurrentDispatcher, enabled);
+            return new SystemMediaSession(playback, backend, owners, OwnerDispatcher.Current, enabled);
         }
         catch { backend.Dispose(); throw; }
     }

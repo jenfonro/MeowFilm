@@ -1,3 +1,5 @@
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -37,7 +39,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private readonly FilmPlaybackSession? filmPlayback;
     private readonly FilmLibrary? library;
     private readonly FilmPlaybackSettings? business;
-    private readonly System.Windows.Threading.Dispatcher dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+    private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private Task? favoriteRefresh;
     private bool favoriteDirty;
     private string favoriteTargetId = "";
@@ -271,31 +273,31 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
         if (stopping || disposed || !DesktopVisual.IsVisible(view) || !IsPlayback || Playback is null || filmPlayback is null) return;
         if (filmPlayback.IsOpeningPage(Playback)) return;
         if (restoringPresentation is { IsCompleted: false }) return;
-        restoringPresentation = dispatcher.InvokeAsync(async () =>
+        restoringPresentation = dispatcher.EnqueueAsync(async () =>
         {
             if (stopping || disposed || !DesktopVisual.IsVisible(view) || !IsPlayback || Playback is null) return;
             if (filmPlayback.IsOpeningPage(Playback)) return;
             if (filmPlayback.HasSession && filmPlayback.IsCurrentPage(Playback))
                 await filmPlayback.ResumePresentationAsync();
             else await OpenPageSessionAsync(Playback, lifetime.Token, restoreOnly: true);
-        }, System.Windows.Threading.DispatcherPriority.Loaded).Task.Unwrap();
+        }, DispatcherQueuePriority.Low);
         ObservePresentationLeave(restoringPresentation, "播放资料恢复失败");
     }
 
     public Task PrepareRuntimeRecoveryAsync(CancellationToken cancellationToken) =>
-        dispatcher.InvokeAsync(async () =>
+        dispatcher.EnqueueAsync(async () =>
         {
             if (stopping || disposed) return;
             navigationGeneration++;
             RetireRequests();
             await Task.WhenAll(search?.SuspendRuntimeAsync() ?? Task.CompletedTask,
                 filmPlayback?.CloseSessionAsync() ?? Task.CompletedTask);
-        }, System.Windows.Threading.DispatcherPriority.Normal, cancellationToken).Task.Unwrap();
+        }, DispatcherQueuePriority.Normal, cancellationToken);
 
     public void ResumeAfterRuntimeRecovery()
     {
-        if (dispatcher.HasShutdownStarted) return;
-        _ = dispatcher.BeginInvoke(new Action(() =>
+        if (dispatcher.IsClosing) return;
+        _ = dispatcher.EnqueueAsync(new Action(() =>
         {
             if (stopping || disposed) return;
             ObservePresentationLeave(RestoreVisibleAsync(), "影片资料恢复失败");
@@ -497,8 +499,8 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     }
     private void FavoritesChanged(object? sender, EventArgs args)
     {
-        if (dispatcher.HasShutdownStarted) return;
-        _ = dispatcher.BeginInvoke(new Action(() =>
+        if (dispatcher.IsClosing) return;
+        _ = dispatcher.EnqueueAsync(new Action(() =>
         {
             if (stopping || disposed || library is null) return;
             favoriteDirty = true;

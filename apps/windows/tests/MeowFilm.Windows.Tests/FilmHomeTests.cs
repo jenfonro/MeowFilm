@@ -1,3 +1,5 @@
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.Text.Json;
 using MeowFilm.Capabilities;
 using MeowFilm.Core.Runtime;
@@ -8,6 +10,8 @@ public static class FilmHomeTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("film-home: content receipts publish only affected cards and retain unchanged identities",
+            IncrementalCards);
         yield return new("film-home: skeletons end on empty failure cancellation and never cover pagination",
             () => MusicQualityConsumerTests.Sta(SkeletonStates));
         yield return new("film-home: runtime entry reads preserve request range cache state and original image identity",
@@ -26,6 +30,45 @@ public static class FilmHomeTests
             () => MusicQualityConsumerTests.Sta(FilterReplacement));
         yield return new("film-home: route replacement and shutdown fence late home and data publication",
             () => MusicQualityConsumerTests.Sta(CancellationAndDrain));
+    }
+
+    private static Task IncrementalCards()
+    {
+        var home = new FilmHomeSection(FilmSectionDefinition.Home[0]);
+        var data = new FilmDataSection(FilmSectionDefinition.Home[0]);
+        Verify(home.Items, items => home.Complete(items), () => home.Begin());
+        Verify(data.Items, items => data.Replace(items, items.Length, true, null), () => data.Begin(true));
+        return Task.CompletedTask;
+
+        static void Verify(System.Collections.ObjectModel.ObservableCollection<FilmCardItem> items,
+            Action<FilmCardItem[]> present, Action begin)
+        {
+            var first = Card("a"); var removed = Card("b"); var last = Card("c");
+            present([first, removed, last]);
+            var events = new List<System.Collections.Specialized.NotifyCollectionChangedEventArgs>();
+            items.CollectionChanged += (_, args) => events.Add(args);
+            begin();
+            present([first with { }, removed with { }, last with { }]);
+            Check(events.Count == 0 && ReferenceEquals(first, items[0]) && ReferenceEquals(last, items[2]),
+                "loading and equal receipts do not mutate the display collection");
+            var appended = Card("d");
+            present([first with { }, last with { }, appended]);
+            Check(events.Count == 2 && events[0].Action == System.Collections.Specialized.NotifyCollectionChangedAction.Remove &&
+                ReferenceEquals(events[0].OldItems![0], removed) && events[1].Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add &&
+                ReferenceEquals(first, items[0]) && ReferenceEquals(last, items[1]),
+                "removing and appending publish only affected identities, without moving survivors");
+            events.Clear();
+            var updated = last with { Title = "更新标题", Score = "9.8", Subtitle = "新状态" };
+            present([first with { }, updated, appended with { }]);
+            Check(events.Count == 1 && events[0].Action == System.Collections.Specialized.NotifyCollectionChangedAction.Replace &&
+                ReferenceEquals(items[1], updated) && ReferenceEquals(items[0], first) && ReferenceEquals(items[2], appended),
+                "a metadata receipt replaces only its changed item");
+            events.Clear();
+            present([appended with { }, first with { }, updated with { }]);
+            Check(events.Count == 1 && events[0].Action == System.Collections.Specialized.NotifyCollectionChangedAction.Move &&
+                ReferenceEquals(items[0], appended) && ReferenceEquals(items[1], first) && ReferenceEquals(items[2], updated),
+                "reordering retains item identities and publishes the actual move without reset");
+        }
     }
 
     private static Task SkeletonStates()
@@ -764,7 +807,7 @@ public static class FilmHomeTests
                 var wait = changed.Task;
                 if (Calls.Count >= count) break;
                 await wait;
-                await System.Windows.Threading.Dispatcher.Yield();
+                await OwnerDispatcher.YieldAsync();
             }
         }
 
@@ -844,7 +887,7 @@ public static class FilmHomeTests
                 var wait = changed.Task;
                 if (Calls.Count >= count) break;
                 await wait;
-                await System.Windows.Threading.Dispatcher.Yield();
+                await OwnerDispatcher.YieldAsync();
             }
         }
 

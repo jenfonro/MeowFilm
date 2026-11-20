@@ -61,7 +61,7 @@ Dispatcher 仅提交仍有效的 revision 及必要字段／集合操作；命�
 - 搜索列表停止后仍可向保留的播放选择通知有效 reference revision，但不发布其 cards/rawCards。播放端只转发 reference，不重搜、不预取全部详情，Node 负责迟到成员／可靠关联及已准备文件保护；退役搜索不再产生可复用 reference，页面最终释放时解除订阅。
 - 初次搜索 open 不生成 `resumeTarget`，允许 Node 跟随迟到 handoff。已有确认播放 snapshot 的同 owner 重进发送当前准确 `resumeTarget`，保留已选元数据、季集、globalEpisode 和 source/candidate；换 owner 不携带失效 searchReference 或仅用于跟随搜索的 resume marker。已确认元数据入口手选准确 source 则独立保存入口 `target` 与精确 `resumeTarget`，不依赖 searchReference 或 owner 仍有效；普通 source/group 入口不补造元数据 provenance。目标不由标题猜测。
 
-搜索派生文本可按 `FilmRuleText` 使用 UInt16 数组。展示 helper 接受数组并为 WPF 渲染文本，原 JSON 和 opaque 身份不变，不从显示字符串反推选择。原始来源 `raw` 保持 Cat 契约。
+搜索派生文本可按 `FilmRuleText` 使用 UInt16 数组。展示 helper 接受数组并为 WinUI 渲染文本，原 JSON 和 opaque 身份不变，不从显示字符串反推选择。原始来源 `raw` 保持 Cat 契约。
 
 Shell 保存模块不透明位置、公共页 `PageId` 及输入草稿，搜索与后续播放页使用同一历史顺序，
 不再用 origin／返回搜索捷径跳过中间播放页。`IDesktopNavigationRetention` 保留可达的
@@ -80,7 +80,7 @@ Q19 本次仅同步源码事实与文档，没有运行下述测试组或操作�
 | `FilmRulesTests` | 原生规则读写、完整草稿、保存失败、opaque revision 与关闭排空；执行预览使用业务替身 |
 | `FilmSearchTests` | 完整投影与 typed ID、精确顺序／状态、停止／恢复／断线、迟到 SSE/open、来源与 source wire；业务替身 |
 | `FilmSearchPlaybackTests` | 原样 handoff、原始单源、迟到 reference、初次与重进、原 producer／revision／时间／原资料、来源交集、协议失败、撤权及取消；业务替身 |
-| `SearchResultsConsumerTests` | 真实 Shell/WPF 分类、目标、返回复用、三类导航、迟到更新、封面投影、UInt16 展示与导航先后 |
+| `SearchResultsConsumerTests` | 真实 Shell/WinUI 分类、目标、返回复用、三类导航、迟到更新、封面投影、UInt16 展示与导航先后 |
 | `FilmSearchPresentationTests` | 类别短横线／可达与高对比、服务器角标／类型来源标签、既有卡片／布局、两视图顺序及独立滚动，1110／860 宽度与隐藏 HWND 离屏图 |
 | `FilmSearchIdentityTests` | 前插／删除／移动、字段级通知、状态不重映射、真实身份转换、后台映射与撤权、命令／SSE 前驱竞态及准确激活 |
 | `FilmSearchViewportTests` | 完整数据的视口回收、远距离滚动与 footer、响应式尺寸及行锚点、集合变更、两模式位置和图片租约释放 |
@@ -89,7 +89,7 @@ Q19 本次仅同步源码事实与文档，没有运行下述测试组或操作�
 | `FilmMetadataConsumerTests` | 原生配置保存成功／失败隔离、CAS／离线规范化、按块通知、迟到结果及关闭写回执；内容交接由 search.handoff 替身提供 |
 | `FilmPlaybackContractTests` | 元数据菜单坏行局部隔离、健康兄弟、SSE／媒体消费、选中身份及未变目录的增量复用；业务与媒体替身 |
 | `FilmMetadataRuntimeTests` | 原生离线保存／冷启动与实际 Node 应用／凭据、精确缓存键、并发、普通取消、配置撤权及关闭排空；内容验证显式调用 film.data.metadata |
-| `FilmMetadataPlaybackIntegrationTests` | 原生保存及真实应用 barrier、原始缓存 receipt 与公开稳定身份分别断言，再经真实 Node 播放会话、WPF 分季／点映／准确推荐与共享图片 owner；HTTP 为合成上游 |
+| `FilmMetadataPlaybackIntegrationTests` | 原生保存及真实应用 barrier、原始缓存 receipt 与公开稳定身份分别断言，再经真实 Node 播放会话、WinUI 分季／点映／准确推荐与共享图片 owner；HTTP 为合成上游 |
 | `FilmRulesRuntimeTests` | 实际 Node/addon 的规则预览、保存／空组重启、恢复／清除、Unicode／flags／UInt16 |
 | `FilmSearchRuntimeTests` | 实际 Node 搜索/SSE/Cat Worker、完整页与 typed 成员、选定封面、more/stop/resume/handoff；真实 TMDB HTTP／完整资料／图片和失败回退消费者 |
 
@@ -97,7 +97,7 @@ Q19 本次仅同步源码事实与文档，没有运行下述测试组或操作�
 
 ## 真实运行器与执行依赖
 
-业务替身组不启动 Node，但测试进程仍要求真实绝对 `MEOWFILM_TEST_NODE` 和当前编译副本 `tmp/test-results/` 内的 `MEOWFILM_TEST_DATA_ROOT`。STA／Dispatcher、WPF HWND 和正常媒体工程构建依赖仍存在，不手工复制任意 DLL 或绕过正常 target。
+业务替身组不启动 Node，但测试进程仍要求真实绝对 `MEOWFILM_TEST_NODE` 和当前编译副本 `tmp/test-results/` 内的 `MEOWFILM_TEST_DATA_ROOT`。WinUI UI 线程／DispatcherQueue、真实 HWND 和正常媒体工程构建依赖仍存在，不手工复制任意 DLL 或绕过正常 target。
 
 运行器测试组使用正常 `prepare-test-bundles.mjs` 生成的当前 Windows 九模块 `aggregate` bundle，以及公共 addon；沿用 `MEOWFILM_TEST_RUNTIME_ROOT` 和默认构建缓存。`FilmSearchRuntimeTests` 的受控 TCP HTTP 上游及 Cat 脚本是合成数据，不等于外部账号、代理或第三方来源在线验收；未取得本轮执行回执前不能宣称实际载体通过。
 

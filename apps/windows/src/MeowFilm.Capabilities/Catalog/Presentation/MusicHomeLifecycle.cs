@@ -165,8 +165,8 @@ public sealed partial class MusicCapability
     {
         var observation = catalogAccountObservations.AddOrUpdate(platform, 1, (_, value) => value + 1);
         Interlocked.Increment(ref accountObservation);
-        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
-        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.IsClosing) return;
+        _ = Presentation.Dispatcher.EnqueueAsync(() =>
         {
             if (stopping) return;
             foreach (var pair in catalogOptionalSnapshots.Where(pair => pair.Value.Platform == platform &&
@@ -213,6 +213,7 @@ public sealed partial class MusicCapability
             homeProjection.Remove(obsolete);
         ReconcileSections(homeDisplaySections, display);
         if (!IsCatalogHome) return;
+        RefreshCatalogDemandMembers();
         var songs = display.SelectMany(section => section.Items).Select(card => card.Song).OfType<SongRow>().ToArray();
         if (!Songs.SequenceEqual(songs, ReferenceEqualityComparer.Instance))
         { Songs.Clear(); foreach (var song in songs) Songs.Add(song); }

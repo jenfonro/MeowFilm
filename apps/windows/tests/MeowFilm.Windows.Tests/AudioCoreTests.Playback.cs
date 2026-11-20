@@ -1,4 +1,5 @@
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Media;
 using static MeowFilm.Windows.Tests.AudioCoreFixtures;
 
@@ -140,14 +141,14 @@ public static partial class AudioPlaybackTests
         var lease = new Lease(WaveBytes(.7));
         int started = 0, ended = 0, failed = 0;
         bool retiredAtEvent = false, dispatcherEvent = false;
-        var dispatcher = Dispatcher.CurrentDispatcher;
+        var dispatcher = OwnerDispatcher.Current;
         player.Started += (_, _) => started++;
         player.Failed += (_, _) => failed++;
         player.Ended += (_, _) =>
         {
             ended++;
             retiredAtEvent = lease.DisposeCalls == 1 && lease.Released.Task.IsCompletedSuccessfully && !player.HasMedia;
-            dispatcherEvent = dispatcher.CheckAccess();
+            dispatcherEvent = dispatcher.HasThreadAccess;
         };
         await StartRead(player, lease);
         await Until(() => ended == 1, "dummy native EOF and owner natural end");
@@ -224,14 +225,13 @@ public static partial class AudioPlaybackTests
         player.Ended += (_, _) => ended++;
         await StartRead(player, lease, token: cancel.Token);
         await player.PauseAsync();
-        using (Dispatcher.CurrentDispatcher.DisableProcessing())
         {
             lease.Revoke();
             cancel.Cancel();
         }
         await Until(() => !player.HasMedia && lease.Released.Task.IsCompletedSuccessfully,
             "cancelled input drains the earlier queued authorization notification");
-        await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+        await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
         Check(!player.IsPlaying && player.OwnerId is null && player.Identity is null &&
             player.LastErrorCode is null && failed == 0 && ended == 0,
             "caller cancellation cannot publish an obsolete failure while the next queue entry is being selected");
@@ -633,7 +633,7 @@ public static partial class AudioPlaybackTests
             released.TrySetResult();
             await Until(() => lease.Released.Task.IsCompletedSuccessfully && player.OwnerId is null,
                 "cancelled retirement drains and clears the occurrence");
-            await Dispatcher.Yield(DispatcherPriority.ContextIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             lease.AssertReleased();
             Check(!player.HasMedia && !player.IsPlaying && player.Identity is null &&
                 player.LastErrorCode is null && ended == 0 && failed == 0 &&

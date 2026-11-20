@@ -139,6 +139,14 @@ public sealed partial class MusicCapability
 
 internal static class CapabilityFilePicker
 {
+    internal static async Task<string[]?> OpenMultipleAsync(FrameworkElement owner, string action, params string[] extensions)
+    {
+        var window = DesktopWindow.GetWindow(owner) ?? throw new InvalidOperationException("FILE_PICKER_OWNER_NOT_ATTACHED");
+        var picker = new FileOpenPicker(window.AppWindow.Id) { CommitButtonText = action };
+        foreach (string extension in extensions) picker.FileTypeFilter.Add(extension);
+        var files = await picker.PickMultipleFilesAsync();
+        return files.Count == 0 ? null : files.Select(file => file.Path).ToArray();
+    }
     internal static async Task<string?> OpenAsync(FrameworkElement owner, string action, params string[] extensions)
     {
         var window = DesktopWindow.GetWindow(owner) ?? throw new InvalidOperationException("FILE_PICKER_OWNER_NOT_ATTACHED");

@@ -120,15 +120,18 @@ public static partial class FilmPlayerOverlayTests
             foreach (string action in new[] { "FullscreenButton", "PipButton" })
             {
                 Click(scene.Element<Button>(action));
-                await Until(() => scene.PlayerWindow is not null && overlay.IsLoaded);
+                await Until(() => scene.PlayerWindow is not null && overlay.IsLoaded && scene.Surface.Describe().Visible == 1);
                 var player = scene.PlayerWindow!;
                 Check(ReferenceEquals(scene.Surface.Content, overlay) && ReferenceEquals(overlay.XamlRoot, player.Root.XamlRoot) &&
                     DesktopVisual.Contains(player.Root, frame) && scene.Rig.Native.Scope == scope && scene.Rig.Native.Commits == 1 &&
-                    scene.Rig.Session.CanRetainMedia == (action == "PipButton"),
+                    scene.Rig.Session.CanRetainMedia == (action == "PipButton") &&
+                    scene.Surface.Describe().DisplayWindow == player.Handle,
                     "window presentation moves one stable media and control tree, retaining only explicit PiP");
                 player.Close();
-                await Until(() => scene.PlayerWindow is null && ReferenceEquals(overlay.XamlRoot, scene.View.XamlRoot));
-                Check(ReferenceEquals(scene.Surface.Content, overlay) && scene.Rig.Native.Stops == 0,
+                await Until(() => scene.PlayerWindow is null && ReferenceEquals(overlay.XamlRoot, scene.View.XamlRoot) &&
+                    scene.Surface.Describe().Visible == 1);
+                Check(ReferenceEquals(scene.Surface.Content, overlay) && scene.Rig.Native.Stops == 0 &&
+                    scene.Surface.Describe().DisplayWindow == scene.Window.Handle,
                     "returning to an active page neither retires nor recreates playback");
             }
     }
@@ -163,6 +166,9 @@ public static partial class FilmPlayerOverlayTests
         scene.Window.Close(); await Pump();
         Check(scene.Surface.Content is null && scene.Element<ContentControl>("VideoHost").Content is null,
             "unloaded page releases its presentation references before surface disposal");
+        scene.Surface.Dispose();
+        Check(scene.Surface.Describe() is { DisplayWindow: 0, Visible: 0 },
+            "a disposed surface cannot expose a retained XAML window as an output target");
         scene.Closed = true;
     }
 
@@ -182,6 +188,9 @@ public static partial class FilmPlayerOverlayTests
             $"aspects={string.Join(',', aspect.Items.Cast<ListBoxItem>().Select(item => item.Tag))}");
         int requests = scene.Rig.Runtime.Calls.Count, commands = scene.Rig.Native.Controls.Count;
         Click(scene.Element<Button>("SettingsButton")); await Pump();
+        await Until(() => rate.IsLoaded && aspect.IsLoaded);
+        Check(rate.SelectedIndex == 2 && aspect.SelectedIndex == 0,
+            $"the opened controls reflect the accepted default rate and aspect (rate={rate.SelectedIndex}, aspect={aspect.SelectedIndex})");
         Check(Visible(panel) && Visible(rate) && Visible(aspect) && DesktopVisual.Contains(panel, rate) &&
             DesktopVisual.Contains(panel, aspect) && scene.Rig.Runtime.Calls.Count == requests &&
             scene.Rig.Native.Controls.Count == commands &&

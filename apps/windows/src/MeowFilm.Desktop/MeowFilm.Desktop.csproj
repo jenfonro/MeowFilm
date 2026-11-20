@@ -5,6 +5,7 @@
     <OutputType>Library</OutputType>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../MeowFilm.Threading/MeowFilm.Threading.csproj" />
     <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
     <ProjectReference Include="../MeowFilm.Platform/MeowFilm.Platform.csproj" />
     <PackageReference Include="SkiaSharp" Version="[4.155.0]" />
@@ -20,6 +21,5 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
-    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
 </Project>

@@ -19,7 +19,9 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
@@ -32,13 +34,15 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Windows.Tests;
 
-// Real WPF -> public application seam -> real Native catalog/Library/CAS.
+// Real WinUI -> public application seam -> real Native catalog/Library/CAS.
 // Typed platform, account and script-resolution fixtures never contact an upstream.
 // This group is independent of the existing five application/UI test groups.
 public static partial class MusicCatalogPersonalTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("home incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(false));
+        yield return Case("channel incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(true));
         foreach (var test in ArtworkDemandCases()) yield return test;
         foreach (var homeCase in HomeCases()) yield return homeCase;
         foreach (var test in LocalHeartbeatCases()) yield return test;
@@ -52,7 +56,7 @@ public static partial class MusicCatalogPersonalTests
                 () => RecommendationCardLoading(kind));
         yield return Case("unresolved song card loading belongs to its own request and clears on cancellation", SongCardLoading);
         yield return Case("native chart opens real album details and keeps album playback separate", ChartNavigation);
-        yield return Case("navigation and WPF actions are real entry points", Entries);
+        yield return Case("navigation and WinUI actions are real entry points", Entries);
         foreach (string platform in new[] { "wy", "tx", "kg" })
             yield return Case("personal directory explicit account and complete cursor " + platform, () => DirectoryPages(platform));
         yield return Case("directory filters nullable totals empty intermediate page and failed refresh", DirectoryFilters);
@@ -91,7 +95,7 @@ public static partial class MusicCatalogPersonalTests
             foreach (bool failed in new[] { false, true })
                 yield return Case("queue preview rejects a retired " + retirement + (failed ? " error" : " success"),
                     () => QueuePreviewRetirement(retirement, failed));
-        yield return Case("queue preview admission failure reaches the WPF notice before a session exists", QueuePreviewFailureNotice);
+        yield return Case("queue preview admission failure reaches the WinUI notice before a session exists", QueuePreviewFailureNotice);
         yield return Case("search paused after Started still admits read-only candidates", PausedQueuePreview);
         foreach (string outcome in new[] { "started", "paused-before-start", "failed", "stopped", "owner-replaced", "source-replaced", "account-intent" })
         {
@@ -105,8 +109,8 @@ public static partial class MusicCatalogPersonalTests
             foreach (bool failed in new[] { false, true })
                 yield return Case((restore ? "return" : "cancel") + " retires a recommendation awaiting shared account " +
                     (failed ? "failure" : "success"), () => RecommendationAccountWaitRetirement(restore, failed));
-        yield return Case("WPF footer switches only live WY FM and retires old popup buttons", PlaybackFmPopup);
-        yield return Case("WPF queue keeps candidates and recovery without an independent continuation switch", QueueCandidateSurface);
+        yield return Case("WinUI footer switches only live WY FM and retires old popup buttons", PlaybackFmPopup);
+        yield return Case("WinUI queue keeps candidates and recovery without an independent continuation switch", QueueCandidateSurface);
         yield return Case("display expiry cannot block an otherwise usable batch action", Expiry);
         yield return Case("account invalidation rejects late response and stale cards", AccountInvalidation);
         yield return Case("private paging reuses first account observation and explicit read is authoritative", AccountReadReuse);
@@ -360,7 +364,7 @@ public static partial class MusicCatalogPersonalTests
     private static void Check(bool value, string message = "assertion failed") { if (!value) throw new InvalidOperationException(message); }
     private static void Equal<T>(T expected, T actual, [CallerLineNumber] int line = 0)
     { if (!EqualityComparer<T>.Default.Equals(expected, actual)) throw new InvalidOperationException($"Line {line}: Expected {expected}, got {actual}"); }
-    private static Task Drain() => Dispatcher.CurrentDispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle).Task;
+    private static Task Drain() => OwnerDispatcher.Current.EnqueueAsync(() => { }, DispatcherQueuePriority.Low);
     private static async Task Until(Func<bool> done)
     {
         for (int i = 0; i < 1000 && !done(); i++) { await Drain(); await Task.Delay(1); }
@@ -2971,7 +2975,7 @@ public static partial class MusicCatalogPersonalTests
     private sealed class Dialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
     private class Output : IMusicPlayback
     {

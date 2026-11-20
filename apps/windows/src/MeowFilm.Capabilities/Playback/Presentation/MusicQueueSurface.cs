@@ -7,13 +7,22 @@ namespace MeowFilm.Capabilities;
 
 public sealed record MusicQueueSurfaceRow(SongRow Song, bool IsCurrent) : System.ComponentModel.INotifyPropertyChanged
 {
+    public bool IsCurrent { get; private set; } = IsCurrent;
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    internal void SetCurrent(bool value)
+    {
+        if (IsCurrent == value) return;
+        IsCurrent = value;
+        PropertyChanged?.Invoke(this, new(nameof(IsCurrent)));
+    }
     internal void RefreshSong(JsonElement? value, long publication = -1)
     {
-        if (value is null) return;
-        Song.ApplyRepository(value, publication);
-        foreach (var name in new[] { nameof(Title), nameof(Artist), nameof(Cover), nameof(Duration) })
-            PropertyChanged?.Invoke(this, new(name));
+        var before = (Title, Artist, Cover, Duration);
+        if (!Song.ApplyRepository(value, publication)) return;
+        if (before.Title != Title) PropertyChanged?.Invoke(this, new(nameof(Title)));
+        if (before.Artist != Artist) PropertyChanged?.Invoke(this, new(nameof(Artist)));
+        if (before.Cover != Cover) PropertyChanged?.Invoke(this, new(nameof(Cover)));
+        if (before.Duration != Duration) PropertyChanged?.Invoke(this, new(nameof(Duration)));
     }
     public string EntryId => Song.EntryId ?? "";
     public string Title => Song.Title;
@@ -199,15 +208,13 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
                             request.Token.ThrowIfCancellationRequested();
                             if (stopping || generation != queueSurfaceGeneration || !queueSurfaceOpen) return;
                             // A newer queue generation arrived while this read was physical.
-                            // Do not flash its older rows; coalesce all changes into one next reset.
+                            // Do not flash its older rows; coalesce all changes into one next receipt.
                             if (queueSurfaceReloadRequested) continue;
                             var rows = MusicDto.Page(reply, "entries", 0)
                                 .Select(item => SongRow.Read(item.GetProperty("song"), MusicDto.Text(item, "id"))).ToArray();
                             var total = MusicDto.Count(reply, "total");
                             var version = MusicDto.Integer(reply, "version");
-                            queueSurfaceRows.Clear();
-                            foreach (var row in rows)
-                                queueSurfaceRows.Add(new(row, row.EntryId == current?.EntryId));
+                            PublishQueueSurfaceRows(rows);
                             queueSurfaceTotal = total;
                             queueSurfaceVersion = version;
                             queueSurfaceObservedMutation = mutation;
@@ -286,13 +293,28 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
 
     private void RefreshQueueSurfaceCurrent()
     {
-        for (var i = 0; i < queueSurfaceRows.Count; i++)
-        {
-            var row = queueSurfaceRows[i];
-            var active = row.EntryId == current?.EntryId;
-            if (row.IsCurrent != active) queueSurfaceRows[i] = row with { IsCurrent = active };
-        }
+        foreach (var row in queueSurfaceRows) row.SetCurrent(row.EntryId == current?.EntryId);
         QueueSurfaceBindings();
+    }
+
+    private void PublishQueueSurfaceRows(IReadOnlyList<SongRow> rows)
+    {
+        var ids = rows.Select(row => row.EntryId).ToHashSet(StringComparer.Ordinal);
+        for (int index = queueSurfaceRows.Count - 1; index >= 0; index--)
+            if (!ids.Contains(queueSurfaceRows[index].EntryId)) queueSurfaceRows.RemoveAt(index);
+        var retained = queueSurfaceRows.ToDictionary(row => row.EntryId, StringComparer.Ordinal);
+        for (int index = 0; index < rows.Count; index++)
+        {
+            var song = rows[index];
+            if (retained.TryGetValue(song.EntryId!, out var row))
+            {
+                if (!ReferenceEquals(queueSurfaceRows[index], row))
+                    queueSurfaceRows.Move(queueSurfaceRows.IndexOf(row), index);
+                row.RefreshSong(song.Raw);
+                row.SetCurrent(row.EntryId == current?.EntryId);
+            }
+            else queueSurfaceRows.Insert(index, new(song, song.EntryId == current?.EntryId));
+        }
     }
 
     private void InvalidateQueueSurface()

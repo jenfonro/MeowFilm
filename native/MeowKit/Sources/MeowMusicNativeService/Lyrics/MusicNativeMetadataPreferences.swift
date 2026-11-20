@@ -12,22 +12,22 @@ private struct NativeMetadataPreferences {
     private static let defaults: [MusicPublicBrowsePlatform] = [.netease, .qq, .kugou, .kuwo, .migu]
 
     init(_ playback: MJ) throws {
-        func decode(_ field: String, complete: Bool) throws -> [MusicPublicBrowsePlatform] {
+        func decode(_ field: String) throws -> [MusicPublicBrowsePlatform] {
             guard playback.contains(field) else { return Self.defaults }
             let value = playback[field]
             try musicRequire(value.isArray && value.array.allSatisfy(\.isString), .corruptDocument)
             let platforms = value.strings.compactMap(MusicPublicBrowsePlatform.init(rawValue:))
-            try musicRequire(platforms.count == value.array.count && Set(platforms).count == platforms.count &&
-                             (!complete || platforms.count == Self.defaults.count), .corruptDocument)
+            try musicRequire(platforms.count == value.array.count && Set(platforms).count == platforms.count, .corruptDocument)
             return platforms
         }
-        order = try decode("metadataPlatforms", complete: true)
-        enabled = Set(try decode("metadataEnabled", complete: false))
+        order = try decode("metadataPlatforms")
+        enabled = Set(try decode("metadataEnabled"))
     }
 
     func visible(revision: Int, available: Set<MusicPublicBrowsePlatform>) -> MusicMetadataPreferences {
-        .init(revision: revision, platforms: order.filter(available.contains),
-              enabledPlatforms: enabled.intersection(available))
+        let displayed = order + Self.defaults.filter { !order.contains($0) }
+        return .init(revision: revision, platforms: displayed.filter(available.contains),
+                     enabledPlatforms: enabled.intersection(available))
     }
 
     mutating func apply(_ change: MusicMetadataPreferencesChange,
@@ -36,6 +36,7 @@ private struct NativeMetadataPreferences {
             try musicRequire(platforms.count == available.count && Set(platforms) == available)
             // Replace only visible slots. A three-platform product must not erase
             // or move the persisted positions of temporarily unavailable kw/mg.
+            order += Self.defaults.filter { available.contains($0) && !order.contains($0) }
             var index = 0
             order = order.map { platform in
                 guard available.contains(platform) else { return platform }
@@ -47,6 +48,9 @@ private struct NativeMetadataPreferences {
         if let platforms = change.enabledPlatforms {
             try musicRequire(platforms.isSubset(of: available))
             enabled = enabled.subtracting(available).union(platforms)
+            let before = order
+            order += Self.defaults.filter { platforms.contains($0) && !order.contains($0) }
+            if order != before { playback["metadataPlatforms"] = .strings(order.map(\.rawValue)) }
             playback["metadataEnabled"] = .strings(Self.defaults.filter(enabled.contains).map(\.rawValue))
         }
     }

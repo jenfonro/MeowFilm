@@ -53,7 +53,7 @@ The new runtime implementation remains application source under GPL-3.0-only.
   `src/data/bookSourceEditorConfig.js`, `bookSourceEditorMapper.js`,
   `replaceRules.js` and `replaceRuleImport.js`; all six Legado tabs retain the
   original field labels, order and row counts. The native shared controls are
-  UIKit/WPF implementations, not a bundled web view.
+  UIKit/WinUI implementations, not a bundled web view.
 - The referenced tree contains no separate license notice. This records
   provenance, not an additional third-party license grant. Application-owned
   adaptations remain under GPL-3.0-only.
@@ -141,7 +141,7 @@ Adapted portions:
   `tests/{netease,qq-feedback,kugou-feedback}.test.cjs`.
 - Sync: `MusicSyncAdapter.cs`.
 - Windows: `MusicPlaybackIcon.cs` adapts the heart/FM SVGs in `static/index.html`
-  and all 42 scene SVGs in `static/fm-icons.js` into frozen native WPF geometry,
+  and all 42 scene SVGs in `static/fm-icons.js` into native WinUI path geometry,
   retaining their Apache-2.0 attribution. Reference package:
   `iwebplus.jsplugin.zip`, SHA-256
   `325524de00243b7e01779c41b92a07ac601091e5b1454244859cdc71f2da26a8`.
@@ -273,7 +273,7 @@ Adapted portions:
 
 ## SkiaSharp and Skia — MIT and bundled third-party notices
 
-- Windows WebP artwork decoding uses NuGet `SkiaSharp` and
+- Windows artwork and novel image decoding use NuGet `SkiaSharp` and
   `SkiaSharp.NativeAssets.Win32` version `4.155.0`, source
   `mono/SkiaSharp` commit `d25e7fa628a2576e50ecc42004cc4fd03c6657f5`.
 - Copyright Microsoft Corporation and the respective Skia and codec contributors.
@@ -1013,6 +1013,7 @@ the still-unverified final binary/distribution legally or technically accepted.
   [microsoft/Win2D](https://github.com/microsoft/Win2D), locked in
   `MeowFilm.Desktop` and downstream Windows `packages.lock.json` files.
 - Copyright (c) Microsoft Corporation. Used by `SidebarBackdrop` for compositor
-  `GaussianBlurEffect` over the dedicated shell background visual surface.
+  `GaussianBlurEffect` over the dedicated shell background visual surface, and
+  by the novel reader for DirectWrite text layout and GPU page surfaces.
 - License text: `Win2D-MIT.txt` (upstream `LICENSE.txt`), included in the
   Windows license manifest.

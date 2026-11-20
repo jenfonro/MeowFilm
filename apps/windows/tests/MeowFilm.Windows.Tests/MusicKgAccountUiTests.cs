@@ -9,7 +9,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
@@ -246,10 +247,16 @@ public static class MusicKgAccountUiTests
             Check(save.IsEnabled); DesktopTestUi.Invoke(save);
             Check(File.Exists(f.Dialogs.Path) && f.Module.AccountStatus == "二维码已保存" &&
                 f.Dialogs.Confirmations == 1 && f.Dialogs.Selections == 1 && f.Transport.Calls == 1);
-            using var stream = File.OpenRead(f.Dialogs.Path!);
-            var png = new System.Windows.Media.Imaging.PngBitmapDecoder(stream, System.Windows.Media.Imaging.BitmapCreateOptions.None, System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
-            Check(png.Frames.Count == 1 && png.Frames[0].PixelWidth == f.Module.AccountQrImage!.PixelWidth);
-            Check(png.Frames[0].Metadata is null || !((System.Windows.Media.Imaging.BitmapMetadata)png.Frames[0].Metadata).ContainsQuery("/tEXt"));
+            var bytes = await File.ReadAllBytesAsync(f.Dialogs.Path!);
+            using var data = SkiaSharp.SKData.CreateCopy(bytes);
+            using var png = SkiaSharp.SKCodec.Create(data);
+            Check(png is not null && png.Info.Width == f.Module.AccountQrImage!.PixelWidth);
+            for (int offset = 8; offset <= bytes.Length - 12;)
+            {
+                int length = checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(bytes.AsSpan(offset, 4)));
+                Check(!bytes.AsSpan(offset + 4, 4).SequenceEqual("tEXt"u8));
+                offset = checked(offset + length + 12);
+            }
         }
         finally { window.Close(); }
     }
@@ -346,7 +353,7 @@ public static class MusicKgAccountUiTests
         internal int Confirmations, Selections;
         internal Action? OnSelect;
         public bool Confirm(string message, string title) { Confirmations++; return Consent; }
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
         public string? SelectQrPngPath() { Selections++; OnSelect?.Invoke(); return Path; }
     }
     private sealed class QrScenario

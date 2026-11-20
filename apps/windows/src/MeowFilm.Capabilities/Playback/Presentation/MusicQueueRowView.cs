@@ -3,19 +3,33 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
+using System.ComponentModel;
 using Windows.UI.ViewManagement;
 
 namespace MeowFilm.Capabilities;
 
 public sealed class MusicQueueRowView : Grid
 {
+    private MusicQueueSurfaceRow? observed;
     public MusicQueueRowView()
     {
-        Loaded += (_, _) => Refresh();
-        DataContextChanged += (_, _) => Refresh();
+        Loaded += (_, _) => Observe();
+        Unloaded += (_, _) => { if (observed is not null) observed.PropertyChanged -= RowChanged; observed = null; };
+        DataContextChanged += (_, _) => Observe();
         ActualThemeChanged += (_, _) => Refresh();
         RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => Refresh());
         RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Refresh());
+    }
+    private void Observe()
+    {
+        if (observed is not null) observed.PropertyChanged -= RowChanged;
+        observed = IsLoaded ? DataContext as MusicQueueSurfaceRow : null;
+        if (observed is not null) observed.PropertyChanged += RowChanged;
+        Refresh();
+    }
+    private void RowChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (args.PropertyName == nameof(MusicQueueSurfaceRow.IsCurrent)) Refresh();
     }
     private void Refresh()
     {

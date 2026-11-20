@@ -42,6 +42,16 @@ for (const [name, change] of [
   ['framework-dependent', f => f.change('build-result.json', result => { result.selfContained = false; })],
   ['wrong architecture', f => f.change('build-result.json', result => { result.runtimeIdentifier = 'win-arm64'; })],
   ['missing native runtime', f => rmSync(join(f.payload, 'coreclr.dll'))],
+  ['missing included .NET framework', f => f.change('meowfilm.runtimeconfig.json', config => {
+    config.runtimeOptions.includedFrameworks = [];
+  })],
+  ['external framework in self-contained publish', f => f.change('meowfilm.runtimeconfig.json', config => {
+    config.runtimeOptions.framework = config.runtimeOptions.includedFrameworks[0];
+    delete config.runtimeOptions.includedFrameworks;
+  })],
+  ['unrelated framework closure', f => f.change('meowfilm.runtimeconfig.json', config => {
+    config.runtimeOptions.includedFrameworks.push({ name: 'Microsoft.WindowsDesktop.App', version: '10.0.0' });
+  })],
   ['missing native dependency', f => rmSync(join(f.payload, 'libSkiaSharp.dll'))],
   ['missing managed dependency', f => rmSync(join(f.payload, 'Example.dll'))],
   ['missing satellite dependency', f => rmSync(join(f.payload, 'zh-Hans/Example.resources.dll'))],

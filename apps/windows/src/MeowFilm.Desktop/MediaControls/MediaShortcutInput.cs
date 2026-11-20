@@ -6,18 +6,15 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.System;
 using Windows.UI.Core;
-using Key = System.Windows.Input.Key;
-using KeyInterop = System.Windows.Input.KeyInterop;
-using ModifierKeys = System.Windows.Input.ModifierKeys;
+using Key = Windows.System.VirtualKey;
+using ModifierKeys = Windows.System.VirtualKeyModifiers;
 
 namespace MeowFilm.Desktop;
 
 internal static class MediaShortcutInput
 {
-    // Keep the persisted WPF enum contract, but convert the native virtual key
-    // explicitly. WinUI's enum values are not WPF Key values.
     internal static Key Key(KeyRoutedEventArgs args) =>
-        KeyInterop.KeyFromVirtualKey((int)args.OriginalKey);
+        args.OriginalKey;
 
     internal static ModifierKeys Modifiers() => Modifiers(Down(VirtualKey.Control), Down(VirtualKey.Menu),
         Down(VirtualKey.Shift), Down(VirtualKey.LeftWindows), Down(VirtualKey.RightWindows));
@@ -26,10 +23,21 @@ internal static class MediaShortcutInput
     {
         ModifierKeys modifiers = ModifierKeys.None;
         if (control) modifiers |= ModifierKeys.Control;
-        if (alt) modifiers |= ModifierKeys.Alt;
+        if (alt) modifiers |= ModifierKeys.Menu;
         if (shift) modifiers |= ModifierKeys.Shift;
         if (leftWindows || rightWindows) modifiers |= ModifierKeys.Windows;
         return modifiers;
+    }
+
+    internal static uint NativeModifiers(ModifierKeys modifiers)
+    {
+        // VirtualKeyModifiers uses Control=1/Alt=2; RegisterHotKey uses MOD_ALT=1/MOD_CONTROL=2.
+        uint native = 0;
+        if (modifiers.HasFlag(ModifierKeys.Menu)) native |= 0x0001;
+        if (modifiers.HasFlag(ModifierKeys.Control)) native |= 0x0002;
+        if (modifiers.HasFlag(ModifierKeys.Shift)) native |= 0x0004;
+        if (modifiers.HasFlag(ModifierKeys.Windows)) native |= 0x0008;
+        return native;
     }
 
     private static bool Down(VirtualKey key) =>

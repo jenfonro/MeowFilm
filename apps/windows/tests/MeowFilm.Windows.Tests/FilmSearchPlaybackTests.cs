@@ -1,3 +1,5 @@
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities;
@@ -845,7 +847,7 @@ public static class FilmSearchPlaybackTests
             await SearchFixture.Until(() => page.ActiveTarget.Id == revoked.Id);
             int before = Updates(fixture.Runtime).Length;
             session.UpdateSearch(page, 8);
-            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             Check(Updates(fixture.Runtime).Length == before && !page.RequiresSourceSearch,
                 "an ordinary empty revocation remains terminal and is never inferred to be an unmatched home entry");
         }

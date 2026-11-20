@@ -1,7 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
-using System.Windows.Input;
+using Key = Windows.System.VirtualKey;
+using ModifierKeys = Windows.System.VirtualKeyModifiers;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
@@ -190,6 +191,5 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         }
     }
     private static bool Fields(JsonElement value, params string[] fields) =>
-        value.ValueKind == JsonValueKind.Object && value.EnumerateObject().Count() == fields.Length &&
-        fields.All(field => value.TryGetProperty(field, out _));
+        value.ValueKind == JsonValueKind.Object && fields.All(field => value.TryGetProperty(field, out _));
 }

@@ -14,7 +14,7 @@ public static partial class MusicUiTests
 {
     internal static IEnumerable<TestCase> PublicCatalogConsumerCases()
     {
-        yield return Case("native KW and MG search preserves grouped versions through WPF and the next round", async () =>
+        yield return Case("native KW and MG search preserves grouped versions through WinUI and the next round", async () =>
         {
             await using var f = await PublicSearchScene.Create();
             await f.Module.SetCatalogSourceAsync("kg");

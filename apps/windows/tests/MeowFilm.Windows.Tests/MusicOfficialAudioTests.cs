@@ -522,7 +522,7 @@ public static class MusicOfficialAudioTests
     private sealed class CacheDialogs : IMusicDialogs
     {
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
     }
     internal sealed class Clock : TimeProvider
     {

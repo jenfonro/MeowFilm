@@ -13,7 +13,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop;
@@ -139,8 +140,8 @@ public static class MusicAppearanceTests
         {
             await module.InitializeAsync(default); await Ready(module);
             module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Red));
-            var initial = (GradientBrush)module.PlayerBackground;
-            var red = ((GradientBrush)MusicPlayerArtwork.Backdrop(new SolidColorBrush(Colors.Red))).GradientStops[0].Color;
+            var initial = (RadialGradientBrush)module.PlayerBackground;
+            var red = ((RadialGradientBrush)MusicPlayerArtwork.Backdrop(new SolidColorBrush(Colors.Red))).GradientStops[0].Color;
             Check(BackdropAnimation(module) is null && initial.GradientStops[0].Color == red,
                 "first unmounted color is assigned directly");
             module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Red));
@@ -148,9 +149,9 @@ public static class MusicAppearanceTests
             window.Activate(); await TestUiHost.LoadedAsync(surface); await DesktopTestUi.DrainAsync();
             Check(DesktopVisual.IsVisible(module.PlayerView) && ReferenceEquals(surface.Background, module.PlayerBackground));
             module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Lime));
-            var moving = (GradientBrush)module.PlayerBackground;
+            var moving = (RadialGradientBrush)module.PlayerBackground;
             var movingClock = BackdropAnimation(module) ?? throw new InvalidOperationException("Missing native backdrop animation");
-            var green = ((GradientBrush)MusicPlayerArtwork.Backdrop(new SolidColorBrush(Colors.Lime))).GradientStops[0].Color;
+            var green = ((RadialGradientBrush)MusicPlayerArtwork.Backdrop(new SolidColorBrush(Colors.Lime))).GradientStops[0].Color;
             Check(!ReferenceEquals(initial, moving) && movingClock.Children.Count == moving.GradientStops.Count,
                 "a new visible target starts one native color animation per stop");
             await SeekBackdrop(movingClock, 0);
@@ -166,14 +167,14 @@ public static class MusicAppearanceTests
                 ReferenceEquals(BackdropAnimation(module), movingClock),
                 "same-target updates retain the brush, visible color and actual native clock");
             module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Blue));
-            var redirected = (GradientBrush)module.PlayerBackground;
+            var redirected = (RadialGradientBrush)module.PlayerBackground;
             var redirectedClock = BackdropAnimation(module)!; await SeekBackdrop(redirectedClock, 0);
             Check(redirected.GradientStops[0].Color == visible,
                 "redirecting starts from the visible color, not the previous target");
             module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Magenta));
             var supersededClock = BackdropAnimation(module)!; await SeekBackdrop(supersededClock, 0);
             module.RefreshPlayerAppearance(new SolidColorBrush(Colors.Yellow));
-            var final = (GradientBrush)module.PlayerBackground;
+            var final = (RadialGradientBrush)module.PlayerBackground;
             var finalClock = BackdropAnimation(module)!; await SeekBackdrop(finalClock, 0);
             Check(movingClock.GetCurrentState() == ClockState.Stopped &&
                 redirectedClock.GetCurrentState() == ClockState.Stopped && supersededClock.GetCurrentState() == ClockState.Stopped,
@@ -181,7 +182,7 @@ public static class MusicAppearanceTests
             Check(ReferenceEquals(final, module.PlayerBackground) && final.GradientStops[0].Color == visible,
                 "retired animations cannot write back over the newest visible color");
             await SeekBackdrop(finalClock, 300);
-            var expected = (GradientBrush)MusicPlayerArtwork.Backdrop(new SolidColorBrush(Colors.Yellow));
+            var expected = (RadialGradientBrush)MusicPlayerArtwork.Backdrop(new SolidColorBrush(Colors.Yellow));
             Check(ReferenceEquals(final, module.PlayerBackground) && final.GradientStops.Select(stop => stop.Color)
                 .SequenceEqual(expected.GradientStops.Select(stop => stop.Color)),
                 "rapid redirects finish at the newest target without an old writeback");
@@ -203,8 +204,8 @@ public static class MusicAppearanceTests
             Check(ReferenceEquals(fixedBackground, module.PlayerBackground),
                 "different samples do not replace the same fixed target");
             await module.SetAppearanceAsync("colorMode", "song"); await Ready(module);
-            var expected = (GradientBrush)MusicPlayerArtwork.Backdrop((new SolidColorBrush(Microsoft.UI.Colors.Lime)));
-            Check(((GradientBrush)module.PlayerBackground).GradientStops.Select(stop => stop.Color)
+            var expected = (RadialGradientBrush)MusicPlayerArtwork.Backdrop((new SolidColorBrush(Microsoft.UI.Colors.Lime)));
+            Check(((RadialGradientBrush)module.PlayerBackground).GradientStops.Select(stop => stop.Color)
                 .SequenceEqual(expected.GradientStops.Select(stop => stop.Color)),
                 "song mode uses the newest sample even when fixed-mode colors were deduplicated");
         }
@@ -217,9 +218,21 @@ public static class MusicAppearanceTests
 
     private static async Task SeekBackdrop(Storyboard clock, int milliseconds)
     {
-        clock.Pause(); clock.SeekAlignedToLastTick(TimeSpan.FromMilliseconds(milliseconds));
-        await DesktopTestUi.DrainAsync();
-        Check(clock.GetCurrentTime() == TimeSpan.FromMilliseconds(milliseconds),
+        var sample = TimeSpan.FromMilliseconds(milliseconds);
+        clock.Pause(); clock.SeekAlignedToLastTick(sample);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        do
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            EventHandler<object> rendered = (_, _) => completion.TrySetResult();
+            CompositionTarget.Rendering += rendered;
+            try { await completion.Task.WaitAsync(timeout.Token); }
+            catch (OperationCanceledException error)
+            { throw new InvalidOperationException($"backdrop sample={sample.Ticks} actual={clock.GetCurrentTime().Ticks} state={clock.GetCurrentState()}", error); }
+            finally { CompositionTarget.Rendering -= rendered; }
+            await DesktopTestUi.DrainAsync();
+        } while (Math.Abs((clock.GetCurrentTime() - sample).Ticks) > 1);
+        Check(Math.Abs((clock.GetCurrentTime() - sample).Ticks) <= 1,
             "the actual native storyboard reached the selected sample time");
     }
 
@@ -236,11 +249,11 @@ public static class MusicAppearanceTests
             await module.InitializeAsync(default); await Ready(module);
             Check(output.Volume == 100 && !module.PlaylistListView);
             var settings = module.AppearanceSettingsView;
-            settings.Measure(new Size(1100, 1000));
-            settings.Arrange(new Rect(0, 0, 1100, 1000)); settings.UpdateLayout();
+            using var host = new DesktopTestUi.Host(settings, 1100, 1000);
+            await TestUiHost.LoadedAsync(settings); await Ready(module); settings.UpdateLayout();
             var mode = Visuals(settings).OfType<ComboBox>()
                 .Single(control => AutomationProperties.GetName(control) == "播放器配色");
-            var palette = Visuals(settings).OfType<MeowFilm.Desktop.ColorPicker>().Single();
+            var palette = Visuals(settings).OfType<ColorSelection>().Single();
             Check(!palette.IsEnabled && (string?)mode.SelectedValue == "song");
 
             int writes = MusicTestStores.For(f.Store).Writes;
@@ -249,18 +262,25 @@ public static class MusicAppearanceTests
             await module.SetAppearanceAsync("playlistView", "list"); await Ready(module);
             settings.UpdateLayout();
             Check(module.AppearanceColorMode == "fixed" && module.AppearanceColorPalette == "mint" &&
-                module.PlaylistListView && palette.IsEnabled && module.AppearanceStatus.Length == 0);
+                module.PlaylistListView && module.AppearanceStatus.Length == 0,
+                "each selection publishes the accepted settings");
+            await DesktopTestUi.DrainAsync();
+            Check(palette.IsEnabled && DesktopVisual.IsVisible(palette),
+                $"the visible fixed-palette selector is enabled after the accepted save: enabled={palette.IsEnabled} loaded={palette.IsLoaded} visible={DesktopVisual.IsVisible(palette)} " +
+                $"settingsLoaded={settings.IsLoaded} settingsVisible={DesktopVisual.IsVisible(settings)} hostVisible={settings.XamlRoot?.IsHostVisible} " +
+                $"CanEdit={module.CanEdit} CanEditAppearance={module.CanEditAppearance} CanEditFixed={module.CanEditFixedAppearance} " +
+                $"sameOwner={ReferenceEquals(palette.DataContext, module)}");
             Check(MusicTestStores.For(f.Store).Writes == writes + 3, "each changed selection is one immediate durable write");
             Check(!Visuals(settings).OfType<Button>().Select(button => button.Content as string).Any(label =>
                 label is "保存设置" or "保存外观设置" or "重新读取设置" or "放弃更改"));
 
-            var expected = (GradientBrush)MusicPlayerArtwork.Backdrop(MusicAppearancePalette.Brush("mint"));
-            Check(module.PlayerBackground is GradientBrush actual &&
+            var expected = (RadialGradientBrush)MusicPlayerArtwork.Backdrop(MusicAppearancePalette.Brush("mint"));
+            Check(module.PlayerBackground is RadialGradientBrush actual &&
                 actual.GradientStops[0].Color == expected.GradientStops[0].Color,
                 "player overlay consumes the current fixed palette");
             await module.SetAppearanceAsync("colorPalette", "#21ABCD"); await Ready(module);
-            expected = (GradientBrush)MusicPlayerArtwork.Backdrop(MusicAppearancePalette.Brush("#21ABCD"));
-            Check(module.AppearanceColorPalette == "#21ABCD" && module.PlayerBackground is GradientBrush custom &&
+            expected = (RadialGradientBrush)MusicPlayerArtwork.Backdrop(MusicAppearancePalette.Brush("#21ABCD"));
+            Check(module.AppearanceColorPalette == "#21ABCD" && module.PlayerBackground is RadialGradientBrush custom &&
                 custom.GradientStops[0].Color == expected.GradientStops[0].Color,
                 "custom fixed color reaches the existing player composition");
             // Restore the existing preset so the original restart preference assertion remains covered.
@@ -273,13 +293,17 @@ public static class MusicAppearanceTests
             Check(module.PlaylistListView && module.CatalogSections.Count == 1,
                 "list preference publishes the current collection presentation");
             Check(output.Opens == 0 && f.Runtime.Calls.Count == 0);
+            DesktopTestUi.Unmount(settings);
 
             await using var appearance = new AppAppearance(f.Store);
             await appearance.LoadAsync();
             var general = new GeneralSettingsView(appearance, [module]);
             var preview = new Border { Background = AppearanceColors.DefaultBackground, Child = general };
+            host.Mount(preview);
+            await TestUiHost.LoadedAsync(preview);
             await GeneralAppearanceTests.SavePreview(preview, "general-wide", 900, 720);
             await GeneralAppearanceTests.SavePreview(preview, "general-narrow", 600, 720);
+            DesktopTestUi.Unmount(preview);
 
             await module.DisposeAsync();
             await using var next = new QualityFixture(f.Store);

@@ -12,10 +12,8 @@ using Windows.Foundation;
 using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
 using Color = Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Media.Imaging;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Windows.Tests;
@@ -795,40 +793,36 @@ public static class ArtworkTests
         }));
         yield return new("Native artwork hidden retained page restores identical pixels and palettes without HTTP", () => Sta(async () =>
         {
-            var encoder = new PngBitmapEncoder();
             using var sample = new FakeLease();
             var colors = new byte[4]; sample.Image.CopyPixels(colors);
-            encoder.Frames.Add(BitmapFrame.Create(BitmapSource.Create(1, 1, 96, 96, PixelFormats.Pbgra32, null, colors, 4)));
-            using var encoded = new MemoryStream(); encoder.Save(encoded);
-            byte[] png = encoded.ToArray();
+            byte[] png = FixtureImages.Encode(1, 1, colors, premultiplied: true);
             var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
             await using var service = new ArtworkService(handler);
             var host = new Grid { Width = 100, Height = 100 };
             var view = new ArtworkImage { Width = 60, Height = 60, Address = "https://art.example.test/retained" };
             ArtworkScope.SetLoader(host, service); host.Children.Add(view);
-            using var surface = Mount(host); Layout(host);
+            using var surface = Mount(host); Layout(host); await TestUiHost.LoadedAsync(view);
             using (await view.PrepareForPresentationAsync()) { }
             var pixels = ((Image)view.Children[0]).Source;
             var raw = view.RawPaletteBrush; var palette = view.PaletteBrush; var top = view.TopPaletteBrush;
-            Check(pixels is not null && ReferenceEquals(pixels, view.Source)); Equal(1, handler.Count); Check(ObservesLayout(view));
+            Check(pixels is not null && ReferenceEquals(pixels, view.Source)); Equal(1, handler.Count);
             Check(view.HasTopPalette && !IsFallback(raw));
             foreach (var visibility in new[] { Visibility.Collapsed, Visibility.Collapsed })
             {
                 host.Visibility = visibility; Layout(host); await Tick();
-                Check(!ObservesLayout(view));
                 Check(ReferenceEquals(pixels, ((Image)view.Children[0]).Source) && ReferenceEquals(pixels, view.Source));
                 host.Visibility = Visibility.Visible; Layout(host); await Tick();
-                Check(ObservesLayout(view)); Equal(1, handler.Count);
+                Equal(1, handler.Count);
                 Check(ReferenceEquals(pixels, ((Image)view.Children[0]).Source));
                 Check(ReferenceEquals(raw, view.RawPaletteBrush));
                 Check(ReferenceEquals(palette, view.PaletteBrush));
                 Check(ReferenceEquals(top, view.TopPaletteBrush));
             }
             host.Children.Remove(view); await Tick();
-            Check(!ObservesLayout(view)); Check(((Image)view.Children[0]).Source is null && view.Source is null);
+            Check(((Image)view.Children[0]).Source is null && view.Source is null);
             Check(!view.HasTopPalette);
         }));
-        yield return new("Native artwork leaving a visible viewport releases its lease and reuses the bounded cache", () => Sta(async () =>
+        yield return new("Native artwork first visibility admits once and scrolling retains its pixels until unmount", () => Sta(async () =>
         {
             byte[] png = Encode("png", 2, 2);
             var handler = new Handler((_, _) => Task.FromResult(Reply(png)));
@@ -841,20 +835,254 @@ public static class ArtworkTests
             Layout(host);
             await WaitFor(() => ((Image)view.Children[0]).Source is not null);
             var pixels = ((Image)view.Children[0]).Source;
+            var palette = view.RawPaletteBrush;
             Check(pixels is not null);
             Equal(1, handler.Count);
 
             Canvas.SetTop(view, 200);
             Layout(host);
             await Tick();
-            Check(((Image)view.Children[0]).Source is null, "leaving the clipped viewport releases the image");
-            Check(IsFallback(view.RawPaletteBrush), "leaving the viewport clears its palette");
+            Check(ReferenceEquals(pixels, view.Source), "a previously viewed image stays mounted outside the viewport");
+            Check(ReferenceEquals(palette, view.RawPaletteBrush), "scrolling retains the acquired palette");
 
             Canvas.SetTop(view, 0);
             Layout(host);
             await WaitFor(() => ReferenceEquals(pixels, ((Image)view.Children[0]).Source),
-                "returning to the viewport must reuse the cached decoded image");
+                "returning to the viewport retains the same decoded image");
             Equal(1, handler.Count);
+            host.Children.Remove(view); await Tick();
+            Check(view.Source is null && IsFallback(view.RawPaletteBrush), "actual unmount releases the image and palette");
+        }));
+        yield return new("Native artwork virtualized items retain admitted leases pixels and palettes until member or list retirement", () => Sta(async () =>
+        {
+            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkItem>(Enumerable.Range(0, 240)
+                .Select(index => new ArtworkItem("item-" + index, "https://art.example.test/item-" + index)));
+            var loader = new ItemsLoader(); var overrideLoader = new ItemsLoader();
+            var list = new ListView { Width = 260, Height = 180, ItemsSource = rows, SelectionMode = ListViewSelectionMode.None, IsTabStop = false,
+                ItemTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load("""
+                    <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                      xmlns:art="using:MeowFilm.Desktop.Artwork">
+                      <Grid><art:ArtworkImage Width="64" Height="64" Address="{Binding LiveAddress}" DisplayIdentity="{Binding Id}"/></Grid>
+                    </DataTemplate>
+                    """) };
+            ArtworkScope.SetLoader(list, loader);
+            ArtworkItemsScope.SetItemKeySelector(list, item => ((ArtworkItem)item).Id);
+            ArtworkItemsScope.SetItemResourcesSelector(list, item =>
+            {
+                var row = (ArtworkItem)item;
+                return new[] { new ArtworkItemResource("cover", row.LiveAddress, row.Id), new ArtworkItemResource("badge", row.Address + "/badge") };
+            });
+            using var surface = Mount(list); Layout(list);
+            using var recycling = new ArtworkRecyclingTrace(list);
+            ArtworkImage? At(int index) => list.ContainerFromIndex(index) is DependencyObject container
+                ? DesktopTestUi.Visuals(container).OfType<ArtworkImage>().FirstOrDefault() : null;
+            await WaitFor(() => At(1)?.Source is not null);
+            var image = At(1)!; var pixels = image.Source; var palette = image.RawPaletteBrush;
+            recycling.Track(rows[1]);
+            var first = loader.Leases[rows[1].Address].Single();
+            list.ScrollIntoView(rows[^1]); list.UpdateLayout();
+            await recycling.WaitForRetirement(rows[1]);
+            await WaitFor(() => At(rows.Count - 1)?.Source is not null);
+            Equal(0, first.DisposeCount);
+            list.ScrollIntoView(rows[1]); list.UpdateLayout(); await WaitFor(() => At(1)?.Source is not null);
+            Equal(1, loader.Leases[rows[1].Address].Count);
+            Check(ReferenceEquals(At(1)!.Source, pixels) && ReferenceEquals(At(1)!.RawPaletteBrush, palette),
+                "a recycled native row borrows the original pixels and palette without reacquiring");
+            var movedRow = rows[1];
+            var reads = loader.Leases.ToDictionary(pair => pair.Key, pair => pair.Value.Count, StringComparer.Ordinal);
+            void CheckRetainedReads()
+            {
+                foreach (var (address, count) in reads)
+                    Check(loader.Leases[address].Count == count, $"Move must not reacquire admitted resource {address}: before={count}; after={loader.Leases[address].Count}");
+                foreach (var (address, leases) in loader.Leases.Where(pair => !reads.ContainsKey(pair.Key)))
+                {
+                    Console.WriteLine($"ARTWORK_MOVE_ADMITTED address={address}; reads={leases.Count}");
+                    Equal(1, leases.Count);
+                }
+            }
+            rows.Move(1, 2); list.UpdateLayout();
+            await WaitFor(() => At(2) is { Source: not null } moved && moved.DisplayIdentity == movedRow.Id && moved.Address == movedRow.LiveAddress,
+                "native Move must finish binding the moved item's current resource before its presentation is checked");
+            Check(ReferenceEquals(At(2)!.Source, pixels) && ReferenceEquals(At(2)!.RawPaletteBrush, palette) && first.DisposeCount == 0,
+                $"a pure native item move retains its admitted pixels and palette: pixels={ReferenceEquals(At(2)!.Source, pixels)}; " +
+                $"palette={ReferenceEquals(At(2)!.RawPaletteBrush, palette)}; dispose={first.DisposeCount}; reads={loader.Leases[movedRow.Address].Count}");
+            CheckRetainedReads();
+            reads = loader.Leases.ToDictionary(pair => pair.Key, pair => pair.Value.Count, StringComparer.Ordinal);
+            rows.Move(2, 1); list.UpdateLayout(); await WaitFor(() => At(1) is { Source: not null } moved && moved.DisplayIdentity == movedRow.Id);
+            Check(ReferenceEquals(rows[1], movedRow) && ReferenceEquals(At(1)!.Source, pixels));
+            CheckRetainedReads();
+            var sibling = new ArtworkImage { Width = 20, Height = 20, Address = rows[1].Address + "/badge", ResourceSlot = "badge" };
+            var originalImage = At(1)!;
+            var parent = (Panel)originalImage.Parent;
+            parent.Children.Add(sibling); list.UpdateLayout(); await WaitFor(() => sibling.Source is not null);
+            var siblingLease = loader.Leases[sibling.Address].Single();
+            ArtworkScope.SetLoader(sibling, overrideLoader); await WaitFor(() => overrideLoader.Leases.ContainsKey(sibling.Address));
+            Check(first.DisposeCount == 0 && siblingLease.DisposeCount == 1 && ReferenceEquals(originalImage.Source, pixels),
+                "a local loader change retires only that resource slot, not its sibling cover");
+            parent.Children.Remove(sibling); await Tick();
+            rows[1] = rows[1] with { Title = "new title" }; list.UpdateLayout(); await Tick();
+            await WaitFor(() => At(1)?.Source is not null);
+            Equal(1, loader.Leases[rows[1].Address].Count);
+            Check(ReferenceEquals(At(1)!.Source, pixels) && first.DisposeCount == 0,
+                "replacing a same-key snapshot with unchanged resources retains the underlying lease");
+            recycling.Track(rows[1]); list.ScrollIntoView(rows[^1]); list.UpdateLayout(); await recycling.WaitForRetirement(rows[1]);
+            rows[1].LiveAddress = "https://art.example.test/replaced-resource";
+            await WaitFor(() => first.DisposeCount == 1);
+            Check(!loader.Leases.ContainsKey(rows[1].LiveAddress), "offscreen INPC resource updates retire old pixels without admitting the new URL");
+            list.ScrollIntoView(rows[1]); list.UpdateLayout();
+            await WaitFor(() => At(1)?.Source is not null && loader.Leases.ContainsKey(rows[1].LiveAddress));
+            var changed = loader.Leases[rows[1].LiveAddress].Single();
+            rows.RemoveAt(1); list.UpdateLayout(); await WaitFor(() => changed.DisposeCount == 1);
+            // The first far scroll already admitted the last item. Its member
+            // retains that lease even if later extent estimates move its bounds.
+            var last = loader.Leases[rows[^1].Address].Single();
+            Equal(0, last.DisposeCount);
+            DesktopTestUi.Unmount(list); await Tick();
+            Check(last.DisposeCount == 1 && loader.Leases.Values.Concat(overrideLoader.Leases.Values).SelectMany(value => value).All(lease => lease.DisposeCount == 1),
+                "list retirement releases every retained underlying lease exactly once");
+        }));
+        yield return new("Native artwork same-key snapshots admit complete resources and retain pixels through replacement failure", () => Sta(async () =>
+        {
+            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkSnapshot>
+            { new("row", "https://art.example.test/original", "song") };
+            var loader = new HeldLoader();
+            var list = new ListView { Width = 200, Height = 160, ItemsSource = rows,
+                ItemTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load("""
+                    <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                      xmlns:art="using:MeowFilm.Desktop.Artwork">
+                      <art:ArtworkImage Width="60" Height="60" DisplayIdentity="{Binding DisplayIdentity}" Address="{Binding Address}"/>
+                    </DataTemplate>
+                    """) };
+            ArtworkScope.SetLoader(list, loader);
+            ArtworkItemsScope.SetItemKeySelector(list, item => ((ArtworkSnapshot)item).Id);
+            ArtworkItemsScope.SetItemResourcesSelector(list, item =>
+            {
+                var row = (ArtworkSnapshot)item;
+                return new[] { new ArtworkItemResource("cover", row.Address, row.DisplayIdentity) };
+            });
+            using var surface = Mount(list); Layout(list);
+            ArtworkImage? View() => list.ContainerFromIndex(0) is DependencyObject container
+                ? DesktopTestUi.Visuals(container).OfType<ArtworkImage>().FirstOrDefault() : null;
+            await WaitFor(() => loader.Calls.Count == 1);
+            var original = new FakeLease(); loader.Calls[0].Completion.SetResult(original);
+            await WaitFor(() => View()?.Source is not null);
+            var view = View()!; var pixels = view.Source; var palette = view.RawPaletteBrush;
+
+            rows[0] = rows[0] with { Address = "https://art.example.test/replacement" };
+            list.UpdateLayout(); await WaitFor(() => loader.Calls.Count >= 2);
+            Equal(2, loader.Calls.Count); Equal(rows[0].Address, loader.Calls[1].Address);
+            view = View()!;
+            Check(ReferenceEquals(pixels, view.Source) && ReferenceEquals(palette, view.RawPaletteBrush),
+                $"same-key URL replacement retains its mounted successful presentation while the new resource is pending: " +
+                $"pixels={ReferenceEquals(pixels, view.Source)}; palette={ReferenceEquals(palette, view.RawPaletteBrush)}; " +
+                $"dispose={original.DisposeCount}; identity={view.DisplayIdentity}; address={view.Address}; loaded={view.IsLoaded}");
+            Equal(0, original.DisposeCount);
+            loader.Calls[1].Completion.SetException(new ArtworkException("ARTWORK_NETWORK"));
+            await WaitFor(() => ((Button)view.Children[1]).Visibility == Visibility.Visible);
+            Check(ReferenceEquals(pixels, view.Source) && original.DisposeCount == 0,
+                "a failed replacement retains the previous successful pixels until explicit retry succeeds");
+            DesktopTestUi.Invoke((Button)view.Children[1]); await WaitFor(() => loader.Calls.Count >= 3);
+            Equal(3, loader.Calls.Count); Equal(rows[0].Address, loader.Calls[2].Address);
+            var replacement = new FakeLease(); loader.Calls[2].Completion.SetResult(replacement);
+            await WaitFor(() => original.DisposeCount == 1 && !ReferenceEquals(pixels, view.Source));
+            Check(ReferenceEquals(replacement.Image.GetSource(DispatcherQueue.GetForCurrentThread()), view.Source));
+
+            rows[0] = rows[0] with { Address = "https://art.example.test/another-song", DisplayIdentity = "another-song" };
+            list.UpdateLayout(); await WaitFor(() => loader.Calls.Count >= 4);
+            Equal(4, loader.Calls.Count); Equal(rows[0].Address, loader.Calls[3].Address);
+            Check(View()?.Source is null && replacement.DisposeCount == 1,
+                "a different permanent song identity never displays the previous song's pixels");
+            var another = new FakeLease(); loader.Calls[3].Completion.SetResult(another);
+            await WaitFor(() => View()?.Source is not null);
+            rows[0] = new("other-row", "https://art.example.test/other-row", "another-song");
+            list.UpdateLayout(); await WaitFor(() => loader.Calls.Count >= 5);
+            Equal(5, loader.Calls.Count); Equal(rows[0].Address, loader.Calls[4].Address);
+            Check(View()?.Source is null && another.DisposeCount == 1,
+                "a different native item key never borrows the preceding item's image, even with the same display identity");
+            DesktopTestUi.Unmount(list); await WaitFor(() => loader.Calls[4].Token.IsCancellationRequested);
+            var late = new FakeLease(); loader.Calls[4].Completion.SetResult(late);
+            await WaitFor(() => late.DisposeCount == 1);
+        }));
+        yield return new("Native artwork virtualized pending acquisition survives container recycling without another read", () => Sta(async () =>
+        {
+            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkItem>(Enumerable.Range(0, 160)
+                .Select(index => new ArtworkItem("pending-" + index, "https://art.example.test/pending-" + index)));
+            var loader = new HeldLoader();
+            var list = new ListView { Width = 200, Height = 160, ItemsSource = rows, IsTabStop = false,
+                ItemTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load("""
+                    <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                      xmlns:art="using:MeowFilm.Desktop.Artwork">
+                      <art:ArtworkImage Width="60" Height="60" Address="{Binding LiveAddress}" DisplayIdentity="{Binding Id}"/>
+                    </DataTemplate>
+                    """) };
+            ArtworkScope.SetLoader(list, loader);
+            ArtworkItemsScope.SetItemKeySelector(list, item => ((ArtworkItem)item).Id);
+            ArtworkItemsScope.SetItemResourcesSelector(list, item =>
+            {
+                var row = (ArtworkItem)item; return new[] { new ArtworkItemResource("cover", row.LiveAddress, row.Id) };
+            });
+            using var surface = Mount(list); Layout(list); await WaitFor(() => loader.Calls.Count > 0);
+            await WaitFor(() => loader.Calls.Any(call => call.Address == rows[1].Address));
+            var original = loader.Calls.Single(call => call.Address == rows[1].Address);
+            using var recycling = new ArtworkRecyclingTrace(list);
+            recycling.Track(rows[1]);
+            list.ScrollIntoView(rows[^1]); list.UpdateLayout(); await recycling.WaitForRetirement(rows[1]);
+            Check(!original.Token.IsCancellationRequested, "virtualization does not cancel an admitted item request");
+            var changedRow = rows.First(row => row.Id != rows[1].Id && recycling.IsRetired(row) && loader.Calls.Any(call => call.Address == row.Address));
+            var changedCall = loader.Calls.Single(call => call.Address == changedRow.Address);
+            int changedAt = rows.IndexOf(changedRow);
+            rows[changedAt] = changedRow with { Address = changedRow.Address + "/updated" };
+            await WaitFor(() => changedCall.Token.IsCancellationRequested);
+            var late = new FakeLease(); changedCall.Completion.TrySetResult(late); await WaitFor(() => late.DisposeCount == 1);
+            var lease = new FakeLease(); original.Completion.TrySetResult(lease); await Tick();
+            int firstCalls = loader.Calls.Count(call => call.Address == rows[1].Address);
+            list.ScrollIntoView(rows[1]); list.UpdateLayout();
+            await WaitFor(() => list.ContainerFromIndex(1) is DependencyObject container &&
+                DesktopTestUi.Visuals(container).OfType<ArtworkImage>().Any(image => image.Source is not null));
+            Check(!lease.Disposed && loader.Calls.Count(call => call.Address == rows[1].Address) == firstCalls,
+                "returning borrows the completed item request without reacquiring");
+            var failedRow = rows.Skip(2).First(row => row != rows[changedAt] &&
+                list.ContainerFromItem(row) is DependencyObject && loader.Calls.Any(call => call.Address == row.Address));
+            var failedCall = loader.Calls.Single(call => call.Address == failedRow.Address);
+            recycling.Track(failedRow); list.ScrollIntoView(rows[^1]); list.UpdateLayout(); await recycling.WaitForRetirement(failedRow);
+            failedCall.Completion.TrySetException(new ArtworkException("ARTWORK_NETWORK")); await Tick();
+            int attempts = loader.Calls.Count(call => call.Address == failedRow.Address);
+            list.ScrollIntoView(failedRow); list.UpdateLayout();
+            await WaitFor(() => list.ContainerFromItem(failedRow) is DependencyObject container &&
+                DesktopTestUi.Visuals(container).OfType<ArtworkImage>().Any(image =>
+                    image.DisplayIdentity == failedRow.Id && image.Address == failedRow.LiveAddress && ToolTipService.GetToolTip(image) is not null),
+                "the failed native item must reborrow its faulted resource and show the explicit retry without reacquiring");
+            Equal(attempts, loader.Calls.Count(call => call.Address == failedRow.Address));
+            var failedImage = DesktopTestUi.Visuals((DependencyObject)list.ContainerFromItem(failedRow)).OfType<ArtworkImage>().Single();
+            DesktopTestUi.Invoke(failedImage.Children.OfType<Button>().Single());
+            await WaitFor(() => loader.Calls.Count(call => call.Address == failedRow.Address) == attempts + 1);
+            DesktopTestUi.Unmount(list); await Tick();
+            foreach (var call in loader.Calls) call.Completion.TrySetCanceled();
+            await WaitFor(() => lease.DisposeCount == 1);
+        }));
+        yield return new("Native artwork virtualized pending items cancel independently and release late success", () => Sta(async () =>
+        {
+            var rows = new System.Collections.ObjectModel.ObservableCollection<ArtworkItem> { new("a", "https://art.example.test/pending") };
+            var loader = new HeldLoader();
+            var list = new ListView { Width = 180, Height = 160, ItemsSource = rows,
+                ItemTemplate = (DataTemplate)Microsoft.UI.Xaml.Markup.XamlReader.Load("""
+                    <DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                      xmlns:art="using:MeowFilm.Desktop.Artwork">
+                      <StackPanel Orientation="Horizontal">
+                        <art:ArtworkImage Width="60" Height="60" Address="{Binding LiveAddress}" DisplayIdentity="{Binding Id}"/>
+                        <art:ArtworkImage Width="60" Height="60" Address="{Binding LiveAddress}" DisplayIdentity="{Binding Id}"/>
+                      </StackPanel>
+                    </DataTemplate>
+                    """) };
+            ArtworkScope.SetLoader(list, loader);
+            using var surface = Mount(list); Layout(list); await WaitFor(() => loader.Calls.Count == 1);
+            var images = DesktopTestUi.Visuals(list).OfType<ArtworkImage>().Where(image => image.IsLoaded).ToArray();
+            Equal(2, images.Length);
+            images[0].Visibility = Visibility.Collapsed; await Tick(); Check(!loader.Calls[0].Token.IsCancellationRequested,
+                "one hidden pending subscriber cannot cancel the other");
+            images[1].Visibility = Visibility.Collapsed; await WaitFor(() => loader.Calls[0].Token.IsCancellationRequested);
+            var late = new FakeLease(); loader.Calls[0].Completion.TrySetResult(late); await WaitFor(() => late.DisposeCount == 1);
+            Check(images.All(image => image.Source is null));
         }));
         yield return new("Native artwork close preserves external leases and forbids further acquisition", () => Sta(async () =>
         {
@@ -974,14 +1202,13 @@ public static class ArtworkTests
             Canvas.SetTop(view, 0); Layout(host); await Tick(); Equal(1, loader.Calls.Count);
             var lease = new FakeLease(); loader.Calls[0].Completion.SetResult(lease); await Tick(); Check(!lease.Disposed);
             view.Visibility = Visibility.Collapsed; await Tick(); Check(!lease.Disposed);
-            Check(!ObservesLayout(view));
             view.Visibility = Visibility.Visible; Layout(host); await Tick(); Equal(1, loader.Calls.Count);
             Check(ReferenceEquals(lease.Image.GetSource(DispatcherQueue.GetForCurrentThread()), ((Image)view.Children[0]).Source));
             view.Address = "https://art.example.test/b"; Equal(2, loader.Calls.Count); Check(lease.Disposed);
             host.Children.Remove(view);
             var late = new FakeLease(); loader.Calls[1].Completion.SetResult(late); await Tick(); Check(late.Disposed);
             Equal(1, lease.DisposeCount); Equal(1, late.DisposeCount);
-            Check(((Image)view.Children[0]).Source is null); Check(!ObservesLayout(view));
+            Check(((Image)view.Children[0]).Source is null);
         }));
         yield return new("Native artwork hiding cancels unfinished demand and hidden identity changes do not fetch", () => Sta(async () =>
         {
@@ -991,7 +1218,7 @@ public static class ArtworkTests
             ArtworkScope.SetLoader(host, first); host.Children.Add(view);
             using var surface = Mount(host); Layout(host); await Tick(); Equal(1, first.Calls.Count);
             host.Visibility = Visibility.Collapsed; await Tick();
-            Check(first.Calls[0].Token.IsCancellationRequested); Check(!ObservesLayout(view));
+            Check(first.Calls[0].Token.IsCancellationRequested);
             view.Address = "https://art.example.test/b"; ArtworkScope.SetLoader(host, second);
             Layout(host); await Tick(); Equal(0, second.Calls.Count);
             var late = new FakeLease(); first.Calls[0].Completion.SetResult(late); await Tick();
@@ -1191,13 +1418,86 @@ public static class ArtworkTests
             return Task.FromCanceled(new CancellationToken(true));
         }
     }
+    private sealed class ArtworkRecyclingTrace : IDisposable
+    {
+        private readonly ListView list;
+        private readonly Dictionary<string, (ArtworkItem Item, DependencyObject Container)> tracked = [];
+        private readonly Dictionary<DependencyObject, ArtworkItem> mappings = [];
+        private readonly HashSet<string> recycled = [];
+        private int recycleEvents, nullRecycleItems, unloadEvents, contextChanges;
+        internal ArtworkRecyclingTrace(ListView list)
+        {
+            this.list = list;
+            foreach (var item in list.Items.OfType<ArtworkItem>()) Track(item);
+            list.ContainerContentChanging += Changed;
+        }
+        internal void Track(ArtworkItem item)
+        {
+            if (list.ContainerFromItem(item) is not DependencyObject container) return;
+            recycled.Remove(item.Id); tracked[item.Id] = (item, container); mappings[container] = item;
+            foreach (var image in DesktopTestUi.Visuals(container).OfType<ArtworkImage>())
+            {
+                image.Unloaded += (_, _) => unloadEvents++;
+                image.DataContextChanged += (_, _) => contextChanges++;
+            }
+        }
+        private void Changed(ListViewBase sender, ContainerContentChangingEventArgs args)
+        {
+            if (args.InRecycleQueue)
+            {
+                recycleEvents++;
+                if (args.Item is not ArtworkItem) nullRecycleItems++;
+                if (mappings.TryGetValue(args.ItemContainer, out var previous)) recycled.Add(previous.Id);
+                if (args.Item is ArtworkItem item) recycled.Add(item.Id);
+            }
+            else if (args.Item is ArtworkItem item) mappings[args.ItemContainer] = item;
+        }
+        internal bool IsRetired(ArtworkItem item) => tracked.TryGetValue(item.Id, out var prior) &&
+            (recycled.Contains(item.Id) || !ReferenceEquals(list.ItemFromContainer(prior.Container), prior.Item));
+        internal async Task WaitForRetirement(ArtworkItem item)
+        {
+            for (int attempt = 0; attempt < 100 && !IsRetired(item); attempt++) await Task.Delay(10);
+            var rail = DesktopTestUi.Visuals(list).OfType<ScrollViewer>().FirstOrDefault();
+            string diagnostic = $"panel={list.ItemsPanelRoot?.GetType().Name}; size={list.ActualWidth}x{list.ActualHeight}; " +
+                $"scrollable={rail?.ScrollableHeight}; offset={rail?.VerticalOffset}; viewport={rail?.ViewportHeight}; " +
+                $"realized={Enumerable.Range(0, list.Items.Count).Count(index => list.ContainerFromIndex(index) is not null)}; " +
+                $"targetRealized={list.ContainerFromIndex(list.Items.Count - 1) is not null}; " +
+                $"recycleEvents={recycleEvents}; nullRecycleItems={nullRecycleItems}; unloads={unloadEvents}; contexts={contextChanges}; " +
+                $"originalMapping={tracked.TryGetValue(item.Id, out var prior) && ReferenceEquals(list.ItemFromContainer(prior.Container), prior.Item)}";
+            Console.WriteLine("ARTWORK_RECYCLE " + diagnostic);
+            Check(IsRetired(item), "The native container must retire its original item: " + diagnostic);
+        }
+        public void Dispose() => list.ContainerContentChanging -= Changed;
+    }
+    public sealed record ArtworkSnapshot(string Id, string Address, string DisplayIdentity);
+    public sealed record ArtworkItem(string Id, string Address, string Title = "") : System.ComponentModel.INotifyPropertyChanged
+    {
+        private string? liveAddress;
+        public string LiveAddress
+        {
+            get => liveAddress ?? Address;
+            set { liveAddress = value; PropertyChanged?.Invoke(this, new(nameof(LiveAddress))); }
+        }
+        public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
+    }
+    private sealed class ItemsLoader : IArtworkLoader
+    {
+        internal readonly Dictionary<string, List<FakeLease>> Leases = [];
+        public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var lease = new FakeLease();
+            if (!Leases.TryGetValue(address, out var values)) Leases.Add(address, values = []);
+            values.Add(lease); return Task.FromResult<IArtworkLease>(lease);
+        }
+    }
     private sealed class HeldLoader : IArtworkLoader
     {
-        internal readonly List<(TaskCompletionSource<IArtworkLease> Completion, CancellationToken Token)> Calls = [];
+        internal readonly List<(TaskCompletionSource<IArtworkLease> Completion, CancellationToken Token, string Address)> Calls = [];
         public Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default)
         {
             var next = new TaskCompletionSource<IArtworkLease>(TaskCreationOptions.RunContinuationsAsynchronously);
-            Calls.Add((next, cancellationToken)); return next.Task;
+            Calls.Add((next, cancellationToken, address)); return next.Task;
         }
     }
     private sealed class FakeLease : IArtworkLease
@@ -1207,9 +1507,6 @@ public static class ArtworkTests
         public ArtworkPixels Image { get; } = new(1, 1, new byte[] { 100, 200, 250, 255 });
         public void Dispose() { Disposed = true; DisposeCount++; }
     }
-    private static bool ObservesLayout(ArtworkImage view) =>
-        (bool)typeof(ArtworkImage).GetField("observingLayout",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(view)!;
     private static HttpResponseMessage Reply(byte[] bytes) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) };
 
     private sealed class RecordingByteCache : IArtworkByteCache
@@ -1230,12 +1527,7 @@ public static class ArtworkTests
     {
         byte[] pixels = new byte[1200 * 1200 * 4];
         new Random(17).NextBytes(pixels);
-        var image = BitmapSource.Create(1200, 1200, 96, 96, PixelFormats.Bgra32, null, pixels, 1200 * 4);
-        var encoder = new PngBitmapEncoder();
-        encoder.Frames.Add(BitmapFrame.Create(image));
-        using var stream = new MemoryStream();
-        encoder.Save(stream);
-        byte[] bytes = stream.ToArray();
+        byte[] bytes = FixtureImages.Encode(1200, 1200, pixels);
         Check(bytes.Length > ArtworkService.MaximumCacheEntryBytes);
         return bytes;
     }
@@ -1281,9 +1573,7 @@ public static class ArtworkTests
     });
     internal static byte[] Encode(string kind, int width, int height)
     {
-        var source = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, new byte[width * height * 4], width * 4);
-        BitmapEncoder encoder = kind switch { "jpeg" => new JpegBitmapEncoder(), "gif" => new GifBitmapEncoder(), _ => new PngBitmapEncoder() };
-        encoder.Frames.Add(BitmapFrame.Create(source)); using var stream = new MemoryStream(); encoder.Save(stream); return stream.ToArray();
+        return FixtureImages.Encode(width, height, new byte[width * height * 4], kind);
     }
     private static void Layout(FrameworkElement view) { view.Measure(new Size(view.Width, view.Height)); view.Arrange(new Rect(0, 0, view.Width, view.Height)); view.UpdateLayout(); }
     private static DesktopTestUi.Host Mount(FrameworkElement root) =>

@@ -35,9 +35,9 @@ internal sealed class AppMediaWindowAttachment : IAsyncDisposable
     {
         if (stopped || args.PropertyName is not (null or "" or
             nameof(IDesktopMediaControlSettings.Preferences) or nameof(IDesktopMediaControlSettings.IsAvailable))) return;
-        if (window.Dispatcher.CheckAccess()) UpdateSystemMedia();
-        else if (!window.Dispatcher.HasShutdownStarted)
-            _ = window.Dispatcher.InvokeAsync(() => { if (!stopped) UpdateSystemMedia(); });
+        if (window.Dispatcher.HasThreadAccess) UpdateSystemMedia();
+        else if (!window.Dispatcher.IsClosing)
+            _ = window.Dispatcher.EnqueueAsync(() => { if (!stopped) UpdateSystemMedia(); });
     }
 
     private void UpdateSystemMedia() => setSystemEnabled?.Invoke(settings.IsAvailable && settings.Preferences.SystemMediaEnabled);

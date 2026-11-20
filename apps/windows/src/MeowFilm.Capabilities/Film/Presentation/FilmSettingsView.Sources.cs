@@ -206,25 +206,35 @@ public partial class FilmSettingsView
     private void RenderSourceLists()
     {
         var cats = CatRows.Select(row => new ManagementRow(row.Source.InstallationId, row.Name, "", row.Enabled,
-            () => { }, _ => { }, new MenuFlyout(), Cells: () => CatCells(row))).ToArray();
+            () => { }, _ => { }, new MenuFlyout(), Cells: () => CatCells(row), CellsIdentity: row)).ToArray();
         var videos = VideoRows.Select(row => new ManagementRow(VideoId(row), row.Name, "", row.Enabled,
-            () => { }, _ => { }, new MenuFlyout(), Cells: () => VideoCells(row))).ToArray();
+            () => { }, _ => { }, new MenuFlyout(), Cells: () => VideoCells(row), CellsIdentity: row)).ToArray();
         CatsList.SetRows(cats, cats.Length, cats.Select(row => row.Id), "暂无猫源");
         VideosList.SetRows(videos, videos.Length, videos.Select(row => row.Id), "暂无视频源");
         foreach (var row in CatRows) row.Selected = CatsList.Selected.Contains(row.Source.InstallationId);
         foreach (var row in VideoRows) row.Selected = VideosList.Selected.Contains(VideoId(row));
     }
 
-    private TextBlock CellText(string text) => new()
+    private TextBlock CellText(FilmSettingsSourceRow row, string property)
     {
-        Text = text, VerticalAlignment = VerticalAlignment.Center, Margin = new(6, 0, 6, 0),
-        Style = (Style)MeowFilm.Desktop.DesktopVisual.Resource(this, "FilmSettings.CellText")
-    };
+        var text = new TextBlock
+        {
+            DataContext = row, VerticalAlignment = VerticalAlignment.Center, Margin = new(6, 0, 6, 0),
+            Style = (Style)MeowFilm.Desktop.DesktopVisual.Resource(this, "FilmSettings.CellText")
+        };
+        text.SetBinding(TextBlock.TextProperty, new Binding { Path = new PropertyPath(property) });
+        return text;
+    }
+    private static void BindRowName(FrameworkElement element, FilmSettingsSourceRow row, string prefix) =>
+        element.SetBinding(AutomationProperties.NameProperty, new Binding
+        {
+            Source = row, Path = new PropertyPath("Name"), Converter = new FilmActionNameConverter(), ConverterParameter = prefix
+        });
     private Button RowButton(string text, FilmSettingsSourceRow row, RoutedEventHandler click, string name, string style = "MeowFilm.ManagementRowButton")
     {
         var button = new Button { Content = text, DataContext = row, Padding = new(6, 0, 6, 0) };
         button.SetValue(StyleProperty, MeowFilm.Desktop.DesktopVisual.Resource(this, style));
-        AutomationProperties.SetName(button, name + (row switch { FilmSettingsCatRow cat => cat.Name, FilmSettingsVideoRow video => video.Name, _ => "" }));
+        BindRowName(button, row, name);
         button.Click += click;
         return button;
     }
@@ -233,7 +243,7 @@ public partial class FilmSettingsView
         var box = new CheckBox { DataContext = row, Tag = tag, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
         box.SetValue(StyleProperty, MeowFilm.Desktop.DesktopVisual.Resource(this, tag is null or "enabled" ? "MeowFilm.ManagementSwitch" : "MeowFilm.ManagementCheck"));
         box.SetBinding(ToggleButton.IsCheckedProperty, new Binding { Path = new PropertyPath(property), Mode = BindingMode.OneWay });
-        AutomationProperties.SetName(box, name);
+        BindRowName(box, row, name);
         box.Click += click;
         return box;
     }
@@ -242,17 +252,17 @@ public partial class FilmSettingsView
         var status = new ManagementStatus { DataContext = row, HorizontalAlignment = HorizontalAlignment.Left, Margin = new(4, 0, 0, 0) };
         status.SetBinding(ContentControl.ContentProperty, new Binding { Path = new PropertyPath(text) });
         status.SetBinding(ManagementStatus.ToneProperty, new Binding { Path = new PropertyPath(tone) });
-        AutomationProperties.SetName(status, name);
+        BindRowName(status, row, name);
         return status;
     }
     private IReadOnlyList<FrameworkElement> CatCells(FilmSettingsCatRow row)
     {
-        var state = RowStatus(row, nameof(row.StateText), nameof(row.StateTone), "猫源状态" + row.Name);
-        ToolTipService.SetToolTip(state, row.ErrorText);
-        AutomationProperties.SetHelpText(state, row.ErrorText ?? "");
-        var update = RowStatus(row, nameof(row.UpdateText), nameof(row.UpdateTone), "猫源更新状态" + row.Name);
-        ToolTipService.SetToolTip(update, row.UpdateErrorText);
-        AutomationProperties.SetHelpText(update, row.UpdateErrorText ?? "");
+        var state = RowStatus(row, nameof(row.StateText), nameof(row.StateTone), "猫源状态");
+        state.SetBinding(ToolTipService.ToolTipProperty, new Binding { Path = new PropertyPath(nameof(row.ErrorText)) });
+        state.SetBinding(AutomationProperties.HelpTextProperty, new Binding { Path = new PropertyPath(nameof(row.ErrorText)) });
+        var update = RowStatus(row, nameof(row.UpdateText), nameof(row.UpdateTone), "猫源更新状态");
+        update.SetBinding(ToolTipService.ToolTipProperty, new Binding { Path = new PropertyPath(nameof(row.UpdateErrorText)) });
+        update.SetBinding(AutomationProperties.HelpTextProperty, new Binding { Path = new PropertyPath(nameof(row.UpdateErrorText)) });
         var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         actions.Children.Add(RowButton("编辑", row, EditCat_Click, "编辑猫源"));
         actions.Children.Add(RowButton("更新", row, UpdateCat_Click, "更新猫源", "MeowFilm.ManagementRowButton.Primary"));
@@ -260,22 +270,22 @@ public partial class FilmSettingsView
         restart.SetBinding(IsEnabledProperty, new Binding { Path = new PropertyPath(nameof(row.CanRestart)) });
         actions.Children.Add(restart);
         actions.Children.Add(RowButton("删除", row, DeleteCat_Click, "删除猫源", "MeowFilm.ManagementRowButton.Danger"));
-        return [CellText(row.Name), CellText(row.TypeText), state,
-            RowCheck(nameof(row.Enabled), row, CatEnabled_Click, "启用猫源" + row.Name), CellText(row.ModifiedText), update, actions];
+        return [CellText(row, nameof(row.Name)), CellText(row, nameof(row.TypeText)), state,
+            RowCheck(nameof(row.Enabled), row, CatEnabled_Click, "启用猫源"), CellText(row, nameof(row.ModifiedText)), update, actions];
     }
     private IReadOnlyList<FrameworkElement> VideoCells(FilmSettingsVideoRow row)
     {
         var name = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new(6, 0, 6, 0) };
-        if (row.AggregateImages)
         {
             var badgeText = new TextBlock { Text = "聚合", Margin = new(6, 0, 6, 0) };
             badgeText.SetValue(StyleProperty, MeowFilm.Desktop.DesktopVisual.Resource(this, "FilmSettings.AggregateText"));
             var badge = new Border { Child = badgeText, CornerRadius = new(4), BorderThickness = new(1), Margin = new(6, 0, 0, 0), Padding = new(0, 2, 0, 2) };
             badge.SetValue(StyleProperty, MeowFilm.Desktop.DesktopVisual.Resource(this, "FilmSettings.AggregateBadge"));
+            badge.SetBinding(VisibilityProperty, new Binding { Source = row, Path = new PropertyPath(nameof(row.AggregateImages)), Converter = new FilmVisibilityConverter() });
             name.Children.Add(badge);
         }
-        var title = CellText(row.Name); title.Margin = new(0); name.Children.Add(title);
-        var state = RowStatus(row, nameof(row.StateText), nameof(row.StateTone), "检测状态" + row.Name);
+        var title = CellText(row, nameof(row.Name)); title.Margin = new(0); name.Children.Add(title);
+        var state = RowStatus(row, nameof(row.StateText), nameof(row.StateTone), "检测状态");
         state.SetBinding(IsTabStopProperty, new Binding { Path = new PropertyPath(nameof(row.HasDiagnostics)) });
         state.Click += VideoStatus_Click;
         var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -285,13 +295,14 @@ public partial class FilmSettingsView
         actions.Children.Add(RowButton("删除", row, DeleteVideo_Click, "删除视频源", "MeowFilm.ManagementRowButton.Danger"));
         var more = RowButton("···", row, (_, _) => { }, "视频源更多操作");
         var menu = new MenuFlyout();
-        var aggregate = new ToggleMenuFlyoutItem { Text = "设置聚合图片", IsChecked = row.AggregateImages };
+        var aggregate = new ToggleMenuFlyoutItem { Text = "设置聚合图片" };
+        aggregate.SetBinding(ToggleMenuFlyoutItem.IsCheckedProperty, new Binding { Source = row, Path = new PropertyPath(nameof(row.AggregateImages)), Mode = BindingMode.OneWay });
         aggregate.Click += async (_, _) => await SetAggregateImagesAsync(row);
         menu.Items.Add(aggregate); more.Flyout = menu;
         actions.Children.Add(more);
-        return [name, state, RowCheck(nameof(row.Enabled), row, VideoOption_Click, "启用视频源" + row.Name, "enabled"),
-            RowCheck(nameof(row.HomeVisible), row, VideoOption_Click, "首页显示" + row.Name, "home"),
-            RowCheck(nameof(row.SearchEnabled), row, VideoOption_Click, "搜索启用" + row.Name, "search"), actions];
+        return [name, state, RowCheck(nameof(row.Enabled), row, VideoOption_Click, "启用视频源", "enabled"),
+            RowCheck(nameof(row.HomeVisible), row, VideoOption_Click, "首页显示", "home"),
+            RowCheck(nameof(row.SearchEnabled), row, VideoOption_Click, "搜索启用", "search"), actions];
     }
 
     private bool CurrentCat(FrameworkElement element, FilmSettingsCatRow row) =>

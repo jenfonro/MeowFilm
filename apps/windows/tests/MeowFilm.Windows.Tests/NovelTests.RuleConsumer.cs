@@ -120,7 +120,7 @@ public static partial class NovelTests
             using var registration = ct.Register(() => cancelled.TrySetResult());
             entered.TrySetResult(); return await physical.Task;
         };
-        var owner = new StackPanel(); var host = GeneralAppearanceTests.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); host.Show(); await NovelTestUi.LoadedAsync(owner);
         var runtime = new Runtime(); var sources = NovelTestSources.Create(runtime);
         await sources.RefreshAsync();
         await using var server = new WebFixture();

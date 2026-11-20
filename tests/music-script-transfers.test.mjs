@@ -86,8 +86,10 @@ test('music private storage persists large values and collections through cold r
     await first.state.storage.set(context(item.generation, 'site0', `key${index}`, large));
   for (let index = 1; index < 33; index++)
     await first.state.storage.set(context(item.generation, `site${index}`, 'key', index));
-  const path = join(first.dataRoot, 'music', 'data', `${item.installationId}.json`);
-  assert.ok(readFileSync(path).length > 512 * 1024);
+  const storedBytes = await withTestDatabase(first.dataRoot, async db =>
+    (await db.query('SELECT sum(encoded_bytes) AS bytes FROM music_script_kv_entries WHERE installation_id=?',
+      [item.installationId]))[0].bytes);
+  assert.ok(storedBytes > 512 * 1024);
   success(await first.module.close());
   const reopened = setup(t, { capabilities, dataRoot: first.dataRoot });
   const restored = success(await reopened.rpc('sources.enable', { installationId: item.installationId })).item;
@@ -173,6 +175,114 @@ test('exact declaration extensions survive HTTP snapshots, canonical comparison 
   success(await reopened.rpc('sources.edit', { installationId: item.installationId, name: 'cold edit' }));
   assert.equal(stringifyJSONValue(await stored()), text);
   assert.equal(stringifyJSONValue(capabilities), text);
+});
+
+test('editing one installation ignores an unconsumed sibling check and accepts command extensions', async t => {
+  const first = setup(t), item = await load(first.rpc);
+  const sibling = await load(first.rpc, input('sibling'));
+  success(await first.module.close());
+  const checkHash = sibling.contentHash;
+  await withTestDatabase(first.dataRoot, db => db.execute(
+    'UPDATE music_script_installations SET check_hash=?,checked_at_ms=-1 WHERE installation_id=?',
+    [checkHash, sibling.installationId]));
+  const readSibling = () => withTestDatabase(first.dataRoot, async db => ({
+    installation: await db.query('SELECT * FROM music_script_installations WHERE installation_id=?', [sibling.installationId]),
+    checks: await db.query('SELECT * FROM music_script_checks WHERE installation_id=?', [sibling.installationId]),
+  }));
+  const before = await readSibling();
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  const edited = success(await reopened.rpc('sources.edit', { installationId: item.installationId,
+    name: 'changed', extra: true })).item;
+  assert.equal(edited.name, 'changed');
+  assert.deepEqual(await readSibling(), before);
+  assert.equal(success(await reopened.rpc('sources.enable', { installationId: item.installationId })).item.state, 'ready');
+  failure(await reopened.rpc('sources.detail', { installationId: sibling.installationId }), 'CORRUPT_STORAGE');
+});
+
+test('cold edits preserve an unconsumed malformed declaration and selected reads report corruption', async t => {
+  const first = setup(t), item = await load(first.rpc);
+  const sibling = await load(first.rpc, input('sibling'));
+  success(await first.module.close());
+  await withTestDatabase(first.dataRoot, async db => {
+    const result = await db.execute(
+      "UPDATE music_script_declared_nodes SET text_value=NULL WHERE installation_id=? AND kind='text'",
+      [sibling.installationId]);
+    assert.ok(result.changes > 0);
+  });
+  const readSibling = () => withTestDatabase(first.dataRoot, async db => ({
+    installation: await db.query('SELECT * FROM music_script_installations WHERE installation_id=?', [sibling.installationId]),
+    nodes: await db.query('SELECT * FROM music_script_declared_nodes WHERE installation_id=? ORDER BY site_id,node_id', [sibling.installationId]),
+  }));
+  const before = await readSibling();
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  assert.equal(success(await reopened.rpc('sources.edit', {
+    installationId: item.installationId, name: 'changed',
+  })).item.name, 'changed');
+  assert.deepEqual(await readSibling(), before);
+  failure(await reopened.rpc('sources.detail', { installationId: sibling.installationId }), 'CORRUPT_STORAGE');
+  assert.deepEqual(await readSibling(), before);
+});
+
+for (const operation of ['sources.enable', 'invoke', 'sources.check']) {
+  test(`cold ${operation} replaces a corrupt stored declaration with the live declaration`, async t => {
+    const first = setup(t), item = await load(first.rpc);
+    success(await first.module.close());
+    await withTestDatabase(first.dataRoot, db => db.execute(
+      "UPDATE music_script_declared_nodes SET text_value=NULL WHERE installation_id=? AND kind='text'",
+      [item.installationId]));
+    const reopened = setup(t, { dataRoot: first.dataRoot });
+    failure(await reopened.rpc('sources.detail', { installationId: item.installationId }), 'CORRUPT_STORAGE');
+    const parameters = operation === 'invoke' ? request(item, { current: true }) : { installationId: item.installationId };
+    const reply = success(await reopened.rpc(operation, parameters));
+    if (operation === 'invoke') assert.deepEqual(reply, { current: true });
+    const restored = success(await reopened.rpc('sources.detail', { installationId: item.installationId })).item;
+    assert.equal(restored.capabilities.kw.name, 'fixture');
+    assert.deepEqual(restored.capabilities.kw.actions, ['musicUrl']);
+    success(await reopened.module.close());
+    const cold = setup(t, { dataRoot: first.dataRoot });
+    assert.deepEqual(success(await cold.rpc('sources.detail', {
+      installationId: item.installationId,
+    })).item.capabilities, restored.capabilities);
+  });
+}
+
+test('cold catalog edits retain large typed declarations without a call argument limit', async t => {
+  const capabilities = { kw: { actions: ['musicUrl'], extra: Array.from({ length: 150000 }, (_, index) => index) } };
+  const first = setup(t, { capabilities }), item = await load(first.rpc);
+  success(await first.module.close());
+  const readNodes = () => withTestDatabase(first.dataRoot, db => db.query(
+    'SELECT * FROM music_script_declared_nodes WHERE installation_id=? ORDER BY site_id,node_id', [item.installationId]));
+  const before = await readNodes();
+  assert.ok(before.length > 150000);
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  const edited = success(await reopened.rpc('sources.edit', { installationId: item.installationId, name: 'large' })).item;
+  assert.equal(edited.name, 'large');
+  assert.deepEqual(edited.capabilities, capabilities);
+  assert.deepEqual(await readNodes(), before);
+  success(await reopened.rpc('sources.remove', { installationId: item.installationId }));
+  assert.deepEqual(await readNodes(), []);
+});
+
+test('private KV reads one value and replaces a broken selected value without consuming siblings', async t => {
+  const first = setup(t), item = await load(first.rpc);
+  const context = key => ({ installationId: item.installationId, generation: item.generation,
+    siteId: 'kw', key, signal: new AbortController().signal, isCurrent: () => true });
+  await first.state.storage.set({ ...context('selected'), value: 'old' });
+  await first.state.storage.set({ ...context('unconsumed'), value: 'broken' });
+  await withTestDatabase(first.dataRoot, db => db.execute(
+    'UPDATE music_script_kv_nodes SET text_value=NULL WHERE installation_id=? AND site_id=? AND entry_key=?',
+    [item.installationId, 'kw', 'unconsumed']));
+  const readSibling = () => withTestDatabase(first.dataRoot, db => db.query(
+    'SELECT * FROM music_script_kv_nodes WHERE installation_id=? AND site_id=? AND entry_key=? ORDER BY node_id',
+    [item.installationId, 'kw', 'unconsumed']));
+  const before = await readSibling();
+  assert.equal(await first.state.storage.get(context('selected')), 'old');
+  await first.state.storage.set({ ...context('selected'), value: 'new' });
+  assert.equal(await first.state.storage.get(context('selected')), 'new');
+  assert.deepEqual(await readSibling(), before);
+  await assert.rejects(first.state.storage.get(context('unconsumed')), { code: 'CORRUPT_STORAGE' });
+  await first.state.storage.set({ ...context('unconsumed'), value: 'replacement' });
+  assert.equal(await first.state.storage.get(context('unconsumed')), 'replacement');
 });
 
 test('B4 malformed and incomplete HTTP inputs never execute or replace a complete candidate', async t => {
@@ -310,9 +420,8 @@ test('complete candidates select exact revisions, reject changed content or base
   failure(await rpc.upload(idOf('one'), 5, Buffer.from('different'), { basename: 'x.js' }), 'SCRIPT_INTEGRITY');
   failure(await rpc.upload(idOf('one'), 5, bytes, { basename: 'other.js' }), 'SCRIPT_INTEGRITY');
   failure(await rpc('sources.update', { ...next, sourceRevision: 4 }), 'SOURCE_NOT_FOUND');
-  failure(await rpc('sources.update', { ...next, permissions: {} }), 'INVALID_REQUEST');
   assert.equal(state.installs, 1);
-  const updated = success(await rpc('sources.update', next)).item;
+  const updated = success(await rpc('sources.update', { ...next, permissions: {} })).item;
   assert.equal(updated.contentHash, hash(bytes));
   assert.equal(success(await rpc('sources.update', next)).item.generation, updated.generation);
   assert.equal(state.installs, 2);

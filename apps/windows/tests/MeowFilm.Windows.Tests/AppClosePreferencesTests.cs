@@ -120,12 +120,13 @@ public static class AppClosePreferencesTests
         {
             byte[] bytes = Encoding.UTF8.GetBytes(invalid);
             store.WindowData = bytes;
+            byte[] stored = store.WindowData!.ToArray();
             await owner.LoadAsync();
             int writes = store.Writes;
             Check(!owner.CanEdit && owner.Status.Length > 0 && owner.Behavior == WindowCloseBehavior.Exit,
                 "invalid storage preserves the last confirmed value and blocks edits");
             Check(!await owner.SaveAsync(WindowCloseBehavior.Ask) && store.Writes == writes &&
-                store.WindowData!.SequenceEqual(bytes),
+                store.WindowData!.SequenceEqual(stored),
                 "invalid storage is never repaired by an implicit default write");
         }
         store.WindowData = null;

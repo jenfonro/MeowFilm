@@ -25,6 +25,7 @@
 ```
 
 - 没有搜索模式。每种搜索固定请求 `enabled` 中的平台；`enabled` 按 `order` 排列，顺序即平台优先级。
+- `order` 可只列部分平台；设置页补足未列选项但不补写或启用。`music.search.settings.get` 可按 `kind` 读取对应分支，一类搜索不预检另一类设置。
 - 保存必须提交准确 `ifRevision`，成功后即时生效。保存先封闭并排空两类搜索；保存期间进入的 start 等到保存结束后按最新设置核对，写入未确认时返回 `SEARCH_SETTINGS_UNCONFIRMED`，不会派发旧设置。策略读取与 start 准入在同一策略 lane 内完成，旧查询排空本身不阻塞 `get`、`next`、`cancel`。
 - `music.search.start` 的平台数组必须与刚读取的当前 `enabled` 完全一致（含顺序），否则返回 `SEARCH_SETTINGS_CHANGED`。应用随后把该类型的 `pages`、`concurrency`、`cacheMinutes` 一并交给 Coordinator。
 
@@ -41,7 +42,7 @@ music.search.cancel
 
 ### `start`
 
-页面输入为 `{ keyword, kind, platforms, refresh? }`；应用补充当前设置后，Coordinator 接收：
+页面输入为 `{ keyword, kind, platforms, refresh? }`；普通额外字段不拒绝，也不改变派发参数。应用补充当前设置后，Coordinator 接收：
 
 ```json
 {
@@ -165,7 +166,7 @@ error
 - 切换到“单曲”或“歌单”时优先复用对应 snapshot；直接进入缺失的单类结果时才创建该 kind。
 - “综合”只截取两个 snapshot 的首批结果做栏目投影，“查看更多”切换到对应单类视图，不另发请求。
 - 两个栏目分别按自己的启动 flight 与 snapshot `loading` 呈现加载状态；一类结算不隐藏另一类的搜索状态。
-- 页面按关键词、kind、当前账号代次和已保存派发平台登记唯一启动 flight，再发布会触发 WPF 绑定回调的状态；SelectionChanged、重复提交或刷新重入只能等待该 flight，不能顺序创建第二个物理 session。
+- 页面按关键词、kind、当前账号代次和已保存派发平台登记唯一启动 flight，再发布会触发 WinUI 绑定回调的状态；SelectionChanged、重复提交或刷新重入只能等待该 flight，不能顺序创建第二个物理 session。
 - 原生账号 owner 的首次成功权威观察由 owner 单飞并复用；歌曲／歌单切换及同身份 start 不重复读取整份账号文档。提交未知仍强制重新权威观察，实际平台请求继续取得并核对自己的精确账号 lease。
 - 返回搜索页使用内存 snapshot 和各 kind 独立滚动位置，不重新请求。
 - “更多”（单曲、歌单视图滚动到底）只调用一次 `next`；失败平台由下一轮自动重试，页面没有单独的平台重试入口。

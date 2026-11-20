@@ -14,7 +14,6 @@ struct MusicDocument: Sendable {
     let songRows: any MusicNativeLibraryReading
     init(snapshot: MusicNativeLibrarySnapshot, runID: String, songs: any MusicNativeLibraryReading) throws {
         revision = snapshot.revision; songRows = songs
-        try musicRequire(snapshot.areas.keys.allSatisfy(Self.areas.contains), .corruptDocument)
         func area(_ name: String, _ fallback: MJ) throws -> MJ { try snapshot.areas[name].map { try MJ.parse($0) } ?? fallback }
         library = try area("library", MusicModel.library)
         queue = try area("queue", MusicModel.queue)

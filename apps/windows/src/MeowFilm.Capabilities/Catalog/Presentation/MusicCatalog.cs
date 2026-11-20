@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 
 namespace MeowFilm.Capabilities;
 
@@ -216,7 +217,7 @@ public sealed partial class MusicCapability
         if (section is null) return;
         section.SelectTab(tab);
         if (IsCatalogHome) RefreshHomeDisplay();
-        visibleCatalogCards.RemoveWhere(card => !ContainsCatalogCard(card));
+        RefreshCatalogDemandMembers();
     }
     public Task OpenCatalogCardAsync(MusicCatalogCard card)
     {
@@ -900,7 +901,7 @@ public sealed partial class MusicCapability
                 IEnumerable<MusicCatalogSection> songSections = IsCatalogHome ? homeDisplaySections : state.Sections;
                 var songs = songSections.SelectMany(s => s.Items).Select(i => i.Song).OfType<SongRow>().ToArray();
                 if (!Songs.SequenceEqual(songs, ReferenceEqualityComparer.Instance))
-                { Songs.Clear(); foreach (var song in songs) Songs.Add(song); }
+                    ReconcileSongRows(Songs, songs);
                 if (!append) selectedSong = null;
                 collection = null; total = state.Total;
                 var visibleCount = IsCatalogHome
@@ -913,7 +914,7 @@ public sealed partial class MusicCapability
             finally { publishing = false; }
             ActivateCatalogOptionalReads(route, platform, state, initializeEntries);
             if (append) return;
-            _ = Presentation.Dispatcher.InvokeAsync(() => { if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(state.Scroll); }, DispatcherPriority.Loaded);
+            _ = Presentation.Dispatcher.EnqueueAsync(() => { if (!stopping && generation == loadGeneration) Presentation.RestoreScroll(state.Scroll); }, DispatcherQueuePriority.Low);
         }
     }
 }

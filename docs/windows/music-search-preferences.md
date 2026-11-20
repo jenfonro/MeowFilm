@@ -34,11 +34,11 @@
 }
 ```
 
-- `order` 必须完整且只包含五个平台，顺序即平台优先级。
+- `order` 是五个平台中任意无重复子集，顺序即平台优先级；设置页补全可选项只用于展示，不补写或启用。
 - `enabled` 可以为空，但必须按 `order` 中的相对顺序排列且不得重复。
 - `pages` 为每轮请求的页数（`int` 范围内的正整数），每页条数由平台适配器决定；`concurrency` 为每个平台同时进行的请求数（`int` 范围内的正整数）；`cacheMinutes` 为搜索结果缓存时长（1–1440 分钟）。
 - 全新文档尚未写入该区域时返回上述当前默认值，不产生写入。
-- 已存在区域必须完整符合 schema 3；其他格式明确失败，不转换、不映射、不回退读取。
+- 已存在区域按 schema 3 和实际消费分支读取；所选分支损坏明确失败，不转换、不映射、不回退默认，也不预检未请求的兄弟分支。
 
 ### `native-search-history`
 
@@ -57,7 +57,7 @@
 - 实际搜索文本的无效字符、控制字符或非法 Unicode 明确失败，不设本地文本长度配额；未消费字段不作为门禁，已有设置扩展保留。
 ## 原生协议
 
-- `music.search.settings.get {}`：读取唯一当前设置。
+- `music.search.settings.get {kind?}`：读取唯一当前设置；指定 `songs` 或 `playlists` 时只返回对应分支及 schema/revision。
 - `music.search.settings.save { ifRevision, songs, playlists }`：以完整当前状态执行 CAS。
 - `music.search.history.get {}`：读取历史及 revision。
 - `music.search.history.record { text, kind }`：由 owner 串行去重并置顶。

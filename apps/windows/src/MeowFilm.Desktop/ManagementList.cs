@@ -9,7 +9,7 @@ namespace MeowFilm.Desktop;
 
 public sealed record ManagementRow(string Id, string Title, string Detail, bool Enabled,
     Action Edit, Action<bool> Toggle, MenuFlyout Menu, bool Failed = false,
-    Func<IReadOnlyList<FrameworkElement>>? Cells = null);
+    Func<IReadOnlyList<FrameworkElement>>? Cells = null, object? CellsIdentity = null);
 public sealed record ManagementColumn(string Header, GridLength Width, double MaxWidth = double.PositiveInfinity);
 
 /// <summary>Virtualized settings rows; native ListView owns drag, auto-scroll and keyboard reordering.</summary>
@@ -48,7 +48,13 @@ public sealed class ManagementList : UserControl
     private IDisposable? visibility;
     private readonly HashSet<Grid> columnRows = [];
     private double[] sharedWidths = [];
-    private bool measuringColumns;
+    private bool measuringColumns, columnsQueued;
+    private void QueueColumns()
+    {
+        if (columnsQueued) return;
+        columnsQueued = DispatcherQueue.TryEnqueue(() => { columnsQueued = false; MeasureColumns(null, EventArgs.Empty); });
+    }
+    private void ColumnSizeChanged(object sender, SizeChangedEventArgs args) => QueueColumns();
     private void MeasureColumns(object? sender, object args)
     {
         if (measuringColumns) return;
@@ -74,9 +80,13 @@ public sealed class ManagementList : UserControl
     }
     internal void AttachColumns(Grid row)
     {
-        if (columnRows.Add(row)) row.LayoutUpdated += MeasureColumns;
+        if (columnRows.Add(row)) { row.SizeChanged += ColumnSizeChanged; QueueColumns(); }
     }
-    internal void DetachColumns(Grid row) { columnRows.Remove(row); row.LayoutUpdated -= MeasureColumns; }
+    internal void DetachColumns(Grid row)
+    {
+        if (!columnRows.Remove(row)) return;
+        row.SizeChanged -= ColumnSizeChanged; QueueColumns();
+    }
 
     public ManagementList()
     {
@@ -134,26 +144,42 @@ public sealed class ManagementList : UserControl
     private void SelectAll(bool value) { selected.Clear(); if (value) selected.UnionWith(rows.Select(row => row.Id)); Changed(); }
     public void SetColumns(IReadOnlyList<ManagementColumn> value)
     {
-        columns = value.ToArray(); sharedWidths = []; header.Children.Clear(); ApplyColumns(header); header.Children.Add(headerAll);
+        if (header.Visibility == Visibility.Visible && columns.SequenceEqual(value)) return;
+        columns = value.ToArray(); sharedWidths = []; ApplyColumns(header);
+        if (header.Children.Count == 0) header.Children.Add(headerAll);
+        while (header.Children.Count > columns.Count + 1) header.Children.RemoveAt(header.Children.Count - 1);
         for (int index = 0; index < columns.Count; index++)
         {
-            var title = new TextBlock { Text = columns[index].Header, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(6, 0, 6, 0), HorizontalAlignment = columns[index].Width.IsStar ? HorizontalAlignment.Left : HorizontalAlignment.Center };
-            title.UseResource(StyleProperty, "MeowFilm.MutedText"); Grid.SetColumn(title, index + 1); header.Children.Add(title);
+            TextBlock title;
+            if (index + 1 < header.Children.Count) title = (TextBlock)header.Children[index + 1];
+            else
+            {
+                title = new TextBlock { VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(6, 0, 6, 0) };
+                title.UseResource(StyleProperty, "MeowFilm.MutedText"); Grid.SetColumn(title, index + 1); header.Children.Add(title);
+            }
+            title.Text = columns[index].Header;
+            title.HorizontalAlignment = columns[index].Width.IsStar ? HorizontalAlignment.Left : HorizontalAlignment.Center;
         }
-        header.Visibility = Visibility.Visible; Fill(); Count();
+        header.Visibility = Visibility.Visible;
+        foreach (var grid in columnRows) ApplyColumns(grid);
+        QueueColumns();
     }
     internal void ApplyColumns(Grid grid)
     {
-        grid.ColumnDefinitions.Clear(); grid.ColumnDefinitions.Add(new() { Width = new(48) });
+        if (grid.ColumnDefinitions.Count == 0) grid.ColumnDefinitions.Add(new() { Width = new(48) });
+        while (grid.ColumnDefinitions.Count > columns.Count + 1) grid.ColumnDefinitions.RemoveAt(grid.ColumnDefinitions.Count - 1);
         for (int index = 0; index < columns.Count; index++)
         {
             var column = columns[index];
-            grid.ColumnDefinitions.Add(new() { Width = column.Width.IsAuto && index < sharedWidths.Length && sharedWidths[index] > 0 ? new GridLength(sharedWidths[index]) : column.Width, MaxWidth = column.MaxWidth });
+            if (grid.ColumnDefinitions.Count <= index + 1) grid.ColumnDefinitions.Add(new());
+            var definition = grid.ColumnDefinitions[index + 1];
+            definition.Width = column.Width.IsAuto && index < sharedWidths.Length && sharedWidths[index] > 0 ? new GridLength(sharedWidths[index]) : column.Width;
+            definition.MaxWidth = column.MaxWidth;
         }
     }
     internal void ReportOrder(string sourceId, string targetId, bool after)
     {
-        if (!EnableRowDrag || rows.Count != total || sourceId == targetId || !rows.Any(row => row.Id == sourceId) || !rows.Any(row => row.Id == targetId)) return;
+        if (!CanDragRows || sourceId == targetId || !rows.Any(row => row.Id == sourceId) || !rows.Any(row => row.Id == targetId)) return;
         var order = rows.Select(row => row.Id).ToList(); order.Remove(sourceId); order.Insert(order.IndexOf(targetId) + (after ? 1 : 0), sourceId);
         if (!order.SequenceEqual(rows.Select(row => row.Id))) OrderChanged?.Invoke(order.ToArray());
     }
@@ -164,8 +190,21 @@ public sealed class ManagementList : UserControl
     }
     private void Fill()
     {
-        draggingOrder = null; items.Clear();
-        foreach (var row in rows) items.Add(new(this, row, selected.Contains(row.Id), value => { if (value) selected.Add(row.Id); else selected.Remove(row.Id); Count(); SelectionChanged?.Invoke(); }));
+        draggingOrder = null;
+        var ids = rows.Select(row => row.Id).ToHashSet(StringComparer.Ordinal);
+        for (int index = items.Count - 1; index >= 0; index--)
+            if (!ids.Contains(items[index].Row.Id)) items.RemoveAt(index);
+        var retained = items.ToDictionary(item => item.Row.Id, StringComparer.Ordinal);
+        for (int index = 0; index < rows.Count; index++)
+        {
+            var row = rows[index];
+            if (retained.TryGetValue(row.Id, out var state))
+            {
+                if (!ReferenceEquals(items[index], state)) items.Move(items.IndexOf(state), index);
+                state.Update(row, selected.Contains(row.Id));
+            }
+            else items.Insert(index, new(this, row, selected.Contains(row.Id)));
+        }
         UpdateDragAdmission();
     }
     private void Count()
@@ -173,7 +212,16 @@ public sealed class ManagementList : UserControl
         headerAll.IsChecked = all.IsChecked = rows.Count > 0 && rows.All(row => selected.Contains(row.Id)); all.Content = $"全选（{selected.Count}/{total}）";
         inverse.IsEnabled = rows.Count > 0; remove.IsEnabled = More.IsEnabled = selected.Count > 0;
     }
-    private void Changed() { Fill(); Count(); SelectionChanged?.Invoke(); }
+    internal void Select(ManagementRowState state, bool value)
+    {
+        if (value) selected.Add(state.Row.Id); else selected.Remove(state.Row.Id);
+        state.SetSelected(value); Count(); SelectionChanged?.Invoke();
+    }
+    private void Changed()
+    {
+        foreach (var state in items) state.SetSelected(selected.Contains(state.Row.Id));
+        Count(); SelectionChanged?.Invoke();
+    }
     public static Button Button(string title, Action action)
     {
         var button = new Button { Content = title, Padding = new(12, 8, 12, 8), MinHeight = 36, Margin = new(4, 0, 0, 0) };
@@ -181,48 +229,142 @@ public sealed class ManagementList : UserControl
     }
     public static void OpenMenu(Button button) => (button.ContextFlyout as MenuFlyout)?.ShowAt(button, new FlyoutShowOptions { Placement = FlyoutPlacementMode.Bottom });
 }
-internal sealed class ManagementRowState(ManagementList owner, ManagementRow row, bool selected, Action<bool> select)
+internal sealed class ManagementRowState(ManagementList owner, ManagementRow row, bool selected)
 {
     internal ManagementList Owner => owner;
-    internal ManagementRow Row => row;
+    internal ManagementRow Row { get; private set; } = row;
     internal bool Selected { get; private set; } = selected;
-    internal void Select(bool value) { Selected = value; select(value); }
+    internal event Action? RowChanged;
+    internal event Action? SelectionChanged;
+    internal void Update(ManagementRow value, bool selected)
+    {
+        var before = Row; Row = value;
+        if (before.Title != value.Title || before.Detail != value.Detail || before.Enabled != value.Enabled ||
+            before.Failed != value.Failed || !ReferenceEquals(before.Menu, value.Menu) ||
+            (before.Cells is null) != (value.Cells is null) ||
+            value.Cells is not null && !ReferenceEquals(before.CellsIdentity ?? before, value.CellsIdentity ?? value))
+            RowChanged?.Invoke();
+        SetSelected(selected);
+    }
+    internal void SetSelected(bool value)
+    {
+        if (Selected == value) return;
+        Selected = value; SelectionChanged?.Invoke();
+    }
+    internal void Select(bool value) => owner.Select(this, value);
 }
 
 public sealed class ManagementRowView : Grid
 {
     private ManagementList? owner;
+    private ManagementRowState? state;
+    private ManagementRow? renderedRow;
+    private CheckBox? check, enabled;
+    private StackPanel? text;
+    private TextBlock? title, detail;
+    private Button? edit, more;
+    private object? cellsIdentity;
+    private bool customCells, observing;
     public ManagementRowView()
     {
-        DataContextChanged += (_, _) => Render();
-        Loaded += (_, _) => { if (DataContext is ManagementRowState state) { owner = state.Owner; owner.AttachColumns(this); } };
-        Unloaded += (_, _) => { owner?.DetachColumns(this); owner = null; };
+        DataContextChanged += (_, _) => Bind();
+        Loaded += (_, _) =>
+        {
+            Bind();
+            if (state is null) return;
+            owner = state.Owner; owner.ApplyColumns(this); owner.AttachColumns(this);
+        };
+        Unloaded += (_, _) => { StopObserving(); owner?.DetachColumns(this); owner = null; };
         Margin = new(6, 0, 6, 0); MinHeight = 64;
     }
-    private void Render()
+    private void StopObserving()
     {
-        owner?.DetachColumns(this); owner = null;
-        Children.Clear(); if (DataContext is not ManagementRowState state) return;
-        if (IsLoaded) { owner = state.Owner; owner.AttachColumns(this); }
-        state.Owner.ApplyColumns(this); var row = state.Row;
-        var check = new CheckBox { IsChecked = state.Selected, Tag = "round", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center }; check.UseResource(StyleProperty, "MeowFilm.ManagementCheck");
-        AutomationProperties.SetName(check, "选择 " + row.Title); check.Click += (_, _) => state.Select(check.IsChecked == true); Children.Add(check);
-        if (row.Cells is not null)
+        if (!observing || state is null) return;
+        state.RowChanged -= UpdateRow; state.SelectionChanged -= UpdateSelection; observing = false;
+    }
+    private void Bind()
+    {
+        var next = DataContext as ManagementRowState;
+        if (!ReferenceEquals(state, next))
         {
-            var cells = row.Cells();
+            StopObserving(); owner?.DetachColumns(this); owner = null; state = next;
+            Children.Clear(); check = enabled = null; text = null; title = detail = null; edit = more = null;
+            cellsIdentity = null; customCells = false; renderedRow = null;
+        }
+        if (state is null) return;
+        if (IsLoaded && !observing) { state.RowChanged += UpdateRow; state.SelectionChanged += UpdateSelection; observing = true; }
+        if (IsLoaded && owner is null) { owner = state.Owner; owner.AttachColumns(this); }
+        state.Owner.ApplyColumns(this);
+        if (check is null)
+        {
+            check = new CheckBox { Tag = "round", HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            check.UseResource(StyleProperty, "MeowFilm.ManagementCheck");
+            check.Click += (_, _) => state?.Select(check.IsChecked == true); Children.Add(check);
+        }
+        UpdateRow(); UpdateSelection();
+    }
+    private void UpdateSelection() { if (check is not null && state is not null) check.IsChecked = state.Selected; }
+    private void UpdateRow()
+    {
+        if (state is null || check is null) return;
+        var row = state.Row;
+        var before = renderedRow; renderedRow = row;
+        if (before?.Title != row.Title) AutomationProperties.SetName(check, "选择 " + row.Title);
+        bool custom = row.Cells is not null;
+        object identity = row.CellsIdentity ?? row;
+        if (custom != customCells || custom && !ReferenceEquals(cellsIdentity, identity))
+        {
+            while (Children.Count > 1) Children.RemoveAt(Children.Count - 1);
+            enabled = null; text = null; title = detail = null; edit = more = null;
+            customCells = custom; cellsIdentity = identity;
+        }
+        if (custom)
+        {
+            if (Children.Count > 1) return;
+            var cells = row.Cells!();
             if (cells.Count != ColumnDefinitions.Count - 1) throw new InvalidOperationException("Management row cells must match its columns.");
             for (int index = 0; index < cells.Count; index++) { SetColumn(cells[index], index + 1); Children.Add(cells[index]); }
             return;
         }
-        var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 8, 12, 8) };
-        var title = new TextBlock { Text = row.Title, TextTrimming = TextTrimming.CharacterEllipsis };
-        title.UseResource(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Body");
-        title.UseResource(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Normal");
-        title.UseResource(FrameworkElement.StyleProperty, "MeowFilm.Text"); text.Children.Add(title);
-        if (row.Detail.Length > 0) { var detail = new TextBlock { Text = row.Detail, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) }; detail.UseResource(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Caption"); detail.UseResource(FrameworkElement.StyleProperty, row.Failed ? "MeowFilm.ErrorText" : "MeowFilm.MutedText"); text.Children.Add(detail); }
-        SetColumn(text, 1); Children.Add(text);
-        var enabled = new CheckBox { IsChecked = row.Enabled, VerticalAlignment = VerticalAlignment.Center, Margin = new(8, 0, 12, 0) }; enabled.UseResource(StyleProperty, "MeowFilm.ManagementSwitch"); AutomationProperties.SetName(enabled, "启用 " + row.Title); enabled.Click += (_, _) => row.Toggle(enabled.IsChecked == true); SetColumn(enabled, 2); Children.Add(enabled);
-        var edit = ManagementList.Button("编辑", row.Edit); edit.ClearValue(MinHeightProperty); edit.ClearValue(Control.PaddingProperty); edit.UseResource(StyleProperty, "MeowFilm.ManagementRowButton"); AutomationProperties.SetName(edit, "编辑 " + row.Title); SetColumn(edit, 3); Children.Add(edit);
-        Button? more = null; more = ManagementList.Button("···", () => ManagementList.OpenMenu(more!)); more.ClearValue(MinHeightProperty); more.ClearValue(Control.PaddingProperty); more.UseResource(StyleProperty, "MeowFilm.ManagementRowButton"); more.ContextFlyout = row.Menu; AutomationProperties.SetName(more, row.Title + "更多操作"); SetColumn(more, 4); Children.Add(more);
+        bool created = text is null;
+        if (created)
+        {
+            text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 8, 12, 8) };
+            title = new TextBlock { TextTrimming = TextTrimming.CharacterEllipsis };
+            title.UseResource(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Body");
+            title.UseResource(TextBlock.FontWeightProperty, "MeowFilm.Font.Weight.Normal");
+            title.UseResource(FrameworkElement.StyleProperty, "MeowFilm.Text"); text.Children.Add(title);
+            SetColumn(text, 1); Children.Add(text);
+            enabled = new CheckBox { VerticalAlignment = VerticalAlignment.Center, Margin = new(8, 0, 12, 0) };
+            enabled.UseResource(StyleProperty, "MeowFilm.ManagementSwitch");
+            enabled.Click += (_, _) => state?.Row.Toggle(enabled.IsChecked == true); SetColumn(enabled, 2); Children.Add(enabled);
+            edit = ManagementList.Button("编辑", () => state?.Row.Edit());
+            edit.ClearValue(MinHeightProperty); edit.ClearValue(Control.PaddingProperty); edit.UseResource(StyleProperty, "MeowFilm.ManagementRowButton"); SetColumn(edit, 3); Children.Add(edit);
+            more = ManagementList.Button("···", () => ManagementList.OpenMenu(more!));
+            more.ClearValue(MinHeightProperty); more.ClearValue(Control.PaddingProperty); more.UseResource(StyleProperty, "MeowFilm.ManagementRowButton"); SetColumn(more, 4); Children.Add(more);
+        }
+        if (created || before?.Title != row.Title) title!.Text = row.Title;
+        bool detailCreated = row.Detail.Length > 0 && detail is null;
+        if (detailCreated)
+        {
+            detail = new TextBlock { TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, Margin = new(0, 4, 0, 0) };
+            detail.UseResource(TextBlock.FontSizeProperty, "MeowFilm.Font.Size.Caption"); text!.Children.Add(detail);
+        }
+        if (detail is not null)
+        {
+            if (detailCreated || before?.Detail != row.Detail)
+            {
+                detail.Text = row.Detail; detail.Visibility = row.Detail.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (detailCreated || before?.Failed != row.Failed)
+                detail.UseResource(FrameworkElement.StyleProperty, row.Failed ? "MeowFilm.ErrorText" : "MeowFilm.MutedText");
+        }
+        if (created || before?.Enabled != row.Enabled) enabled!.IsChecked = row.Enabled;
+        if (created || before?.Title != row.Title)
+        {
+            AutomationProperties.SetName(enabled!, "启用 " + row.Title); AutomationProperties.SetName(edit!, "编辑 " + row.Title);
+            AutomationProperties.SetName(more!, row.Title + "更多操作");
+        }
+        if (created || !ReferenceEquals(before?.Menu, row.Menu)) more!.ContextFlyout = row.Menu;
     }
 }

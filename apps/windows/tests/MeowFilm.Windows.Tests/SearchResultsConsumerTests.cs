@@ -36,6 +36,7 @@ public static partial class MusicUiTests
         yield return Case("unified search pending film stop keeps later tabs and resumes the same search", UnifiedStopTabs);
         yield return Case("unified search pending film stop cannot remount results after page exit", UnifiedStopExit);
         yield return Case("unified search novel target five result classes route book and preserve original query", UnifiedNovel);
+        yield return Case("unified search novel receipts update only changed cards covers and source states", UnifiedNovelIncremental);
         yield return Case("unified search retired novel preparation cannot start after tab changes or page exit", UnifiedNovelPreparation);
         yield return Case("unified search same-word target change cancels novel work without discarding retained pages", UnifiedNovelRetirement);
     }
@@ -62,6 +63,55 @@ public static partial class MusicUiTests
         True(filmTools.Visibility == Visibility.Visible, "film results retain their own metadata status and raw-list switch");
         await f.Page.OpenTabAsync("songs"); Equal("music", f.Page.SelectedTarget);
         True(filmTools.Visibility == Visibility.Collapsed, "music results do not inherit film-only tools");
+    }
+    private static async Task UnifiedNovelIncremental()
+    {
+        var runtime = new NovelTests.Runtime();
+        await using var f = await UnifiedScene.Create(novelRuntime: runtime);
+        await f.Submit("增量小说", "novel");
+        await SearchFixture.Until(() => !f.Novel.Search.Loading && f.Novel.Search.Books.Count == 1);
+        var view = (SearchResultsView)f.Page.View;
+        var books = f.Novel.Search.Books; var states = f.Novel.Search.States;
+        var original = books.Single() with { CoverUrl = "https://a.invalid/cover.png" };
+        books[0] = original; view.PublishNovel(); view.UpdateLayout();
+        NovelImage Image(Button button) => Visuals(button).OfType<NovelImage>().Single();
+        Button Card(string name) => Visuals(view).OfType<Button>().Single(button =>
+            Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == name && button.Content is StackPanel);
+        await SearchFixture.Until(() => Visuals(view).OfType<NovelImage>().Any(image => image.Source is not null));
+        var first = Card(original.Name); var image = Image(first); var pixels = image.Source;
+        int reads = runtime.ImageReads, releases = runtime.Released;
+        var status = Visuals(view).OfType<TextBlock>().Single(text => text.Text == states.Single().Source.Name + " · " + states.Single().Status);
+        states[0] = states[0] with { Status = "搜索中" }; view.PublishNovel(); await Drain();
+        True(ReferenceEquals(Card(original.Name), first) && ReferenceEquals(Image(first), image) && ReferenceEquals(image.Source, pixels) &&
+            runtime.ImageReads == reads && runtime.Released == releases && status.Text.EndsWith("搜索中"),
+            "status receipts retain the original status control, book card and admitted image");
+        var updated = original with { Name = "新书名", Author = "新作者" };
+        books[0] = updated; view.PublishNovel(); await Drain();
+        True(ReferenceEquals(Card(updated.Name), first) && ReferenceEquals(Image(first), image) && ReferenceEquals(image.Source, pixels) &&
+            runtime.ImageReads == reads && runtime.Released == releases && Visuals(first).OfType<TextBlock>().Any(text => text.Text == updated.Author),
+            "metadata updates change only text and the current action target");
+        NovelBook? opened = null;
+        f.Page.NavigateToNovelAsync = (book, _) => { opened = book; return Task.CompletedTask; };
+        DesktopTestUi.Invoke(first); await SearchFixture.Until(() => opened is not null);
+        True(ReferenceEquals(opened, updated), "the retained button opens the current book snapshot");
+        var second = updated with { BookUrl = "https://novel.invalid/second", Name = "第二本", CoverUrl = "" };
+        books.Add(second); view.PublishNovel(); await Drain();
+        var secondCard = Card(second.Name);
+        True(ReferenceEquals(Card(updated.Name), first) && ReferenceEquals(Image(first), image) && runtime.ImageReads == reads,
+            "adding a result does not recreate the existing cover");
+        books.Move(1, 0); view.PublishNovel(); await Drain();
+        True(ReferenceEquals(Card(second.Name), secondCard) && ReferenceEquals(Card(updated.Name), first), "reordering retains both cards");
+        books.Remove(second); view.PublishNovel(); await Drain();
+        True(!Visuals(view).Contains(secondCard) && ReferenceEquals(Image(first), image), "removing one card preserves its neighbour");
+        books[0] = updated with { CoverUrl = "https://a.invalid/cover-next.png" }; view.PublishNovel(); view.UpdateLayout();
+        await SearchFixture.Until(() => runtime.ImageReads == reads + 1 && runtime.Released == releases + 1 && Image(first).Source is not null);
+        var nextImage = Image(first);
+        True(!ReferenceEquals(nextImage, image) && ReferenceEquals(Card(updated.Name), first), "a changed cover URL retires only its image owner");
+        books[0] = books[0] with { Revision = books[0].Revision + 1 }; view.PublishNovel(); view.UpdateLayout(); await Drain();
+        True(!ReferenceEquals(Image(first), nextImage), "a changed source revision retires the cover identity");
+        states[0] = states[0] with { Status = "完成" }; view.PublishNovel(); await Drain();
+        True(Visuals(view).Contains(status) && status.Text.EndsWith("完成"), "later status receipts reuse the original source label");
+        books.Clear(); view.PublishNovel(); await SearchFixture.Until(() => runtime.ImageReferences.Count == 0);
     }
     private static async Task UnifiedNovelPreparation()
     {

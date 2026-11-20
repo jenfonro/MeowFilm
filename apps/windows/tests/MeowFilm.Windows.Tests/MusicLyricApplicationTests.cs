@@ -151,6 +151,16 @@ public static class MusicLyricApplicationTests
                 platforms = new[] { "tx", "wy", "kg", "kw", "mg" }, enabled = new[] { "wy", "tx" } })).GetProperty("ok").GetBoolean());
             Ready(await f.Lookup(song)); Equal("tx", f.Provider.Requests.Single().Platform);
         });
+        yield return Case("explicitly enabled edition outside a partial priority list remains available", async f =>
+        {
+            var song = Song();
+            var qq = await MusicSongFixture.AdoptAsync(f.Library, Song("tx", "partial-exact"));
+            song["sources"]!.AsArray().Add(qq["sources"]![0]!.DeepClone());
+            True((await f.Library.ExecuteAsync("music.metadata.settings.save", new { ifRevision = 0,
+                platforms = new[] { "wy" }, enabled = new[] { "tx" } })).GetProperty("ok").GetBoolean());
+            Ready(await f.Lookup(song)); Equal("tx", f.Provider.Requests.Single().Platform);
+            Equal(0, f.SourceReads);
+        });
         yield return Case("empty metadata enabled subset blocks both official and enabled LX lookup", async f =>
         {
             f.AddSource("enabled-script", "wy");
@@ -313,14 +323,17 @@ public static class MusicLyricApplicationTests
             Equal("canonical", result.GetProperty("lines")[0].GetProperty("text").GetString());
             Ready(await f.Lookup(Song())); Equal(1, f.Provider.Requests.Count);
         });
-        yield return Case("invalid lyric size rejects without storing a truncated success", async f =>
+        yield return Case("long provider lyrics are preserved and reused without truncation", async f =>
         {
+            var text = new string('x', 65536);
             f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload() with {
-                Text = "[00:01]" + new string('x', 65536)
+                Text = "[00:01]" + text
             });
-            Code(await f.Lookup(Song()), "INVALID_LYRIC_RESPONSE");
-            f.Provider.Handler = (request, _) => Task.FromResult<NativeLyricPayload?>(Payload());
-            Ready(await f.Lookup(Song())); Equal(2, f.Provider.Requests.Count);
+            var result = await f.Lookup(Song()); Ready(result);
+            Equal(text, result.GetProperty("lines")[0].GetProperty("text").GetString());
+            var cached = await f.Lookup(Song()); Ready(cached);
+            Equal(text, cached.GetProperty("lines")[0].GetProperty("text").GetString());
+            Equal(1, f.Provider.Requests.Count);
         });
         yield return Case("native lyric owner close physically drains a noncooperative request", async f =>
         {
@@ -362,7 +375,7 @@ public static class MusicLyricApplicationTests
         });
     }
     private static TestCase Case(string name, Func<Fixture, Task> body) => new("Native lyric application " + name,
-        async () => { await using var fixture = new Fixture(); await body(fixture).WaitAsync(TimeSpan.FromSeconds(10)); });
+        async () => { await using var fixture = new Fixture(); await Task.Run(() => body(fixture)).WaitAsync(TimeSpan.FromSeconds(10)); });
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static NativeLyricPayload Payload() =>
         new( "[00:01]original", "[00:01]translation", "[00:01]romanized");

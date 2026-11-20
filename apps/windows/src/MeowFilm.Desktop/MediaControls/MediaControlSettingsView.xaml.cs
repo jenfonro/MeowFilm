@@ -2,8 +2,8 @@ using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Key = System.Windows.Input.Key;
-using ModifierKeys = System.Windows.Input.ModifierKeys;
+using Key = Windows.System.VirtualKey;
+using ModifierKeys = Windows.System.VirtualKeyModifiers;
 
 namespace MeowFilm.Desktop;
 
@@ -27,7 +27,7 @@ public partial class MediaControlSettingsView : UserControl
         InitializeComponent();
         DataContext = settings;
         ShortcutRows.ItemsSource = rows;
-        LayoutUpdated += View_LayoutUpdated;
+        _ = DesktopVisual.ObserveVisibility(this, visible => { if (!visible) EndRecording(); });
         Refresh();
     }
 
@@ -135,10 +135,6 @@ public partial class MediaControlSettingsView : UserControl
         Refresh();
     }
     private void Window_Deactivated(object? sender, EventArgs e) => EndRecording();
-    private void View_LayoutUpdated(object? sender, object args)
-    {
-        if (recordingButton is not null && !DesktopVisual.IsVisible(this)) EndRecording();
-    }
     private void View_LostFocus(object sender, RoutedEventArgs e)
     {
         if (recordingButton is not null && !ReferenceEquals(DesktopVisual.Focused(this), recordingButton)) EndRecording();

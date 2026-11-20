@@ -1,12 +1,13 @@
 using System.ComponentModel;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Capabilities;
 
 public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
 {
     private readonly IMusicVipPageSource source;
-    private readonly Dispatcher dispatcher;
+    private readonly OwnerDispatcher dispatcher;
     private CancellationTokenSource? request;
     private Task transition = Task.CompletedTask;
     private Task? preparation, disposal;
@@ -16,7 +17,7 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
     private long epoch, generation;
     private bool signedToday, signUnconfirmed, viewLoaded, vipRoute, surfaceActive, stopping, disposed;
 
-    internal MusicVipPage(IMusicVipPageSource source, Dispatcher dispatcher)
+    internal MusicVipPage(IMusicVipPageSource source, OwnerDispatcher dispatcher)
     {
         this.source = source ?? throw new ArgumentNullException(nameof(source));
         this.dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
@@ -201,8 +202,8 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
 
     private void Invalidated()
     {
-        if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished) return;
-        _ = dispatcher.InvokeAsync(() =>
+        if (dispatcher.IsClosing) return;
+        _ = dispatcher.EnqueueAsync(() =>
         {
             if (disposed || stopping) return;
             var reload = surfaceActive && viewLoaded && vipRoute;

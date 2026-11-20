@@ -33,9 +33,13 @@ public sealed class FilmPlaybackPoster : Grid
         Children.Add(artwork);
     }
 
+    private static bool IsBundled(string? address) => address?.StartsWith(BundledPrefix, StringComparison.Ordinal) == true;
+    internal static IEnumerable<ArtworkItemResource> ArtworkResources(string? address) =>
+        IsBundled(address) || string.IsNullOrEmpty(address) ? [] : [new("cover", address)];
+
     private void UpdateAddress()
     {
-        bool bundled = Address?.StartsWith(BundledPrefix, StringComparison.Ordinal) == true;
+        bool bundled = IsBundled(Address);
         bundledImage.Source = bundled ? new BitmapImage(new Uri(Address!, UriKind.Absolute)) : null;
         bundledImage.Visibility = bundled ? Visibility.Visible : Visibility.Collapsed;
         artwork.Address = bundled ? "" : Address ?? "";

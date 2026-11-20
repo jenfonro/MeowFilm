@@ -41,7 +41,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402，Node.js 版本以 `scripts/script-host-native.json` 的 `build.node` 为准。
 - 通用脚本宿主与影视规则共用 Node addon，需要 Python、Perl、NASM 与 MSVC x64 开发环境（`cl`／`nmake` 在 PATH）；首次构建按 `scripts/script-host-native.json` 下载校验依赖，后续复用默认缓存。
 - 随 App 发布的 Node 运行时版本与来源由 `scripts/script-host-native.json` 的 `build.node` 锁定；`scripts/windows/node-runtime.json` 固定运行时文件与许可证哈希，构建时 PATH 上的 `node.exe` 须符合该版本与哈希。
-- 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Desktop Runtime。
+- 默认完整发布目录自带 Node、引擎依赖和 .NET，不要求目标电脑安装开发工具；`-FrameworkDependent` 另需系统 .NET Runtime。
 
 ## 目录
 
@@ -66,6 +66,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟与 D3D11 原生 HDR 输出；固定 KSPlayer 机制来源及静态依赖，不包含上游 UI 或音乐 owner
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
+  - `MeowFilm.Threading` — 无 XAML 依赖的 DispatcherQueue owner 调度、排队取消和计时器机制
   - `MeowFilm.Platform` — 本地 SQLite 与资源文件能力、私密启动管道、HTTP 子进程会话、文件授权
   - `MeowFilm.Desktop` — 窗口、导航、设置入口、主题、通知
   - `MeowFilm.Audio` — 独立音乐解码、PCM／DSP 与 WASAPI 输出
@@ -139,6 +140,9 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - 删除或移动移植代码前确认许可来源；仍在使用的许可文件随代码保留。
 
 ## 前端
+
+- Windows 全应用的栏目、卡片和列表显示投影只由内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动与布局事件不得扫描整页控件树来决定业务显示、重建投影或触发刷新。视口只准入尚未看过的资源；已准入请求、图像与取色在当前挂载页面／章节的 owner 内复用，滚出再滚回不得释放重载。原生容器滚动回收只归还视图借用，不退休数据项资源；数据项删除、页面真正卸载、资源身份或 owner 变化才退休；隐藏停止新准入并按 owner 契约取消未完成工作、关闭等待实际排空。共享机制及消费者行为测试固定这些约束，不设回退开关，不以源码关键字禁令替代行为门禁。尺寸、裁剪、命中区域和绘制等几何更新不得触发业务读取。
+- 数据回执按稳定身份增量更新实际变化的元素，保留未变化的集合、控件和资源；加载状态、选择及无关属性通知不得清空重填列表或重建整页。验收检查集合通知、元素身份、读取次数和退休边界，性能数值仅作辅助证据，不能代替处理机制正确性。
 
 - Windows 与 iOS 的普通文字统一使用系统常规字体（Normal／Regular），包括标题、按钮、菜单、标签、选中态和歌词；层级只通过字号区分，不使用 Medium、SemiBold、Bold、斜体或状态切换粗细来强调。阅读器 UI 同样遵守；仅阅读器内可自定义的正文排版保留用户字体／加粗设置。纯图标／符号图形不属于普通文字，不通过该例外给文本加粗。
 

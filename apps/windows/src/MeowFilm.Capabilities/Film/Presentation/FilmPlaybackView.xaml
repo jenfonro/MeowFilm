@@ -144,7 +144,8 @@
       <RowDefinition x:Name="HeroRowGutter" Height="0" />
       <RowDefinition Height="Auto" />
      </Grid.RowDefinitions>
-     <Grid x:Name="PlayerFrame" VerticalAlignment="Top" SizeChanged="Player_SizeChanged" AutomationProperties.Name="影片播放器">
+     <local:AspectRatioDecorator x:Name="PlayerSlot" AspectRatio="16,9" VerticalAlignment="Top" SizeChanged="Player_SizeChanged">
+     <Grid x:Name="PlayerFrame" AutomationProperties.Name="影片播放器">
       <Grid x:Name="VideoPicture" Background="Black">
        <ContentControl x:Name="VideoHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" />
        <Grid x:Name="PlayerOverlay" RequestedTheme="Dark" Background="#01000000" Loaded="Overlay_Loaded" Unloaded="Overlay_Unloaded" SizeChanged="Overlay_SizeChanged" PointerMoved="Player_MouseMove" PointerEntered="Player_MouseEnter" PointerExited="Player_MouseLeave" KeyDown="Player_KeyDown" Tapped="Picture_Tapped" DoubleTapped="Picture_DoubleTapped">
@@ -240,6 +241,7 @@
        </Grid>
       </Grid>
      </Grid>
+     </local:AspectRatioDecorator>
      <Grid x:Name="MetadataPanel" Grid.Column="2" local:CardClip.Radius="16">
       <ScrollViewer x:Name="MetadataScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
        <Grid x:Name="MetadataOverlay">

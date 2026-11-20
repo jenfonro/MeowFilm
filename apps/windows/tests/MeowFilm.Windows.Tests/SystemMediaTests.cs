@@ -1,7 +1,8 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Windows.Graphics;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.SystemMedia;
 using Windows.Media;
 
@@ -129,7 +130,7 @@ public static class SystemMediaTests
             backend.Request(SystemPlaybackCommand.Next);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(4));
             backend.Request(SystemPlaybackCommand.Play);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             session.SetEnabled(false);
             Check(!activeToken.IsCancellationRequested && player.Calls.Count == 0 && player.State.IsPlaying);
             session.SetEnabled(true);
@@ -235,7 +236,7 @@ public static class SystemMediaTests
             // Pause/Stop intentionally bypass the gate to fence pending playback.
             // Play must really be queued before changing the captured owner.
             backend.Request(SystemPlaybackCommand.Play);
-            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             player.Change("video", "next");
             backend.Request(SystemPlaybackCommand.Next);
             blocked.TrySetResult();
@@ -373,9 +374,9 @@ public static class SystemMediaTests
 
     private static async Task Pump()
     {
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
         await Task.Delay(10);
-        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
     }
     private static void Check(bool value) { if (!value) throw new InvalidOperationException("System media assertion"); }
     private static Task Sta(Func<Task> action) => TestUiHost.InvokeAsync(action);

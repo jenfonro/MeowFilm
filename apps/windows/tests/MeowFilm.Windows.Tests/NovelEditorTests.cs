@@ -8,7 +8,6 @@ using Windows.System;
 using Window = MeowFilm.Desktop.DesktopWindow;
 using FontWeights = Microsoft.UI.Text.FontWeights;
 using Color = global::Windows.UI.Color;
-using PixelFormats = System.Windows.Media.PixelFormats;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
@@ -318,7 +317,7 @@ public static class NovelEditorTests
         }
         private async Task<bool> OpenAsync()
         {
-            await TestUiHost.LoadedAsync(Owner);
+            await NovelTestUi.LoadedAsync(Owner);
             return await NovelUi.DialogAsync(Owner, "编辑书源", Editor, "保存", Save, Cancellation.Token, applicationOverlay: true, editing: Editing);
         }
         internal Border Surface => NovelTests.Find<Border>(Host).Single(border => AutomationProperties.GetName(border) == "编辑书源");

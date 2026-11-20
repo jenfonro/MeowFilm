@@ -34,9 +34,8 @@ public partial class MusicSourcesSettingsView : UserControl
         InitializeComponent();
         initialized = true;
         BindRows();
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateActivation());
-        LayoutUpdated += (_, _) => { if (Active != (activeOwner is not null)) UpdateActivation(); };
-        IsEnabledChanged += (_, _) => { if (!IsEnabled) { CloseEdit(); CloseNetwork(); } };
+        _ = DesktopVisual.ObserveVisibility(this, _ => UpdateActivation());
+        IsEnabledChanged += (_, _) => UpdateActivation();
         SourceList.SelectionChanged += () =>
         {
             if (Module is not { } owner) return;
@@ -87,7 +86,7 @@ public partial class MusicSourcesSettingsView : UserControl
     {
         var rows = Module?.Sources.Select(row => new ManagementRow(row.Key, row.Name, "", row.Enabled,
             () => OpenEdit(row), enabled => _ = Module!.SetSourceEnabledAsync(row, enabled), new MenuFlyout(),
-            Cells: () => SourceCells(row))).ToArray() ?? [];
+            Cells: () => SourceCells(row), CellsIdentity: row)).ToArray() ?? [];
         SourceList.SetRows(rows, rows.Length, rows.Select(row => row.Id), "");
     }
 

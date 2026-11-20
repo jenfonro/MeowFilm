@@ -42,7 +42,7 @@ public class FilmVideoSurface : Grid, IDisposable
     }
 
     internal event EventHandler? TargetChanged;
-    internal virtual nint DisplayWindow => IsLoaded && XamlRoot is { } current
+    internal virtual nint DisplayWindow => !closed && IsLoaded && XamlRoot is { } current
         ? Win32Interop.GetWindowFromWindowId(current.ContentIslandEnvironment.AppWindowId) : 0;
 
     internal virtual FilmKernelNative.Surface Describe() => new()
@@ -52,7 +52,7 @@ public class FilmVideoSurface : Grid, IDisposable
         Width = Math.Max(1, (int)Math.Ceiling(ActualWidth * picture.CompositionScaleX)),
         Height = Math.Max(1, (int)Math.Ceiling(ActualHeight * picture.CompositionScaleY)),
         ScaleX = picture.CompositionScaleX, ScaleY = picture.CompositionScaleY,
-        Visible = IsLoaded && XamlRoot?.IsHostVisible == true && ActualWidth > 0 && ActualHeight > 0 ? 1 : 0
+        Visible = !closed && IsLoaded && XamlRoot?.IsHostVisible == true && ActualWidth > 0 && ActualHeight > 0 ? 1 : 0
     };
 
     internal virtual async Task WaitForTargetAsync(CancellationToken token)

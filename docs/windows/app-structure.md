@@ -4,6 +4,14 @@
 
 ## 装配与依赖方向
 
+Windows 全应用的显示投影由业务数据 owner 更新：内容回执、刷新、筛选、账号变化等决定栏目、卡片和列表成员。布局和滚动不重新筛选成员、不扫描整页 XAML 树以决定业务显示，也不触发刷新。到底分页仍按真实滚动意图请求尚未取得的下一页。几何、裁剪、命中区域、动画及绘制更新只处理呈现，不取得业务数据。
+
+回执按稳定身份增量协调：音乐目录显示槽持有最新业务快照并保留栏目和卡片；影视栏目保留内容相同的条目；小说发现、详情和统一搜索局部更新文字、状态及受影响封面。共享 `ManagementList` 保留同 ID 的行状态和控件，选择只更新选择框，列变更只更新列定义；自定义 cells 以显式绑定 owner 身份复用。加载状态、选择及无关属性通知不清空集合或重建整页。回归验证集合通知、控件／像素身份、读取和释放次数，CPU／帧耗时仅作辅助诊断。
+
+歌曲分页与同目标刷新保留存活 `SongRow`，重复歌曲按各自 occurrence 匹配，不去重或清空重填；仓库元数据沿现有 publication fence 更新。播放队列按 `EntryId` 增删移动并保留行对象，当前播放标记只通知前后受影响行。三行歌曲栏让每首歌曲成为原生虚拟列表的数据项，换列不更换资源 owner。
+
+共享 `DesktopViewport` 以 WinUI `EffectiveViewportChanged` 提供首次资源准入，并观察实际祖先可见性、显式裁剪和 Canvas 位置变化；不订阅全局布局轮询。音乐与影视图片、音乐目录可选读取及小说封面复用该机制。当前挂载页面内已准入的资源在滚出后继续完成并复用，不因回滚重取租约、重解码或重建取色。小说正文按当前章节保留已看到的图片，仅更大解码宽度等真实输入变化替换像素。隐藏页面停止新准入、保留成功资源，并按 owner 契约处理未完成工作；虚拟列表以数据项稳定身份持有已准入资源，容器回收只借还视图引用；数据项删除、页面真正卸载、资源身份、owner 变化及关闭按对应生命周期释放并隔离迟到回执。这些边界没有用户开关，行为门禁覆盖首次准入、回滚复用、隐藏、退休和实际排空；具体资源预算见[公共图像](artwork.md)和[小说](novel.md)。
+
 唯一入口是 `apps/windows/app/MeowFilm.Windows.App.csproj`，可执行文件为 `meowfilm.exe`。
 
 ```text
@@ -11,7 +19,9 @@ Windows App
  ├─ AppHost → Desktop / Platform
  ├─ Capabilities → Desktop / Platform / Audio / Media
  └─ SystemMedia
-Audio / Media / Platform / Desktop → Core
+Audio / Media → Core / Threading
+Desktop / SystemMedia → Core / Threading
+Platform → Core
 ```
 
 Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
@@ -38,7 +48,7 @@ Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口�
 
 具体歌曲、歌词、音乐平台协议保留 `Music` 语义。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`EntryCard`、`Shelf`、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。WinUI 共享资源使用带库身份的 `ms-appx:///` URI，不靠移动后目录的相对搜索回退。
 
-Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。保留的 WPF FrameworkReference 仅供非可视的调度与文字排版消费者，不承载另一个可视岛。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
+Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。`MeowFilm.Threading` 只封装 Windows App SDK `DispatcherQueue` 的 owner 调度，不依赖 XAML、Desktop 或业务。音视频核心仅依赖 Core 与该调度机制；阅读器的排版与绘制使用 Win2D／DirectWrite，不引用 WPF framework。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
 
 ## 当前身份与唯一数据格式
 

@@ -1,7 +1,8 @@
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Files;
@@ -29,7 +30,7 @@ public static partial class MusicUiTests
             Equal(f.EntryIds[0], before.GetProperty("currentId").GetString());
 
             using var hold = f.Store.HoldNextLibraryWrite();
-            var dispatcher = Dispatcher.CurrentDispatcher;
+            var dispatcher = OwnerDispatcher.Current;
             int uiThread = Environment.CurrentManagedThreadId;
             var observation = hold.ObserveDispatcher(dispatcher);
             Task step = Task.CompletedTask;
@@ -146,14 +147,14 @@ public static partial class MusicUiTests
             WriterThreadId = Environment.CurrentManagedThreadId;
             entered.Set(); release.Wait();
         }
-        internal Task<bool> ObserveDispatcher(Dispatcher dispatcher) => Task.Factory.StartNew(() =>
+        internal Task<bool> ObserveDispatcher(OwnerDispatcher dispatcher) => Task.Factory.StartNew(() =>
         {
             try
             {
                 if (!entered.Wait(TimeSpan.FromSeconds(10))) return false;
                 // The deadline is only a hang guard. Success requires dispatch before
                 // release, not completing a song operation within a performance budget.
-                return dispatcher.InvokeAsync(() => !Released, DispatcherPriority.Send).Task
+                return dispatcher.EnqueueAsync(() => !Released, DispatcherQueuePriority.High)
                     .WaitAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
             }
             catch (TimeoutException) { return false; }

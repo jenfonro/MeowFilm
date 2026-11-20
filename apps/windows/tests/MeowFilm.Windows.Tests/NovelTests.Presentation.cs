@@ -8,7 +8,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 
@@ -28,13 +29,14 @@ public static partial class NovelTests
             var window = GeneralAppearanceTests.Window(root);
             NovelUi.Theme(DesktopTestUi.WindowRoot(window));
             dialogHost.Attach(window);
-            window.Show();
+            window.Show(); await NovelTestUi.LoadedAsync(owner);
             var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             Task<bool>? retired = null;
             try
             {
-                retired = NovelUi.DialogAsync(owner, "先前编辑", new TextBox(), "保存", async _ =>
+                var retiredBody = new TextBox();
+                retired = NovelUi.DialogAsync(owner, "先前编辑", retiredBody, "保存", async _ =>
                 {
                     started.TrySetResult();
                     await release.Task;
@@ -42,7 +44,7 @@ public static partial class NovelTests
                     if (outcome == "cancelled") throw new OperationCanceledException();
                     return true;
                 }, applicationOverlay: true);
-                await Until(() => dialogHost.IsOpen);
+                await NovelTestUi.LoadedAsync(retiredBody);
                 DesktopTestUi.Invoke(Find<Button>(dialogHost).Single(button => Equals(button.Content, "保存")));
                 await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 DesktopTestUi.Invoke(Find<Button>(dialogHost).Single(button => Equals(button.Content, "取消")));
@@ -52,6 +54,7 @@ public static partial class NovelTests
                 var input = new TextBox { Text = "后续输入" };
                 var current = NovelUi.DialogAsync(owner, "后续编辑", input, "保存",
                     _ => Task.FromResult(true), applicationOverlay: true);
+                await NovelTestUi.LoadedAsync(input);
                 await Until(() => dialogHost.IsOpen && ReferenceEquals(Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(input.XamlRoot), input));
                 var surface = Find<Border>(dialogHost).Single(item =>
                     AutomationProperties.GetName(item) == "后续编辑");
@@ -92,7 +95,7 @@ public static partial class NovelTests
         var window = GeneralAppearanceTests.Window(root);
         NovelUi.Theme(DesktopTestUi.WindowRoot(window));
         dialogHost.Attach(window);
-        window.Show();
+        window.Show(); await NovelTestUi.LoadedAsync(owner);
         try
         {
             var input = NovelUi.Input("桌面输入", "保留输入", 420);
@@ -106,8 +109,7 @@ public static partial class NovelTests
             owner.Focus(FocusState.Programmatic);
             var dialog = NovelUi.DialogAsync(owner, "桌面编辑", body, "保存", _ => Task.FromResult(true),
                 applicationOverlay: true);
-            await Until(() => dialogHost.IsOpen);
-            await DesktopTestUi.DrainAsync();
+            await NovelTestUi.LoadedAsync(body);
             await Until(() => ReferenceEquals(Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(input.XamlRoot), input));
 
             var surface = Find<Border>(dialogHost).Single(item =>
@@ -133,9 +135,10 @@ public static partial class NovelTests
             Check(ReferenceEquals(Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(input.XamlRoot), owner),
                 "Closing the Novel editor did not return focus to its owner.");
 
-            var saved = NovelUi.DialogAsync(owner, "应用内保存", new TextBlock { Text = "保存" }, "保存", _ => Task.FromResult(true),
+            var savedBody = new TextBlock { Text = "保存" };
+            var saved = NovelUi.DialogAsync(owner, "应用内保存", savedBody, "保存", _ => Task.FromResult(true),
                 applicationOverlay: true);
-            await Until(() => dialogHost.IsOpen);
+            await NovelTestUi.LoadedAsync(savedBody);
             DesktopTestUi.Invoke(Find<Button>(dialogHost).Single(button => Equals(button.Content, "保存")));
             Check(await saved && !dialogHost.IsOpen, "Application-hosted dialog did not complete its save action.");
 
@@ -144,8 +147,7 @@ public static partial class NovelTests
             var narrowEditor = new NovelAppearanceEditor(new());
             var narrow = NovelUi.DialogAsync(owner, "窄窗编辑", narrowEditor, "保存",
                 _ => Task.FromResult(true), applicationOverlay: true);
-            await Until(() => dialogHost.IsOpen);
-            await DesktopTestUi.DrainAsync();
+            await NovelTestUi.LoadedAsync(narrowEditor);
             var narrowSurface = Find<Border>(dialogHost).Single(item =>
                 AutomationProperties.GetName(item) == "窄窗编辑");
             Check(narrowSurface.ActualWidth <= Math.Max(0, dialogHost.ActualWidth - 32) + 1,

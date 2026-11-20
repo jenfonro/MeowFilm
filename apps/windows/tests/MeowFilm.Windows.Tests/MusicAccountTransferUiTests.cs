@@ -157,7 +157,7 @@ public static partial class MusicUiTests
         internal int Choices, ImportSelections, ExportSelections;
         internal MusicAccountTransferPolicy Policy = MusicAccountTransferPolicy.Overwrite;
         public bool Confirm(string message, string title) => true;
-        public string[]? SelectAudioFiles() => null;
+        public Task<string[]?> SelectAudioFilesAsync(Microsoft.UI.Xaml.FrameworkElement owner) => Task.FromResult<string[]?>(null);
         public string? SelectAccountImportPath() { ImportSelections++; return ImportPath; }
         public string? SelectAccountExportPath() { ExportSelections++; return ExportPath; }
         public MusicAccountTransferPolicy ChooseAccountTransferPolicy(IReadOnlyList<MusicAccountTransferConflict> conflicts)

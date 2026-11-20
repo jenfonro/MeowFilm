@@ -9,7 +9,9 @@ using Microsoft.UI.Xaml.Input;
 using Windows.UI.ViewManagement;
 using Windows.System;
 
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 
 namespace MeowFilm.Desktop;
 
@@ -504,7 +506,7 @@ public sealed partial class ShellWindow : DesktopWindow
     private void OnModulePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (sender is not IDesktopModule module || _isClosing ||
-            Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+            Dispatcher.IsClosing) return;
         var all = string.IsNullOrEmpty(e.PropertyName);
         lock (_moduleChangesGate)
         {
@@ -517,11 +519,11 @@ public sealed partial class ShellWindow : DesktopWindow
         }
         try
         {
-            _ = Dispatcher.InvokeAsync(() =>
+            _ = Dispatcher.EnqueueAsync(() =>
             {
                 try { ApplyModuleChanges(); }
                 catch (Exception) { if (!_isClosing) SetStatus("暂时无法完成操作", error: true); }
-            }, DispatcherPriority.DataBind);
+            }, DispatcherQueuePriority.Normal);
         }
         catch (InvalidOperationException) { /* Dispatcher teardown retires this batch. */ }
     }
@@ -991,15 +993,15 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void QueueUi(Action action)
     {
-        if (_isClosing || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        if (_isClosing || Dispatcher.IsClosing) return;
         try
         {
-            _ = Dispatcher.InvokeAsync(() =>
+            _ = Dispatcher.EnqueueAsync(() =>
             {
                 if (_isClosing) return;
                 try { action(); }
                 catch (Exception) { SetStatus("暂时无法完成操作", error: true); }
-            }, DispatcherPriority.DataBind);
+            }, DispatcherQueuePriority.Normal);
         }
         catch (InvalidOperationException) { /* The dispatcher is already closing. */ }
     }
@@ -1066,14 +1068,14 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private async Task RequestFinalCloseAsync()
     {
-        if (_closeQueued || _isClosed || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        if (_closeQueued || _isClosed || Dispatcher.IsClosing) return;
         _closeQueued = true;
         _state.SetShutdownConfirmation(_state.IsShutdownConfirmationOpen);
         try
         {
             // Even a synchronously completed callback must not re-enter Close from inside OnClosing.
-            await Dispatcher.Yield(DispatcherPriority.Background);
-            if (_isClosed || Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+            await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
+            if (_isClosed || Dispatcher.IsClosing) return;
             _allowClose = true;
             Close();
             if (!_isClosed)
@@ -1128,12 +1130,12 @@ public sealed partial class ShellWindow : DesktopWindow
         {
             if (initialAttempt) _shutdownCompletion.TrySetResult();
         }
-        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+        if (Dispatcher.IsClosing) return;
         try
         {
-            if (Dispatcher.CheckAccess()) ApplyShutdownOutcome(succeeded, timedOut);
-            else await Dispatcher.InvokeAsync(() => ApplyShutdownOutcome(succeeded, timedOut),
-                DispatcherPriority.Normal).Task.ConfigureAwait(false);
+            if (Dispatcher.HasThreadAccess) ApplyShutdownOutcome(succeeded, timedOut);
+            else await Dispatcher.EnqueueAsync(() => ApplyShutdownOutcome(succeeded, timedOut),
+                DispatcherQueuePriority.Normal).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { /* Dispatcher teardown can reject the UI-only result. */ }
         catch (InvalidOperationException) { /* An externally forced shutdown already owns exit. */ }

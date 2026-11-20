@@ -1,7 +1,6 @@
 using System.Text.Json.Nodes;
-using Key = System.Windows.Input.Key;
-using ModifierKeys = System.Windows.Input.ModifierKeys;
-using KeyInterop = System.Windows.Input.KeyInterop;
+using Key = Windows.System.VirtualKey;
+using ModifierKeys = Windows.System.VirtualKeyModifiers;
 using MeowFilm.AppHost;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop;
@@ -50,7 +49,7 @@ public static class MediaControlSettingsTests
             var binding = owner.Preferences.Bindings.Single(item => item.Action == action);
             Check(binding.Local == new MediaShortcutGesture(key, ModifierKeys.Control));
             Check(binding.Global == (action == MediaShortcutAction.ToggleTranslation ? null :
-                new MediaShortcutGesture(key, ModifierKeys.Control | ModifierKeys.Alt)));
+                new MediaShortcutGesture(key, ModifierKeys.Control | ModifierKeys.Menu)));
             Check(MediaControlDefaults.Label(action) == label);
         }
         Check(store.Writes == 0 && store.ControlsData is null);
@@ -164,11 +163,11 @@ public static class MediaControlSettingsTests
         await owner.LoadAsync();
         MediaShortcutGesture[] invalid =
         [
-            new(Key.None, ModifierKeys.None), new(Key.System, ModifierKeys.None),
-            new(Key.ImeProcessed, ModifierKeys.None), new(Key.DeadCharProcessed, ModifierKeys.None),
-            new(Key.LeftCtrl, ModifierKeys.Control), new(Key.RightShift, ModifierKeys.Shift),
-            new(Key.LWin, ModifierKeys.Windows), new(Key.A, (ModifierKeys)32),
-            new(Key.F, ModifierKeys.Control), new(Key.Left, ModifierKeys.Alt),
+            new(Key.None, ModifierKeys.None), new((Key)0xFF, ModifierKeys.None),
+            new(Key.Control, ModifierKeys.None), new(Key.Menu, ModifierKeys.None), new(Key.Shift, ModifierKeys.None),
+            new(Key.LeftControl, ModifierKeys.Control), new(Key.RightShift, ModifierKeys.Shift),
+            new(Key.LeftWindows, ModifierKeys.Windows), new(Key.A, (ModifierKeys)32),
+            new(Key.F, ModifierKeys.Control), new(Key.Left, ModifierKeys.Menu),
             new(Key.Escape, ModifierKeys.None), new(Key.Space, ModifierKeys.None)
         ];
         foreach (var gesture in invalid)
@@ -180,7 +179,7 @@ public static class MediaControlSettingsTests
         await owner.SaveAsync(Replace(owner.Preferences, MediaShortcutAction.TogglePlayback, new(Key.P, ModifierKeys.Control), true));
         Check(store.Writes == 1 && Binding(owner, MediaShortcutAction.TogglePlayback).Local == Binding(owner, MediaShortcutAction.TogglePlayback).Global,
             "the same action may share its local and global gesture");
-        Check(MediaShortcutGestures.Display(new(Key.D5, ModifierKeys.Control | ModifierKeys.Shift)) == "Ctrl+Shift+5");
+        Check(MediaShortcutGestures.Display(new(Key.Number5, ModifierKeys.Control | ModifierKeys.Shift)) == "Ctrl+Shift+5");
         Check(MediaShortcutGestures.Display(null) == "未设置");
     }
     private static async Task RuntimeState()

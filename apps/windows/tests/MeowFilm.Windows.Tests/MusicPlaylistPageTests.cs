@@ -83,7 +83,7 @@ public static partial class MusicUiTests
             True(f.Module.IsContentDetailPage && f.Module.ShowsSongTable, "local playlist uses the shared detail surface");
             Equal("3", f.Module.DetailCountText);
             var row = (FrameworkElement)grid.ContainerFromIndex(0);
-            Equal(50d, DesktopTestUi.Visuals(row).OfType<Grid>().Single(panel => panel.ColumnDefinitions.Count == 4).Height);
+            Equal(50d, row.ActualHeight);
             True(f.Module.CanReorderPlaylist, "same page owns drag reorder");
             True(((MeowFilm.Desktop.IDesktopHeaderSource)f.Module.View).Header.Slot is null,
                 "playlist detail does not publish the home-only create control");

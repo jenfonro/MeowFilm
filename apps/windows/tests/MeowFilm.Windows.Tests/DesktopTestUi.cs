@@ -17,6 +17,19 @@ namespace MeowFilm.Windows.Tests;
 // All callers run on TestUiHost's one application UI thread.
 internal static class DesktopTestUi
 {
+    internal static Rect WorkArea
+    {
+        get
+        {
+            var display = Microsoft.UI.Windowing.DisplayArea.Primary;
+            var area = display.WorkArea;
+            var monitor = Microsoft.UI.Win32Interop.GetMonitorFromDisplayId(display.DisplayId);
+            Marshal.ThrowExceptionForHR(GetDpiForMonitor(monitor, 0, out uint dpiX, out uint dpiY));
+            return new Rect(area.X * 96d / dpiX, area.Y * 96d / dpiY,
+                area.Width * 96d / dpiX, area.Height * 96d / dpiY);
+        }
+    }
+
     internal static async Task DrainAsync()
     {
         var queue = DispatcherQueue.GetForCurrentThread();
@@ -109,6 +122,7 @@ internal static class DesktopTestUi
     [DllImport("user32.dll")] private static extern nint GetWindowLongPtr(nint window, int index);
     [DllImport("user32.dll")] private static extern nint GetWindow(nint window, uint command);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(nint monitor, int type, out uint dpiX, out uint dpiY);
     internal static void Unmount(FrameworkElement element)
     {
         if (DesktopWindow.GetWindow(element) is { } window && ReferenceEquals(window.Content, element)) window.Content = null;
@@ -122,8 +136,10 @@ internal static class DesktopTestUi
     internal static void Select(ListView list, object item)
     {
         list.ScrollIntoView(item); list.UpdateLayout();
-        var container = (ListViewItem)(list.ContainerFromItem(item) ?? throw new InvalidOperationException("Selection container not realized"));
-        var peer = FrameworkElementAutomationPeer.CreatePeerForElement(container) ?? new ListViewItemAutomationPeer(container);
+        if (list.ContainerFromItem(item) is not ListViewItem)
+            throw new InvalidOperationException("Selection container not realized");
+        var owner = (ListViewAutomationPeer)(FrameworkElementAutomationPeer.CreatePeerForElement(list) ?? new ListViewAutomationPeer(list));
+        var peer = new ListViewItemDataAutomationPeer(item, owner);
         ((ISelectionItemProvider)peer.GetPattern(PatternInterface.SelectionItem)).Select();
     }
     internal static IExpandCollapseProvider Expansion(ComboBox picker) =>
@@ -148,6 +164,18 @@ internal static class DesktopTestUi
     }
     internal static Rect Bounds(FrameworkElement element, UIElement root) =>
         new(element.TransformToVisual(root).TransformPoint(new Point()), new Size(element.ActualWidth, element.ActualHeight));
+    internal static bool InViewport(FrameworkElement element)
+    {
+        if (!DesktopVisual.IsVisible(element) || element.ActualWidth <= 0 || element.ActualHeight <= 0) return false;
+        for (DependencyObject? parent = VisualTreeHelper.GetParent(element); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+            if (parent is FrameworkElement ancestor && (ancestor.Clip is not null || ancestor is ScrollContentPresenter or ScrollViewer))
+            {
+                var bounds = element.TransformToVisual(ancestor).TransformBounds(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+                bounds.Intersect(ancestor.Clip?.Rect ?? new Rect(0, 0, ancestor.ActualWidth, ancestor.ActualHeight));
+                if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0) return false;
+            }
+        return true;
+    }
     internal static DependencyObject? Hit(FrameworkElement root, Point point)
     {
         var host = root.XamlRoot?.Content as UIElement ?? throw new InvalidOperationException("Hit-test root is not mounted");

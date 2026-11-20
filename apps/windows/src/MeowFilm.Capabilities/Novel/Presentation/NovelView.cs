@@ -33,13 +33,13 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private string renderedRoute = "";
     private NovelBookSession? renderedSession;
     private DesktopWindow? attachedWindow;
-    private object? presentationStamp;
+    private Action? updateBook;
     private readonly Dictionary<string, double> scrollPositions = [];
     private readonly Button purchase;
     private readonly Slider progress = new() { Minimum = 0, Maximum = 100, Width = 240, Margin = new(10) };
     public NovelView(NovelCapability module)
     {
-        this.module = module; AddDiscoveryTheme(); surface = new(module.Sources) { ReportError = module.Notify };
+        this.module = module; module.DiscoverBooks.CollectionChanged += DiscoveryBooksChanged; AddDiscoveryTheme(); surface = new(module.Sources) { ReportError = module.Notify };
         Content = root; root.Children.Add(body); root.Children.Add(notice);
         purchase = NovelUi.Button("购买本章", () => module.RunUi(PurchaseAsync));
         BuildReader();
@@ -56,7 +56,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         visibility = new(this, visible =>
         {
             if (disposed) return;
-            if (!visible) { discoveryFocus = null; discoveryChannelBar?.Close(); module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
+            if (!visible) { discoveryChannelBar?.Close(); module.CancelPresentation(); module.Session?.Cancel(); module.RunUi(_ => SavePositionAsync()); }
             else if (module.Route == NovelCapability.ReaderRoute)
                 module.RefreshReaderSettings();
         });
@@ -73,8 +73,8 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         bool reading = module.Route == NovelCapability.ReaderRoute && module.Session is not null;
         if (reading)
         {
-            discoveryFocus = null;
             discoveryChannelBar?.Close();
+            updateBook = null; updateDiscovery = null; discoveryCards.Clear(); discoveryChoices.Clear();
             body.Margin = new(0); body.Content = reader;
             purchase.Visibility = module.Session is { Chapter: { IsVip: true, IsPay: false } } session &&
                 module.Sources.Sources.Any(s => s.InstallationId == session.Book.InstallationId && s.Enabled && s.Actions.Contains("payAction")) ? Visibility.Visible : Visibility.Collapsed;
@@ -86,34 +86,18 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         else
         {
             PauseReading(); body.Margin = module.Route == NovelCapability.BookRoute ? new(40, 20, 24, 20) : new(0);
-            object stamp = module.Route switch
+            bool book = module.Route == NovelCapability.BookRoute;
+            if (renderedRoute != module.Route || book && !ReferenceEquals(renderedSession, module.Session) || ReferenceEquals(body.Content, reader))
             {
-                NovelCapability.BookRoute => (module.Route, module.Session, module.Session?.Book, module.Session?.Chapters,
-                    module.Session?.Loading, module.Library.Entries.Any(e => e.BookId == module.Session?.Entry.BookId && e.OnShelf)),
-                _ => (module.Route, module.Sources.Sources, module.ExploreSource, module.Kinds, module.ExploreKind,
-                    module.DiscoveryGeneration, module.DiscoverBooks.Count, module.LoadingDiscovery, module.MoreDiscovery,
-                    module.DiscoveryState, module.Library.Entries)
-            };
-            if (!Equals(stamp, presentationStamp) || ReferenceEquals(body.Content, reader))
-            {
-                string? focus = renderedRoute == module.Route &&
-                    (module.Route is NovelCapability.HomeRoute or NovelCapability.CategoriesRoute)
-                    ? CaptureDiscoveryFocus() : null;
-                discoveryFocus = null;
                 discoveryChannelBar?.Close(); discoveryChannelBar = null;
+                updateBook = null; updateDiscovery = null; discoveryCards.Clear(); discoveryChoices.Clear();
                 if (body.Content is ScrollViewer old) scrollPositions[renderedRoute] = old.VerticalOffset;
-                body.Content = module.Route switch
-                {
-                    NovelCapability.BookRoute => BuildBook(), _ => BuildDiscovery(module.Route == NovelCapability.CategoriesRoute)
-                };
-                presentationStamp = stamp;
-                if (body.Content is ScrollViewer scroll)
-                {
-                    if (scrollPositions.TryGetValue(module.Route, out double position))
-                        scroll.Loaded += (_, _) => scroll.ChangeView(null, position, null, true);
-                    if (focus is not null) RestoreDiscoveryFocus(scroll, focus);
-                }
+                body.Content = book ? BuildBook() : BuildDiscovery(module.Route == NovelCapability.CategoriesRoute);
+                if (body.Content is ScrollViewer scroll && scrollPositions.TryGetValue(module.Route, out double position))
+                    scroll.Loaded += (_, _) => scroll.ChangeView(null, position, null, true);
             }
+            if (book) updateBook?.Invoke();
+            else PresentDiscovery();
         }
         renderedRoute = module.Route; renderedSession = module.Session; HeaderChanged?.Invoke(this, EventArgs.Empty);
         PresentDiscoveryFailure();
@@ -121,24 +105,86 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private FrameworkElement BuildBook()
     {
         var panel = new StackPanel();
+        updateBook = null;
         if (module.Session is not { } session) return panel;
-        var book = session.Book;
         var summary = new DockPanel { Margin = new(0, 0, 0, 24) };
-        var cover = new NovelImage(module.Sources, book) { Width = 132, Height = 190, Margin = new(0, 0, 24, 0) };
+        var cover = new ContentControl { Width = 132, Height = 190, Margin = new(0, 0, 24, 0) };
         DockPanel.SetDock(cover, Dock.Left); summary.Children.Add(cover);
-        var info = new StackPanel(); info.Children.Add(NovelUi.Text(book.Name, 26)); info.Children.Add(NovelUi.Text(book.Author, muted: true));
-        info.Children.Add(NovelUi.Text(module.Sources.Sources.FirstOrDefault(s => s.InstallationId == book.InstallationId)?.Name ?? "书源不可用", muted: true));
-        info.Children.Add(NovelUi.Text(book.LatestChapterTitle, muted: true));
-        info.Children.Add(NovelUi.Bar(NovelUi.Button(session.Entry.Anchor is null ? "开始阅读" : "继续阅读", () => module.RunUi(ct => module.StartReadingAsync(ct)), !session.Loading),
-            NovelUi.Button(module.Library.Entries.Any(e => e.BookId == session.Entry.BookId && e.OnShelf) ? "移出书架" : "加入书架", () => module.RunUi(ct => session.ShelfAsync(ct))),
-            NovelUi.Button("换源", () => module.RunUi(SwitchSourceAsync)))); summary.Children.Add(info); panel.Children.Add(summary);
-        panel.Children.Add(NovelUi.Text(book.Intro)); panel.Children.Add(NovelUi.Text("目录", 19));
+        var info = new StackPanel();
+        var name = NovelUi.Text("", 26); var author = NovelUi.Text("", muted: true);
+        var source = NovelUi.Text("", muted: true); var latest = NovelUi.Text("", muted: true);
+        info.Children.Add(name); info.Children.Add(author); info.Children.Add(source); info.Children.Add(latest);
+        var read = NovelUi.Button("开始阅读", () => module.RunUi(ct => module.StartReadingAsync(ct)));
+        var shelf = NovelUi.Button("加入书架", () => module.RunUi(ct => session.ShelfAsync(ct)));
+        info.Children.Add(NovelUi.Bar(read, shelf, NovelUi.Button("换源", () => module.RunUi(SwitchSourceAsync))));
+        summary.Children.Add(info); panel.Children.Add(summary);
+        var intro = NovelUi.Text(""); panel.Children.Add(intro); panel.Children.Add(NovelUi.Text("目录", 19));
+        var cancel = NovelUi.Button("取消加载", session.Cancel);
         panel.Children.Add(NovelUi.Bar(NovelUi.Button("打开目录", () => module.RunUi(CatalogAsync)),
-            NovelUi.Button("刷新目录", () => module.RunUi(ct => session.LoadMetadataAsync(ct))),
-            NovelUi.Button("取消加载", session.Cancel, session.Loading)));
-        if (session.Loading) panel.Children.Add(NovelUi.Text("加载中…", muted: true));
-        foreach (var chapter in session.Chapters.Take(8)) panel.Children.Add(NovelUi.Button(chapter.Name, () => module.RunUi(async ct =>
-        { await session.ReadAsync(chapter.Index, token: ct); module.Request(NovelCapability.ReaderRoute); })));
+            NovelUi.Button("刷新目录", () => module.RunUi(ct => session.LoadMetadataAsync(ct))), cancel));
+        var loading = NovelUi.Text("加载中…", muted: true); panel.Children.Add(loading);
+        var chapters = new StackPanel(); panel.Children.Add(chapters);
+        NovelBook? displayedBook = null;
+        IReadOnlyList<NovelChapter>? displayedChapters = null;
+        IReadOnlyList<NovelSource>? displayedSources = null;
+        IReadOnlyList<NovelEntry>? displayedEntries = null;
+        NovelEntry? displayedEntry = null;
+        var chapterButtons = new Dictionary<(string Url, int Index), Button>();
+        updateBook = () =>
+        {
+            var book = session.Book;
+            bool bookChanged = displayedBook != book;
+            if (bookChanged)
+            {
+                if (displayedBook is null || CoverIdentity(displayedBook) != CoverIdentity(book))
+                    cover.Content = new NovelImage(module.Sources, book) { Width = 132, Height = 190 };
+                name.Text = book.Name; author.Text = book.Author; latest.Text = book.LatestChapterTitle; intro.Text = book.Intro;
+                displayedBook = book;
+            }
+            if (bookChanged || !ReferenceEquals(displayedSources, module.Sources.Sources))
+            {
+                source.Text = module.Sources.Sources.FirstOrDefault(s => s.InstallationId == book.InstallationId)?.Name ?? "书源不可用";
+                displayedSources = module.Sources.Sources;
+            }
+            if (!ReferenceEquals(displayedEntry, session.Entry))
+            {
+                read.Content = session.Entry.Anchor is null ? "开始阅读" : "继续阅读";
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(read, (string)read.Content);
+                displayedEntry = session.Entry;
+            }
+            read.IsEnabled = !session.Loading; cancel.IsEnabled = session.Loading;
+            loading.Visibility = session.Loading ? Visibility.Visible : Visibility.Collapsed;
+            if (!ReferenceEquals(displayedEntries, module.Library.Entries))
+            {
+                displayedEntries = module.Library.Entries;
+                string label = displayedEntries.Any(e => e.BookId == session.Entry.BookId && e.OnShelf) ? "移出书架" : "加入书架";
+                if (!Equals(shelf.Content, label))
+                { shelf.Content = label; Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(shelf, label); }
+            }
+            if (!ReferenceEquals(displayedChapters, session.Chapters))
+            {
+                displayedChapters = session.Chapters;
+                var desired = session.Chapters.Take(8).ToArray();
+                var identities = desired.Select(c => (c.ChapterUrl, c.Index)).ToHashSet();
+                foreach (var key in chapterButtons.Keys.Where(key => !identities.Contains(key)).ToArray())
+                { chapters.Children.Remove(chapterButtons[key]); chapterButtons.Remove(key); }
+                for (int index = 0; index < desired.Length; index++)
+                {
+                    var chapter = desired[index]; var key = (chapter.ChapterUrl, chapter.Index);
+                    if (!chapterButtons.TryGetValue(key, out var button))
+                    {
+                        int chapterIndex = chapter.Index;
+                        button = NovelUi.Button(chapter.Name, () => module.RunUi(async ct =>
+                        { await session.ReadAsync(chapterIndex, token: ct); module.Request(NovelCapability.ReaderRoute); }));
+                        chapterButtons.Add(key, button);
+                    }
+                    button.Content = chapter.Name;
+                    Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, chapter.Name);
+                    PlaceChild(chapters, button, index);
+                }
+            }
+        };
+        updateBook();
         return NovelUi.Scroll(panel);
     }
     private void BuildReader()
@@ -283,7 +329,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             if ((author.Length == 0 || nextAuthor.Length == 0) && !await NovelUi.ConfirmAsync(panel, "确认换源", $"切换至《{book.Name}》 · {book.Author}？", "切换", ct)) return false;
             await session.SwitchSourceAsync(book, ct); return true;
         }, cancel.Token);
-        if (selected) { presentationStamp = null; Present(); }
+        if (selected) Present();
         }
         finally
         {
@@ -322,19 +368,23 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         {
             attachedWindow.Deactivated += WindowDeactivated;
             attachedWindow.WindowStateChanged += WindowDeactivated;
+            attachedWindow.Closed += WindowClosed;
         }
     }
     private void WindowDeactivated(object? sender, EventArgs e) { PauseReading(); module.RunUi(_ => SavePositionAsync()); }
+    private void WindowClosed(object sender, WindowEventArgs e) { PauseReading(); DetachWindow(); }
     private void DetachWindow()
     {
         if (attachedWindow is null) return;
         attachedWindow.Deactivated -= WindowDeactivated;
         attachedWindow.WindowStateChanged -= WindowDeactivated;
+        attachedWindow.Closed -= WindowClosed;
         attachedWindow = null;
     }
     private sealed record SourceCandidate(NovelBook Book, string Label) { public override string ToString() => Label; }
     internal async Task DrainSavesAsync() { await automaticOperation; await saves.PauseAsync(); }
     internal void Resume() { saves.Resume(); surface.ResumeImages(); }
     internal Task DrainImagesAsync() => surface.DrainImagesAsync();
-    public void Dispose() { if (disposed) return; disposed = true; visibility.Dispose(); discoveryChannelBar?.Close(); PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }
+    private void DiscoveryBooksChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) => discoveryBooksChanged = true;
+    public void Dispose() { if (disposed) return; disposed = true; module.DiscoverBooks.CollectionChanged -= DiscoveryBooksChanged; visibility.Dispose(); discoveryChannelBar?.Close(); PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }
 }

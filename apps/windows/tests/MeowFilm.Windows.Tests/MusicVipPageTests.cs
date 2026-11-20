@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.ExceptionServices;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 
 namespace MeowFilm.Windows.Tests;
@@ -15,7 +16,7 @@ public static class MusicVipPageTests
             {
                 Snapshot = Snapshot(sign: null, signError: "UPSTREAM_ERROR")
             };
-            await using var page = new MusicVipPage(source, Dispatcher.CurrentDispatcher);
+            await using var page = new MusicVipPage(source, OwnerDispatcher.Current);
             await page.SetSurfaceAsync(false, true);
             await page.SetSurfaceAsync(true, false);
             Equal(0, source.Reads);
@@ -35,7 +36,7 @@ public static class MusicVipPageTests
         yield return Case("VIP invalidation cancels one physical read and coalesces to one serial reread", async () =>
         {
             var source = new Source();
-            await using var page = new MusicVipPage(source, Dispatcher.CurrentDispatcher);
+            await using var page = new MusicVipPage(source, OwnerDispatcher.Current);
             await page.SetSurfaceAsync(true, true);
             var hold = source.HoldNextRead();
             source.Invalidate();
@@ -58,7 +59,7 @@ public static class MusicVipPageTests
             {
                 SignReceipt = new(7, Sign(false))
             };
-            await using var page = new MusicVipPage(source, Dispatcher.CurrentDispatcher);
+            await using var page = new MusicVipPage(source, OwnerDispatcher.Current);
             await page.SetSurfaceAsync(true, true);
             var account = page.Account;
             var banner = page.Banner;
@@ -78,7 +79,7 @@ public static class MusicVipPageTests
         yield return Case("VIP unconfirmed sign admission stays disabled and is never replayed", async () =>
         {
             var source = new Source { SignError = "COMMIT_UNKNOWN" };
-            await using var page = new MusicVipPage(source, Dispatcher.CurrentDispatcher);
+            await using var page = new MusicVipPage(source, OwnerDispatcher.Current);
             await page.SetSurfaceAsync(true, true);
             await page.SignAsync();
             Equal(1, source.Signs);
@@ -91,7 +92,7 @@ public static class MusicVipPageTests
         yield return Case("VIP close preparation and disposal wait for physical source settlement", async () =>
         {
             var source = new Source();
-            var page = new MusicVipPage(source, Dispatcher.CurrentDispatcher);
+            var page = new MusicVipPage(source, OwnerDispatcher.Current);
             var hold = source.HoldNextRead();
             var loading = page.SetSurfaceAsync(true, true);
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(3));

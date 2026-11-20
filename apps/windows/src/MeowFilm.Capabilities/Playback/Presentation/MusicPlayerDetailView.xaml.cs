@@ -157,7 +157,7 @@ public partial class MusicPlayerDetailView : UserControl
     internal bool BrowseLyricWheel(int delta)
     {
         if (!IsVisible || Descendant<ScrollViewer>(LyricList) is not { } scroll) return false;
-        int lines = System.Windows.SystemParameters.WheelScrollLines;
+        int lines = MeowFilm.Desktop.DesktopSystemSettings.WheelScrollLines;
         double distance = lines < 0 ? scroll.ViewportHeight : lines * 24d;
         BrowseLyrics(scroll, -delta / 120d * distance); return true;
     }

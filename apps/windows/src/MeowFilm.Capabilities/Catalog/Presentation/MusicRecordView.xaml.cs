@@ -48,6 +48,7 @@ public partial class MusicRecordView : UserControl
     private string? pendingIdentity;
     private long swipeGeneration;
     private MeowFilm.Desktop.DesktopWindow? window;
+    private readonly Grid compactGrooves = new(), detailGrooves = new();
     private bool IsVisible => MeowFilm.Desktop.DesktopVisual.IsVisible(this);
     internal bool IsSwiping { get; private set; }
     internal double SwipeOffset => SwipeTranslation.X;
@@ -56,6 +57,9 @@ public partial class MusicRecordView : UserControl
     public MusicRecordView()
     {
         InitializeComponent();
+        Grooves.Children.Add(new Ellipse { Fill = MusicVisuals.Brush("#161719"), Width = 300, Height = 300 });
+        BuildGrooves(compactGrooves, compact: true); BuildGrooves(detailGrooves, compact: false);
+        Grooves.Children.Add(compactGrooves); Grooves.Children.Add(detailGrooves);
         UpdateGrooves();
         SetBinding(PaletteBrushProperty, new Binding { Path = new PropertyPath(nameof(ArtworkImage.PaletteBrush)), Source = Cover, Mode = BindingMode.OneWay });
         IsTabStop = true;
@@ -98,11 +102,14 @@ public partial class MusicRecordView : UserControl
 
     private void UpdateGrooves()
     {
-        Grooves.Children.Clear();
         bool compact = Math.Min(ActualWidth, ActualHeight) < 160;
-        Grooves.Children.Add(new Ellipse { Fill = MusicVisuals.Brush("#161719"), Width = 300, Height = 300 });
+        compactGrooves.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
+        detailGrooves.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+    }
+    private static void BuildGrooves(Grid host, bool compact)
+    {
         for (double radius = 100; radius < 148; radius += compact ? 14 : 1.7)
-            Grooves.Children.Add(new Ellipse { Stroke = MusicVisuals.Brush("#3C444547"),
+            host.Children.Add(new Ellipse { Stroke = MusicVisuals.Brush("#3C444547"),
                 StrokeThickness = compact ? 4 : .65, Width = radius * 2, Height = radius * 2,
                 HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center });
     }

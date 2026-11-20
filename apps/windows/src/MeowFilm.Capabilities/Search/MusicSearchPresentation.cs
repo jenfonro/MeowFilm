@@ -1,5 +1,6 @@
 using System.Text.Json;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Capabilities;
 
@@ -46,13 +47,13 @@ public sealed partial class MusicCapability
     private void UnsubscribeSearch() => application.SearchChanged -= SearchChanged;
     private void SearchChanged(JsonElement snapshot)
     {
-        if (Presentation.Dispatcher.HasShutdownStarted || Presentation.Dispatcher.HasShutdownFinished) return;
-        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        if (Presentation.Dispatcher.IsClosing) return;
+        _ = Presentation.Dispatcher.EnqueueAsync(() =>
         {
             if (disposed || stopping) return;
             try { AcceptSearchSnapshot(snapshot); }
             catch { SearchStatus = "搜索结果格式无效"; SearchBindings(); }
-        }, DispatcherPriority.Background);
+        }, DispatcherQueuePriority.Low);
     }
     private void SearchBindings()
     {
@@ -75,7 +76,6 @@ public sealed partial class MusicCapability
     private Task BeginSearchAsync(string keyword, CancellationToken token, bool refresh = false)
     {
         if (stopping) return Task.CompletedTask;
-        if (!searchPreferencesLoaded) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
         RememberSearch();
         if (searchKeyword != keyword)
         {
@@ -84,6 +84,7 @@ public sealed partial class MusicCapability
             CatalogSearchKind = "歌曲";
         }
         string kind = searchView == "playlists" ? "playlists" : "songs";
+        if (!SearchPreferencesLoaded(kind)) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
         searchKind = kind;
         string[] platforms = SearchDispatchPlatforms(kind);
         var key = SearchStartIdentity(keyword, kind, platforms);
@@ -284,7 +285,7 @@ public sealed partial class MusicCapability
             total = searchView == SearchOverview ? songCards.Length + playlistCards.Length :
                 searchView == "songs" ? songCards.Length : playlistCards.Length;
             if (CatalogTags.Count > 0) CatalogTags.Clear();
-            if (songsChanged) ApplySearchSongs(nextSongs, prefix);
+            if (songsChanged) ReconcileSongRows(Songs, nextSongs);
             if (restore || searchRefresh || songsChanged || sectionsChanged)
             {
                 var restored = Songs.FirstOrDefault(song => song.SelectionKey == selected);
@@ -298,11 +299,11 @@ public sealed partial class MusicCapability
         if (!restoreScroll) return;
         long generation = loadGeneration, epoch = searchEpoch;
         string view = searchView;
-        _ = Presentation.Dispatcher.InvokeAsync(() =>
+        _ = Presentation.Dispatcher.EnqueueAsync(() =>
         {
             if (!stopping && generation == loadGeneration && epoch == searchEpoch && IsSearchPage && view == searchView)
                 Presentation.RestoreScroll(scroll);
-        }, DispatcherPriority.Loaded);
+        }, DispatcherQueuePriority.Low);
     }
 
     private (bool Prefix, bool Changed) SearchSongDelta(SongRow[] next)
@@ -368,19 +369,6 @@ public sealed partial class MusicCapability
         return changed;
     }
 
-    private void ApplySearchSongs(SongRow[] next, bool prefix)
-    {
-        if (prefix)
-        {
-            for (int index = 0; index < Songs.Count; index++)
-                if (!ReferenceEquals(Songs[index], next[index])) Songs[index] = next[index];
-            for (int index = Songs.Count; index < next.Length; index++) Songs.Add(next[index]);
-            return;
-        }
-        Songs.Clear();
-        foreach (var song in next) Songs.Add(song);
-    }
-
     private string SearchViewStatus()
     {
         string[] kinds = searchView == SearchOverview ? ["songs", "playlists"] : [searchKind];
@@ -427,6 +415,7 @@ public sealed partial class MusicCapability
     }
     private Task StartMissingSearchKindAsync(string kind, CancellationToken token)
     {
+        if (!SearchPreferencesLoaded(kind)) return CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
         long epoch = searchEpoch, navigation = loadGeneration;
         string keyword = searchKeyword;
         string[] platforms = SearchDispatchPlatforms(kind);

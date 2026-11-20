@@ -8,7 +8,8 @@ using WindowState = MeowFilm.Desktop.DesktopWindowState;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using Microsoft.UI.Dispatching;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
@@ -47,7 +48,7 @@ public static partial class NovelTests
 
     private static async Task DialogClosure()
     {
-        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
         try
         {
             foreach (string mode in new[] { "manual", "automatic", "automatic-failure" })
@@ -61,6 +62,7 @@ public static partial class NovelTests
                     entered.TrySetResult();
                     return mode == "manual" ? Task.FromResult(true) : release.Task;
                 }, cancellation.Token, autoSubmit: mode != "manual");
+                await NovelTestUi.LoadedAsync(body);
                 var popup = ObserveDialog(body); var closed = DialogClosed(popup);
                 try
                 {
@@ -95,13 +97,14 @@ public static partial class NovelTests
     {
         foreach (string mode in new[] { "cancel", "escape", "token", "owner-hidden", "owner-closed" })
         {
-            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
             using var cancellation = new CancellationTokenSource();
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var cancelled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var physical = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var body = new TextBlock { Text = "等待合成提交释放" };
             var dialog = NovelUi.DialogAsync(owner, "取消提交", body, "确认", Save, cancellation.Token);
+            await NovelTestUi.LoadedAsync(body);
             var popup = ObserveDialog(body); var closed = DialogClosed(popup);
             try
             {
@@ -135,7 +138,7 @@ public static partial class NovelTests
 
     private static async Task DialogIsolation()
     {
-        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+        var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
         using var oldCancellation = new CancellationTokenSource();
         using var currentCancellation = new CancellationTokenSource();
         try
@@ -144,12 +147,14 @@ public static partial class NovelTests
             var firstBody = new TextBlock { Text = "旧确认" };
             var first = NovelUi.DialogAsync(owner, "旧确认", firstBody, "确认", _ =>
             { saves++; return Task.FromResult(true); }, oldCancellation.Token);
+            await NovelTestUi.LoadedAsync(firstBody);
             var oldPopup = ObserveDialog(firstBody); var oldClosed = DialogClosed(oldPopup);
             await Until(() => Find<Button>(oldPopup.Panel).Any(b => b.Content as string == "取消" && DesktopVisual.IsVisible(b)));
             ClickDialog(oldPopup, "取消"); Check(!await first && saves == 0 && oldClosed.IsCompleted);
             var nextBody = new TextBlock { Text = "当前确认" };
             var next = NovelUi.DialogAsync(owner, "当前确认", nextBody, "确认", _ =>
             { saves++; return Task.FromResult(true); }, currentCancellation.Token);
+            await NovelTestUi.LoadedAsync(nextBody);
             var popup = ObserveDialog(nextBody); var closed = DialogClosed(popup);
             oldCancellation.Cancel(); await DesktopTestUi.DrainAsync();
             Check(popup.IsAttached && !next.IsCompleted && saves == 0, "Retired dialog cancelled or submitted the next confirmation.");
@@ -165,20 +170,21 @@ public static partial class NovelTests
         foreach (string mode in new[] { "io", "document", "cancel" })
         {
             await using var store = new MemoryStore(); var library = new NovelLibrary(store); await library.InitializeAsync();
-            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
             store.Accepted = new(TaskCreationOptions.RunContinuationsAsynchronously);
             var physical = store.Hold = new(TaskCreationOptions.RunContinuationsAsynchronously);
             using var cancellation = new CancellationTokenSource();
             var body = new TextBlock { Text = "已接纳的本地保存" };
             var dialog = NovelUi.DialogAsync(owner, "保存排版", body, "保存", async ct =>
             { await library.SaveAppearanceAsync(new() { FontSize = 28 }, ct); return true; }, cancellation.Token);
+            await NovelTestUi.LoadedAsync(body);
             var popup = ObserveDialog(body); var closed = DialogClosed(popup);
             try
             {
                 await Until(() => Find<Button>(popup.Panel).Any(b => b.Content as string == "保存" && DesktopVisual.IsVisible(b)));
                 ClickDialog(popup, "保存"); await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 ClickDialog(popup, "取消"); await closed.WaitAsync(TimeSpan.FromSeconds(5));
-                Check(!dialog.IsCompleted && library.Appearance.FontSize == 22 && store.Bytes is null,
+                Check(!dialog.IsCompleted && library.Appearance.FontSize == 22 && store.Writes == 1,
                     mode + ": closed dialog did not wait for the accepted write.");
                 store.WriteFailure = mode switch
                 {
@@ -199,12 +205,13 @@ public static partial class NovelTests
             finally { physical.TrySetResult(); cancellation.Cancel(); host.Close(); await library.PrepareShutdownAsync(); }
         }
         await using var retryStore = new MemoryStore(); var retryLibrary = new NovelLibrary(retryStore); await retryLibrary.InitializeAsync();
-        var retryOwner = new StackPanel(); var retryHost = NovelTestUi.Window(retryOwner); NovelUi.Theme(DesktopTestUi.WindowRoot(retryHost)); retryHost.Show();
+        var retryOwner = new StackPanel(); var retryHost = NovelTestUi.Window(retryOwner); NovelUi.Theme(DesktopTestUi.WindowRoot(retryHost)); retryHost.Show(); await NovelTestUi.LoadedAsync(retryOwner);
         using var retryCancellation = new CancellationTokenSource();
         retryStore.FailWrite = true;
         var retryBody = new TextBlock { Text = "保留输入与原位重试" };
         var retry = NovelUi.DialogAsync(retryOwner, "保存排版", retryBody, "保存", async ct =>
         { await retryLibrary.SaveAppearanceAsync(new() { FontSize = 28 }, ct); return true; }, retryCancellation.Token);
+        await NovelTestUi.LoadedAsync(retryBody);
         var retryPopup = ObserveDialog(retryBody); var retryClosed = DialogClosed(retryPopup);
         try
         {
@@ -240,7 +247,7 @@ public static partial class NovelTests
             root.Children.Add(dialogHost);
             var host = NovelTestUi.Window(root);
             dialogHost.Attach(host);
-            host.Show();
+            host.Show(); await NovelTestUi.LoadedAsync(view);
             var physical = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             try
             {
@@ -257,7 +264,7 @@ public static partial class NovelTests
                 DialogSurface? popup = null;
                 if (owner == "settings")
                 {
-                    await Until(() => dialogHost.IsOpen);
+                    await Until(() => Find<Button>(dialogHost).Any(button => button.Content as string == "保存" && button.IsLoaded));
                     DesktopTestUi.Invoke(Find<Button>(dialogHost).Single(b => b.Content as string == "保存"));
                     await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5));
                     DesktopTestUi.Invoke(Find<Button>(dialogHost).Single(b => b.Content as string == "取消"));
@@ -271,7 +278,7 @@ public static partial class NovelTests
                     await store.Accepted.Task.WaitAsync(TimeSpan.FromSeconds(5)); ClickDialog(popup, "取消");
                     await closed.WaitAsync(TimeSpan.FromSeconds(5));
                 }
-                Check(module.Notice.Length == 0 && store.Bytes is null);
+                Check(module.Notice.Length == 0 && store.Writes == 1 && !physical.Task.IsCompleted && module.Library.Appearance.FontSize == 22);
                 store.WriteFailure = cancel ? new OperationCanceledException() : new DocumentStoreException(DocumentStoreError.Storage);
                 physical.TrySetResult();
                 if (!cancel)
@@ -297,7 +304,7 @@ public static partial class NovelTests
         var profiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (string mode in new[] { "success", "failure", "token", "owner-closed" })
         {
-            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show();
+            var owner = new StackPanel(); var host = NovelTestUi.Window(owner); NovelUi.Theme(DesktopTestUi.WindowRoot(host)); host.Show(); await NovelTestUi.LoadedAsync(owner);
             using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var operation = NovelWebInteraction.ShowAsync(owner, rules, Json(new { mode = "rule", request = new
             {

@@ -34,6 +34,25 @@ public static class MusicSearchPreferenceTests
                 value.GetProperty("playlists").GetProperty("enabled").GetArrayLength() == 0 &&
                 value.GetProperty("revision").GetInt64() == 1);
         });
+        yield return Case("partial order and selected kind do not audit an unconsumed sibling", async () =>
+        {
+            var store = new Store();
+            await using (var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
+                await Call(owner, "music.search.settings.save", Policy(0,
+                    Kind(order: ["wy"], enabled: ["wy"]), Kind()));
+            var records = MusicTestStores.For(store);
+            var document = records.Root;
+            var policy = document["areas"]!["native-search-policy"]!;
+            policy["playlists"]!["pages"] = -1;
+            records.Seed(document);
+            await using var reopened = new MusicLibraryOwner(records, database: records.Storage);
+            var reply = await Call(reopened, "music.search.settings.get", new { kind = "songs" });
+            var settings = reply.GetProperty("settings");
+            Check(settings.GetProperty("songs").GetProperty("order").GetArrayLength() == 1 &&
+                !settings.TryGetProperty("playlists", out _));
+            Check(records.Root["areas"]!["native-search-policy"]!["playlists"]!["pages"]!.GetValue<long>() == -1);
+            await Code(reopened, "music.search.settings.get", new { kind = "playlists" }, "CORRUPT_STORAGE");
+        });
         yield return Case("settings-revision-conflict-keeps-newer-policy", async () =>
         {
             var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
@@ -114,10 +133,10 @@ public static class MusicSearchPreferenceTests
         });
         yield return Case("history-keeps-query-beyond-two-hundred-characters", async () =>
         {
-            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store));
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             string text = new('x', 4097);
             await Call(owner, "music.search.history.record", new { text, kind = "songs" });
-            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store));
+            await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
             var rows = (await Call(reopened, "music.search.history.get")).GetProperty("history").GetProperty("items");
             Check(rows.GetArrayLength() == 1 && rows[0].GetProperty("text").GetString() == text);
         });
@@ -162,7 +181,7 @@ public static class MusicSearchPreferenceTests
         foreach (var test in MusicUiTests.SearchPreferenceIntegrationCases()) yield return test;
     }
 
-    private static TestCase Case(string name, Func<Task> run) => new("music.search-preferences." + name, run);
+    private static TestCase Case(string name, Func<Task> run) => new("music.search-preferences." + name, () => Task.Run(run));
     private static void Check(bool condition) { if (!condition) throw new InvalidOperationException("Search preferences assertion"); }
     private static readonly string[] Platforms = ["wy", "tx", "kw", "kg", "mg"];
     private static object Kind(string[]? order = null, string[]? enabled = null,

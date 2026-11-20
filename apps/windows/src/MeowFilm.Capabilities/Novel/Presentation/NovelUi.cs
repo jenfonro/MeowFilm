@@ -225,7 +225,7 @@ internal static class NovelUi
             editing.Tools.Children.Add(close); editing.ContinueAsync = ContinueAsync;
         }
         registration = token.Register(() => owner.DispatcherQueue.TryEnqueue(() => { if (!finished) CloseDialog(); }));
-        surface.Loaded += async (_, _) => await FocusDialog();
+        body.Loaded += async (_, _) => await FocusDialog();
         if (parent is not null)
         {
             nestedLayer = new Grid(); nestedLayer.UseResource(FrameworkElement.StyleProperty, "MeowFilm.DialogHost");
@@ -286,8 +286,10 @@ internal static class NovelUi
         async Task FocusDialog()
         {
             if (!IsOpen()) return;
-            if (FocusManager.FindFirstFocusableElement(body) is UIElement first) first.Focus(FocusState.Programmatic);
-            else cancel.Focus(FocusState.Programmatic);
+            bool focused = body is Control { IsTabStop: true, IsEnabled: true } && body.Focus(FocusState.Programmatic);
+            if (!focused && FocusManager.FindFirstFocusableElement(body) is UIElement first)
+                focused = first.Focus(FocusState.Programmatic);
+            if (!focused) cancel.Focus(FocusState.Programmatic);
             if (autoSubmit) await AcceptAsync();
         }
         void DialogClosed()
@@ -319,59 +321,31 @@ internal sealed class NovelImage : Grid
     internal Stretch Stretch { get => image.Stretch; set => image.Stretch = value; }
     private readonly NovelSourceService sources;
     private readonly NovelBook book;
+    private readonly DesktopViewport viewport;
     private CancellationTokenSource? request;
-    private bool loaded, observingLayout, demanded;
+    private bool loaded, admitted, attempted;
     internal NovelImage(NovelSourceService sources, NovelBook book)
     {
         this.sources = sources; this.book = book; Children.Add(image); Width = 96; Height = 136; Stretch = Stretch.UniformToFill;
         AutomationProperties.SetName(this, book.Name + "封面");
-        Loaded += (_, _) => { loaded = true; UpdateVisibility(); };
-        Unloaded += (_, _) => { loaded = false; UpdateVisibility(); };
-        _ = new NovelPresentation.VisibilityWatch(this, _ => UpdateVisibility());
-        EffectiveViewportChanged += (_, _) => UpdateVisibility();
+        viewport = new DesktopViewport(this, UpdateVisibility);
+        Loaded += (_, _) => { loaded = true; sources.Resumed += OnResumed; UpdateVisibility(); };
+        Unloaded += (_, _) => { loaded = admitted = attempted = false; sources.Resumed -= OnResumed; Stop(); };
     }
     protected override Microsoft.UI.Xaml.Automation.Peers.AutomationPeer OnCreateAutomationPeer() =>
         new Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer(this);
-    private bool InViewport()
-    {
-        if (!loaded || !DesktopVisual.IsVisible(this) || ActualWidth <= 0 || ActualHeight <= 0) return false;
-        try
-        {
-            Rect visible = new(0, 0, ActualWidth, ActualHeight);
-            UIElement child = this;
-            for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null; parent = VisualTreeHelper.GetParent(parent))
-            {
-                if (parent is not UIElement visual) continue;
-                visible = child.TransformToVisual(visual).TransformBounds(visible); child = visual;
-                if (visual is FrameworkElement element && (element.Clip is not null || element is ScrollViewer || ReferenceEquals(element, XamlRoot?.Content)))
-                {
-                    visible.Intersect(element.Clip?.Rect ?? new Rect(0, 0, element.ActualWidth, element.ActualHeight));
-                    if (visible.IsEmpty || visible.Width <= 0 || visible.Height <= 0) return false;
-                }
-            }
-            return true;
-        }
-        catch (InvalidOperationException) { return false; }
-    }
-    private void OnLayout(object? sender, object e) => UpdateVisibility();
-    private void OnResumed(object? sender, EventArgs e) { Stop(); demanded = false; UpdateVisibility(); }
+    private bool HasDemand => loaded && admitted && viewport.IsVisible;
+    private void OnResumed(object? sender, EventArgs e) { Stop(); attempted = false; UpdateVisibility(); }
     private void UpdateVisibility()
     {
-        bool observe = loaded && DesktopVisual.IsVisible(this);
-        if (observe != observingLayout)
-        {
-            if (observe) { LayoutUpdated += OnLayout; sources.Resumed += OnResumed; }
-            else { LayoutUpdated -= OnLayout; sources.Resumed -= OnResumed; }
-            observingLayout = observe;
-        }
-        bool next = InViewport();
-        if (next == demanded) return;
-        demanded = next;
-        if (demanded) Start(); else Stop();
+        if (viewport?.IsInViewport == true) admitted = true;
+        if (HasDemand) Start();
+        else if (Source is null && request is not null) { Stop(); attempted = false; }
     }
     private void Start()
     {
-        if (request is not null || book.CoverUrl.Length == 0) return;
+        if (attempted || book.CoverUrl.Length == 0) return;
+        attempted = true;
         var owner = request = new();
         _ = Load();
         async Task Load()
@@ -386,11 +360,11 @@ internal sealed class NovelImage : Grid
                         var source = await sources.RequireAsync(book, ct);
                         reference = await sources.ImageAsync(source, book.CoverUrl, book.BookUrl, "cover", ct);
                         var bytes = await sources.ReadImageAsync(reference, ct);
-                        var bitmap = await Task.Run(() => NovelReadingSurface.Decode(bytes, 240), ct);
+                        var bitmap = await Task.Run(() => NovelImagePixels.Decode(bytes, 240), ct);
                         ct.ThrowIfCancellationRequested();
-                        if (!ReferenceEquals(request, owner) || !InViewport()) return;
-                        Source = NovelPresentation.Bitmap(bitmap);
-                        // Keep the lease only while this cover intersects its viewport.
+                        if (!ReferenceEquals(request, owner) || !HasDemand) return;
+                        Source = bitmap.CreateSource();
+                        // The mounted page retains an admitted cover across scrolling.
                         await Task.Delay(Timeout.Infinite, ct);
                     }
                     finally { if (reference is not null) await sources.ReleaseImageAsync(reference); }

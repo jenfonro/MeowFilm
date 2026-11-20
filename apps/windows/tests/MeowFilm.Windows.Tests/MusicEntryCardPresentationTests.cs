@@ -13,7 +13,8 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using System.Windows.Threading;
+using MeowFilm.Threading;
+using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 using MeowFilm.Capabilities;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
@@ -396,7 +397,8 @@ public static class MusicEntryCardPresentationTests
             var shade = (Border)f.Entry.FindName("ExpansionShade");
             var rest = await Capture(f.Entry);
             var footer = new Point(f.Entry.ActualWidth / 2, f.Entry.ActualHeight - 3);
-            Check(rest.At(footer) == surface.Color, "the real footer paints the selected image tone");
+            Check(rest.At(footer) == surface.Color,
+                $"the real footer paints the selected image tone: actual={rest.At(footer)}; expected={surface.Color}");
             Check(shade.Background is LinearGradientBrush expansion && expansion.GradientStops[^1].Color == surface.Color,
                 "hover and footer use one color source");
             await f.Expand(true);
@@ -726,18 +728,25 @@ public static class MusicEntryCardPresentationTests
         Canvas.SetTop(entry, 210); viewport.InvalidateArrange(); viewport.UpdateLayout();
         await Until(() => loader.Addresses.Count == 2 && decoration.Source is not null && fade.Mask is not null,
             "partial visibility prepares the same clipped decoration source", PresentationState);
+        var retainedDecoration = decoration.Source;
+        var retainedMask = fade.Mask;
         Canvas.SetTop(entry, 260); viewport.InvalidateArrange(); viewport.UpdateLayout();
-        await Until(() => decoration.Source is null && fade.Mask is null && loader.Leases.All(lease => lease.Disposed),
-            "leaving the actual viewport releases the decoration presentation and its pixels", PresentationState);
-        Check(entry.IsLoaded, "viewport retirement does not require unmounting the entry");
+        await Drain();
+        Check(ReferenceEquals(retainedDecoration, decoration.Source) && ReferenceEquals(retainedMask, fade.Mask) &&
+            loader.Leases.All(lease => !lease.Disposed), "scrolling keeps the already presented decoration and its pixels");
+        Check(entry.IsLoaded, "scrolling preserves the mounted entry");
         Canvas.SetTop(entry, 0); viewport.InvalidateArrange(); viewport.UpdateLayout();
-        await Until(() => loader.Addresses.Count == 4 && decoration.Source is not null && fade.Mask is not null,
-            "reentry prepares the current decoration without a second image owner", PresentationState);
+        await Drain();
+        Check(loader.Addresses.Count == 2 && ReferenceEquals(retainedDecoration, decoration.Source) &&
+            ReferenceEquals(retainedMask, fade.Mask), "reentry reuses the original decoration without acquiring again");
         viewport.Visibility = Visibility.Collapsed;
-        await Until(() => decoration.Source is null && fade.Mask is null, "hiding retires the decoration presentation lease", PresentationState);
+        await Drain();
+        Check(ReferenceEquals(retainedDecoration, decoration.Source) && ReferenceEquals(retainedMask, fade.Mask),
+            "hiding retains the mounted decoration");
         viewport.Visibility = Visibility.Visible; viewport.UpdateLayout();
-        await Until(() => loader.Addresses.Count == 5 && decoration.Source is not null && fade.Mask is not null,
-            "redisplay reuses the retained cover and prepares only the retired decoration", PresentationState);
+        await Drain();
+        Check(loader.Addresses.Count == 2 && ReferenceEquals(retainedDecoration, decoration.Source) &&
+            ReferenceEquals(retainedMask, fade.Mask), "redisplay reuses both cover and decoration");
         viewport.Children.Remove(entry);
         await Until(() => fade.Mask is null && loader.Leases.All(lease => lease.Disposed),
             "actual unmount releases every decoration presentation and artwork lease");
