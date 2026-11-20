@@ -56,7 +56,7 @@ public sealed partial class MusicCapability
                     { queueSource = new { id = card.ContentKey, title = card.Title, kind = card.Kind, platform = card.Platform } } }, signal);
                     MusicDto.Require(MusicDto.Integer(result, "version") > version);
                     await ReadQueue(lifetime.Token);
-                    if (currentAction()) await StartCurrent(signal);
+                    if (currentAction()) await StartCatalogCurrent(signal);
                 }
                 catch (OperationCanceledException) { }
                 catch { queueSaved = false; throw; }

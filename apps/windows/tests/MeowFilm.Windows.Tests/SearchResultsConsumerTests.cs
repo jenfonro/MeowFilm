@@ -622,7 +622,7 @@ public static partial class MusicUiTests
         internal readonly ShellWindow Shell;
         internal FilmSearchConsumerRuntime Runtime => Search.Runtime;
         internal TextBox Input => (TextBox)DesktopTestUi.WindowRoot(Shell).FindName("SearchBox");
-        internal ComboBox Picker => (ComboBox)DesktopTestUi.WindowRoot(Shell).FindName("SearchTargetPicker");
+        internal ShellSearchScope Picker => (ShellSearchScope)DesktopTestUi.WindowRoot(Shell).FindName("SearchTargetPicker");
         internal string Status => ((TextBlock)DesktopTestUi.WindowRoot(Shell).FindName("StatusText")).Text;
         internal ContentControl? SearchHost => (DesktopTestUi.WindowRoot(Shell).FindName("ContentDeck") as Grid)!.Children.OfType<ContentControl>()
             .SingleOrDefault(host => ReferenceEquals(host.Content, Page.View));

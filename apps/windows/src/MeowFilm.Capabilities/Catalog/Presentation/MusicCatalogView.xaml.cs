@@ -1,13 +1,12 @@
 using System.ComponentModel;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.Globalization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Animation;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.System;
 using Windows.Foundation;
 using MeowFilm.Desktop;
@@ -18,16 +17,14 @@ public partial class MusicCatalogView : UserControl
 {
     private readonly UserScrollIntent scrollIntent;
     private readonly ObservableCollection<MusicCatalogCard> searchPlaylists = [];
-    private readonly MusicCatalogSectionDisplayCollection homeDisplay = new(), channelDisplay = new(), catalogDisplay = new();
-    private IReadOnlyList<MusicCatalogCard>? searchPlaylistCards;
+    private readonly MusicCatalogSectionDisplayCollection homeDisplay = new(), searchDisplay = new(), utilityDisplay = new();
+    private readonly Dictionary<ObservableCollection<MusicCatalogSection>, (MusicCatalogSectionDisplayCollection Display, ItemsControl View)> channelPresentations = [];
+    private ItemsControl? activeChannelView;
     private ScrollViewer? searchScroll;
     private MusicCapability? observed;
     private bool loadingMore, restoringOffset;
     private double searchPlaylistOffset;
     private long restoreEpoch;
-    private Storyboard? homeTransition;
-    private long homeCaptureEpoch;
-    private readonly global::Windows.UI.ViewManagement.UISettings animationSettings = new();
     private IDisposable? visibility;
     private bool visible, reportQueued;
     private readonly Dictionary<FrameworkElement, MusicCatalogCard> visibleSlots = [];
@@ -40,31 +37,30 @@ public partial class MusicCatalogView : UserControl
         MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemKeySelector(SearchPlaylistList, item => ((MusicCatalogCard)item).Key);
         MeowFilm.Desktop.Artwork.ArtworkItemsScope.SetItemResourcesSelector(SearchPlaylistList,
             item => MusicCatalogCardView.ArtworkResources((MusicCatalogCard)item));
-        HomeItems.ItemsSource = homeDisplay.Items; ChannelItems.ItemsSource = channelDisplay.Items;
-        SearchOverviewItems.ItemsSource = UtilityItems.ItemsSource = catalogDisplay.Items;
-        catalogDisplay.Items.CollectionChanged += (_, _) => RefreshSearchCards();
+        HomeItems.ItemsSource = homeDisplay.Items;
+        SearchOverviewItems.ItemsSource = searchDisplay.Items; UtilityItems.ItemsSource = utilityDisplay.Items;
         Loaded += (_, _) =>
         {
             scrollIntent.Attach(CatalogScroll); Observe(); Refresh(); RestoreSearchOffset();
-            animationSettings.AnimationsEnabledChanged += HomeAnimationSettingsChanged;
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
                 this.visible = visible;
                 if (visible) QueueVisibleCards();
-                else { observed?.UpdateCatalogVisibleCards([]); ChannelMorePopup.Hide(); scrollIntent.Clear(); ClearHomeTransition(); }
+                else { observed?.UpdateCatalogVisibleCards([]); ChannelMorePopup.Hide(); scrollIntent.Clear(); }
             });
         };
         DataContextChanged += (_, _) => { observed?.UpdateCatalogVisibleCards([]); if (IsLoaded) Observe(); Refresh(); QueueVisibleCards(); };
         Unloaded += (_, _) =>
         {
             visibility?.Dispose(); visibility = null;
-            animationSettings.AnimationsEnabledChanged -= HomeAnimationSettingsChanged;
             visible = false; visibleSlots.Clear();
             observed?.UpdateCatalogVisibleCards([]);
-            RememberSearchOffset(); restoreEpoch++; scrollIntent.Clear(); ChannelMorePopup.Hide(); ClearHomeTransition();
-            if (observed is not null) { observed.PropertyChanged -= Changed; if (observed.PrepareHomeReplacement == CaptureHomeReplacementAsync) observed.PrepareHomeReplacement = null; }
+            RememberSearchOffset(); restoreEpoch++; scrollIntent.Clear(); ChannelMorePopup.Hide();
+            if (observed is not null)
+            { observed.PropertyChanged -= Changed; observed.ChannelPageRetired -= RetireChannelPresentation;
+                observed.SearchPlaylistSections.CollectionChanged -= SearchPlaylistsChanged; }
             observed = null;
-            homeDisplay.Dispose(); channelDisplay.Dispose(); catalogDisplay.Dispose();
+            homeDisplay.Dispose(); searchDisplay.Dispose(); utilityDisplay.Dispose(); ClearChannelPresentations();
         };
         SearchPlaylistList.SizeChanged += (_, _) => SizeSearchCards();
         SearchPlaylistList.Loaded += (_, _) =>
@@ -76,9 +72,7 @@ public partial class MusicCatalogView : UserControl
             scrollIntent.Attach(scroll); SizeSearchCards(); RestoreSearchOffset();
         };
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        { if (Visibility != Visibility.Visible) { RememberSearchOffset(); ChannelMorePopup.Hide(); scrollIntent.Clear(); ClearHomeTransition(); } else { Refresh(); RestoreSearchOffset(); } });
-        DesktopTheme.Observe(this, () => { if (!MusicVisuals.CanAnimate(this)) ClearHomeTransition(); });
-        HomeScroll.SizeChanged += (_, _) => ClearHomeTransition();
+        { if (Visibility != Visibility.Visible) { RememberSearchOffset(); ChannelMorePopup.Hide(); scrollIntent.Clear(); } else { Refresh(); RestoreSearchOffset(); } });
     }
     internal void UpdateVisibleSlot(FrameworkElement slot, MusicCatalogCard? card)
     {
@@ -101,86 +95,75 @@ public partial class MusicCatalogView : UserControl
     }
     private void Observe()
     {
-        ClearHomeTransition();
-        if (observed is not null) { observed.PropertyChanged -= Changed; if (observed.PrepareHomeReplacement == CaptureHomeReplacementAsync) observed.PrepareHomeReplacement = null; }
+        if (observed is not null)
+        { observed.PropertyChanged -= Changed; observed.ChannelPageRetired -= RetireChannelPresentation;
+            observed.SearchPlaylistSections.CollectionChanged -= SearchPlaylistsChanged; }
+        if (!ReferenceEquals(observed, Owner)) ClearChannelPresentations();
         observed = Owner;
-        homeDisplay.Observe(observed?.HomeSections); channelDisplay.Observe(observed?.ChannelSections);
-        catalogDisplay.Observe(observed?.CatalogSections);
-        if (observed is not null) { observed.PropertyChanged += Changed; observed.PrepareHomeReplacement = CaptureHomeReplacementAsync; }
+        homeDisplay.Observe(observed?.HomeSections);
+        searchDisplay.Observe(observed?.SearchOverviewSections); utilityDisplay.Observe(observed?.UtilitySections);
+        ShowChannelPresentation(); RefreshSearchCards();
+        if (observed is not null)
+        { observed.PropertyChanged += Changed; observed.ChannelPageRetired += RetireChannelPresentation;
+            observed.SearchPlaylistSections.CollectionChanged += SearchPlaylistsChanged; }
     }
     private void Changed(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MusicCapability.CatalogSections))
-        { catalogDisplay.Observe(Owner?.CatalogSections); RefreshSearchCards(); }
+            ShowChannelPresentation();
         if (e.PropertyName is nameof(MusicCapability.IsCatalogHome) or nameof(MusicCapability.IsChannelLanding) or
-            nameof(MusicCapability.IsChannelDirectory) or nameof(MusicCapability.ShowCatalogSkeleton) or
-            nameof(MusicCapability.ShowSearchSkeleton) or nameof(MusicCapability.IsSearchPlaylists) or
-            nameof(MusicCapability.HasSearchSession)) Refresh();
+            nameof(MusicCapability.IsChannelDirectory) or nameof(MusicCapability.ShowCatalogLoading) or
+            nameof(MusicCapability.ShowSearchLoading) or nameof(MusicCapability.IsSearchPlaylists)) Refresh();
     }
-    private async Task<Action?> CaptureHomeReplacementAsync()
+    private void ShowChannelPresentation()
     {
-        ClearHomeTransition();
-        if (!DesktopVisual.IsVisible(HomeScroll) || HomeScroll.ActualWidth <= 0 || HomeScroll.ActualHeight <= 0 || !MusicVisuals.CanAnimate(this)) return null;
-        long epoch = homeCaptureEpoch;
-        var owner = Owner;
-        var image = new RenderTargetBitmap();
-        try { await image.RenderAsync(HomeScroll); }
-        catch (System.Runtime.InteropServices.COMException error) when (error.HResult == unchecked((int)0x80004004) &&
-            (epoch != homeCaptureEpoch || !DesktopVisual.IsVisible(HomeScroll))) { return null; }
-        if (epoch != homeCaptureEpoch || image.PixelWidth <= 0 || image.PixelHeight <= 0) return null;
-        return () =>
+        if (activeChannelView is not null) activeChannelView.Visibility = Visibility.Collapsed;
+        activeChannelView = null;
+        if (Owner is not { IsChannelLanding: true, IsChannelDirectory: false } owner ||
+            !owner.RetainedChannelSections.Contains(owner.ChannelSections)) return;
+        var current = owner.ChannelSections;
+        if (!channelPresentations.TryGetValue(current, out var presentation))
         {
-            if (epoch != homeCaptureEpoch || !ReferenceEquals(Owner, owner) || Owner?.IsCatalogHome != true ||
-                !DesktopVisual.IsVisible(HomeScroll) || !MusicVisuals.CanAnimate(this)) return;
-            HomeRefreshOverlay.Source = image; HomeRefreshOverlay.Visibility = Visibility.Visible;
-            var transition = new Storyboard();
-            foreach (var (target, from, to) in new (DependencyObject, double, double)[] { (HomeScroll, 0, 1), (HomeRefreshOverlay, 1, 0) })
-            {
-                var fade = new DoubleAnimation { From = from, To = to, Duration = TimeSpan.FromMilliseconds(220), EnableDependentAnimation = true };
-                Storyboard.SetTarget(fade, target); Storyboard.SetTargetProperty(fade, "Opacity"); transition.Children.Add(fade);
-            }
-            transition.Completed += (_, _) => { if (ReferenceEquals(homeTransition, transition)) ClearHomeTransition(); };
-            homeTransition = transition; transition.Begin();
-        };
+            var display = new MusicCatalogSectionDisplayCollection(); display.Observe(current);
+            var view = new ItemsControl { ItemsSource = display.Items, ItemTemplate = (DataTemplate)Resources["Section"] };
+            channelPresentations.Add(current, presentation = (display, view)); ChannelPages.Children.Add(view);
+        }
+        activeChannelView = presentation.View;
+        activeChannelView.Visibility = Visibility.Visible;
     }
-    private void HomeAnimationSettingsChanged(global::Windows.UI.ViewManagement.UISettings sender, object args) =>
-        DispatcherQueue.TryEnqueue(() => { if (!MusicVisuals.CanAnimate(this)) ClearHomeTransition(); });
-    private void ClearHomeTransition()
+    private void RetireChannelPresentation(ObservableCollection<MusicCatalogSection> sections)
     {
-        homeCaptureEpoch++;
-        homeTransition?.Stop(); homeTransition = null;
-        HomeScroll.Opacity = HomeRefreshOverlay.Opacity = 1;
-        HomeRefreshOverlay.Source = null; HomeRefreshOverlay.Visibility = Visibility.Collapsed;
+        if (!channelPresentations.Remove(sections, out var presentation)) return;
+        presentation.Display.Dispose(); ChannelPages.Children.Remove(presentation.View);
+        if (ReferenceEquals(activeChannelView, presentation.View)) activeChannelView = null;
+    }
+    private void ClearChannelPresentations()
+    {
+        foreach (var presentation in channelPresentations.Values) presentation.Display.Dispose();
+        ChannelPages.Children.Clear(); channelPresentations.Clear(); activeChannelView = null;
     }
     private void Refresh()
     {
         if (Owner is not { } owner) return;
-        if (!owner.IsCatalogHome) ClearHomeTransition();
-        CatalogScroll.Visibility = owner.IsChannelLanding && !owner.IsChannelDirectory ? Visibility.Visible : Visibility.Collapsed;
-        Skeleton.Visibility = owner.ShowCatalogSkeleton || owner.ShowSearchSkeleton && owner.IsSearchPlaylists ? Visibility.Visible : Visibility.Collapsed;
-        if (!owner.HasSearchSession) ResetSearchPlaylistProjection();
+        CatalogScroll.Visibility = owner.IsChannelLanding && !owner.IsChannelDirectory && !owner.ShowCatalogLoading ? Visibility.Visible : Visibility.Collapsed;
+        CatalogLoading.IsActive = owner.ShowCatalogLoading || owner.ShowSearchLoading && owner.IsSearchPlaylists;
+        CatalogLoading.Visibility = CatalogLoading.IsActive ? Visibility.Visible : Visibility.Collapsed;
         if (owner.IsSearchPlaylists)
         {
             bool restore = SearchPlaylistList.Visibility != Visibility.Visible;
             SearchPlaylistList.Visibility = Visibility.Visible;
-            RefreshSearchCards();
             if (restore) RestoreSearchOffset();
         }
         else if (SearchPlaylistList.Visibility == Visibility.Visible)
         { RememberSearchOffset(); SearchPlaylistList.Visibility = Visibility.Collapsed; }
     }
-    private void RefreshSearchCards()
-    {
-        if (Owner is not { IsSearchPlaylists: true } owner) return;
-        var cards = owner.CatalogSections.Count == 1 ? owner.CatalogSections[0].Items : [];
-        if (ReferenceEquals(cards, searchPlaylistCards)) return;
-        searchPlaylistCards = cards;
-        MusicCatalogSectionView.ReconcileCards(searchPlaylists, cards);
-    }
+    private void SearchPlaylistsChanged(object? sender, NotifyCollectionChangedEventArgs e) => RefreshSearchCards();
+    private void RefreshSearchCards() => MusicCatalogSectionView.ReconcileCards(searchPlaylists,
+        Owner is { SearchPlaylistSections.Count: 1 } owner ? owner.SearchPlaylistSections[0].Items : []);
     internal void ResetSearchPlaylistProjection()
     {
-        if (searchPlaylistCards is null && searchPlaylists.Count == 0 && searchPlaylistOffset == 0) return;
-        restoreEpoch++; restoringOffset = false; searchPlaylistOffset = 0; searchPlaylistCards = null; searchPlaylists.Clear();
+        if (searchPlaylists.Count == 0 && searchPlaylistOffset == 0) return;
+        restoreEpoch++; restoringOffset = false; searchPlaylistOffset = 0; searchPlaylists.Clear();
     }
     private void RememberSearchOffset()
     { if (!restoringOffset && SearchPlaylistList.Visibility == Visibility.Visible && searchScroll is { } scroll) searchPlaylistOffset = scroll.VerticalOffset; }
@@ -226,17 +209,6 @@ public partial class MusicCatalogView : UserControl
         try { if (search) await owner.MoreSearchAsync(); else await owner.CatalogPageAsync(1); }
         finally { loadingMore = false; scrollIntent.Clear(); }
     }
-    private void ChannelMore_Click(object sender, RoutedEventArgs e)
-    { ((FrameworkElement)ChannelMorePopup.Content).DataContext = Owner; ChannelMorePopup.ShowAt(ChannelMoreButton); }
-    private void Channel_Loaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: MusicCatalogCard card } button || Owner is not { } owner) return;
-        bool selected = owner.CurrentChannelKey == card.Platform + "/" + Uri.EscapeDataString(card.ActionId);
-        button.BorderBrush = selected ? (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"] : MusicVisuals.Brush("#00000000");
-        AutomationProperties.SetItemStatus(button, selected ? "已选中" : "");
-    }
-    private void Tag_Loaded(object sender, RoutedEventArgs e)
-    { if (sender is Button { Tag: MusicCatalogTag tag } button) { button.BorderBrush = (Brush)Application.Current.Resources[tag.Selected ? "AccentFillColorDefaultBrush" : "ControlStrokeColorDefaultBrush"]; AutomationProperties.SetItemStatus(button, tag.Selected ? "已选中" : ""); } }
     private void SignDay_Loaded(object sender, RoutedEventArgs e)
     {
         if (sender is not Border border) return;

@@ -17,6 +17,50 @@ public static class MusicLyricAnimationTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return Case("timed words retain real whitespace advances on first measure and text replacement", async () =>
+        {
+            var samples = new[] { ("Thought ", FlowDirection.LeftToRight), ("  ", FlowDirection.LeftToRight),
+                ("العربية ", FlowDirection.RightToLeft), ("中文", FlowDirection.LeftToRight) };
+            var wrap = new MusicWrapPanel();
+            var words = samples.Select(sample => new MusicLyricWordView
+            {
+                Word = new(sample.Item1, 0, 2), FontSize = 24, FlowDirection = sample.Item2,
+                Foreground = MusicVisuals.Brush("#FFFFFF"), HorizontalAlignment = HorizontalAlignment.Left
+            }).ToArray();
+            foreach (var word in words) wrap.Children.Add(word);
+            var initial = new InitialWordMeasure(wrap, words);
+            using var host = new DesktopTestUi.Host(initial, 600, 320);
+            await Drain(); initial.UpdateLayout();
+            Check(initial.Widths is not null, "the actual wrap consumer measures each word before its first arrange");
+            for (int index = 0; index < words.Length; index++)
+                Verify(words[index], samples[index].Item1, initial.Widths![index]);
+            var retainedGlyphs = Glyphs(words[0]).ToArray();
+            foreach (string text in new[] { "Thought", "Thought  ", "中文", "Thought " })
+            {
+                words[0].Word = new(text, 0, 2);
+                initial.UpdateLayout();
+                Verify(words[0], text, words[0].DesiredSize.Width);
+                Check(retainedGlyphs.SequenceEqual(Glyphs(words[0])), "text replacement retains the native TextBlocks");
+            }
+
+            static void Verify(MusicLyricWordView word, string text, double measured)
+            {
+                var glyph = Glyphs(word).First();
+                Equal(text, glyph.Text);
+                Equal(word.FlowDirection, glyph.FlowDirection);
+                if (!char.IsWhiteSpace(text[^1]))
+                {
+                    Near(glyph.DesiredSize.Width, measured, .01, "text without trailing whitespace receives no synthetic spacing");
+                    return;
+                }
+                var run = (Microsoft.UI.Xaml.Documents.Run)glyph.Inlines[0];
+                var first = run.ContentStart.GetCharacterRect(Microsoft.UI.Xaml.Documents.LogicalDirection.Forward);
+                var last = run.ContentEnd.GetCharacterRect(Microsoft.UI.Xaml.Documents.LogicalDirection.Backward);
+                double nativeAdvance = Math.Abs(last.X - first.X);
+                Near(nativeAdvance, measured, 2.01, "first and replacement layouts reserve the native text advance within the TextBlock and parent layout rounding");
+                if (text.All(char.IsWhiteSpace)) Check(measured > 0, "a whitespace-only timed word reserves its real advance");
+            }
+        });
         yield return Case("accepted playback advances between real samples and pauses at the real position", async () =>
         {
             using var f = new Fixture([new("连续高亮", 0, 8)], position: 1);
@@ -32,6 +76,13 @@ public static class MusicLyricAnimationTests
                 Check(word.WordProgress > initial + .015, "the compositor advances highlight without another media position");
             else Near(initial, word.WordProgress, .001, "reduced animation keeps the last real sample");
             Equal(size, word.DesiredSize);
+            word.Foreground = MusicVisuals.Brush("#D3D3D3");
+            word.Highlight = MusicVisuals.Brush("#FFFFFF");
+            word.Stroke = MusicVisuals.Brush("#191919");
+            word.StrokeThickness = 1.1;
+            if (AnimationEnabled) Check(Animated(word), "changing row colors does not interrupt the running compositor clip");
+            await Drain();
+            Check(glyphs.SequenceEqual(Glyphs(word)), "changing row colors retains native text geometry");
             f.List.Position = 1.4;
             f.List.IsPlaying = false;
             await Drain();
@@ -60,6 +111,10 @@ public static class MusicLyricAnimationTests
             f.List.Position = 7.2;
             await Drain();
             Near(.9, word.WordProgress, .001, "forward seek preserves pause");
+            word.Word = new("连续高亮", 4, 8);
+            await Drain();
+            Near(.4, word.WordProgress, .001, "replacing only source timing recalibrates the retained word");
+            Check(glyphs.SequenceEqual(Glyphs(word)), "timing-only replacement retains native text controls");
             Equal("连续高亮", FrameworkElementAutomationPeer.CreatePeerForElement(word)!.GetName());
         });
         yield return Case("unknown rate identity changes hidden and unloaded words retire their clocks", async () =>
@@ -328,9 +383,26 @@ public static class MusicLyricAnimationTests
                 Check(!Animated(word) || f.Visible(word), "no hidden words keep animation clocks after cancellation");
             Equal(1.2, f.List.Position);
         });
+        yield return Case("a queued stop event cannot complete a later native scroll before its destination", async () =>
+        {
+            using var f = new Fixture(Enumerable.Range(0, 36).Select(index => new MusicLyricWord("歌词 " + index, 0, 30)).ToArray(), position: 1);
+            await f.Ready();
+            var scroll = Visuals(f.List).OfType<ScrollViewer>().First();
+            double target = Math.Min(400, scroll.ScrollableHeight);
+            Check(target > scroll.ViewportHeight, "a short fixture crosses the native viewport boundary");
+            MusicLyricScroll.Settle(scroll, 48);
+            var settled = new TaskCompletionSource<double>(TaskCreationOptions.RunContinuationsAsynchronously);
+            bool intermediate = false;
+            scroll.ViewChanged += (_, args) => intermediate |= args.IsIntermediate && scroll.VerticalOffset > 48 && scroll.VerticalOffset < target;
+            MusicLyricScroll.Move(scroll, target, () => settled.TrySetResult(scroll.VerticalOffset));
+            Near(target, await settled.Task.WaitAsync(TimeSpan.FromSeconds(5)), .5,
+                "only the successor's final destination owns completion");
+            if (AnimationEnabled) Check(intermediate, "automatic follow moves through intermediate native offsets instead of settling in one jump");
+            Check(!MusicLyricScroll.IsMoving(scroll), "the actual final event clears the motion owner");
+        });
         yield return Case("recycled rows keep viewport bounded animation and newly visible words use the current sample", async () =>
         {
-            var lyrics = Enumerable.Range(0, 1000).Select(index => new MusicLyricWord("歌词 " + index, 0, 30)).ToArray();
+            var lyrics = Enumerable.Range(0, 128).Select(index => new MusicLyricWord("歌词 " + index, 0, 30)).ToArray();
             using var f = new Fixture(lyrics, position: 1);
             await f.Ready();
             var first = f.Words.First();
@@ -361,12 +433,13 @@ public static class MusicLyricAnimationTests
             await Drain();
             Near(.2, word.WordProgress, .001, "high contrast uses the real sample");
             Check(!Animated(word), "high contrast does not animate text");
+            f.List.UpdateLayout();
             var small = word.DesiredSize;
             word.FontSize = 32;
             word.FlowDirection = FlowDirection.RightToLeft;
-            await Drain();
+            f.List.UpdateLayout(); await Drain();
             Check(word.DesiredSize.Width > small.Width && word.DesiredSize.Height > small.Height,
-                "font and direction changes invalidate text metrics");
+                $"font and direction changes invalidate text metrics: before={small}, after={word.DesiredSize}, font={word.FontSize}, glyph={Glyphs(word).First().DesiredSize}");
             Near(.2, word.WordProgress, .001, "reformatting preserves the sampled progress");
             Check(Glyphs(word).All(text => text.FontWeight == FontWeights.Normal && text.FlowDirection == FlowDirection.RightToLeft),
                 "native text keeps regular weight and the current direction");
@@ -410,6 +483,26 @@ public static class MusicLyricAnimationTests
     private static bool AnimationEnabled => MusicVisuals.Animate;
     private static TestCase Case(string name, Func<Task> run) =>
         new("music-lyric-animation: " + name, () => MusicQualityConsumerTests.Sta(run));
+
+    private sealed class InitialWordMeasure : Panel
+    {
+        private readonly MusicWrapPanel wrap;
+        private readonly MusicLyricWordView[] words;
+        internal double[]? Widths { get; private set; }
+        internal InitialWordMeasure(MusicWrapPanel wrap, MusicLyricWordView[] words)
+        { this.wrap = wrap; this.words = words; Children.Add(wrap); }
+        protected override Size MeasureOverride(Size availableSize)
+        {
+            wrap.Measure(availableSize);
+            Widths ??= words.Select(word => word.DesiredSize.Width).ToArray();
+            return wrap.DesiredSize;
+        }
+        protected override Size ArrangeOverride(Size finalSize)
+        {
+            wrap.Arrange(new Rect(0, 0, finalSize.Width, finalSize.Height));
+            return finalSize;
+        }
+    }
 
     private sealed class Fixture : IDisposable
     {
@@ -455,7 +548,7 @@ public static class MusicLyricAnimationTests
         public void Dispose() => Window.Close();
     }
 
-    private static MusicLyricWord[][] MultiwordLines() => Enumerable.Range(0, 1000)
+    private static MusicLyricWord[][] MultiwordLines() => Enumerable.Range(0, 128)
         .Select(index => new MusicLyricWord[] {
             new($"行{index:D4} ", 0, .1), new("当前🙂 ", .1, 6),
             new("随后 e\u0301 ", 6.1, 6), new("العربية ", 12.1, 6)

@@ -51,6 +51,10 @@ export async function wyPlaylist(c, { id, page: current = 1, limit = 100 }, comp
     const embedded = tracks.filter(row => {
       const s = first(row?.songInfo, row?.songData, row?.song, row);
       const id = scalar(first(s?.id, s?.songId, s?.resourceId));
+      // A member locator is not an embedded song response. Its ID still needs
+      // the selected-member detail recipe; optional song fields may stay empty.
+      if (id && !['name', 'title', 'ar', 'artists', 'artistName', 'artist', 'al', 'album',
+        'dt', 'duration', 'picUrl', 'coverUrl'].some(field => Object.hasOwn(record(s), field))) return false;
       return selected.has(id) || (complete || current === 1) && !requested.has(id);
     }).map(wySong);
     const known = new Map(embedded.filter(song => idOf(song)).map(song => [idOf(song), song]));

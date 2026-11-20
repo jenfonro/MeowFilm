@@ -67,7 +67,7 @@
     <Grid x:Name="LyricFadeViewport">
     <local:MusicLyricList x:Name="LyricList" Background="Transparent" BorderThickness="0" Padding="0" Position="{Binding LyricPositionSeconds}" IsPlaying="{Binding IsPlaying}" PlaybackRate="{Binding AcceptedPlaybackRate}" PresentationKey="{Binding PlaybackPresentationKey}" ItemsSource="{Binding Lyrics}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" AutomationProperties.Name="歌词">
      <ListView.Header><Border x:Name="LyricLeadingSpace"/></ListView.Header><ListView.Footer><Border x:Name="LyricTrailingSpace"/></ListView.Footer>
-     <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="IsHitTestVisible" Value="False"/><Setter Property="IsTabStop" Value="False"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/></Style></ListView.ItemContainerStyle>
+     <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"><Setter Property="IsHitTestVisible" Value="False"/></Style></ListView.ItemContainerStyle>
      <ListView.ItemTemplate><DataTemplate><local:MusicLyricRowView/></DataTemplate></ListView.ItemTemplate>
     </local:MusicLyricList>
     <local:MusicArtworkFade x:Name="LyricEdgeFade" Source="{Binding ElementName=PageBackdrop}"/>

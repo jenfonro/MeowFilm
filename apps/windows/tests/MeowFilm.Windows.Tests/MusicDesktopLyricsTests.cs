@@ -394,6 +394,7 @@ public static partial class MusicUiTests
                 var line = (MusicDesktopLyricLineView)DesktopTestUi.WindowRoot(window).FindName("TopLine");
                 var original = (MusicDesktopLyricTextView)line.FindName("PlainText");
                 var translation = (MusicDesktopLyricTextView)line.FindName("TranslationText");
+                await TestUiHost.LoadedAsync(line); await Drain();
                 Equal("第一行原文", original.Text); Equal("first source translation", translation.Text);
                 f.Playback.Tick(6); await Drain();
                 Equal("第二行原文", original.Text); Equal("second source translation", translation.Text);
@@ -406,7 +407,8 @@ public static partial class MusicUiTests
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 owner.Content = detail; owner.AttachRoot();
                 await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
-                Render(detail, 1110, 800); await Drain();
+                owner.Resize(1110, 800);
+                await TestUiHost.LoadedAsync(detail); await Drain();
                 await GeneralAppearanceTests.SavePreview(detail, "full-player-lyric-control-rail", 1110, 800);
                 var detailFooter = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
                 var detailButton = (Button)detailFooter.FindName("DesktopLyricsButton");
@@ -422,8 +424,13 @@ public static partial class MusicUiTests
                     ToolTipService.GetToolTip(translationButton)?.ToString() == "隐藏译文歌词",
                     "the Windows translation button exposes its current shared state");
                 var translationPath = Visuals(translationButton).OfType<Microsoft.UI.Xaml.Shapes.Path>().Single();
-                True(translationPath.Data!.ToString()!.StartsWith("M3,5", StringComparison.Ordinal),
-                    "the Windows control reuses the iOS PageIcon.translation vector path");
+                var iconBounds = translationPath.Data!.Bounds;
+                True(iconBounds.Width > 0 && iconBounds.Height > 0 && iconBounds.Left >= 0 && iconBounds.Top >= 0 &&
+                    iconBounds.Right <= 24 && iconBounds.Bottom <= 24 && translationPath.Stroke is not null &&
+                    Math.Abs(translationPath.StrokeThickness - 1.6) < .001 &&
+                    translationPath.StrokeStartLineCap == PenLineCap.Round && translationPath.StrokeEndLineCap == PenLineCap.Round &&
+                    translationPath.StrokeLineJoin == PenLineJoin.Round,
+                    "the translation control renders a nonempty vector inside its 24 DIP icon with the intended rounded stroke");
                 var lyricViewport = (FrameworkElement)detail.FindName("LyricList");
                 var viewportBounds = new Rect(lyricViewport.TransformToVisual(detail).TransformPoint(new()), lyricViewport.RenderSize);
                 var railBounds = new Rect(controlRail.TransformToVisual(detail).TransformPoint(new()), controlRail.RenderSize);
@@ -471,7 +478,8 @@ public static partial class MusicUiTests
                 var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
                 owner.Content = detail; owner.AttachRoot();
                 await f.Module.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, default);
-                Render(detail, 1110, 800); await Drain();
+                owner.Resize(1110, 800);
+                await TestUiHost.LoadedAsync(detail); await Drain();
                 f.Playback.Tick(6);
                 await f.Rpc("music.lyrics.local.save", new { song = f.Module.Songs[0].Raw,
                     text = "[00:00]新第一行\n[00:05]新第二行" });

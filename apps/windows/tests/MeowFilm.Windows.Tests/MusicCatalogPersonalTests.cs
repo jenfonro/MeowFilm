@@ -43,6 +43,9 @@ public static partial class MusicCatalogPersonalTests
     {
         yield return Case("home incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(false));
         yield return Case("channel incremental receipts and viewport admission retain existing controls and resources", () => RetainedCatalog(true));
+        yield return Case("channel cache eviction cancels optional reads and removes mounted content before the next receipt", ChannelEvictionRetirement);
+        yield return Case("another platform account invalidation retires hidden channel resources and retains current receipts", () => HiddenChannelAccountRetirement(anotherPlatform: true));
+        yield return Case("account invalidation retires mounted hidden channel resources", () => HiddenChannelAccountRetirement(anotherPlatform: false));
         foreach (var test in ArtworkDemandCases()) yield return test;
         foreach (var homeCase in HomeCases()) yield return homeCase;
         foreach (var test in LocalHeartbeatCases()) yield return test;
@@ -1072,7 +1075,7 @@ public static partial class MusicCatalogPersonalTests
             var open = f.Module.OpenCatalogCardAsync(card);
             await hold.Arrived.Task.WaitAsync(TimeSpan.FromSeconds(5));
             Equal(card.Title, f.Module.Heading); Equal(card.Cover, f.Module.DetailArtwork);
-            Equal("", f.Module.DetailCountText); Check(f.Module.ShowDetailSkeleton, "members load independently from summary");
+            Equal("", f.Module.DetailCountText); Check(f.Module.ShowDetailLoading, "members load independently from summary");
             hold.Release(); await open;
             DesktopTestUi.WindowRoot(window).UpdateLayout(); await Drain();
             await SaveRecommendationFrame((FrameworkElement)f.Module.View, "playlist-pages-playlist.png");
@@ -2981,6 +2984,7 @@ public static partial class MusicCatalogPersonalTests
     {
         public int Opens, Resumes;
         public bool StartOnOpen;
+        public CancellationToken OpenToken;
         public string? OwnerId { get; private set; }
         public string? Identity { get; private set; }
         public bool HasMedia { get; private set; }
@@ -2994,6 +2998,7 @@ public static partial class MusicCatalogPersonalTests
         public event EventHandler? Failed;
         public Task OpenAsync(string owner, string identity, Uri uri, string title, CancellationToken token)
         {
+            OpenToken = token;
             token.ThrowIfCancellationRequested(); OwnerId = owner; Identity = identity; HasMedia = true;
             IsPlaying = false; PositionSeconds = 0; Opens++;
             PropertyChanged?.Invoke(this, new(nameof(OwnerId)));

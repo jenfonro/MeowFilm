@@ -27,6 +27,84 @@ public static partial class MusicUiTests
 {
     private static IEnumerable<TestCase> PlayerChromeCases()
     {
+        yield return Case("mounted player metadata artwork and quality badge follow playback with complete geometry", async () =>
+        {
+            await using var f = await Fixture.Create();
+            await SetupOnline(f);
+            var collection = await f.Rpc("music.library.create", new { name = "播放器在线元数据", songs = new[] {
+                MusicSongFixture.Online("wy", "chrome-first", "第一首在线歌曲", "第一位艺人", cover: "https://images.example.test/chrome-first.png"),
+                MusicSongFixture.Online("wy", "chrome-second", "第二首在线歌曲", "第二位艺人", cover: "https://images.example.test/chrome-second.png") } });
+            await f.Module.NavigateAsync("playlist/" + collection.GetProperty("collection").GetProperty("id").GetString(), default);
+            f.Module.SelectedSong = f.Module.Songs[0];
+            var player = (MusicPlayerView)f.Module.PlayerView;
+            var record = (MusicRecordView)((Button)player.FindName("ArtworkButton")).Content;
+            var artwork = new PlayerArtworkFixture(); ArtworkScope.SetLoader(record, artwork);
+            player.Width = 1110; player.Height = 80;
+            using var host = new DesktopTestUi.Host(player, 1126, 160); await Drain();
+            await Until(() => player.IsLoaded && player.XamlRoot is not null);
+            await f.Module.PlaySelectionAsync(); await Drain(); player.UpdateLayout();
+            async Task VerifyCurrentSong()
+            {
+                var song = (await f.Rpc("music.queue.get")).GetProperty("current").GetProperty("song");
+                var normalized = SongRow.Read(song);
+                Equal(song.GetProperty("title").GetString(), normalized.Title); Equal(normalized.Title, f.Module.CurrentTitle);
+                Equal(song.GetProperty("artist").GetString(), normalized.Artist); Equal(normalized.Artist, f.Module.CurrentArtist);
+                Equal(song.GetProperty("cover_url").GetString(), normalized.Cover); Equal(normalized.Cover, f.Module.CurrentArtwork);
+                Equal(normalized.Id, f.Module.CurrentSongId);
+                True(normalized.Cover.Length > 0 && normalized.IsOnline, "the real queue retains admitted online metadata and artwork");
+            }
+            await VerifyCurrentSong();
+            var metadata = ((StackPanel)player.FindName("MetadataText")).Children.OfType<TextBlock>().ToArray();
+            True(f.Module.CurrentTitle.Length > 0 && f.Module.CurrentArtist.Length > 0, "playing owner has metadata");
+            Equal(f.Module.CurrentTitle, metadata[0].Text); Equal(f.Module.CurrentArtist, metadata[1].Text);
+            True(metadata.All(text => text.ActualWidth > 0 && text.ActualHeight > 0), "mounted footer realizes title and artist");
+            Equal(f.Module.CurrentArtwork, record.Address); Equal(f.Module.CurrentArtworkIdentity, record.ArtworkIdentity);
+            await Until(() => ((ArtworkImage)record.FindName("Cover")).Source is not null);
+            var quality = (Button)player.FindName("QualityButton"); var badge = (Border)quality.Content;
+            True(f.Module.HasQualityButton && quality.Visibility == Visibility.Visible && quality.ActualWidth > 0 && quality.ActualHeight > 0,
+                "accepted online playback realizes its quality control");
+            var bounds = DesktopTestUi.Bounds(badge, quality);
+            True(bounds.Left >= 0 && bounds.Top >= 0 && bounds.Right <= quality.ActualWidth && bounds.Bottom <= quality.ActualHeight,
+                $"all four quality border edges fit the actual button: badge={bounds}, button={quality.ActualWidth}x{quality.ActualHeight}");
+            var queue = (Button)player.FindName("QueueButton");
+            var queueGlyph = (Microsoft.UI.Xaml.Shapes.Path)queue.Content;
+            Equal(19d, queueGlyph.Width); Equal(19d, queueGlyph.Height);
+            True(Math.Abs(queueGlyph.StrokeThickness - 1.3) < .000001,
+                $"queue uses the original stroke thickness: {queueGlyph.StrokeThickness:R}");
+            Color BrushColor(Brush brush) => ((SolidColorBrush)brush).Color;
+            void VerifyQueuePalette(Button button)
+            {
+                Equal(BrushColor(button.Foreground), BrushColor(((Microsoft.UI.Xaml.Shapes.Path)button.Content).Stroke));
+                Equal(BrushColor((Brush)DesktopVisual.Resource(button, "Capability.Player.Foreground")), BrushColor(button.Foreground));
+            }
+            VerifyQueuePalette(queue);
+            var volume = (Button)player.FindName("VolumeButton");
+            Equal(BrushColor(volume.Foreground), BrushColor(((FontIcon)volume.Content).Foreground));
+            await NativeDesktopCapture.SaveAsync(player, "presentation-player-footer");
+            string priorTitle = f.Module.CurrentTitle, priorArtwork = f.Module.CurrentArtwork;
+            await f.Module.StepAsync(true); await Drain(); await VerifyCurrentSong();
+            True(f.Module.CurrentTitle != priorTitle && f.Module.CurrentArtwork != priorArtwork, "stepping adopts the next online song's metadata and artwork");
+            Equal(f.Module.CurrentTitle, metadata[0].Text); Equal(f.Module.CurrentArtist, metadata[1].Text);
+            Equal(f.Module.CurrentArtwork, record.Address);
+            host.Window.Content = null; await Drain();
+            var detail = (MusicPlayerDetailView)f.Module.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail);
+            var detailRecord = (MusicRecordView)detail.FindName("DetailRecord");
+            ArtworkScope.SetLoader(detailRecord, artwork);
+            using var detailHost = new DesktopTestUi.Host(detail, 1110, 800); await Drain(); detail.UpdateLayout();
+            await Until(() => detail.IsLoaded && detail.XamlRoot is not null);
+            Equal(f.Module.CurrentTitle, ((TextBlock)detail.FindName("DetailTitle")).Text);
+            True(Visuals((FrameworkElement)detail.FindName("DetailMetadata")).OfType<TextBlock>().Any(text => text.Text == f.Module.CurrentArtist),
+                "full player artist binding receives the same current owner");
+            Equal(f.Module.CurrentArtwork, detailRecord.Address); Equal(f.Module.CurrentArtworkIdentity, detailRecord.ArtworkIdentity);
+            await Until(() => ((ArtworkImage)detailRecord.FindName("Cover")).Source is not null);
+            var detailFooter = (MusicPlayerView)((ContentControl)detail.FindName("DetailPlayerHost")).Content;
+            var detailFooterText = ((StackPanel)detailFooter.FindName("MetadataText")).Children.OfType<TextBlock>().ToArray();
+            Equal(f.Module.CurrentTitle, detailFooterText[0].Text); Equal(f.Module.CurrentArtist, detailFooterText[1].Text);
+            var detailQueue = (Button)detailFooter.FindName("QueueButton"); var detailVolume = (Button)detailFooter.FindName("VolumeButton");
+            VerifyQueuePalette(detailQueue);
+            Equal(BrushColor(detailVolume.Foreground), BrushColor(((FontIcon)detailVolume.Content).Foreground));
+            await NativeDesktopCapture.SaveAsync(detail, "presentation-player-detail");
+        });
         yield return Case("player native controls and flyouts use system regular text without replacing icons", async () =>
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
@@ -120,9 +198,22 @@ public static partial class MusicUiTests
             await Until(() => list.ContainerFromIndex(1) is ListViewItem);
             var item = (ListViewItem)list.ContainerFromIndex(1);
             var row = Visuals(item).OfType<MusicQueueRowView>().Single();
-            var overlay = Visuals(row).OfType<Border>().Single(border => border.Name == "QueuePlayMark");
-            var remove = Visuals(row).OfType<Button>().Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
-            var play = Visuals(row).OfType<Button>().Single(button => !ReferenceEquals(button, remove));
+            var play = row.Children.OfType<Button>().Single(button => Grid.GetColumn(button) == 0);
+            var remove = row.Children.OfType<Button>().Single(button => Grid.GetColumn(button) == 1);
+            var rowContent = (Grid)play.Content;
+            var coverSlot = rowContent.Children.OfType<Grid>().Single();
+            var overlay = coverSlot.Children.OfType<Border>().Single();
+            var boundRow = f.Module.QueueSurfaceRows[1];
+            True(boundRow.Title.Length > 0 && boundRow.Artist.Length > 0 && boundRow.Duration != "—",
+                "the queue owner publishes complete repository song metadata");
+            var title = rowContent.Children.OfType<StackPanel>().Single().Children.OfType<TextBlock>().First();
+            await Until(() => title.Text == boundRow.Title);
+            var rowLabels = Visuals(row).OfType<TextBlock>().Select(text => text.Text).ToArray();
+            True(rowLabels.Contains(boundRow.Artist) && rowLabels.Contains(boundRow.Duration),
+                "the native row binds its artist and duration rather than showing only a default dash");
+            var artwork = coverSlot.Children.OfType<ArtworkImage>().Single();
+            Equal(boundRow.Cover, artwork.Address); Equal(boundRow.Song.Id, artwork.DisplayIdentity);
+            await NativeDesktopCapture.SaveAsync(queue, "music-queue-metadata");
             Equal(0d, overlay.Opacity); CardMotion.SetProgress(row, 1); await Drain(); Equal(1d, overlay.Opacity);
             True(((SolidColorBrush)row.Background).Color == ((SolidColorBrush)DesktopVisual.Resource(queue, "MeowFilm.Brush.ItemHover")).Color,
                 "whole row including remove column uses the hover color");
@@ -144,7 +235,10 @@ public static partial class MusicUiTests
                 ((SolidColorBrush)remove.Foreground).Color == settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText),
                 "focus palette includes title artist duration and removal");
             var current = Visuals((ListViewItem)list.ContainerFromIndex(0)).OfType<MusicQueueRowView>().Single();
-            Equal(1d, Visuals(current).OfType<Border>().Single(border => border.Name == "QueuePlayMark").Opacity);
+            True(current.DataContext is MusicQueueSurfaceRow { IsCurrent: true } currentRow &&
+                ReferenceEquals(currentRow, f.Module.QueueSurfaceRows[0]), "the current queue occurrence remains the row's real owner");
+            var currentContent = (Grid)current.Children.OfType<Button>().Single(button => Grid.GetColumn(button) == 0).Content;
+            Equal(1d, currentContent.Children.OfType<Grid>().Single().Children.OfType<Border>().Single().Opacity);
             True(Visuals(current).OfType<TextBlock>().All(text => text.FontWeight == FontWeights.Normal),
                 "current row has a non-color playing indicator and regular text");
             DesktopTheme.SetIsHighContrast(queue, false);
@@ -153,11 +247,11 @@ public static partial class MusicUiTests
             Click(play); await SettleQueue(f); Equal(opens + 1, f.Playback.Opens.Count);
             var playedRow = f.Module.QueueSurfaceRows.Single(value => value.EntryId == entry);
             await Until(() => list.ContainerFromItem(playedRow) is ListViewItem);
-            var currentRemove = Visuals((ListViewItem)list.ContainerFromItem(playedRow)).OfType<Button>()
-                .Single(button => Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(button) == "从播放列表移除");
+            var playedView = Visuals((ListViewItem)list.ContainerFromItem(playedRow)).OfType<MusicQueueRowView>().Single();
+            var currentRemove = playedView.Children.OfType<Button>().Single(button => Grid.GetColumn(button) == 1);
             True(ReferenceEquals(currentRemove.Tag, playedRow), "current owner row remains the real action target");
             int count = f.Module.QueueSurfaceRows.Count, removals = f.Calls.Count("music.queue.remove");
-            CardMotion.SetProgress(Visuals((ListViewItem)list.ContainerFromItem(playedRow)).OfType<MusicQueueRowView>().Single(), 1);
+            CardMotion.SetProgress(playedView, 1);
             await Drain(); Click(currentRemove); await SettleQueue(f);
             Equal(removals + 1, f.Calls.Count("music.queue.remove"));
             Equal(count - 1, f.Module.QueueSurfaceRows.Count);
@@ -397,43 +491,52 @@ public static partial class MusicUiTests
         {
             var bar = new SeekBar { Maximum = 100, Value = 25, Height = 16, RailAtTop = true,
                 PlayedBrush = (new SolidColorBrush(Microsoft.UI.Colors.CornflowerBlue)), Margin = new Thickness(0, 32, 0, 0), VerticalAlignment = VerticalAlignment.Top };
-            var root = new Grid { Background = (new SolidColorBrush(Microsoft.UI.Colors.White)) }; root.Children.Add(bar);
+            var root = new Grid { Width = 400, Height = 96, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+                Background = (new SolidColorBrush(Microsoft.UI.Colors.White)) }; root.Children.Add(bar);
             root.Resources.MergedDictionaries.Add(new ResourceDictionary { Source = new Uri("ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml", UriKind.Absolute) });
-            using var source = new DesktopTestUi.Host(new Grid(), 400, 80);
-            source.Mount(root); Render(root, 400, 80); await Drain();
-            async Task<byte[]> Capture()
-            {
-                var bitmap = await DesktopTestUi.Render(root, 1);
-                var pixels = new byte[400 * 80 * 4]; bitmap.Pixels.CopyTo(pixels, 0); return pixels;
-            }
-            var resting = await Capture();
+            using var source = new DesktopTestUi.Host(root, 480, 200);
+            await Until(() => root.IsLoaded && root.XamlRoot is not null);
+            root.UpdateLayout(); await Drain();
+            var barBounds = bar.TransformToVisual(root).TransformBounds(new Rect(0, 0, bar.ActualWidth, bar.ActualHeight));
+            True(barBounds.Top >= 0 && barBounds.Bottom <= root.ActualHeight, "the full seek surface fits inside the rendered host");
+            var railCenter = bar.TransformToVisual(root).TransformPoint(new Point(0, bar.RailOrigin + 1));
+            var resting = await CaptureSeekFrame(root, 1);
             bar.SetPointerWithin(true);
-            await Task.Delay(160); await Drain(); Render(root, 400, 80);
-            var active = await Capture();
-            // Inspect the actual tooltip and simulate its pointer coordinate, never the system pointer.
+            await Task.Delay(160); await Drain(); root.UpdateLayout();
+            var active = await CaptureSeekFrame(root, 1);
+            // Inspect the actual capsule and update its local input coordinate, never the system pointer.
             const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-            var tip = (ToolTip)typeof(SeekBar).GetField("preview", flags)!.GetValue(bar)!;
+            var tip = (Border)typeof(SeekBar).GetField("preview", flags)!.GetValue(bar)!;
+            var tipPosition = (TranslateTransform)tip.RenderTransform;
+            double TipLeft() => Canvas.GetLeft(tip) + tipPosition.X;
+            var tipText = (TextBlock)tip.Child;
             var pointer = typeof(SeekBar).GetField("pointerX", flags)!;
             var update = typeof(SeekBar).GetMethod("UpdatePreview", flags)!;
-            double HoverAt(double x) { pointer.SetValue(bar, x); update.Invoke(bar, null); return tip.HorizontalOffset + tip.DesiredSize.Width / 2; }
+            double HoverAt(double x) { pointer.SetValue(bar, x); update.Invoke(bar, new object?[] { null }); return TipLeft() + tip.DesiredSize.Width / 2; }
             double left = HoverAt(40), right = HoverAt(360);
-            True(tip.IsOpen && Math.Abs(left - 100) < 1 && Math.Abs(right - 100) < 1,
+            True(tip.Visibility == Visibility.Visible && Math.Abs(left - 100) < 1 && Math.Abs(right - 100) < 1,
                 "hovering at either end of a paused track keeps the capsule centered on the 25% playback head");
-            Equal("00:25 / 01:40", tip.Content as string);
-            Equal(Colors.White, ((SolidColorBrush)tip.Background).Color); Equal(Colors.Black, ((SolidColorBrush)tip.Foreground).Color);
-            True(Visuals(tip).OfType<Border>().Any(border => border.CornerRadius.TopLeft >= 16), "actual popup template is a white capsule");
-            for (int y = 30; y <= 36; y++)
-                True(active[(y * 400 + 50) * 4 + 2] < 240, "expanded played rail is visibly thicker than five DIP");
-            True(active[(24 * 400 + 200) * 4 + 2] < resting[(24 * 400 + 200) * 4 + 2], "shade paints above the rail, not only inside its hit area");
-            True(active[(12 * 400 + 200) * 4 + 2] > active[(24 * 400 + 200) * 4 + 2], "upper shade fades smoothly away from the rail");
+            Equal("00:25 / 01:40", tipText.Text);
+            Equal(Colors.White, ((SolidColorBrush)tip.Background).Color); Equal(Colors.Black, ((SolidColorBrush)tipText.Foreground).Color);
+            True(tip.CornerRadius.TopLeft >= 16, "actual retained visual is a white capsule");
+            double fixedTop = Canvas.GetTop(tip);
+            for (int offset = -3; offset <= 3; offset++)
+                True(SeekPixel(active, railCenter.X + 50, railCenter.Y + offset).R < 240, "expanded played rail is visibly thicker than five DIP");
+            Equal(Colors.White, SeekPixel(resting, railCenter.X + 50, railCenter.Y + 3));
+            True(SeekPixel(active, railCenter.X + 200, railCenter.Y - 9).R < SeekPixel(resting, railCenter.X + 200, railCenter.Y - 9).R,
+                "shade paints above the rail, not only inside its hit area");
+            True(SeekPixel(active, railCenter.X + 200, railCenter.Y - 21).R > SeekPixel(active, railCenter.X + 200, railCenter.Y - 9).R,
+                "upper shade fades smoothly away from the rail");
             bar.PresentationKey = "hover-track"; bar.PlaybackRate = 1; bar.IsPlaying = true;
-            double before = tip.HorizontalOffset; await Task.Delay(180); await Drain();
-            if (new global::Windows.UI.ViewManagement.UISettings().AnimationsEnabled) True(tip.HorizontalOffset > before, "the native presentation clock moves both head and capsule without new media ticks");
+            double before = tipPosition.X; await Task.Delay(180); await Drain();
+            if (new global::Windows.UI.ViewManagement.UISettings().AnimationsEnabled) True(tipPosition.X > before, "the native presentation clock moves both head and capsule without new media ticks");
             Equal(25d, bar.Value);
-            bar.BeginScrub(); bar.UpdateScrub(75); update.Invoke(bar, null);
-            Equal("01:15 / 01:40", tip.Content as string);
-            True(Math.Abs(tip.HorizontalOffset + tip.DesiredSize.Width / 2 - 300) < 1, "scrubbing uses the target head");
-            bar.CancelScrub(); source.Window.Content = null; await Drain(); True(!tip.IsOpen, "unmount closes the popup");
+            bar.BeginScrub(); bar.UpdateScrub(75); update.Invoke(bar, new object?[] { null });
+            Equal("01:15 / 01:40", tipText.Text);
+            True(Math.Abs(TipLeft() + tip.DesiredSize.Width / 2 - 300) < 1, "scrubbing uses the target head");
+            Equal(fixedTop, Canvas.GetTop(tip));
+            True(ToolTipService.GetToolTip(bar) is null, "capsule has no competing native tooltip placement clock");
+            bar.CancelScrub(); source.Window.Content = null; await Drain(); True(tip.Visibility == Visibility.Collapsed, "unmount closes the capsule");
         });
         yield return Case("footer shade stays light and continuous with a larger white head across colors and DPI", async () =>
         {
@@ -606,7 +709,9 @@ public static partial class MusicUiTests
         {
             await using var f = await Fixture.Create(); await f.PlayableCollection(); await f.Module.PlaySelectionAsync();
             var footer = f.Module.PlayerView; var bar = (SeekBar)footer.FindName("Progress");
-            Render(footer, 1110, 80); await Drain();
+            using var inputSource = new DesktopTestUi.Host(footer, 1110, 80);
+            await Until(() => footer.IsLoaded && footer.XamlRoot is not null);
+            footer.Measure(new(1110, 80)); footer.Arrange(new(0, 0, 1110, 80)); footer.UpdateLayout(); await Drain();
             bar.BeginScrub(); bar.UpdateScrub(74);
             await f.Playback.SeekAsync(12); await Drain();
             Equal(74d, bar.Value); Equal(12d, f.Playback.Seek);
@@ -622,9 +727,6 @@ public static partial class MusicUiTests
             var peer = FrameworkElementAutomationPeer.CreatePeerForElement(bar)!;
             ((IRangeValueProvider)peer.GetPattern(PatternInterface.RangeValue)).SetValue(36);
             await Until(() => !f.Module.Busy); Equal(36d, f.Playback.Seek);
-            using var inputSource = new DesktopTestUi.Host(new Grid(), 1110, 80);
-            inputSource.Mount(footer);
-            footer.Measure(new(1110, 80)); footer.Arrange(new(0, 0, 1110, 80)); footer.UpdateLayout(); await Drain();
             void Key(VirtualKey key, bool down) => bar.HandleSeekKey(key, down);
             Key(VirtualKey.Right, true);
             Equal(41d, bar.Value);
@@ -635,7 +737,7 @@ public static partial class MusicUiTests
             Key(VirtualKey.Escape, true);
             Key(VirtualKey.End, false);
             await Drain(); Equal(41d, f.Playback.Seek); Equal(41d, bar.Value);
-            bar.BeginScrub(); bar.UpdateScrub(50); DesktopTestUi.Unmount(footer);
+            bar.BeginScrub(); bar.UpdateScrub(50); inputSource.Window.Content = null; await Until(() => !footer.IsLoaded);
             True(!bar.IsScrubbing, "unload cancels"); Equal(41d, f.Playback.Seek);
         });
         yield return Case("skip arrows animate direction without duplicate queue calls and clear on unload", async () =>
