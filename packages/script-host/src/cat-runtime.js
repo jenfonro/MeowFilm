@@ -57,13 +57,14 @@ function decodeSource(bytes) {
 /** Shared execution owner. A platform may supply native source intent; actual
  * source files, installation facts, sandbox and routing remain in this package. */
 export class CatRuntime {
-  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits, clock = Date.now, configuration } = {}) {
+  constructor({ dataRoot, network, onDiagnostic, onScriptError, onNetwork, limits, clock = Date.now, configuration, debug } = {}) {
     requireValue(typeof dataRoot === 'string' && isAbsolute(dataRoot));
     this.productRoot = resolve(dataRoot);
     this.dataRoot = join(this.productRoot, 'cat');
     this.network = network; this.onDiagnostic = onDiagnostic; this.onScriptError = onScriptError;
     this.configuration = configuration;
     this.onNetwork = onNetwork; this.limits = limits; this.clock = clock;
+    this.debug = debug ?? null;
     this.sessions = new Map(); this.snapshots = new Map(); this.proxies = new Map();
     this.candidates = new Map();
     this.candidateSpecs = new Map(); this.workers = new Set();
@@ -140,7 +141,7 @@ export class CatRuntime {
         this.host = new ScriptHost({ adapters: {
           cat: input => this.workerSession(input),
         }, network: this.network, onDiagnostic: this.onDiagnostic,
-        onScriptError: this.onScriptError, limits: this.limits });
+        onScriptError: this.onScriptError, limits: this.limits, debug: this.debug });
         this.aggregatePort = 0;
         await this.apply(this.settings.read(), { background: true });
       })();
@@ -190,6 +191,7 @@ export class CatRuntime {
   workerSession(input) {
     const candidate = new WorkerSession({
       ...input,
+      debug: this.debug,
       protocol: 'cat',
       startSignal: input.startSignal
         ? AbortSignal.any([input.startSignal, this.initialStartSignal.signal])
@@ -218,9 +220,29 @@ export class CatRuntime {
         this.sweepProxies(session);
       },
       onNetwork: value => {
+        this.debug?.emit({
+          level: 'debug',
+          cat: 'film-catalog',
+          sub: 'cat.network',
+          event: 'worker.network',
+          data: value,
+        });
         try { this.onNetwork?.(value); } catch { /* Observation cannot alter networking. */ }
       },
       onStopped: session => {
+        this.debug?.emit({
+          level: session.failure ? 'warn' : 'info',
+          cat: 'runtime-node',
+          sub: 'cat.worker',
+          event: 'worker.stopped',
+          data: {
+            installationId: session.installationId,
+            generation: session.generation,
+            exitCode: session.exitCode ?? null,
+            unresponsive: Boolean(session.unresponsive),
+          },
+          error: session.failure ?? null,
+        });
         if (this.candidates.get(session.installationId) === session)
           this.candidates.delete(session.installationId);
         if (this.sessions.get(session.installationId) !== session) return;
@@ -231,6 +253,13 @@ export class CatRuntime {
     });
     this.candidates.set(input.installationId, candidate);
     this.workers.add(candidate);
+    this.debug?.emit({
+      level: 'info',
+      cat: 'runtime-node',
+      sub: 'cat.worker',
+      event: 'worker.created',
+      data: { installationId: input.installationId, generation: input.generation, totalWorkers: this.workers.size },
+    });
     return candidate;
   }
   publishCandidate(installationId) {
@@ -721,7 +750,21 @@ export class CatRuntime {
       requireValue(!worker.worker && !worker.live && !worker.adapterTasks.size, 'SERVICE_ERROR');
     } catch (error) { failure ??= error; }
     await proxyClosing;
-    if (!worker.worker && !worker.live && !worker.adapterTasks.size) this.workers.delete(worker);
+    if (!worker.worker && !worker.live && !worker.adapterTasks.size) {
+      this.workers.delete(worker);
+      this.debug?.emit({
+        level: failure ? 'warn' : 'info',
+        cat: 'runtime-node',
+        sub: 'cat.worker',
+        event: 'worker.removed',
+        data: {
+          installationId: worker.installationId,
+          generation: worker.generation,
+          remainingWorkers: this.workers.size,
+        },
+        error: failure ?? null,
+      });
+    }
     if (failure) throw failure;
   }
   async drainProxies(session, reason = fault('HOST_CLOSED')) {
@@ -1568,6 +1611,20 @@ export class CatRuntime {
     }
     try { client?.off('socket', socketAssigned); } catch (error) { failure ??= error; }
     if (failure) throw failure;
+  }
+  diagnostics() {
+    const liveWorkers = [...this.workers].filter(worker => worker.live).length;
+    return {
+      closed: this.closed,
+      installations: this.sessions.size,
+      totalWorkers: this.workers.size,
+      liveWorkers,
+      readyWorkers: this.host?.list().filter(entry => entry.state === 'ready').length ?? 0,
+      activeProxies: this.proxies.size,
+      pendingRequests: this.pending.size,
+      failures: this.failures.size,
+      host: this.host?.stats?.() ?? null,
+    };
   }
   async close() {
     if (this.closing) return this.closing;

@@ -223,7 +223,9 @@ export class CatSession {
     const event = Object.freeze({ ...this.scopeIdentity(scope), ...describeScriptError(error) });
     try { this.onDiagnostic?.(event); } catch {}
     if (typeof error?.message === 'string') {
-      try { this.onScriptError?.(Object.freeze({ ...event, message: error.message })); } catch {}
+      const raw = { message: error.message };
+      for (const key of ['name', 'stack', 'code']) if (typeof error[key] === 'string' && error[key]) raw[key] = error[key];
+      try { this.onScriptError?.(Object.freeze({ ...event, message: error.message, raw })); } catch {}
     }
   }
   emitScriptDiagnostic(diagnostic, scope, message) {

@@ -1,6 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
@@ -156,7 +157,10 @@ async function requestOnce(url, { method, headers, body }, signal, follow) {
  * Validate HTTP(S) on every redirect and preserve explicit caller headers.
  */
 export function createNodeNetwork({
-  maxRedirects = 5
+  maxRedirects = 5,
+  debug,
+  debugCategory = 'film-catalog',
+  debugSub = 'script.http',
 } = {}) {
   requireValue(Number.isSafeInteger(maxRedirects) && maxRedirects >= 0 && maxRedirects <= 10);
   return async ({ url: input, options = {}, signal, validateURL }) => {
@@ -167,6 +171,21 @@ export function createNodeNetwork({
     const follow = Math.min(requestedFollow, maxRedirects);
     let request = prepare(options);
     let url = new URL(validateURL(input));
+    const startedAt = debug ? performance.now() : 0;
+    if (debug) {
+      debug.emit({
+        level: 'debug',
+        cat: debugCategory,
+        sub: debugSub,
+        event: 'http.request',
+        data: {
+          url: url.href,
+          method: request.method,
+          headers: request.headers,
+          body: request.body ? request.body.toString('utf8') : null,
+        },
+      });
+    }
     try {
       for (let hop = 0; ; hop++) {
         if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
@@ -184,9 +203,37 @@ export function createNodeNetwork({
           continue;
         }
         if (signal.aborted) throw signal.reason ?? fault('CANCELLED');
-        return { ...response, url: url.href };
+        const output = { ...response, url: url.href };
+        if (debug) {
+          debug.emit({
+            level: 'debug',
+            cat: debugCategory,
+            sub: debugSub,
+            event: 'http.response',
+            durationMs: performance.now() - startedAt,
+            data: {
+              url: output.url,
+              method: request.method,
+              statusCode: output.statusCode,
+              headers: output.headers,
+              body: output.body,
+            },
+          });
+        }
+        return output;
       }
     } catch (e) {
+      if (debug) {
+        debug.emit({
+          level: 'warn',
+          cat: debugCategory,
+          sub: debugSub,
+          event: 'http.error',
+          durationMs: performance.now() - startedAt,
+          data: { url: url.href, method: request.method, code: e?.code ?? null },
+          error: e,
+        });
+      }
       throw signal.aborted ? safeError(signal.reason, 'CANCELLED') : safeError(e, 'NETWORK_ERROR');
     }
   };

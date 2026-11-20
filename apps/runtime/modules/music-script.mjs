@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   createScriptHost, createNodeNetwork, createSourceDownload, PrivateSources, ScriptHostError,
 } from '@meowfilm/script-host';
@@ -255,11 +256,12 @@ function lxInfo(musicInfo) {
  * ScriptHost executes guest code in isolated QuickJS heaps.
  */
 export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost,
-  network = createNodeNetwork(),
+  network,
   download = createSourceDownload({ maxRedirects: 0 }),
-  clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, debug } = {}) {
+  const activeNetwork = network ?? createNodeNetwork({ debug, debugCategory: 'music-playback', debugSub: 'music.script.http' });
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
-    typeof network === 'function' && typeof download === 'function' && typeof clock === 'function' &&
+    typeof activeNetwork === 'function' && typeof download === 'function' && typeof clock === 'function' &&
     typeof setTimer === 'function' && typeof clearTimer === 'function');
   let sourceFiles;
   try { sourceFiles = new PrivateSources(dataRoot, 'music'); }
@@ -281,9 +283,10 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     return promise;
   }
   const host = hostFactory({
-    network: input => track(input.scope, Promise.resolve().then(() => network(input))),
+    network: input => track(input.scope, Promise.resolve().then(() => activeNetwork(input))),
     storage: Object.fromEntries(['get', 'set', 'delete'].map(operation =>
       [operation, input => storage(operation, input)])),
+    debug,
   });
   function guard(signal) {
     requireValue(!closed, 'CLOSED');
@@ -701,7 +704,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   const failure = error => ({ ok: false, contract: musicScriptContract, code: errorCode(error) });
   function business(allowed, required, body) {
-    return async (parameters = {}, context = {}) => {
+    return async (parameters = {}, context = {}, debugHook) => {
       try {
         requireValue(object(context));
         const { signal } = context;
@@ -714,6 +717,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         guard(scoped);
         return success(result);
       } catch (error) {
+        debugHook?.onError?.(error);
         return failure(closed && errorCode(error) === 'CANCELLED' ? new Failure('CLOSED') : error);
       }
     };
@@ -942,5 +946,44 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       try { fields(params, []); return await close(); } catch (error) { return failure(error); }
     },
   };
-  return { id: 'music', version: contracts.music.version, contract: musicScriptContract, methods, upload, close };
+  if (debug) {
+    for (const [name, handler] of Object.entries(methods)) {
+      const op = name.slice('music.script.'.length);
+      const cat = op.startsWith('sources.') || op === 'close' ? 'runtime-node' : 'music-playback';
+      const sub = `music.script.${op}`;
+      methods[name] = async (parameters = {}, context = {}) => {
+        const startedAt = performance.now();
+        let rawError = null;
+        debug.emit({ level: 'debug', cat, sub, event: 'script.call.start', data: { operation: op, input: parameters } });
+        const reply = await handler(parameters, context, { onError: err => { rawError = err; } });
+        debug.emit({
+          level: reply?.ok === false ? 'warn' : 'debug',
+          cat,
+          sub,
+          event: reply?.ok === false ? 'script.call.error' : 'script.call.end',
+          durationMs: performance.now() - startedAt,
+          data: reply?.ok === false
+            ? { operation: op, input: parameters, code: reply.code }
+            : { operation: op, result: reply?.value },
+          error: reply?.ok === false ? rawError : null,
+        });
+        return reply;
+      };
+    }
+  }
+  return {
+    id: 'music',
+    version: contracts.music.version,
+    contract: musicScriptContract,
+    diagnostics: () => ({
+      closed,
+      installations: cached?.installations?.length ?? 0,
+      activeOperations: active.size,
+      pendingAdapterTasks: adapterTasks.size,
+      host: host.stats(),
+    }),
+    methods,
+    upload,
+    close,
+  };
 }

@@ -1,3 +1,4 @@
+import { performance } from 'node:perf_hooks';
 import { createClientContexts } from './clients.mjs';
 import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { createMusicTransport } from './transport.mjs';
@@ -19,11 +20,14 @@ const providers = { wy: wyProvider, tx: txProvider, kg: kgProvider, kw: kwProvid
 const writes = new Set(['dailyStyle.save', 'sync.write', 'feedback.send', 'feedback.upload', 'vip.checkIn', 'sms.send']);
 const physicalCancellation = new Set(['audio', 'lyrics', 'chorus', 'account.verify', 'account.refresh', 'account.profile',
   'qr.create', 'qr.poll', 'sms.login', 'feedback.prepare', 'feedback.qualify', 'sync.prepare']);
+const isAccountOperation = operation => typeof operation === 'string' &&
+  (operation.startsWith('account.') || operation.startsWith('qr.') ||
+    operation.startsWith('sms.') || operation.startsWith('vip.'));
 
 /** Shared request/parse owner. Only anonymous client state and recoverable API results live here.
  * The native account owner publishes an authorized session after its durable save. */
-export function createMusicPlatform({ dataRoot, clientStore, transport = createMusicTransport(), clock = Date.now,
-  tokenProvider } = {}) {
+export function createMusicPlatform({ dataRoot, clientStore, debug, transport = createMusicTransport({ debug }),
+  clock = Date.now, tokenProvider } = {}) {
   const clients = createClientContexts({ dataRoot, clientStore, transport, clock }), accounts = createAccountOperations(), mutations = createMutations();
   const sessions = new Map(), active = new Set(), cache = new Map(), flights = new Map();
   let cacheBytes = 0, closed = false, closing, xeapiState = {};
@@ -41,6 +45,13 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
   async function sessionUpdate({ platform, session = null }) {
     if (closed) fail('CLOSED');
     guardPlatform(platform);
+    debug?.emit({
+      level: 'info',
+      cat: 'music-account',
+      sub: `${platform}.session`,
+      event: 'session.update',
+      data: { platform, hasSession: session !== null, session },
+    });
     const previous = sessions.get(platform);
     const next = session === null ? null : { scope: input(session.scope), generation: session.generation,
       userId: input(session.userId), cookie: input(session.cookie) };
@@ -200,10 +211,26 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
           entry.account?.generation ?? 0, parts]);
         assertCurrent();
         const old = cache.get(key);
-        if (!params.refresh && old?.expires > clock()) return cloneJSONValue(old.value);
+        if (!params.refresh && old?.expires > clock()) {
+          debug?.emit({
+            level: 'debug',
+            cat: 'music-platform',
+            sub: `${platform}.cache`,
+            event: 'cache.hit',
+            data: { platform, parts, bytes: old.bytes },
+          });
+          return cloneJSONValue(old.value);
+        }
         if (old) erase(key);
         const shared = flights.get(key);
         if (shared) {
+          debug?.emit({
+            level: 'debug',
+            cat: 'music-platform',
+            sub: `${platform}.cache`,
+            event: 'cache.coalesced',
+            data: { platform, parts },
+          });
           const result = await shared.work; assertCurrent(); return cloneJSONValue(result);
         }
         const work = Promise.resolve().then(action);
@@ -219,6 +246,13 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
               while (cache.size >= 64 || cacheBytes + bytes > 2 * 1024 * 1024) erase(cache.keys().next().value);
               cache.set(key, { platform, bytes, value: cloneJSONValue(result), expires: Math.min(clock() + ttl, result.expiresAt ?? Infinity) });
               cacheBytes += bytes;
+              debug?.emit({
+                level: 'debug',
+                cat: 'music-platform',
+                sub: `${platform}.cache`,
+                event: 'cache.store',
+                data: { platform, parts, bytes, cacheEntries: cache.size, cacheBytes },
+              });
             }
           }
           return result;
@@ -231,6 +265,16 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
     if (closed) fail('CLOSED');
     guardPlatform(platform); object(params, 'INVALID_REQUEST');
     signal?.throwIfAborted();
+    const startedAt = debug ? performance.now() : 0;
+    const logCat = isAccountOperation(operation) ? 'music-account' : 'music-platform';
+    const logSub = `${platform}.${operation}`;
+    debug?.emit({
+      level: 'debug',
+      cat: logCat,
+      sub: logSub,
+      event: 'request.start',
+      data: { platform, operation, params, candidate, expectedSession },
+    });
     const action = Object.hasOwn(providers[platform], operation) ? providers[platform][operation] :
       Object.hasOwn(accounts.operations, operation) ? accounts.operations[operation] :
       Object.hasOwn(mutations.operations, operation) ? mutations.operations[operation] : undefined;
@@ -278,13 +322,40 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
     })
       .then(value => {
         if (!entry.committed) controller.signal.throwIfAborted();
-        if (entry.readback && (controller.signal.aborted || !entry.candidate && session !== sessions.get(platform)))
-          return controller.signal.reason?.code === 'TIMEOUT'
+        if (entry.readback && (controller.signal.aborted || !entry.candidate && session !== sessions.get(platform))) {
+          const readbackValue = controller.signal.reason?.code === 'TIMEOUT'
             ? { ...entry.readback, errorCode: entry.readback.errorCode ?? 'TIMEOUT' } : entry.readback;
+          debug?.emit({
+            level: 'debug',
+            cat: logCat,
+            sub: logSub,
+            event: 'request.end',
+            durationMs: debug ? performance.now() - startedAt : undefined,
+            data: { platform, operation, readback: true, value: readbackValue },
+          });
+          return readbackValue;
+        }
+        debug?.emit({
+          level: 'debug',
+          cat: logCat,
+          sub: logSub,
+          event: 'request.end',
+          durationMs: debug ? performance.now() - startedAt : undefined,
+          data: { platform, operation, value },
+        });
         return value;
       })
       .catch(error => {
         const failure = error instanceof MusicPlatformError ? error : new MusicPlatformError(errorCode(error));
+        debug?.emit({
+          level: 'warn',
+          cat: logCat,
+          sub: logSub,
+          event: 'request.error',
+          durationMs: debug ? performance.now() - startedAt : undefined,
+          data: { platform, operation, code: failure.code, committed: entry.committed },
+          error,
+        });
         if (entry.readback) {
           const code = controller.signal.aborted ? errorCode(controller.signal.reason) : failure.code;
           return { ...entry.readback, errorCode: entry.readback.errorCode ??
@@ -309,8 +380,24 @@ export function createMusicPlatform({ dataRoot, clientStore, transport = createM
   }
   return {
     get ready() { return clients.ready; }, request, sessionUpdate,
-    clear({ platform } = {}) { if (closed) fail('CLOSED'); if (platform) guardPlatform(platform); invalidate(platform); return { cleared: true }; },
+    clear({ platform } = {}) {
+      if (closed) fail('CLOSED');
+      if (platform) guardPlatform(platform);
+      invalidate(platform);
+      debug?.emit({ level: 'info', cat: 'music-platform', sub: platform ?? 'all', event: 'cache.clear', data: { platform: platform ?? null } });
+      return { cleared: true };
+    },
     describe() { return { execution: 'node', contract: 'music.platform.v1', platforms: Object.keys(providers) }; },
+    diagnostics() {
+      return {
+        closed,
+        activeRequests: active.size,
+        inFlightCacheReads: flights.size,
+        cacheEntries: cache.size,
+        cacheBytes,
+        sessions: [...sessions.keys()],
+      };
+    },
     close() {
       return closing ??= (async () => {
         closed = true; invalidate();

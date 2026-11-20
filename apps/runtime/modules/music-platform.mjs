@@ -1,12 +1,13 @@
 import { createMusicPlatform } from '@meowfilm/music-platform';
 import { contracts } from '../contracts.mjs';
 
-export function createMusicPlatformModule({ dataRoot, clientStore, tokenProvider, ...options } = {}) {
+export function createMusicPlatformModule({ dataRoot, clientStore, tokenProvider, debug, ...options } = {}) {
   const owner = createMusicPlatform({ ...options, tokenProvider,
-    dataRoot, clientStore });
+    dataRoot, clientStore, debug });
   const spec = contracts['music-platform'];
   return {
     id: 'music-platform', ready: owner.ready, version: spec.version, contract: spec.contract,
+    diagnostics: () => owner.diagnostics(),
     methods: {
       'music.platform.request': async (input, context) => ({ ok: true, contract: spec.contract,
         value: await owner.request(input, { signal: context?.signal }) }),

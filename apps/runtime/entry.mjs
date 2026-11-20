@@ -1,4 +1,5 @@
 import { createAppRuntime } from './bootstrap.mjs';
+import { createNodeDebug, parseDebugHandshake, DEBUG_CATEGORIES } from './debug.mjs';
 import { createMusicScriptModule } from './modules/music-script.mjs';
 import { createCatScriptModule } from './modules/cat-script.mjs';
 import { createSourceRuntimeModule } from './modules/source-runtime.mjs';
@@ -16,6 +17,7 @@ export { createTMDBDataModule, createDoubanDataModule, createFilmPlaybackModule 
 export { createMusicPlatformModule };
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
+export { createNodeDebug, parseDebugHandshake, DEBUG_CATEGORIES };
 
 /** Account ownership stays with pan; Cat receives only a trusted live capability. */
 export function connectPanAccounts(modules) {
@@ -66,20 +68,21 @@ export function connectFilmPlayback(modules, options) {
 }
 
 export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan, tmdb, douban, film, musicPlatform,
-  ...config } = {}) {
+  debug: rawDebug, ...config } = {}) {
   configureStandaloneStorage(createDesktopStorageDriver);
-  return createAppRuntime({ ...config, product: 'aggregate', assemble: () => {
+  const debug = rawDebug !== undefined ? createNodeDebug(rawDebug) : null;
+  return createAppRuntime({ ...config, debug, product: 'aggregate', assemble: () => {
     const modules = [];
     try {
-      modules.push(createMusicScriptModule({ ...music, dataRoot }));
-      modules.push(createCatScriptModule({ ...cat, dataRoot }));
-      modules.push(createSourceRuntimeModule({ ...source, dataRoot }));
-      if (pan !== undefined) modules.push(createPanRuntimeModule({ ...pan, dataRoot }));
+      modules.push(createMusicScriptModule({ ...music, dataRoot, debug }));
+      modules.push(createCatScriptModule({ ...cat, dataRoot, debug }));
+      modules.push(createSourceRuntimeModule({ ...source, dataRoot, debug }));
+      if (pan !== undefined) modules.push(createPanRuntimeModule({ ...pan, dataRoot, debug }));
       connectPanAccounts(modules);
-      if (tmdb !== undefined) modules.push(createTMDBDataModule({ ...tmdb, dataRoot }));
-      if (douban !== undefined) modules.push(createDoubanDataModule({ ...douban, dataRoot }));
-      if (film !== undefined) connectFilmPlayback(modules, { ...film, dataRoot });
-      if (musicPlatform !== undefined) connectMusicPlatform(modules, { ...musicPlatform, dataRoot });
+      if (tmdb !== undefined) modules.push(createTMDBDataModule({ ...tmdb, dataRoot, debug }));
+      if (douban !== undefined) modules.push(createDoubanDataModule({ ...douban, dataRoot, debug }));
+      if (film !== undefined) connectFilmPlayback(modules, { ...film, dataRoot, debug });
+      if (musicPlatform !== undefined) connectMusicPlatform(modules, { ...musicPlatform, dataRoot, debug });
       return modules;
     } catch (error) {
       for (const module of modules) void Promise.resolve(module.close()).catch(() => {});

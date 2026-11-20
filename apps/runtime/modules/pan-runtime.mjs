@@ -9,6 +9,7 @@ export function createPanRuntimeModule(options) {
     ready: service.ready,
     accounts: service.accounts,
     settingsChanged: () => service.settingsChanged(),
+    diagnostics: () => service.diagnostics(),
     methods: Object.fromEntries(spec.operations.map(operation => [spec.prefix + operation,
       async (input, context) => ({ ok: true, contract: spec.contract,
         value: await service.invoke(operation, input, context) })])),

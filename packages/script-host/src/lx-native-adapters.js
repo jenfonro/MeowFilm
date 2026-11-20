@@ -137,7 +137,10 @@ export class LXAdapterOwner {
     const event = Object.freeze({ ...this.scopeIdentity(scope), ...safe });
     try { this.onDiagnostic?.(event); } catch { /* Observers do not own script execution. */ }
     if (typeof this.onScriptError === 'function' && typeof input.message === 'string') {
-      try { this.onScriptError(Object.freeze({ ...event, message: input.message })); }
+      const raw = { message: input.message };
+      // Raw guest name/stack/code are observation only; the safe diagnostic stays authoritative.
+      for (const key of ['name', 'stack', 'code']) if (typeof input[key] === 'string' && input[key]) raw[key] = input[key];
+      try { this.onScriptError(Object.freeze({ ...event, message: input.message, raw })); }
       catch { /* Raw errors are explicit, non-authoritative observation. */ }
     }
   }

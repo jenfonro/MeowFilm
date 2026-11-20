@@ -1,11 +1,12 @@
 import { contracts } from '../contracts.mjs';
 import { isDeepStrictEqual } from 'node:util';
+import { performance } from 'node:perf_hooks';
 import { createPlaybackCache, createPlaybackLibrary, createMediaService, createPlaybackData,
   createPlaybackService, createFilmRulesService, createFilmSearchService, createFilmCatalog,
   fail, object, requireValue } from '@meowfilm/film-playback';
 
 /** App-owned business module, borrowing already-assembled provider owners. */
-export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, nativeSettings }) {
+export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, nativeSettings, debug }) {
   requireValue(Array.isArray(modules));
   const owners = new Map(modules.map(module => [module.id, module]));
   const cache = createPlaybackCache({ now });
@@ -13,7 +14,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     nativePreferences: () => nativeSettings.read('film.preferences')?.preferences ?? {}
   } : {}) });
   const catalog = createFilmCatalog({ library });
-  const media = createMediaService();
+  const media = createMediaService({ debug });
   const data = createPlaybackData({ modules: owners, cache, now, dataRoot });
   const rules = createFilmRulesService({ dataRoot, nativeSettings });
   const search = createFilmSearchService({ data, rules, catalog, now });
@@ -166,7 +167,16 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
   };
   return {
     id: 'film', ready: library.ready, version: spec.version, contract: spec.contract,
+    diagnostics() {
+      return {
+        closed,
+        media: media.diagnostics(),
+        search: search.diagnostics(),
+        playback: service.diagnostics(),
+      };
+    },
     async settingsChanged(block) {
+      debug?.emit({ level: 'info', cat: 'film-playback', sub: 'film.settings', event: 'settings.changed', data: { block } });
       if (block === 'film.rules') await rules.settingsChanged();
       else if (block === 'film.preferences') await service.settingsChanged();
       else if (block === 'pan.accounts') await observeProviderChange('pan');
@@ -182,7 +192,38 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
         if (context?.signal?.aborted) throw fail('CANCELLED');
         requireValue(object(input));
         await library.ready;
-        return { ok: true, contract: spec.contract, value: await handler(input, context?.signal) };
+        if (!debug) {
+          return { ok: true, contract: spec.contract, value: await handler(input, context?.signal) };
+        }
+        const startedAt = performance.now();
+        const cat = operation.startsWith('search.') || operation === 'data.search'
+          ? 'search'
+          : operation.startsWith('data.') ? 'film-catalog' : 'film-playback';
+        const sub = `film.${operation}`;
+        debug.emit({ level: 'debug', cat, sub, event: 'film.call.start', data: { operation, input } });
+        try {
+          const value = await handler(input, context?.signal);
+          debug.emit({
+            level: 'debug',
+            cat,
+            sub,
+            event: 'film.call.end',
+            durationMs: performance.now() - startedAt,
+            data: { operation, value },
+          });
+          return { ok: true, contract: spec.contract, value };
+        } catch (error) {
+          debug.emit({
+            level: 'warn',
+            cat,
+            sub,
+            event: 'film.call.error',
+            durationMs: performance.now() - startedAt,
+            data: { operation, input, code: error?.code ?? null },
+            error,
+          });
+          throw error;
+        }
       }])),
     events(path, context) {
       if (closed) throw fail('CLOSED');
@@ -190,7 +231,15 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
       requireValue(path.searchParams.getAll('after').length <= 1);
       const after = path.searchParams.has('after') ? Number(path.searchParams.get('after')) : -1;
       requireValue(Number.isSafeInteger(after) && after >= -1);
-      return search.has(id) ? search.events(id, after, context) : service.events(id, after, context);
+      const isSearch = search.has(id);
+      debug?.emit({
+        level: 'debug',
+        cat: isSearch ? 'search' : 'film-playback',
+        sub: isSearch ? 'film.search.events' : 'film.playback.events',
+        event: 'events.subscribe',
+        data: { sessionId: id, after },
+      });
+      return isSearch ? search.events(id, after, context) : service.events(id, after, context);
     },
     async beforeMutation(moduleId) {
       return providerState(moduleId);
