@@ -23,6 +23,180 @@ public sealed class RelationalRecord(string table, string[] keys, RecordField[] 
     private readonly RecordRelation[] relations = relations;
     public string Table => table;
     public IReadOnlyList<string> Keys => keys;
+    public RelationalRecord Relation(string name) => relations.Single(relation => relation.Name == name).Record;
+    public sealed record SelectedRow(object?[] Key, int Ordinal, JsonObject Value);
+
+    // A selected read never decodes a sibling column or loads an unselected relation.
+    public JsonObject? ReadSelected(DatabaseSession db, object?[] key, params string[] members)
+    {
+        if (key.Length != keys.Length) throw Invalid();
+        var row = db.Query("SELECT * FROM " + Q(table) + " WHERE " + Predicate(), Row, Parameters(key)).SingleOrDefault();
+        if (row is null) return null;
+        var batch = new ReadBatch();
+        foreach (var relation in relations.Where(relation => members.Contains(relation.Name)))
+        {
+            var child = relation.Record;
+            var rows = db.Query("SELECT * FROM " + Q(child.table) + " WHERE " + child.Predicate(key.Length) +
+                " ORDER BY ordinal", Row, Parameters(key));
+            batch.Add(child.table, rows, keys);
+            child.LoadChildren(db, key, batch);
+        }
+        return Read(row, batch, members);
+    }
+    public IReadOnlyList<SelectedRow> ReadRows(DatabaseSession db, object?[] prefix, string[]? members = null)
+    {
+        if (prefix.Length > keys.Length) throw Invalid();
+        var rows = db.Query("SELECT * FROM " + Q(table) + " WHERE " + Predicate(prefix.Length) + " ORDER BY ordinal", Row, Parameters(prefix));
+        return rows.Select(row =>
+        {
+            var key = keys.Select(name => row[name]).ToArray();
+            return new SelectedRow(key, Convert.ToInt32(row["ordinal"]),
+                members is null ? Read(db, key)! : members.Any(name => relations.Any(relation => relation.Name == name))
+                    ? ReadSelected(db, key, members)! : Read(row, new ReadBatch(), members));
+        }).ToArray();
+    }
+    public bool HasRelation(DatabaseSession db, object?[] key, string name)
+    {
+        int index = Array.FindIndex(relations, relation => relation.Name == name);
+        if (index < 0 || key.Length != keys.Length) throw Invalid();
+        var masks = db.Query("SELECT shape_mask,null_mask FROM " + Q(table) + " WHERE " + Predicate(),
+            row => (Shape: row.GetInt64(0), Nulls: row.GetInt64(1)), Parameters(key));
+        if (masks.Count == 0) return false;
+        long bit = 1L << (fields.Length + index);
+        if ((masks[0].Shape & bit) == 0 || (masks[0].Nulls & bit) != 0)
+            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        return true;
+    }
+
+    // Only supplied fields/relations are replaced. Omitted columns, relationships and
+    // extension nodes remain in SQLite; no partial projection is a complete previous value.
+    public void Patch(DatabaseSession db, JsonObject value, object?[] key, int ordinal = 0) => WritePatch(db, value, key, ordinal, false);
+    public void Replace(DatabaseSession db, JsonObject value, object?[] key, int ordinal = 0) => WritePatch(db, value, key, ordinal, true);
+    private void WritePatch(DatabaseSession db, JsonObject value, object?[] key, int ordinal, bool replace)
+    {
+        if (key.Length != keys.Length) throw Invalid();
+        if (Extra(value).Count != 0) throw Invalid(); // Existing extension nodes are preserved, never implicitly replaced.
+        if (identityField is not null && value[identityField]?.GetValue<string>() != key[^1] as string) throw Invalid();
+        long touched = 0, shape = 0, nulls = 0;
+        var columns = new List<string>(); var cells = new List<object?>();
+        for (int i = 0; i < fields.Length; i++)
+            if (replace || value.ContainsKey(fields[i].Name))
+            {
+                touched |= 1L << i;
+                if (value.ContainsKey(fields[i].Name)) shape |= 1L << i;
+                if (value.ContainsKey(fields[i].Name) && value[fields[i].Name] is null) nulls |= 1L << i;
+                columns.AddRange(fields[i].Columns); cells.AddRange(Cells(fields[i], value[fields[i].Name]));
+            }
+        for (int i = 0; i < relations.Length; i++)
+            if (replace || value.ContainsKey(relations[i].Name))
+            {
+                touched |= 1L << (fields.Length + i);
+                if (value.ContainsKey(relations[i].Name)) shape |= 1L << (fields.Length + i);
+                if (value.ContainsKey(relations[i].Name) && value[relations[i].Name] is null) nulls |= 1L << (fields.Length + i);
+            }
+        string[] names = [.. keys, "ordinal", "shape_mask", "null_mask", .. columns];
+        object?[] values = [.. key, ordinal, shape, nulls, .. cells];
+        var updates = columns.Select(column => Q(column) + "=excluded." + Q(column)).ToList();
+        updates.Add("ordinal=excluded.ordinal");
+        updates.Add("shape_mask=((shape_mask & ~$touched) | excluded.shape_mask)");
+        updates.Add("null_mask=((null_mask & ~$touched) | excluded.null_mask)");
+        string current = Q(table) + ".";
+        var changed = columns.Select(column => current + Q(column) + " IS NOT excluded." + Q(column)).ToList();
+        changed.Add(current + "ordinal IS NOT excluded.ordinal");
+        changed.Add(current + "shape_mask IS NOT ((" + current + "shape_mask & ~$touched) | excluded.shape_mask)");
+        changed.Add(current + "null_mask IS NOT ((" + current + "null_mask & ~$touched) | excluded.null_mask)");
+        db.Execute("INSERT INTO " + Q(table) + "(" + string.Join(",", names.Select(Q)) + ") VALUES(" +
+            string.Join(",", values.Select((_, i) => "$p" + i)) + ") ON CONFLICT(" + string.Join(",", keys.Select(Q)) +
+            ") DO UPDATE SET " + string.Join(",", updates) + " WHERE " + string.Join(" OR ", changed),
+            [.. Parameters(values), ("$touched", touched)]);
+        foreach (var relation in relations.Where(relation => replace || value.ContainsKey(relation.Name)))
+        {
+            var child = relation.Record;
+            var next = Children(relation, value[relation.Name], key);
+            IReadOnlyList<string> existing = relation.Kind == RecordRelationKind.Object ? [] : db.Query("SELECT " + Q(child.keys[^1]) + " FROM " + Q(child.table) + " WHERE " + child.Predicate(key.Length),
+                row => row.GetString(0), Parameters(key));
+            if (relation.Kind == RecordRelationKind.Object)
+            {
+                if (next.Count == 0) child.Delete(db, key);
+                else child.Replace(db, next[0].Value, key);
+            }
+            else
+            {
+                var ids = next.Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+                foreach (string id in existing.Where(id => !ids.Contains(id))) child.Delete(db, [.. key, id]);
+                foreach (var item in next) child.Replace(db, item.Value, item.Key, item.Ordinal);
+            }
+        }
+    }
+    public bool Matches(DatabaseSession db, object?[] key, JsonObject value, bool complete = false)
+    {
+        var row = db.Query("SELECT * FROM " + Q(table) + " WHERE " + Predicate(), Row, Parameters(key)).SingleOrDefault();
+        if (row is null) return false;
+        long shape = Convert.ToInt64(row["shape_mask"]), nulls = Convert.ToInt64(row["null_mask"]);
+        if (complete)
+        {
+            long expectedShape = 0, expectedNulls = 0;
+            foreach (var (name, index) in fields.Select(field => field.Name).Concat(relations.Select(relation => relation.Name))
+                .Select((name, index) => (name, index)))
+                if (value.ContainsKey(name))
+                {
+                    expectedShape |= 1L << index;
+                    if (value[name] is null) expectedNulls |= 1L << index;
+                }
+            if (shape != expectedShape || nulls != expectedNulls) return false;
+            foreach (var relation in relations.Where(relation => value[relation.Name] is null))
+            {
+                var child = relation.Record;
+                if (db.Scalar<long>("SELECT EXISTS(SELECT 1 FROM " + Q(child.table) + " WHERE " + child.Predicate(key.Length) + ")",
+                    Parameters(key)) != 0) return false;
+            }
+        }
+        foreach (var (field, index) in fields.Select((field, index) => (field, index)))
+            if (value.ContainsKey(field.Name))
+            {
+                if ((shape & (1L << index)) == 0 || ((nulls & (1L << index)) != 0) != (value[field.Name] is null)) return false;
+                var cells = Cells(field, value[field.Name]);
+                if (field.Columns.Where((column, i) => !Equals(row[column], cells[i])).Any()) return false;
+            }
+        foreach (var (relation, index) in relations.Select((relation, index) => (relation, index)))
+            if (value.ContainsKey(relation.Name))
+            {
+                long bit = 1L << (fields.Length + index);
+                if ((shape & bit) == 0 || ((nulls & bit) != 0) != (value[relation.Name] is null)) return false;
+                if (value[relation.Name] is null) continue;
+                var expected = Children(relation, value[relation.Name], key);
+                var child = relation.Record;
+                var actual = db.Query("SELECT " + string.Join(",", child.keys.Select(Q)) + " FROM " + Q(child.table) +
+                    " WHERE " + child.Predicate(key.Length) + " ORDER BY ordinal", Row, Parameters(key));
+                if (actual.Count != expected.Count) return false;
+                for (int i = 0; i < expected.Count; i++)
+                {
+                    var member = expected[i];
+                    if (!child.keys.Select(name => actual[i][name]).SequenceEqual(member.Key) ||
+                        !child.Matches(db, member.Key, member.Value, complete)) return false;
+                }
+            }
+        return true;
+    }
+    public void InsertAt(DatabaseSession db, object?[] prefix, int ordinal)
+    {
+        if (prefix.Length != keys.Length - 1) throw Invalid();
+        db.Execute("UPDATE " + Q(table) + " SET ordinal=ordinal+1 WHERE " + Predicate(prefix.Length) + " AND ordinal >= $ordinal",
+            [.. Parameters(prefix), ("$ordinal", ordinal)]);
+    }
+    public void Delete(DatabaseSession db, object?[] key)
+    {
+        if (key.Length != keys.Length) throw Invalid();
+        db.Execute("DELETE FROM " + Q(table) + " WHERE " + Predicate(), Parameters(key));
+    }
+    public void SetRelationPresent(DatabaseSession db, object?[] key, string name)
+    {
+        int index = Array.FindIndex(relations, relation => relation.Name == name);
+        if (index < 0 || key.Length != keys.Length) throw Invalid();
+        long bit = 1L << (fields.Length + index);
+        db.Execute("UPDATE " + Q(table) + " SET shape_mask=shape_mask | $bit,null_mask=null_mask & ~$bit WHERE " + Predicate(),
+            [.. Parameters(key), ("$bit", bit)]);
+    }
     private static DocumentStoreException Invalid() => new(DocumentStoreError.InvalidRequest);
     private static string Q(string value) => "\"" + value.Replace("\"", "\"\"") + "\"";
     private string Predicate(int? count = null) => string.Join(" AND ", keys.Take(count ?? keys.Length)
@@ -141,19 +315,20 @@ public sealed class RelationalRecord(string table, string[] keys, RecordField[] 
             batch.Add(extensionTable, nodes, keys);
         }
     }
-    private JsonObject Read(IReadOnlyDictionary<string, object?> row, ReadBatch batch)
+    private JsonObject Read(IReadOnlyDictionary<string, object?> row, ReadBatch batch, string[]? members = null)
     {
         var obj = new JsonObject();
         if (identityField is not null) obj[identityField] = (string)row[keys[^1]]!;
         object?[] key = keys.Select(name => row[name]).ToArray();
         long shape = Convert.ToInt64(row["shape_mask"]), nulls = Convert.ToInt64(row["null_mask"]);
-        if (shape < 0 || shape >> (fields.Length + relations.Length) != 0 || (nulls & ~shape) != 0)
+        if (members is null && (shape < 0 || shape >> (fields.Length + relations.Length) != 0 || (nulls & ~shape) != 0))
             throw new DocumentStoreException(DocumentStoreError.Corrupt);
         for (int i = 0; i < fields.Length; i++)
-            if ((shape & (1L << i)) != 0) obj[fields[i].Name] = Value(fields[i], row);
+            if ((shape & (1L << i)) != 0 && (members is null || members.Contains(fields[i].Name))) obj[fields[i].Name] = Value(fields[i], row);
         for (int i = 0; i < relations.Length; i++)
         {
             var relation = relations[i];
+            if (members is not null && !members.Contains(relation.Name)) continue;
             long mask = 1L << (fields.Length + i);
             if ((shape & mask) == 0) continue;
             if ((nulls & mask) != 0) { obj[relation.Name] = null; continue; }
@@ -186,7 +361,7 @@ public sealed class RelationalRecord(string table, string[] keys, RecordField[] 
                 obj[relation.Name] = array;
             }
         }
-        if (extensionTable is not null)
+        if (extensionTable is not null && members is null)
         {
             var nodes = batch.Rows(extensionTable, key);
             if (nodes.Count != 0)

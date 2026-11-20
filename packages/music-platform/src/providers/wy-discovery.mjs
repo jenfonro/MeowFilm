@@ -523,16 +523,22 @@ export async function wyChannelPage(c, params) {
           { dataStatus: raw => first(raw.data) !== undefined || first(raw.list) === undefined }),
       ]);
       c.signal.throwIfAborted();
-      if (reads.every(row => row.status === 'rejected')) throw reads[0].reason;
+      const failures = reads.filter(row => row.status === 'rejected');
+      const fatal = failures.find(row => !['INVALID_RESPONSE', 'UPSTREAM_HTTP', 'UPSTREAM_ERROR', 'NETWORK_ERROR', 'NOT_FOUND']
+        .includes(c.errorCode(row.reason)));
+      if (fatal) throw fatal.reason;
+      if (failures.length === reads.length) throw failures[0].reason;
       if (reads[0].status === 'fulfilled') {
         const raw = reads[0].value, data = record(raw?.data ?? raw);
         const items = array(first(data.songInfoList, raw?.songInfoList)).map(wySong);
         if (items.length) result.sections.push(section(target + ':recommend', text(data.title) || '黑胶VIP 每日推荐', 'songs', items, 'vip-songs'));
-      }
+      } else result.sections.push({ ...section(target + ':recommend', '黑胶VIP 每日推荐', 'songs', [], 'vip-songs'),
+        errorCode: c.errorCode(reads[0].reason) });
       if (reads[1].status === 'fulfilled') {
         const items = rankings(reads[1].value, target).sections.flatMap(row => row.items).filter(row => /^黑胶(?:SVIP|VIP)/i.test(row.name));
         if (items.length) result.sections.push(section(target + ':rankings', '黑胶VIP 排行榜', 'rankings', items, 'vip-ranked-songs'));
-      }
+      } else result.sections.push({ ...section(target + ':rankings', '黑胶VIP 排行榜', 'rankings', [], 'vip-ranked-songs'),
+        errorCode: c.errorCode(reads[1].reason) });
       break;
     }
     default: fail('UNSUPPORTED');

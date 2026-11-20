@@ -106,9 +106,6 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
         return declaration.GetProperty("credentialFields").EnumerateArray().Select(value => value.GetString()!).ToHashSet();
     }
 
-    private static JsonElement PreserveExtensions(JsonElement original, JsonElement replacement, IReadOnlySet<string> fields) =>
-        SettingsDocument.Patch(original, replacement.EnumerateObject().ToDictionary(field => field.Name, field => field.Value), fields);
-
     private static void ValidateCredentials(string provider, JsonElement credentials, string code)
     {
         var allowed = Fields(provider, code);

@@ -154,7 +154,6 @@ try {
     if (JSON.stringify(db.prepare(structure).all()) !== JSON.stringify(expected.prepare(structure).all()))
       fail('STORAGE_SCHEMA');
   } finally { expected.close(); }
-  if (db.prepare('PRAGMA foreign_key_check').get()) fail('STORAGE_CORRUPT');
   fileIdentity = lstatSync(path, {bigint:true});
   parentPort.postMessage({ id: 0, value: true });
 } catch (error) {

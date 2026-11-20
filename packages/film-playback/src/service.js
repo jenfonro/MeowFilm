@@ -7,6 +7,7 @@ import { contentResults, matchesResult, mediaVariants, normalizeDetail, recogniz
 import { buildEpisodeMap, matchEpisodeMaps, resolveEpisode, sameSeasonPartition } from './episodes.js';
 import { providerFamily, qualityKey } from './rules.js';
 import { createFilmCatalog } from './catalog.js';
+import { validateManual, validateBlock } from './library.js';
 import { recognizeChapters } from './chapters.js';
 import { checkSource, checkTarget, clone, codeOf, fail, identity, isIdentifier, object, requireValue,
   nativeMediaErrorCodes, playbackFeedbackFailure, resultDetailId, sourceRevision, text, variantParentId } from './identity.js';
@@ -544,8 +545,12 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
     }
     const constraint = explicit || discoverVariants && session.constraint.action === 'quality'
       ? { action: 'default' } : session.constraint;
+    const blocks = library.read().blocks.filter(row => row.targetId === target.id &&
+      row.sourceKey === candidate.source?.key && (row.errorCode ||
+        row.detailId === (candidate.detailId ?? candidate.source?.detailId) && row.lineId === candidate.lineId));
+    for (const row of blocks) validateBlock(row, 'CORRUPT_STORAGE');
     if (!isCandidateAllowed(candidate, { target: policyTarget, constraint,
-      excluded: retry ? new Set() : session.excluded, blocks: library.read().blocks,
+      excluded: retry ? new Set() : session.excluded, blocks,
       actualEpisode })) return false;
     if (target.kind === 'tv' && !explicit) {
       const projection = episodeProjection(session, playbackMetadata(session)), key = `${candidate.season}:${candidate.episode}`;
@@ -852,10 +857,11 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
         const rows = document[stage].filter(row => row?.targetId === session.target.id && row.enabled !== false);
         for (const row of rows) {
           if (!valid(session, generation)) return;
-          if (stage === 'manual' && (!Number.isSafeInteger(row.failureCount) || row.failureCount < 0 ||
-              row.failureCount === Number.MAX_SAFE_INTEGER)) {
-            session.selectionError = 'CORRUPT_STORAGE';
-            continue;
+          if (stage === 'manual') {
+            try {
+              validateManual(row, 'CORRUPT_STORAGE');
+              requireValue(row.failureCount < Number.MAX_SAFE_INTEGER, 'CORRUPT_STORAGE');
+            } catch (error) { session.selectionError = codeOf(error); continue; }
           }
           if (stage === 'manual' && row.share) {
             if (['source', 'group'].includes(session.target.kind)) continue;
@@ -1605,6 +1611,7 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
       const row = library.read().manual.find(value => value?.id === target.source.detailId &&
         value.targetId === target.id && value.share && value.enabled !== false);
       requireValue(row && target.source.key === `manual:${row.id}`, 'SOURCE_NOT_FOUND');
+      validateManual(row, 'CORRUPT_STORAGE');
       const source = { key: target.source.key, engine: 'pan', name: row.name || '人工匹配', detailId: row.id };
       await addResults(session, source, [{ id: row.id, title: row.title || target.title }], 'linked');
       Object.assign(session.results.find(value => value.source.key === source.key),
@@ -2839,14 +2846,11 @@ export function createPlaybackService({ data, library, media, rules, catalog = c
           const matches = document.manual.filter(row => row?.id === id);
           requireValue(matches.length <= 1, 'CORRUPT_STORAGE');
           previous = matches[0];
-          const item = { ...previous, ...clone(input.item), id, failureCount: 0 };
-          for (const key of ['kind', 'title', 'name', 'sourceKey', 'detailId', 'provider', 'share',
-            'seasonHint', 'enabled', 'autoDisable']) {
-            if (!Object.hasOwn(input.item, key)) delete item[key];
-          }
-          if (object(previous?.share) && object(item.share)) {
-            item.share = { ...previous.share, ...item.share };
-            if (!Object.hasOwn(input.item.share, 'password')) delete item.share.password;
+          const item = { ...fields(input.item, ['targetId','kind','title','name','sourceKey','detailId','provider',
+            'seasonHint','enabled','autoDisable']), id, failureCount: 0 };
+          if (input.item.share !== undefined) {
+            requireValue(object(input.item.share));
+            item.share = fields(input.item.share, ['url','password']);
           }
           if (item.share !== undefined) {
             requireValue(object(item.share) && typeof item.share.url === 'string' &&

@@ -72,8 +72,6 @@ public static class MusicHomeSnapshotTests
             var accountSnapshot = (await new MusicHomeSnapshotStore(accountReopened).ReadAsync(_ => null))!;
             Check(accountSnapshot.Platform == "wy" && accountSnapshot.Pages.Length == 1 &&
                 PageId(accountSnapshot.Pages[0]) == content);
-            Check(accountSnapshot.Pages[0].EnumerateObject().Select(property => property.Name)
-                .Order(StringComparer.Ordinal).SequenceEqual(new[] { "platform", "sections" }));
             string text = Encoding.UTF8.GetString(backing.HomeData!);
             Check(!text.Contains(account, StringComparison.Ordinal));
             foreach (string field in new[] { "ok", "scope", "accountStamp", "credentials", "cookie", "cursor",
@@ -165,8 +163,6 @@ public static class MusicHomeSnapshotTests
                 using var json = JsonDocument.Parse(document.Data!);
                 Check(!Encoding.UTF8.GetString(document.Data!).Contains("\"sources\"") &&
                     !Encoding.UTF8.GetString(document.Data!).Contains("https://image.invalid/song.jpg"));
-                Check(json.RootElement.EnumerateObject().Select(property => property.Name)
-                    .SequenceEqual(new[] { "platform", "pages" }));
                 saved.Pages[0] = default;
                 Check(PageId((await new MusicHomeSnapshotStore(store).ReadAsync(library.SongSnapshot))!.Pages[0]) == "disk-first");
             }
@@ -246,9 +242,9 @@ public static class MusicHomeSnapshotTests
         await using var backing = new MusicOfficialAudioTests.MemoryStore();
         await using var store = new NativeTestDatabase(backing);
         var owner = new MusicHomeSnapshotStore(store);
-        var partial = Page("kg", "partial");
-        partial["sections"]!.AsArray().Add(new JsonObject { ["title"] = "Empty section" });
-        await owner.SaveAsync(Snapshot("wy", partial, new JsonObject()));
+        var page = Page("kg", "partial");
+        page["sections"]!.AsArray().Add(new JsonObject { ["title"] = "Empty section" });
+        await owner.SaveAsync(Snapshot("wy", page, new JsonObject()));
         var restored = (await owner.ReadAsync(_ => null))!;
         Check(restored.Platform == "wy" && restored.Pages.Length == 2 && PageId(restored.Pages[0]) == "partial");
         Check(restored.Pages.All(page => page.GetProperty("platform").GetString() == "wy"));

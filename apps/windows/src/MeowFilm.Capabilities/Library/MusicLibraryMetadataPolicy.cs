@@ -39,7 +39,8 @@ public sealed partial class MusicLibraryOwner
         // Unknown CAS may already have disabled a platform. No consumer may use
         // the old in-memory policy until the single owner reconciles its receipt.
         LJ.Require(pending is null, "PENDING_WRITE");
-        var policy = MetadataPolicy(doc);
+        var policy = method == "music.metadata.settings.get" ? MetadataPolicy(doc) :
+            OverwriteSettings(doc, MetadataPolicyArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
         if (method == "music.metadata.settings.get")
         {
             return (LJ.Obj(("settings", policy)), false);
@@ -50,7 +51,7 @@ public sealed partial class MusicLibraryOwner
         var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(policy) + 1)),
             ("platforms", p["platforms"]), ("enabled", p["enabled"]));
         ValidateMetadataPolicy(next);
-        Set(doc, MetadataPolicyArea, next);
+        Set(doc, MetadataPolicyArea, next, partial: true);
         ApplyArtworkPolicy(doc, force: true);
         return (LJ.Obj(("settings", next)), true);
     }

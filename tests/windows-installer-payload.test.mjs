@@ -37,6 +37,23 @@ test('installer packages the entire publish closure and emits an explicit upgrad
   assert.equal(JSON.parse(readFileSync(join(f.payload, 'build-result.json'))).status, 'built-not-accepted');
 });
 
+test('installer accepts an additional declared framework and retains its actual publish dependencies', t => {
+  const f = fixture(t);
+  f.change('meowfilm.runtimeconfig.json', config => {
+    config.runtimeOptions.includedFrameworks.unshift({ name: 'Microsoft.WindowsDesktop.App', version: '10.0.1' });
+  });
+  f.change('meowfilm.deps.json', deps => {
+    deps.targets['net10.0/win-x64']['DesktopRuntime/10.0.1'] = {
+      runtime: { 'lib/DesktopRuntime.dll': {} },
+    };
+  });
+  assert.throws(f.prepare, /publish dependency is missing lib\/DesktopRuntime.dll/);
+  assert.deepEqual(readdirSync(f.output), []);
+  f.write('DesktopRuntime.dll');
+  f.prepare();
+  assert.ok(readFileSync(join(f.output, 'meowfilm-install-files.txt'), 'utf8').split('\n').includes('DesktopRuntime.dll'));
+});
+
 for (const [name, change] of [
   ['Debug', f => f.change('build-result.json', result => { result.configuration = 'Debug'; })],
   ['framework-dependent', f => f.change('build-result.json', result => { result.selfContained = false; })],
@@ -49,8 +66,8 @@ for (const [name, change] of [
     config.runtimeOptions.framework = config.runtimeOptions.includedFrameworks[0];
     delete config.runtimeOptions.includedFrameworks;
   })],
-  ['unrelated framework closure', f => f.change('meowfilm.runtimeconfig.json', config => {
-    config.runtimeOptions.includedFrameworks.push({ name: 'Microsoft.WindowsDesktop.App', version: '10.0.0' });
+  ['unversioned framework', f => f.change('meowfilm.runtimeconfig.json', config => {
+    config.runtimeOptions.includedFrameworks.push({ name: 'Microsoft.WindowsDesktop.App' });
   })],
   ['missing native dependency', f => rmSync(join(f.payload, 'libSkiaSharp.dll'))],
   ['missing managed dependency', f => rmSync(join(f.payload, 'Example.dll'))],

@@ -40,7 +40,7 @@ await runtime.start();
 - `settings.get {}`：读取完整设置（包括明文凭据）和不透明配置代次 `revision`。
 - `settings.update {…patch}`：原子更新指定字段；省略字段不变，凭据空字符串表示清除。成功返回与 get 同形的完整设置。
 
-普通 HTTP 操作只消费各自定义的参数。`settings.get` 忽略附加参数，`settings.update` 只接受当前 provider 声明的类型化设置字段，未知字段返回 `INVALID_REQUEST`，不能覆盖 `revision`。实际使用的设置值仍须满足 URL、凭据头等要求。数据、搜索、图片各自在实际请求处解释所需配置，错误不伪装为缺失或空成功。
+普通 HTTP 操作只消费各自定义的参数。`settings.get` 忽略附加参数，`settings.update` 只投影当前 provider 声明的类型化设置字段，普通未知字段被忽略且不持久化，不能覆盖 owner 生成的 `revision`；所选字段类型错误仍返回 `INVALID_REQUEST`。实际使用的设置值仍须满足 URL、凭据头等要求。数据、搜索、图片各自在实际请求处解释所需配置，错误不伪装为缺失或空成功。
 
 `revision` 是设置 owner 从完整有效配置生成的不透明稳定身份；包括凭据在内的有效配置改变才换代，无变化更新和冷启动保持不变。调用方只比较是否相等，不解析其内容。影视业务缓存以此隔离配置，不复制或用明文凭据充当缓存身份。身份不另写第二套持久配置，也不包含明文凭据；业务元数据的持久化、组件完整度和定向刷新由 [film data owner](film-playback.md)统一处理。
 

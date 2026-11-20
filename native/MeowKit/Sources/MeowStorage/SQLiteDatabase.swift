@@ -421,7 +421,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
             let structure = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
             let expected = SQLiteConnection(expectedHandle, maintenanceDescriptor: -1)
             guard try db.query(structure) == expected.query(structure),
-                  try db.query("PRAGMA foreign_key_check").isEmpty,
                   try db.query("PRAGMA auto_vacuum").first?.integer("auto_vacuum") == 2 else { throw SQLiteStorageError.invalidSchema }
             try Self.regular(url, required: true)
             var state = stat()

@@ -92,23 +92,28 @@ function scriptBody(value) {
 export class LegadoAdapter {
   constructor({ source, kernel, limits, importedProtocol }) {
     Object.assign(this, { source, kernel, limits, importedProtocol });
-    this.searchRule = parseRuleObject(source.ruleSearch);
-    this.exploreRule = parseRuleObject(source.ruleExplore);
-    this.bookInfoRule = parseRuleObject(source.ruleBookInfo);
-    this.tocRule = parseRuleObject(source.ruleToc);
-    this.contentRule = parseRuleObject(source.ruleContent);
+    // Discovery does not reject an unconsumed malformed rule. Its action
+    // reports the parse failure when invoked.
+    let content;
+    try { content = parseRuleObject(source.ruleContent); } catch { /* Deferred to the selected action. */ }
     const available = [];
     if (source.searchUrl) available.push('search');
     if (source.exploreUrl) available.push('exploreKinds', 'explore');
-    if (Object.keys(this.bookInfoRule).length) available.push('bookInfo');
-    if (Object.keys(this.tocRule).length) available.push('toc');
-    if (this.contentRule.content) available.push('content');
+    if (source.ruleBookInfo) available.push('bookInfo');
+    if (source.ruleToc) available.push('toc');
+    if (content?.content || content === undefined && source.ruleContent !== undefined) available.push('content');
     available.push('loginStatus');
     if (source.loginUrl || source.loginUi) available.push('login');
-    if (this.contentRule.payAction) available.push('payAction');
+    if (content?.payAction || content === undefined && source.ruleContent !== undefined) available.push('payAction');
     available.push('image');
     this.actions = Object.freeze(standardActions.filter(action => available.includes(action)));
   }
+
+  get searchRule() { return parseRuleObject(this.source.ruleSearch); }
+  get exploreRule() { return parseRuleObject(this.source.ruleExplore); }
+  get bookInfoRule() { return parseRuleObject(this.source.ruleBookInfo); }
+  get tocRule() { return parseRuleObject(this.source.ruleToc); }
+  get contentRule() { return parseRuleObject(this.source.ruleContent); }
 
   async start() {
     const configured = String(this.source.jsLib ?? '').trim();
@@ -219,7 +224,9 @@ export class LegadoAdapter {
   }
 
   async headers(payload, invocation) {
-    const rendered = await this.render(this.source.header ?? {}, payload, invocation);
+    sourceRequire(this.source.header === undefined || typeof this.source.header === 'string' ||
+      this.source.header && typeof this.source.header === 'object' && !Array.isArray(this.source.header), 'UNSUPPORTED_RULE');
+    const rendered = await this.render(this.source.header === undefined ? {} : this.source.header, payload, invocation);
     return objectOrEmpty(rendered);
   }
 
@@ -377,12 +384,17 @@ export class LegadoAdapter {
     const results = [];
     if (!list.length) return results;
     const variables = this.kernel.ruleVariables(invocation.id);
+    let consumable = 0;
     for (const item of list) {
+      const parsed = parseJSON(item);
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+      consumable++;
       this.kernel.invocations.get(invocation.id).variables = new Map(variables);
       const book = await this.book(item, rule, payload, invocation, baseUrl);
       if (book.name || book.bookUrl) results.push(book);
     }
     this.kernel.invocations.get(invocation.id).variables = variables;
+    sourceRequire(consumable > 0, 'SCRIPT_PROTOCOL_ERROR');
     return results;
   }
 

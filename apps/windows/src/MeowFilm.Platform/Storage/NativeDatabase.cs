@@ -104,7 +104,8 @@ public sealed class NativeDatabase : IStorageDatabase
                 target.Open(); source.Connection.BackupDatabase(target);
                 var snapshot = new DatabaseSession(target);
                 VerifySchema(snapshot, ReadSchema());
-                if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok")
+                if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok" ||
+                    snapshot.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
                     throw new DocumentStoreException(DocumentStoreError.Corrupt);
                 RandomAccess.FlushToDisk(claimed);
                 completed = true;
@@ -309,8 +310,6 @@ public sealed class NativeDatabase : IStorageDatabase
             row => string.Join("\n", row.GetString(0), row.GetString(1), row.GetString(2), row.IsDBNull(3) ? "" : row.GetString(3)));
         if (!Structure(actual).SequenceEqual(Structure(expected), StringComparer.Ordinal))
             throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
-        if (actual.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
     }
     private static bool SafeWalVersion(string text) => Version.TryParse(text, out var version) &&
         (version >= new Version(3, 51, 3) ||

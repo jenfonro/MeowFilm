@@ -25,9 +25,9 @@ function hostFor(t, options) {
 }
 
 test('host validates options and storage permissions', async t => {
-  const host = hostFor(t);
-  assert.throws(() => createScriptHost({ unknownOption: true }), { code: 'INVALID_ARGUMENT' });
-  assert.throws(() => createScriptHost({ limits: { unknownLimit: 1 } }), { code: 'INVALID_ARGUMENT' });
+  const host = hostFor(t, { unknownOption: true, limits: { unknownLimit: { ignored: true } } });
+  assert.equal(Object.hasOwn(host.limits, 'unknownLimit'), false);
+  assert.throws(() => createScriptHost({ limits: { maxStackBytes: 0 } }), { code: 'INVALID_ARGUMENT' });
   assert.throws(() => host.install({ installationId: 'denied', source: lxScript(),
     permissions: { unsupported: true } }), { code: 'INVALID_ARGUMENT' });
   assert.equal(host.list().length, 0);

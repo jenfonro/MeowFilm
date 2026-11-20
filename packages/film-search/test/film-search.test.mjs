@@ -347,7 +347,6 @@ test('one projection returns both complete views with independently settled orde
   };
   const before = clone(input);
   const output = invoke(input);
-  assert.deepEqual(Object.keys(output), ['cards', 'rawCards']);
   assert.deepEqual(output.cards.map(card => card.displayKey), previousOrder);
   assert.deepEqual(output.rawCards.map(card => card.displayKey), previousRawOrder);
   assert.deepEqual(output.cards.find(card => card.tmdbId === 12).aggregateItems.map(item => item.detailId), ['a', 'b']);

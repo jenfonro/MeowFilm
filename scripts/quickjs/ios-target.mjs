@@ -30,39 +30,11 @@ export function iosArtifacts(target) {
   };
 }
 
-// Fixed build-time value closure, never Undici's package entry or HTTP transport.
+// The constructor adapter is version-specific; its dependency graph comes from the entry.
 export const IOS_CAT_WEB_VALUES = Object.freeze({
   version: '6.29.1',
-  resolved: 'https://registry.npmjs.org/undici/-/undici-6.29.1.tgz',
-  integrity: 'sha512-EvRlUt/QqAEvXdQeRMYUfwOQsfzpDztykrG2owGEE/rBOBoYv9uF39ZzsNDh4lTFHhTr2XOZjKkYgueD12ZmGA==',
   license: { path: 'node_modules/undici/LICENSE',
     sha256: 'a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27' },
-  modules: [
-    'lib/core/constants.js',
-    'lib/core/errors.js',
-    'lib/core/symbols.js',
-    'lib/core/tree.js',
-    'lib/core/util.js',
-    'lib/web/fetch/body.js',
-    'lib/web/fetch/constants.js',
-    'lib/web/fetch/data-url.js',
-    'lib/web/fetch/dispatcher-weakref.js',
-    'lib/web/fetch/file.js',
-    'lib/web/fetch/formdata-parser.js',
-    'lib/web/fetch/formdata.js',
-    'lib/web/fetch/global.js',
-    'lib/web/fetch/headers.js',
-    'lib/web/fetch/request.js',
-    'lib/web/fetch/response.js',
-    'lib/web/fetch/symbols.js',
-    'lib/web/fetch/util.js',
-    'lib/web/fetch/webidl.js',
-  ],
-  builtins: [
-    'node:assert', 'node:buffer', 'node:crypto', 'node:events', 'node:http', 'node:net',
-    'node:perf_hooks', 'node:querystring', 'node:stream', 'node:util', 'node:util/types',
-    'node:worker_threads', 'node:zlib',
-  ],
 });
 
 export function checkIOSMachO(bytes, target) {

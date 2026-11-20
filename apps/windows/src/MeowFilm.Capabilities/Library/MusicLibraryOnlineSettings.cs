@@ -22,11 +22,11 @@ public sealed partial class MusicLibraryOwner
     {
         if (method == "music.settings.get") { return (LJ.Obj(("settings", Settings(doc))), false); }
         LJ.Fields(p, "ifRevision lyrics", "ifRevision lyrics");
-        LJ.Require(pending is null, "PENDING_WRITE"); var settings = Settings(doc);
+        LJ.Require(pending is null, "PENDING_WRITE"); var settings = OverwriteSettings(doc, "online-settings", 3, LJ.Obj(("schema", 3), ("revision", 0)));
         LJ.Require(Revision(settings) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT");
         var next = LJ.Obj(("schema", 3), ("revision", Revision(settings) + 1), ("lyrics", p["lyrics"]));
         ValidateSettings(next);
-        Set(doc, "online-settings", next); return (LJ.Obj(("settings", next)), true);
+        Set(doc, "online-settings", next, partial: true); return (LJ.Obj(("settings", next)), true);
     }
 
 }

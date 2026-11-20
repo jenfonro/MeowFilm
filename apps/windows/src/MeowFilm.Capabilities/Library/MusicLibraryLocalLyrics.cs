@@ -5,31 +5,6 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner
 {
     private const string LocalLyricsArea = "native-local-lyrics";
-    private JsonObject LocalLyrics(MusicLibraryData doc)
-    {
-        var value = Area(doc, LocalLyricsArea) ??
-        LJ.Obj(("schema", 1), ("items", new JsonArray()));
-        try { ValidateLocalLyrics(value); }
-        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-        return value;
-    }
-
-    private static void ValidateLocalLyrics(JsonObject state)
-    {
-        LJ.Fields(state, "schema items", "schema items");
-        LJ.Require(LJ.I(state["schema"]) == 1);
-        var rows = LJ.Array(state["items"]);
-        var identities = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var item in rows)
-        {
-            var row = LJ.Object(item);
-            LJ.Fields(row, "songId contentHash lines", "songId contentHash lines");
-            LJ.Require(Guid.TryParseExact(LJ.S(row["songId"]), "D", out _) && identities.Add(LJ.S(row["songId"])) &&
-                LJ.S(row["contentHash"]).Length == 64, "CORRUPT_STORAGE");
-            ValidateDisplayLines(LJ.Array(row["lines"]));
-        }
-    }
-
     private (JsonObject Result, bool Mutate) LocalLyricsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(method is "music.lyrics.local.get" or "music.lyrics.local.save" or "music.lyrics.local.remove",
@@ -39,21 +14,32 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(pending is null, "PENDING_WRITE");
         var song = NativeMusicSong.Normalize(p["song"]);
         string key = DisplayKey(song);
-        var state = LocalLyrics(doc);
-        var items = LJ.Array(state["items"]);
-        var existing = items.OfType<JsonObject>().SingleOrDefault(item => LJ.S(item["songId"]) == key);
+        var state = doc.Select(LocalLyricsArea, "schema");
+        if (state is not null)
+        {
+            try { LJ.Require(LJ.I(state["schema"]) == 1); }
+            catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+            LJ.Require(doc.HasRelation(LocalLyricsArea, [], [doc.Scope], "items"), "CORRUPT_STORAGE");
+        }
+        var rows = doc.Rows(LocalLyricsArea, ["items"], [doc.Scope], "songId");
+        var matches = rows.Where(item => LJ.S(item.Value["songId"]) == key).ToArray();
+        LJ.Require(matches.Length <= 1, "CORRUPT_STORAGE");
+        var existing = matches.SingleOrDefault();
         if (method == "music.lyrics.local.get")
         {
             if (!LJ.B(Settings(doc)["lyrics"]))
                 return (LJ.Obj(("state", "disabled"), ("lines", new JsonArray()), ("available", existing is not null)), false);
-            return (existing is null ? LJ.Obj(("state", "none"), ("lines", new JsonArray()), ("available", false)) :
-                LJ.Obj(("state", "local"), ("lines", existing["lines"]), ("available", true)), false);
+            if (existing is null) return (LJ.Obj(("state", "none"), ("lines", new JsonArray()), ("available", false)), false);
+            var selected = doc.Row(LocalLyricsArea, ["items"], existing.Key);
+            LJ.Require(LJ.S(selected["contentHash"]).Length == 64, "CORRUPT_STORAGE");
+            try { ValidateDisplayLines(LJ.Array(selected["lines"], "CORRUPT_STORAGE")); }
+            catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+            return (LJ.Obj(("state", "local"), ("lines", selected["lines"]), ("available", true)), false);
         }
         if (!save)
         {
             if (existing is null) return (LJ.Obj(("removed", false)), false);
-            items.Remove(existing);
-            Set(doc, LocalLyricsArea, state);
+            doc.ChangeRow(LocalLyricsArea, ["items"], existing.Key, null, existing.Ordinal);
             return (LJ.Obj(("removed", true)), true);
         }
         RequireCurrentLyricSong(doc, key);
@@ -65,12 +51,12 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(lines.Count > 0, "INVALID_LYRIC_RESPONSE");
         var next = LJ.Obj(("songId", song["songId"]),
             ("contentHash", LJ.Digest(LJ.Obj(("text", text)))), ("lines", lines));
-        if (existing is not null && JsonNode.DeepEquals(existing, next))
+        if (existing is not null && doc.Matches(LocalLyricsArea, ["items"], existing.Key,
+            next))
             return (LJ.Obj(("saved", true)), false);
-        if (existing is not null) items.Remove(existing);
-        items.Add(next);
-        ValidateLocalLyrics(state);
-        Set(doc, LocalLyricsArea, state);
+        if (state is null) Set(doc, LocalLyricsArea, LJ.Obj(("schema", 1), ("items", new JsonArray())));
+        doc.ChangeRow(LocalLyricsArea, ["items"], existing?.Key ?? [doc.Scope, Guid.NewGuid().ToString("D")], next,
+            existing?.Ordinal ?? (rows.Count == 0 ? 0 : rows.Max(row => row.Ordinal) + 1));
         return (LJ.Obj(("saved", true)), true);
     }
 

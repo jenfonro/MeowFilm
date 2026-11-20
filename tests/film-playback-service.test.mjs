@@ -11,6 +11,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createFilmRulesService } from '../packages/film-playback/src/rules-service.js';
 import { createPlaybackService } from '../packages/film-playback/src/service.js';
 import { createPlaybackLibrary } from '../packages/film-playback/src/library.js';
+import { openDatabase } from '@meowfilm/storage';
 import { createPlaybackData } from '../packages/film-playback/src/data.js';
 import { createPlaybackCache } from '../packages/film-playback/src/cache.js';
 import { createFilmCatalog } from '../packages/film-playback/src/catalog.js';
@@ -6459,14 +6460,15 @@ test('source display renaming rechecks formal selection only when its consumed p
   } finally { waiting.resolve(); }
 });
 
-test('real typed library edits and playback writes reopen without accepting unknown internal fields', async t => {
+test('real typed library edits and playback writes project ordinary extensions across restart', async t => {
   const root = mkdtempSync(join(tmpdir(), 'film-library-service-'));
   const library = createPlaybackLibrary({ dataRoot: root });
   await library.ready;
   const f = fixture({ library });
   const owners = [library];
   t.after(async () => { await f.service.close(); for (const owner of owners) await owner.close(); rmSync(root, { recursive: true, force:true }); });
-  await assert.rejects(library.update(document => { document.extension = rawJSON('1e400'); }), {code:'INVALID_REQUEST'});
+  await library.update(document => { document.extension = rawJSON('1e400'); });
+  assert.equal('extension' in library.read(), false);
   await library.update(document => {
     document.manual.push({ id: 'edited', targetId: 'another-target', sourceKey: 'a', detailId: 'old', failureCount: 0 });
   });
@@ -6499,16 +6501,23 @@ for (const item of [
   assert.equal(f.calls.length, 0);
 });
 
-test('a corrupt manual failure counter does not block a healthy match or get overwritten', async t => {
-  const f = fixture(); t.after(() => f.service.close());
-  f.library.update(document => { document.manual.push(
-    { id: 'bad', targetId: movie.id, sourceKey: 'a', detailId: 'must-not-fetch', failureCount: 'broken' },
-    { id: 'good', targetId: movie.id, sourceKey: 'a', detailId: 'good', failureCount: 0 }); });
-  const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
+test('a schema-valid unusable manual sibling does not block ready or healthy playback and stays stored', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'film-manual-sibling-'));
+  const database = openDatabase(root);
+  await database.execute(`INSERT INTO film_manual_matches(match_id,position_order,target_id,
+    has_enabled,has_auto_disable,failure_count,row_revision) VALUES('bad',0,?,0,0,0,1)`, [movie.id]);
+  const library = createPlaybackLibrary({dataRoot:root});
+  const f = fixture({library});
+  t.after(async () => { await f.service.close(); await library.close(); await database.close(); rmSync(root,{recursive:true,force:true}); });
+  await library.ready;
+  const [before] = await database.query("SELECT * FROM film_manual_matches WHERE match_id='bad'");
+  await f.service.updateManual({action:'save',item:{id:'good',targetId:movie.id,sourceKey:'a',detailId:'good'}});
+  await f.service.setSettings({...defaultPreferences(),iosAutoPrepare:false});
+  const {sessionId} = await f.open({platform:'windows',sources:[source('a')]});
   const attempt = await f.pending(sessionId);
-  assert.equal(attempt.candidate.source.detailId, 'good');
-  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'), [['detail', 'a', 'good']]);
-  assert.equal(f.library.read().manual[0].failureCount, 'broken');
+  assert.equal(attempt.candidate.source.detailId,'good');
+  assert.deepEqual(f.calls.filter(row => row[0] === 'detail'),[['detail','a','good']]);
+  assert.deepEqual((await database.query("SELECT * FROM film_manual_matches WHERE match_id='bad'"))[0],before);
 });
 
 test('ambiguous manual identity cannot silently replace and discard either stored row', async t => {
@@ -6520,7 +6529,7 @@ test('ambiguous manual identity cannot silently replace and discard either store
   assert.deepEqual(f.library.read(), before);
 });
 
-test('manual save replaces known selection fields while retaining unedited record/share extensions', async t => {
+test('manual save projects typed fields and clears omitted selection fields', async t => {
   const f = fixture(); t.after(() => f.service.close());
   const share = { id: 'edited', targetId: movie.id, kind: 'share', provider: 'quark',
     share: { url: 'https://pan.quark.cn/s/test', password: 'synthetic-only', extension: { keep: true } },
@@ -6528,13 +6537,13 @@ test('manual save replaces known selection fields while retaining unedited recor
   await f.service.updateManual({ action: 'save', item: share });
   await f.service.updateManual({ action: 'save', item: { id: share.id, targetId: movie.id,
     provider: 'quark', share: { url: share.share.url } } });
-  assert.deepEqual(f.library.read().manual[0].share, { url: share.share.url, extension: { keep: true } });
+  assert.deepEqual(f.library.read().manual[0].share, { url: share.share.url });
   assert.equal('seasonHint' in f.library.read().manual[0], false);
   await f.service.updateManual({ action: 'save', item: { id: share.id, targetId: movie.id, sourceKey: 'a', detailId: 'actual' } });
   const row = f.library.read().manual[0];
   assert.equal('share' in row, false);
   assert.equal('provider' in row, false);
-  assert.deepEqual(row.extension, { keep: true });
+  assert.equal('extension' in row, false);
   const { sessionId } = await f.open({ platform: 'windows', sources: [source('a')] });
   assert.equal((await f.pending(sessionId)).candidate.source.detailId, 'actual');
   assert.equal(f.calls.some(row => row[0] === 'expand'), false);
@@ -6549,4 +6558,23 @@ for (const position of [-1, 'broken']) test(`only a consumed history resume posi
   assert.equal(f.snapshot(sessionId).attempt, null);
   assert.equal(f.calls.some(row => row[0] === 'prepare'), false);
   assert.equal(f.library.read().history[0].position, position);
+});
+
+
+test('an actually selected unusable SQL manual record reports corruption without fetching or rewriting it', async t => {
+  const root = mkdtempSync(join(tmpdir(),'film-selected-bad-manual-'));
+  const database = openDatabase(root);
+  await database.execute(`INSERT INTO film_manual_matches(match_id,position_order,target_id,
+    has_enabled,has_auto_disable,failure_count,row_revision) VALUES('bad',0,?,0,0,0,3)`,[movie.id]);
+  const library = createPlaybackLibrary({dataRoot:root}), f = fixture({library, data:{
+    async search() {return {page:1,hasMore:false,items:[]};},
+  }});
+  t.after(async () => {await f.service.close();await library.close();await database.close();rmSync(root,{recursive:true,force:true});});
+  await library.ready;
+  const before = await database.query('SELECT * FROM film_manual_matches');
+  const {sessionId} = await f.open({platform:'windows',sources:[source('a')]});
+  await until(() => f.snapshot(sessionId).stage === 'unavailable');
+  assert.equal(f.snapshot(sessionId).error,'CORRUPT_STORAGE');
+  assert.equal(f.calls.some(row => ['detail','prepare','resolve'].includes(row[0])),false);
+  assert.deepEqual(await database.query('SELECT * FROM film_manual_matches'),before);
 });

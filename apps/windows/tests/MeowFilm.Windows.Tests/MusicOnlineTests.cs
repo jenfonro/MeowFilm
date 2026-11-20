@@ -197,8 +197,8 @@ public static partial class MusicUiTests
             await f.Module.UpdateSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
             Equal("2", ScriptRow(f).Version);
             var update = f.Runtime.Requests.Last(request => request.Method == "music.script.sources.update").Parameters;
-            True(update.EnumerateObject().Select(field => field.Name).OrderBy(name => name, StringComparer.Ordinal)
-                .SequenceEqual(["installationId", "sourceRevision"]), "an update selects the exact complete source candidate");
+            True(update.GetProperty("installationId").GetString() == ScriptRow(f).InstallationId &&
+                update.GetProperty("sourceRevision").GetInt64() > 0, "an update selects the exact source candidate");
             await f.Module.RemoveSourceAsync(ScriptRow(f)); await Until(() => f.Module.CanEdit);
             Equal(1, ScriptRows(f).Length);
             f.Dialogs.Confirmation = true;

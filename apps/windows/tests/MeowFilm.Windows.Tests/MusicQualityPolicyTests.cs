@@ -14,10 +14,11 @@ public static class MusicQualityPolicyTests
 {
     public static IEnumerable<TestCase> Cases()
     {
+        yield return new("Music quality saves empty enabled sets unchanged and reports disabled before script calls", EmptyEnabled);
         yield return new("quality fixed b900 category spatial priority and request vectors", Vectors);
         yield return new("quality fresh current document returns the current default without writes or Node", Defaults);
-        yield return new("quality strict writes reject all off spatial empty duplicates and invented LX", Invalid);
-        yield return new("quality malformed persisted current policy fails without repair or rewrite", Corrupt);
+        yield return new("quality writes reject duplicate identities and invented LX", Invalid);
+        yield return new("quality stored empty policy stays disabled without repair or rewrite", Corrupt);
         yield return new("quality policy CAS leaves the independently owned online settings unchanged", IndependentOwners);
         yield return new("quality cold restart retains policy and rejects stale revision", Restart);
         yield return new("quality unknown before CAS is resolved by the next current read without resend", () => Unknown(false));
@@ -72,25 +73,39 @@ public static class MusicQualityPolicyTests
         await f.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
         read = await f.Ok("music.quality.settings.get");
         Check(read.GetProperty("settings").GetProperty("request").GetString() == "flac" &&
-            !read.GetProperty("onlineSettings").GetProperty("lyrics").GetBoolean());
+            !(await f.Ok("music.settings.get")).GetProperty("settings").GetProperty("lyrics").GetBoolean());
         Check(read.GetProperty("settings").GetRawText() == before.GetProperty("settings").GetRawText() &&
             read.GetProperty("signature").GetString() == before.GetProperty("signature").GetString(),
             "saving lyrics must leave the complete quality policy and signature unchanged");
-        Check(read.GetProperty("onlineSettings").GetProperty("schema").GetInt32() == 3 &&
-            read.GetProperty("onlineSettings").GetProperty("revision").GetInt64() == 1);
+        var online = (await f.Ok("music.settings.get")).GetProperty("settings");
+        Check(online.GetProperty("schema").GetInt32() == 3 && online.GetProperty("revision").GetInt64() == 1);
         Check(MusicTestStores.For(f.Store).Writes == 1 && f.Runtime.Calls.Count == 0);
     }
+    private static async Task EmptyEnabled()
+    {
+        await using var f = new QualityFixture();
+        foreach (bool spatial in new[] { false, true })
+        {
+            var draft = await f.SaveParameters();
+            draft["qualityEnabled"] = spatial ? new JsonArray("spatial") : new JsonArray();
+            draft["spatialEnabled"] = new JsonArray();
+            var settings = (await f.Ok("music.quality.settings.save", draft)).GetProperty("settings");
+            Check(settings.GetProperty("qualityEnabled").GetArrayLength() == (spatial ? 1 : 0));
+            Check(settings.GetProperty("spatialEnabled").GetArrayLength() == 0);
+            await f.Error("music.online.resolve", new { installationId = "fixture", platform = "wy", quality = "320k", song = QualityFixture.Song() }, "QUALITY_DISABLED");
+        }
+        Check(f.Runtime.Calls.Count == 0);
+    }
+
     private static async Task Invalid()
     {
         await using var f = new QualityFixture();
-        foreach (string kind in new[] { "off", "spatial", "duplicate", "request" })
+        foreach (string kind in new[] { "duplicate", "request" })
         {
             var p = await f.SaveParameters();
-            if (kind == "off") p["qualityEnabled"] = new JsonArray();
-            if (kind == "spatial") { p["qualityEnabled"] = new JsonArray("spatial"); p["spatialEnabled"] = new JsonArray(); }
             if (kind == "duplicate") p["qualityOrder"]![0] = "high";
             if (kind == "request") p["request"] = "dolby";
-            await f.Error("music.quality.settings.save", p, kind is "off" or "spatial" ? "QUALITY_REQUIRED" : "INVALID_REQUEST");
+            await f.Error("music.quality.settings.save", p, "INVALID_REQUEST");
         }
         Check(MusicTestStores.For(f.Store).Writes == 0 && f.Runtime.Calls.Count == 0);
     }
@@ -109,9 +124,11 @@ public static class MusicQualityPolicyTests
         int writes = records.Writes;
         await using var f = new QualityFixture(store);
         await f.Ok("music.library.list");
-        await f.Error("music.quality.settings.get", null, "CORRUPT_STORAGE");
+        var restored = (await f.Ok("music.quality.settings.get")).GetProperty("settings");
+        Check(restored.GetProperty("qualityEnabled").GetArrayLength() == 0 && restored.GetProperty("spatialEnabled").GetArrayLength() == 0);
+        await f.Error("music.online.resolve", new { installationId = "fixture", quality = "320k", platform = "wy", song = QualityFixture.Song() }, "QUALITY_DISABLED");
         Check(records.Writes == writes && records.Bytes!.SequenceEqual(original) &&
-            f.Runtime.Calls.Count == 0, "invalid current data must not be repaired, rewritten or sent to Node");
+            f.Runtime.Calls.Count == 0, "stored disabled policy must not be repaired, rewritten or sent to Node");
     }
     private static async Task IndependentOwners()
     {
@@ -121,7 +138,7 @@ public static class MusicQualityPolicyTests
         var request = await f.SaveParameters("master");
         var reply = await f.Ok("music.quality.settings.save", request);
         Check(MusicTestStores.For(f.Store).Writes == 2 &&
-            reply.GetProperty("onlineSettings").GetRawText() ==
+            (await f.Ok("music.settings.get")).GetProperty("settings").GetRawText() ==
             online.GetProperty("settings").GetRawText() &&
             reply.GetProperty("settings").GetProperty("request").GetString() == "master");
         var stale = await f.SaveParameters();

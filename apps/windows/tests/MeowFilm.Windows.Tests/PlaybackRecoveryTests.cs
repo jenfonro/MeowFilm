@@ -454,8 +454,8 @@ public static partial class PlaybackRecoveryTests
                         probe.CatalogMethods.SequenceEqual(new[] { "music.catalog.playlist.prepare", "music.catalog.playlist.commit" }),
                         "public card action completed one real native prepare and next commit before reconciliation");
                     Check(probe.CommitInput is { } input && input.GetProperty("action").GetString() == "next" &&
-                        input.EnumerateObject().Select(property => property.Name).OrderBy(name => name)
-                            .SequenceEqual(new[] { "action", "expectedVersion", "token" }),
+                        input.GetProperty("token").GetString()!.Length > 0 && input.GetProperty("expectedVersion").GetInt64() >= 0 &&
+                        !input.TryGetProperty("songs", out _),
                         "consumer used the actual token-only next commit contract");
                     Check(!action.IsCompleted && !probe.ReleaseQueueRead.Task.IsCompleted && oldToken.IsCancellationRequested,
                         "successful next cancels the old attempt before any post-commit queue snapshot can return");
@@ -3148,7 +3148,7 @@ public static partial class PlaybackRecoveryTests
             Check(saved.GetProperty("ok").GetBoolean(), "native quality fixture setup");
             var online = await inner.ExecuteAsync("music.settings.save", new
             {
-                ifRevision = reply.GetProperty("onlineSettings").GetProperty("revision").GetInt64(),
+                ifRevision = (await inner.ExecuteAsync("music.settings.get", cancellationToken: token)).GetProperty("settings").GetProperty("revision").GetInt64(),
                 lyrics = false
             }, token);
             Check(online.GetProperty("ok").GetBoolean() &&

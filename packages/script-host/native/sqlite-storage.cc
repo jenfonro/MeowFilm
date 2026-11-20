@@ -385,7 +385,6 @@ class Storage : public std::enable_shared_from_this<Storage> {
       return values;
     };
     Check(structure(database) == structure(rawExpected), "STORAGE_SCHEMA");
-    Check(read("PRAGMA foreign_key_check").values.empty(), "STORAGE_CORRUPT");
     Check(integer("PRAGMA auto_vacuum") == 2, "STORAGE_CONFIGURATION");
   }
   void Backup(const std::string& destination) {

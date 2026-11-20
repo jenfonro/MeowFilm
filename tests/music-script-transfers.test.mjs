@@ -1,4 +1,4 @@
-import { withTestDatabase } from './storage-test-fixture.mjs';
+import { databaseProbe, withTestDatabase } from './storage-test-fixture.mjs';
 import { decodeValueNodes } from '@meowfilm/storage/values';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -86,20 +86,55 @@ test('music private storage persists large values and collections through cold r
     await first.state.storage.set(context(item.generation, 'site0', `key${index}`, large));
   for (let index = 1; index < 33; index++)
     await first.state.storage.set(context(item.generation, `site${index}`, 'key', index));
-  const storedBytes = await withTestDatabase(first.dataRoot, async db =>
-    (await db.query('SELECT sum(encoded_bytes) AS bytes FROM music_script_kv_entries WHERE installation_id=?',
-      [item.installationId]))[0].bytes);
-  assert.ok(storedBytes > 512 * 1024);
   success(await first.module.close());
   const reopened = setup(t, { capabilities, dataRoot: first.dataRoot });
   const restored = success(await reopened.rpc('sources.enable', { installationId: item.installationId })).item;
   assert.equal(restored.version, version);
-  assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', 'key64')), large);
+  for (let index = 0; index < 65; index++)
+    assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', `key${index}`)), large);
   assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', longKey)), large);
   assert.equal(await reopened.state.storage.get(context(restored.generation, 'site32', 'key')), 32);
   await reopened.state.storage.delete(context(restored.generation, 'site0', 'key0'));
   assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', 'key0')), null);
   assert.equal(await reopened.state.storage.get(context(restored.generation, 'site0', 'key64')), large);
+});
+
+test('private KV set and delete commit without reading other entries', async t => {
+  const dataRoot = mkdtempSync(join(tmpdir(), 'music-kv-lane-'));
+  const probe = databaseProbe(dataRoot);
+  t.after(() => probe.close());
+  const first = setup(t, { dataRoot }), item = await load(first.rpc);
+  const context = key => ({ installationId: item.installationId, generation: item.generation,
+    siteId: 'kw', key, signal: new AbortController().signal, isCurrent: () => true });
+  try {
+    await first.state.storage.set({ ...context('sibling'), value: 'retained' });
+    probe.requests.length = 0;
+    probe.before = input => assert.equal(input.kind, 'transaction');
+    try {
+      await first.state.storage.set({ ...context('selected'), value: 'new' });
+      await first.state.storage.delete(context('selected'));
+    } finally { probe.before = null; }
+    assert.equal(probe.requests.length, 2);
+    assert.equal(await first.state.storage.get(context('sibling')), 'retained');
+    assert.equal(await first.state.storage.get(context('selected')), null);
+  } finally { await probe.close(); }
+});
+
+test('one wide private KV value round-trips and replaces through cold reopen', async t => {
+  const first = setup(t), item = await load(first.rpc);
+  const value = Array.from({ length: 150000 }, (_, index) => index);
+  const context = generation => ({ installationId: item.installationId, generation,
+    siteId: 'kw', key: 'wide', signal: new AbortController().signal, isCurrent: () => true });
+  await first.state.storage.set({ ...context(item.generation), value });
+  assert.deepEqual(await first.state.storage.get(context(item.generation)), value);
+  success(await first.module.close());
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  const restored = success(await reopened.rpc('sources.enable', { installationId: item.installationId })).item;
+  assert.deepEqual(await reopened.state.storage.get(context(restored.generation)), value);
+  await reopened.state.storage.set({ ...context(restored.generation), value: false });
+  assert.equal(await reopened.state.storage.get(context(restored.generation)), false);
+  await reopened.state.storage.delete(context(restored.generation));
+  assert.equal(await reopened.state.storage.get(context(restored.generation)), null);
 });
 
 test('B1 arbitrary values named blob and receipt remain ordinary business JSON', async t => {
@@ -283,6 +318,22 @@ test('private KV reads one value and replaces a broken selected value without co
   await assert.rejects(first.state.storage.get(context('unconsumed')), { code: 'CORRUPT_STORAGE' });
   await first.state.storage.set({ ...context('unconsumed'), value: 'replacement' });
   assert.equal(await first.state.storage.get(context('unconsumed')), 'replacement');
+});
+
+test('a selected NULL boolean reports corruption while other keys and replacement still work', async t => {
+  const first = setup(t), item = await load(first.rpc);
+  const context = key => ({ installationId: item.installationId, generation: item.generation,
+    siteId: 'kw', key, signal: new AbortController().signal, isCurrent: () => true });
+  await first.state.storage.set({ ...context('broken'), value: false });
+  await first.state.storage.set({ ...context('healthy'), value: true });
+  await withTestDatabase(first.dataRoot, db => db.execute(
+    'UPDATE music_script_kv_nodes SET bool_value=NULL WHERE installation_id=? AND site_id=? AND entry_key=?',
+    [item.installationId, 'kw', 'broken']));
+  assert.equal(await first.state.storage.get(context('healthy')), true);
+  await assert.rejects(first.state.storage.get(context('broken')), { code: 'CORRUPT_STORAGE' });
+  await first.state.storage.set({ ...context('broken'), value: false });
+  assert.equal(await first.state.storage.get(context('broken')), false);
+  assert.equal(await first.state.storage.get(context('healthy')), true);
 });
 
 test('B4 malformed and incomplete HTTP inputs never execute or replace a complete candidate', async t => {

@@ -123,7 +123,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         {
             var loaded = preferences ?? await service.ReadPreferencesAsync(token);
             if (ticket != generation || token.IsCancellationRequested) return;
-            if (preferences is null) { preferences = loaded; PopulatePreferences(); }
+            if (preferences is null) { PopulatePreferences(loaded); preferences = loaded; }
             readBusy = false;
             libraryBusy = requestedSection == "preferences";
             Changed();
@@ -166,12 +166,15 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         "quality" => "画质", "pan" => "网盘", "keyword" => "关键词", "yidong" => "移动云盘",
         "tianyi" => "天翼云盘", "quark" => "夸克", "uc" => "UC", "baidu" => "百度网盘", _ => id
     };
-    private void PopulatePreferences()
+    private void PopulatePreferences(FilmPreferences value)
     {
-        if (preferences is not { } value) return;
-        PopulateOrders();
-        Keywords.Text = string.Join(",", value.Keywords);
-        CleanKeywords.Text = string.Join(",", value.SiteCleanKeywords);
+        if (section == "clean") CleanKeywords.Text = string.Join(",", value.SiteCleanKeywords);
+        else
+        {
+            var rules = value.RuleOrder; var pans = value.PanOrder; var keywords = value.Keywords;
+            ReplaceOrder(ruleItems, rules); ReplaceOrder(panItems, pans);
+            Keywords.Text = string.Join(",", keywords);
+        }
     }
     private void PopulateOrders()
     {

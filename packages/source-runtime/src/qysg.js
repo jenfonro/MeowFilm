@@ -59,6 +59,12 @@ function listValue(value, keys = []) {
   throw sourceFault('SCRIPT_PROTOCOL_ERROR');
 }
 
+function validItems(items) {
+  const valid = items.map(parseValue).filter(item => item && typeof item === 'object' && !Array.isArray(item));
+  sourceRequire(items.length === 0 || valid.length > 0, 'SCRIPT_PROTOCOL_ERROR');
+  return valid;
+}
+
 function absolute(value, base) {
   if (!value) return '';
   try { return new URL(String(value), base || undefined).href; }
@@ -67,7 +73,8 @@ function absolute(value, base) {
 
 function bookValue(value, source, maximumNodes, baseUrl, maximumParseBytes) {
   const parsed = parseValue(value);
-  const input = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  sourceRequire(parsed && typeof parsed === 'object' && !Array.isArray(parsed), 'SCRIPT_PROTOCOL_ERROR');
+  const input = parsed;
   const book = normalizeBook({
     ...input,
     bookUrl: input.bookUrl ?? input.url,
@@ -298,7 +305,7 @@ export class QysgAdapter {
     const value = await this.guest('search', payload, invocation);
     const baseUrl = absolute(payload.baseUrl, this.baseUrl) || this.baseUrl;
     return {
-      books: listValue(value, ['books', 'list'])
+      books: validItems(listValue(value, ['books', 'list']))
         .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl, this.limits.maximumParseBytes)),
       page: Number(payload.page ?? 1),
     };
@@ -307,9 +314,7 @@ export class QysgAdapter {
   async exploreKinds(_payload, invocation) {
     const value = await this.guest('getfinds', {}, invocation);
     return {
-      kinds: listValue(value, ['kinds', 'list']).map(item => {
-        const parsed = parseValue(item);
-        const input = parsed && typeof parsed === 'object' ? parsed : {};
+      kinds: validItems(listValue(value, ['kinds', 'list'])).map(input => {
         return {
           title: String(input.title ?? input.name ?? ''),
           url: String(input.url ?? ''),
@@ -324,7 +329,7 @@ export class QysgAdapter {
     const value = await this.guest('find', payload, invocation);
     const baseUrl = absolute(payload.url ?? payload.baseUrl, this.baseUrl) || this.baseUrl;
     return {
-      books: listValue(value, ['books', 'list'])
+      books: validItems(listValue(value, ['books', 'list']))
         .map(item => bookValue(item, this.source, this.limits.maximumNodes, baseUrl, this.limits.maximumParseBytes)),
       page: Number(payload.page ?? 1),
     };

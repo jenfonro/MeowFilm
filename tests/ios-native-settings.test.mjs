@@ -146,13 +146,16 @@ test('private frame parsing rejects malformed values, fingerprints, unknown code
 
 test('private frames accept multiple replies, large documents and release pending work on close', async t => {
   const f = pipe(t), a = f.settings.reload('tmdb'), b = f.settings.reload('douban');
-  f.settings.accept(Buffer.concat([line(result(1, null)), line(result(2, { version: 1 }))]));
+  const document = { version: 1, value: 'x'.repeat(2 * 1024 * 1024) };
+  f.settings.accept(Buffer.concat([line(result(1, null)), line(result(2, document))]));
   assert.equal(await a, null);
-  assert.deepEqual(await b, { version: 1 });
-  await assert.rejects(f.settings.update('pan.accounts', { provider: 'quark', mode: 'replace',
-    accountRevision: 0, rowRevision: 0, credentials: { cookie: 'x'.repeat(nativeSettingsFrameBytes) } }),
-    { code: 'INVALID_REQUEST' });
+  assert.deepEqual(await b, document);
   assert.equal(f.requests.length, 2);
+  const writing = f.settings.update('pan.accounts', { provider: 'quark', mode: 'replace',
+    accountRevision: 0, rowRevision: 0, credentials: { cookie: document.value } });
+  assert.equal(f.requests[2].command.credentials.cookie, document.value);
+  f.respond(3, { version: 1, accounts: {} });
+  assert.deepEqual((await writing).document, { version: 1, accounts: {} });
   const waiting = assert.rejects(f.settings.reload('cat.sources'), { code: 'CLOSED' });
   f.settings.close();
   await waiting;

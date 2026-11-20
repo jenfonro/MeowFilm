@@ -128,7 +128,7 @@ test('invalid, asynchronous and reentrant edits never commit and diagnostics con
   assert.throws(()=>owner.update(async ()=>{}),{code:'INVALID_REQUEST'});
   await assert.rejects(owner.update(()=>Promise.resolve()),{code:'INVALID_REQUEST'});
   await assert.rejects(owner.update(()=>owner.update(()=>{})),{code:'INVALID_REQUEST'});
-  await assert.rejects(owner.update(draft=>{draft.manual.push({...manual(),unknown:'not a field'});}),{code:'INVALID_REQUEST'});
+  await assert.rejects(owner.update(draft=>{draft.manual.push({...manual(),enabled:'not a boolean'});}),{code:'INVALID_REQUEST'});
   await assert.rejects(owner.update(()=>{throw new Error('SYNTHETIC_PRIVATE_DIAGNOSTIC');}),error=>{
     assert.equal(error.code,'LIBRARY_UPDATE_FAILED'); assert.equal(error.cause,undefined);
     assert.equal(error.stack.includes('SYNTHETIC_PRIVATE_DIAGNOSTIC'),false); return true;
@@ -141,4 +141,63 @@ test('close drains an already admitted control write and rejects new work', asyn
   const closing=owner.close(); await pending; await closing;
   assert.throws(()=>owner.read(),{code:'CLOSED'}); assert.throws(()=>owner.update(()=>{}),{code:'CLOSED'});
   assert.deepEqual((await open()).read().previewTargets,['tmdb:tv:0']);
+});
+
+
+test('ordinary extensions are projected before typed validation and never become saved fields', async t => {
+  const {owner,open} = await fixture(t);
+  const group = {id:'group:'+'a'.repeat(64),keys:['key'],members:['member']};
+  await owner.update(draft => {
+    draft.extension = {unused:true};
+    draft.manual.push({...manual(),extension:{unused:true}});
+    draft.blocks.push({...block(),extension:[]});
+    draft.groups.push({...group,extension:false});
+    draft.preferences.extension = 'unused';
+  });
+  const entry = history();
+  await owner.saveHistory({...entry,extension:{unused:true},episode:{...entry.episode,extension:'unused'},
+    playbackTarget:{...entry.playbackTarget,extension:false,source:{...entry.playbackTarget.source,extension:[]}}});
+  await owner.close(); const restarted = await open();
+  assert.deepEqual(await restarted.history(entry.targetId),entry);
+  assert.deepEqual(restarted.read().manual,[manual()]);
+  assert.deepEqual(restarted.read().blocks,[block()]);
+  assert.deepEqual(restarted.read().groups,[group]);
+  assert.deepEqual(restarted.read().preferences,defaultPreferences());
+  assert.equal('extension' in restarted.read(),false);
+  await assert.rejects(restarted.saveHistory({...entry,episode:{season:'bad'}}),{code:'INVALID_REQUEST'});
+  await assert.rejects(restarted.saveHistory({...entry,playbackTarget:{...entry.playbackTarget,id:'wrong'}}),{code:'INVALID_REQUEST'});
+});
+
+test('unselected unusable SQL rows survive ready, unrelated writes and restart without re-encoding', async t => {
+  const {owner,database,open} = await fixture(t);
+  await owner.close();
+  await database.execute(`INSERT INTO film_manual_matches(match_id,position_order,target_id,detail_id_kind,detail_id_text,
+    has_enabled,has_auto_disable,failure_count,row_revision) VALUES('bad',7,'unselected','integer','not-an-integer',0,0,0,7)`);
+  await database.execute(`INSERT INTO film_blocked_sources VALUES('bad-block',7,'unselected','a','integer','not-an-integer','text','line')`);
+  await database.execute("INSERT INTO film_groups VALUES('unusable-group',7)");
+  await database.execute("INSERT INTO film_group_keys VALUES('unusable-group',0,'')");
+  const tables = ['film_manual_matches','film_blocked_sources','film_groups','film_group_keys'];
+  const before = await Promise.all(tables.map(table => database.query(`SELECT * FROM ${table}`)));
+  const restarted = await open();
+  assert.equal(restarted.read().manual[0].errorCode,'CORRUPT_STORAGE');
+  assert.equal(restarted.read().blocks[0].errorCode,'CORRUPT_STORAGE');
+  await restarted.update(draft => {
+    draft.preferences.keywords=['healthy']; draft.manual[0].extension='unused'; draft.blocks[0].extension=false;
+    draft.groups[0].extension=[]; draft.manual.push(manual());
+  });
+  await restarted.update(draft => {draft.manual[1].name='edited';draft.previewTargets.push('healthy');});
+  for (const [index,table] of tables.entries()) {
+    const rows = await database.query(`SELECT * FROM ${table}`);
+    assert.deepEqual(rows[0],before[index][0]);
+  }
+  const committed = restarted.read();
+  await assert.rejects(restarted.update(draft => {draft.manual[0].name='actually edited';}),{code:'INVALID_REQUEST'});
+  assert.equal(restarted.read(),committed);
+  await restarted.saveHistory(history());
+  await restarted.close(); const reopened = await open();
+  assert.deepEqual(reopened.read().manual,committed.manual);
+  assert.deepEqual(await reopened.history(history().targetId),history());
+  await reopened.update(draft => {draft.manual = draft.manual.filter(row => row.id !== 'bad');});
+  assert.deepEqual(await database.query("SELECT * FROM film_manual_matches WHERE match_id='bad'"),[]);
+  assert.deepEqual((await database.query('SELECT * FROM film_blocked_sources'))[0],before[1][0]);
 });

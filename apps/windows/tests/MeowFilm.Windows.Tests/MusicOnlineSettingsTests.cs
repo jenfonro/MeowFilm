@@ -12,7 +12,7 @@ public static partial class MusicNativeLibraryTests
     {
         yield return new("Native music online settings missing area stays absent on reads and reconciliation", OnlineSettingsMissingArea);
         yield return new("Native music online settings current reads preserve active library state across reopen", OnlineSettingsCurrentState);
-        yield return new("Native music online settings missing required values fail every owner entry without writes", OnlineSettingsMissingRequired);
+        yield return new("Native music online settings missing identity values reject writes while lyrics can be overwritten", OnlineSettingsMissingRequired);
         yield return new("Native music online settings ignore unrelated damaged areas until selected", OnlineSettingsInvalidDocument);
         yield return new("Native music online settings current schema consumes extras and rejects unusable current values", OnlineSettingsInvalidCurrent);
         yield return new("Native music online settings save before commit failure settles without replay", () => OnlineSettingsUnknownCommit(false));
@@ -60,8 +60,7 @@ public static partial class MusicNativeLibraryTests
         byte[] before = f.Store.Bytes.ToArray();
         var owner = f.Owner();
         var fresh = (await Ok(owner, "music.settings.get")).GetProperty("settings");
-        Check(fresh.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal)
-            .SequenceEqual(new[] { "lyrics", "revision", "schema" }));
+
         CheckOnlineSettings(fresh, 0, true);
         await owner.ReconcileAsync();
         CheckOnlineSettings((await Ok(owner, "music.settings.get")).GetProperty("settings"), 0, true);
@@ -117,10 +116,21 @@ public static partial class MusicNativeLibraryTests
         var durable = f.Store.Bytes!.ToArray();
         var owner = f.Owner();
         await Error(owner, "music.settings.get", null, code);
-        await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, code);
-        await owner.ReconcileAsync();
-        await Error(owner, "music.settings.get", null, code);
-        Check(f.Store.WriteCalls == 0 && durable.SequenceEqual(f.Store.Bytes!));
+        var settings = JsonNode.Parse(bytes)!["areas"]!["online-settings"]!.AsObject();
+        bool replaceable = settings["schema"] is JsonValue schema && schema.ToJsonString() == "3" &&
+            settings["revision"] is JsonValue rev && rev.ToJsonString() == "7";
+        if (replaceable)
+        {
+            CheckOnlineSettings((await Ok(owner, "music.settings.save", new { ifRevision = 7, lyrics = true })).GetProperty("settings"), 8, true);
+            Check(f.Store.WriteCalls == 1);
+        }
+        else
+        {
+            await Error(owner, "music.settings.save", new { ifRevision = 7, lyrics = true }, code);
+            await owner.ReconcileAsync();
+            await Error(owner, "music.settings.get", null, code);
+            Check(f.Store.WriteCalls == 0 && durable.SequenceEqual(f.Store.Bytes!));
+        }
     }
 
     private static async Task OnlineSettingsMissingRequired()
@@ -134,13 +144,15 @@ public static partial class MusicNativeLibraryTests
 
     private static async Task OnlineSettingsInvalidDocument()
     {
-        foreach (var (area, invalid, code) in new (string, JsonObject, string)[]
+        foreach (var (area, code) in new (string, string)[]
         {
-            ("library", O(new { schema = 2, scope = "local", revision = 0, library = (await CurrentDocuments()).Library["library"] }), "CORRUPT_LIBRARY"),
-            ("native-official-sources", O(new { schema = 2, revision = 4, enabled = new[] { "kg" } }), "CORRUPT_STORAGE")
+            ("library", "CORRUPT_LIBRARY"),
+            ("native-official-sources", "CORRUPT_STORAGE")
         })
         {
             var doc = JsonNode.Parse(await OnlineSettingsDocument(CurrentOnlineSettings()))!.AsObject();
+            var invalid = doc["areas"]![area]!.DeepClone().AsObject();
+            invalid["schema"] = 2;
             doc["areas"]![area] = invalid;
             await using var f = new Fixture();
             f.Store.Bytes = JsonSerializer.SerializeToUtf8Bytes(doc, PersistedJson);

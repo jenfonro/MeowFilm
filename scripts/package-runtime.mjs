@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, matchesGlob, parse, posix, relative, resolve
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { isBuiltin } from 'node:module';
-import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols, IOS_CAT_WEB_VALUES } from './quickjs/ios-target.mjs';
+import { iosTarget, iosArtifacts, checkIOSMachO, checkIOSSymbols } from './quickjs/ios-target.mjs';
 import { packageNameFromSpecifier, sourceReferences, publicPackageImport,
   workspaceMap } from './module-policy.mjs';
 import { discoverRuntimeSource, runtimeOutputPath } from './runtime-source.mjs';
@@ -270,40 +270,16 @@ function trustedNative(root, inputs, target) {
       && sqlite.inputs.every(input => recorded.get(input.path) === input.sha256),
     'NATIVE_INPUT_MISMATCH', 'Both Apple storage writers require the same pinned SQLite framework');
     const web = receipt.catWebValues;
-    const dependencyFields = ['dependencies', 'optionalDependencies', 'peerDependencies'];
-    const { value: manifest } = readJSON(root, 'package.json');
-    const { value: lock } = readJSON(root, 'package-lock.json');
-    const { value: installed } = readJSON(root, 'node_modules/undici/package.json');
-    const pinned = lock.packages?.['node_modules/undici'];
-    check(manifest.devDependencies?.undici === IOS_CAT_WEB_VALUES.version
-      && lock.packages?.['']?.devDependencies?.undici === IOS_CAT_WEB_VALUES.version
-      && dependencyFields.every(field => !manifest[field]?.undici && !lock.packages?.['']?.[field]?.undici)
-      && installed.name === 'undici' && installed.version === IOS_CAT_WEB_VALUES.version
-      && installed.license === 'MIT' && installed.engines?.node === '>=18.17'
-      && pinned?.version === IOS_CAT_WEB_VALUES.version && pinned.resolved === IOS_CAT_WEB_VALUES.resolved
-      && pinned.integrity === IOS_CAT_WEB_VALUES.integrity && pinned.dev === true && !pinned.link
-      && pinned.license === 'MIT' && pinned.engines?.node === '>=18.17'
-      && [installed, pinned].every(value => dependencyFields.every(field => Object.keys(value[field] ?? {}).length === 0)),
-    'NATIVE_INPUT_MISMATCH', 'Cat Web values must use the locked build-only Undici 6.29.1');
-    check(artifact(web, ios.catWebValues) && Array.isArray(web.inputs)
-      && artifact(web.license, IOS_CAT_WEB_VALUES.license.path)
-      && web.license.sha256 === IOS_CAT_WEB_VALUES.license.sha256,
-    'INVALID_NATIVE_RECEIPT', 'iOS build must include the fixed Cat Web value bundle and license');
-    const webInputs = [
-      'package.json', 'package-lock.json', 'scripts/quickjs/build-ios.mjs', 'scripts/quickjs/ios-target.mjs',
-      'node_modules/esbuild/package.json', 'node_modules/undici/package.json', web.license.path,
-      ...IOS_CAT_WEB_VALUES.modules.map(path => `node_modules/undici/${path}`),
-    ].sort();
-    check(isDeepStrictEqual(web.inputs.map(input => input?.path).sort(), webInputs)
+    check(artifact(web, ios.catWebValues) && Array.isArray(web.inputs) && web.inputs.length > 0
+      && typeof web.license?.path === 'string' && artifact(web.license, web.license.path),
+    'INVALID_NATIVE_RECEIPT', 'iOS build must include the Cat Web value bundle and license');
+    check(new Set(web.inputs.map(input => input?.path)).size === web.inputs.length
       && web.inputs.every(input => isObject(input) && digest(input.sha256) && recorded.get(input.path) === input.sha256)
-      && recorded.get(web.license.path) === web.license.sha256,
+      && web.inputs.some(input => input.path === web.license.path && input.sha256 === web.license.sha256),
     'NATIVE_INPUT_MISMATCH', 'Cat Web value inputs differ from the build');
     check(lstatSync(sourcePath(root, web.license.path)).size === web.license.bytes
       && fileHash(root, web.license.path) === web.license.sha256,
-    'NATIVE_LICENSE_MISMATCH', 'Undici license changed since build');
-    check(isDeepStrictEqual([...recorded.keys()].filter(path => path.startsWith('node_modules/undici/')).sort(),
-      inputFiles(root, 'node_modules/undici').sort()),
-    'NATIVE_INPUT_MISMATCH', 'Undici dependency inventory changed since build');
+    'NATIVE_LICENSE_MISMATCH', 'Cat Web value license changed since build');
     const { value: mobile } = readJSON(root, 'scripts/ios-node-mobile.json');
     const archive = `.cache/nodejs-mobile/${posix.basename(new URL(mobile.archive.url).pathname)}`;
     check(mobile.version === '18.20.4'

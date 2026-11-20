@@ -13,7 +13,7 @@ App 工程把 WinUI 构建已解析的内容输出及应用 PRI 索引加入 `Re
 
 构建机需要使用 `scripts/script-host-native.json` 中 `build.node` 锁定的 Node 版本，以及 npm、Git、.NET SDK 10+、Python、Perl、NASM、CMake 3.20+ 和 MSVC x64 工具链。原生宿主构建应在 Visual Studio x64 Developer PowerShell / Command Prompt 中运行，使 `cl`、`nmake` 与 SDK 路径有效；不是只安装 .NET 即可。源码依赖首次按 `scripts/script-host-native.json` 下载并校验，下载归档与 node-gyp 头文件采用[构建依赖缓存](../common/dependency-cache.md)的共享路径；`tmp/build/runtime-native` 仍保存本副本源码与编译状态，不按测试轮次复制缓存。
 
-目标机只需完整 `build/windows/`，launcher 使用包内 `runtime/node.exe`，不查询 PATH 或借系统 Node。默认输出自带 .NET；`-FrameworkDependent` 版本另需匹配的 .NET Runtime。发布闭包仅包含 `Microsoft.NETCore.App`：自包含配置使用 `includedFrameworks`，依赖系统运行时的配置接受 SDK 生成的单个 `framework` 或单项 `frameworks`。不能只复制 exe，也不需要目标机安装编译工具。
+目标机只需完整 `build/windows/`，launcher 使用包内 `runtime/node.exe`，不查询 PATH 或借系统 Node。默认输出自带 .NET；`-FrameworkDependent` 版本另需匹配的 .NET Runtime。自包含配置使用 `includedFrameworks`，依赖系统运行时的配置使用 SDK 生成的 `framework` 或 `frameworks`；各项声明实际名称和版本，允许新增 framework，交付文件仍按实际发布闭包核对。构建回执的 `runtimeVersion` 按 `Microsoft.NETCore.App` 身份读取，不依赖声明顺序。不能只复制 exe，也不需要目标机安装编译工具。
 
 ## Windows 安装与卸载
 

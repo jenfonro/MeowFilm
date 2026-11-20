@@ -11,7 +11,6 @@ CREATE TABLE music_script_installations (
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     origin_kind TEXT NOT NULL CHECK (origin_kind IN ('file', 'network')),
     origin_url TEXT,
-    origin_basename TEXT,
     current_hash TEXT NOT NULL,
     current_bytes INTEGER NOT NULL CHECK (current_bytes > 0),
     current_version TEXT NOT NULL,
@@ -62,8 +61,6 @@ CREATE TABLE music_script_kv_entries (
     installation_id TEXT NOT NULL,
     site_id TEXT NOT NULL,
     entry_key TEXT NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    encoded_bytes INTEGER NOT NULL CHECK (encoded_bytes >= 0),
     PRIMARY KEY (installation_id, site_id, entry_key)
 ) STRICT;
 
@@ -83,8 +80,6 @@ CREATE TABLE music_script_declared_nodes (
     FOREIGN KEY (installation_id, site_id)
         REFERENCES music_script_declared_sites(installation_id, site_id) ON DELETE CASCADE
 ) STRICT;
-
-CREATE INDEX idx_music_script_kv_site ON music_script_kv_entries(installation_id, site_id, position);
 
 CREATE TABLE music_script_kv_nodes (
     installation_id TEXT NOT NULL,

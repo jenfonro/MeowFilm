@@ -45,7 +45,8 @@ public sealed partial class MusicLibraryOwner
     private (JsonObject Result, bool Mutate) DesktopLyricSettingsCommand(string method, JsonObject p, MusicLibraryData doc)
     {
         LJ.Require(pending is null, "PENDING_WRITE");
-        var saved = DesktopLyricSettings(doc);
+        var saved = method == "music.lyrics.desktop.settings.get" ? DesktopLyricSettings(doc) :
+            OverwriteSettings(doc, DesktopLyricSettingsArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
         if (method == "music.lyrics.desktop.settings.get")
         {
             return (LJ.Obj(("settings", saved)), false);
@@ -54,6 +55,14 @@ public sealed partial class MusicLibraryOwner
         LJ.Fields(p, "ifRevision layout normalColor highlightColor geometry", "ifRevision layout normalColor highlightColor");
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
         var next = (JsonObject)saved.DeepClone();
+        if (!p.ContainsKey("geometry") && doc.Select(DesktopLyricSettingsArea, "geometry") is { } geometry && geometry.ContainsKey("geometry"))
+        {
+            var consumed = LJ.Obj(("schema", 1), ("revision", 0), ("layout", "single"),
+                ("normalColor", "#FFB5C5"), ("highlightColor", "#FFF2A8"), ("geometry", geometry["geometry"]));
+            try { ValidateDesktopLyricSettings(consumed); }
+            catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+            next["geometry"] = geometry["geometry"]?.DeepClone();
+        }
         next["revision"] = checked(Revision(saved) + 1);
         next["layout"] = p["layout"]?.DeepClone();
         next["normalColor"] = p["normalColor"]?.DeepClone();
@@ -61,20 +70,21 @@ public sealed partial class MusicLibraryOwner
         if (p.ContainsKey("geometry"))
         {
             LJ.Require(p["geometry"] is JsonObject);
-            next["geometry"] = LJ.Merge((saved["geometry"] as JsonObject)?.DeepClone().AsObject() ?? new JsonObject(),
-                LJ.Object(p["geometry"]));
+            var incoming = LJ.Object(p["geometry"]);
+            next["geometry"] = new JsonObject(new[] { "monitor", "x", "y", "width", "height" }
+                .Where(incoming.ContainsKey).Select(name => KeyValuePair.Create(name, incoming[name]?.DeepClone())));
         }
         ValidateDesktopLyricSettings(next);
         AppearanceColors.TryParse(LJ.S(next["normalColor"]), out var normal);
         AppearanceColors.TryParse(LJ.S(next["highlightColor"]), out var highlight);
         next["normalColor"] = AppearanceColors.Hex(normal);
         next["highlightColor"] = AppearanceColors.Hex(highlight);
-        if (LJ.S(saved["layout"]) == LJ.S(next["layout"]) &&
-            LJ.S(saved["normalColor"]) == LJ.S(next["normalColor"]) &&
-            LJ.S(saved["highlightColor"]) == LJ.S(next["highlightColor"]) &&
-            JsonNode.DeepEquals(saved["geometry"], next["geometry"]))
-            return (LJ.Obj(("settings", saved)), false);
-        Set(doc, DesktopLyricSettingsArea, next);
+        var comparable = next.DeepClone().AsObject(); comparable.Remove("revision");
+        if (doc.Select(DesktopLyricSettingsArea, "schema") is null && !next.ContainsKey("geometry") &&
+            LJ.S(next["layout"]) == "single" && LJ.S(next["normalColor"]) == "#FFB5C5" && LJ.S(next["highlightColor"]) == "#FFF2A8" ||
+            doc.Matches(DesktopLyricSettingsArea, [], [doc.Scope], comparable))
+        { next["revision"] = saved["revision"]?.DeepClone(); return (LJ.Obj(("settings", next)), false); }
+        Set(doc, DesktopLyricSettingsArea, next, partial: true);
         return (LJ.Obj(("settings", next)), true);
     }
 }

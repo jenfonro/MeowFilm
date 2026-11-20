@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using MeowFilm.Platform.Storage;
+using Microsoft.Data.Sqlite;
 
 namespace MeowFilm.Windows.Tests;
 
@@ -59,6 +60,35 @@ public static class StorageTests
                 Check(db.Scalar<long>("SELECT length($value)", ("$value", Array.Empty<byte>())) == 0);
                 return true;
             });
+        });
+        yield return Case("ordinary-reopen-scopes-stored-relations-and-keeps-write-and-backup-integrity", async () =>
+        {
+            string root = Root();
+            await using (var database = new NativeDatabase(root))
+                await database.Ready;
+            using (var inspection = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(root, NativeDatabase.RelativePath), Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false, ForeignKeys = false
+            }.ToString()))
+            {
+                inspection.Open();
+                using var command = inspection.CreateCommand();
+                command.CommandText = "INSERT INTO operation_receipts VALUES('missing-owner','retained',1)";
+                command.ExecuteNonQuery();
+            }
+            await using var reopened = new NativeDatabase(root);
+            await reopened.Ready;
+            Check(await reopened.ReadAsync(db => db.Scalar<long>("PRAGMA foreign_keys")) == 1);
+            await reopened.WriteAsync(db => db.CommitRevision("unrelated", StorageRevision.Empty, "saved"));
+            await Error(DocumentStoreError.Conflict, () => reopened.WriteAsync(db =>
+                db.Execute("INSERT INTO operation_receipts VALUES('missing-owner','rejected',1)")));
+            Check(await reopened.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM operation_receipts WHERE owner='missing-owner'")) == 1);
+            Check(await reopened.ReadAsync(db => db.Scalar<string>("SELECT operation_id FROM operation_receipts WHERE owner='missing-owner'")) == "retained");
+            string destination = Path.Combine(Root(), "storage-v1", "meowfilm.sqlite3");
+            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+            await Error(DocumentStoreError.Corrupt, () => reopened.BackupAsync(destination));
+            Check(!File.Exists(destination));
         });
         yield return Case("independent-connections-serialize-current-row-increments", async () =>
         {

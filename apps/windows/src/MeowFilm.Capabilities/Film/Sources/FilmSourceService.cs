@@ -134,9 +134,8 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         CatSourceSettings.ValidateSource(name, "local", null);
         var input = await CatSourceSettings.SelectLocalAsync(filePath, cancellationToken).ConfigureAwait(false);
         string id = installationId ?? Guid.NewGuid().ToString("N");
-        return await SaveCatConfigurationAsync(id, configured =>
-            configured.Any(cat => cat.InstallationId == id) ? throw new FilmSourceException("STORAGE_CONFLICT") :
-                [.. configured, new(id, name.Trim(), "local", null, input.Path, input.Hash, true, 1)],
+        return await SaveCatConfigurationAsync(id, token => settings.AddAsync(
+            new(id, name.Trim(), "local", null, input.Path, input.Hash, true, 1), token),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -145,9 +144,8 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     {
         CatSourceSettings.ValidateSource(name, "network", sourceUrl);
         string id = installationId ?? Guid.NewGuid().ToString("N");
-        return SaveCatConfigurationAsync(id, configured =>
-            configured.Any(cat => cat.InstallationId == id) ? throw new FilmSourceException("STORAGE_CONFLICT") :
-                [.. configured, new(id, name.Trim(), "network", sourceUrl, null, null, true, 1)], cancellationToken);
+        return SaveCatConfigurationAsync(id, token => settings.AddAsync(
+            new(id, name.Trim(), "network", sourceUrl, null, null, true, 1), token), cancellationToken);
     }
 
     public Task<FilmCatSource> EditCatAsync(string installationId, string name, string? sourceUrl = null,
@@ -164,18 +162,9 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         CatSourceSettings.ValidateSource(name, sourceType, sourceType == "network" ? sourceUrl : null);
         (string Path, string Hash)? input = sourceType != "local" || localPath is null ? null :
             await CatSourceSettings.SelectLocalAsync(localPath, cancellationToken).ConfigureAwait(false);
-        return await SaveCatConfigurationAsync(installationId, configured => configured.Select(cat =>
-        {
-            if (cat.InstallationId != installationId) return cat;
-            string? path = sourceType == "local" ? input?.Path ?? (cat.SourceType == "local" ? cat.LocalPath : null) : null;
-            string? hash = sourceType == "local" ? input?.Hash ?? (cat.SourceType == "local" ? cat.LocalHash : null) : null;
-            if (sourceType == "local" && hash is null) throw new FilmSourceException("INVALID_ARGUMENT");
-            string? url = sourceType == "network" ? sourceUrl : null;
-            bool changed = cat.SourceType != sourceType || cat.SourceUrl != url ||
-                cat.LocalPath != path || cat.LocalHash != hash;
-            return cat with { Name = name.Trim(), SourceType = sourceType, SourceUrl = url,
-                LocalPath = path, LocalHash = hash, InputRevision = cat.InputRevision + (changed ? 1 : 0) };
-        }), cancellationToken, requireExisting: true).ConfigureAwait(false);
+        return await SaveCatConfigurationAsync(installationId,
+            token => settings.EditAsync(installationId, name.Trim(), sourceType, sourceUrl, input, token),
+            cancellationToken).ConfigureAwait(false);
     }
 
     public Task<FilmCatSource> UpdateCatAsync(string installationId, string? filePath = null,
@@ -198,15 +187,13 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
 
     public Task<FilmCatSource> EnableCatAsync(string installationId, bool enabled,
         CancellationToken cancellationToken = default) => SaveCatConfigurationAsync(installationId,
-        configured => configured.Select(cat => cat.InstallationId == installationId ? cat with { Enabled = enabled } : cat),
-        cancellationToken, requireExisting: true);
+        token => settings.EnableAsync(installationId, enabled, token), cancellationToken);
 
     public Task DeleteCatAsync(string installationId, CancellationToken cancellationToken = default) =>
         RunAsync(token => InStateAsync(async ct =>
         {
             await LoadAsync(ct).ConfigureAwait(false);
-            FindCat(installationId);
-            var configured = await settings.ChangeAsync(cats => cats.Where(cat => cat.InstallationId != installationId), ct)
+            var configured = await settings.RemoveAsync(installationId, ct)
                 .ConfigureAwait(false);
             ConfigurationChanged();
             InvalidateCat(installationId);
@@ -214,15 +201,14 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         }, token), cancellationToken);
 
     private Task<FilmCatSource> SaveCatConfigurationAsync(string id,
-        Func<IReadOnlyList<CatSourceConfiguration>, IEnumerable<CatSourceConfiguration>> edit,
-        CancellationToken token, bool requireExisting = false) => RunAsync(async ct =>
+        Func<CancellationToken, Task<IReadOnlyList<CatSourceConfiguration>>> change,
+        CancellationToken token) => RunAsync(async ct =>
     {
         FilmCatSource result = null!;
         await InStateAsync(async admission =>
         {
             await LoadAsync(admission).ConfigureAwait(false);
-            if (requireExisting) FindCat(id);
-            var configured = await settings.ChangeAsync(edit, admission).ConfigureAwait(false);
+            var configured = await change(admission).ConfigureAwait(false);
             // No runtime acknowledgement or cache write can revoke this native commit.
             ApplyConfiguration(configured);
             ConfigurationChanged();

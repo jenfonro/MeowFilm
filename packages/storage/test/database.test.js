@@ -34,14 +34,33 @@ test('current schema, constraints, transactional CAS and restart', () => fixture
   await restarted.close();
 }));
 
-test('new program never reads an old JSON file; mismatched current database is a fault', () => fixture(async root => {
-  await writeFile(join(root, 'accounts.json'), 'not json');
+test('mismatched current database schema hash is a fault', () => fixture(async root => {
   const db = openDatabase(root); await db.ready;
   await db.execute('UPDATE storage_identity SET schema_hash=?', ['0'.repeat(64)]);
   await db.close();
   const wrong = openDatabase(root);
   await assert.rejects(wrong.ready, {code:'STORAGE_SCHEMA'});
   await assert.rejects(wrong.close(), {code:'STORAGE_SCHEMA'});
+}));
+
+test('ordinary reopen isolates stored relations while new writes keep foreign key enforcement', () => fixture(async root => {
+  const db = openDatabase(root);
+  try {
+    await db.ready;
+    await db.query('PRAGMA foreign_keys=OFF');
+    await db.execute('INSERT INTO operation_receipts VALUES(?,?,?)', ['missing-owner', 'retained', 1]);
+    await db.query('PRAGMA foreign_keys=ON');
+  } finally { await db.close(); }
+  const reopened = openDatabase(root);
+  try {
+    await reopened.ready;
+    assert.equal((await reopened.query('PRAGMA foreign_keys'))[0].foreign_keys, 1);
+    await reopened.execute('INSERT INTO owner_revisions VALUES(?,?,?)', ['unrelated', 1, 'saved']);
+    await assert.rejects(reopened.execute('INSERT INTO operation_receipts VALUES(?,?,?)',
+      ['missing-owner', 'rejected', 1]), {code:'STORAGE_CONSTRAINT'});
+    assert.deepEqual(await reopened.query('SELECT operation_id FROM operation_receipts'), [{operation_id:'retained'}]);
+    assert.equal((await reopened.query("SELECT receipt FROM owner_revisions WHERE owner='unrelated'"))[0].receipt, 'saved');
+  } finally { await reopened.close(); }
 }));
 
 test('a changed table cannot pass by retaining the schema hash', () => fixture(async root => {

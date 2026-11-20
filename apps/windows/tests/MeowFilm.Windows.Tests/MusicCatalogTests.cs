@@ -54,8 +54,8 @@ public static partial class MusicCatalogTests
             Equal(0, f.Playback.Opens.Count);
             var commit = f.Client.Log.Single(call => call.Method == "music.catalog.playlist.commit").Parameters;
             Equal("next", commit.GetProperty("action").GetString());
-            True(commit.EnumerateObject().Select(p => p.Name).OrderBy(n => n)
-                .SequenceEqual(new[] { "action", "expectedVersion", "token" }), "next sends only stage token and CAS version");
+            True(commit.GetProperty("token").GetString()!.Length > 0 && commit.GetProperty("expectedVersion").GetInt64() >= 0 &&
+                !commit.TryGetProperty("songs", out _), "next uses a prepared stage and current queue version");
             Equal(1, f.Client.Count("music.catalog.playlist.discard"));
             Equal(0, f.Client.Count("music.queue.append"));
         });
@@ -1027,6 +1027,18 @@ public static partial class MusicCatalogTests
                     .Single(border => border.Name == "ChannelFilterPill").CornerRadius);
             }
             finally { window.Close(); }
+        });
+        yield return Case("VIP active network error reaches the unified operation notification", async () =>
+        {
+            await using var f = await Fixture.Create(vipAccount: true);
+            await f.Module.NavigateAsync("catalog-channels", default);
+            await f.Module.OpenCatalogCardAsync(f.Module.ChannelTabs.Single(card => card.ActionId == "vip"));
+            await f.Module.UpdateVipPageAsync(true);
+            f.Vip!.SignError = "NETWORK_ERROR";
+            await f.Module.SignVipPageAsync();
+            Equal(1, f.Vip.Signs);
+            Equal(f.Module.OperationErrorText(new MusicOperationException("NETWORK_ERROR")), f.Module.Status);
+            True(!f.Module.VipPage.SignedToday, "failed sign stays unsigned");
         });
         yield return Case("VIP route owns one three-card row and clears it outside the retained page", async () =>
         {
@@ -2742,6 +2754,7 @@ public static partial class MusicCatalogTests
         private string bannerType = "PLAYLIST", bannerId = "500";
         private bool signed;
         internal int Reads, Signs;
+        internal string SignError = "";
 
         public override event Action? VipPageInvalidated;
 
@@ -2759,6 +2772,7 @@ public static partial class MusicCatalogTests
             token.ThrowIfCancellationRequested();
             Equal(Generation, expectedGeneration);
             Signs++;
+            if (SignError.Length != 0) throw new MusicOperationException(SignError);
             signed = true;
             return Task.FromResult(new MusicVipSignReceipt(Generation, Sign()));
         }

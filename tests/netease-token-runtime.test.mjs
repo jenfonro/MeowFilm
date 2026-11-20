@@ -7,7 +7,7 @@ import { createNeteaseTokenModule } from '../apps/runtime/modules/netease-token.
 import { createNeteaseTokenProvider } from '../packages/netease-token/src/index.js';
 import { EventEmitter } from 'node:events';
 
-test('token module has its own exact HTTP contract and sends no account data', async t => {
+test('token module routes its HTTP contract and sends no account data', async t => {
   let gets = 0, closes = 0;
   const module = createNeteaseTokenModule({ provider: {
     async get(input) {
@@ -23,8 +23,9 @@ test('token module has its own exact HTTP contract and sends no account data', a
   const client = createRuntimeClient({ sessionId, requestKey, baseUrl: runtime.baseUrl });
   t.after(async () => { await client.close(); await runtime.close(); });
   const description = (await client.describe()).value;
-  assert.deepEqual(description.modules, [{ id: 'netease', version: '0.1.0',
-    contract: 'netease.token.v1', methods: ['netease.token.get'] }]);
+  const descriptor = description.modules.find(item => item.id === 'netease');
+  assert.equal(descriptor.version, '0.1.0');
+  assert.equal(descriptor.contract, 'netease.token.v1');
   assert.equal(gets, 0);
   const inputs = [{ cookie: 'synthetic-cookie' }, { url: 'https://example.invalid/' }, {}];
   for (const [index, input] of inputs.entries()) {

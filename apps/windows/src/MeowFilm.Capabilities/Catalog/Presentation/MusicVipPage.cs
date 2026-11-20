@@ -68,7 +68,9 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
         var ticket = ++epoch;
         request = cancellation;
         Notify();
-        return transition = SignCoreAsync(previous, cancellation, ticket, expectedGeneration);
+        var work = SignCoreAsync(previous, cancellation, ticket, expectedGeneration);
+        transition = ObserveSignAsync(work);
+        return work;
     }
 
     internal bool Owns(MusicVipBannerData value) =>
@@ -163,8 +165,16 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
                 Notify();
             }
         }
-        catch { }
+        catch when (!Current(cancellation, ticket)) { }
         finally { Finish(cancellation); }
+    }
+
+    private static async Task ObserveSignAsync(Task work)
+    {
+        // The foreground operation receives the error. The serial lifecycle tail only
+        // observes physical completion, so later refresh/sign and close can still drain.
+        try { await work; }
+        catch { }
     }
 
     private bool Current(CancellationTokenSource cancellation, long ticket) =>
@@ -248,7 +258,11 @@ public sealed partial class MusicCapability
     internal Task UpdateVipPageAsync(bool viewVisible) =>
         vipPage.SetSurfaceAsync(viewVisible, IsVipChannel);
 
-    public Task SignVipPageAsync() => vipPage.SignAsync();
+    public Task SignVipPageAsync() => RunAsync(async () =>
+    {
+        try { await vipPage.SignAsync(); }
+        catch (Exception error) { await Notify(OperationErrorText(error)); }
+    });
 
     public Task OpenVipBannerAsync()
     {

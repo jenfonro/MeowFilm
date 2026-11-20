@@ -11,11 +11,36 @@ public static partial class MusicNativeLibraryTests
 {
     private static IEnumerable<TestCase> LyricPersistenceCases()
     {
+        yield return new("Native music selected local lyrics preserve damaged siblings and allow overwrite and removal", LocalLyricsIsolation);
         yield return new("Native music lyric display independent cache preserves plain and true words across restart", () => Task.Run(LyricDisplayRestart));
         yield return new("Native music local lyrics current schema preserves plain and true words across restart", LocalLyricsRestart);
         yield return new("Native music local lyrics beyond sixty four songs and two MiB reopen without truncation", LargeLocalLyrics);
         yield return new("Native music current local lyric documents reject damaged schema fields without writes", LyricSnapshotSchemas);
         yield return new("Native music lyric snapshots ignore unused timing fields without rewriting source data", LyricSnapshotFields);
+    }
+
+    private static async Task LocalLyricsIsolation()
+    {
+        await using var f = new Fixture(); var owner = f.Owner();
+        var (song, _) = await SeedLyricSong(owner);
+        await Ok(owner, "music.queue.append", new { songs = new[] { Online("lyric-brother") } });
+        var queue = await Ok(owner, "music.queue.get");
+        string brother = queue.GetProperty("entries")[1].GetProperty("song").GetProperty("songId").GetString()!;
+        await Ok(owner, "music.lyrics.local.save", new { song, text = "[00:01]first" });
+        await f.Store.Storage.WriteAsync(db =>
+        {
+            var record = MusicStorageRecords.Areas["native-local-lyrics"].Relation("items");
+            record.Replace(db, LJ.Obj(("songId", brother), ("contentHash", "bad")), ["local", "broken"], 1);
+            return true;
+        });
+        Check((await Ok(owner, "music.lyrics.local.get", new { song })).GetProperty("state").GetString() == "local");
+        await f.Store.Storage.WriteAsync(db => db.Execute("DELETE FROM music_windows_local_lyrics_items_lines WHERE scope_key='local' AND items_key<>'broken'"));
+        await Error(owner, "music.lyrics.local.get", new { song }, "CORRUPT_STORAGE");
+        await Ok(owner, "music.lyrics.local.save", new { song, text = "[00:01]first" });
+        Check((await Ok(owner, "music.lyrics.local.get", new { song })).GetProperty("lines")[0].GetProperty("text").GetString() == "first");
+        await f.Store.Storage.WriteAsync(db => db.Execute("DELETE FROM music_windows_local_lyrics_items_lines WHERE scope_key='local' AND items_key<>'broken'"));
+        await Ok(owner, "music.lyrics.local.remove", new { song });
+        Check(await f.Store.Storage.ReadAsync(db => db.Scalar<long>("SELECT count(*) FROM music_windows_local_lyrics_items WHERE items_key='broken'")) == 1);
     }
 
     private const string PersistedLyricText =
@@ -102,7 +127,7 @@ public static partial class MusicNativeLibraryTests
         await Ok(owner, "music.lyrics.local.save", new { song, text = PersistedLyricText });
         var saved = f.Store.State("native-local-lyrics");
         var lines = CurrentLyricRows();
-        Check(saved["schema"]!.GetValue<int>() == 1 && JsonNode.DeepEquals(saved["items"]![0]!["lines"], lines));
+        Check(saved["schema"]!.GetValue<long>() == 1 && JsonNode.DeepEquals(saved["items"]![0]!["lines"], lines));
         byte[] bytes = f.Store.Bytes!.ToArray(); int writes = f.Store.Writes;
         await owner.DisposeAsync();
 

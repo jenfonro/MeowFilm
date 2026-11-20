@@ -170,6 +170,11 @@ private extension XCTestCase {
 
         // close() includes launcher.waitForExit() and all admitted notifications.
         // Do not construct another launcher: NodeMobile is single-start per App.
+        try await resources.musicScripts.close()
+        if let report = await resources.musicAccountGate?.close(), !report.cleanupComplete {
+            throw NativeSettingsHostFailure.runtimeNotClosed
+        }
+        try await resources.musicPlatform.close()
         await resources.scriptSession.close()
         try await NativeSettingsHost.requireClosed(resources, client: client)
         try await NativeSettingsHost.save(resources, run: run, suffix: "-superseded")
@@ -342,7 +347,8 @@ private enum NativeSettingsHost {
               Set(preferencesRoot.keys) == ["version", "preferences"],
               preferencesRoot["version"] == .number(1),
               let preferences = preferencesRoot["preferences"]?.filmObject,
-              Set(preferences.keys) == ["ruleOrder", "panOrder", "keywords", "siteCleanKeywords", "iosAutoPrepare"],
+              let provider = preferences["metadataViewProvider"]?.filmText,
+              provider == "tmdb" || provider == "douban",
               case .bool? = preferences["iosAutoPrepare"] else { throw NativeSettingsHostFailure.unsafeBaseline }
         for key in ["ruleOrder", "panOrder", "keywords", "siteCleanKeywords"] {
             guard let rows = preferences[key]?.filmArray, rows.allSatisfy({ $0.filmText != nil }) else {

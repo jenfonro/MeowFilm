@@ -81,13 +81,22 @@ public static class MusicSearchPreferenceTests
             await Code(owner, "music.search.settings.save", Policy(1, Kind(concurrency: 0), Kind()), "INVALID_REQUEST");
             Check(store.Writes == 1);
         });
+        yield return Case("search order and enabled have independent membership and priority", async () =>
+        {
+            var store = new Store(); await using var owner = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
+            var saved = await Call(owner, "music.search.settings.save", Policy(0,
+                Kind(order: ["wy", "tx"], enabled: ["tx", "wy"]), Kind(order: ["wy"], enabled: ["tx"])));
+            Check(saved.GetProperty("settings").GetProperty("songs").GetProperty("enabled").EnumerateArray()
+                .Select(value => value.GetString()).SequenceEqual(["tx", "wy"]));
+            Check(saved.GetProperty("settings").GetProperty("playlists").GetProperty("enabled")[0].GetString() == "tx");
+        });
         foreach (var invalid in new object[] {
             Policy(0, new { order = Platforms, enabled = Platforms, pages = 2147483648L, concurrency = 1, cacheMinutes = 60 }, Kind()),
             Policy(0, new { order = Platforms, enabled = Platforms, pages = 1, concurrency = 2147483648L, cacheMinutes = 60 }, Kind()),
             Policy(0, Kind(cacheMinutes: 0), Kind()),
             Policy(0, Kind(cacheMinutes: 1441), Kind()),
             Policy(0, Kind(order: ["wy", "tx", "kw", "kg", "kg"]), Kind()),
-            Policy(0, Kind(enabled: ["tx", "wy"]), Kind())
+            Policy(0, Kind(enabled: ["tx", "tx"]), Kind())
         })
             yield return Case("invalid-policy-" + JsonSerializer.Serialize(invalid), async () =>
             {

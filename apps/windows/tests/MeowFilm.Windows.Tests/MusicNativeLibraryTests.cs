@@ -19,6 +19,7 @@ public static partial class MusicNativeLibraryTests
         foreach (var test in RecordingConsumerCases()) yield return test;
         foreach (var test in OnlineSettingsCases()) yield return test;
         foreach (var test in LyricPersistenceCases()) yield return test;
+        yield return new("Native music history isolates summaries pages deletion and actual restore validation", HistoryIsolation);
         yield return new("Native music library contract version and storage identity", Contract);
         yield return new("Native music library initial reads never write control or song records", Initial);
         yield return new("Native music collection member edits exact ordering revisions and tombstones", Collections);
@@ -527,15 +528,14 @@ public static partial class MusicNativeLibraryTests
         var settings = (await Ok(o, "music.settings.get")).GetProperty("settings");
         Check(settings.GetProperty("schema").GetInt32() == 3 &&
             settings.GetProperty("revision").GetInt64() == 0 &&
-            settings.GetProperty("lyrics").GetBoolean() &&
-            settings.EnumerateObject().Count() == 3);
+            settings.GetProperty("lyrics").GetBoolean());
         int writes = f.Store.Writes;
         await Error(o, "music.settings.save", new { ifRevision = 0 }, "INVALID_REQUEST");
         await Error(o, "music.settings.save", new { lyrics = true }, "INVALID_REQUEST");
         Check(f.Store.Writes == writes);
         var saved = (await Ok(o, "music.settings.save", new { ifRevision = 0, lyrics = false, quality = "flac", target = new { installationId = "missing", platform = "wy" } })).GetProperty("settings");
         Check(saved.GetProperty("schema").GetInt32() == 3 && saved.GetProperty("revision").GetInt64() == 1 &&
-            !saved.GetProperty("lyrics").GetBoolean() && saved.EnumerateObject().Count() == 3);
+            !saved.GetProperty("lyrics").GetBoolean());
         await Error(o, "music.settings.save", new { ifRevision = 0, lyrics = true }, "REVISION_CONFLICT");
         await o.DisposeAsync();
         Check((await Ok(f.Owner(), "music.settings.get")).GetProperty("settings").GetRawText() == saved.GetRawText());
@@ -550,6 +550,23 @@ public static partial class MusicNativeLibraryTests
         else await Throws(expected, async () => await owner.ReadLibrarySyncAsync());
         Check(f.Store.Writes == 0 && original.SequenceEqual(f.Store.Bytes!), "Rejected selected data changed");
     }
+    private static async Task HistoryIsolation()
+    {
+        await using var f = new Fixture(); var owner = f.Owner();
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Online("h1"), Online("h2") }, index = 0 });
+        await Ok(owner, "music.queue.replace", new { songs = new[] { Online("h3") }, index = 0 });
+        string archive = (await Ok(owner, "music.history.list", new { kind = "playlists" })).GetProperty("items")[0].GetProperty("id").GetString()!;
+        await f.Store.Storage.WriteAsync(db => db.Execute("DELETE FROM music_history_playlists_entries_context WHERE entries_key='entry-2'"));
+        Check((await Ok(owner, "music.history.get")).GetProperty("total").GetInt32() == 0);
+        Check((await Ok(owner, "music.history.detail", new { kind = "playlists", id = archive, offset = 0, limit = 1 })).GetProperty("entries").GetArrayLength() == 1);
+        Check(!(await owner.ExecuteAsync("music.history.detail", new { kind = "playlists", id = archive, offset = 1, limit = 1 })).GetProperty("ok").GetBoolean());
+        await Error(owner, "music.history.restorePlaylist", new { id = archive }, "CORRUPT_STORAGE");
+        var current = (await Ok(owner, "music.queue.get")).GetProperty("currentId").GetString();
+        await Ok(owner, "music.history.recordPlayed", new { entryId = current, at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() });
+        await Ok(owner, "music.history.removePlaylist", new { id = archive });
+        Check((await Ok(owner, "music.history.list", new { kind = "playlists" })).GetProperty("total").GetInt32() == 0);
+    }
+
     private static async Task DamagedDocuments()
     {
         static JsonObject Changed(JsonObject value, Action<JsonObject> change)

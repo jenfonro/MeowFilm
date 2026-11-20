@@ -17,7 +17,7 @@ public static class MusicQualityConsumerTests
 {
     public static IEnumerable<TestCase> Cases()
     {
-        yield return Case("native settings persist each quality change immediately and reject all-off policy", Settings);
+        yield return Case("native settings persist each quality change immediately including all-off policy", Settings);
         yield return Case("native module immediate auto policy reaches exact LX request", Playback);
         yield return Case("native settings resolve unknown CAS internally without a reload action", Unknown);
         yield return Case("native admitted immediate save physically drains before close", Close);
@@ -44,8 +44,11 @@ public static class MusicQualityConsumerTests
         await f.Module.SetQualityEnabledAsync(f.Module.SpatialQualities[0], false, true);
         await Editable(f.Module);
         Check(!f.Module.SpatialQualities.Single(row => row.Key == spatial).Enabled);
+        await f.Fixture.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
+        await Editable(f.Module);
         await f.Module.SetPlaybackQualityRequestAsync("auto"); await Editable(f.Module);
-        Check(f.Module.PlaybackQualityRequest == "auto" && f.Module.QualityStatus.Length == 0);
+        Check(f.Module.PlaybackQualityRequest == "auto" && f.Module.QualityStatus.Length == 0 && !f.Module.LyricsEnabled,
+            "successful quality save reads the independent online settings owner");
         var reply = await f.Fixture.Ok("music.quality.settings.get");
         Check(reply.GetProperty("settings").GetProperty("request").GetString() == "auto" &&
             reply.GetProperty("settings").GetProperty("qualityOrder")[1].GetString() == first);
@@ -54,8 +57,10 @@ public static class MusicQualityConsumerTests
             await f.Module.SetQualityEnabledAsync(f.Module.QualityCategories.Single(row => row.Key == key), false, false);
             await Editable(f.Module);
         }
-        Check(f.Module.QualityStatus == "请至少保留一种可用音质");
-        Check(f.Module.QualityCategories.Count(row => row.Enabled) == 1);
+        Check(f.Module.QualityStatus.Length == 0 && f.Module.QualityCategories.All(row => !row.Enabled));
+        var disabled = (await f.Fixture.Ok("music.quality.settings.get")).GetProperty("settings");
+        Check(disabled.GetProperty("qualityEnabled").GetArrayLength() == 0,
+            "all-off remains the saved policy without reopening a category");
     }
     private static async Task Playback()
     {
@@ -68,7 +73,7 @@ public static class MusicQualityConsumerTests
         Check(f.Module.PlaybackQualityRequest == "auto");
         var before = await f.Fixture.Ok("music.quality.settings.get");
         await f.Fixture.Ok("music.settings.save", new {
-            ifRevision = before.GetProperty("onlineSettings").GetProperty("revision").GetInt64(), lyrics = true });
+            ifRevision = (await f.Fixture.Ok("music.settings.get")).GetProperty("settings").GetProperty("revision").GetInt64(), lyrics = true });
         await f.Module.RefreshSourceManagementAsync(); await Editable(f.Module);
         var after = await f.Fixture.Ok("music.quality.settings.get");
         Check(after.GetProperty("settings").GetRawText() == before.GetProperty("settings").GetRawText() &&
@@ -87,10 +92,13 @@ public static class MusicQualityConsumerTests
     {
         await using var f = new Scene(); await f.Module.InitializeAsync(default); await f.Module.ActivateQualitySettingsAsync();
         await Editable(f.Module);
+        await f.Fixture.Ok("music.settings.save", new { ifRevision = 0, lyrics = false });
+        await Editable(f.Module);
         MusicTestStores.For(f.Fixture.Store).Fault = true; MusicTestStores.For(f.Fixture.Store).FaultAfter = true;
         await f.Module.SetPlaybackQualityRequestAsync("master"); await Editable(f.Module);
         Check(f.Module.CanEditQuality && f.Module.PlaybackQualityRequest == "master" &&
-            f.Module.QualityStatus.Length == 0);
+            f.Module.QualityStatus.Length == 0 && !f.Module.LyricsEnabled,
+            "unknown-commit reconciliation reads lyrics from music.settings.get");
         int writes = MusicTestStores.For(f.Fixture.Store).Writes;
         await f.Module.SetPlaybackQualityRequestAsync("master");
         Check(MusicTestStores.For(f.Fixture.Store).Writes == writes);

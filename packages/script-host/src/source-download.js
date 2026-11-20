@@ -16,7 +16,6 @@ export function createSourceDownload({ maxRedirects = 5 } = {}) {
   return async ({ url: input, options = {}, signal, validateURL }) => {
     requireValue(signal instanceof AbortSignal && typeof validateURL === 'function' &&
       options && typeof options === 'object' && !Array.isArray(options) &&
-      Object.keys(options).every(key => key === 'followRedirect') &&
       (options.followRedirect === undefined || typeof options.followRedirect === 'boolean'));
     const follow = options.followRedirect === false ? 0 : maxRedirects;
     let url = new URL(validateURL(input));

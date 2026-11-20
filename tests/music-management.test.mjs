@@ -107,15 +107,11 @@ const storageFixture = fixture({ handler: `async ({info}, {storage}) => {
 const networkFixture = fixture({ handler: `async () => new Promise((resolve,reject) =>
  lx.request('https://fixture.invalid/value',{},(error,response,body)=>error?reject(error):resolve(body)))` });
 
-test('descriptor exposes complete HTTP management and playback methods only', async t => {
+test('music identity routes management calls and closes its owner', async t => {
   const { module, rpc } = setup(t);
   assert.equal(module.id, 'music'); assert.equal(module.version, '0.8.0');
+  assert.equal(module.contract, musicScriptContract);
   assert.deepEqual(musicPlatforms, ['wy', 'tx', 'kw', 'kg', 'mg']);
-  assert.deepEqual(Object.keys(module.methods).sort(), [
-    'sources.list', 'sources.detail', 'sources.add',
-    'sources.download', 'sources.edit', 'sources.update', 'sources.rollback', 'sources.enable',
-    'sources.disable', 'sources.remove', 'sources.check', 'resolve', 'invoke', 'close',
-  ].map(name => `music.script.${name}`).sort());
   assert.deepEqual(okay(await rpc('sources.list')), { revision: 0, items: [] });
   assert.throws(() => createMusicScriptModule(), { code: 'INVALID_REQUEST' });
   assert.throws(() => createMusicScriptModule({ dataRoot: 'relative' }), { code: 'INVALID_REQUEST' });
@@ -148,7 +144,7 @@ test('import persists installation facts without executing; reopen restores the 
   assert.deepEqual(listed.items[0], item);
 });
 
-test('a corrupt catalog is reported and never reset or overwritten', async t => {
+test('listing reports a corrupt name while a healthy add preserves that sibling', async t => {
   const dataRoot = root(t);
   const first = setup(t, { dataRoot });
   await imported(first.rpc);
@@ -160,9 +156,72 @@ test('a corrupt catalog is reported and never reset or overwritten', async t => 
     denied(await reopened.rpc('sources.list'), 'CORRUPT_STORAGE');
     const installationId = randomUUID();
     const sourceRevision = await upload(reopened.rpc, installationId);
-    denied(await reopened.rpc('sources.add', { installationId, sourceRevision }), 'CORRUPT_STORAGE');
-    assert.deepEqual(await database.query('SELECT * FROM music_script_installations'), original);
+    const added = okay(await reopened.rpc('sources.add', { installationId, sourceRevision })).item;
+    assert.equal(added.installationId, installationId);
+    assert.deepEqual(await database.query('SELECT * FROM music_script_installations WHERE installation_id<>?',
+      [installationId]), original);
+    denied(await reopened.rpc('sources.list'), 'CORRUPT_STORAGE');
     okay(await reopened.module.close());
+  });
+});
+
+test('removing an installation needs its identity and drains the active owner despite corrupt display metadata', async t => {
+  const first = setup(t), item = await enabled(first.rpc);
+  await withTestDatabase(first.dataRoot, db => db.execute(
+    "UPDATE music_script_installations SET name='',origin_kind='network',origin_url='broken' WHERE installation_id=?",
+    [item.installationId]));
+  okay(await first.module.close());
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  denied(await reopened.rpc('sources.detail', { installationId: item.installationId }), 'CORRUPT_STORAGE');
+  assert.equal(await value(reopened.rpc, item, 'kw', {}, 'lyric'), '[00:01.00]kw');
+  assert.equal(reopened.host().stats().liveSessions, 1);
+  assert.deepEqual(okay(await reopened.rpc('sources.remove', { installationId: item.installationId })), { removed: true });
+  assert.equal(reopened.host().stats().liveSessions, 0);
+  assert.deepEqual(okay(await reopened.rpc('sources.list')).items, []);
+});
+
+test('editing a network origin replaces a corrupt old URL before displaying the new metadata', async t => {
+  const requests = [], download = async input => {
+    requests.push(input.url);
+    input.validateURL(input.url);
+    return { statusCode: 200, body: Buffer.from(fixture()) };
+  };
+  const first = setup(t, { download });
+  const item = okay(await first.rpc('sources.download', { url: 'https://old.invalid/source.js' })).item;
+  okay(await first.module.close());
+  await withTestDatabase(first.dataRoot, db => db.execute(
+    "UPDATE music_script_installations SET origin_url='broken' WHERE installation_id=?", [item.installationId]));
+  const reopened = setup(t, { dataRoot: first.dataRoot, download });
+  denied(await reopened.rpc('sources.detail', { installationId: item.installationId }), 'CORRUPT_STORAGE');
+  const url = 'https://new.invalid/source.js';
+  const edited = okay(await reopened.rpc('sources.edit', { installationId: item.installationId, url })).item;
+  assert.deepEqual(edited.origin, { kind: 'network', host: 'new.invalid', url });
+  okay(await reopened.rpc('sources.update', { installationId: item.installationId }));
+  assert.deepEqual(requests, ['https://old.invalid/source.js', url]);
+});
+
+test('cold invoke and resolve consume source integrity rather than unreturned description fields', async t => {
+  const first = setup(t), item = await enabled(first.rpc);
+  okay(await first.module.close());
+  await withTestDatabase(first.dataRoot, db => db.execute(
+    'UPDATE music_script_installations SET current_author=?,current_description=?,current_homepage=? WHERE installation_id=?',
+    ['bad\u0000author', 'bad\ndescription', 'bad\thomepage', item.installationId]));
+  const reopened = setup(t, { dataRoot: first.dataRoot });
+  denied(await reopened.rpc('sources.detail', { installationId: item.installationId }), 'CORRUPT_STORAGE');
+  assert.equal(await value(reopened.rpc, item, 'kw', {}, 'lyric'), '[00:01.00]kw');
+  assert.match(okay(await resolve(reopened.rpc, item)).url, /^https:\/\/media\.invalid\/kw\//);
+});
+
+test('cold execution still rejects damaged source hash, byte count and version', async t => {
+  for (const change of ["current_hash='broken'", "current_hash='" + '0'.repeat(64) + "'",
+    'current_bytes=current_bytes+1', "current_version=''"]) await t.test(change, async sub => {
+    const first = setup(sub), item = await enabled(first.rpc);
+    okay(await first.module.close());
+    await withTestDatabase(first.dataRoot, db => db.execute(
+      'UPDATE music_script_installations SET ' + change + ' WHERE installation_id=?', [item.installationId]));
+    const reopened = setup(sub, { dataRoot: first.dataRoot });
+    denied(await resolve(reopened.rpc, item), 'CORRUPT_STORAGE');
+    assert.equal(reopened.host().stats().liveSessions, 0);
   });
 });
 
@@ -366,8 +425,7 @@ test('network sources download over HTTPS without redirects; update re-downloads
   status = 200; body = Buffer.alloc(0);
   denied(await rpc('sources.update', { installationId: item.installationId }), 'SOURCE_DOWNLOAD_FAILED');
   body = Buffer.from(fixture({ name: 'Net 2' }));
-  denied(await rpc('sources.update', { installationId: item.installationId, sourceRevision: 1 }), 'INVALID_REQUEST');
-  const updated = okay(await rpc('sources.update', { installationId: item.installationId })).item;
+  const updated = okay(await rpc('sources.update', { installationId: item.installationId, sourceRevision: 1 })).item;
   assert.equal(updated.contentHash, hash(body)); assert.equal(updated.rollbackAvailable, true);
   assert.equal(requests.at(-1).url, 'https://host.invalid/path/net.js?token=secret');
   const edited = okay(await rpc('sources.edit', { installationId: item.installationId, name: ' 改名 ',

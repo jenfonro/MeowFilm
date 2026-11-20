@@ -50,7 +50,6 @@ internal static class MusicQualityPolicy
         }
         List(policy["qualityOrder"], Categories); List(policy["qualityEnabled"], Categories);
         List(policy["spatialOrder"], Spatial); List(policy["spatialEnabled"], Spatial);
-        LJ.Require(HasEnabled(policy), "QUALITY_REQUIRED");
     }
     internal static bool Enabled(string level, JsonObject policy)
     {

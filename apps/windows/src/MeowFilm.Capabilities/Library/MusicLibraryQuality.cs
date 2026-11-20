@@ -18,7 +18,7 @@ public sealed partial class MusicLibraryOwner
     private string QualitySignature(MusicLibraryData doc) => LJ.Digest(LJ.Obj(
         ("contract", "music.quality.v1"), ("scope", scope), ("policy", QualityPolicy(doc))));
     private JsonObject QualityReply(MusicLibraryData doc) => LJ.Obj(("settings", QualityPolicy(doc)),
-        ("signature", QualitySignature(doc)), ("onlineSettings", Settings(doc)));
+        ("signature", QualitySignature(doc)));
 
     private async Task<(JsonObject Result, bool Mutate)> QualityCommandAsync(
         string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
@@ -30,7 +30,7 @@ public sealed partial class MusicLibraryOwner
         }
         LJ.Require(method == "music.quality.settings.save", "CAPABILITY_UNAVAILABLE");
         LJ.Fields(p, "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled", "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled");
-        var current = QualityPolicy(doc);
+        var current = OverwriteSettings(doc, QualityPolicyArea, 1, MusicQualityPolicy.Default());
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(current), "REVISION_CONFLICT");
         var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(current) + 1)), ("request", p["request"]),
             ("qualityOrder", p["qualityOrder"]), ("qualityEnabled", p["qualityEnabled"]),
@@ -38,7 +38,7 @@ public sealed partial class MusicLibraryOwner
         MusicQualityPolicy.Validate(next);
         token.ThrowIfCancellationRequested();
         RevokeQualityLeases(); // Fail closed even when the admitted CAS receipt is unknown.
-        Set(doc, QualityPolicyArea, next);
+        Set(doc, QualityPolicyArea, next, partial: true);
         return (QualityReply(doc), true);
     }
 

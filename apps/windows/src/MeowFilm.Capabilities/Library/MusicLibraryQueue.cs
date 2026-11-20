@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -14,17 +15,26 @@ public sealed partial class MusicLibraryOwner
     private bool queueLoaded;
     private JsonObject Queue(MusicLibraryData doc)
     {
-        var queue = Area(doc, "queue") ??
-            LJ.Obj(("schema", 1), ("entries", new JsonArray()), ("currentId", null), ("priority", new JsonArray()), ("source", null));
+        var saved = Area(doc, "queue");
+        var queue = saved ?? LJ.Obj(("schema", 1), ("entries", new JsonArray()), ("currentId", null), ("priority", new JsonArray()), ("source", null));
         ValidateQueue(queue, true, doc.Songs.Contains);
-        if (!queueLoaded) { RestoreRuntime(queue, false); queueLoaded = true; }
+        if (!queueLoaded) { if (saved is not null) RestoreRuntime(queue, false); queueLoaded = true; }
         return queue;
     }
-    private JsonObject History(MusicLibraryData doc)
+    private void History(MusicLibraryData doc, string kind)
     {
-        var history = Area(doc, "history") ?? LJ.Obj(("schema", 1), ("playlists", new JsonArray()), ("days", new JsonArray()));
-        ValidateHistory(history, doc.Songs.Contains);
-        return history;
+        var history = doc.Select("history", "schema");
+        if (history is null)
+        {
+            if (kind == "write") Set(doc, "history", LJ.Obj(("schema", 1), ("playlists", new JsonArray()), ("days", new JsonArray())));
+            return;
+        }
+        try { LJ.Require(LJ.I(history["schema"]) == 1); }
+        catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_HISTORY"); }
+        if (kind != "write")
+            try { LJ.Require(doc.HasRelation("history", [], [doc.Scope], kind), "CORRUPT_HISTORY"); }
+            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Corrupt)
+            { throw new MusicLibraryException("CORRUPT_HISTORY"); }
     }
     private int Mode(MusicLibraryData doc) => Area(doc, "playback-settings") is { } m ? (int)LJ.I(m["mode"], 1, 3) : 1;
     private JsonObject Position(JsonObject q, MusicLibraryData doc) => LJ.Obj(("currentId", q["currentId"]), ("version", queueVersion), ("mode", Mode(doc)));
@@ -132,40 +142,18 @@ public sealed partial class MusicLibraryOwner
         }
         catch (MusicLibraryException e) when (e.Code != "LIMIT") { throw new MusicLibraryException("CORRUPT_QUEUE"); }
     }
-    private static void ValidateHistory(JsonObject history, Func<string, bool> containsSong)
+    private static void ValidateHistoryDay(JsonObject day, Func<string, bool> containsSong)
     {
-        try
+        LJ.Require(DateOnly.TryParseExact(LJ.S(day["date"]), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None, out _), "CORRUPT_HISTORY");
+        long previous = long.MaxValue; var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var node in LJ.Array(day["songs"], "CORRUPT_HISTORY"))
         {
-            LJ.Fields(history, "schema playlists days", "schema playlists days");
-            LJ.Require(LJ.I(history["schema"]) == 1, "CORRUPT_HISTORY");
-            var playlists = LJ.Array(history["playlists"]); var days = LJ.Array(history["days"]);
-            var ids = new HashSet<string>();
-            foreach (var a in playlists.OfType<JsonObject>())
-            {
-                ValidateQueue(a, false, containsSong);
-                LJ.Require(ids.Add(LJ.S(a["id"])), "CORRUPT_HISTORY");
-            }
-            LJ.Require(playlists.All(p => p is JsonObject), "CORRUPT_HISTORY"); ids.Clear();
-            foreach (var n in days)
-            {
-                var day = LJ.Object(n); LJ.Fields(day, "date songs", "date songs"); string date = LJ.S(day["date"]);
-                LJ.Require(DateOnly.TryParseExact(date, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.None, out _) && ids.Add(date), "CORRUPT_HISTORY");
-                var songs = LJ.Array(day["songs"]);
-                long previous = long.MaxValue;
-                foreach (var row in songs.OfType<JsonObject>())
-                {
-                    LJ.Fields(row, "songId context at", "songId context at");
-                    LJ.Require(containsSong(LJ.S(row["songId"])), "CORRUPT_HISTORY");
-                    ValidateContext(LJ.Object(row["context"], "CORRUPT_HISTORY"));
-                    long at = LJ.I(row["at"], 1);
-                    LJ.Require(at <= previous, "CORRUPT_HISTORY");
-                    previous = at;
-                }
-                LJ.Require(songs.All(s => s is JsonObject), "CORRUPT_HISTORY");
-            }
+            var row = LJ.Object(node, "CORRUPT_HISTORY");
+            LJ.Require(containsSong(LJ.S(row["songId"])) && ids.Add(LJ.S(row["songId"])), "CORRUPT_HISTORY");
+            ValidateContext(LJ.Object(row["context"], "CORRUPT_HISTORY"));
+            long at = LJ.I(row["at"], 1); LJ.Require(at <= previous, "CORRUPT_HISTORY"); previous = at;
         }
-        catch (MusicLibraryException e) when (e.Code != "LIMIT") { throw new MusicLibraryException("CORRUPT_HISTORY"); }
     }
     private void RestoreRuntime(JsonObject q, bool archive)
     {
@@ -182,13 +170,14 @@ public sealed partial class MusicLibraryOwner
     private void Archive(JsonObject previous, MusicLibraryData doc)
     {
         var entries = LJ.Array(previous["entries"]); if (entries.Count < 2) return;
-        var history = History(doc);
+        History(doc, "write");
         string title = LJ.S(previous["source"]?["title"]);
         if (title.Length == 0) title = LJ.S(entries[0]?["context"]?["sourceTitle"]);
         if (title.Length == 0) title = LJ.S(entries[0]?["context"]?["playlist"], "播放列表");
         var archive = (JsonObject)NativeMusicSong.Durable(previous)!; archive.Remove("schema");
         archive["history"] = LJ.Arr(shuffleHistory); archive["at"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); archive["id"] = Guid.NewGuid().ToString(); archive["title"] = title;
-        history["playlists"] = LJ.Arr(new[] { archive }.Concat(LJ.Array(history["playlists"]).OfType<JsonObject>())); Set(doc, "history", history);
+        doc.ChangeRow("history", ["playlists"], [doc.Scope, LJ.S(archive["id"])], archive,
+            0, insert: true);
     }
     private static void Select(JsonObject q, string id, bool remember, List<string> history)
     {
@@ -351,55 +340,100 @@ public sealed partial class MusicLibraryOwner
     }
     private (JsonObject Result, bool Mutate) HistoryCommand(string method, JsonObject p, MusicLibraryData doc)
     {
-        var h = History(doc);
         if (method is "music.history.list" or "music.history.detail" or "music.history.get")
         {
             LJ.Fields(p, "kind id offset limit", method.EndsWith(".detail", StringComparison.Ordinal) ? "kind id" : method.EndsWith(".list", StringComparison.Ordinal) ? "kind" : "");
-            string kind = LJ.S(p["kind"], "days"); LJ.Require(kind is "playlists" or "days"); var list = LJ.Array(h[kind]);
+            string kind = LJ.S(p["kind"], "days"); LJ.Require(kind is "playlists" or "days");
+            History(doc, kind);
+            string identity = kind == "playlists" ? "id" : "date", contents = kind == "playlists" ? "entries" : "songs";
+            var rows = doc.Rows("history", [kind], [doc.Scope], identity);
             if (p["id"] is null)
-                return (LJ.Page(list.OfType<JsonObject>().Select(v => kind == "playlists" ?
-                    LJ.Obj(("id", v["id"]), ("title", v["title"]), ("at", v["at"]), ("count", LJ.Array(v["entries"]).Count), ("currentId", v["currentId"])) :
-                    LJ.Obj(("id", v["date"]), ("date", v["date"]), ("count", LJ.Array(v["songs"]).Count))), p), false);
-            string id = LJ.Text(p["id"]); var item = list.OfType<JsonObject>().FirstOrDefault(i => LJ.S(i[kind == "playlists" ? "id" : "date"]) == id)
-                ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
-            return kind == "days" ? (LJ.Merge(LJ.Page(LJ.Array(item["songs"]).OfType<JsonObject>(), p, v =>
-                LJ.Obj(("song", SongReference(doc, v["songId"])), ("context", ContextView(v["context"])), ("at", v["at"]))), LJ.Obj(("id", id), ("date", id))), false) :
-                (LJ.Merge(LJ.Page(LJ.Array(item["entries"]), p, e => EntryView(e, doc), "entries"), LJ.Obj(("id", id), ("title", item["title"]), ("at", item["at"]), ("currentId", item["currentId"]), ("source", SourceView(item["source"])))), false);
+            {
+                return (LJ.Page(rows, p, row =>
+                {
+                    var summary = doc.SelectRow("history", [kind], row.Key, kind == "playlists" ? ["id", "title", "at", "currentId"] : ["date"]);
+                    LJ.Require(doc.HasRelation("history", [kind], row.Key, contents), "CORRUPT_HISTORY");
+                    int count = doc.Rows("history", [kind, contents], row.Key).Count;
+                    if (kind == "playlists")
+                    {
+                        LJ.Require(Guid.TryParseExact(LJ.S(summary["id"]), "D", out _), "CORRUPT_HISTORY");
+                        _ = QueueText(summary["title"]); _ = LJ.I(summary["at"], 1);
+                        return LJ.Obj(("id", summary["id"]), ("title", summary["title"]), ("at", summary["at"]), ("count", count), ("currentId", summary["currentId"]));
+                    }
+                    LJ.Require(DateOnly.TryParseExact(LJ.S(summary["date"]), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None, out _), "CORRUPT_HISTORY");
+                    return LJ.Obj(("id", summary["date"]), ("date", summary["date"]), ("count", count));
+                }), false);
+            }
+            string id = LJ.Text(p["id"]);
+            var selected = rows.SingleOrDefault(row => LJ.S(row.Value[identity]) == id) ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
+            var header = doc.SelectRow("history", [kind], selected.Key, kind == "playlists" ? ["id", "title", "at", "currentId", "source"] : ["date"]);
+            LJ.Require(doc.HasRelation("history", [kind], selected.Key, contents), "CORRUPT_HISTORY");
+            if (kind == "playlists")
+            {
+                _ = QueueText(header["title"]); _ = LJ.I(header["at"], 1); ValidateSource(header["source"]);
+            }
+            else LJ.Require(DateOnly.TryParseExact(id, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out _), "CORRUPT_HISTORY");
+            var members = doc.Rows("history", [kind, contents], selected.Key);
+            var seenEntries = new HashSet<string>(StringComparer.Ordinal);
+            var page = LJ.Page(members, p, row =>
+            {
+                var value = doc.Row("history", [kind, contents], row.Key);
+                LJ.Require(doc.Songs.Contains(LJ.S(value["songId"])), "CORRUPT_HISTORY");
+                ValidateContext(LJ.Object(value["context"], "CORRUPT_HISTORY"));
+                if (kind == "playlists")
+                {
+                    string entryId = LJ.S(value["id"]);
+                    LJ.Require(Regex.IsMatch(entryId, "^entry-[1-9][0-9]*$", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout) &&
+                        long.TryParse(entryId[6..], out long serial) && serial <= LJ.MaxInteger && seenEntries.Add(entryId), "CORRUPT_HISTORY");
+                    return EntryView(value, doc);
+                }
+                _ = LJ.I(value["at"], 1);
+                return LJ.Obj(("song", SongReference(doc, value["songId"])), ("context", ContextView(value["context"])), ("at", value["at"]));
+            }, kind == "playlists" ? "entries" : "items");
+            return (LJ.Merge(page, kind == "days" ? LJ.Obj(("id", id), ("date", id)) :
+                LJ.Obj(("id", id), ("title", header["title"]), ("at", header["at"]), ("currentId", header["currentId"]), ("source", SourceView(header["source"])))), false);
         }
         LJ.Require(pending is null, "PENDING_WRITE");
-        switch (method)
+        if (method is "music.history.removePlaylist" or "music.history.restorePlaylist")
         {
-            case "music.history.removePlaylist":
-                LJ.Fields(p, "id", "id"); string remove = LJ.Text(p["id"]);
-                h["playlists"] = LJ.Arr(LJ.Array(h["playlists"]).Where(p => LJ.S(p?["id"]) != remove)); break;
-            case "music.history.restorePlaylist":
+            LJ.Fields(p, "id", "id"); string id = LJ.Text(p["id"]);
+            History(doc, "playlists");
+            var selected = doc.Rows("history", ["playlists"], [doc.Scope], "id")
+                .SingleOrDefault(row => LJ.S(row.Value["id"]) == id);
+            if (method == "music.history.removePlaylist")
             {
-                LJ.Fields(p, "id", "id"); string id = LJ.Text(p["id"]); var archive = LJ.Array(h["playlists"]).OfType<JsonObject>().FirstOrDefault(a => LJ.S(a["id"]) == id)
-                    ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
-                var q = (JsonObject)archive.DeepClone(); q.Remove("id"); q.Remove("at"); q.Remove("title"); q["schema"] = 1;
-                Archive(Queue(doc), doc); RestoreRuntime(q, true); q.Remove("history");
-                Set(doc, "queue", q); return (Position(q, doc), true);
+                if (selected is null) return (new JsonObject(), false);
+                doc.ChangeRow("history", ["playlists"], selected.Key, null, selected.Ordinal);
+                return (new JsonObject(), true);
             }
-            case "music.history.recordPlayed":
-            {
-                LJ.Fields(p, "entryId at", "entryId at"); var q = Queue(doc); string entryId = LJ.Text(p["entryId"]);
-                var current = LJ.Array(q["entries"]).OfType<JsonObject>().FirstOrDefault(e => LJ.S(e["id"]) == entryId && LJ.S(q["currentId"]) == entryId)
-                    ?? throw new MusicLibraryException("ENTRY_NOT_FOUND");
-                long at = LJ.I(p["at"], 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-                string date = DateTimeOffset.FromUnixTimeMilliseconds(at).ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
-                var days = LJ.Array(h["days"]); var day = days.OfType<JsonObject>().FirstOrDefault(d => LJ.S(d["date"]) == date);
-                if (day is null) { day = LJ.Obj(("date", date), ("songs", new JsonArray())); days.Add(day); }
-                var played = LJ.Obj(("songId", current["songId"]), ("context", current["context"]), ("at", at));
-                var merged = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
-                foreach (var row in new[] { played }.Concat(LJ.Array(day["songs"]).OfType<JsonObject>()).OrderByDescending(r => LJ.I(r["at"])))
-                {
-                    merged.TryAdd(LJ.S(row["songId"]), row);
-                }
-                day["songs"] = LJ.Arr(merged.Values);
-                h["days"] = LJ.Arr(days.OfType<JsonObject>().OrderByDescending(d => LJ.S(d["date"]), StringComparer.Ordinal)); break;
-            }
-            default: throw new MusicLibraryException("INVALID_REQUEST");
+            if (selected is null) throw new MusicLibraryException("HISTORY_NOT_FOUND");
+            var archive = doc.Row("history", ["playlists"], selected.Key);
+            ValidateQueue(archive, false, doc.Songs.Contains);
+            var q = archive.DeepClone().AsObject(); q.Remove("id"); q.Remove("at"); q.Remove("title"); q["schema"] = 1;
+            Archive(Queue(doc), doc); RestoreRuntime(q, true); q.Remove("history");
+            Set(doc, "queue", q); return (Position(q, doc), true);
         }
-        Set(doc, "history", h); return (new JsonObject(), true);
+        LJ.Require(method == "music.history.recordPlayed", "INVALID_REQUEST");
+        LJ.Fields(p, "entryId at", "entryId at"); var queue = Queue(doc); string entryId = LJ.Text(p["entryId"]);
+        var current = LJ.Array(queue["entries"]).OfType<JsonObject>().FirstOrDefault(e => LJ.S(e["id"]) == entryId && LJ.S(queue["currentId"]) == entryId)
+            ?? throw new MusicLibraryException("ENTRY_NOT_FOUND");
+        long at = LJ.I(p["at"], 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        string date = DateTimeOffset.FromUnixTimeMilliseconds(at).ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        History(doc, "days"); History(doc, "write");
+        var days = doc.Rows("history", ["days"], [doc.Scope], "date");
+        var prior = days.SingleOrDefault(row => LJ.S(row.Value["date"]) == date);
+        var day = prior is null ? LJ.Obj(("date", date), ("songs", new JsonArray())) : doc.Row("history", ["days"], prior.Key);
+        ValidateHistoryDay(day, doc.Songs.Contains);
+        var played = LJ.Obj(("songId", current["songId"]), ("context", current["context"]), ("at", at));
+        var merged = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (var row in new[] { played }.Concat(LJ.Array(day["songs"]).OfType<JsonObject>()).OrderByDescending(row => LJ.I(row["at"])))
+            merged.TryAdd(LJ.S(row["songId"]), row);
+        day["songs"] = LJ.Arr(merged.Values);
+        doc.ChangeRow("history", ["days"], prior?.Key ?? [doc.Scope, Guid.NewGuid().ToString("D")], day,
+            prior?.Ordinal ?? days.Where(row => StringComparer.Ordinal.Compare(LJ.S(row.Value["date"]), date) < 0)
+                .Select(row => row.Ordinal).DefaultIfEmpty(days.Count == 0 ? 0 : days.Max(row => row.Ordinal) + 1).Min(), insert: prior is null);
+        return (new JsonObject(), true);
     }
 }

@@ -19,6 +19,7 @@ public static partial class MusicUiTests
         yield return Case("TMDB admitted settings save drains before close and never restores a revoked search", MetadataSaveDrain);
         yield return Case("native TMDB and Douban settings work offline with CAS failures and block notifications", MetadataNativeOwner);
         yield return Case("native metadata saves preserve canonical text endpoints and proxy validation offline", MetadataNativeNormalization);
+        yield return Case("native metadata patches replace invalid old fields and validate the complete final DTO before commit", MetadataPatchConsumption);
     }
     private static void MetadataSearch(FilmSearchConsumerRuntime runtime)
     {
@@ -225,6 +226,31 @@ public static partial class MusicUiTests
         True(store.WritesFor("film.douban.v1") == writes && (await metadata.GetDoubanSettingsAsync()) == douban &&
             runtime.Notifications.SequenceEqual(["tmdb", "douban"]) && runtime.Captures == 0,
             "invalid drafts cannot write notify or replace accepted local settings while offline");
+    }
+    private static async Task MetadataPatchConsumption()
+    {
+        using var runtime = new MetadataRuntime { Offline = true };
+        await using var store = new FilmNativeSettingsFixture();
+        await using var metadata = new FilmMetadataService(runtime, store);
+        await metadata.SaveSettingsAsync(new Dictionary<string, object?>());
+        await metadata.SaveDoubanSettingsAsync(new Dictionary<string, object?>());
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_tmdb_settings SET language=NULL,null_mask=null_mask | 16"));
+        var saved = await metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["language"] = " ja-JP " });
+        True(saved.Language == "ja-JP", "a valid new language replaces the discarded null field");
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_douban_settings SET cookie=NULL,null_mask=null_mask | 32"));
+        var douban = await metadata.SaveDoubanSettingsAsync(new Dictionary<string, object?> { ["cookie"] = "" });
+        True(douban.Cookie == "", "a valid cookie clear does not require the old cookie to be consumable");
+        await store.Inner.WriteAsync(db => db.Execute("UPDATE windows_tmdb_settings SET region=NULL,null_mask=null_mask | 32"));
+        int notifications = runtime.Notifications.Count;
+        var before = store.Value("film.tmdb.v1");
+        await MetadataStoreError(DocumentStoreError.Corrupt, () => metadata.SaveSettingsAsync(
+            new Dictionary<string, object?> { ["language"] = "en-US" }));
+        True(JsonElement.DeepEquals(before, store.Value("film.tmdb.v1")) && metadata.Settings == saved &&
+            runtime.Notifications.Count == notifications,
+            "an unpatched final DTO field fails before committing or publishing the otherwise valid edit");
+        saved = await metadata.SaveSettingsAsync(new Dictionary<string, object?> { ["region"] = "JP", ["unused"] = new { ignored = true } });
+        True(saved.Region == "JP" && saved.Language == "ja-JP" && runtime.Captures == 0,
+            "the complete final projection is returned after repairing its selected field and ignoring unused input");
     }
     private static async Task MetadataStoreError(DocumentStoreError code, Func<Task> operation)
     {

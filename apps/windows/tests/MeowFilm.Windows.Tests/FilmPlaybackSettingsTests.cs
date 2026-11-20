@@ -155,7 +155,7 @@ public static class FilmPlaybackSettingsTests
             Check(saved.RuleOrder.SequenceEqual(["quality", "future"]) && saved.PanOrder.SequenceEqual(["quark", "115"]),
                 "real reorder keeps unknown IDs and precise unedited material");
         });
-        yield return Test("explicit and inferred preference edits preserve other typed fields and reject missing fields", async () =>
+        yield return Test("explicit and inferred preference edits preserve other typed fields", async () =>
         {
             var runtime = new FilmRuleConsumerRuntime { Respond = (_, _, _) => throw new BridgeException("CLOSED") };
             await using var store = new FilmNativeSettingsFixture();
@@ -179,12 +179,48 @@ public static class FilmPlaybackSettingsTests
             }
             var partial = FilmJson.Encode(new { version = 1, preferences = new { metadataViewProvider = "tmdb", keywords = new[] { "visible" } } });
             store.Seed("film.preferences.v1", partial);
-            int writes = store.Writes, notifications = runtime.Notifications.Count;
-            await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.ReadPreferencesAsync(default));
-            await PreferenceStoreError(DocumentStoreError.Corrupt, () => service.SavePreferencesAsync(original));
-            Check(store.Writes == writes + 1 && runtime.Notifications.Count == notifications &&
-                JsonElement.DeepEquals(partial, store.Value("film.preferences.v1")) && runtime.Calls.Count == 0,
-                "incomplete current rows remain an error without replacing data or publishing a notification");
+            var projected = await service.ReadPreferencesAsync(default);
+            Check(projected.MetadataViewProvider == "tmdb" && projected.Keywords.SequenceEqual(["visible"]),
+                "only the requested typed fields are consumed");
+            var savedPartial = await service.SavePreferencesAsync(projected with { Keywords = [" edited "] }, "keywords");
+            Check(savedPartial.Keywords.SequenceEqual(["edited"]) &&
+                !store.Value("film.preferences.v1").GetProperty("preferences").TryGetProperty("ruleOrder", out _),
+                "an edit cannot fill absent sibling groups with control defaults");
+            store.Seed("film.preferences.v1", new { version = 1, preferences = new
+            { ruleOrder = (string[]?)null, keywords = (string[]?)null, iosAutoPrepare = (bool?)null, metadataViewProvider = "invalid" } });
+            var savedProvider = await service.SavePreferencesAsync(original with { MetadataViewProvider = "douban" }, "metadataViewProvider");
+            var raw = store.Value("film.preferences.v1").GetProperty("preferences");
+            Check(savedProvider.MetadataViewProvider == "douban" && raw.GetProperty("keywords").ValueKind == JsonValueKind.Null &&
+                raw.GetProperty("iosAutoPrepare").ValueKind == JsonValueKind.Null,
+                "provider replacement ignores old provider semantics and unconsumed Windows or iOS fields");
+            var repaired = await service.SavePreferencesAsync(original);
+            Check(repaired.RuleOrder.SequenceEqual(original.RuleOrder) && repaired.Keywords.SequenceEqual(original.Keywords),
+                "a complete legal replacement consumes only its new values");
+        });
+        yield return Test("settings sections consume only their visible preference groups", async () =>
+        {
+            await using var scene = await Scene.Create();
+            scene.Preferences = JsonSerializer.SerializeToElement(new { siteCleanKeywords = new[] { "仅净化" }, keywords = (string[]?)null,
+                ruleOrder = (string[]?)null, iosAutoPrepare = (bool?)null, metadataViewProvider = "invalid" });
+            await scene.View.ShowAsync("clean");
+            await Until(() => scene.View.Idle);
+            Check(!scene.View.ReadFailed && scene.Element<TextBox>("CleanKeywords").Text == "仅净化",
+                "clean controls do not consume preference or iOS siblings");
+            scene.Element<TextBox>("CleanKeywords").Text = "新净化";
+            Click(scene.Button("保存站点净化"));
+            await Until(() => scene.View.Idle && scene.Notices.Contains("设置已保存"));
+            Check(scene.Preferences.GetProperty("keywords").ValueKind == JsonValueKind.Null &&
+                scene.Preferences.GetProperty("siteCleanKeywords")[0].GetString() == "新净化",
+                "saving a clean group leaves unavailable siblings intact");
+            await scene.View.ShowAsync("preferences");
+            await Until(() => scene.View.Idle);
+            Check(scene.View.ReadFailed, "visible missing groups remain a real read error");
+            scene.Preferences = JsonSerializer.SerializeToElement(new { ruleOrder = new[] { "quality" }, panOrder = new[] { "quark" },
+                keywords = new[] { "visible" }, siteCleanKeywords = (string[]?)null, iosAutoPrepare = (bool?)null, metadataViewProvider = "invalid" });
+            Click(scene.Button("重新读取智能播放设置"));
+            await Until(() => scene.View.Idle && !scene.View.ReadFailed);
+            Check(scene.Element<TextBox>("Keywords").Text == "visible",
+                "retry reads fresh visible groups without consuming clean iOS or provider fields");
         });
         yield return Test("duplicate keyword drafts fail before storage and a corrected draft can still save", async () =>
         {

@@ -73,7 +73,7 @@ public static partial class FilmLibraryTests
                 !bytes.Contains("original-query", StringComparison.Ordinal), "no short-lived private reference is serialized");
         });
         yield return Test("typed favorite fields and exact source identities survive independent edits and cold reopen", TypedPersistence);
-        yield return Test("corrupt favorite rows remain unchanged by unrelated writes and cannot be silently reset", CorruptRow);
+        yield return Test("corrupt favorite rows survive unrelated writes and explicit replacement or deletion uses the exact key", CorruptRow);
         yield return Test("favorite identity foreign key and type constraints roll back the entire transaction", IdentityConstraints);
         yield return Test("independent favorite writers never overwrite each other with a stale collection", ConcurrentWriters);
         yield return Test("group favorites keep member identities without persisting source or search credentials", GroupPrivacy);

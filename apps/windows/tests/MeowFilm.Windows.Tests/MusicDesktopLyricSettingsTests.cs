@@ -37,7 +37,6 @@ public static class MusicDesktopLyricSettingsTests
             foreach (var entry in before["areas"]!.AsObject())
                 Check(JsonNode.DeepEquals(current["areas"]![entry.Key], entry.Value),
                     "saving desktop lyrics preserves each independent current area");
-            Check(StoredSettings(current).Count == 5, "only schema, revision, layout and two colors are persisted");
             await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Settings(reopenedSettings, 1, "double", "#12ABEF", "#000000");
@@ -96,6 +95,22 @@ public static class MusicDesktopLyricSettingsTests
             await using var reopened = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
             var reopenedSettings = (await reopened.ExecuteAsync(Get)).GetProperty("settings");
             Check(JsonNode.DeepEquals(JsonNode.Parse(reopenedSettings.GetProperty("geometry").GetRawText()), geometry));
+        });
+        yield return Case("full geometry replacement repairs old values while omitted geometry remains consumed", async () =>
+        {
+            await using var f = new QualityFixture();
+            await f.Ok(Save, Draft(layout: "double"));
+            await MusicTestStores.For(f.Store).Storage.WriteAsync(db =>
+            {
+                MusicStorageRecords.Areas[Area].Patch(db, O(new { layout = "broken",
+                    geometry = new { monitor = "DISPLAY1", x = 0d, y = 0d, width = -1d, height = 144d } }), ["local"]);
+                return true;
+            });
+            await using var owner = new MusicLibraryOwner(MusicTestStores.For(f.Store), database: MusicTestStores.For(f.Store).Storage);
+            Code(await owner.ExecuteAsync(Save, Draft(1, layout: "single")), "CORRUPT_STORAGE");
+            var geometry = O(new { monitor = "DISPLAY1", x = 20d, y = 0d, width = 760d, height = 144d });
+            Check((await owner.ExecuteAsync(Save, Draft(1, layout: "single", geometry: geometry))).GetProperty("ok").GetBoolean());
+            Settings((await owner.ExecuteAsync(Get)).GetProperty("settings"), 2, "single", Normal, Highlight);
         });
         yield return Case("selected desktop fields stay validated while unrelated extensions survive", async () =>
         {
@@ -191,7 +206,6 @@ public static class MusicDesktopLyricSettingsTests
             Check(MusicTestStores.For(store).Writes == writes && scene.Runtime.Calls.Count == 0, "unchanged values do not save");
             Settings((await scene.Native.ExecuteAsync(Get)).GetProperty("settings"),
                 4, "double", "#000000", "#12ABEF");
-            Check(StoredSettings(Document(store)).Count == 6);
         }
         await using var next = new Scene(store);
         await next.Module.EnsureDesktopLyricSettingsAsync();

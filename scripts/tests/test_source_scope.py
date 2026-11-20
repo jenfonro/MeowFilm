@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("source_scope", ROOT / "scripts/check-source-scope.py")
@@ -278,9 +279,46 @@ let package = Package(name: "Fixture", products: [
         self.sqlite_target(binary_path="../Foreign/MeowSQLite.xcframework")
         self.assertIn("Invalid binary target: MeowSQLite", scope.check(self.root))
 
-    def test_binary_sqlite_rejects_unowned_consumers(self):
-        self.sqlite_target(consumer="UnownedSQLiteConsumer")
-        self.assertIn("Unapproved binary dependency: UnownedSQLiteConsumer", scope.check(self.root))
+    def test_binary_sqlite_accepts_another_explicit_consumer(self):
+        self.sqlite_target(consumer="SQLiteInspection")
+        self.assertEqual(scope.check(self.root), [])
+
+    def test_binary_sqlite_import_requires_the_actual_declared_dependency(self):
+        self.sqlite_target(consumer="SQLiteInspection")
+        path = self.root / "native/MeowKit/Package.swift"
+        path.write_text(path.read_text().replace(
+            '.target(name: "SQLiteInspection", dependencies: ["MeowSQLite"])',
+            '.target(name: "SQLiteInspection", dependencies: [])'))
+        self.assertIn("Undeclared imports for SQLiteInspection: ['MeowSQLite']", scope.check(self.root))
+
+    def test_binary_sqlite_evaluated_dependency_boundary(self):
+        # Exercise the checker without a Swift toolchain. The other binary
+        # fixtures above continue to exercise real SwiftPM evaluation.
+        self.sqlite_target(consumer="SQLiteInspection")
+        package = self.root / "native/MeowKit"
+        declarations = [{"name": directory.name, "type": kind, "dependencies": []}
+                        for folder, kind in (("Sources", "regular"), ("Tests", "test"))
+                        for directory in sorted((package / folder).iterdir())]
+        consumer = next(item for item in declarations if item["name"] == "SQLiteInspection")
+        consumer["dependencies"] = [{"byName": ["MeowSQLite", None]}]
+        binary_path = "../SQLite/.cache/Artifacts/MeowSQLite.xcframework"
+        binary = {"name": "MeowSQLite", "type": "binary", "path": binary_path, "dependencies": []}
+        manifest = {"dependencies": [], "targets": declarations + [binary], "products": [
+            {"name": item["name"], "targets": [item["name"]]}
+            for item in declarations if item["type"] == "regular"]}
+        with patch.object(scope, "evaluate_package", return_value=manifest):
+            self.assertEqual(scope.check(self.root), [])
+            consumer["dependencies"] = []
+            self.assertIn("Undeclared imports for SQLiteInspection: ['MeowSQLite']", scope.check(self.root))
+            consumer["dependencies"] = [{"byName": ["MeowSQLite", None]}]
+            binary["path"] = "../Foreign/MeowSQLite.xcframework"
+            self.assertIn("Invalid binary target: MeowSQLite", scope.check(self.root))
+            binary["path"] = binary_path
+            binary["url"] = "https://example.invalid/untrusted.xcframework.zip"
+            self.assertIn("Invalid binary target: MeowSQLite", scope.check(self.root))
+            del binary["url"]
+            binary["name"] = "ForeignSQLite"
+            self.assertIn("Unapproved binary target", scope.check(self.root))
 
     def system_sqlite_target(self):
         path = self.root / "native/MeowKit/Package.swift"

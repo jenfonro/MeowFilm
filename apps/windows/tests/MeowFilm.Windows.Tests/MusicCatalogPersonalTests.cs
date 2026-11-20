@@ -243,8 +243,8 @@ public static partial class MusicCatalogPersonalTests
             .SequenceEqual(new[] { Id("wy", 0), Id("wy", 1) }));
         var commit = f.App.Last("music.catalog.playlist.commit");
         Equal("next", S(commit, "action"));
-        Check(commit.EnumerateObject().Select(p => p.Name).Order()
-            .SequenceEqual(new[] { "action", "expectedVersion", "token" }));
+        Check(commit.GetProperty("token").GetString()!.Length > 0 && commit.GetProperty("expectedVersion").GetInt64() >= 0 &&
+            !commit.TryGetProperty("songs", out _), "next uses a prepared stage and current queue version");
         Equal(starts, f.App.Log.Count(call => call.Method == "music.recommendations.start"));
         Equal(requests, f.Platform.Requests.OfType<MusicQueueRecommendationsRequest>().Count());
         Equal(writes + 2, f.Store.LibraryWrites); Equal(opens, f.Output.Opens);
@@ -2755,8 +2755,6 @@ public static partial class MusicCatalogPersonalTests
             var result = JsonNode.Parse(reply.GetRawText())!.AsObject();
             // Keep lyrics disabled in this port fixture without adding a library write.
             // The real owner's quality policy and signature remain authoritative.
-            result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 3, revision = 0, lyrics = false });
             return E(result);
         }
         private static JsonElement ScriptSource() => E(new {
@@ -2844,6 +2842,7 @@ public static partial class MusicCatalogPersonalTests
                 else
                     result = await Catalog.ExecuteAsync(method, p, cancellationToken);
             }
+            else if (method == "music.settings.get") result = E(new { ok = true, settings = new { schema = 3, revision = 0, lyrics = false } });
             else if (method == "music.quality.settings.get") result = await ReadQualitySettings(cancellationToken);
             else if (method == "music.official.candidates")
             {

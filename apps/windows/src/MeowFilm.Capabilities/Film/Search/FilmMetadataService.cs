@@ -90,7 +90,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
             {
                 var saved = await document.UpdateAsync(current =>
                 {
-                    var next = ReadSettings(current, defaults);
+                    var next = SettingsBody(current, defaults);
                     foreach (var (key, value) in patch)
                     {
                         if (!defaults.TryGetProperty(key, out var fallback)) continue;
@@ -99,6 +99,9 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
                             block == "tmdb");
                         next = FilmDocument.Set(next, key, normalized.GetProperty(key));
                     }
+                    ValidateSettings(next, defaults);
+                    if (block == "tmdb") _ = ParseSettings(next);
+                    else _ = ParseDoubanSettings(next);
                     return FilmDocument.Set(current ?? FilmJson.Encode(new { version = 1 }), "settings", next);
                 }, token);
                 settings = saved.GetProperty("settings");
@@ -110,19 +113,30 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
 
     private static JsonElement ReadSettings(JsonElement? current, JsonElement defaults)
     {
+        var settings = SettingsBody(current, defaults);
+        ValidateSettings(settings, defaults);
+        return settings;
+    }
+
+    private static JsonElement SettingsBody(JsonElement? current, JsonElement defaults)
+    {
         if (current is null) return defaults;
         var root = current.Value;
         if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var version) ||
             version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int number) || number != 1 ||
             !root.TryGetProperty("settings", out var settings) || settings.ValueKind != JsonValueKind.Object)
             throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        return settings;
+    }
+
+    private static void ValidateSettings(JsonElement settings, JsonElement defaults)
+    {
         foreach (var field in defaults.EnumerateObject())
             if (!settings.TryGetProperty(field.Name, out var value) ||
                 (field.Value.ValueKind is JsonValueKind.True or JsonValueKind.False
                     ? value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
                     : value.ValueKind != field.Value.ValueKind))
                 throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        return settings;
     }
 
     private static JsonElement NormalizeSettings(JsonElement value, JsonElement defaults, bool tmdb)

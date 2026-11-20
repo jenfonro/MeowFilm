@@ -6,7 +6,7 @@
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- App 持有 `MusicLibraryDatabase`，文件为业务数据根下 `music-library/music-library.sqlite3`；owner 借用 `IMusicLibraryStore`，不释放 App 的数据库。
+- App 持有唯一 `NativeDatabase`，文件为业务数据根下 `storage-v1/meowfilm.sqlite3`；`MusicLibraryDatabase` 通过 `IMusicLibraryStore` 为音乐 owner 提供专属关系访问，owner 不释放 App 的数据库。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
@@ -66,7 +66,11 @@ ValueTask DisposeAsync();
 
 所有连接使用 WAL／FULL，同库原生和 Node writer 以短事务及 owner revision CAS 协作。一次提交只更新本轮实际改变的歌曲、来源、控制关系与回执；路径、维护锁、备份和故障语义见[存储](protected-storage.md)。
 
-普通读只取得控制状态或按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。
+普通读先取得 owner revision/receipt，再按实际动作读取所选 area／关系／成员；显式诊断导出才展开所有 area。history 列表只读摘要与计数，详情只展开所选分页，恢复校验所选完整 archive 和当前队列，播放记录只合并当天真实字段。
+
+完整覆盖设置只消费旧 schema/revision；准确成员删除按原表键执行。局部写入保留未提供的列、未读关系与既有扩展节点，不能把部分投影当完整 previous 交给 Save。所选内容、全量覆盖和局部字段更新在提交中显式区分，仍与同一 owner receipt 在同一 CAS 事务提交。
+
+普通歌曲读按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。
 
 - 控制与单记录的内存／协议投影保留实际字节和深度预算；数据库使用固定字段及关系，允许的动态扩展拆为类型节点，不保存整份 JSON。owner 状态仍须满足 scope／generation／receipt。
 - 仅在实际 getter／command 处校验当前动作涉及的 area；未知 area 不获得命令权限，也不阻断其他 area，未修改值原样保留。脚本实例私有存储不在此库。

@@ -108,6 +108,42 @@ public static partial class NovelTests
         Check(store.Bytes!.SequenceEqual(before));
         await library.PrepareShutdownAsync(); await reopened.PrepareShutdownAsync();
     }
+    private static async Task LibraryWriteConsumption()
+    {
+        await using var store = new MemoryStore();
+        var seed = new NovelLibrary(store); await seed.InitializeAsync();
+        var good = new NovelEntry("live", "live-key", Book(), OnShelf: true);
+        var bad = new NovelEntry("bad", "bad-key", Book(url: "https://novel.invalid/bad"), OnShelf: true);
+        await seed.SaveEntryAsync(good); await seed.SaveEntryAsync(bad);
+        await seed.SaveRulesAsync([new() { Id = "old", Pattern = "old" }]);
+        await store.Inner.WriteAsync(db =>
+        {
+            db.Execute("UPDATE windows_novel_library_entries_book SET revision=0 WHERE entries_key='bad'");
+            return db.Execute("UPDATE windows_novel_library_rules SET pattern=NULL,null_mask=null_mask | 4 WHERE rules_key='old'");
+        });
+        var damaged = StoredLibrary(store).GetProperty("entries")[1];
+        var cold = new NovelLibrary(store);
+        await cold.SaveAppearanceAsync(new() { FontSize = 29 });
+        await cold.SaveRulesAsync([new() { Id = "old", Pattern = "new" }, new() { Id = "added", Pattern = "added" }]);
+        await cold.SaveEntryAsync(good with { ContentSignature = "replacement" });
+        await cold.PinAsync("live");
+        var raw = StoredLibrary(store);
+        Check(JsonElement.DeepEquals(damaged, raw.GetProperty("entries")[1]) && raw.GetProperty("appearance").GetProperty("fontSize").GetInt32() == 29 &&
+            raw.GetProperty("rules")[0].GetProperty("pattern").GetString() == "new",
+            "cold writes only consume their selected section and preserve the bad sibling");
+        var before = store.Bytes!;
+        try { await cold.PinAsync("bad"); throw new InvalidOperationException("A merge ignored its corrupt current entry"); }
+        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
+        try { await cold.InitializeAsync(); throw new InvalidOperationException("Full initialization discarded a corrupt sibling"); }
+        catch (DocumentStoreException error) { Check(error.Error == DocumentStoreError.Corrupt); }
+        Check(store.Bytes!.SequenceEqual(before));
+        await cold.SaveEntryAsync(bad with { ContentSignature = "repaired" });
+        await cold.InitializeAsync();
+        Check(cold.Entries.Count == 2 && cold.Entries.Single(row => row.BookId == "bad").ContentSignature == "repaired" &&
+            cold.Rules.Count == 2 && cold.Appearance.FontSize == 29,
+            "explicit full replacement repairs only its exact key and later initialization reads the complete library");
+        await seed.PrepareShutdownAsync(); await cold.PrepareShutdownAsync();
+    }
     private static async Task RuleProjectionExecution()
     {
         const string text = """

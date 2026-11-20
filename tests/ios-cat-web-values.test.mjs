@@ -1,25 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { hash, paths, readJSON, repository, target } from './ios-native-package-support.mjs';
+import { buildCatWebValues } from '../scripts/quickjs/build-ios.mjs';
 
 // The artifact must come from the real iOS prepare/build, not an in-test bundle.
 // These isolated desktop value tests do not stand in for NodeMobile host tests.
-const modules = [
-  'lib/core/constants.js', 'lib/core/errors.js', 'lib/core/symbols.js', 'lib/core/tree.js', 'lib/core/util.js',
-  'lib/web/fetch/body.js', 'lib/web/fetch/constants.js', 'lib/web/fetch/data-url.js',
-  'lib/web/fetch/dispatcher-weakref.js', 'lib/web/fetch/file.js', 'lib/web/fetch/formdata-parser.js',
-  'lib/web/fetch/formdata.js', 'lib/web/fetch/global.js', 'lib/web/fetch/headers.js',
-  'lib/web/fetch/request.js', 'lib/web/fetch/response.js', 'lib/web/fetch/symbols.js',
-  'lib/web/fetch/util.js', 'lib/web/fetch/webidl.js',
-];
-const builtins = [
-  'node:assert', 'node:buffer', 'node:crypto', 'node:events', 'node:http', 'node:net',
-  'node:perf_hooks', 'node:querystring', 'node:stream', 'node:util', 'node:util/types',
-  'node:worker_threads', 'node:zlib',
-];
 
 function preparedBundle() {
   const receipt = readJSON(join(repository, paths.receipt));
@@ -32,14 +20,13 @@ function preparedBundle() {
   return { receipt, path };
 }
 
-function isolatedValues(scenario) {
-  const { path } = preparedBundle();
+function isolatedValues(scenario, path = preparedBundle().path) {
   const result = spawnSync(process.execPath, ['--input-type=commonjs', '-e', `
     const assert = require('node:assert/strict');
     const { Blob } = require('node:buffer');
     const { ReadableStream, WritableStream } = require('node:stream/web');
     const Module = require('node:module');
-    const artifact = process.argv[1], touched = [], allowed = new Set(${JSON.stringify(builtins)});
+    const artifact = process.argv[1], touched = [];
     assert.equal(globalThis.ReadableStream, ReadableStream);
     assert.equal(globalThis.WritableStream, WritableStream);
     assert.equal(globalThis.Blob, Blob);
@@ -51,9 +38,17 @@ function isolatedValues(scenario) {
         throw new Error('BUILTIN_FETCH_VALUE_READ:' + name);
       } });
     }
+    const dispatcherKey = Symbol.for('undici.globalDispatcher.1');
+    const dispatcher = new Proxy({}, { get() { throw new Error('AMBIENT_DISPATCHER_USE'); } });
+    globalThis[dispatcherKey] = dispatcher;
+    const intern = Symbol.for;
+    Symbol.for = function(name) {
+      if (name === 'undici.globalDispatcher.1') throw new Error('AMBIENT_DISPATCHER_LOOKUP');
+      return intern(name);
+    };
     const load = Module._load;
     Module._load = function(specifier, parent, isMain) {
-      if (parent?.filename === artifact) assert.ok(allowed.has(specifier),
+      if (parent?.filename === artifact) assert.ok(Module.isBuiltin(specifier),
         'VALUE_BUNDLE_EXTERNAL:' + specifier);
       return load.call(this, specifier, parent, isMain);
     };
@@ -62,6 +57,7 @@ function isolatedValues(scenario) {
       const { Request, Response, Headers, FormData } = values;
       ${scenario}
       assert.deepEqual(touched, []);
+      assert.equal(globalThis[dispatcherKey], dispatcher);
       assert.equal(typeof WebAssembly, 'undefined');
       console.log('CAT_WEB_VALUES_OK');
     })().catch(error => { console.error(error); process.exitCode = 1; });
@@ -74,10 +70,104 @@ function isolatedValues(scenario) {
   assert.match(result.stdout, /CAT_WEB_VALUES_OK/);
 }
 
-test('prepared iOS Cat Web values bind the reviewed pure inputs and MIT license', () => {
+// Local builder tests exercise only the JS dependency collector, not an iOS receipt or framework.
+function builderFixture(t) {
+  const temporary = join(repository, 'tmp/test-results/compatibility-cleanup/clean36/ios-build');
+  mkdirSync(temporary, { recursive: true });
+  const root = mkdtempSync(join(temporary, 'web-values-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const path of ['package.json', 'package-lock.json', 'scripts/quickjs/build-ios.mjs',
+    'scripts/quickjs/ios-target.mjs', 'scripts/ios-node-mobile.json', 'node_modules/esbuild/package.json',
+    'node_modules/undici']) {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    cpSync(join(repository, path), join(root, path), { recursive: true });
+  }
+  const write = (path, value) => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), typeof value === 'string' ? value : JSON.stringify(value));
+  };
+  return { root, write, build: () => buildCatWebValues(join(root, 'output'), root) };
+}
+
+test('Cat Web value builder records its real inputs and loads without ambient transport capabilities', async t => {
+  const f = builderFixture(t), values = await f.build();
+  for (const input of values.inputs) {
+    assert.equal(hash(readFileSync(join(f.root, input.path))), input.sha256);
+  }
+  assert.equal(hash(readFileSync(join(f.root, values.path))), values.sha256);
+  isolatedValues(`
+    const headers = new Headers({ 'x-value': 'local' });
+    const controller = new AbortController();
+    const request = new Request('https://example.invalid/value', { headers, signal: controller.signal });
+    controller.abort('cancelled');
+    assert.equal(request.signal.reason, 'cancelled');
+    assert.equal(request.headers.get('x-value'), 'local');
+    assert.equal(await new Response(new Blob(['local'])).text(), 'local');
+    const storage = new Uint8Array([9, 1, 2, 8]);
+    const body = new Request('https://example.invalid/value', {
+      method: 'POST', body: new DataView(storage.buffer, 1, 2),
+    });
+    const copy = body.clone();
+    storage.fill(7);
+    for (const bytes of await Promise.all([body.arrayBuffer(), copy.arrayBuffer()])) {
+      assert.deepEqual([...new Uint8Array(bytes)], [1, 2]);
+    }
+    const form = new FormData();
+    form.append('key', 'value');
+    assert.equal(form.get('key'), 'value');
+  `, join(f.root, values.path));
+});
+
+test('Cat Web value builder follows a referenced helper and public builtin without an approval list', async t => {
+  const f = builderFixture(t), entry = 'node_modules/undici/lib/web/fetch/headers.js';
+  const helper = 'node_modules/undici/lib/web/fetch/helpers/index.js';
+  f.write(entry, `${readFileSync(join(f.root, entry), 'utf8')}
+module.exports.Headers.prototype.helperValue = require('./helpers').value;
+`);
+  f.write(helper, "module.exports.value = require('node:path').basename('/values/helper');\n");
+  f.write('node_modules/undici/unreferenced.js', "require('./missing');\n");
+  const values = await f.build();
+  assert.ok(values.inputs.some(input => input.path === helper));
+  assert.equal(values.inputs.some(input => input.path === 'node_modules/undici/unreferenced.js'), false);
+  isolatedValues("assert.equal(new Headers().helperValue, 'helper');", join(f.root, values.path));
+});
+
+test('Cat Web value builder follows a locked dependency without dev or engines gates', async t => {
+  const f = builderFixture(t), lock = readJSON(join(f.root, 'package-lock.json'));
+  const installed = readJSON(join(f.root, 'node_modules/undici/package.json'));
+  const dependencies = { 'web-value-helper': '1.0.0' };
+  installed.dependencies = dependencies;
+  installed.engines.node = '>=18';
+  Object.assign(lock.packages['node_modules/undici'], { dev: false, engines: installed.engines, dependencies });
+  lock.packages['node_modules/web-value-helper'] = {
+    version: '1.0.0', resolved: 'https://registry.npmjs.org/web-value-helper/-/web-value-helper-1.0.0.tgz',
+    integrity: 'sha512-' + Buffer.alloc(64).toString('base64'),
+  };
+  f.write('node_modules/web-value-helper/package.json', { name: 'web-value-helper', version: '1.0.0' });
+  f.write('node_modules/web-value-helper/index.js', "module.exports.value = 'locked helper';\n");
+  const entry = 'node_modules/undici/lib/web/fetch/headers.js';
+  f.write(entry, `${readFileSync(join(f.root, entry), 'utf8')}
+module.exports.Headers.prototype.helperValue = require('web-value-helper').value;
+`);
+  f.write('node_modules/undici/package.json', installed);
+  f.write('package-lock.json', lock);
+  const values = await f.build();
+  for (const path of ['node_modules/web-value-helper/index.js', 'node_modules/web-value-helper/package.json']) {
+    assert.ok(values.inputs.some(input => input.path === path));
+  }
+  isolatedValues("assert.equal(new Headers().helperValue, 'locked helper');", join(f.root, values.path));
+});
+
+test('Cat Web value builder rejects an installed dependency version that differs from the root lock', async t => {
+  const f = builderFixture(t), installed = readJSON(join(f.root, 'node_modules/undici/package.json'));
+  f.write('node_modules/undici/package.json', { ...installed, version: '6.29.0' });
+  await assert.rejects(f.build(), /differs from package lock/);
+});
+
+test('prepared iOS Cat Web values bind the consumed inputs and MIT license', () => {
   const { receipt } = preparedBundle(), values = receipt.catWebValues;
-  assert.deepEqual(values.inputs.filter(input => input.path.startsWith('node_modules/undici/lib/'))
-    .map(input => input.path).sort(), modules.map(path => `node_modules/undici/${path}`).sort());
+  assert.ok(values.inputs.length > 0);
+  assert.equal(new Set(values.inputs.map(input => input.path)).size, values.inputs.length);
   assert.equal(values.license.path, 'node_modules/undici/LICENSE');
   assert.equal(values.license.sha256, 'a6db8096b2707bc0102d256917d4d33f298ba36d8c3f25de067a2b5bb379db27');
   const license = readFileSync(join(repository, values.license.path));
@@ -91,8 +181,8 @@ test('prepared iOS Cat Web values bind the reviewed pure inputs and MIT license'
 
 test('prepared pure CJS loads without WebAssembly or readable native fetch-value getters', () => {
   isolatedValues(`
-    assert.deepEqual(Object.keys(values).sort(), ['FormData', 'Headers', 'Request', 'Response']);
     for (const constructor of [Request, Response, Headers, FormData]) assert.equal(typeof constructor, 'function');
+    assert.equal(values.fetch, undefined);
   `);
 });
 

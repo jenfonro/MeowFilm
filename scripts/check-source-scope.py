@@ -16,7 +16,7 @@ LOCAL_PRODUCTS = {
     "CMeowAudioKernel": ("audiokernel", "../AudioKernel"),
     "MeowAetherKernel": ("aetherkernel", "../AetherKernel"),
 }
-BINARY_TARGETS = {"MeowSQLite": ("../SQLite/.cache/Artifacts/MeowSQLite.xcframework", {"MeowStorage"})}
+BINARY_TARGETS = {"MeowSQLite": "../SQLite/.cache/Artifacts/MeowSQLite.xcframework"}
 
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
@@ -241,7 +241,7 @@ def check(root):
         name = declaration["name"]
         if name not in binaries:
             continue
-        if name in BINARY_TARGETS and (declaration.get("path") != BINARY_TARGETS[name][0]
+        if name in BINARY_TARGETS and (declaration.get("path") != BINARY_TARGETS[name]
                 or declaration.get("url") or declaration.get("checksum") or targets[name]
                 or directories[name].resolve() != directories[name]):
             failures.append("Invalid binary target: " + name)
@@ -269,9 +269,6 @@ def check(root):
     for target, dependencies in targets.items():
         if not dependencies <= sources | external | systems | binaries:
             failures.append("Non-source dependency: " + target)
-        for binary in dependencies & binaries:
-            if target not in BINARY_TARGETS.get(binary, (None, set()))[1]:
-                failures.append("Unapproved binary dependency: " + target)
         if target in binaries:
             continue
         folder = "Sources" if target in sources | systems else "Tests"

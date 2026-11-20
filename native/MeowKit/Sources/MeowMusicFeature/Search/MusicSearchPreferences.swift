@@ -152,7 +152,9 @@ public struct MusicSearchPreferences: Codable, Equatable, Sendable {
         do {
             if let database {
                 try await database.transaction { db in
-                    guard try Self.load(db).1 == expected else { throw SQLiteStorageError.conflict }
+                    let current = try db.query("SELECT row_revision FROM ios_music_search_preferences WHERE singleton=1")
+                        .first?.integer("row_revision") ?? 0
+                    guard current == expected else { throw SQLiteStorageError.conflict }
                     try db.upsert("ios_music_search_preferences",
                         columns: ["singleton", "searchPlaylists", "song_pages", "song_concurrency", "song_cache_minutes",
                                   "playlist_pages", "playlist_concurrency", "playlist_cache_minutes", "row_revision"],

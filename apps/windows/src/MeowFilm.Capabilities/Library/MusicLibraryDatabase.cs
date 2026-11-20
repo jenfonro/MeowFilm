@@ -12,7 +12,6 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
     private readonly object admission = new();
     private string? activeScope;
     private bool closed;
-    private MusicLibrarySnapshot? cached;
     private Task? disposal;
 
     public MusicLibraryDatabase(IStorageDatabase database) => this.database = database;
@@ -42,19 +41,43 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
     public Task<MusicLibrarySnapshot> ReadAsync(string scope, CancellationToken cancellationToken = default)
     {
         Check(scope);
-        return database.ReadAsync(db =>
-        {
-            var revision = Revision(db, scope);
-            if (cached?.Revision == revision) return Copy(cached);
-            var areas = new Dictionary<string, JsonNode?>(StringComparer.Ordinal);
-            foreach (var (name, record) in MusicStorageRecords.Areas)
-                if (record.Read(db, [scope]) is { } value) areas.Add(name, value);
-            cached = new(revision, areas);
-            return Copy(cached);
-        }, cancellationToken);
+        return database.ReadAsync(db => new MusicLibrarySnapshot(Revision(db, scope),
+            new Dictionary<string, JsonNode?>(StringComparer.Ordinal)), cancellationToken);
     }
-    private static MusicLibrarySnapshot Copy(MusicLibrarySnapshot snapshot) => new(snapshot.Revision,
-        snapshot.Areas.ToDictionary(pair => pair.Key, pair => pair.Value?.DeepClone(), StringComparer.Ordinal));
+    // Explicit diagnostic export consumes every control record; ordinary commands do not.
+    internal Task<MusicLibrarySnapshot> ReadAllAsync(string scope, CancellationToken cancellationToken = default)
+    {
+        Check(scope);
+        return database.ReadAsync(db => new MusicLibrarySnapshot(Revision(db, scope), MusicStorageRecords.Areas
+            .Select(pair => (pair.Key, Value: pair.Value.Read(db, [scope])))
+            .Where(pair => pair.Value is not null).ToDictionary(pair => pair.Key, pair => (JsonNode?)pair.Value, StringComparer.Ordinal)), cancellationToken);
+    }
+    private T AtRevision<T>(string scope, MusicLibraryRevision revision, Func<DatabaseSession, T> read)
+    {
+        Check(scope);
+        return database.Read(db =>
+        {
+            if (Revision(db, scope) != revision) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            return read(db);
+        });
+    }
+    private static RelationalRecord Record(string area, string[] relations)
+    {
+        var record = MusicStorageRecords.Areas[area];
+        foreach (string relation in relations) record = record.Relation(relation);
+        return record;
+    }
+    public JsonObject? ReadArea(string scope, MusicLibraryRevision revision, string area, string[]? members = null) =>
+        AtRevision(scope, revision, db => members is null ? Record(area, []).Read(db, [scope]) : Record(area, []).ReadSelected(db, [scope], members));
+    public IReadOnlyList<RelationalRecord.SelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area,
+        string[] relations, object?[] prefix, string[] members) => AtRevision(scope, revision,
+            db => Record(area, relations).ReadRows(db, prefix, members));
+    public JsonObject? ReadRow(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key) =>
+        AtRevision(scope, revision, db => Record(area, relations).Read(db, key));
+    public bool HasRelation(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, string relation) =>
+        AtRevision(scope, revision, db => Record(area, relations).HasRelation(db, key, relation));
+    public bool Matches(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, JsonObject value) =>
+        AtRevision(scope, revision, db => Record(area, relations).Matches(db, key, value));
     private T Read<T>(Func<DatabaseSession, T> action) { Check(); return database.Read(action); }
     public JsonObject? ReadSong(string id) => Read(db =>
     {
@@ -90,8 +113,10 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         foreach (var (id, value) in songs) ValidateSong(id, value, DocumentStoreError.InvalidRequest);
         if (areas.Keys.Any(name => !MusicStorageRecords.Areas.ContainsKey(name)))
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        var partialAreas = changes.PartialAreas.ToHashSet(StringComparer.Ordinal);
+        var rows = changes.Rows.Select(row => row with { Value = row.Value?.DeepClone().AsObject() }).ToArray();
         int bytes = 0;
-        foreach (var value in songs.Values.Concat(areas.Values))
+        foreach (var value in songs.Values.Concat(areas.Values).Concat(rows.Where(row => row.Value is not null).Select(row => row.Value!)))
         {
             bytes = checked(bytes + System.Text.Encoding.UTF8.GetByteCount(value.ToJsonString(LJ.Json)));
         }
@@ -121,16 +146,24 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
                 });
             }
             foreach (var (name, value) in areas)
+                if (partialAreas.Contains(name)) MusicStorageRecords.Areas[name].Patch(db, value, [scope]);
+                else MusicStorageRecords.Areas[name].Replace(db, value, [scope]);
+            foreach (var row in rows)
             {
-                var record = MusicStorageRecords.Areas[name];
-                var previous = cached?.Revision == expected && cached.Areas.TryGetValue(name, out var memory) ? memory?.AsObject() : record.Read(db, [scope]);
-                record.Save(db, value, previous, [scope]);
+                var record = Record(row.Area, row.Relations);
+                if (row.Key[0] as string != scope) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+                if (row.Value is null) record.Delete(db, row.Key);
+                else
+                {
+                    if (row.Insert) record.InsertAt(db, row.Key[..^1], row.Ordinal);
+                    record.Replace(db, row.Value, row.Key, row.Ordinal);
+                    var parent = Record(row.Area, row.Relations[..^1]);
+                    parent.SetRelationPresent(db, row.Key[..parent.Keys.Count], row.Relations[^1]);
+                }
             }
             db.Execute("INSERT INTO music_owner_state(scope,revision,receipt) VALUES($scope,$revision,$receipt) " +
                 "ON CONFLICT(scope) DO UPDATE SET revision=excluded.revision,receipt=excluded.receipt",
                 ("$scope", scope), ("$revision", next.Generation), ("$receipt", next.Receipt));
-            // A failed COMMIT cannot make this cache appear current; the next read checks the durable revision.
-            cached = null;
             return next;
         }, cancellationToken, bytes);
     }
@@ -170,7 +203,6 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         try { await database.DrainAsync().ConfigureAwait(false); }
         finally
         {
-            cached = null;
             if (ownsDatabase) await database.DisposeAsync().ConfigureAwait(false);
         }
     }

@@ -62,18 +62,14 @@ export function parseLiteral(value) {
 }
 
 export function parseRuleObject(value) {
-  if (!value) return {};
+  if (value === undefined || value === '') return {};
   if (value && typeof value === 'object' && !Array.isArray(value)) return value;
-  if (typeof value !== 'string') return {};
-  try {
-    const parsed = JSON.parse(value);
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    try {
-      const parsed = parseLiteral(value);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-    } catch { return {}; }
-  }
+  sourceRequire(typeof value === 'string', 'UNSUPPORTED_RULE');
+  let parsed;
+  try { parsed = JSON.parse(value); }
+  catch { parsed = parseLiteral(value); }
+  sourceRequire(parsed && typeof parsed === 'object' && !Array.isArray(parsed), 'UNSUPPORTED_RULE');
+  return parsed;
 }
 
 export function splitTopLevel(rule, operator) {

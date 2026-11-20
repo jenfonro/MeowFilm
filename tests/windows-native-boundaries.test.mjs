@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { verifyPublishedGraph, verifyRuntimeConfiguration, verifyWindowsProjects } from '../scripts/windows/verify-projects.mjs';
 import { temporaryRoot, assertOwnedPath } from '../scripts/windows/working-paths.mjs';
@@ -28,7 +28,16 @@ function fixture(t) {
   const verify = () => verifyWindowsProjects(root, { properties, evaluate: (path, properties) => {
     contexts.push(properties); return entries.get(path);
   } });
-  return { app, core, feature, entries, verify, properties, contexts };
+  const add = (scope, name, references = [], values = {}) => {
+    const path = join(root, 'apps/windows', scope, name + '.csproj');
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '<Project/>');
+    const project = entry(name, name, references);
+    Object.assign(project.Properties, values);
+    entries.set(path, project);
+    return path;
+  };
+  return { root, app, core, feature, entries, verify, properties, contexts, add };
 }
 
 test('uses the evaluated graph and configuration instead of a fixed project list', t => {
@@ -51,6 +60,54 @@ test('rejects duplicate evaluated project references', t => {
   const f = fixture(t);
   f.entries.get(f.app).Items.ProjectReference.push({ FullPath: f.feature });
   assert.throws(f.verify, /duplicate project reference/);
+});
+
+test('rejects project references that leave the repository through paths or links', t => {
+  const f = fixture(t);
+  const outside = mkdtempSync(join(temporaryRoot, 'outside-project-'));
+  t.after(() => rmSync(assertOwnedPath(temporaryRoot, outside), { recursive: true }));
+  const project = join(outside, 'Outside.csproj');
+  writeFileSync(project, '<Project/>');
+  f.entries.get(f.core).Items.ProjectReference.push({ FullPath: project });
+  assert.throws(f.verify, /project leaves repository/);
+  const linked = join(f.root, 'linked-project');
+  symlinkSync(outside, linked, process.platform === 'win32' ? 'junction' : 'dir');
+  f.entries.get(f.core).Items.ProjectReference = [{ FullPath: join(linked, 'Outside.csproj') }];
+  assert.throws(f.verify, /project leaves repository/);
+});
+
+test('new neutral helpers use their evaluated references without project-name registration', t => {
+  const f = fixture(t);
+  const input = f.add('src/BinaryInput', 'BinaryInput');
+  const helper = f.add('src/BufferPool', 'BufferPool', [input]);
+  const threading = f.add('src/MeowFilm.Threading', 'OwnerScheduling', [helper]);
+  f.entries.get(f.core).Items.ProjectReference.push({ FullPath: helper });
+  for (const scope of ['MeowFilm.Audio', 'MeowFilm.Media']) {
+    const project = f.add('src/' + scope, scope + '.Renamed', [f.core, threading]);
+    f.entries.get(f.app).Items.ProjectReference.push({ FullPath: project });
+  }
+  assert.ok(f.verify().application.projects.includes('BufferPool'));
+  const policy = f.verify(), names = policy.application.assemblies, target = 'net10.0/win-x64';
+  const deps = { libraries: Object.fromEntries(names.map(name => [name + '/1.0.0', { type: 'project' }])),
+    runtimeTarget: { name: target }, targets: { [target]: {} } };
+  const files = [...names.map(name => name + '.dll'), 'meowfilm.exe'];
+  assert.ok(verifyPublishedGraph('aggregate', deps, files, policy).projects.includes('BufferPool'));
+  assert.throws(() => verifyPublishedGraph('aggregate', deps, files.filter(name => name !== 'BufferPool.dll'), policy),
+    /assemblies/);
+});
+
+test('a neutral helper cannot hide transitive business or application dependencies behind evaluated names', t => {
+  const f = fixture(t);
+  const helper = f.add('src/BufferPool', 'BufferPool');
+  f.entries.get(f.core).Items.ProjectReference.push({ FullPath: helper });
+  f.entries.get(f.feature).Items.ProjectReference = [];
+  f.entries.get(f.feature).Properties.MSBuildProjectName = 'NeutralLookingName';
+  const host = f.add('src/MeowFilm.AppHost', 'RenamedHost');
+  f.entries.get(f.app).Items.ProjectReference = [{ FullPath: f.core }];
+  for (const target of [f.feature, host]) {
+    f.entries.get(helper).Items.ProjectReference = [{ FullPath: target }];
+    assert.throws(f.verify, /shared project depends/);
+  }
 });
 
 test('independent audio and film cores accept neutral input and owner scheduling projects', t => {
@@ -85,6 +142,22 @@ test('independent audio and film cores accept neutral input and owner scheduling
   }
 });
 
+test('neutral helpers cannot hide a dependency on the other playback owner or WinUI presentation', t => {
+  const f = fixture(t);
+  const audio = f.add('src/MeowFilm.Audio', 'RenamedAudio');
+  const media = f.add('src/MeowFilm.Media', 'RenamedMedia');
+  const presentation = f.add('src/SharedControls', 'SharedControls', [], { UseWinUI: 'true' });
+  const helper = f.add('src/BufferPool', 'BufferPool');
+  for (const [owner, dependency] of [[audio, media], [media, audio], [audio, presentation], [media, presentation]]) {
+    f.entries.get(f.app).Items.ProjectReference = [{ FullPath: owner }];
+    f.entries.get(audio).Items.ProjectReference = [];
+    f.entries.get(media).Items.ProjectReference = [];
+    f.entries.get(owner).Items.ProjectReference = [{ FullPath: helper }];
+    f.entries.get(helper).Items.ProjectReference = [{ FullPath: dependency }];
+    assert.throws(f.verify, /native playback core depends beyond its neutral input boundary/);
+  }
+});
+
 test('owner threading cannot depend on a presentation project', t => {
   const f = fixture(t);
   const projects = ['MeowFilm.Threading', 'MeowFilm.Desktop'].map(name => {
@@ -92,13 +165,22 @@ test('owner threading cannot depend on a presentation project', t => {
     mkdirSync(dirname(project), { recursive: true });
     writeFileSync(project, '<Project/>');
     f.entries.set(project, {
-      Properties: { MSBuildProjectName: name, AssemblyName: name },
+      Properties: { MSBuildProjectName: name, AssemblyName: name, UseWinUI: name === 'MeowFilm.Desktop' ? 'true' : 'false' },
       Items: { ProjectReference: [] },
     });
     return project;
   });
   f.entries.get(f.app).Items.ProjectReference.push({ FullPath: projects[0] });
   f.entries.get(projects[0]).Items.ProjectReference.push({ FullPath: projects[1] });
+  assert.throws(f.verify, /owner threading depends beyond its neutral scheduling boundary/);
+});
+
+test('owner scheduling cannot reach a playback owner through a neutral helper', t => {
+  const f = fixture(t);
+  const owner = f.add('src/MeowFilm.Audio', 'RenamedAudio');
+  const helper = f.add('src/BufferPool', 'BufferPool', [owner]);
+  const threading = f.add('src/MeowFilm.Threading', 'RenamedScheduling', [helper]);
+  f.entries.get(f.app).Items.ProjectReference.push({ FullPath: threading });
   assert.throws(f.verify, /owner threading depends beyond its neutral scheduling boundary/);
 });
 
@@ -111,7 +193,16 @@ test('runtime configuration accepts self-contained and SDK framework-dependent d
   ]) assert.equal(verifyRuntimeConfiguration({ runtimeOptions }, selfContained), framework.version);
 });
 
-test('runtime configuration rejects missing, mixed or unrelated runtime framework closures', () => {
+test('runtime configuration accepts additional declared frameworks and reads .NETCore by identity', () => {
+  const runtime = { name: 'Microsoft.NETCore.App', version: '10.0.2' };
+  const extra = { name: 'Microsoft.WindowsDesktop.App', version: '10.0.1' };
+  for (const frameworks of [[extra, runtime], [runtime, extra]]) {
+    assert.equal(verifyRuntimeConfiguration({ runtimeOptions: { includedFrameworks: frameworks } }, true), runtime.version);
+    assert.equal(verifyRuntimeConfiguration({ runtimeOptions: { frameworks } }, false), runtime.version);
+  }
+});
+
+test('runtime configuration rejects missing, mixed or unversioned framework declarations', () => {
   const framework = { name: 'Microsoft.NETCore.App', version: '10.0.2' };
   for (const [selfContained, runtimeOptions] of [
     [true, {}], [false, {}],
@@ -121,8 +212,9 @@ test('runtime configuration rejects missing, mixed or unrelated runtime framewor
     [true, { includedFrameworks: [] }],
     [false, { framework: { ...framework, version: '' } }],
     [true, { includedFrameworks: [{ name: 'Microsoft.WindowsDesktop.App', version: '10.0.2' }] }],
-    [true, { includedFrameworks: [framework, { name: 'Microsoft.WindowsDesktop.App', version: '10.0.2' }] }],
-    [false, { frameworks: [framework, framework] }],
+    [true, { includedFrameworks: [framework, { name: 'Microsoft.WindowsDesktop.App' }] }],
+    [false, { frameworks: [framework, { name: '', version: '10.0.2' }] }],
+    [true, { includedFrameworks: [framework, null] }],
   ]) assert.throws(() => verifyRuntimeConfiguration({ runtimeOptions }, selfContained), /runtime.*framework/);
 });
 

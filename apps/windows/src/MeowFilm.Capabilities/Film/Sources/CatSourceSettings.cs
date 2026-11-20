@@ -22,17 +22,64 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     internal async Task<IReadOnlyList<CatSourceConfiguration>> ReadAsync(CancellationToken token) =>
         Parse(await document.ReadAsync(token).ConfigureAwait(false) ?? Empty);
 
-    internal async Task<IReadOnlyList<CatSourceConfiguration>> ChangeAsync(
-        Func<IReadOnlyList<CatSourceConfiguration>, IEnumerable<CatSourceConfiguration>> edit, CancellationToken token)
+    internal Task<IReadOnlyList<CatSourceConfiguration>> AddAsync(CatSourceConfiguration script, CancellationToken token) =>
+        UpdateAsync(script.InstallationId, current => current is not null
+            ? throw new FilmSourceException("STORAGE_CONFLICT") : JsonSerializer.SerializeToElement(script, Json), token);
+
+    internal Task<IReadOnlyList<CatSourceConfiguration>> EditAsync(string installationId, string name, string type,
+        string? url, (string Path, string Hash)? input, CancellationToken token) => UpdateAsync(installationId, current =>
     {
+        var row = current ?? throw new FilmSourceException("NOT_FOUND");
+        bool reuseLocal = type == "local" && input is null && FilmJson.Text(row, "sourceType") == "local";
+        string? path = type == "local" ? input?.Path ?? (reuseLocal ? Text(row, "localPath") : null) : null;
+        string? hash = type == "local" ? input?.Hash ?? (reuseLocal ? Text(row, "localHash") : null) : null;
+        if (type == "local" && hash is null) throw new FilmSourceException("INVALID_ARGUMENT");
+        var next = row;
+        foreach (var (field, value) in new Dictionary<string, JsonElement>
+        {
+            ["name"] = FilmJson.Encode(name), ["sourceType"] = FilmJson.Encode(type),
+            ["sourceUrl"] = JsonSerializer.SerializeToElement(type == "network" ? url : null, Json),
+            ["localPath"] = JsonSerializer.SerializeToElement(path, Json), ["localHash"] = JsonSerializer.SerializeToElement(hash, Json)
+        }) next = FilmDocument.Set(next, field, value);
+        bool changed = !FilmJson.Equal(FilmJson.Member(row, "sourceType"), FilmJson.Member(next, "sourceType")) ||
+            (type == "network" ? new[] { "sourceUrl" } : new[] { "localPath", "localHash" })
+                .Any(field => !FilmJson.Equal(FilmJson.Member(row, field), FilmJson.Member(next, field)));
+        long revision;
+        try { revision = row.GetProperty("inputRevision").GetInt64(); }
+        catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or FormatException)
+        { throw new FilmSourceException("INVALID_DOCUMENT"); }
+        if (revision is < 1 or > BridgeCodec.MaximumSafeInteger) throw new FilmSourceException("INVALID_DOCUMENT");
+        return FilmDocument.Set(next, "inputRevision", FilmJson.Encode(revision + (changed ? 1 : 0)));
+    }, token);
+
+    internal Task<IReadOnlyList<CatSourceConfiguration>> EnableAsync(string installationId, bool enabled, CancellationToken token) =>
+        UpdateAsync(installationId, row => FilmDocument.Set(row ?? throw new FilmSourceException("NOT_FOUND"),
+            "enabled", FilmJson.Encode(enabled)), token);
+
+    internal Task<IReadOnlyList<CatSourceConfiguration>> RemoveAsync(string installationId, CancellationToken token) =>
+        UpdateAsync(installationId, row => row is null ? throw new FilmSourceException("NOT_FOUND") : null, token);
+
+    private async Task<IReadOnlyList<CatSourceConfiguration>> UpdateAsync(string installationId,
+        Func<JsonElement?, JsonElement?> edit, CancellationToken token)
+    {
+        if (!ValidIdentity(installationId)) throw new FilmSourceException("INVALID_DOCUMENT");
         var saved = await document.UpdateAsync(current =>
         {
             var root = current ?? Empty;
-            var next = edit(Parse(root)).ToArray();
-            if (next.Select(item => item.InstallationId).Distinct(StringComparer.Ordinal).Count() != next.Length)
+            var rows = Rows(root);
+            var selected = rows.Where(row => Identity(row) == installationId).ToArray();
+            if (selected.Length > 1) throw new FilmSourceException("INVALID_DOCUMENT");
+            var next = edit(selected.Length == 0 ? null : selected[0]);
+            if (next is not null && ReadScript(next.Value).InstallationId != installationId)
                 throw new FilmSourceException("INVALID_DOCUMENT");
-            foreach (var script in next) Validate(script);
-            return FilmDocument.Set(root, "scripts", JsonSerializer.SerializeToElement(next, Json));
+            var scripts = new List<JsonElement>();
+            foreach (var row in rows)
+            {
+                if (Identity(row) != installationId) scripts.Add(row);
+                else if (next is not null) scripts.Add(next.Value);
+            }
+            if (selected.Length == 0 && next is not null) scripts.Add(next.Value);
+            return FilmDocument.Set(root, "scripts", JsonSerializer.SerializeToElement(scripts));
         }, token).ConfigureAwait(false);
         return Parse(saved);
     }
@@ -57,58 +104,67 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
             throw new FilmSourceException("INVALID_ARGUMENT");
     }
 
+    private static JsonElement[] Rows(JsonElement current)
+    {
+        if (current.ValueKind != JsonValueKind.Object ||
+            FilmJson.Member(current, "version") is not { ValueKind: JsonValueKind.Number } version ||
+            !version.TryGetInt32(out int number) || number != 1 ||
+            FilmJson.Member(current, "scripts").ValueKind != JsonValueKind.Array)
+            throw new FilmSourceException("INVALID_DOCUMENT");
+        return current.GetProperty("scripts").EnumerateArray().ToArray();
+    }
+
+    private static string? Identity(JsonElement row) =>
+        FilmJson.Member(row, "installationId") is { ValueKind: JsonValueKind.String } id ? id.GetString() : null;
+
     private static CatSourceConfiguration[] Parse(JsonElement current)
+    {
+        var rows = Rows(current);
+        var counts = rows.Select(Identity).OfType<string>().GroupBy(id => id, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        var scripts = new List<CatSourceConfiguration>();
+        foreach (var row in rows)
+        {
+            if (Identity(row) is not { } id || counts[id] != 1) continue;
+            try { scripts.Add(ReadScript(row)); }
+            catch (FilmSourceException) { /* Unreadable business rows remain stored outside the management projection. */ }
+        }
+        return scripts.ToArray();
+    }
+
+    private static CatSourceConfiguration ReadScript(JsonElement row)
     {
         try
         {
-            static void Fields(JsonElement value, params string[] names)
-            {
-                if (value.ValueKind != JsonValueKind.Object ||
-                    !value.EnumerateObject().Select(field => field.Name).Order(StringComparer.Ordinal)
-                        .SequenceEqual(names.Order(StringComparer.Ordinal)))
-                    throw new JsonException();
-            }
-            Fields(current, "version", "port", "providers", "mappings", "scripts");
-            if (BridgeCodec.RequiredProperty(current, "version").GetInt32() != 1 ||
-                BridgeCodec.RequiredProperty(current, "port").GetInt32() is < 0 or > 65535) throw new JsonException();
-            foreach (var provider in current.GetProperty("providers").EnumerateObject())
-                if (provider.Name.Length == 0 || provider.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-                    throw new JsonException();
-            foreach (var mapping in current.GetProperty("mappings").EnumerateArray())
-            {
-                Fields(mapping, "provider", "aliases");
-                if (mapping.GetProperty("provider").GetString() is not { Length: > 0 } ||
-                    mapping.GetProperty("aliases").EnumerateArray().Any(alias => alias.ValueKind != JsonValueKind.String))
-                    throw new JsonException();
-            }
-            var rows = BridgeCodec.RequiredProperty(current, "scripts").EnumerateArray().ToArray();
-            var identities = new HashSet<string>(StringComparer.Ordinal);
-            var scripts = new List<CatSourceConfiguration>();
-            foreach (var row in rows)
-            {
-                Fields(row, "installationId", "name", "sourceType", "sourceUrl", "localPath", "localHash", "enabled", "inputRevision");
-                var id = row.GetProperty("installationId").GetString()!;
-                if (!identities.Add(id)) throw new JsonException();
-                string? Text(string name) => row.GetProperty(name).ValueKind == JsonValueKind.Null
-                    ? null : row.GetProperty(name).GetString();
-                var script = new CatSourceConfiguration(id, Text("name")!, Text("sourceType")!,
-                    Text("sourceUrl"), Text("localPath"), Text("localHash"),
-                    row.GetProperty("enabled").GetBoolean(), row.GetProperty("inputRevision").GetInt64());
-                try { Validate(script); }
-                catch (FilmSourceException) { throw new JsonException(); }
-                scripts.Add(script);
-            }
-            return scripts.ToArray();
+            string type = Text(row, "sourceType")!;
+            var script = new CatSourceConfiguration(Identity(row)!, Text(row, "name")!, type,
+                Text(row, "sourceUrl"), type == "local" ? Text(row, "localPath") : null,
+                type == "local" ? Text(row, "localHash") : null,
+                row.GetProperty("enabled").GetBoolean(), row.GetProperty("inputRevision").GetInt64());
+            Validate(script);
+            return script;
         }
-        catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException or BridgeException or FormatException)
+        catch (Exception error) when (error is JsonException or InvalidOperationException or ArgumentException or
+            KeyNotFoundException or FormatException)
         { throw new FilmSourceException("INVALID_DOCUMENT"); }
     }
 
+    private static string? Text(JsonElement row, string name)
+    {
+        var value = FilmJson.Member(row, name);
+        return value.ValueKind switch
+        {
+            JsonValueKind.Null => null, JsonValueKind.String => value.GetString(),
+            _ => throw new FilmSourceException("INVALID_DOCUMENT")
+        };
+    }
+
+    private static bool ValidIdentity(string id) => Regex.IsMatch(id, @"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z");
+
     private static void Validate(CatSourceConfiguration script)
     {
-        if (!Regex.IsMatch(script.InstallationId ?? "", @"\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z") ||
+        if (!ValidIdentity(script.InstallationId ?? "") ||
             script.InputRevision is < 1 or > BridgeCodec.MaximumSafeInteger ||
-            script.SourceType == "network" && (script.LocalPath is not null || script.LocalHash is not null) ||
             script.SourceType == "local" && (!Regex.IsMatch(script.LocalHash ?? "", @"\A[a-f0-9]{64}\z") ||
                 script.LocalPath is not null && (!System.IO.Path.IsPathFullyQualified(script.LocalPath) || script.LocalPath.Any(char.IsControl))))
             throw new FilmSourceException("INVALID_DOCUMENT");

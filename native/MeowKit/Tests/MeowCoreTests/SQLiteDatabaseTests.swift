@@ -57,6 +57,31 @@ final class SQLiteDatabaseTests: XCTestCase {
         XCTAssertEqual(revision, 41)
         try await second.close()
     }
+    func testOrdinaryReopenKeepsRelationsScopedAndWriteConstraintsEnabled() async throws {
+        let (root, db) = try await fixture()
+        try await db.read { connection in
+            try connection.execute("PRAGMA foreign_keys=OFF")
+            try connection.execute("INSERT INTO operation_receipts VALUES('missing-owner','retained',1)")
+            try connection.execute("PRAGMA foreign_keys=ON")
+        }
+        try await db.close()
+        let reopened = try await Task.detached { try SQLiteDatabase(dataRoot: root) }.value
+        addTeardownBlock { try await reopened.close() }
+        let enabled = try await reopened.read { try $0.query("PRAGMA foreign_keys").first!.integer("foreign_keys") }
+        XCTAssertEqual(enabled, 1)
+        try await reopened.transaction { try $0.execute("INSERT INTO owner_revisions VALUES('unrelated',1,'saved')") }
+        do {
+            try await reopened.transaction { try $0.execute("INSERT INTO operation_receipts VALUES('missing-owner','rejected',1)") }
+            XCTFail("invalid new relation committed")
+        } catch { XCTAssertEqual(error as? SQLiteStorageError, .constraint) }
+        let receipts = try await reopened.read { try $0.query("SELECT operation_id FROM operation_receipts").map { try $0.text("operation_id") } }
+        XCTAssertEqual(receipts, ["retained"])
+        let destination = root.appendingPathComponent("rejected-backup.sqlite3")
+        do { try await reopened.backup(to: destination); XCTFail("invalid whole-database backup accepted") }
+        catch { XCTAssertEqual(error as? SQLiteStorageError, .corrupt) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        try await reopened.close()
+    }
     func testModifiedStructureIsRejectedWithoutRebuildingTheDatabase() async throws {
         let (root, db) = try await fixture()
         try await db.transaction { try $0.execute("ALTER TABLE owner_revisions ADD COLUMN unknown TEXT") }

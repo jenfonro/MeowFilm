@@ -90,17 +90,17 @@ export class ScriptHost {
   #cleanupIssues = new Map();
   #closing;
 
-  constructor({ adapters, network, storage, onDiagnostic, onScriptError, limits = {},
-    ...unsupported }) {
-    requireValue(Object.keys(unsupported).length === 0);
+  constructor({ adapters, network, storage, onDiagnostic, onScriptError, limits = {} }) {
     requireValue(adapters && typeof adapters === 'object');
     requireValue(network === undefined || typeof network === 'function');
     requireValue(storage === undefined || (storage && typeof storage === 'object'));
     requireValue(onDiagnostic === undefined || typeof onDiagnostic === 'function');
     requireValue(onScriptError === undefined || typeof onScriptError === 'function');
-    requireValue(Object.keys(limits).every(k => Object.hasOwn(defaults, k)));
-    this.limitOverrides = Object.freeze({ ...limits });
-    this.limits = Object.freeze({ ...defaults, ...limits });
+    requireValue(limits && typeof limits === 'object' && !Array.isArray(limits));
+    const selected = Object.fromEntries(Object.keys(defaults).filter(key => limits[key] !== undefined)
+      .map(key => [key, limits[key]]));
+    this.limitOverrides = Object.freeze(selected);
+    this.limits = Object.freeze({ ...defaults, ...selected });
     for (const value of Object.values(this.limits)) requireValue(Number.isSafeInteger(value) && value > 0);
     this.adapters = { ...adapters };
     this.network = network;

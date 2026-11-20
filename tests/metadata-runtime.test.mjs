@@ -239,8 +239,7 @@ test('metadata HTTP operations project known settings and ignore extras without 
     assert.ok(initialSignal instanceof AbortSignal);
     for (const extra of [null, 'unused', [], { nested: { cover_url: 'javascript:unused', imageSize: 'bad' } }]) {
       assert.deepEqual(value(await owner.client.call(`${id}.data.settings.get`, { extra, revision: extra })), saved);
-      assert.deepEqual(await owner.client.call(`${id}.data.settings.update`, { ...patch, extra, revision: extra }),
-        { ok: false, contract: `${id}.data.v1`, code: 'INVALID_REQUEST' });
+      assert.deepEqual(value(await owner.client.call(`${id}.data.settings.update`, { ...patch, extra, revision: extra })), saved);
       assert.deepEqual(value(await owner.client.call(`${id}.data.request`, {
         path, method: extra, headers: extra, url: extra, body: extra, cookie: extra, accessToken: extra, extra,
       })), expected);
@@ -412,12 +411,13 @@ test('Douban HTML JSON parsing never rounds a fractional source ID into a health
     { ok: false, contract: 'douban.data.v1', code: 'UPSTREAM_FORMAT' });
 });
 
-test('metadata settings preserve typed Unicode fields and reject unowned extensions', async t => {
+test('metadata settings preserve typed Unicode fields and project unowned extensions', async t => {
   const root = area(t), store = createMetadataSettings(root, 'douban');
   await store.ready;
   const saved = await store.update({ cookie: '合成🎬�', apiProxy: 'https://relay.invalid/?url={encodedUrl}' });
   assert.equal(saved.cookie, '合成🎬�');
-  await assert.rejects(store.update({ extension: 'unused' }), { code: 'INVALID_REQUEST' });
+  assert.deepEqual(await store.update({ extension: 'unused', revision: 'untrusted' }), saved);
+  await assert.rejects(store.update({ cookie: false }), { code: 'INVALID_REQUEST' });
   await store.close();
   await withTestDatabase(root, async database => {
     const [row] = await database.query('SELECT cookie, api_proxy FROM metadata_standalone_douban');
@@ -764,4 +764,21 @@ test('metadata settings persist effective TMDB options and accept plain Douban p
   }
   await douban.update({ cookie: '' });
   await Promise.all([tmdb.close(), douban.close()]);
+});
+
+
+test('metadata extra fields grant no native write permission or bypass standalone CAS', async t => {
+  const injected = createMetadataSettings(area(t),'tmdb',{read:() => ({version:1,settings:{apiKey:'native-only'}})});
+  const root = area(t), first = createMetadataSettings(root,'tmdb');
+  let stale;
+  try {
+    await injected.ready;
+    await assert.rejects(injected.update({apiKey:'changed',extra:true}),{code:'PERMISSION_DENIED'});
+    assert.equal((await injected.get()).apiKey,'native-only');
+    await first.update({apiKey:'initial'});
+    stale = createMetadataSettings(root,'tmdb'); await stale.ready;
+    const saved = await first.update({apiKey:'first',extra:[]});
+    await assert.rejects(stale.update({apiKey:'stale',revision:saved.revision,extra:false}),{code:'STORAGE_CONFLICT'});
+    assert.deepEqual(await stale.get(),saved);
+  } finally {await injected.close();await first.close();await stale?.close();}
 });

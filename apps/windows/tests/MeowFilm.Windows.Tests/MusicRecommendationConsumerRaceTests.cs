@@ -464,17 +464,6 @@ public static partial class MusicUiTests
             if (coordinator is not null) await coordinator.DisposeAsync();
             await library.DisposeAsync();
         }
-        private async Task<JsonElement> ReadQualitySettings(CancellationToken token)
-        {
-            var reply = await library.ExecuteAsync("music.quality.settings.get", cancellationToken: token);
-            if (!reply.GetProperty("ok").GetBoolean()) return reply;
-            var result = JsonNode.Parse(reply.GetRawText())!.AsObject();
-            // Keep lyrics disabled without adding a library write or replacing
-            // the real owner's quality policy signature.
-            result["onlineSettings"] = JsonSerializer.SerializeToNode(new {
-                schema = 3, revision = 0, lyrics = false });
-            return JsonSerializer.SerializeToElement(result);
-        }
         private static JsonElement ScriptSource() => JsonSerializer.SerializeToElement(new {
             installationId = "recommendation-consumer-race", name = "Recommendation race fixture", version = "1",
             contentHash = new string('c', 64), executionHash = new string('d', 64), sourceRevision = 1,
@@ -493,7 +482,8 @@ public static partial class MusicUiTests
                 RecommendationCalls.Add((method, JsonSerializer.SerializeToElement(parameters ?? new { })));
                 if (coordinator is not null) return await coordinator.ExecuteAsync(method, parameters, cancellationToken);
             }
-            if (method == "music.quality.settings.get") return await ReadQualitySettings(cancellationToken);
+            if (method == "music.settings.get") return JsonSerializer.SerializeToElement(new { ok = true, settings = new { schema = 3, revision = 0, lyrics = false } });
+            if (method == "music.quality.settings.get") return await library.ExecuteAsync(method, cancellationToken: cancellationToken);
             if (method == "music.official.candidates")
             {
                 var request = JsonSerializer.SerializeToElement(parameters);
@@ -504,7 +494,7 @@ public static partial class MusicUiTests
                 _ = NativeMusicSong.Normalize(input["song"]);
                 string level = LJ.S(input["quality"]);
                 LJ.Require(level == "auto" || MusicQualityPolicy.OfficialTypes.Contains(level), "QUALITY_UNAVAILABLE");
-                var quality = await ReadQualitySettings(cancellationToken);
+                var quality = await library.ExecuteAsync("music.quality.settings.get", cancellationToken: cancellationToken);
                 if (!quality.GetProperty("ok").GetBoolean()) return quality;
                 string signature = quality.GetProperty("signature").GetString()!;
                 LJ.Require(LJ.S(input["qualityPolicySignature"]) == signature, "QUALITY_POLICY_CHANGED");
@@ -553,7 +543,7 @@ public static partial class MusicUiTests
                     LJ.S(row["source"]) == platform &&
                     (input["sourceKey"] is null || LJ.S(row["sourceKey"]) == LJ.Text(input["sourceKey"])));
                 string sourceKey = LJ.Text(source["sourceKey"]);
-                var quality = await ReadQualitySettings(cancellationToken);
+                var quality = await library.ExecuteAsync("music.quality.settings.get", cancellationToken: cancellationToken);
                 if (!quality.GetProperty("ok").GetBoolean()) return quality;
                 if (request.GetProperty("quality").GetString() != "320k")
                     return JsonSerializer.SerializeToElement(new { ok = false, code = "CAPABILITY_UNAVAILABLE" });

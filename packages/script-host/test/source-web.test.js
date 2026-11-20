@@ -97,10 +97,10 @@ test('Web origin changes commit once, preserve scalar types, delete cookies and 
   fixture = setup({ onProfileChange: name => commits.push([name, fixture.owner.snapshotProfiles(name)]) });
   await fixture.seed(['deleted=old; Path=/']);
   commits.length = 0;
-  fixture.reply({ value: false, url: 'https://other.invalid/final',
+  fixture.reply({ value: false, url: 'https://other.invalid/final', extra: { ignored: true },
     headers: { 'set-cookie': ['final=header; Path=/; Secure'] },
     cookieChanges: [
-      { url: 'https://books.invalid/', setCookie: '__Host-session=a; Path=/; Secure; HttpOnly; SameSite=Strict' },
+      { url: 'https://books.invalid/', setCookie: '__Host-session=a; Path=/; Secure; HttpOnly; SameSite=Strict', extra: false },
       { url: 'https://books.invalid/', setCookie: 'deleted=; Path=/; Max-Age=0' },
       { url: 'https://other.invalid/', setCookie: 'redirect=b; Path=/; Secure; SameSite=None' },
     ] });
@@ -137,6 +137,10 @@ test('Web cookie changes are atomic on invalid input and persistent write failur
   } });
   await fixture.seed(['accepted=old; Path=/']);
   writes = 0;
+  for (const headers of [null, false, 7, 'bad', []]) {
+    fixture.reply({ value: false, url, headers, extra: true });
+    await assert.rejects(fixture.web('browser', { url }), { code: 'INVALID_RESPONSE' });
+  }
   fixture.reply({ value: 0, url, headers: {}, cookieChanges: [
     { url, setCookie: 'accepted=new; Path=/' }, { url: 'file:///private', setCookie: 'bad=value' },
   ] });

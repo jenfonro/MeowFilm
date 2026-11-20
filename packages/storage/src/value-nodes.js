@@ -112,7 +112,9 @@ export function decodeValueNodes(rows, { rawNumbers = false } = {}) {
     const textValue = row.text_value ?? row.textValue;
     switch (kind) {
       case 'null': return null;
-      case 'boolean': return Boolean(boolValue);
+      case 'boolean':
+        if (boolValue !== 0 && boolValue !== 1) throw storageError('STORAGE_CORRUPT');
+        return boolValue === 1;
       case 'integer':
         if (typeof intValue === 'bigint') return rawNumbers ? rawJSON(intValue.toString(10)) : intValue;
         if (typeof intValue !== 'number') throw storageError('STORAGE_CORRUPT');

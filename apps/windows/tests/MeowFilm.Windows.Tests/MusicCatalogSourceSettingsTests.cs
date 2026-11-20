@@ -33,7 +33,6 @@ public static class MusicCatalogSourceSettingsTests
         {
             Settings(await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" }), "kg", 1);
             var entry = store.State("native-catalog-source");
-            Equal(3, entry.AsObject().Count);
             Equal(1, entry["schema"]!.GetValue<int>());
             await owner.AbortAsync();
             await using (var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage))
@@ -127,34 +126,50 @@ public static class MusicCatalogSourceSettingsTests
             await Ok(owner, "music.catalogSource.settings.save", new { ifRevision = 0, platform = "kg" });
             await owner.AbortAsync();
             byte[] original = store.Data!.ToArray();
-            foreach (string value in new[]
+            foreach (var (value, durable) in new (string, bool)[]
             {
-                "null", "[]",
-                """{"schema":2,"revision":1,"platform":"kg"}""",
-                """{"schema":"1","revision":1,"platform":"kg"}""",
-                """{"schema":1,"revision":-1,"platform":"kg"}""",
-                """{"schema":1,"revision":"1","platform":"kg"}""",
-                """{"schema":1,"revision":0.5,"platform":"kg"}""",
-                """{"schema":1,"revision":1,"platform":"tx"}""",
-                """{"schema":1,"revision":1,"platform":"KG"}""",
-                """{"schema":1,"revision":1,"platform":null}""",
-                """{"schema":1,"revision":1,"platform":true}""",
-                """{"schema":1,"revision":1,"platform":["kg"]}""",
-                """{"schema":1,"revision":1}""",
-                """{"revision":1,"platform":"kg"}""",
-                """{"schema":1,"platform":"kg"}""",
+                ("""{"schema":2,"revision":1,"platform":"kg"}""", true),
+                ("""{"schema":"1","revision":1,"platform":"kg"}""", false),
+                ("""{"schema":1,"revision":-1,"platform":"kg"}""", true),
+                ("""{"schema":1,"revision":"1","platform":"kg"}""", false),
+                ("""{"schema":1,"revision":0.5,"platform":"kg"}""", false),
+                ("""{"schema":1,"revision":1,"platform":"tx"}""", true),
+                ("""{"schema":1,"revision":1,"platform":"KG"}""", true),
+                ("""{"schema":1,"revision":1,"platform":null}""", true),
+                ("""{"schema":1,"revision":1,"platform":true}""", false),
+                ("""{"schema":1,"revision":1,"platform":["kg"]}""", false),
+                ("""{"schema":1,"revision":1}""", true),
+                ("""{"revision":1,"platform":"kg"}""", true),
+                ("""{"schema":1,"platform":"kg"}""", true),
             })
             {
                 var document = JsonNode.Parse(original)!.AsObject();
                 document["areas"]!["native-catalog-source"] = JsonNode.Parse(value);
+                if (!durable)
+                {
+                    byte[] before = store.Data!.ToArray();
+                    bool rejected = false;
+                    try { store.Data = LJ.Bytes(document); }
+                    catch (DocumentStoreException error) when (error.Error == DocumentStoreError.InvalidRequest) { rejected = true; }
+                    Check(rejected && before.SequenceEqual(store.Data!), "typed column rejection must roll back the fixture write");
+                    continue;
+                }
                 store.Data = LJ.Bytes(document);
-                byte[] corrupt = store.Data.ToArray();
                 await using var reopened = new MusicLibraryOwner(MusicTestStores.For(store), database: MusicTestStores.For(store).Storage);
                 await Code(reopened, "music.catalogSource.settings.get", null, "CORRUPT_STORAGE");
-                await Code(reopened, "music.catalogSource.settings.save",
-                    new { ifRevision = 1, platform = "wy" }, "CORRUPT_STORAGE");
-                Equal(1, store.Writes);
-                Check(corrupt.SequenceEqual(store.Data!), "corrupt settings were rewritten");
+                var old = JsonNode.Parse(value) as JsonObject;
+                bool replaceable = old?["schema"]?.ToJsonString() == "1" && old?["revision"]?.ToJsonString() == "1";
+                int writes = store.Writes;
+                if (replaceable)
+                {
+                    await Ok(reopened, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" });
+                    Equal(writes + 1, store.Writes);
+                }
+                else
+                {
+                    await Code(reopened, "music.catalogSource.settings.save", new { ifRevision = 1, platform = "wy" }, "CORRUPT_STORAGE");
+                    Equal(writes, store.Writes);
+                }
             }
         });
         yield return Case("unknown before commit reads the old durable state without replay", (owner, store) => Unknown(owner, store, false));

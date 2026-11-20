@@ -43,7 +43,6 @@ extension NativeMusicService {
         try musicRequire(Set(source.capabilities.map(\.siteID)).count == source.capabilities.count, .invalidResponse)
         guard let cap = source.capabilities.first(where: { $0.siteID == site }), cap.actions.contains(action),
               quality == nil || cap.qualities.contains(quality!) else { throw MusicServiceError.sourceUnavailable }
-        try musicRequire(Set(cap.qualities).count == cap.qualities.count, .invalidResponse)
         return cap
     }
     func sameSource(_ current: MusicScriptSource, _ previous: MusicScriptSource) throws {
