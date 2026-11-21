@@ -230,6 +230,12 @@ extension RuntimeHTTPClient {
         let knownPrefixes: [(prefix: String, module: String)] = [
             ("music-platform.", "music-platform"),
             ("music.platform.", "music-platform"),
+            ("music.script.", "music"),
+            ("cat.script.", "cat"),
+            ("source.runtime.", "source"),
+            ("tmdb.data.", "tmdb"),
+            ("douban.data.", "douban"),
+            ("netease.token.", "netease"),
             ("netease.", "netease"),
             ("music.", "music"),
             ("cat.", "cat"),
