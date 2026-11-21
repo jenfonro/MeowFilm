@@ -40,14 +40,60 @@ public sealed record DebugNodeForwardResult(
     bool Available,
     int StatusCode,
     JsonElement? Body,
-    string? Reason);
+    string? Reason)
+{
+    public object ToDiagnosticSection()
+    {
+        if (!Available || StatusCode != 200 || Body is not { } body)
+        {
+            return new
+            {
+                available = false,
+                httpStatus = StatusCode,
+                reason = Reason ?? (StatusCode == 404 ? "NODE_DEBUG_ENDPOINT_UNAVAILABLE" : "NODE_DEBUG_ERROR")
+            };
+        }
+        if (body.ValueKind == JsonValueKind.Object &&
+            body.TryGetProperty("ok", out var okProp) &&
+            okProp.ValueKind == JsonValueKind.False)
+        {
+            var code = body.TryGetProperty("code", out var c) && c.ValueKind == JsonValueKind.String
+                ? c.GetString() : null;
+            return new
+            {
+                available = false,
+                httpStatus = StatusCode,
+                reason = code ?? "NODE_DEBUG_ERROR"
+            };
+        }
+        var payload = UnwrapNodeEnvelope(body);
+        if (payload.ValueKind == JsonValueKind.Object)
+        {
+            var map = new Dictionary<string, object?>(StringComparer.Ordinal);
+            foreach (var prop in payload.EnumerateObject())
+                map[prop.Name] = prop.Value;
+            map["available"] = true;
+            return map;
+        }
+        return new { available = true, result = payload };
+    }
+
+    public static JsonElement? UnwrapValue(JsonElement? body) =>
+        body is { } element ? UnwrapNodeEnvelope(element) : null;
+
+    private static JsonElement UnwrapNodeEnvelope(JsonElement element) =>
+        element.ValueKind == JsonValueKind.Object && element.TryGetProperty("value", out var valueProp)
+            ? valueProp : element;
+}
+
+public sealed record DebugNodeInvokeResult(int StatusCode, JsonElement? JsonBody, string? RawText, double DurationMs);
 
 public interface IDebugRuntimeHost
 {
     bool IsConnected { get; }
     string? BaseUrl { get; }
     int? RuntimePid { get; }
-    Task<JsonElement> InvokeMethodAsync(string method, JsonElement? input, TimeSpan timeout, CancellationToken cancellationToken);
+    Task<DebugNodeInvokeResult> InvokeDebugAsync(string path, JsonElement? input, TimeSpan timeout, CancellationToken cancellationToken);
     Task<DebugNodeForwardResult> SendNodeDebugRequestAsync(HttpMethod method, string path, object? body,
         TimeSpan timeout, CancellationToken cancellationToken);
 }

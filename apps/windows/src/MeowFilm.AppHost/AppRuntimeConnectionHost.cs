@@ -157,11 +157,14 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
         }
     }
 
-    public Task<JsonElement> InvokeMethodAsync(string method, JsonElement? input, TimeSpan timeout, CancellationToken cancellationToken)
+    public Task<DebugNodeInvokeResult> InvokeDebugAsync(string path, JsonElement? input, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        object parameters = input is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null }
-            ? input.Value : new { };
-        return CallAsync(method, parameters, timeout, cancellationToken);
+        NodeRuntime? node;
+        lock (gate) node = current?.Node;
+        if (node is null || !node.IsConnected)
+            return Task.FromException<DebugNodeInvokeResult>(
+                DebugApiException.RuntimeUnavailable("Node runtime is not connected."));
+        return node.InvokeDebugRawAsync(path, input, timeout, cancellationToken);
     }
 
     public Task<DebugNodeForwardResult> SendNodeDebugRequestAsync(HttpMethod method, string path, object? body,

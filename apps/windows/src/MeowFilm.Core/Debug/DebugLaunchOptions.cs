@@ -60,23 +60,58 @@ public sealed record DebugLaunchOptions(
         for (int i = 0; i < args.Length; i++)
         {
             string arg = args[i];
-            switch (arg)
+            string flag = arg;
+            string? inlineValue = null;
+            if (arg.StartsWith("--debug-", StringComparison.Ordinal) ||
+                arg.StartsWith("--data-root=", StringComparison.Ordinal))
+            {
+                int eq = arg.IndexOf('=');
+                if (eq >= 0)
+                {
+                    flag = arg[..eq];
+                    inlineValue = arg[(eq + 1)..];
+                }
+            }
+
+            switch (flag)
             {
                 case "--debug":
                     break;
                 case "--debug-first-chance":
-                    firstChance = true;
+                {
+                    if (inlineValue is not null)
+                    {
+                        if (!TryParseBoolValue(inlineValue, out firstChance))
+                            return (Disabled, $"Invalid value for --debug-first-chance: '{inlineValue}' (expected true|false|1|0).");
+                    }
+                    else if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
+                    {
+                        if (TryParseBoolValue(args[i + 1], out var parsedBool))
+                        {
+                            firstChance = parsedBool;
+                            i++;
+                        }
+                        else
+                        {
+                            firstChance = true;
+                        }
+                    }
+                    else
+                    {
+                        firstChance = true;
+                    }
                     break;
+                }
                 case "--debug-port":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out port) || port is < 0 or > 65535)
                         return (Disabled, $"Invalid value for --debug-port: '{raw}' (expected 0..65535).");
                     break;
                 }
                 case "--debug-bind":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     if (!IPAddress.TryParse(raw, out _))
                         return (Disabled, $"Invalid IP address for --debug-bind: '{raw}'.");
                     bind = raw;
@@ -84,14 +119,14 @@ public sealed record DebugLaunchOptions(
                 }
                 case "--debug-dir":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     if (!TryNormalizeDirectoryPath(raw, "--debug-dir", out debugDir, out var pathErr))
                         return (Disabled, pathErr);
                     break;
                 }
                 case "--debug-modules":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     var parsed = DebugCategories.ParseModules(raw);
                     if (parsed.Error is not null) return (Disabled, parsed.Error);
                     modules = parsed.Modules;
@@ -99,35 +134,35 @@ public sealed record DebugLaunchOptions(
                 }
                 case "--debug-inline-limit":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out inlineLimit) || inlineLimit < 0)
                         return (Disabled, $"Invalid value for --debug-inline-limit: '{raw}' (expected >= 0).");
                     break;
                 }
                 case "--debug-event-limit":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out eventLimit) || eventLimit < 0)
                         return (Disabled, $"Invalid value for --debug-event-limit: '{raw}' (expected >= 0).");
                     break;
                 }
                 case "--debug-keep":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out keep) || keep < 1)
                         return (Disabled, $"Invalid value for --debug-keep: '{raw}' (expected >= 1).");
                     break;
                 }
                 case "--data-root":
                 {
-                    if (!TryNextValue(args, ref i, arg, out var raw, out var error)) return (Disabled, error);
+                    if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
                     if (!TryNormalizeDirectoryPath(raw, "--data-root", out dataRoot, out var pathErr))
                         return (Disabled, pathErr);
                     break;
                 }
                 default:
-                    if (arg.StartsWith("--debug-", StringComparison.Ordinal))
-                        return (Disabled, $"Unknown debug option: '{arg}'.");
+                    if (flag.StartsWith("--debug-", StringComparison.Ordinal))
+                        return (Disabled, $"Unknown debug option: '{flag}'.");
                     break;
             }
         }
@@ -181,8 +216,30 @@ public sealed record DebugLaunchOptions(
         }
     }
 
-    private static bool TryNextValue(string[] args, ref int index, string option, out string value, out string? error)
+    private static bool TryParseBoolValue(string raw, out bool value)
     {
+        if (raw.Equals("true", StringComparison.OrdinalIgnoreCase) || raw == "1")
+        {
+            value = true;
+            return true;
+        }
+        if (raw.Equals("false", StringComparison.OrdinalIgnoreCase) || raw == "0")
+        {
+            value = false;
+            return true;
+        }
+        value = false;
+        return false;
+    }
+
+    private static bool TryOptionValue(string[] args, ref int index, string option, string? inlineValue, out string value, out string? error)
+    {
+        if (inlineValue is not null)
+        {
+            value = inlineValue;
+            error = null;
+            return true;
+        }
         if (index + 1 >= args.Length)
         {
             value = "";
