@@ -384,6 +384,8 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private sealed record SourceCandidate(NovelBook Book, string Label) { public override string ToString() => Label; }
     internal async Task DrainSavesAsync() { await automaticOperation; await saves.PauseAsync(); }
     internal Task DrainImagesAsync() => surface.DrainImagesAsync();
+    internal string DebugReaderPageStatus => surface.PageStatus;
+    internal Task<bool> DebugTurnReaderPageAsync(int delta) => surface.TurnAsync(delta);
     private void DiscoveryBooksChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e) => discoveryBooksChanged = true;
     public void Dispose() { if (disposed) return; disposed = true; module.DiscoverBooks.CollectionChanged -= DiscoveryBooksChanged; visibility.Dispose(); discoveryChannelBar?.Close(); PauseReading(); save.Stop(); DetachWindow(); surface.Dispose(); }
 }

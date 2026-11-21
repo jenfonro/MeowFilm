@@ -16,7 +16,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource,
+public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource,
     IRuntimeRecoveryScope
 {
     internal const string HomeRoute = "film-home";
@@ -37,6 +37,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
     private readonly FilmSearchService? search;
     private readonly FilmMetadataService? metadata;
     private readonly FilmPlaybackSession? filmPlayback;
+    private readonly FilmPlayback? nativeFilmPlayback;
     private readonly FilmLibrary? library;
     private readonly FilmPlaybackSettings? business;
     private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
@@ -82,6 +83,7 @@ public sealed class FilmCapability : IDesktopModule, IDesktopNavigationSource, I
                     PreparePlaybackOpenAsync(sources, capture, page, parameters, reconnect, token)),
             new FilmLibrary(storage), new FilmPlaybackSettings(runtime, storage), storage)
     {
+        nativeFilmPlayback = playback;
         (runtime as IRuntimeRecovery)?.RegisterRecoveryScope(this);
     }
 

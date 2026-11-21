@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using MeowFilm.Core.Debug;
 using MeowFilm.Threading;
 using Microsoft.UI.Dispatching;
 
@@ -22,6 +23,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private readonly HashSet<Task> readRequests = [];
     private CancellationTokenSource? readQueue = new();
     private readonly DispatcherQueueTimer progress;
+    private readonly IDisposable? leaseRegistration;
     private Session? session, prepared;
     private CancellationTokenSource? authority, opening, preparing;
     private NativePlaybackContinuation? continuation;
@@ -44,6 +46,23 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         this.audioOutput = audioOutput;
         progress = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(100), UpdatePosition);
         progress.Stop();
+        if (DebugLog.IsEnabled)
+        {
+            leaseRegistration = DebugLeaseRegistry.Register("audio.kernel", () => new
+            {
+                hasMedia,
+                isPlaying,
+                pauseRequested,
+                ownerId,
+                identity,
+                title,
+                positionSeconds = Math.Round(position, 3),
+                durationSeconds = Math.Round(duration, 3),
+                volume,
+                lastErrorCode,
+                disposed
+            });
+        }
     }
 
     public string? OwnerId => ownerId;
@@ -259,6 +278,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             session?.Output?.Pause();
             UpdatePosition();
             Set(ref isPlaying, false, nameof(IsPlaying));
+            if (DebugLog.IsEnabled)
+                DebugLog.Debug(DebugCategories.MusicPlayback, "audiokernel", "state.paused",
+                    new { ownerId, identity, title, positionSeconds = Math.Round(position, 3) });
         }
         finally { commands.Release(); }
     });
@@ -405,6 +427,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 throw Error(PlaybackError.Superseded);
             Set(ref isPlaying, true, nameof(IsPlaying));
             progress.Start();
+            if (DebugLog.IsEnabled)
+                DebugLog.Info(DebugCategories.MusicPlayback, "audiokernel", "state.playing",
+                    new { ownerId, identity, title, positionSeconds = Math.Round(position, 3), durationSeconds = Math.Round(duration, 3) });
             if (!target.Started)
             {
                 target.Started = true;
@@ -465,6 +490,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         Set(ref hasMedia, false, nameof(HasMedia));
         Set(ref lastErrorCode, error is PlaybackException known ? known.Code : PlaybackError.OpenFailed,
             nameof(LastErrorCode));
+        if (DebugLog.IsEnabled)
+            DebugLog.Error(DebugCategories.MusicPlayback, "audiokernel", "playback.error",
+                new { ownerId, identity, title, code = lastErrorCode }, error: error);
         if (lastErrorCode == PlaybackError.ReadRevoked) { recoverable = false; RevokeAuthority(); }
         Failed?.Invoke(this, EventArgs.Empty);
     }
@@ -627,6 +655,8 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                     Set(ref position, 0, nameof(PositionSeconds));
                     Set(ref duration, 0, nameof(DurationSeconds));
                     Set(ref pauseRequested, false, nameof(PauseRequested));
+                    if (DebugLog.IsEnabled)
+                        DebugLog.Debug(DebugCategories.MusicPlayback, "audiokernel", "state.stopped");
                 }
             }
         }
@@ -669,6 +699,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     public ValueTask DisposeAsync() => new(DispatchAsync(() => disposal ??= DisposeCoreAsync()));
     private async Task DisposeCoreAsync()
     {
+        leaseRegistration?.Dispose();
         disposed = true;
         ++generation;
         var pendingReads = CancelQueuedReads(closing: true);

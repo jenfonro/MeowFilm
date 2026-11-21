@@ -5,8 +5,10 @@ using Microsoft.UI.Windowing;
 using Windows.Graphics;
 using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
+using MeowFilm.Platform.Debug;
 using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -40,8 +42,14 @@ public static class AppLauncher
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
         Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
-        Func<Task>? stopPlayback = null)
-        => Run(AppDataPaths.Current, definition, createModules, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback);
+        Func<Task>? stopPlayback = null,
+        DebugLaunchOptions? debugOptions = null)
+    {
+        var paths = debugOptions is { Enabled: true, DataRoot: { Length: > 0 } customRoot }
+            ? new AppDataPaths(customRoot)
+            : AppDataPaths.Current;
+        Run(paths, definition, createModules, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback, debugOptions);
+    }
 
     // Isolated App-host tests use the same launcher without touching the user's data.
     internal static void Run(AppDataPaths paths, AppDefinition definition,
@@ -51,14 +59,55 @@ public static class AppLauncher
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
         Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
-        Func<Task>? stopPlayback = null)
+        Func<Task>? stopPlayback = null,
+        DebugLaunchOptions? debugOptions = null)
     {
         var startup = new AppStartup();
         UserDataDirectory? userData = null;
         AppShutdown? ownedLifecycle = null;
+        DebugSession? debugSession = null;
+        DebugDiagnostics? debugDiagnostics = null;
+        DebugControlHttpServer? debugServer = null;
+        ShellWindow? activeShell = null;
+        AppRuntimeConnectionHost? activeRuntime = null;
+        NativeDatabase? activeStore = null;
+        bool cleanDrain = true;
+        string? lastFatalError = null;
         WinRT.ComWrappersSupport.InitializeComWrappers();
         try
         {
+            if (debugOptions is { Enabled: true })
+            {
+                try
+                {
+                    var debugRoot = debugOptions.DebugDir ?? AppDataPaths.DefaultDebugRoot(AppIdentity.StorageId);
+                    debugSession = new DebugSession(debugOptions, debugRoot, paths.Documents);
+                    DebugLog.Current = debugSession;
+                    debugDiagnostics = new DebugDiagnostics(debugSession);
+                    debugServer = new DebugControlHttpServer(
+                        debugSession,
+                        debugDiagnostics,
+                        () => Volatile.Read(ref activeShell),
+                        () => Volatile.Read(ref activeRuntime),
+                        () => Volatile.Read(ref activeStore));
+                    DebugLog.Info(DebugCategories.Lifecycle, "app.launch", "debug.started", new
+                    {
+                        sessionId = debugSession.SessionId,
+                        sessionDir = debugSession.SessionDir,
+                        controlUrl = debugServer.ControlUrl,
+                        dataRoot = paths.Documents,
+                        options = debugSession.GetCurrentConfigSnapshot()
+                    });
+                }
+                catch (Exception ex)
+                {
+                    cleanDrain = false;
+                    lastFatalError = ex.ToString();
+                    Console.Error.WriteLine($"Failed to initialize debug mode: {ex.Message}");
+                    Environment.ExitCode = 2;
+                    return;
+                }
+            }
             Application.Start(args =>
             {
                 SynchronizationContext.SetSynchronizationContext(
@@ -66,13 +115,42 @@ public static class AppLauncher
                         Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread()));
                 // The executable's compiled XAML root owns metadata for all
                 // referenced view libraries; the launcher owns startup.
-                _ = createApplication(Launch);
+                var app = createApplication(Launch);
+                if (debugDiagnostics is not null)
+                {
+                    app.UnhandledException += (_, e) =>
+                    {
+                        lastFatalError = e.Exception?.ToString() ?? e.Message;
+                        if (e.Exception is not null)
+                            debugDiagnostics.RecordException("unhandled", e.Exception, "WinUI.Application.UnhandledException");
+                    };
+                }
             });
+        }
+        catch (Exception ex)
+        {
+            cleanDrain = false;
+            lastFatalError = ex.ToString();
+            debugDiagnostics?.RecordException("unhandled", ex, "AppLauncher.Run");
+            throw;
         }
         finally
         {
             startup.Dispose();
             if (ownedLifecycle is null || ownedLifecycle.IsReleased) userData?.Dispose();
+            if (debugServer is not null)
+            {
+                try { debugServer.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { }
+            }
+            if (debugSession is not null)
+            {
+                DebugLog.Info(DebugCategories.Lifecycle, "app.exit", "debug.stopped",
+                    new { exitCode = Environment.ExitCode, cleanDrain, lastError = lastFatalError });
+                debugSession.MarkExiting(Environment.ExitCode, cleanDrain, lastFatalError);
+                DebugLog.Current = null;
+                debugDiagnostics?.Dispose();
+                debugSession.Dispose();
+            }
         }
 
         void Launch(Application application)
@@ -181,8 +259,12 @@ public static class AppLauncher
                 await Task.Run(userData.Open, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(paths.Documents);
-                store = new NativeDatabase(paths.Documents);
+                var nativeDb = new NativeDatabase(paths.Documents);
+                store = nativeDb;
+                Volatile.Write(ref activeStore, nativeDb);
                 await store.Ready;
+                DebugLog.Info(DebugCategories.Lifecycle, "storage", "database.ready",
+                    new { databasePath = nativeDb.DatabasePath, sqliteVersion = nativeDb.SQLiteVersion });
                 cancellationToken.ThrowIfCancellationRequested();
                 var nativeSettings = runtimeSettings?.Invoke(store);
                 runtime = new AppRuntimeConnectionHost(async token =>
@@ -195,7 +277,8 @@ public static class AppLauncher
                     return await NodeRuntime.StartAsync(Path.Combine(root, "node.exe"), bundle,
                         definition.RuntimeModules, paths.ScriptRuntime, token, ownerRevoked: token,
                         settingsStore: nativeSettings).ConfigureAwait(false);
-                });
+                }, onRuntimeEndpointChanged: (url, childPid) => debugSession?.UpdateRuntimeEndpoint(url, childPid));
+                Volatile.Write(ref activeRuntime, runtime);
                 cancellationToken.ThrowIfCancellationRequested();
                 createModules(runtime, store, modules);
                 appearance = new AppAppearance(store);
@@ -215,6 +298,7 @@ public static class AppLauncher
                     () => replacing ? lifecycle.CloseAsync() : exiting ??= CloseProcessAsync(),
                     appearance, closePreferences, mediaControls: mediaControls,
                     resetUserData: reset.ResetAsync) { Title = "meowfilm" };
+                Volatile.Write(ref activeShell, shell);
                 artwork = new ArtworkService(readTrusted: async (reference, token) =>
                 {
                     try { return await runtime.ReadImageAsync(reference, token).ConfigureAwait(false); }
@@ -244,6 +328,8 @@ public static class AppLauncher
                 };
                 shell.Activate();
                 switched = true;
+                DebugLog.Info(DebugCategories.Lifecycle, "shell", "shell.activated",
+                    new { modules = modules.Select(m => m.Id).ToArray() });
                 // Keep the startup/retry surface for an in-process data reset.
                 launchWindow.Hide();
                 return StartupOutcome.Started;
@@ -276,6 +362,10 @@ public static class AppLauncher
                 {
                     // Closing this retired shell must not shut down the dispatcher.
                     replacing = true;
+                    Volatile.Write(ref activeShell, null);
+                    Volatile.Write(ref activeRuntime, null);
+                    Volatile.Write(ref activeStore, null);
+                    DebugLog.Info(DebugCategories.Lifecycle, "reset", "app.reopen.start");
                     try
                     {
                         await shell!.CloseAfterReleaseAsync();
@@ -293,8 +383,13 @@ public static class AppLauncher
                     await StartAsync();
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                Volatile.Write(ref activeShell, null);
+                Volatile.Write(ref activeRuntime, null);
+                Volatile.Write(ref activeStore, null);
+                DebugLog.Error(DebugCategories.Lifecycle, "app.launch", "startup.failed",
+                    new { cancelled = cancellationToken.IsCancellationRequested }, error: ex);
                 try
                 {
                     await Lifecycle().CloseAsync();

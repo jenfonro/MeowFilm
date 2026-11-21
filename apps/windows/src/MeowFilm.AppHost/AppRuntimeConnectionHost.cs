@@ -1,6 +1,8 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
+using MeowFilm.Platform.Runtime;
 
 namespace MeowFilm.AppHost;
 
@@ -9,20 +11,24 @@ namespace MeowFilm.AppHost;
 /// factory result and its owner token, never infers an epoch from Generation.
 /// </summary>
 internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageClient, IRuntimeRecovery, IRuntimeConnectionSource,
-    IRuntimeSettingsNotifications, IRuntimeLifetime, IAsyncDisposable
+    IRuntimeSettingsNotifications, IRuntimeLifetime, IDebugRuntimeHost, IAsyncDisposable
 {
     private sealed class Capture(CancellationToken owner)
     {
         internal readonly CancellationToken Owner = owner;
         internal readonly TaskCompletionSource<RuntimeConnection> Ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal NodeRuntime? Node;
     }
 
     private readonly AppRuntimeClient runtime;
     private readonly object gate = new();
+    private readonly Action<string?, int?>? onRuntimeEndpointChanged;
     private Capture? current;
 
-    internal AppRuntimeConnectionHost(Func<CancellationToken, Task<IRuntimeSession>> factory)
+    internal AppRuntimeConnectionHost(Func<CancellationToken, Task<IRuntimeSession>> factory,
+        Action<string?, int?>? onRuntimeEndpointChanged = null)
     {
+        this.onRuntimeEndpointChanged = onRuntimeEndpointChanged;
         runtime = new AppRuntimeClient(async owner =>
         {
             var capture = new Capture(owner);
@@ -37,6 +43,11 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
                     owner.ThrowIfCancellationRequested();
                     connection.Revoked.ThrowIfCancellationRequested();
                     if (!connection.Revoked.CanBeCanceled) throw new BridgeException("INVALID_RESPONSE");
+                    if (session is NodeRuntime node)
+                    {
+                        lock (gate) capture.Node = node;
+                        onRuntimeEndpointChanged?.Invoke(node.BaseUrl, node.ProcessId);
+                    }
                     capture.Ready.TrySetResult(connection);
                     return session;
                 }
@@ -121,6 +132,47 @@ internal sealed class AppRuntimeConnectionHost : IRuntimeClient, IRuntimeImageCl
         runtime.UploadSourceAsync(module, installationId, sourceRevision, source, basename, cancellationToken);
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default) =>
         runtime.ReadImageAsync(reference, cancellationToken);
+
+    public bool IsConnected
+    {
+        get
+        {
+            lock (gate) return current?.Node is { IsConnected: true };
+        }
+    }
+
+    public string? BaseUrl
+    {
+        get
+        {
+            lock (gate) return current?.Node is { IsConnected: true } n ? n.BaseUrl : null;
+        }
+    }
+
+    public int? RuntimePid
+    {
+        get
+        {
+            lock (gate) return current?.Node is { IsConnected: true } n ? n.ProcessId : null;
+        }
+    }
+
+    public Task<JsonElement> InvokeMethodAsync(string method, JsonElement? input, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        object parameters = input is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null }
+            ? input.Value : new { };
+        return CallAsync(method, parameters, timeout, cancellationToken);
+    }
+
+    public Task<DebugNodeForwardResult> SendNodeDebugRequestAsync(HttpMethod method, string path, object? body,
+        TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        NodeRuntime? node;
+        lock (gate) node = current?.Node;
+        if (node is null || !node.IsConnected)
+            return Task.FromResult(new DebugNodeForwardResult(false, 503, null, "RUNTIME_UNAVAILABLE"));
+        return node.SendNodeDebugRequestAsync(method, path, body, timeout, cancellationToken);
+    }
     public async IAsyncEnumerable<JsonElement> EventsAsync(string module, Guid sessionId, long after = 0,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {

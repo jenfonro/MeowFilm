@@ -23,6 +23,7 @@
 | 播放反馈 | [真实播放反馈](music/playback-feedback.md) | 共用事实、平台准入、计量、来源归属、结束与安全待发 |
 | 音乐验证 | [逐端自查](music/self-check.md) | 调用链核对、请求分类、合成场景及证据报告格式，不另定义业务规则 |
 | 来源宿主能力 | [capability ABI](../runtime/source-capability-abi.md) | HTTP、Cookie、存储、编码、加解密、Web 交互和虚拟路由的跨平台语义 |
+| Debug 模式与调试接口 | [跨端 Debug 模式与调试接口](debug-mode.md) | 运行期 `--debug` 开关、Node 握手透传、16 类结构化日志与不脱敏 `$blob` 外置、本地 Control API、底层诊断与跨端 CLI 契约 |
 
 每项共同规则在对应职责文件中维护；端侧文档引用该文件，保留具体 API、协议字段、系统生命周期、存储格式、预算数值、测试入口和实现缺口。
 
