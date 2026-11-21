@@ -1,8 +1,11 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Data.Sqlite;
 using Microsoft.Win32.SafeHandles;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Platform.Storage;
 
@@ -12,7 +15,7 @@ public sealed record StorageRevision(long Revision, string Receipt)
 }
 
 /// <summary>One bounded native I/O lane. Repositories own SQL and business policy.</summary>
-public sealed class NativeDatabase : IStorageDatabase
+public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
 {
     public const int ApplicationId = 1296450626;
     public const int FormatVersion = 1;
@@ -64,15 +67,258 @@ public sealed class NativeDatabase : IStorageDatabase
     public Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default, int retainedBytes = 0, Action<Action>? commit = null) =>
         Enqueue(session =>
         {
+            var started = DebugLog.IsEnabled ? Stopwatch.GetTimestamp() : 0L;
             using var transaction = session.Connection.BeginTransaction();
-            var result = write(new(session.Connection, transaction));
-            bool committed = false;
-            void Commit() { transaction.Commit(); committed = true; }
-            if (commit is null) Commit(); else commit(Commit);
-            if (!committed) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            commits++;
-            return result;
+            try
+            {
+                var result = write(new(session.Connection, transaction));
+                bool committed = false;
+                void Commit() { transaction.Commit(); committed = true; }
+                if (commit is null) Commit(); else commit(Commit);
+                if (!committed) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                commits++;
+                if (started != 0)
+                {
+                    DebugLog.Trace(DebugCategories.Storage, "sqlite", "tx.commit",
+                        new { commitCount = commits, retainedBytes },
+                        durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                }
+                return result;
+            }
+            catch (Exception ex)
+            {
+                if (started != 0)
+                {
+                    DebugLog.Warn(DebugCategories.Storage, "sqlite", "tx.error",
+                        new { retainedBytes }, error: ex,
+                        durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                }
+                throw;
+            }
         }, token, retainedBytes);
+
+    public async Task<object> ExecuteReadOnlyQueryAsync(string sql, JsonElement? parameters, int maxRows, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(sql) || sql.Contains('\0'))
+            throw DebugApiException.InvalidArgument("SQL query must be a non-empty string.");
+        ValidateReadOnlySql(sql);
+        maxRows = Math.Clamp(maxRows, 1, 5000);
+        var started = Stopwatch.GetTimestamp();
+        (string[] columns, List<Dictionary<string, object?>> rows, bool truncated) result;
+        try
+        {
+            result = await Enqueue(session =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using (var on = session.Connection.CreateCommand())
+                {
+                    on.CommandText = "PRAGMA query_only = ON";
+                    on.ExecuteNonQuery();
+                }
+                try
+                {
+                    using var cmd = session.Connection.CreateCommand();
+                    cmd.CommandText = sql;
+                    BindDebugParameters(cmd, parameters);
+                    using var reader = cmd.ExecuteReader();
+                    var columns = new string[reader.FieldCount];
+                    var seenNames = new Dictionary<string, int>(StringComparer.Ordinal);
+                    for (int i = 0; i < columns.Length; i++)
+                    {
+                        var rawName = reader.GetName(i);
+                        if (seenNames.TryGetValue(rawName, out var count))
+                        {
+                            seenNames[rawName] = count + 1;
+                            columns[i] = $"{rawName}_{count + 1}";
+                        }
+                        else
+                        {
+                            seenNames[rawName] = 1;
+                            columns[i] = rawName;
+                        }
+                    }
+                    var rows = new List<Dictionary<string, object?>>();
+                    bool truncated = false;
+                    while (reader.Read())
+                    {
+                        if (rows.Count >= maxRows)
+                        {
+                            truncated = true;
+                            break;
+                        }
+                        var row = new Dictionary<string, object?>(columns.Length, StringComparer.Ordinal);
+                        for (int i = 0; i < columns.Length; i++)
+                        {
+                            var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                            if (value is byte[] blob) value = Convert.ToBase64String(blob);
+                            row[columns[i]] = value;
+                        }
+                        rows.Add(row);
+                    }
+                    return (columns, rows, truncated);
+                }
+                finally
+                {
+                    using var off = session.Connection.CreateCommand();
+                    off.CommandText = "PRAGMA query_only = OFF";
+                    off.ExecuteNonQuery();
+                }
+            }, cancellationToken, 0).ConfigureAwait(false);
+        }
+        catch (SqliteException ex)
+        {
+            throw DebugApiException.InvalidArgument($"Read-only SQL query failed: {ex.Message}");
+        }
+        var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        DebugLog.Info(DebugCategories.Storage, "debug-sql", "query.readonly",
+            new { sql, rowCount = result.rows.Count, truncated = result.truncated },
+            durationMs: elapsedMs);
+        return new
+        {
+            columns = result.columns,
+            rows = result.rows,
+            rowCount = result.rows.Count,
+            truncated = result.truncated,
+            durationMs = Math.Round(elapsedMs, 3)
+        };
+    }
+
+    private static void ValidateReadOnlySql(string sql)
+    {
+        bool inSingle = false, inDouble = false, inLineComment = false, inBlockComment = false;
+        int len = sql.Length;
+        for (int i = 0; i < len; i++)
+        {
+            char c = sql[i];
+            char next = i + 1 < len ? sql[i + 1] : '\0';
+            if (inLineComment) { if (c == '\n') inLineComment = false; continue; }
+            if (inBlockComment) { if (c == '*' && next == '/') { inBlockComment = false; i++; } continue; }
+            if (inSingle) { if (c == '\'' && next == '\'') { i++; continue; } if (c == '\'') inSingle = false; continue; }
+            if (inDouble) { if (c == '"' && next == '"') { i++; continue; } if (c == '"') inDouble = false; continue; }
+            if (c == '-' && next == '-') { inLineComment = true; i++; continue; }
+            if (c == '/' && next == '*') { inBlockComment = true; i++; continue; }
+            if (c == '\'') { inSingle = true; continue; }
+            if (c == '"') { inDouble = true; continue; }
+            if (c == ';')
+            {
+                var rest = sql[(i + 1)..].Trim();
+                if (rest.Length > 0)
+                    throw DebugApiException.InvalidArgument("Only a single read-only SQL statement is allowed.");
+            }
+        }
+        var stripped = StripLeadingSqlComments(sql).TrimStart();
+        int wordEnd = 0;
+        while (wordEnd < stripped.Length && char.IsAsciiLetter(stripped[wordEnd])) wordEnd++;
+        var keyword = stripped[..wordEnd].ToUpperInvariant();
+        if (keyword is not ("SELECT" or "PRAGMA" or "EXPLAIN" or "WITH"))
+            throw DebugApiException.InvalidArgument($"Only SELECT/WITH/PRAGMA/EXPLAIN queries are allowed (got '{keyword}').");
+        if (keyword == "PRAGMA")
+        {
+            if (stripped.Contains('=') ||
+                stripped.Contains("query_only", StringComparison.OrdinalIgnoreCase) ||
+                stripped.Contains("writable_schema", StringComparison.OrdinalIgnoreCase) ||
+                stripped.Contains("wal_checkpoint", StringComparison.OrdinalIgnoreCase) ||
+                stripped.Contains("incremental_vacuum", StringComparison.OrdinalIgnoreCase) ||
+                stripped.Contains("optimize", StringComparison.OrdinalIgnoreCase))
+                throw DebugApiException.InvalidArgument("Write or mutating PRAGMA statements are not allowed.");
+        }
+    }
+
+    private static string StripLeadingSqlComments(string sql)
+    {
+        int i = 0;
+        while (i < sql.Length)
+        {
+            while (i < sql.Length && char.IsWhiteSpace(sql[i])) i++;
+            if (i + 1 < sql.Length && sql[i] == '-' && sql[i + 1] == '-')
+            {
+                i += 2;
+                while (i < sql.Length && sql[i] != '\n') i++;
+            }
+            else if (i + 1 < sql.Length && sql[i] == '/' && sql[i + 1] == '*')
+            {
+                i += 2;
+                while (i + 1 < sql.Length && !(sql[i] == '*' && sql[i + 1] == '/')) i++;
+                i = Math.Min(sql.Length, i + 2);
+            }
+            else break;
+        }
+        return sql[i..];
+    }
+
+    private static void BindDebugParameters(SqliteCommand cmd, JsonElement? parameters)
+    {
+        if (parameters is not { } p) return;
+        if (p.ValueKind == JsonValueKind.Array)
+        {
+            var sqlText = cmd.CommandText;
+            string? numberedPrefix = sqlText.Contains("$1", StringComparison.Ordinal) ? "$"
+                : sqlText.Contains("?1", StringComparison.Ordinal) ? "?"
+                : sqlText.Contains("@1", StringComparison.Ordinal) ? "@"
+                : sqlText.Contains(":1", StringComparison.Ordinal) ? ":"
+                : null;
+            var values = p.EnumerateArray().Select(JsonToDbValue).ToArray();
+            if (numberedPrefix is not null)
+            {
+                for (int i = 0; i < values.Length; i++)
+                    cmd.Parameters.AddWithValue($"{numberedPrefix}{i + 1}", values[i]);
+            }
+            else
+            {
+                cmd.CommandText = RewritePositionalPlaceholders(sqlText, values.Length);
+                for (int i = 0; i < values.Length; i++)
+                    cmd.Parameters.AddWithValue($"$__p{i + 1}", values[i]);
+            }
+        }
+        else if (p.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in p.EnumerateObject())
+            {
+                var name = prop.Name.StartsWith('$') || prop.Name.StartsWith('@') || prop.Name.StartsWith(':')
+                    ? prop.Name : "$" + prop.Name;
+                cmd.Parameters.AddWithValue(name, JsonToDbValue(prop.Value));
+            }
+        }
+    }
+
+    private static string RewritePositionalPlaceholders(string sql, int count)
+    {
+        if (count <= 0 || !sql.Contains('?')) return sql;
+        var sb = new System.Text.StringBuilder(sql.Length + count * 4);
+        bool inSingle = false, inDouble = false, inLineComment = false, inBlockComment = false;
+        int nextIndex = 1;
+        for (int i = 0; i < sql.Length; i++)
+        {
+            char c = sql[i];
+            char next = i + 1 < sql.Length ? sql[i + 1] : '\0';
+            if (inLineComment) { sb.Append(c); if (c == '\n') inLineComment = false; continue; }
+            if (inBlockComment) { sb.Append(c); if (c == '*' && next == '/') { sb.Append(next); inBlockComment = false; i++; } continue; }
+            if (inSingle) { sb.Append(c); if (c == '\'' && next == '\'') { sb.Append(next); i++; continue; } if (c == '\'') inSingle = false; continue; }
+            if (inDouble) { sb.Append(c); if (c == '"' && next == '"') { sb.Append(next); i++; continue; } if (c == '"') inDouble = false; continue; }
+            if (c == '-' && next == '-') { inLineComment = true; sb.Append(c); continue; }
+            if (c == '/' && next == '*') { inBlockComment = true; sb.Append(c); continue; }
+            if (c == '\'') { inSingle = true; sb.Append(c); continue; }
+            if (c == '"') { inDouble = true; sb.Append(c); continue; }
+            if (c == '?' && !char.IsAsciiDigit(next) && nextIndex <= count)
+            {
+                sb.Append("$__p").Append(nextIndex++);
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    private static object JsonToDbValue(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Null or JsonValueKind.Undefined => DBNull.Value,
+        JsonValueKind.String => value.GetString()!,
+        JsonValueKind.True => 1L,
+        JsonValueKind.False => 0L,
+        JsonValueKind.Number when value.TryGetInt64(out var i) => i,
+        JsonValueKind.Number => value.GetDouble(),
+        _ => value.GetRawText()
+    };
 
     public Task<StorageRevision> RevisionAsync(string owner, CancellationToken token = default) =>
         ReadAsync(session => session.Revision(owner), token);

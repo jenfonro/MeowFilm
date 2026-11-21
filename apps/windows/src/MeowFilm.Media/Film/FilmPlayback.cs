@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
+using MeowFilm.Core.Debug;
 using MeowFilm.Threading;
 using Microsoft.UI.Dispatching;
 
@@ -19,6 +20,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     private readonly Func<CancellationToken, Task<IDisposable>>? acquireOutput;
     private readonly FilmVideoSurface surface;
     private readonly DispatcherQueueTimer timer;
+    private readonly IDisposable? leaseRegistration;
     private readonly SemaphoreSlim commands = new(1, 1);
     private readonly object ownership = new();
     private readonly HashSet<Session> sessions = [];
@@ -54,6 +56,27 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         this.surface.TargetChanged += SurfaceChanged;
         timer = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(100), Poll);
         timer.Stop();
+        if (DebugLog.IsEnabled)
+        {
+            leaseRegistration = DebugLeaseRegistry.Register("film.kernel", () =>
+            {
+                int sessionCount;
+                lock (ownership) sessionCount = sessions.Count;
+                return new
+                {
+                    activeSessions = sessionCount,
+                    hasOutput,
+                    buffering,
+                    paused,
+                    identity = scope?.Identity,
+                    positionSeconds = Math.Round(position, 3),
+                    durationSeconds = Math.Round(duration, 3),
+                    volume,
+                    lastErrorCode = lastError,
+                    disposing
+                };
+            });
+        }
     }
     public FilmVideoSurface VideoView => surface;
     public NativePlaybackScope? Scope => scope;
@@ -261,6 +284,9 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             Set(ref hasOutput, true, nameof(HasOutput)); Set(ref lastError, null, nameof(LastErrorCode));
             Publish(snapshot);
             timer.Start();
+            if (DebugLog.IsEnabled)
+                DebugLog.Info(DebugCategories.FilmPlayback, "filmkernel", "session.started",
+                    new { identity = session.Scope.Identity, startPaused, positionSeconds = Math.Round(position, 3), durationSeconds = Math.Round(duration, 3) });
             committed();
             return true;
         }
@@ -335,6 +361,9 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     public Task SetPausedAsync(NativePlaybackScope scope, bool value) => Command(scope, session =>
     {
         FilmKernelNative.Check(kernel.Pause(session.Handle, value ? 1 : 0));
+        if (DebugLog.IsEnabled)
+            DebugLog.Debug(DebugCategories.FilmPlayback, "filmkernel", value ? "state.paused" : "state.resumed",
+                new { identity = session.Scope.Identity });
     });
     public Task SeekAsync(NativePlaybackScope scope, double seconds) => Command(scope, session =>
     {
@@ -409,6 +438,8 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         await commands.WaitAsync();
         try { await Task.WhenAll(owned.Select(RetireAsync)); }
         finally { commands.Release(); }
+        if (DebugLog.IsEnabled && owned.Length > 0)
+            DebugLog.Debug(DebugCategories.FilmPlayback, "filmkernel", "state.stopped", new { retiredSessions = owned.Length });
     });
 
     private async Task SetVolumeAsync(Session session)
@@ -571,6 +602,9 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     private void Report(Exception error)
     {
         Set(ref lastError, Safe(error).Code, nameof(LastErrorCode));
+        if (DebugLog.IsEnabled)
+            DebugLog.Error(DebugCategories.FilmPlayback, "filmkernel", "playback.error",
+                new { identity = scope?.Identity, code = lastError }, error: error);
         Failed?.Invoke(this, EventArgs.Empty);
     }
     private static PlaybackException Safe(Exception error) => error as PlaybackException ??
@@ -589,6 +623,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     public ValueTask DisposeAsync() => new(Dispatch(() => disposal ??= DisposeCoreAsync()));
     private async Task DisposeCoreAsync()
     {
+        leaseRegistration?.Dispose();
         Session[] owned;
         lock (ownership) { disposing = true; owned = sessions.ToArray(); }
         timer.Stop();

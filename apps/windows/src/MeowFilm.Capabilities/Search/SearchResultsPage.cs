@@ -7,7 +7,7 @@ using MeowFilm.Desktop;
 namespace MeowFilm.Capabilities;
 
 /// <summary>App-level composition of existing music results and film-owned search. Owns no domain requests.</summary>
-public sealed class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChanged, IDisposable
+public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChanged, IDisposable
 {
     private readonly FilmCapability film;
     private readonly NovelCapability? novel;

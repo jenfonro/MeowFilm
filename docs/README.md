@@ -5,6 +5,7 @@
 ## 共同契约
 
 - [共同契约索引](common/README.md) — 按页面、设置存储、音乐平台和验证职责维护，端侧 API、存储与实现差异仍在各端文档。
+- [跨端 Debug 模式与调试接口](common/debug-mode.md) — Windows、iOS 与共用 Node 运行时的运行期 `--debug` 开关、分类日志、本地 Control API、底层诊断与跨端 CLI 共同契约。
 
 ## 共用脚本运行时
 
@@ -43,6 +44,7 @@
 ### 架构
 
 - [App 结构与能力划分](windows/app-structure.md)
+- [Debug 模式实现说明](windows/debug-mode.md)
 - [桌面壳](windows/desktop-shell.md)
 - [影视首页](windows/film-home.md)
 - [影视播放页](windows/film-playback.md)

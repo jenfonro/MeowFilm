@@ -20,6 +20,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private readonly PanAccounts panAccounts;
     private readonly FilmPlaybackSettingsView? playbackSettings;
     private string section = "rules";
+    internal string CurrentDebugSection => section;
     private bool initialized, observingSources;
     private long activation;
     private Func<Task>? popupAction;
@@ -153,6 +154,86 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         anchor.Focus(FocusState.Programmatic); anchor.StartBringIntoView();
         await ActivateCurrentAsync();
     }
+
+    internal async Task<bool> SelectDebugSectionAsync(string key)
+    {
+        var normalized = key.Trim().ToLowerInvariant() switch
+        {
+            "rules" or "search-rules" or "matching" => "rules",
+            "cats" => "cats",
+            "videos" => "videos",
+            "metadata" or "datasources" => "metadata",
+            "pan" => "pan",
+            "pan-routing" or "paninterception" => "pan-routing",
+            "preferences" or "player" => "preferences",
+            _ => ""
+        };
+        if (normalized.Length == 0) return false;
+        var radio = SettingsNavigation.Children.OfType<RadioButton>()
+            .Concat(BusinessNavigation.Children.OfType<RadioButton>())
+            .FirstOrDefault(r => string.Equals(r.Tag as string, normalized, StringComparison.OrdinalIgnoreCase));
+        if (radio is null) return false;
+        Deactivate();
+        section = normalized;
+        radio.IsChecked = true;
+        RulesPage.Visibility = normalized == "rules" ? Visibility.Visible : Visibility.Collapsed;
+        CatsPage.Visibility = normalized == "cats" ? Visibility.Visible : Visibility.Collapsed;
+        VideosPage.Visibility = normalized == "videos" ? Visibility.Visible : Visibility.Collapsed;
+        MetadataPage.Visibility = normalized == "metadata" ? Visibility.Visible : Visibility.Collapsed;
+        PanPage.Visibility = normalized == "pan" ? Visibility.Visible : Visibility.Collapsed;
+        PanInterceptionPage.Visibility = normalized == "pan-routing" ? Visibility.Visible : Visibility.Collapsed;
+        BusinessPage.Visibility = normalized is "rules" or "cats" or "videos" or "metadata" or "pan" or "pan-routing"
+            ? Visibility.Collapsed : Visibility.Visible;
+        await ActivateCurrentAsync();
+        return true;
+    }
+
+    internal async Task<bool> TryDebugSetPanInterceptionAsync(string provider, bool enabled, CancellationToken cancellationToken)
+    {
+        var p = provider.Trim().ToLowerInvariant();
+        if (p is not ("baidu" or "quark" or "uc" or "tianyi" or "yidong")) return false;
+        var saved = await sources.SavePanInterceptionAsync(p, enabled, cancellationToken);
+        ReplacePanInterception(saved);
+        return true;
+    }
+
+    internal Task RefreshDebugSourcesAsync(CancellationToken cancellationToken) =>
+        sources.InitializeAsync(cancellationToken);
+
+    internal object[] DescribeDebugTabs() => SettingsNavigation.Children.OfType<RadioButton>()
+        .Concat(BusinessNavigation.Children.OfType<RadioButton>())
+        .Where(r => r.Visibility == Visibility.Visible)
+        .Select((r, idx) => new
+        {
+            group = "settings-section",
+            index = idx,
+            id = r.Tag as string ?? "",
+            title = r.Content?.ToString() ?? "",
+            selected = string.Equals(r.Tag as string, section, StringComparison.OrdinalIgnoreCase),
+            enabled = r.IsEnabled
+        }).ToArray();
+
+    internal object BuildDebugSnapshot() => new
+    {
+        domain = "film",
+        section,
+        tabs = DescribeDebugTabs(),
+        rulesLoaded = RulesLoaded,
+        rulesBusy = RulesBusy,
+        rulesFailed = RulesFailed,
+        sourcesBusy = SourcesBusy,
+        sourcesFailed = SourcesFailed,
+        hasMetadataSettings = HasMetadataSettings,
+        metadataLoaded = MetadataLoaded,
+        panInterception = new
+        {
+            baidu = BaiduInterception.IsChecked == true,
+            quark = QuarkInterception.IsChecked == true,
+            uc = UcInterception.IsChecked == true,
+            tianyi = TianyiInterception.IsChecked == true,
+            yidong = YidongInterception.IsChecked == true
+        }
+    };
 
     private void Section_KeyDown(object sender, KeyRoutedEventArgs e)
     {

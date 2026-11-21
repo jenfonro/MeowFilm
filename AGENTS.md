@@ -153,21 +153,21 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 ## 验证
 
 - 校验、失败传播与清理遵循[拒绝条件与数据消费边界](docs/common/validation-boundaries.md)。普通 API 按实际字段消费；禁止未消费兄弟／全库业务预检、覆盖或删除前校验将被丢弃的旧业务值、静默吞错与完整实现镜像断言。typed 存储的实际列／关系、身份／权限、CAS、执行信任与排空边界继续保留。
-- 按风险覆盖实际受影响的契约与消费者：编译、静态检查、单元、组件或集成测试；必要时覆盖失败、取消、恢复和资源释放路径。
-- 可机械核对的目录、依赖和契约约束接入 `scripts`（Windows 为 `scripts/windows`）中的现有检查。
+- **禁止新增或适配回归测试与测试夹具**：不再编写、扩展或适配单元测试、UI 回归测试、Mock/替身夹具及仅服务于测试的生产代码钩子，禁止以测试通过代替真实运行验收。既有历史测试目录与测试门禁脚本处于冻结状态，将由独立清理 PR 一次性删除。
+- **统一使用 Debug 模式验收**：功能、数据产出、界面交互、状态流转与底层故障排查统一通过运行期 `--debug` 模式完成（契约唯一来源见 [docs/common/debug-mode.md](docs/common/debug-mode.md)），依据分类结构化日志、`blobs/` 不脱敏原文、本地 Control API（直达页面、结构化内容读取、索引操控、截屏）及底层内存/线程堆栈/GC/Dump/V8 Snapshot 进行真实运行验证。
+- **保留非测试构建与完整性检查**：可机械核对的目录、依赖、打包与边界约束继续保留在 `scripts`（如 `scripts/verify-boundaries.mjs`、`scripts/verify-dependency-lock.mjs`、`scripts/check-source-scope.py`、`scripts/windows/verify-app-structure.mjs`、`scripts/windows/verify-projects.mjs`）。
 - 构建与打包只检查实际输入、依赖边界和交付完整性，不增加逐文件／导入／target 名称批准表、固定数量或完整源码／方法清单快照；合法公开依赖和实际引用的 helper 不需要额外登记。启动只核对实际身份、权限、执行内容与生命周期，不预检未调用业务方法，不重复审计同一输入，不将普通描述扩展或无依赖的排列变化作为拒绝条件。
-- 新增构建或启动拒绝条件须说明当前保护的实际消费边界，并以行为测试覆盖；不增加关键字扫描式禁令、例外白名单或另一套批准框架。真实 native 来源／ABI／哈希／签名、执行污染、权限与资源排空约束继续保留。
+- 新增构建或启动拒绝条件须说明当前保护的实际消费边界，并在真实启动或 Debug 模式下核对；不增加关键字扫描式禁令、例外白名单或另一套批准框架。真实 native 来源／ABI／哈希／签名、执行污染、权限与资源排空约束继续保留。
 - 通用运行器原生引擎仅按 `scripts/script-host-native.json` 的精确来源、版本、ABI／架构、补丁、根锁、构建输入及文件／许可哈希放行；用 `node scripts/quickjs/build-native.mjs` 构建，再由 `scripts/package-runtime.mjs --product aggregate --profile common-native --output <absolute-directory>` 复制受信产物。无 WASM／asm.js 回退；其他 native/WASM 仍拒绝，打包不安装／修锁。平台包装尚未迁移时，不将通用运行器通过表述为平台 App 通过。
 - 影视纯计算与第三方脚本共用锁定的 QuickJS-NG 0.18.0 源码、Unicode 表及平台载体，但 Runtime/Context、线程和生命周期独立；影视通过 `NativeJsonProgram` 使用 JSON 字符串边界，客户端不再链接第二份引擎。
 - iOS 脚本引擎使用 App 内置 `MeowScriptHost.framework`，复用通用原生核心与固定依赖，构建目标明确区分 device／simulator。原生载体随 App 签名；构建回执、内置身份和 JS／SDK 清单不能用签名前 Mach-O 全文件 hash 代替安装后签名边界，也不能据此放宽桌面 `.node` 校验。
-- 长期测试验证现行行为与契约；删除／重构后的旧实现及引用清理检查只做当次验证，通过后移除，不堆入长期测试。功能、安全、取消与资源释放等有效回归保留。
-- 编译成功、测试替身和真实业务验证分别记录，不互相冒充；不为刷绿删除有效断言、隐藏失败或用空测试集代替验证。
+- 编译成功、静态检查与真实业务/界面运行验证分别记录，不互相冒充。
 - 外部脚本由 `scripts/accept-sources.mjs` 按实际声明动作验收；未归因、宿主缺失能力、资源超限或清理失败不能因初始化成功而放行。报告只保留脱敏结构和固定分类，见 `docs/runtime/source-acceptance.md`。
 - 交付时说明实际修改范围、验证结果和未覆盖项。
 
 ## 安全与协作
 
-- 密码、令牌、Cookie、密钥和真实用户数据不得进入源码、文档、日志或测试样例。
+- 密码、令牌、Cookie、密钥和真实用户数据不得进入源码、文档、提交记录或公开报告；仅在显式开启 `--debug` 的本机私有调试会话目录中按 [docs/common/debug-mode.md](docs/common/debug-mode.md) 保留原始明文用于排查，严禁纳入版本控制或外部共享。
 - 不覆盖他人未提交的修改，不擅自清理用户数据；删除或移动前核对绝对路径。
 - 提交、推送和破坏性操作须有当次明确授权。
 

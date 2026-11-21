@@ -3,6 +3,7 @@ using MeowFilm.App;
 using MeowFilm.Capabilities;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Film.Rules;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
@@ -14,13 +15,23 @@ using System.Runtime.InteropServices;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
+        var (debugOptions, debugError) = DebugLaunchOptions.Parse(args);
+        if (debugError is not null)
+        {
+            Console.Error.WriteLine(debugError);
+            Environment.ExitCode = 2;
+            return;
+        }
         if (!AppInstallationLifetime.TryEnter())
         {
             MessageBox(0, "正在安装或卸载 meowfilm，请完成后重试。", "meowfilm", 0x40);
             return;
         }
+        var effectivePaths = debugOptions.Enabled && debugOptions.DataRoot is { Length: > 0 } customRoot
+            ? new AppDataPaths(customRoot)
+            : AppDataPaths.Current;
         NativeAudioPlayback? musicPlayback = null;
         FilmPlayback? filmPlayback = null;
         AppPlaybackCoordinator? playbackCoordinator = null;
@@ -39,7 +50,7 @@ internal static class Program
                     () => filmPlayback?.StopAsync() ?? Task.CompletedTask);
                 musicPlayback = new NativeAudioPlayback(acquireOutput: playbackCoordinator.AcquireMusicAsync);
                 filmPlayback = new FilmPlayback(acquireOutput: playbackCoordinator.AcquireFilmAsync);
-                var cacheRoot = AppDataPaths.Current.Caches;
+                var cacheRoot = effectivePaths.Caches;
                 musicLibraryStore = new(storage);
                 capabilities.Add(new MusicCapability(runtime, storage, musicLibraryStore, musicPlayback,
                     Path.Combine(cacheRoot, "music-audio")));
@@ -139,7 +150,8 @@ internal static class Program
                 capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())],
             runtimeSettings: database => new FilmRuntimeSettings(database),
             stopPlayback: () => Task.WhenAll(musicPlayback?.StopAsync() ?? Task.CompletedTask,
-                filmPlayback?.StopAsync() ?? Task.CompletedTask));
+                filmPlayback?.StopAsync() ?? Task.CompletedTask),
+            debugOptions: debugOptions.Enabled ? debugOptions : null);
     }
     [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
     private static extern int MessageBox(nint window, string text, string caption, uint flags);

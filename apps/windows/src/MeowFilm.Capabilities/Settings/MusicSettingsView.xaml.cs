@@ -21,6 +21,8 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private long exclusionRequest;
     private bool active, exclusionShowing, advancedShowing;
     private double scrollOffset;
+    private string currentSectionKey = "accounts";
+    internal string CurrentSectionKey => currentSectionKey;
 
     public MusicSettingsView(MusicCapability module)
     {
@@ -100,6 +102,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private void Section_Checked(object sender, RoutedEventArgs e)
     {
         if (sections is null || updatingNavigation || sender is not RadioButton { Tag: string key } anchor) return;
+        currentSectionKey = NormalizeSectionName(key);
         AccountsPanel.CloseTransientPopups();
         bool sources = key == "sources";
         SettingsScroller.Visibility = sources ? Visibility.Collapsed : Visibility.Visible;
@@ -109,6 +112,48 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         SettingsScroller.UpdateLayout(); UpdateLayoutMetrics();
         if (FindName(key) is Border section) SettingsScroller.ChangeView(null, section.TransformToVisual(SectionsStack).TransformPoint(new Point()).Y, null, true);
     }
+
+    internal bool SelectDebugSection(string section)
+    {
+        if (anchors is null) return false;
+        string tag = section.Trim().ToLowerInvariant() switch
+        {
+            "accounts" or "aggregation" => "AccountsSection",
+            "search" => "SearchSection",
+            "quality" or "playback" => "QualitySection",
+            "metadata" => "MetadataSection",
+            "sources" or "exclusions" => "sources",
+            _ => ""
+        };
+        if (tag.Length == 0) return false;
+        var anchor = anchors.FirstOrDefault(a => string.Equals(a.Tag as string, tag, StringComparison.OrdinalIgnoreCase));
+        if (anchor is null) return false;
+        updatingNavigation = true;
+        try { anchor.IsChecked = true; }
+        finally { updatingNavigation = false; }
+        Section_Checked(anchor, new RoutedEventArgs());
+        return true;
+    }
+
+    internal object[] DescribeDebugTabs() => (anchors ?? []).Select((a, idx) => new
+    {
+        group = "settings-section",
+        index = idx,
+        id = NormalizeSectionName(a.Tag as string ?? ""),
+        title = a.Content?.ToString() ?? "",
+        selected = a.IsChecked == true,
+        enabled = a.IsEnabled
+    }).ToArray();
+
+    private static string NormalizeSectionName(string tag) => tag switch
+    {
+        "AccountsSection" => "accounts",
+        "SearchSection" => "search",
+        "QualitySection" => "quality",
+        "MetadataSection" => "metadata",
+        "sources" => "sources",
+        _ => tag.ToLowerInvariant()
+    };
     internal bool NavigateAnchor(RadioButton current, VirtualKey key)
     {
         int index = Array.IndexOf(anchors, current);

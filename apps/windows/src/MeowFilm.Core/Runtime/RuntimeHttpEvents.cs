@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Channels;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Core.Runtime;
 
@@ -67,6 +68,16 @@ public sealed partial class RuntimeHttpClient
             request.Headers.Add("X-Meow-Request-Id", requestId);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
             request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
+            string? debugOpId = DebugLog.IsEnabled ? DebugLog.NextOpId() : null;
+            string? debugTraceId = DebugLog.IsEnabled ? DebugLog.Correlation?.TraceId : null;
+            if (debugOpId is not null)
+            {
+                request.Headers.TryAddWithoutValidation("X-Meow-Debug-Op", debugOpId);
+                if (!string.IsNullOrEmpty(debugTraceId))
+                    request.Headers.TryAddWithoutValidation("X-Meow-Debug-Trace", debugTraceId);
+                DebugLog.Debug(DebugCategories.RuntimeBridge, $"sse.{module}", "sse.connect",
+                    new { module, sessionId = eventSessionId.ToString("D"), after }, opId: debugOpId, traceId: debugTraceId);
+            }
             // Only header admission has a deadline. A live observation has no absolute RPC deadline.
             using var admission = CancellationTokenSource.CreateLinkedTokenSource(subscription);
             admission.CancelAfter(TimeSpan.FromSeconds(30));
@@ -97,6 +108,14 @@ public sealed partial class RuntimeHttpClient
                     var snapshot = parser.Feed(bytes[index]);
                     if (snapshot is not { } value) continue;
                     received = true;
+                    if (DebugLog.IsEnabled)
+                    {
+                        long? seq = value.TryGetProperty("sequence", out var seqProp) &&
+                            seqProp.ValueKind == JsonValueKind.Number && seqProp.TryGetInt64(out var s) ? s : null;
+                        DebugLog.Trace(DebugCategories.RuntimeBridge, $"sse.{module}", "sse.snapshot",
+                            new { module, sessionId = eventSessionId.ToString("D"), sequence = seq, snapshot = value },
+                            opId: debugOpId, traceId: debugTraceId);
+                    }
                     snapshots.TryWrite(value);
                 }
             }
@@ -110,6 +129,11 @@ public sealed partial class RuntimeHttpClient
         catch { failure = new BridgeException("INVALID_RESPONSE"); }
         finally
         {
+            if (DebugLog.IsEnabled)
+            {
+                DebugLog.Debug(DebugCategories.RuntimeBridge, $"sse.{module}", "sse.closed",
+                    new { module, sessionId = eventSessionId.ToString("D"), error = failure?.Message });
+            }
             // The bounded reader runs independently of a parked UI iterator, so App close
             // can drain it even if that iterator never calls MoveNext again.
             snapshots.TryComplete(failure);

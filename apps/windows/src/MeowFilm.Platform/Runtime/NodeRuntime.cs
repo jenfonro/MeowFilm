@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 using Microsoft.Win32.SafeHandles;
@@ -24,6 +26,7 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
     private readonly Uri businessOrigin;
     private readonly CancellationTokenSource capability;
     private readonly CancellationToken revoked;
+    private readonly IDisposable? leaseRegistration;
     private Task? disposal;
 
     private NodeRuntime(Process process, NamedPipeServerStream pipe, RuntimeHttpClient client,
@@ -36,6 +39,16 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         capability = CancellationTokenSource.CreateLinkedTokenSource(ownerRevoked);
         revoked = capability.Token;
         pipeEnd = settingsPipe.RunAsync();
+        if (DebugLog.IsEnabled)
+        {
+            leaseRegistration = DebugLeaseRegistry.Register("runtime.node", () => new
+            {
+                connected = IsConnected,
+                pid = processId,
+                baseUrl = client.EndpointUrl,
+                activeHttpRequests = client.ActiveRequestCount
+            });
+        }
         _ = MonitorAsync();
     }
 
@@ -44,8 +57,15 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
     private static partial bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint clientProcessId);
 
     public int ProcessId => processId;
+    public string BaseUrl => client.EndpointUrl;
     public bool IsConnected { get { lock (gate) return disposal is null && !revoked.IsCancellationRequested &&
         !processExit.IsCompleted && !pipeEnd.IsCompleted; } }
+
+    public Task<DebugNodeForwardResult> SendNodeDebugRequestAsync(HttpMethod method, string path,
+        object? body, TimeSpan timeout, CancellationToken cancellationToken) =>
+        IsConnected
+            ? client.SendNodeDebugRequestAsync(method, path, body, timeout, cancellationToken)
+            : Task.FromResult(new DebugNodeForwardResult(false, 503, null, "RUNTIME_CLOSED"));
     /// <summary>Proves release after the actual child, pipe and output drains stop;
     /// it is not a graceful-close acknowledgement.</summary>
     public Task Completion => completion.Task;
@@ -89,6 +109,13 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         Task output = Task.CompletedTask, error = Task.CompletedTask;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(15));
+        var debugLogger = DebugLog.Current is { IsEnabled: true } activeLogger ? activeLogger : null;
+        var started = debugLogger is not null ? Stopwatch.GetTimestamp() : 0L;
+        if (debugLogger is not null)
+        {
+            DebugLog.Info(DebugCategories.RuntimeBridge, "node.start", "handshake.start",
+                new { sessionId, pipeName, dataRoot, nodeExecutable = node, entry = bundle.EntryPath });
+        }
         try
         {
             server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte,
@@ -106,8 +133,10 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             foreach (var argument in new[] { bundle.EntryPath, "--meow-pipe", pipeName, "--meow-session", sessionId })
                 start.ArgumentList.Add(argument);
             child = Process.Start(start) ?? throw new BridgeException("CLOSED");
-            output = DrainAsync(child.StandardOutput.BaseStream);
-            error = DrainAsync(child.StandardError.BaseStream);
+            string? stdoutLog = debugLogger is not null ? Path.Combine(debugLogger.SessionDir, "logs", "runtime-node.stdout.log") : null;
+            string? stderrLog = debugLogger is not null ? Path.Combine(debugLogger.SessionDir, "logs", "runtime-node.stderr.log") : null;
+            output = DrainAsync(child.StandardOutput.BaseStream, stdoutLog, isStderr: false);
+            error = DrainAsync(child.StandardError.BaseStream, stderrLog, isStderr: true);
             job = OwnedProcessJob.Attach(child);
             child.StandardInput.Close();
             var exited = child.WaitForExitAsync();
@@ -121,8 +150,30 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             await connect.ConfigureAwait(false);
             if (!GetNamedPipeClientProcessId(server.SafePipeHandle, out var pid) || pid != (uint)child.Id)
                 throw new BridgeException("INVALID_MESSAGE");
-            var config = BridgeCodec.EncodeJSONValue(settingsStore is null ? new { sessionId, dataRoot } :
-                (object)new { sessionId, dataRoot, nativeSettings = true });
+            object handshakePayload;
+            if (debugLogger is not null)
+            {
+                var h = debugLogger.CreateRuntimeHandshake();
+                var debugObj = new
+                {
+                    enabled = true,
+                    sessionId = h.SessionId,
+                    sessionDir = h.SessionDir,
+                    inlineLimit = h.InlineLimit,
+                    eventBytesLimit = h.EventBytesLimit,
+                    modules = h.Modules
+                };
+                handshakePayload = settingsStore is null
+                    ? new { sessionId, dataRoot, debug = debugObj }
+                    : (object)new { sessionId, dataRoot, nativeSettings = true, debug = debugObj };
+            }
+            else
+            {
+                handshakePayload = settingsStore is null
+                    ? new { sessionId, dataRoot }
+                    : (object)new { sessionId, dataRoot, nativeSettings = true };
+            }
+            var config = BridgeCodec.EncodeJSONValue(handshakePayload);
             await server.WriteAsync(config, deadline.Token).ConfigureAwait(false);
             await server.WriteAsync("\n"u8.ToArray(), deadline.Token).ConfigureAwait(false);
             await server.FlushAsync(deadline.Token).ConfigureAwait(false);
@@ -137,10 +188,24 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             RuntimeHttpProtocol.ValidateDescription(description.GetProperty("value"), bundle.Product, expectedModules);
             deadline.Token.ThrowIfCancellationRequested();
             if (!runtime.IsConnected) throw new BridgeException("CLOSED");
+            if (debugLogger is not null)
+            {
+                DebugLog.Info(DebugCategories.RuntimeBridge, "node.start", "handshake.ready",
+                    new { sessionId, pid = child.Id, baseUrl = ready.AbsoluteUri },
+                    durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            }
             return runtime;
         }
         catch (Exception original)
         {
+            if (debugLogger is not null)
+            {
+                int? exitCode = null;
+                try { if (child is { HasExited: true }) exitCode = child.ExitCode; } catch { }
+                DebugLog.Error(DebugCategories.RuntimeBridge, "node.start", "handshake.failed",
+                    new { sessionId, exitCode }, error: original,
+                    durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            }
             var failedCleanup = false;
             var failure = original is BridgeException known ? known.Code :
                 original is OperationCanceledException ? "TIMEOUT" : "CLOSED";
@@ -206,13 +271,101 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         catch { /* The owner observes actual release failure through Completion. */ }
     }
 
-    private static async Task DrainAsync(Stream stream)
+    private static async Task DrainAsync(Stream stream, string? logPath, bool isStderr)
     {
-        // Discard child diagnostics: no payload, provider stack or credential is persisted.
         var bytes = new byte[4096];
-        try { while (await stream.ReadAsync(bytes).ConfigureAwait(false) != 0) { } }
+        if (string.IsNullOrEmpty(logPath))
+        {
+            // Non-debug mode discards child diagnostics: no payload, provider stack or credential is persisted.
+            try { while (await stream.ReadAsync(bytes).ConfigureAwait(false) != 0) { } }
+            catch (IOException) { }
+            catch (ObjectDisposedException) { }
+            return;
+        }
+        FileStream? file = null;
+        var lineBuffer = isStderr ? new StringBuilder() : null;
+        var decoder = isStderr ? Encoding.UTF8.GetDecoder() : null;
+        var charBuf = isStderr ? new char[4096] : null;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+            file = new FileStream(logPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 8192);
+        }
+        catch
+        {
+            file = null;
+        }
+        try
+        {
+            int read;
+            while ((read = await stream.ReadAsync(bytes).ConfigureAwait(false)) != 0)
+            {
+                if (file is not null)
+                {
+                    try
+                    {
+                        await file.WriteAsync(bytes.AsMemory(0, read)).ConfigureAwait(false);
+                        await file.FlushAsync().ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        try { file.Dispose(); } catch { }
+                        file = null;
+                    }
+                }
+                if (lineBuffer is not null && decoder is not null && charBuf is not null)
+                {
+                    int decoded = decoder.GetChars(bytes, 0, read, charBuf, 0, flush: false);
+                    if (decoded > 0) lineBuffer.Append(charBuf, 0, decoded);
+                    FlushStderrLines(lineBuffer);
+                }
+            }
+            if (lineBuffer is { Length: > 0 })
+            {
+                if (decoder is not null && charBuf is not null)
+                {
+                    int tail = decoder.GetChars([], 0, 0, charBuf, 0, flush: true);
+                    if (tail > 0) lineBuffer.Append(charBuf, 0, tail);
+                }
+                DebugLog.Warn(DebugCategories.RuntimeNode, "stderr", "process.stderr",
+                    new { text = lineBuffer.ToString().TrimEnd('\r', '\n') });
+                lineBuffer.Clear();
+            }
+        }
         catch (IOException) { }
         catch (ObjectDisposedException) { }
+        finally
+        {
+            if (file is not null)
+            {
+                try { await file.FlushAsync().ConfigureAwait(false); } catch { }
+                file.Dispose();
+            }
+        }
+    }
+
+    private static void FlushStderrLines(StringBuilder buffer)
+    {
+        const int MaxBufferedLineChars = 64 * 1024;
+        while (true)
+        {
+            int nl = -1;
+            for (int i = 0; i < buffer.Length; i++)
+                if (buffer[i] == '\n') { nl = i; break; }
+            if (nl < 0)
+            {
+                if (buffer.Length >= MaxBufferedLineChars)
+                {
+                    DebugLog.Warn(DebugCategories.RuntimeNode, "stderr", "process.stderr", new { text = buffer.ToString() });
+                    buffer.Clear();
+                }
+                return;
+            }
+            var line = buffer.ToString(0, nl).TrimEnd('\r');
+            buffer.Remove(0, nl + 1);
+            if (line.Length > 0)
+                DebugLog.Warn(DebugCategories.RuntimeNode, "stderr", "process.stderr", new { text = line });
+        }
     }
 
     private static async Task StopProcessAsync(Process child, OwnedProcessJob? job)
@@ -266,6 +419,15 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
             else completion.TrySetException(new BridgeException("INTERNAL"));
         }
         catch { completion.TrySetException(new BridgeException("INTERNAL")); }
-        finally { capability.Dispose(); }
+        finally
+        {
+            leaseRegistration?.Dispose();
+            if (DebugLog.IsEnabled)
+            {
+                DebugLog.Info(DebugCategories.RuntimeBridge, "node.stop", "process.stopped",
+                    new { pid = processId, hadFailure = failure is not null });
+            }
+            capability.Dispose();
+        }
     }
 }

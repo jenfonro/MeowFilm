@@ -473,6 +473,9 @@ public sealed partial class ShellWindow : DesktopWindow
     private Task NavigateFromUiAsync(ModuleSession session, string route)
     {
         if (_isClosing) return Task.CompletedTask;
+        if (MeowFilm.Core.Debug.DebugLog.IsEnabled)
+            MeowFilm.Core.Debug.DebugLog.Info(MeowFilm.Core.Debug.DebugCategories.UiNav, "shell", "navigate",
+                new { moduleId = session.Module.Id, route });
         _settingsReturn = null;
         if (_current is { } previous) previous.IsSettingsOpen = false;
         PreparePresentation(session);
@@ -970,6 +973,9 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void SetStatus(string message = "", bool busy = false, bool error = false, bool retry = false)
     {
+        if (MeowFilm.Core.Debug.DebugLog.IsEnabled && (message.Length > 0 || error))
+            MeowFilm.Core.Debug.DebugLog.Write(error ? "warn" : "debug", MeowFilm.Core.Debug.DebugCategories.UiNav, "shell.status",
+                "status.changed", new { message, busy, error, retry });
         _state.SetStatus(message, busy, error, retry);
         if (StatusText.IsLoaded && AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
             FrameworkElementAutomationPeer.FromElement(StatusText)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);

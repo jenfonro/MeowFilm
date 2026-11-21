@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
@@ -14,6 +15,8 @@ public partial class GeneralSettingsView : UserControl
     private readonly IDesktopAppearance appearance;
     private readonly IDesktopClosePreferences? closePreferences;
     private readonly Action? resetUserData;
+    private string currentArea = "appearance";
+    internal string CurrentArea => currentArea;
     public static IValueConverter StatusVisibility { get; } = new StatusConverter();
     public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
         IDesktopClosePreferences? closePreferences = null, IDesktopMediaControlSettings? mediaControls = null,
@@ -56,12 +59,96 @@ public partial class GeneralSettingsView : UserControl
     private void Area_Checked(object sender, RoutedEventArgs e)
     {
         if (AppearancePage is null || sender is not RadioButton { Tag: string area }) return;
+        currentArea = area;
         AppearancePage.Visibility = area == "appearance" ? Visibility.Visible : Visibility.Collapsed;
         HomeSourceContributions.Visibility = area == "sources" ? Visibility.Visible : Visibility.Collapsed;
         CachePage.Visibility = area == "cache" ? Visibility.Visible : Visibility.Collapsed;
         WindowBehaviorPage.Visibility = area == "window" ? Visibility.Visible : Visibility.Collapsed;
         ShortcutsPage.Visibility = area == "shortcuts" ? Visibility.Visible : Visibility.Collapsed;
         SettingsScroller.ChangeView(null, 0, null, true);
+    }
+
+    internal bool SelectArea(string area)
+    {
+        var normalized = area.Trim().ToLowerInvariant() switch
+        {
+            "home-source" or "home-sources" => "sources",
+            "media-controls" => "shortcuts",
+            var other => other
+        };
+        var target = Areas.Children.OfType<RadioButton>()
+            .FirstOrDefault(tab => tab.Visibility == Visibility.Visible &&
+                string.Equals(tab.Tag as string, normalized, StringComparison.OrdinalIgnoreCase));
+        if (target is null) return false;
+        if (target.IsChecked != true) target.IsChecked = true;
+        else Area_Checked(target, new RoutedEventArgs());
+        return true;
+    }
+
+    internal string? SelectAreaByIndex(int index)
+    {
+        var visible = Areas.Children.OfType<RadioButton>().Where(tab => tab.Visibility == Visibility.Visible).ToArray();
+        if (index < 0 || index >= visible.Length) return null;
+        var target = visible[index];
+        if (target.IsChecked != true) target.IsChecked = true;
+        else Area_Checked(target, new RoutedEventArgs());
+        return target.Tag as string ?? currentArea;
+    }
+
+    internal object[] DescribeDebugTabs() => Areas.Children.OfType<RadioButton>()
+        .Where(tab => tab.Visibility == Visibility.Visible)
+        .Select((tab, idx) => new
+        {
+            group = "settings-section",
+            index = idx,
+            id = tab.Tag as string ?? "",
+            title = tab.Content?.ToString() ?? "",
+            selected = tab.IsChecked == true,
+            enabled = tab.IsEnabled
+        }).ToArray();
+
+    internal object BuildDebugSnapshot()
+    {
+        return new
+        {
+            domain = "general",
+            section = currentArea,
+            tabs = DescribeDebugTabs(),
+            appearance = new
+            {
+                themeColor = appearance.ThemeColor,
+                canEdit = appearance.CanEdit,
+                status = appearance.Status
+            },
+            windowBehavior = closePreferences is null ? null : new
+            {
+                behavior = closePreferences.Behavior.ToString(),
+                canEdit = closePreferences.CanEdit,
+                status = closePreferences.Status
+            },
+            canResetUserData = resetUserData is not null
+        };
+    }
+
+    internal async Task<bool> TryDebugSetAsync(string key, JsonElement value)
+    {
+        switch (key.Trim().ToLowerInvariant())
+        {
+            case "themecolor" or "theme_color" or "theme":
+                if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString())) return false;
+                await appearance.SaveAsync(value.GetString()!);
+                ThemeSelection.RestoreSelection();
+                return true;
+            case "closebehavior" or "close_behavior":
+                if (closePreferences is null || value.ValueKind != JsonValueKind.String ||
+                    !Enum.TryParse<WindowCloseBehavior>(value.GetString(), ignoreCase: true, out var behavior))
+                    return false;
+                await closePreferences.SaveAsync(behavior);
+                RestoreCloseBehavior();
+                return true;
+            default:
+                return false;
+        }
     }
     private void Area_KeyDown(object sender, KeyRoutedEventArgs e)
     {

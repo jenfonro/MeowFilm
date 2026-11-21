@@ -19,6 +19,43 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     private readonly ManagementList sourceList = new(), ruleList = new();
     private readonly Button sourceSort, sourceGroups, sourceMore, ruleGroups, ruleMore;
     private string tab = "sources", sourceQuery = "", ruleQuery = "";
+    internal string CurrentDebugTab => tab;
+    internal bool SelectDebugTab(string nextTab)
+    {
+        var normalized = nextTab.Trim().ToLowerInvariant();
+        if (normalized is not ("sources" or "rules")) return false;
+        if (tab == normalized) return true;
+        tab = normalized;
+        BuildLayout();
+        Refresh();
+        return true;
+    }
+    internal object BuildDebugSnapshot() => new
+    {
+        domain = "novel",
+        section = tab,
+        tabs = new object[]
+        {
+            new { group = "settings-section", index = 0, id = "sources", title = "书源管理", selected = tab == "sources", enabled = true },
+            new { group = "settings-section", index = 1, id = "rules", title = "替换净化", selected = tab == "rules", enabled = true }
+        },
+        sourceCount = module.Sources.Sources.Count,
+        enabledSourceCount = module.Sources.Sources.Count(s => s.Enabled),
+        ruleCount = module.Library.Rules.Count,
+        appearance = module.Library.Appearance,
+        sources = module.Sources.Sources.Take(100).Select((s, i) => new
+        {
+            index = i,
+            installationId = s.InstallationId,
+            name = s.Name,
+            url = s.SourceUrl,
+            group = s.Group,
+            protocol = s.Protocol,
+            enabled = s.Enabled,
+            enabledExplore = s.EnabledExplore,
+            errorCode = s.ErrorCode
+        }).ToArray()
+    };
     private string? sourceGroup, sourceProtocol, ruleGroup;
     private int sourceStatus, sort;
     private bool reverse, ungroupedRules, disposed, loading;
