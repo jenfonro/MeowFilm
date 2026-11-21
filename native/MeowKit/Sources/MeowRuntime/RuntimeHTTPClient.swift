@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 
 public enum RuntimeHTTPError: Error, Sendable, Equatable {
     case cancelled, timeout, closed, invalidRequest, invalidResponse, remote(String)
@@ -62,6 +63,10 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     public var isClosed: Bool { state.isClosed }
+    public var endpointURL: URL { baseURL }
+    var debugBaseURL: URL { baseURL }
+    var debugSession: URLSession { session }
+    var debugDefaultTimeout: TimeInterval { timeout }
 
     /// Observes irreversible client revocation, not HTTP drain or executor exit.
     /// Cancelling a borrower only removes its wait; it never closes this client.
@@ -138,6 +143,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         request.httpShouldHandleCookies = false
         request.setValue(requestID, forHTTPHeaderField: "X-Meow-Request-Id")
         request.setValue("image/*", forHTTPHeaderField: "Accept")
+        let debugEnabled = DebugRuntime.isEnabled
+        let debugOp = debugEnabled ? (DebugTraceContext.current.opId ?? DebugTraceContext.nextOpID()) : nil
+        let debugTrace = debugEnabled ? DebugTraceContext.current.traceId : nil
+        if let debugOp { request.setValue(debugOp, forHTTPHeaderField: "X-Meow-Debug-Op") }
+        if let debugTrace { request.setValue(debugTrace, forHTTPHeaderField: "X-Meow-Debug-Trace") }
+        let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         let read = RuntimeHTTPImageRead(requestID: requestID, provider: provider, state: state)
         let outgoing = request
         let data: Data = try await withTaskCancellationHandler {
@@ -152,6 +163,15 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         } onCancel: { read.cancel() }
         guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
+        if debugEnabled {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+            DebugRuntime.log(.runtimeBridge, sub: "http.image", event: "response", level: .debug,
+                             opId: debugOp, traceId: debugTrace, durationMs: ms, data: .object([
+                                "path": .string(reference.absoluteString),
+                                "provider": .string(provider.rawValue),
+                                "bytes": .int(data.count)
+                             ]))
+        }
         return data
     }
 
@@ -195,6 +215,18 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         request.setValue(requestID, forHTTPHeaderField: "X-Meow-Request-Id")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        if DebugRuntime.isEnabled {
+            let op = DebugTraceContext.current.opId ?? DebugTraceContext.nextOpID()
+            request.setValue(op, forHTTPHeaderField: "X-Meow-Debug-Op")
+            if let trace = DebugTraceContext.current.traceId {
+                request.setValue(trace, forHTTPHeaderField: "X-Meow-Debug-Trace")
+            }
+            DebugRuntime.log(.runtimeBridge, sub: "http.events", event: "open", opId: op, data: .object([
+                "module": .string(moduleID),
+                "sessionId": .string(sessionID.uuidString.lowercased()),
+                "after": .integer(after)
+            ]))
+        }
         let state = state
         let events = RuntimeHTTPEvents(sessionID: sessionID, requestID: requestID) { state.endEvents(id) }
         guard state.startEvents(id, events.connection) else { throw RuntimeHTTPError.closed }
@@ -256,6 +288,12 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         request.httpBody = body
         request.httpShouldHandleCookies = false
         request.setValue(requestID, forHTTPHeaderField: "X-Meow-Request-Id")
+        let debugEnabled = DebugRuntime.isEnabled
+        let debugOp = debugEnabled ? (DebugTraceContext.current.opId ?? DebugTraceContext.nextOpID()) : nil
+        let debugTrace = debugEnabled ? DebugTraceContext.current.traceId : nil
+        if let debugOp { request.setValue(debugOp, forHTTPHeaderField: "X-Meow-Debug-Op") }
+        if let debugTrace { request.setValue(debugTrace, forHTTPHeaderField: "X-Meow-Debug-Trace") }
+        let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         if let body {
             request.setValue(raw ? "application/octet-stream" : "application/json", forHTTPHeaderField: "Content-Type")
             request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
@@ -263,7 +301,9 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         let outgoingRequest = request
         let owner = RuntimeHTTPRequest()
         let state = state
-        let (data, response): (Data, HTTPURLResponse) = try await withTaskCancellationHandler {
+        let (data, response): (Data, HTTPURLResponse)
+        do {
+            (data, response) = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 state.start(continuation: continuation) {
                     do { try onDispatch?() }
@@ -288,11 +328,51 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                 }
             }
         } onCancel: { owner.cancel() }
+        } catch {
+            if debugEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+                DebugRuntime.logError(.runtimeBridge, sub: module?.rawValue ?? "http", event: "rpc.transport_error",
+                                      error: error, opId: debugOp, traceId: debugTrace, durationMs: ms, data: .object([
+                                        "method": .string(method),
+                                        "path": .string(path)
+                                      ]))
+            }
+            throw error
+        }
         // A successfully completed resource-acquisition response transfers a
         // lease to its owner. Late cancellation must not hide that receipt.
         guard preservingAcceptedReceipt || !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         let result = Result { try Self.value(data: data, response: response, requestID: requestID, module: module) }
+        if debugEnabled {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+            let reqText: DebugJSONValue = raw
+                ? .string("<binary \(body?.count ?? 0) bytes>")
+                : (body.flatMap { String(data: $0, encoding: .utf8) }.map(DebugJSONValue.string) ?? .null)
+            let respText: DebugJSONValue = String(data: data, encoding: .utf8).map(DebugJSONValue.string)
+                ?? .string("<binary \(data.count) bytes>")
+            switch result {
+            case .success:
+                DebugRuntime.log(.runtimeBridge, sub: module?.rawValue ?? "http", event: "rpc.ok", level: .debug,
+                                 opId: debugOp, traceId: debugTrace, durationMs: ms, data: .object([
+                                    "method": .string(method),
+                                    "path": .string(path),
+                                    "status": .int(response.statusCode),
+                                    "request": reqText,
+                                    "response": respText
+                                 ]))
+            case .failure(let error):
+                DebugRuntime.log(.runtimeBridge, sub: module?.rawValue ?? "http", event: "rpc.error", level: .error,
+                                 opId: debugOp, traceId: debugTrace, durationMs: ms, data: .object([
+                                    "method": .string(method),
+                                    "path": .string(path),
+                                    "status": .int(response.statusCode),
+                                    "request": reqText,
+                                    "response": respText
+                                 ]),
+                                 error: DebugErrorPayload(error: error, code: String(describing: error)))
+            }
+        }
         guard preservingAcceptedReceipt || !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
         return try result.get()

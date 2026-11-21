@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import MeowDebug
 
 @MainActor
 public final class FilmHomeModel: ObservableObject {
@@ -79,6 +80,10 @@ public final class FilmHomeModel: ObservableObject {
         self.requestID = requestID
         error = nil
         isLoading = true
+        DebugRuntime.log(.filmCatalog, sub: "home", event: "load.start", level: .debug, data: .object([
+            "sourceId": .string(selectedSourceID),
+            "refresh": .bool(refresh)
+        ]))
         let task = Task<Void, Never> { [weak self] in
             do {
                 try Task.checkCancellation()
@@ -111,8 +116,16 @@ public final class FilmHomeModel: ObservableObject {
         case .success(let sections):
             self.sections = sections
             error = sections.compactMap { $0.cache?.errorCode }.first.map { .runtime(code: $0) }
+            DebugRuntime.log(.filmCatalog, sub: "home", event: "load.ok", level: .debug, data: .object([
+                "sourceId": .string(sourceID),
+                "sections": .int(sections.count),
+                "items": .int(sections.reduce(0) { $0 + $1.items.count })
+            ]))
         case .failure(let error):
             self.error = error
+            DebugRuntime.logError(.filmCatalog, sub: "home", event: "load.error", error: error, data: .object([
+                "sourceId": .string(sourceID)
+            ]))
         }
         snapshots[sourceID] = Snapshot(sections: sections, error: error)
         isLoading = false

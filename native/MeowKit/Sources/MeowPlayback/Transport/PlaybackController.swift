@@ -3,6 +3,7 @@ import Foundation
 import Combine
 import MeowAudio
 import MeowContracts
+import MeowDebug
 
 /// One product-scoped coordinator for the active media owner. Construction is
 /// passive: no item, asset, audio session, remote commands or network request.
@@ -107,6 +108,43 @@ public final class PlaybackController: ObservableObject {
     /// Live transport counters, including retired-but-not-completed tasks.
     /// This is not a measurement of AVFoundation or decoded-frame memory.
     public var networkUsage: PlaybackNetworkUsage { networkBudget.usage }
+
+    public func debugSnapshot() -> DebugJSONValue {
+        let usage = networkUsage
+        return .object([
+            "activeOwner": .optional(snapshot.owner),
+            "resourceId": .optional(snapshot.resourceID),
+            "phase": .string(String(describing: snapshot.phase)),
+            "wantsPlayback": .bool(wantsPlayback),
+            "isOutputPlaying": .bool(isOutputPlaying),
+            "position": .number(currentPosition),
+            "duration": .optional(snapshot.duration),
+            "preferredRate": .number(preferredRate),
+            "effectiveRate": .number(effectiveRate),
+            "actualRate": .number(Double(actualRate)),
+            "volume": .number(volume),
+            "title": .string(title),
+            "error": .optional(snapshot.error ?? lastError?.localizedDescription),
+            "audio": .object([
+                "hasActiveInput": .bool(hasActiveMusicInput),
+                "hasOutput": .bool(hasMusicOutput),
+                "isPrepared": .bool(isMusicPrepared),
+                "bufferedFrames": .int(audioMedia?.session?.bufferedFrames ?? 0)
+            ]),
+            "video": .object([
+                "active": .bool(videoTransport != nil),
+                "engine": .optional(videoTransport.map { String(describing: type(of: $0.kernel)) }),
+                "hasCandidate": .bool(videoCandidate != nil),
+                "retiredCount": .int(retiredVideos.count)
+            ]),
+            "network": .object([
+                "activeTasks": .int(usage.activeTasks),
+                "reservedPayloadBytes": .int(usage.reservedPayloadBytes),
+                "activeConnections": .int(usage.activeConnections),
+                "activeListeners": .int(usage.activeListeners)
+            ])
+        ])
+    }
     #if os(iOS)
     private var systemSession: PlaybackSystemSession? {
         get { lifetime.systemSession }

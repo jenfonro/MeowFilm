@@ -1,5 +1,6 @@
 import UIKit
 import Combine
+import MeowDebug
 import MeowUI
 import MeowMusicFeature
 import MeowFilmFeature
@@ -8,18 +9,18 @@ import MeowNovelFeature
 @MainActor
 final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     let primaryPlaybackPresentation = MusicMiniPlayerPresentation()
-    private let window: UIWindow
-    private let assembly: MeowfilmAssembly
-    private let resetUserData: @MainActor () async throws -> Void
-    private let navigation: PageNavigationController
-    private let root: MeowfilmRootContainerViewController
+    let window: UIWindow
+    let assembly: MeowfilmAssembly
+    let resetUserData: @MainActor () async throws -> Void
+    let navigation: PageNavigationController
+    let root: MeowfilmRootContainerViewController
     private var observations: Set<AnyCancellable> = []
-    private var main: MeowfilmPrimaryShellViewController?
-    private var surface: MusicPlayerSurface?
-    private var playerContent: MusicPlayerContentModel?
+    private(set) var main: MeowfilmPrimaryShellViewController?
+    private(set) var surface: MusicPlayerSurface?
+    private(set) var playerContent: MusicPlayerContentModel?
     private var pendingPresentation: (destination: MusicPlaybackDestination, access: UUID, occurrence: String?)?
-    private weak var novelHome: NovelHomeViewController?
-    private weak var player: MusicPlayerViewController?
+    private(set) weak var novelHome: NovelHomeViewController?
+    private(set) weak var player: MusicPlayerViewController?
     private var accessGeneration: UUID?
     private var presentedError: String?
     private var shownSettingsNotices = Set<UUID>()
@@ -27,7 +28,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private weak var settingsAlert: UIAlertController?
     private var startupErrorAcknowledged = false
     private var filmNavigation: Task<Void, Never>?
-    private weak var filmPlayer: FilmPlayerViewController?
+    private(set) weak var filmPlayer: FilmPlayerViewController?
 
     init(window: UIWindow, assembly: MeowfilmAssembly,
          resetUserData: @escaping @MainActor () async throws -> Void) {
@@ -59,6 +60,11 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             }
             self.root.setReadingVisible(self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
             self.showPendingError()
+            DebugRuntime.log(.uiNav, sub: "navigation", event: "did_show", data: .object([
+                "page": .string(String(describing: type(of: page))),
+                "stackDepth": .int(self.navigation.viewControllers.count),
+                "settingsVisible": .bool(self.isSettingsBranchVisible)
+            ]))
         }
         root.onSelectPage = { [weak self] page in
             self?.primaryPlaybackPresentation.invalidate()
@@ -120,6 +126,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showSearch() {
+        showSearch(animated: true, initialTargetID: nil)
+    }
+
+    func showSearch(animated: Bool, initialTargetID: String? = nil) {
         guard let model = assembly.music, let service = assembly.filmSearch else { return }
         let category = MeowfilmSearchComposition.category(service: service, images: assembly.filmImages,
             themeProvider: assembly.appearance) { [weak self] in self?.showFilmSearchResult($0) }
@@ -130,11 +140,16 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         navigation.pushViewController(MusicSearchViewController(
             model: model, appearance: assembly.appearance, router: self,
             primaryTarget: MeowfilmSearchComposition.music, additionalCategories: categories,
-            initialTargetID: MeowfilmSearchComposition.defaultTarget(on: main?.selectedPage ?? .recommend)
-        ), animated: true)
+            initialTargetID: initialTargetID ?? MeowfilmSearchComposition.defaultTarget(on: main?.selectedPage ?? .recommend)
+        ), animated: animated)
     }
 
     func showSettings() {
+        _ = showSettings(animated: true)
+    }
+
+    @discardableResult
+    func showSettings(animated: Bool) -> MeowfilmSettingsViewController {
         let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance, resetUserData: resetUserData)
         page.openMusic = { [weak self, weak page] in
             guard let self else { return }
@@ -174,10 +189,11 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             guard let novel = assembly.novel else { page?.showError("小说设置暂不可用"); return }
             navigation.pushViewController(NovelSettingsViewController(feature: novel, themeProvider: assembly.appearance), animated: true)
         }
-        navigation.pushViewController(page, animated: true)
+        navigation.pushViewController(page, animated: animated)
+        return page
     }
 
-    private func showNovel(_ book: NovelBook) {
+    func showNovel(_ book: NovelBook, animated: Bool = true) {
         guard let novel = assembly.novel else { return }
         let page = NovelDetailViewController(book: book, feature: novel, themeProvider: assembly.appearance)
         page.onRead = { [weak self, weak novel] book in
@@ -185,7 +201,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             let session = novel.makeReader(book: book)
             navigation.pushViewController(NovelReaderViewController(session: session, themeProvider: assembly.appearance), animated: true)
         }
-        navigation.pushViewController(page, animated: true)
+        navigation.pushViewController(page, animated: animated)
     }
 
     private func startupPage() -> MeowfilmStartupViewController {
@@ -265,7 +281,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         main?.selectChannel(channel)
     }
 
-    private func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, entrySurface: String? = nil) {
+    func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, entrySurface: String? = nil, animated: Bool = true) {
         let item = FilmItem(sourceID: item.sourceID, id: item.id, title: item.title,
                             kind: FilmItemKind(rawValue: kind.rawValue) ?? item.kind,
                             posterURL: item.posterURL, largePosterURL: item.largePosterURL,
@@ -279,7 +295,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
         let page = FilmDetailViewController(detail: FilmDetail(item: item), library: assembly.filmLibrary,
             images: assembly.filmImages, themeProvider: assembly.appearance, model: model)
-        presentFilmDetail(page, model: model)
+        presentFilmDetail(page, model: model, animated: animated)
     }
 
     func showFilmSearchResult(_ context: FilmSearchContext) {
@@ -293,7 +309,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
     }
 
-    private func presentFilmDetail(_ page: FilmDetailViewController, model: FilmPlaybackModel) {
+    private func presentFilmDetail(_ page: FilmDetailViewController, model: FilmPlaybackModel, animated: Bool = true) {
         page.onSelectRelatedItem = { [weak self] in self?.showFilm($0, kind: $1) }
         page.onSelectItem = { [weak self] item in
             guard let kind = item.kind else { return }
@@ -308,7 +324,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                   (self.navigation.topViewController as? any FilmPlaybackPage)?.filmPlaybackModel === model else { return }
             self.presentFilmPlayer(model)
         }
-        navigation.pushViewController(page, animated: true)
+        navigation.pushViewController(page, animated: animated)
     }
 
     private func activateFilmPage(_ page: UIViewController) {
@@ -333,7 +349,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     @discardableResult
-    private func presentFilmPlayer(_ model: FilmPlaybackModel, restoring: Bool = false,
+    func presentFilmPlayer(_ model: FilmPlaybackModel, restoring: Bool = false,
                                    completion: (() -> Void)? = nil) -> Bool {
         let applicationState = UIApplication.shared.applicationState
         guard filmPlayer == nil,
@@ -489,7 +505,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
     }
 
-    private func presenter() -> UIViewController {
+    func presenter() -> UIViewController {
         var page: UIViewController = root
         while let presented = page.presentedViewController { page = presented }
         return page

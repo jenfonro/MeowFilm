@@ -5,7 +5,7 @@ import MeowUI
 @MainActor
 public final class FilmCategoryViewController: PageViewController, UICollectionViewDelegate {
     public var onSelectItem: ((FilmItem) -> Void)?
-    private let model: FilmCategoryModel
+    let model: FilmCategoryModel
     private let images: ArtworkImages
     private let filters = UIStackView()
     private lazy var emptyFiltersHeight = filters.heightAnchor.constraint(equalToConstant: 0)
@@ -15,7 +15,7 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
     private let activity = UIActivityIndicatorView(style: .medium)
     private let empty = UILabel()
     private var shownError: FilmHomeError?
-    private var renderedItems: [FilmItem] = []
+    var renderedItems: [FilmItem] = []
     private var items: [FilmItemIdentity: FilmItem] = [:]
     private var dataSource: UICollectionViewDiffableDataSource<Int, FilmItemIdentity>!
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())

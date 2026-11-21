@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import MeowDebug
 
 public enum RuntimeLaunchError: Error, Sendable, Equatable {
     case payloadUnavailable, alreadyStarted, descriptorUnavailable
@@ -47,6 +48,7 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
     private let stackSize: Int
     private let start: Start
     private let settings: RuntimeSettingsAccess?
+    private let debugHandshake: DebugNodeHandshake?
     private let lock = NSLock()
     private var started = false
     private var closed = false
@@ -57,9 +59,11 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
     private var exitWaiters: [CheckedContinuation<Void, Never>] = []
 
     public init(payload: @escaping @Sendable () throws -> RuntimePayload, dataDirectory: URL,
-                stackSize: Int = 8 * 1024 * 1024, settings: RuntimeSettingsAccess? = nil, start: @escaping Start) {
+                stackSize: Int = 8 * 1024 * 1024, settings: RuntimeSettingsAccess? = nil,
+                debugHandshake: DebugNodeHandshake? = nil, start: @escaping Start) {
         self.payload = payload; self.dataDirectory = dataDirectory
-        self.stackSize = stackSize; self.settings = settings; self.start = start
+        self.stackSize = stackSize; self.settings = settings
+        self.debugHandshake = debugHandshake; self.start = start
     }
 
     public func connect() async throws -> RuntimeHTTPClient {
@@ -84,7 +88,23 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
             "dataRoot": .string(dataDirectory.path)
         ]
         if settings != nil { fields["nativeSettings"] = .bool(true) }
+        if let debugHandshake, debugHandshake.enabled {
+            fields["debug"] = .object([
+                "enabled": .bool(true),
+                "sessionId": .string(debugHandshake.sessionId),
+                "sessionDir": .string(debugHandshake.sessionDir),
+                "inlineLimit": .number(Double(debugHandshake.inlineLimit)),
+                "eventBytesLimit": .number(Double(debugHandshake.eventBytesLimit)),
+                "modules": .array(debugHandshake.modules.map(RuntimeValue.string))
+            ])
+        }
         let configuration = try RuntimeJSON.encode(.object(fields))
+        DebugRuntime.log(.runtimeBridge, sub: "launcher", event: "handshake.start", data: .object([
+            "sessionId": .string(sessionID),
+            "dataRoot": .string(dataDirectory.path),
+            "nativeSettings": .bool(settings != nil),
+            "debugAttached": .bool(debugHandshake?.enabled == true)
+        ]))
         let channel = RuntimeBootstrapChannel(descriptor: descriptors[0], settings: settings) { [weak self] in self?.bootstrapEnded() }
         guard admit(channel) else {
             channel.disposeUnstarted()
@@ -97,7 +117,10 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
         let arguments = ["node", payload.entry.path, "--meow-bootstrap-fd", String(bootstrapDescriptor)]
         let start = start
         let thread = Thread { [self] in
-            _ = start(arguments)
+            let exitCode = start(arguments)
+            DebugRuntime.log(.runtimeNode, sub: "node_mobile", event: "executor.exit",
+                             level: exitCode == 0 ? .info : .error,
+                             data: .object(["exitCode": .int(Int(exitCode))]))
             _ = Darwin.close(bootstrapDescriptor)
             channel.executorReturned()
             runtimeExited()
@@ -109,8 +132,13 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
             let baseURL = try await channel.endpoint(configuration: configuration)
             let client = try RuntimeHTTPClient(baseURL: baseURL)
             guard publish(client, endpoint: baseURL) else { await client.close(); throw RuntimeHTTPError.closed }
+            DebugRuntime.current?.session.updateRuntimeEndpoint(baseURL)
+            DebugRuntime.log(.runtimeBridge, sub: "launcher", event: "handshake.ready", data: .object([
+                "baseUrl": .string(baseURL.absoluteString)
+            ]))
             return client
         } catch {
+            DebugRuntime.logError(.runtimeBridge, sub: "launcher", event: "handshake.failed", error: error)
             await close()
             throw error
         }

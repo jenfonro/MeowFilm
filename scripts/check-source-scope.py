@@ -9,7 +9,7 @@ import sys
 # App source directories are declared by the project generator, not duplicated here.
 import runpy
 APPLICATION_DIRECTORIES = set(runpy.run_path(str(Path(__file__).with_name("generate-ios-project.py")))["APPLICATION_DIRECTORIES"])
-SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowStorage", "MeowAccounts", "MeowAudio", "MeowPlayback", "MeowPlaybackVideo", "MeowUI", "MeowRuntime"}
+SHARED_TARGETS = {"MeowContracts", "MeowJSON", "MeowDebug", "MeowStorage", "MeowAccounts", "MeowAudio", "MeowPlayback", "MeowPlaybackVideo", "MeowUI", "MeowRuntime"}
 # Native packages linked by the current client.
 LOCAL_PRODUCTS = {
     "MeowVideoKernel": ("videokernel", "../VideoKernel"),

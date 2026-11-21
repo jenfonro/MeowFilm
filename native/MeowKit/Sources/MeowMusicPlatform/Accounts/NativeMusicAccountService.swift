@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 import MeowAccounts
 import MeowContracts
+import MeowDebug
 import MeowMusicFeature
 import MeowStorage
 import MeowRuntime
@@ -880,6 +881,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         return try await accounts.beginLogin(for: identity)
     }
     public func beginLogin(platform: MusicAccountPlatform) async throws -> MusicLoginChallenge {
+        DebugRuntime.log(.musicAccount, sub: platform.rawValue, event: "login.begin")
         try check(); let identity = try configured(platform), own = epoch
         guard !transitions.contains(platform), login == nil else { throw MusicServiceError.busy }
         transitions.insert(platform)
@@ -961,6 +963,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         if let token { _ = try? await accounts.failLogin(token, reason: .cancelled) }
     }
     public func logout(platform: MusicAccountPlatform) async throws {
+        DebugRuntime.log(.musicAccount, sub: platform.rawValue, event: "logout.begin")
         try check(); let identity = try configured(platform), own = epoch
         guard !transitions.contains(platform) else { throw MusicServiceError.busy }
         transitions.insert(platform)

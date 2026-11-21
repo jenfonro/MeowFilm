@@ -7,7 +7,7 @@ import MeowUI
 public final class MusicPlayerViewController: MusicPageViewController, UIPopoverPresentationControllerDelegate {
     public var onDismiss: (() -> Void)?
     public var onPresent: ((MusicPlaybackDestination) -> Void)?
-    private let content: MusicPlayerContentModel
+    let content: MusicPlayerContentModel
     private let playerView: MusicFullPlayerView
     private let transition = VerticalPageTransition(edge: .bottom)
     private var closeQueued = false

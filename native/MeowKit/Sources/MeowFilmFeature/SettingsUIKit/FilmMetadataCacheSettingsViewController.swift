@@ -4,7 +4,7 @@ import MeowUI
 
 @MainActor
 public final class FilmMetadataCacheSettingsViewController: PageViewController {
-    private let owner: FilmPlaybackSettingsModel
+    let owner: FilmPlaybackSettingsModel
     public init(owner: FilmPlaybackSettingsModel, themeProvider: any PageThemeProviding) {
         self.owner = owner
         super.init(themeProvider: themeProvider)

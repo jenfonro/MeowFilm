@@ -5,32 +5,32 @@ import MeowUI
 
 @MainActor
 public final class MusicCollectionViewController: MusicPageViewController, UITableViewDelegate {
-    private enum Content {
+    enum Content {
         case local(MusicCollectionViewModel)
         case remote(MusicPublicBrowseCollection?, MusicPublicBrowseViewModel)
     }
 
-    private enum RowID: Hashable {
+    enum RowID: Hashable {
         case local(MusicReference)
         case remote(section: String, item: String)
     }
 
-    private struct Row {
+    struct Row {
         let track: MusicRemoteTrack
         let filteredIndex: Int
         let originalIndex: Int?
     }
 
-    private let model: MusicViewModel
-    private let content: Content
-    private let favorites: MusicMiniPlayerFavorites?
-    private let table = UITableView(frame: .zero, style: .plain)
+    let model: MusicViewModel
+    let content: Content
+    let favorites: MusicMiniPlayerFavorites?
+    let table = UITableView(frame: .zero, style: .plain)
     private lazy var detailHeader = MusicCollectionDetailHeaderView(themeProvider: themeProvider)
     private let statusFooter = MusicCollectionStatusFooterView()
     private weak var activeEditor: MusicCollectionEditorViewController?
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
-    private var rows: [RowID: Row] = [:]
-    private var orderedRows: [(id: RowID, row: Row)] = []
+    var rows: [RowID: Row] = [:]
+    var orderedRows: [(id: RowID, row: Row)] = []
     private var remoteFilter = ""
     private var searchButton: PageHeaderButton?
     private var deleteButton: PageHeaderButton?
@@ -54,12 +54,12 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         let canEdit: Bool
     }
 
-    private var localPage: MusicCollectionViewModel? {
+    var localPage: MusicCollectionViewModel? {
         guard case .local(let page) = content else { return nil }
         return page
     }
 
-    private var remotePage: MusicPublicBrowseViewModel? {
+    var remotePage: MusicPublicBrowseViewModel? {
         guard case .remote(_, let page) = content else { return nil }
         return page
     }
@@ -1222,7 +1222,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         }
     }
 
-    private func loadNextRemotePage() {
+    func loadNextRemotePage() {
         guard remoteFilter.isEmpty, let page = remotePage else { return }
         runPageTask { [weak self, weak page] in
             guard let self, let page, page === self.remotePage else { return }
@@ -1350,7 +1350,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         present(alert, animated: true)
     }
 
-    private func refresh() {
+    func refresh() {
         automaticPaginationHeld = false
         MusicArtworkView.retryFailedLoads(in: view)
         switch content {

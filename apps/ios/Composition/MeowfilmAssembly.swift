@@ -1,6 +1,7 @@
 import UIKit
 import Combine
 import MeowContracts
+import MeowDebug
 import MeowPlayback
 import MeowPlaybackVideo
 import MeowMusicFeature
@@ -18,6 +19,7 @@ private let musicAccessGeneration: UInt64 = 1
 
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
+    let dataRootOverride: URL?
     let playerPreferences = FilmPlayerPreferencesStore()
     let volumePreferences = PlaybackVolumePreferences()
     lazy var playback = PlaybackController(volumePreferences: volumePreferences, videoDecoderFactory: {
@@ -65,7 +67,7 @@ final class MeowfilmAssembly: ObservableObject {
     private(set) var filmPlayback: FilmPlaybackModel?
     private var filmMedia: MeowfilmFilmMedia?
     var filmMediaPlayback: FilmPlaybackModel? { filmMedia?.currentModel }
-    private var filmModels: [FilmPlaybackModel] {
+    var filmModels: [FilmPlaybackModel] {
         var identities = Set<ObjectIdentifier>()
         return ([filmPlayback].compactMap { $0 } + (filmMedia?.models ?? [])).filter {
             identities.insert(ObjectIdentifier($0)).inserted
@@ -76,7 +78,8 @@ final class MeowfilmAssembly: ObservableObject {
         didSet { filmMedia?.restoreUI = restoreFilmPlaybackUI }
     }
 
-    init() {
+    init(dataRootOverride: URL? = nil) {
+        self.dataRootOverride = dataRootOverride
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: UIApplication.willTerminateNotification, object: nil, queue: .main
@@ -122,15 +125,21 @@ final class MeowfilmAssembly: ObservableObject {
 
     func start() {
         guard startup == nil, resources == nil, !closed else { return }
+        let dataRootOverride = self.dataRootOverride
+        let handshake = DebugRuntime.current?.session.nodeHandshake()
+        DebugRuntime.log(.lifecycle, sub: "assembly", event: "start", data: .object([
+            "dataRootOverride": .optional(dataRootOverride?.path)
+        ]))
         startup = Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                let resources = try MeowfilmResources()
+                let resources = try MeowfilmResources(dataRootOverride: dataRootOverride, debugHandshake: handshake)
                 guard !Task.isCancelled, let self else {
                     await Self.closeSettings(resources)
                     return
                 }
                 await self.install(resources)
             } catch {
+                DebugRuntime.logError(.lifecycle, sub: "assembly", event: "resources.failed", error: error)
                 await self?.failedStartup()
             }
         }
@@ -138,6 +147,7 @@ final class MeowfilmAssembly: ObservableObject {
 
     private func failedStartup() {
         guard !closed, !Task.isCancelled else { return }
+        DebugRuntime.log(.lifecycle, sub: "assembly", event: "startup.failed", level: .error)
         startupFailed = true
     }
 
@@ -152,7 +162,13 @@ final class MeowfilmAssembly: ObservableObject {
             try await volumePreferences.bind(database: resources.database)
             await playerPreferences.bind(database: resources.database)
             try await filmLibrary.bind(database: resources.database)
-        } catch { failedStartup(); return }
+        } catch {
+            DebugRuntime.logError(.lifecycle, sub: "assembly", event: "bind.failed", error: error)
+            failedStartup(); return
+        }
+        DebugRuntime.log(.lifecycle, sub: "assembly", event: "install.ready", data: .object([
+            "dataRoot": .string(resources.database.dataRoot.path)
+        ]))
         guard !closed, !Task.isCancelled else { return }
         runtimeAvailability = Task { [weak self] in
             for await _ in await resources.scriptSession.connections() {

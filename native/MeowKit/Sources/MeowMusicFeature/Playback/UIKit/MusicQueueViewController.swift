@@ -6,7 +6,7 @@ import MeowUI
 public final class MusicQueueViewController: MusicPageViewController,
     UICollectionViewDelegate, UITableViewDelegate
 {
-    private let model: MusicViewModel
+    let model: MusicViewModel
     private let favorites: MusicMiniPlayerFavorites
     private let sheet = FixedSheetTransition { viewport in
         let metrics = MusicReferenceQueueMetrics(viewportWidth: Double(viewport.width),
@@ -20,14 +20,14 @@ public final class MusicQueueViewController: MusicPageViewController,
         return MusicReferenceQueuePage.allCases.map { MusicQueueTabButton(page: $0, theme: theme) }
     }()
     private let clear = UIButton(type: .system), dots = UIPageControl()
-    private let pager = MusicQueuePagerViewController()
+    let pager = MusicQueuePagerViewController()
     private let current = MusicQueueCurrentPage(), songs = MusicQueueTablePage()
     private let emptyHistory = MusicQueueTablePage()
     private var histories: [String: MusicHistoryCardViewController] = [:]
     private var currentDataSource: UICollectionViewDiffableDataSource<Int, String>!
     private var songsDataSource: UITableViewDiffableDataSource<String, String>!
     private var reorder: MusicQueueReorderController!
-    private var entries: [MusicQueueEntry] = []
+    var entries: [MusicQueueEntry] = []
     private var entryRows: [String: (entry: MusicQueueEntry, index: Int)] = [:]
     private var playedRows: [String: (song: MusicPlayedSong, index: Int)] = [:]
     private var displayed: MusicReferenceQueueIntent?
@@ -36,7 +36,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     private var historyAccess: UUID?
     private var previewedQueue: MusicReferenceQueueIntent?
     private var previewAccount: UUID?
-    private var selected: String { pager.selectedID }
+    var selected: String { pager.selectedID }
 
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         self.model = model

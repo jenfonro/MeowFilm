@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import MeowDebug
 import MeowRuntime
 
 @MainActor
@@ -86,6 +87,11 @@ public final class NovelReadingSession: ObservableObject {
         }
     }
     public func jump(_ index: Int, ratio: Double = 0, continuingAutomatic: Bool = false) {
+        DebugRuntime.log(.novel, sub: "reader", event: "chapter.jump", level: .debug, data: .object([
+            "book": .string(book.name),
+            "index": .int(index),
+            "ratio": .number(ratio)
+        ]))
         guard chapters.indices.contains(index), let identity = bookIdentity else { return }
         initialLoad = nil
         run(resumeAutomatic: continuingAutomatic) { session, token in

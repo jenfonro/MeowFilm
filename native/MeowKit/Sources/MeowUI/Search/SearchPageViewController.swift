@@ -109,6 +109,14 @@ open class SearchPageViewController: PageViewController {
         onSubmit?(keyword)
     }
 
+    public func debugSubmit(query text: String, targetID: String? = nil) {
+        if let targetID, !targetID.isEmpty, searchTargets.contains(where: { $0.id == targetID }) {
+            searchTargetID = targetID
+        }
+        query = text
+        submitQuery()
+    }
+
     @objc private func updateSubmission() {
         input.submit.isEnabled = !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

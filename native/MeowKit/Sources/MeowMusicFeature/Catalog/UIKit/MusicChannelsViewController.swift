@@ -9,16 +9,16 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 {
     /// The dynamic channel switcher is placed in the app-owned page header title area.
     public var channelSwitcherView: UIView { channelTabs }
-    private let model: MusicViewModel
-    private let browser: (any MusicPublicBrowsing)?
-    private weak var router: (any MusicUIRouting)?
-    private let selection: MusicChannelSelection
-    private let catalogue: MusicPublicBrowseViewModel?
-    private let pager = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
+    let model: MusicViewModel
+    let browser: (any MusicPublicBrowsing)?
+    weak var router: (any MusicUIRouting)?
+    let selection: MusicChannelSelection
+    let catalogue: MusicPublicBrowseViewModel?
+    let pager = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
     /// A scroll pager cannot hold an empty controller list while the catalogue is empty.
     private let emptyPage = UIViewController()
-    private var pages: [String: MusicBrowseViewController] = [:]
-    private var channels: [MusicPublicBrowseChannel] = []
+    var pages: [String: MusicBrowseViewController] = [:]
+    var channels: [MusicPublicBrowseChannel] = []
     private var pagingAccess: UUID?
     private var observation: Task<Void, Never>?
     private var observationAccess: UUID?

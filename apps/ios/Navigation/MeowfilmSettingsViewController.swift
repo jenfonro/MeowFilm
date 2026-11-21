@@ -1,4 +1,5 @@
 import UIKit
+import MeowDebug
 import MeowUI
 
 /// App-level categories and the cold-start reset request are independent of
@@ -85,11 +86,17 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
         let alert = UIAlertController(title: "清空本机数据？",
             message: "将删除本机登录凭据、设备身份和密钥、本地歌单、收藏与书架、历史与阅读进度、导入音源与书源、偏好及缓存，无法撤销。云端数据和 App 外的原始文件不受影响。\n\n确认后需从多任务列表关闭 App，再重新打开才能完成清除。",
             preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "清除并等待重启", style: .destructive) { [weak self, weak alert] _ in
+        let cancelHandler: @MainActor () -> Void = {}
+        let confirmHandler: @MainActor () -> Void = { [weak self, weak alert] in
             guard let self, let alert else { return }
             dismissPageModal(alert) { [weak self] in self?.requestUserDataReset() }
-        })
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in })
+        alert.addAction(UIAlertAction(title: "清除并等待重启", style: .destructive) { _ in confirmHandler() })
+        DebugAlertActionRegistry.shared.register(alert: alert, actions: [
+            .init(index: 0, label: "取消", kind: "cancel", handler: cancelHandler),
+            .init(index: 1, label: "清除并等待重启", kind: "destructive", handler: confirmHandler)
+        ])
         present(alert, animated: true)
     }
 
@@ -104,6 +111,80 @@ final class MeowfilmSettingsViewController: PageViewController, UITableViewDataS
                 self?.requestingReset = false; self?.table.reloadData()
                 self?.showError("无法记录清除请求，请重试")
             }
+        }
+    }
+}
+
+extension MeowfilmSettingsViewController: DebugPageInspectable, DebugPageActionable {
+    var debugPageStatus: DebugPageStatus {
+        DebugPageStatus(
+            target: "settings.general",
+            moduleId: "settings",
+            route: "settings",
+            title: pageTitle ?? "设置",
+            isBusy: requestingReset,
+            settingsDomain: "general",
+            settingsSection: nil
+        )
+    }
+
+    func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
+        var rows: [DebugContentRow] = [
+            .init(index: 0, id: "music", title: "音乐设置", actions: ["open"]),
+            .init(index: 1, id: "film", title: "影视设置", actions: ["open"]),
+            .init(index: 2, id: "novel", title: "小说设置", actions: ["open"]),
+            .init(index: 3, id: "appearance", title: "偏好设置", actions: ["open"]),
+            .init(index: 4, id: "cache", title: "缓存管理", actions: ["open"])
+        ]
+        if resetUserData != nil {
+            rows.append(.init(
+                index: 5,
+                id: "clear_user_data",
+                title: requestingReset ? "正在记录清除请求…" : "清空本机数据",
+                actions: ["open"]
+            ))
+        }
+        return DebugContentSnapshot(
+            target: "settings.general",
+            kind: "settings",
+            loading: requestingReset,
+            rows: Array(rows.prefix(maxItems)),
+            settings: .object([
+                "domain": .string("general"),
+                "section": .string("root"),
+                "sections": .array(["music", "film", "novel", "appearance", "cache"].map(DebugJSONValue.string)),
+                "requestingReset": .bool(requestingReset),
+                "resetAvailable": .bool(resetUserData != nil)
+            ])
+        )
+    }
+
+    func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        switch request.action {
+        case "list.item.invoke":
+            let id = request.params["id"]?.stringValue
+            let idx = request.params["index"]?.intValue
+            switch (id, idx) {
+            case ("music", _), (nil, 0): openMusic?(); return .object(["opened": .string("settings.music")])
+            case ("film", _), (nil, 1): openFilm?(); return .object(["opened": .string("settings.film")])
+            case ("novel", _), (nil, 2): openNovel?(); return .object(["opened": .string("settings.novel")])
+            case ("appearance", _), (nil, 3): openPreferences?(); return .object(["opened": .string("settings.general.appearance")])
+            case ("cache", _), (nil, 4): openCache?(); return .object(["opened": .string("settings.cache")])
+            case ("clear_user_data", _), (nil, 5): confirmUserDataReset(); return .object(["opened": .string("dialog.reset_confirm")])
+            default: throw DebugAPIError.invalidArgument("Unknown settings item")
+            }
+        case "setting.action":
+            let cmd = request.params["command"]?.stringValue ?? ""
+            if cmd == "reset_user_data" {
+                guard request.params["confirm"]?.stringValue == "RESET_ALL_USER_DATA" else {
+                    throw DebugAPIError.invalidState("reset_user_data requires confirm == 'RESET_ALL_USER_DATA'")
+                }
+                requestUserDataReset()
+                return .object(["requested": .bool(true)])
+            }
+            throw DebugAPIError.invalidArgument("Unsupported setting.action command: \(cmd)")
+        default:
+            throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MeowfilmSettingsViewController")
         }
     }
 }

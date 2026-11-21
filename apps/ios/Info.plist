@@ -17,5 +17,7 @@
     <key>UIBackgroundModes</key><array><string>audio</string></array>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>仅在显式启用 Debug 模式并绑定局域网地址时用于本地调试接口通信。</string>
 </dict>
 </plist>

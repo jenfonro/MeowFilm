@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Darwin
+import MeowDebug
 import MeowMusicFeature
 import MeowContracts
 import MeowStorage
@@ -73,6 +74,15 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         testBaseURL = baseURL
         self.timing = timing
         self.presentationCache = presentationCache
+    }
+
+    public func debugCacheStats() -> DebugJSONValue {
+        .object([
+            "entryCount": .int(entries.count),
+            "pendingCount": .int(pending.count),
+            "closed": .bool(closed),
+            "rootPath": .string(rootURL.path)
+        ])
     }
 
     public func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,

@@ -37,6 +37,7 @@
 - [小说、书架与原生阅读器](ios/novel.md)
 - [本地存储](ios/storage.md)
 - [内嵌 Node 运行底座预检](ios/runtime-preflight.md)
+- [Debug 模式与调试接口](ios/debug-mode.md)
 - [构建、发布与安装](ios/release.md)
 
 ## Windows

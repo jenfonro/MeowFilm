@@ -37,9 +37,9 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     public var onSelectRelatedItem: ((FilmItem, FilmPlaybackKind) -> Void)?
     public var onActivatePlayback: (() -> Void)?
     public var filmPlaybackModel: FilmPlaybackModel? { model }
-    private let originalDetail: FilmDetail
-    private let model: FilmPlaybackModel?
-    private let library: FilmLibrary
+    let originalDetail: FilmDetail
+    let model: FilmPlaybackModel?
+    let library: FilmLibrary
     private let images: ArtworkImages
     private let scroll = FilmTouchScrollView(), content = UIStackView()
     private let heroClip = UIView()
@@ -497,14 +497,14 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         content.setCustomSpacing(8, after: sourceContainer)
     }
 
-    private func showDirectory() {
+    func showDirectory(animated: Bool = true) {
         guard let model, let browsing = model.presentation?.browsing, browsing.error == nil,
               let sourceID = browsing.sourceID, !browsing.originalFiles.isEmpty else { return }
         let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: browsing.lineID,
                                                metadataSourceID: model.presentation?.metadataSourceID, season: browsing.season,
                                                themeProvider: themeProvider)
         page.onPresentPlayback = onPresentPlayback
-        navigationController?.pushViewController(page, animated: true)
+        navigationController?.pushViewController(page, animated: animated)
     }
 
     private func renderPlayback() {

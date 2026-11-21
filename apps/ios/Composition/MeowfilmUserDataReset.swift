@@ -20,9 +20,10 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
 
     private let support: URL
     private let directories: [URL]
+    private let markerName: String
     private let clearNetworkState: @Sendable () throws -> Void
     private let lock = NSLock()
-    private var marker: URL { support.appendingPathComponent("meowfilm-reset.pending") }
+    private var marker: URL { support.appendingPathComponent(markerName) }
 
     static func live() throws -> MeowfilmUserDataReset {
         let fm = FileManager.default
@@ -37,13 +38,36 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
             })
     }
 
+    static func isolated(dataRoot: URL) throws -> MeowfilmUserDataReset {
+        let normalized = dataRoot.standardizedFileURL
+        try FileManager.default.createDirectory(at: normalized, withIntermediateDirectories: true)
+        let markerParent = normalized.deletingLastPathComponent()
+        return .init(
+            support: markerParent,
+            markerName: ".\(normalized.lastPathComponent)-reset.pending",
+            directories: [normalized],
+            clearNetworkState: {
+                URLCache.shared.removeAllCachedResponses()
+            }
+        )
+    }
+
     init(support: URL, temporary: URL,
          clearNetworkState: @escaping @Sendable () throws -> Void) {
         self.support = support
+        self.markerName = "meowfilm-reset.pending"
         directories = [
             support.appendingPathComponent("meowfilm", isDirectory: true),
             temporary.appendingPathComponent("meowfilm", isDirectory: true)
         ]
+        self.clearNetworkState = clearNetworkState
+    }
+
+    private init(support: URL, markerName: String, directories: [URL],
+                 clearNetworkState: @escaping @Sendable () throws -> Void) {
+        self.support = support
+        self.markerName = markerName
+        self.directories = directories
         self.clearNetworkState = clearNetworkState
     }
 

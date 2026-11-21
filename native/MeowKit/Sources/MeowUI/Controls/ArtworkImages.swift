@@ -1,6 +1,7 @@
 #if os(iOS)
 import UIKit
 import ImageIO
+import MeowDebug
 
 @MainActor
 public final class ArtworkImages {
@@ -42,6 +43,22 @@ public final class ArtworkImages {
     private var pending: [(url: URL, flight: Flight)] = []
 
     public var revision: UUID { byteCache?.revision ?? loaderRevision }
+
+    public func debugCacheStats() -> DebugJSONValue {
+        .object([
+            "activeFlights": .int(flights.count),
+            "activeProducers": .int(producers.count),
+            "pending": .int(pending.count),
+            "countLimit": .int(cache.countLimit),
+            "totalCostLimit": .int(cache.totalCostLimit),
+            "closed": .bool(closed)
+        ])
+    }
+
+    public func debugClearMemoryCache() {
+        cache.removeAllObjects()
+        DebugRuntime.log(.storage, sub: "artwork.cache", event: "memory.clear", level: .debug)
+    }
 
     public init(maximumBytes: Int, byteCache: (any ArtworkByteCaching)? = nil,
                 loadData: @escaping @Sendable (URL) async throws -> Data) {

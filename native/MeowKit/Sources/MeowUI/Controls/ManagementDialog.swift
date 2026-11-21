@@ -16,6 +16,11 @@ public final class ManagementDialog: UIViewController {
     private var themeObservation: AnyCancellable?
     private var task: Task<Void, Never>?
     private var cancelling = false
+    public var debugHeading: String { heading }
+    public var debugActionTitle: String { action }
+    public var debugErrorText: String? { error.isHidden ? nil : error.text }
+    public func debugConfirm() { commit() }
+    public func debugCancel() { close() }
     public init(title: String, action: String = "确定", themeProvider: any PageThemeProviding) {
         heading = title; self.action = action; self.themeProvider = themeProvider
         super.init(nibName: nil, bundle: nil); modalPresentationStyle = .overFullScreen; modalTransitionStyle = .crossDissolve

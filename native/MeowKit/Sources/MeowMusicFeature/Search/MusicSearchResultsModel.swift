@@ -3,6 +3,7 @@
 import Foundation
 import Combine
 import MeowContracts
+import MeowDebug
 
 public enum MusicSearchSection: Hashable, Sendable { case songs, playlists }
 public struct MusicSearchPlatformFailure: Sendable, Identifiable {
@@ -183,6 +184,11 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         clear()
         query = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         self.preferences = preferences
+        DebugRuntime.log(.search, sub: "music", event: "submit", level: .debug, data: .object([
+            "query": .string(query),
+            "songPlatforms": .array(preferences.songPlatforms.map { .string($0.rawValue) }),
+            "playlistPlatforms": .array(preferences.effectivePlaylistPlatforms.map { .string($0.rawValue) })
+        ]))
         for platform in self.preferences.songPlatforms { songStates[platform] = .init() }
         for platform in self.preferences.effectivePlaylistPlatforms { playlistStates[platform] = .init() }
         loadSongs(.initial); loadPlaylists(.initial)

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import MeowContracts
+import MeowDebug
 import MeowRuntime
 #if os(iOS)
 import UIKit
@@ -676,6 +677,10 @@ public final class FilmPlaybackModel: ObservableObject {
     /// keeps only its latest queued value. Actual start/terminal facts stay ordered.
     @discardableResult
     public func send(_ action: String, parameters: RuntimeObject = [:]) -> Task<Void, Never>? {
+        DebugRuntime.log(.filmPlayback, sub: "session", event: "action.\(action)", level: .debug, data: .object([
+            "action": .string(action),
+            "sessionId": .optional(sessionID?.uuidString.lowercased())
+        ]))
         if Self.mediaActions.contains(action) { cancelTemporaryRate() }
         if action == "stop", closed || closingTask != nil || openingTask != nil || reopeningTask != nil {
             let admission = UUID(); commandAdmission = admission

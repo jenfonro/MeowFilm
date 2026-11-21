@@ -10,8 +10,8 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     private let scroll = UIScrollView(), canvas = NovelReaderCanvas(), backdrop = UIImageView()
     private let controls = UIView(), top = UIStackView(), bottom = UIStackView()
     private let position = UILabel(), progress = UISlider(), purchase = UIButton(type: .system), retryImages = UIButton(type: .system)
-    private var pages: [NovelReaderPage] = []
-    private var currentPage = 0
+    var pages: [NovelReaderPage] = []
+    var currentPage = 0
     private var renderedContent: NovelContent?, renderedSettings: NovelReadingSettings?, renderedSize = CGSize.zero
     private var renderedChapter = ""
     private var imageSizes: [Int: CGSize] = [:], images: [Int: UIImage] = [:]
@@ -193,7 +193,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     private func publishAnchor() {
         guard !positioning, isPageVisible, let anchor = currentAnchor() else { return }; session.display(anchor)
     }
-    private func showPage(_ index: Int, animated: Bool) {
+    func showPage(_ index: Int, animated: Bool) {
         guard !session.loading, !animating else { return }
         if index < 0 { session.jump(session.chapterIndex - 1, ratio: 1); return }
         if index >= pages.count {

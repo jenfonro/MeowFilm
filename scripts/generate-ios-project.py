@@ -6,7 +6,7 @@ import plistlib
 
 ROOT = Path(__file__).resolve().parents[1]
 
-APPLICATION_DIRECTORIES = ("Application", "Composition", "Navigation", "Presentation")
+APPLICATION_DIRECTORIES = ("Application", "Composition", "Debug", "Navigation", "Presentation")
 # Prepared by scripts/prepare-ios-runtime.py; regenerable inputs, not sources.
 NODE_MOBILE_FRAMEWORK = "../../.cache/nodejs-mobile/ios/NodeMobile.xcframework"
 RUNTIME_PAYLOAD = "../../.cache/ios-runtime/$(MEOW_RUNTIME_SDK)-$(MEOW_RUNTIME_ARCH)/Runtime"
@@ -89,7 +89,7 @@ def generate():
         "runtimeTestMovie", "runtimeTestMovieBuild", "runtimeTestResources",
         "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
-    libraries = ["MeowContracts", "MeowStorage", "MeowPlayback", "MeowPlaybackVideo", "MeowAccounts", "MeowUI", "MeowRuntime",
+    libraries = ["MeowContracts", "MeowDebug", "MeowStorage", "MeowPlayback", "MeowPlaybackVideo", "MeowAccounts", "MeowUI", "MeowRuntime",
                  "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature", "MeowNovelFeature"]
     objects = []
     def obj(key, content):

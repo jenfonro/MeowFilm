@@ -5,8 +5,8 @@ import MeowUI
 @MainActor
 public final class NovelDetailViewController: PageViewController {
     public var onRead: ((NovelBook) -> Void)?
-    private let feature: NovelFeature
-    private var book: NovelBook
+    let feature: NovelFeature
+    var book: NovelBook
     private let titleLabel = UILabel(), author = UILabel(), intro = UILabel(), latest = UILabel()
     private let shelf = UIButton(type: .system), read = UIButton(type: .system)
     private var task: Task<Void, Never>?

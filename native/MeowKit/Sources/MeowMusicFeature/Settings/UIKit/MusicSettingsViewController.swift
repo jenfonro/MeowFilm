@@ -5,11 +5,11 @@ import MeowUI
 
 @MainActor
 public final class MusicSettingsViewController: HostingPageViewController<MusicSettingsContent> {
-    private let model: MusicViewModel
-    private let appearance: MusicAppearancePreferencesStore
-    private weak var router: (any MusicUIRouting)?
+    let model: MusicViewModel
+    let appearance: MusicAppearancePreferencesStore
+    weak var router: (any MusicUIRouting)?
     private var renderedTheme: PageTheme?
-    private let sourceSettings: MusicHomeSourceSettingsModel
+    let sourceSettings: MusicHomeSourceSettingsModel
 
     public init(
         model: MusicViewModel,
@@ -77,7 +77,7 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
             selectCatalogSource: { [weak self] in self?.sourceSettings.select($0) }))
     }
 
-    private func open(_ destination: MusicSettingsDestination) {
+    func open(_ destination: MusicSettingsDestination, animated: Bool = true) {
         let controller: UIViewController
         switch destination {
         case .aggregation:
@@ -93,7 +93,7 @@ public final class MusicSettingsViewController: HostingPageViewController<MusicS
         case .metadata:
             controller = MusicMetadataSettingsViewController(model: model, appearance: appearance)
         }
-        navigationController?.pushViewController(controller, animated: true)
+        navigationController?.pushViewController(controller, animated: animated)
     }
 }
 #endif

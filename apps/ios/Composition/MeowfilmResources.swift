@@ -1,5 +1,6 @@
 import Foundation
 import MeowContracts
+import MeowDebug
 import MeowStorage
 import MeowMusicFeature
 import MeowMusicPlatform
@@ -31,13 +32,21 @@ struct MeowfilmResources: Sendable {
     let novelRules: NovelRuleProcessor
     let novelRuntime: NovelRuntime
 
-    init() throws {
+    init(dataRootOverride: URL? = nil, debugHandshake: DebugNodeHandshake? = nil) throws {
         // A sideloading host may rewrite the installed bundle identifier while
         // signing. Product storage identities are stable and never signer-derived.
         try Task.checkCancellation()
-        let root = try SQLiteDatabase.canonicalSystemBaseURL(FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
-            .appendingPathComponent("meowfilm", isDirectory: true)
+        let root: URL
+        if let dataRootOverride {
+            let normalized = dataRootOverride.standardizedFileURL
+            try FileManager.default.createDirectory(at: normalized, withIntermediateDirectories: true)
+            root = try SQLiteDatabase.canonicalSystemBaseURL(normalized)
+        } else {
+            root = try SQLiteDatabase.canonicalSystemBaseURL(FileManager.default.url(
+                for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))
+                .appendingPathComponent("meowfilm", isDirectory: true)
+        }
+        DebugRuntime.current?.session.updateDataRoot(root)
         let database = try SQLiteDatabase(dataRoot: root)
         self.database = database
         let resources = root.appendingPathComponent("resources-v1", isDirectory: true)
@@ -52,7 +61,11 @@ struct MeowfilmResources: Sendable {
         musicHomeSnapshot = MusicNativeHomeSnapshotDocument(database: database)
         let filmSettings = MeowfilmNativeSettings(database: database)
         self.filmSettings = filmSettings
-        let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(dataRoot: root, settings: filmSettings.access))
+        let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(
+            dataRoot: root,
+            settings: filmSettings.access,
+            debugHandshake: debugHandshake
+        ))
         filmSettings.attach(scriptSession)
         self.scriptSession = scriptSession
         let connection: @Sendable () async throws -> RuntimeHTTPClient = {

@@ -1,6 +1,7 @@
 #if os(iOS)
 import UIKit
 import Combine
+import MeowDebug
 
 /// Page resources live until removal; appearance and foreground only control
 /// visibility. Returning to a retained page does not reactivate its content.
@@ -360,16 +361,29 @@ open class PageViewController: UIViewController {
     private func presentError(_ message: String?, retry: (() -> Void)?, acknowledged: (() -> Void)?) -> Bool {
         guard let message, !message.isEmpty, canPresentPageAlert else { return false }
         let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "确定", style: .cancel) { [weak self, weak alert] _ in
+        let confirmHandler: @MainActor () -> Void = { [weak self, weak alert] in
             guard let self, let alert else { return }
             dismissPageModal(alert, completion: acknowledged)
-        })
+        }
+        alert.addAction(UIAlertAction(title: "确定", style: .cancel) { _ in confirmHandler() })
+        var registered: [DebugAlertActionRegistry.RegisteredAction] = [
+            .init(index: 0, label: "确定", kind: "cancel", handler: confirmHandler)
+        ]
         if let retry {
-            alert.addAction(UIAlertAction(title: "重试", style: .default) { [weak self, weak alert] _ in
+            let retryHandler: @MainActor () -> Void = { [weak self, weak alert] in
                 guard let self, let alert else { return }
                 dismissPageModal(alert, completion: retry)
-            })
+            }
+            alert.addAction(UIAlertAction(title: "重试", style: .default) { _ in retryHandler() })
+            registered.append(.init(index: 1, label: "重试", kind: "default", handler: retryHandler))
         }
+        DebugAlertActionRegistry.shared.register(alert: alert, actions: registered)
+        DebugRuntime.log(.uiNav, sub: "alert", event: "present", level: .warn, data: .object([
+            "title": .string("错误"),
+            "message": .string(message),
+            "hasRetry": .bool(retry != nil),
+            "page": .string(String(describing: type(of: self)))
+        ]))
         present(alert, animated: true)
         return true
     }

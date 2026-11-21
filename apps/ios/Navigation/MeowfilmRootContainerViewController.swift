@@ -14,6 +14,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
     private(set) var dock: MeowfilmDockView?
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
     private var sidebar: MeowfilmSidebarView?
+    var isSidebarVisible: Bool { sidebar != nil }
     private let keyboardArea = UILayoutGuide()
     private var readingVisible = false
     private var settingsVisible = false
@@ -207,5 +208,11 @@ final class MeowfilmRootContainerViewController: PageViewController {
             self.sidebar = nil
             if self.isPageActive { completion?() }
         }
+    }
+
+    func dismissSidebarImmediately() {
+        guard let sidebar else { return }
+        sidebar.removeFromSuperview()
+        self.sidebar = nil
     }
 }

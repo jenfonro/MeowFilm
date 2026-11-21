@@ -8,12 +8,12 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
     public var onSelectCategory: ((FilmCategoryModel) -> Void)?
     public var onSelectItem: ((FilmItem) -> Void)?
     public var onSelectPlaybackItem: ((FilmItem, FilmCategory?) -> Void)?
-    private let model: FilmHomeModel
+    let model: FilmHomeModel
     private let images: ArtworkImages
     private let activity = UIActivityIndicatorView(style: .medium)
     private let status = UILabel()
     private let stateView = UIStackView()
-    private var sections: [FilmHomeSection] = []
+    var sections: [FilmHomeSection] = []
     private var items: [Row: FilmItem] = [:]
     private var shownError: FilmHomeError?
     private var renderedSourceID: String?

@@ -1,6 +1,7 @@
 #if os(iOS)
 import UIKit
 import Combine
+import MeowDebug
 import MeowUI
 
 /// The collection's displayed fields and exact selection references, not another
@@ -73,7 +74,7 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     private let activity = UIActivityIndicatorView(style: .medium)
     private let empty = UILabel(), metadataStatus = UILabel()
     private var raw = false
-    private var presentation = FilmSearchResultsPresentation()
+    var presentation = FilmSearchResultsPresentation()
     private var shownSessionError: UUID?
     private var offsets: [Bool: CGPoint] = [:]
     private var dataSource: UICollectionViewDiffableDataSource<Int, FilmSearchResultsPresentation.Identifier>!
@@ -157,6 +158,9 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     }
 
     public func submit(_ query: String) {
+        DebugRuntime.log(.search, sub: "film", event: "submit", level: .debug, data: .object([
+            "query": .string(query)
+        ]))
         do {
             let next = try service.session(for: query, reusing: session)
             guard session !== next || observation == nil else { return }

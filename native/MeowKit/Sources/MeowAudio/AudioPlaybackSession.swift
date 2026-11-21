@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 @preconcurrency import AVFoundation
+import MeowDebug
 
 /// A decoder and a bounded PCM queue. Preparation is silent; the graph is
 /// created only after the product has admitted this session's output.
@@ -52,6 +53,11 @@ public final class AudioPlaybackSession {
         try check()
         guard let first, first.frameCount > 0 else { throw AudioCoreError.invalidMedia }
         position = first.position
+        DebugRuntime.log(.musicPlayback, sub: "audio.kernel", event: "prepare.ok", level: .debug, data: .object([
+            "position": .number(position),
+            "duration": .optional(information?.duration),
+            "firstFrames": .int(first.frameCount)
+        ]))
     }
 
     public func check() throws {
@@ -85,6 +91,11 @@ public final class AudioPlaybackSession {
             try schedule(first)
         }
         try output.play()
+        DebugRuntime.log(.musicPlayback, sub: "audio.kernel", event: "play", level: .debug, data: .object([
+            "rate": .number(Double(requested)),
+            "position": .number(position),
+            "bufferedFrames": .int(bufferedFrames)
+        ]))
         if timer == nil {
             timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.sample() }
@@ -98,6 +109,9 @@ public final class AudioPlaybackSession {
         rate = 0
         output?.pause()
         onTransport?(false, 0)
+        DebugRuntime.log(.musicPlayback, sub: "audio.kernel", event: "pause", level: .debug, data: .object([
+            "position": .number(position)
+        ]))
     }
 
     /// An engine configuration reset does not reopen or seek the byte input.
