@@ -1,6 +1,7 @@
 import Foundation
 import MeowSQLite
 import CryptoKit
+import MeowDebug
 #if canImport(Darwin)
 import Darwin
 #else
@@ -70,7 +71,7 @@ public struct SQLiteRow: Equatable, Sendable {
 /// A connection is borrowed only during an executor closure. Domain repositories
 /// own SQL and projections; this layer never selects a business namespace.
 public final class SQLiteConnection {
-    fileprivate let handle: OpaquePointer
+    let handle: OpaquePointer
     fileprivate let maintenanceDescriptor: Int32
     private var statements: [String: OpaquePointer] = [:]
     private var statementOrder: [String] = []
@@ -498,9 +499,32 @@ public final class SQLiteDatabase: @unchecked Sendable {
         try Self.lock(maintenanceDescriptor, exclusive: exclusive)
         defer { _ = flock(maintenanceDescriptor, LOCK_UN); scheduleMaintenance() }
         let changes = sqlite3_total_changes64(connection.handle)
-        let result = try action(connection)
-        if !connection.isInTransaction && sqlite3_total_changes64(connection.handle) != changes { commits += 1 }
-        return result
+        let debugEnabled = DebugRuntime.isEnabled
+        let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        do {
+            let result = try action(connection)
+            let afterChanges = sqlite3_total_changes64(connection.handle)
+            if !connection.isInTransaction && afterChanges != changes {
+                commits += 1
+                if debugEnabled {
+                    let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+                    DebugRuntime.log(.storage, sub: "sqlite", event: "write.commit", level: .debug, durationMs: ms, data: .object([
+                        "deltaChanges": .integer(afterChanges - changes),
+                        "exclusive": .bool(exclusive)
+                    ]))
+                }
+            }
+            return result
+        } catch {
+            if debugEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+                DebugRuntime.logError(.storage, sub: "sqlite", event: "operation.error", error: error,
+                                      durationMs: ms, data: .object([
+                    "exclusive": .bool(exclusive)
+                ]))
+            }
+            throw error
+        }
     }
 
     /// Non-main synchronous owners can retain their generation/fence through a

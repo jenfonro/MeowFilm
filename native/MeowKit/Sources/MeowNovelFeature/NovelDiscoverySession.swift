@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import MeowDebug
 import MeowRuntime
 
 public struct NovelDiscoveryItem: Identifiable, Equatable, Sendable {
@@ -114,12 +115,16 @@ public final class NovelDiscoverySession: ObservableObject {
 
     public func refresh() {
         guard !closed else { return }
+        DebugRuntime.log(.novel, sub: "discovery", event: "refresh", level: .debug)
         unfinished = .refresh
         if active { begin(.refresh) }
     }
 
     public func loadMore() {
         guard !closed, active, !loading, canLoadMore else { return }
+        DebugRuntime.log(.novel, sub: "discovery", event: "load_more", level: .debug, data: .object([
+            "page": .int(page)
+        ]))
         begin(.page)
     }
 

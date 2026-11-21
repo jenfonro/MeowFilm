@@ -7,8 +7,8 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class MusicAccountsViewController: MusicSettingsPageViewController<MusicAccountsSettingsContent>, UIDocumentPickerDelegate {
-    private let owner: MusicViewModel
-    private let state: MusicAccountsSettingsState
+    let owner: MusicViewModel
+    let state: MusicAccountsSettingsState
     let transfer: MusicAccountTransferState
     private weak var filePicker: UIDocumentPickerViewController?
     private var exportingFile = false

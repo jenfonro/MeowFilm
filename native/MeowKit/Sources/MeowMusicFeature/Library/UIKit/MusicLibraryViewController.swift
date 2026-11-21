@@ -1,13 +1,14 @@
 #if os(iOS)
 import UIKit
 import Combine
+import MeowDebug
 import MeowUI
 
 @MainActor
 public final class MusicLibraryViewController: MusicPageViewController, UICollectionViewDelegateFlowLayout
 {
-    private let model: MusicViewModel
-    private weak var router: (any MusicUIRouting)?
+    let model: MusicViewModel
+    weak var router: (any MusicUIRouting)?
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: UICollectionViewFlowLayout())
     private lazy var heartbeat = PageHeaderTextButton(title: "云喜欢心动") { [weak self] in
         guard let self, self.isPageActive else { return }
@@ -21,8 +22,8 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     private var items: [Data: MusicCollection] = [:]
     private var access: UUID?
     private var request = UUID()
-    private var loading = false
-    private var loadError: String?
+    var loading = false
+    var loadError: String?
     private var shownLoadError: String?
     private var renderedPlaylistAppearance: MusicPlaylistAppearance?
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
@@ -197,7 +198,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         if !model.hasLoadedLibrary, !model.isLoading { loadLibrary(refresh: false) }
     }
 
-    private func loadLibrary(refresh: Bool = true) {
+    func loadLibrary(refresh: Bool = true) {
         guard isPageActive, model.isAvailable, !model.isClosed, !loading, !model.isLoading else {
             collection.refreshControl?.endRefreshing()
             return
@@ -206,6 +207,9 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         let own = UUID(), access = model.accountAccessGeneration
         request = own; loading = true; loadError = nil; shownLoadError = nil
         renderState()
+        DebugRuntime.log(.musicLibrary, sub: "library", event: "load.start", level: .debug, data: .object([
+            "refresh": .bool(refresh)
+        ]))
         let model = model
         runPageTask { [weak self, model] in
             guard !Task.isCancelled, self?.request == own else { return }
@@ -216,6 +220,11 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             self.loading = false; self.loadError = self.model.notices.error
             self.collection.refreshControl?.endRefreshing()
             self.render()
+            DebugRuntime.log(.musicLibrary, sub: "library", event: "load.end", level: .debug, data: .object([
+                "refresh": .bool(refresh),
+                "collections": .int(self.model.collections.count),
+                "error": .optional(self.loadError)
+            ]))
         }
     }
 

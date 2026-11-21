@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 import MeowRuntime
 
@@ -237,7 +238,12 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
             .sourceUnavailable)
     }
     public func resolve(request: MusicScriptRequest) async throws -> MusicScriptResult<MusicNativeAudio> {
-        try await perform { service in
+        DebugRuntime.log(.musicPlayback, sub: "script.resolve", event: "start", level: .debug, data: .object([
+            "installationId": .string(request.installationID),
+            "siteId": .string(request.siteID),
+            "quality": .string(request.quality)
+        ]))
+        return try await perform { service in
             let execution = try await service.request(request, operation: "resolve", parameters: [
                 "installationId": .string(request.installationID), "platform": .string(request.siteID),
                 "quality": .string(request.quality), "musicInfo": try Self.musicInfo(request.musicInfo),

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import MeowDebug
 
 @MainActor
 public final class FilmCategoryModel: ObservableObject {
@@ -66,6 +67,12 @@ public final class FilmCategoryModel: ObservableObject {
         requestID = id
         let source = source, category = category, filters = filters
         let loadedThrough = lastLoadedOffset
+        DebugRuntime.log(.filmCatalog, sub: "category", event: "load.start", level: .debug, data: .object([
+            "category": .string(category.rawValue),
+            "offset": .int(offset),
+            "replacing": .bool(replacing),
+            "refresh": .bool(refresh)
+        ]))
         let task = Task { [weak self] in
             do {
                 var pageOffset = offset
@@ -96,11 +103,20 @@ public final class FilmCategoryModel: ObservableObject {
                 self.hasMore = nextOffset != nil
                 self.offset = nextOffset ?? pageOffset
                 self.error = cacheError
+                DebugRuntime.log(.filmCatalog, sub: "category", event: "load.ok", level: .debug, data: .object([
+                    "category": .string(category.rawValue),
+                    "itemCount": .int(self.items.count),
+                    "hasMore": .bool(self.hasMore)
+                ]))
                 self.finish(id)
             } catch {
                 guard let self, !self.closed, self.requestID == id else { return }
                 if !(error is CancellationError) && !Task.isCancelled && (error as? URLError)?.code != .cancelled {
                     self.error = FilmHomeError.from(error)
+                    DebugRuntime.logError(.filmCatalog, sub: "category", event: "load.error", error: error, data: .object([
+                        "category": .string(category.rawValue),
+                        "offset": .int(offset)
+                    ]))
                 }
                 self.finish(id)
             }

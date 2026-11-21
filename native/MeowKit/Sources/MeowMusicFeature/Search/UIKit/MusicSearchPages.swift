@@ -8,26 +8,26 @@ public final class MusicSearchViewController: SearchPageViewController,
     UITableViewDelegate
 {
     private enum RowID: Hashable { case history, suggestions, charts }
-    private let model: MusicViewModel
-    private let appearance: MusicAppearancePreferencesStore
-    private weak var router: (any MusicUIRouting)?
-    private let history: SearchHistoryStore
-    private let additionalCategories: [SearchResultCategory]
-    private let primaryTarget: SearchTargetOption
+    let model: MusicViewModel
+    let appearance: MusicAppearancePreferencesStore
+    weak var router: (any MusicUIRouting)?
+    let history: SearchHistoryStore
+    let additionalCategories: [SearchResultCategory]
+    let primaryTarget: SearchTargetOption
     private let table = UITableView(frame: .zero, style: .plain)
     private let historyCell = MusicSearchHistoryCell(style: .default, reuseIdentifier: "history")
     private let suggestionsCell = MusicSearchSuggestionsCell(style: .default, reuseIdentifier: "suggestions")
     private let chartsCell = MusicSearchChartRailCell(style: .default, reuseIdentifier: "charts")
     private let loading = MusicLoadingSkeletonView()
-    private let discoveryPage: MusicSearchDiscoveryModel?
+    let discoveryPage: MusicSearchDiscoveryModel?
     private var historyExpanded = false
     private var rowHeights: [RowID: CGFloat] = [:]
     private var updatingHeights = false
     private var applyingSnapshot = false, needsRender = false
     private var renderedTheme: PageTheme?
-    private var renderedHistory: [String] = [], renderedSuggestions: [String] = []
+    var renderedHistory: [String] = [], renderedSuggestions: [String] = []
     private var renderedExpanded = false
-    private var renderedCards: [MusicSearchChartCardViewData] = []
+    var renderedCards: [MusicSearchChartCardViewData] = []
     private var shownFailures: [MusicSearchDiscoveryModel.Target: MusicServiceError] = [:]
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
 
@@ -142,7 +142,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     public func scrollViewDidScroll(_ scrollView: UIScrollView) { measureMemberDemand() }
     public func scrollViewDidChangeAdjustedContentInset(_ scrollView: UIScrollView) { measureMemberDemand() }
 
-    private func submit(_ keyword: String) {
+    func submit(_ keyword: String, animated: Bool = true) {
         let additional = additionalCategories.first { $0.target.id == searchTargetID }
         guard additional != nil || (model.isAvailable && !model.isClosed) else { return }
         model.query = keyword
@@ -153,7 +153,7 @@ public final class MusicSearchViewController: SearchPageViewController,
             model: model, query: keyword, appearance: appearance, router: router, history: history,
             primaryTarget: primaryTarget, additionalCategories: additionalCategories,
             initialTargetID: additional?.target.id ?? primaryTarget.id
-        ), animated: true)
+        ), animated: animated)
     }
 
     func retryDiscovery() {
@@ -351,7 +351,7 @@ public final class MusicSearchViewController: SearchPageViewController,
 public final class MusicSearchResultsViewController: SearchPageViewController,
     UIPageViewControllerDataSource, UIPageViewControllerDelegate, UITableViewDelegate
 {
-    private enum Kind: Hashable {
+    enum Kind: Hashable {
         case all, songs, playlists, additional(String)
         static let music: [Kind] = [.all, .songs, .playlists]
         var isAdditional: Bool { if case .additional = self { return true }; return false }
@@ -359,34 +359,34 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             switch self { case .all: return "综合"; case .songs: return "单曲"; case .playlists: return "歌单"; case .additional: return "" }
         }
     }
-    private let model: MusicViewModel
-    private let appearance: MusicAppearancePreferencesStore
-    private weak var router: (any MusicUIRouting)?
-    private let preferences: MusicSearchPreferencesStore
-    private let history: SearchHistoryStore
-    private let additionalCategories: [SearchResultCategory]
-    private let primaryTarget: SearchTargetOption
-    private var additionalContents: [String: any SearchResultContent] = [:]
-    private let results: MusicSearchResultsModel
-    private let actions: MusicSearchActions
+    let model: MusicViewModel
+    let appearance: MusicAppearancePreferencesStore
+    weak var router: (any MusicUIRouting)?
+    let preferences: MusicSearchPreferencesStore
+    let history: SearchHistoryStore
+    let additionalCategories: [SearchResultCategory]
+    let primaryTarget: SearchTargetOption
+    var additionalContents: [String: any SearchResultContent] = [:]
+    let results: MusicSearchResultsModel
+    let actions: MusicSearchActions
     private let categories = MusicSearchResultTabsView()
     private let pager = UIPageViewController(transitionStyle: .scroll, navigationOrientation: .horizontal)
     private weak var pagerScrollView: UIScrollView?
     private var pagerOffsetObservation: NSKeyValueObservation?
     private var categoriesHeight: NSLayoutConstraint!
     private var pages: [Kind: MusicSearchTableController] = [:]
-    private var selected = Kind.all
+    var selected = Kind.all
     private var paging = false
     private var pagingOriginIndex: Int?
     private var pagingTargetIndex: Int?
     private var pendingKind: Kind?
     private var songRows: [Data: (song: MusicSearchSong, index: Int)] = [:]
-    private var renderedSongs: [MusicSearchSong] = []
-    private var renderedPlaylists: [MusicPublicBrowseCollection] = []
+    var renderedSongs: [MusicSearchSong] = []
+    var renderedPlaylists: [MusicPublicBrowseCollection] = []
     private var renderedRequest: UUID?
     private var shownFailures: [Int: String] = [:]
-    private var submittedKeyword: String
-    private var kinds: [Kind] {
+    var submittedKeyword: String
+    var kinds: [Kind] {
         if !additionalCategories.isEmpty { return Kind.music + additionalCategories.map { .additional($0.target.id) } }
         return results.preferences.searchPlaylists ? Kind.music : [.songs]
     }
@@ -1003,7 +1003,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             return
         }
     }
-    private func select(_ kind: Kind, animated: Bool) {
+    func select(_ kind: Kind, animated: Bool) {
         guard let target = kinds.firstIndex(of: kind), let page = controller(for: kind) else { return }
         if paging { pendingKind = kind; return }
         let origin = selected

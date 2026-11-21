@@ -39,6 +39,14 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
 
     var selectedPage: MeowfilmPrimaryPage { MeowfilmPrimaryPage.allCases[pages.selectedIndex] }
 
+    var activeContentViewController: UIViewController? {
+        (pages.page(at: pages.selectedIndex) as? MeowfilmPrimaryPageViewController)?.content
+    }
+
+    func contentViewController(for page: MeowfilmPrimaryPage) -> UIViewController? {
+        (pages.page(at: index(of: page)) as? MeowfilmPrimaryPageViewController)?.content
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         view.accessibilityIdentifier = "app.primary"
@@ -64,14 +72,14 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
         prepareSelectedPage()
     }
 
-    func select(_ page: MeowfilmPrimaryPage) {
+    func select(_ page: MeowfilmPrimaryPage, animated: Bool = true) {
         guard let index = MeowfilmPrimaryPage.allCases.firstIndex(of: page) else { return }
-        pages.select(index)
+        pages.select(index, animated: animated)
     }
 
-    func selectChannel(_ channel: MusicPublicBrowseChannel) {
+    func selectChannel(_ channel: MusicPublicBrowseChannel, animated: Bool = true) {
         pendingChannel = channel
-        select(.channels)
+        select(.channels, animated: animated)
         prepareSelectedPage()
     }
 

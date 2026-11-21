@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import MeowDebug
 
 public enum MusicPublicBrowseRequest: Sendable, Hashable {
     case playlists(MusicPublicBrowsePlatform, query: String)
@@ -452,6 +453,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         }
     }
     public func selectFilter(_ id: String) async {
+        DebugRuntime.log(.musicCatalog, sub: "browse", event: "filter.select", data: .object([
+            "filterId": .string(id)
+        ]))
         guard available, visible, !isActing, selectedFilter != id,
               filters.contains(where: { $0.id == id }), case .discovery(.channel(let channel, _)) = request else { return }
         request = .discovery(.channel(channel, tag: id))
@@ -585,6 +589,9 @@ public struct MusicPublicBrowseActionIntent: Sendable {
         return result
     }
     public func refresh() async {
+        DebugRuntime.log(.musicCatalog, sub: "browse", event: "refresh", data: .object([
+            "isHome": .bool(isHome)
+        ]))
         if isHome {
             // Reentry joins the complete home read, including its continuations.
             if let homeTask { await homeTask.work.value; return }

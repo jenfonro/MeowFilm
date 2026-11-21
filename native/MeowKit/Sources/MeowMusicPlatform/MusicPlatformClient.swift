@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 import MeowRuntime
 
@@ -97,6 +98,8 @@ public actor MusicPlatformClient {
                         candidate: RuntimeValue? = nil,
                         authorize: (@Sendable () throws -> Void)? = nil) async throws -> RuntimeValue {
         let writing = Self.writes.contains(operation), dispatch = MusicPlatformDispatch()
+        let debugEnabled = DebugRuntime.isEnabled
+        let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         do {
             guard !closed, !shuttingDown else { throw MusicServiceError.closed }
             try Task.checkCancellation()
@@ -139,8 +142,25 @@ public actor MusicPlatformClient {
                     throw MusicServiceError.staleResult
                 }
             }
+            if debugEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+                DebugRuntime.log(.musicPlatform, sub: "\(platform).\(operation)", event: "request.ok",
+                                 level: .debug, durationMs: ms, data: .object([
+                                    "platform": .string(platform),
+                                    "operation": .string(operation),
+                                    "writing": .bool(writing)
+                                 ]))
+            }
             return value
         } catch {
+            if debugEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+                DebugRuntime.logError(.musicPlatform, sub: "\(platform).\(operation)", event: "request.error",
+                                      error: error, durationMs: ms, data: .object([
+                                        "platform": .string(platform),
+                                        "operation": .string(operation)
+                                      ]))
+            }
             if writing && operation != "sms.send" {
                 // Node returns dispatched outcomes in a receipt. A valid remote
                 // error envelope rejects the operation before that boundary.

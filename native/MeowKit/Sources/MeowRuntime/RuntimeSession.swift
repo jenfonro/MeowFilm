@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 
 public protocol RuntimeLaunching: Sendable {
     func connect() async throws -> RuntimeHTTPClient
@@ -94,6 +95,27 @@ public actor RuntimeSession {
         return try? await connection()
     }
 
+    public func debugStatus() -> DebugJSONValue {
+        let connected: Bool
+        let baseUrl: String?
+        if case .success(let client)? = outcome, !client.isClosed {
+            connected = true
+            baseUrl = client.endpointURL.absoluteString
+        } else {
+            connected = false
+            baseUrl = nil
+        }
+        return .object([
+            "connected": .bool(connected),
+            "closed": .bool(closed),
+            "started": .bool(launch != nil),
+            "baseUrl": .optional(baseUrl),
+            "waiterCount": .int(waiters.count),
+            "observerCount": .int(availability.count),
+            "pendingNotifications": .int(notifications.count)
+        ])
+    }
+
     private func notify(_ block: String, generation: UUID) {
         guard !closed, notificationLifetime.current() == generation else { return }
         let startup = launch, id = UUID()
@@ -155,6 +177,10 @@ public actor RuntimeSession {
             return
         }
         if case .success(let client) = result, !client.isClosed {
+            DebugRuntime.current?.session.updateRuntimeEndpoint(client.endpointURL)
+            DebugRuntime.log(.runtimeBridge, sub: "session", event: "connected", data: .object([
+                "baseUrl": .string(client.endpointURL.absoluteString)
+            ]))
             for continuation in availability.values { continuation.yield(client) }
             connectionLifetime?.cancel()
             connectionLifetime = Task { [weak self] in
@@ -162,7 +188,12 @@ public actor RuntimeSession {
                 catch { return }
                 await self?.connectionEnded(client)
             }
-        } else { notificationLifetime.end() }
+        } else {
+            notificationLifetime.end()
+            if case .failure(let error) = result {
+                DebugRuntime.logError(.runtimeBridge, sub: "session", event: "connect.failed", error: error)
+            }
+        }
         let pending = waiters
         waiters.removeAll()
         for waiter in pending.values {

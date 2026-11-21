@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { Session } from 'node:inspector/promises';
+import { Session } from 'node:inspector';
 import { isAbsolute, join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import v8 from 'node:v8';
@@ -342,7 +342,9 @@ export function createNodeDebug(rawOptions) {
     if (value instanceof Date) return Number.isNaN(value.getTime()) ? 'Invalid Date' : value.toISOString();
     if (value instanceof URL) return foldString(value.href);
     if (value instanceof URLSearchParams) return foldString(value.toString());
-    if (typeof Headers === 'function' && value instanceof Headers) {
+    // Avoid touching globalThis.Headers: on Node 18 / jitless iOS NodeMobile it triggers
+    // lazy loading of Undici which fails when WebAssembly is unavailable.
+    if (typeof value.entries === 'function' && Object.prototype.toString.call(value) === '[object Headers]') {
       const out = {};
       for (const [k, v] of value.entries()) out[k] = foldString(v);
       return out;
@@ -565,12 +567,17 @@ export function createNodeDebug(rawOptions) {
       ensureDumpsDir();
       const session = new Session();
       session.connect();
+      const post = (method, params) => new Promise((resolvePost, rejectPost) => {
+        const cb = (error, result) => error ? rejectPost(error) : resolvePost(result);
+        if (params === undefined) session.post(method, cb);
+        else session.post(method, params, cb);
+      });
       try {
-        await session.post('Profiler.enable');
-        await session.post('Profiler.start');
+        await post('Profiler.enable');
+        await post('Profiler.start');
         await abortableDelay(durationMs, signal);
-        const { profile } = await session.post('Profiler.stop');
-        await session.post('Profiler.disable').catch(() => {});
+        const { profile } = await post('Profiler.stop');
+        await post('Profiler.disable').catch(() => {});
         const fileName = `${formatDumpTimestamp()}-node.cpuprofile`;
         const targetPath = join(dumpsDir, fileName);
         const tmpPath = join(dumpsDir, `.tmp-${process.pid}-${++tmpSeq}-${randomBytes(4).toString('hex')}`);

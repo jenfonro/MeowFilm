@@ -2,6 +2,7 @@
 import Foundation
 import Combine
 import MeowContracts
+import MeowDebug
 import MeowPlayback
 import MeowStorage
 import MeowUI
@@ -475,6 +476,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         do { epoch = try enter() } catch { return }
         let token = UUID(); loadID = token; libraryState.isLoading = true
         defer { if loadID == token { libraryState.isLoading = false } }
+        let started = DispatchTime.now().uptimeNanoseconds
+        DebugRuntime.log(.musicLibrary, sub: "model", event: "load.start", level: .debug)
         do {
             if let service {
                 let nextState = try await service.state()
@@ -500,8 +503,17 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 beginPlaybackMetadata(restoreOnly: candidate == nil)
                 observeSimilarMode()
                 await loadRecommendationState(refreshQueue: false)
+                let elapsedMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+                DebugRuntime.log(.musicLibrary, sub: "model", event: "load.end", level: .debug, durationMs: elapsedMs, data: .object([
+                    "collections": .int(libraryState.collections.count),
+                    "queue": .int(playbackState.queue.count),
+                    "platforms": .int(libraryState.platforms.count)
+                ]))
             }
-        } catch { report(error, epoch: epoch, operation: "读取曲库与播放状态", kind: .library) }
+        } catch {
+            DebugRuntime.logError(.musicLibrary, sub: "model", event: "load.error", error: error)
+            report(error, epoch: epoch, operation: "读取曲库与播放状态", kind: .library)
+        }
     }
 
     public func updateSettings(_ change: MusicSettingsChange) async {

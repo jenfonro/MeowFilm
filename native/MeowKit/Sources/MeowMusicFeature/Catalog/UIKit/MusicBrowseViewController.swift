@@ -6,11 +6,11 @@ import MeowUI
 @MainActor
 public final class MusicBrowseViewController: MusicPageViewController, UICollectionViewDelegate {
     private static let sectionHorizontalInset: CGFloat = 16
-    private let model: MusicViewModel
-    private let page: MusicPublicBrowseViewModel?
-    private weak var router: (any MusicUIRouting)?
-    private let embedded: Bool
-    private var sections: [MusicPublicBrowseSection] = []
+    let model: MusicViewModel
+    let page: MusicPublicBrowseViewModel?
+    weak var router: (any MusicUIRouting)?
+    let embedded: Bool
+    var sections: [MusicPublicBrowseSection] = []
     private struct ItemID: Hashable {
         let section: String
         let item: String?
@@ -48,8 +48,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     private var observationAccess: UUID?
     private var observationNeedsRestart = false
     private var shownReadError: String?
-    private var renderedFilters: [MusicPublicBrowseFilter] = []
-    private var renderedFilter = ""
+    var renderedFilters: [MusicPublicBrowseFilter] = []
+    var renderedFilter = ""
     private var automaticPaginationHeld = false
     private var moreButton: PageHeaderButton?
     private var renderedActionsKey: BrowseActionsKey?
@@ -278,7 +278,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         open(row.item, section: row.section)
     }
 
-    private func open(_ item: MusicPublicBrowseItem, section: MusicPublicBrowseSection) {
+    func open(_ item: MusicPublicBrowseItem, section: MusicPublicBrowseSection) {
         switch item.content {
         case .collection(let value): router?.showPublicCollection(value)
         case .channel(let value): router?.selectChannel(value)
@@ -308,7 +308,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         loadAutomaticNextPage()
     }
 
-    private func loadAutomaticNextPage() {
+    func loadAutomaticNextPage() {
         guard let page, page.request != .discovery(.home),
               isPageVisible, !automaticPaginationHeld, page.error == nil, !page.isLoading,
               !page.requiresExplicitNext, !page.usesPageNavigation, page.nextCursor != nil else { return }
@@ -776,7 +776,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         collection.backgroundView = statusView
     }
 
-    private func selectChoice(_ id: String, section: MusicPublicBrowseSection) {
+    func selectChoice(_ id: String, section: MusicPublicBrowseSection) {
         guard let page, let intent = page.makeActionIntent() else { return }
         if section.tabs.contains(where: { $0.id == id }) {
             runPageTask { await page.selectSectionTab(id, sectionID: section.id, intent: intent) }
@@ -785,7 +785,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
     }
 
-    private func play(_ item: MusicPublicBrowseItem, section: MusicPublicBrowseSection,
+    func play(_ item: MusicPublicBrowseItem, section: MusicPublicBrowseSection,
                       startingAt selected: MusicRemoteTrack? = nil) {
         guard let page else { return }
         let account = model.searchAccessGeneration

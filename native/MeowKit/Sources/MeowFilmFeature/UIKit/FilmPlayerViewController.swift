@@ -14,7 +14,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     private let presentationOwner = UUID()
     public var filmPlaybackModel: FilmPlaybackModel? { model }
     public var onDismiss: (() -> Void)?
-    private let model: FilmPlaybackModel
+    let model: FilmPlaybackModel
     private let video = UIView()
     private let top = UIStackView(), bottom = UIStackView()
     private let transport = UIStackView(), sourceControls = UIStackView(), controlGroups = UIStackView()

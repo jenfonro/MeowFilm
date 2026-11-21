@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowStorage
 import MeowRuntime
 
@@ -136,6 +137,10 @@ public actor NovelLibrary {
             guard try db.execute("UPDATE ios_novel_books SET onShelf=?,row_revision=row_revision+1 WHERE id=?",
                 [.bool(present), .text(id)]) == 1 else { throw NovelError.invalidResponse }
         }
+        DebugRuntime.log(.novel, sub: "shelf", event: "set", level: .debug, data: .object([
+            "bookId": .string(id),
+            "present": .bool(present)
+        ]))
     }
     public func pin(_ id: String) async throws {
         try checkOpen()

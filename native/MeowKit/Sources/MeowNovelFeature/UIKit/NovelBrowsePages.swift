@@ -1,6 +1,7 @@
 #if os(iOS)
 import UIKit
 import Combine
+import MeowDebug
 import MeowUI
 
 @MainActor
@@ -19,7 +20,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDataS
     private var kindsTop: NSLayoutConstraint!
     private var tableTop: NSLayoutConstraint!
     private var layoutWidth: CGFloat = -1
-    private var renderedBooks: [NovelBook] = []
+    var renderedBooks: [NovelBook] = []
     private var renderedTarget = ""
     private var shownError: String?
 
@@ -201,7 +202,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     private var theme: PageTheme
     private var subscription: AnyCancellable?
     private var active = false
-    private var rows: [NovelSearchBook] { session.books }
+    var rows: [NovelSearchBook] { session.books }
     public init(feature: NovelFeature, theme: PageTheme, matchingBook: NovelBook? = nil) {
         session = NovelSearchSession(feature: feature, matchingBook: matchingBook); self.theme = theme
         super.init(nibName: nil, bundle: nil)
@@ -225,7 +226,12 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         }
         render()
     }
-    public func submit(_ query: String) { active = true; session.submit(query); if isViewLoaded { render() } }
+    public func submit(_ query: String) {
+        DebugRuntime.log(.search, sub: "novel", event: "submit", level: .debug, data: .object([
+            "query": .string(query)
+        ]))
+        active = true; session.submit(query); if isViewLoaded { render() }
+    }
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         if !session.query.isEmpty { submit(session.query) }

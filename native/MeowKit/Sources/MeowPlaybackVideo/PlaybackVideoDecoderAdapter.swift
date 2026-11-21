@@ -1,5 +1,6 @@
 import Foundation
 import MeowContracts
+import MeowDebug
 import MeowPlayback
 import MeowVideoKernel
 
@@ -11,6 +12,9 @@ public func makePlaybackVideoDecoder() throws -> any PlaybackVideoDecoding {
 
 @MainActor
 public func makePlaybackVideoDecoder(engine: PlaybackVideoEngine) throws -> any PlaybackVideoDecoding {
+    DebugRuntime.log(.filmPlayback, sub: "video.decoder", event: "create", level: .debug, data: .object([
+        "engine": .string(String(describing: engine))
+    ]))
     switch engine {
     case .ksPlayer: return try makePlaybackVideoDecoder()
     case .aether:

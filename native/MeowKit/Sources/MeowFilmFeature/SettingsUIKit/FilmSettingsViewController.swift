@@ -4,7 +4,7 @@ import MeowUI
 
 @MainActor
 public final class FilmSettingsViewController: PageViewController {
-    private let model: FilmSettingsModel
+    let model: FilmSettingsModel
     private var list: FilmSettingsMenuController?
 
     public init(model: FilmSettingsModel, themeProvider: any PageThemeProviding) {
