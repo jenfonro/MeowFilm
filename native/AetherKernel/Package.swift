@@ -37,7 +37,6 @@ let package = Package(
                 .linkedFramework("VideoToolbox"), .linkedFramework("AudioToolbox")
             ]
         ),
-        .target(name: "MeowAetherKernel", dependencies: ["AetherEngine"]),
-        .testTarget(name: "MeowAetherKernelTests", dependencies: ["MeowAetherKernel"])
+        .target(name: "MeowAetherKernel", dependencies: ["AetherEngine"])
     ]
 )

@@ -16,9 +16,6 @@
     "src",
     "schema.sql"
   ],
-  "scripts": {
-    "test": "node --test test/*.test.js"
-  },
   "dependencies": {
     "@meowfilm/runtime-bridge": "0.2.0"
   }

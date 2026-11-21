@@ -184,7 +184,7 @@ error
 ## 当前格式纪律
 
 - 活动代码只支持当前搜索偏好、历史、平台页和 snapshot 格式。
-- 当前格式变化必须同时更新 Library owner、应用准入、Coordinator、平台页解析、UI consumer 和测试夹具。
+- 当前格式变化必须同时更新 Library owner、应用准入、Coordinator、平台页解析和 UI consumer。
 - 不兼容数据保持原样并明确失败；未经用户授权不得清理或覆盖。
 
 ### 页面保留与恢复

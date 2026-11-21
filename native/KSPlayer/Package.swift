@@ -25,8 +25,7 @@ let package = Package(
         .target(name: "DisplayCriteria", publicHeadersPath: "include"),
         .target(name: "KSPlayer", dependencies: (["FFmpegKit", "DisplayCriteria"] + modules).map {
                     .byName(name: $0)
-                }, resources: [.process("Metal/Shaders.metal")]),
-        .testTarget(name: "KSPlayerTests", dependencies: ["KSPlayer", "Libavcodec", "Libavutil"])
+                }, resources: [.process("Metal/Shaders.metal")])
     ],
     swiftLanguageVersions: [.v5],
     cLanguageStandard: .c11

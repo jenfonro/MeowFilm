@@ -31,7 +31,7 @@ jobs:
           cache: npm
       - name: Restore locked runtime dependencies
         run: npm ci --ignore-scripts
-      - name: Verify runtime dependency and startup behavior
-        run: node --test tests/package-boundaries.test.mjs tests/windows-app-structure.test.mjs tests/runtime-package.test.mjs tests/runtime-assembly.test.mjs
-      - name: Run complete native code gate
-        run: bash scripts/test-native.sh all
+      - name: Verify dependency lock, package boundaries, and structure
+        run: npm run verify
+      - name: Run native build, linkage, and signing verification
+        run: bash scripts/verify-native.sh

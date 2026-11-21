@@ -1,9 +1,6 @@
-using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
 using MeowFilm.Threading;
 using Microsoft.UI.Dispatching;
-
-[assembly: InternalsVisibleTo("MeowFilm.Windows.Tests")]
 
 namespace MeowFilm.SystemMedia;
 

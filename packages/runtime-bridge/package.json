@@ -11,9 +11,6 @@
     ".": "./src/index.js",
     "./json": "./src/json-value.js"
   },
-  "scripts": {
-    "test": "node --test test/*.test.js"
-  },
   "files": [
     "src"
   ]

@@ -128,59 +128,8 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 App 关闭先停止接纳并排空规则执行／来源任务；规则适配的 prepare／clear／close 共享物理排空，关闭不提前越过已接纳 clear，也不关闭借用的 runtime。音乐薄适配器拒绝新工作、取消并排空已接纳的调用与传输，通过 `music.script.close` 的 `closed:true, cleanupComplete:true` 回执确认音乐模块收口，空实例清单或连接断开不等于清理成功。并发／重复关闭共用同一终态，取消等待者不放弃收尾。音乐不关闭共享连接／Cat 模块；App 最后关闭并等待共享连接和 Node 线程。数据清除仍按既有下次冷启动流程覆盖当前共享数据库、原始资源和运行器数据，不在原进程重建 Node。
 
-下列为验证入口及职责，不代表本轮已经执行；编译、传输替身与真实 App 业务须分别记录。
 
-- Swift 规则精确 filter：`FilmRuleLifecycleTests|FilmRulePersistenceTests|FilmRuleReferenceTests|FilmRuleTextTests`，覆盖原生分组 CAS／回执／失败、离线默认及文本规范化、预览取消和物理排空、UTF16 每码元往返；传输替身不代表真实 Node。
-- `FilmSettingsDocumentTests` 覆盖类型化字段、revision CAS、按块通知和事务失败；领域测试 `FilmCatNativeSettingsTests`、`PanAccountServiceTests|PanAccountsModelTests|PanLoginModelTests`、`FilmTMDBServiceTests`、`FilmPlaybackSettingsModelTests` 分别核对原生保存和在线业务边界。
-- `MeowfilmNativeSettingsHostTests/testTypedSettingsRejectUnknownFieldsAndPreserveDeclaredTextThroughNodeMobile` 在真实 App 内核对未知字段拒绝及声明文本字段经原生 SQLite、私密设置通知和 NodeMobile HTTP 的往返。拒绝非空账号凭据基线，teardown 恢复原设置并等待运行器应用；主机测试或编译不能替代此 NodeMobile 链验证。
-- `MeowfilmRuntimeTests/FilmSettingsPlatformTests`：真实前台 UIKit 草稿、导航生命周期、控件、失败／重试、确认、取消、窄／宽视口和大字体截图。普通规则配置使用共享数据库中的原生规则关系，规则执行才走 NodeMobile；来源状态／调用仍有协议夹具，不能替代实际脚本装载验收。
-- `MeowfilmFilmSettingsHostTests`：原生规则保存／草稿一致性与真实 Node 预览，固定共享 reference cases 每例两次、Unicode 属性／前后瞻／捕获／g-y／孤立码元，以及正则取消／截止／长编译／全局删除后的恢复；固定 JSON 以内嵌 Swift 常量进入宿主测试，不依赖产品载荷包含 test 目录。Node 宿主的 `native-json` 用例另保留通用无 I/O、内存失败、循环、排队／关闭与真实 C 入口不可捕获中断覆盖。Cat HTTP 五阶段与原生来源／客户端目录持久化、落盘前换代拒旧检测、前台确认／失败弹窗仍保留。显式重启不是实际内存超限实验；后台快照不能替代前台系统弹窗。`MeowfilmRuntimeHostTests` 在同一个 NodeMobile 中并发调用 source 与影视规则，验证共享载体但 Runtime／Context 独立，不另启运行器。
-
-规则载体的精确 `MeowfilmAcceptance` 选择如下；每项须实际执行，编译或跳过不算规则载体通过：
-
-```text
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testGroupDraftSurvivesNavigationAndRestoreAndInlineTestNeverSave
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRulesGroupSaveFailureRetainsDraftAndRetryPreservesOtherSavedGroups
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testModelLoadsNativeRulesAndLocalSourcesAndCloseDoesNotCloseServices
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testNarrowWideLargeTypeAndEmptyScreensProduceRealUIKitAttachments
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testPageSaveNormalizesClearedRowsAndStaleFieldsCannotChangeSuccessor
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testAddAndDefaultsOnlyChangeCurrentGroupDraftAndTestStaysInline
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testInlineEpisodeTestsUseThisGroupDraftAndAssociatedSavedGroupOnly
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testInlineRuleTestCancellationOnHiddenPageDoesNotPublishOrSave
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testNativeGroupSaveWhilePreviewHeldKeepsReceiptAfterPageRemovalAndWaiterCancellation
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleFieldsShowEditableFlagsBesideReplacementInTheSameCard
--only-testing:MeowfilmRuntimeTests/FilmSettingsPlatformTests/testRuleResultDisplayDoesNotReplaceLosslessBusinessText
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileRulesUseSameSavedAndDraftEntryAndKeepIsolatedUTF16
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileGroupSaveAndDraftPreviewPreserveAssociatedSavedGroups
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileEntryMatchesEverySharedReferenceCaseTwice
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileUnicodeAssertionsCapturesAndStatefulRulesRepeatExactly
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSettingsHostTests/testNodeMobileRuleCancellationDeadlineCompilationAndGlobalDeletionDrainThenRecover
--only-testing:MeowfilmRuntimeTests/MeowfilmRuntimeHostTests/testNativeSourceAndNodeRulesUseIndependentRuntimesInTheSameApp
-```
-
-- `MeowfilmScriptShutdownHostTests` 仅设 `TEST_RUNNER_MEOWFILM_SCRIPT_SHUTDOWN=1` 后单独运行：真实音乐模块关闭后 Cat 仍可访问，App 最终关闭共享连接并等待 Node 退出；该测试会终止本进程装配，默认跳过，不能与其他宿主业务用例放在同次调用。
-- 六块原生设置使用 `MeowfilmNativeSettingsColdStartTests/testRepeatedAppProcessesRestoreNativeSettingsWithoutReinstalling`，配合现场新建的 `TEST_RUNNER_MEOWFILM_NATIVE_SETTINGS_COLD_RUN_ID="$(uuidgen)"`，在单次 `xcodebuild test-without-building` 中设置 `-test-iterations 2 -test-repetition-relaunch-enabled YES` 并仅选择该方法。第一轮真实关闭运行器后离线连续保存六块最终配置，第二轮验证原生文档和运行器冷读，读取不回写、不重放离线通知。检查点只接受相同 runID、App 身份／安装路径／数据容器及不同 PID；恢复完成后清除合成凭据与测试猫源。两轮各保留 `native-settings-cold-<runID>-<phase>.json` 附件，仅含阶段、身份、路径、PID和成功标记，不含设置值或凭据。必须核对恰好 prepare／restore 各一次、均通过且无 skip；两次独立 Xcode 调用可能重新安装并更换容器，不能代替此原容器验收。
-- 冷启动必须分两次独立 `xcodebuild test`／`test-without-building`，同一专用模拟器：先仅运行 `MeowfilmCatColdStartPrepareTests` 并设置 `TEST_RUNNER_MEOWFILM_CAT_COLD_PHASE=prepare`，结束宿主进程后再仅运行 `MeowfilmCatColdStartRestoreTests`，设为 `restore`。脚本私有卷计数证明启用项恢复一次、停用项未执行、没有自动检测且 tombstone 未复活；restore 清理两条测试安装。普通测试运行跳过这两个显式跨进程场景，不能把跳过当作冷启动通过。
-- TMDB／豆瓣配置冷启动使用同一个专用模拟器，在**单次** `xcodebuild` 中重复两轮，并要求新宿主进程、原 App 数据容器与原安装路径。官方 `man xcodebuild` 的 `-test-repetition-relaunch-enabled YES` 配合 `-test-iterations 2` 要求每轮使用新进程；免重装仍须由本次真实结果核对，不能由参数推定。使用覆盖当前测试源码的 `MeowfilmAcceptance` 构建产物，将 `IOS_TMDB_COLD_XCTESTRUN` 指向对应 `.xctestrun`，`IOS_SIMULATOR_UDID` 指向全程独占的同一设备，`IOS_TMDB_COLD_RESULT` 指向尚不存在的结果包路径：
-
-```sh
-TEST_RUNNER_MEOWFILM_TMDB_COLD_RUN_ID="$(uuidgen)" \
-xcodebuild test-without-building \
-  -xctestrun "$IOS_TMDB_COLD_XCTESTRUN" \
-  -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_UDID" \
-  -parallel-testing-enabled NO \
-  -maximum-concurrent-test-simulator-destinations 1 \
-  -test-iterations 2 \
-  -test-repetition-relaunch-enabled YES \
-  -only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartRepetitionTests/testRepeatedAppProcessesRestoreSettingsWithoutReinstalling \
-  -resultBundlePath "$IOS_TMDB_COLD_RESULT"
-```
-
-每次调用现场生成全新 UUID；不要复用旧 UUID 或配置自动失败重试。首轮仍只接受默认基址且无凭据的目录，成功保存两供应商合成设置后才在 `Library/Application Support/TMDBColdStartTests/<UUID>.json` 记录 prepare。第二轮读取同一记录，先验证 runID、App 身份、不同 PID、相同数据容器和 App bundle 路径，写入 restoring 防止重复进入，再执行恢复及字段读回断言；同时核对读取未改写原生配置、Node 未另建设置副本。restore 的 teardown 清除合成凭据、恢复默认基址之后，且本轮没有失败，才记录 restore 完成。无效 UUID、损坏记录、身份或路径不符、同进程重入、restoring／已完成记录都失败；失败不靠删除标记伪造完成。记录按 UUID 保留，旧未清夹具仍受原默认设置 guard 拦截；不读取真实秘密。
-
-每轮保留 `tmdb-cold-<UUID>-<phase>.json` XCTest 附件，字段为 `runID`、`phase`、`processID`、`dataContainerPath`、`appBundlePath`、`appBundleIdentifier`、`succeeded`，不包含设置值或凭据。用 `xcrun xcresulttool get test-results summary --path "$IOS_TMDB_COLD_RESULT"`、`get test-results tests --path "$IOS_TMDB_COLD_RESULT"` 及 `xcrun xcresulttool export attachments --path "$IOS_TMDB_COLD_RESULT" --output-path "$IOS_TMDB_COLD_ATTACHMENTS"` 核对本次真实结果：所选方法恰好执行两轮、均通过且无 skip，附件恰好为同一 runID 的 prepare、restore 各一次且 `succeeded=true`，PID 不同、数据容器及 App bundle 身份／路径一致，并核对日志中阶段间没有安装／重装或清数据。单轮通过、第二轮仍是 prepare、缺少附件、清理失败或任何条件不符均不能算冷启动验收通过，源码编排本身不证明免重装。
-
-原手动入口仍可独立使用：`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartPrepareTests/testSaveSyntheticSettingsForNextAppProcess` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=prepare`；`-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBColdStartRestoreTests/testNextAppProcessRestoresPlainSettingsWithoutNativeWriteback` 配合 `TEST_RUNNER_MEOWFILM_TMDB_COLD_PHASE=restore`。后者可在完整合成设置 guard 通过后执行原断言及凭据清理，包括重复入口失败后遗留的夹具；不跳过 guard、不仅删除阶段文件，部分写入或 guard 不符时须报告而非冒充清理成功。普通两次 `xcodebuild` 不能称为免重装验证。新入口未设 UUID、旧入口未设对应 phase 均显式跳过，跳过不算通过。真实设置 UI 的保存、保留／替换／清除、失败与截图见 `MeowfilmTMDBHostTests`。
+设置持久化、NodeMobile 规则预览、网盘账号与内置接管开关、数据源设置以及页面关闭排空均通过真实 App `--debug` 模式核对（详见[Debug 模式](debug-mode.md)）；静态边界与原生构建校验使用 `bash scripts/verify-native.sh`。
 
 设置不承载首页／搜索业务策略；搜索通过既有 owner 消费其快照。仍不提供任意第三方脚本兼容保证，不以模拟器结果宣称真机后台或实际媒体播放已验证。
 

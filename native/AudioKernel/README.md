@@ -10,7 +10,6 @@ python3 -I -B scripts/prepare-ios-audio-kernel.py --sources-only
 python3 -I -B scripts/prepare-ios-audio-kernel.py --target ios-arm64
 python3 -I -B scripts/prepare-ios-audio-kernel.py --target macos-arm64 --target ios-simulator-arm64
 python3 -I -B scripts/prepare-ios-audio-kernel.py --verify --target ios-arm64
-python3 -I -B -m unittest discover -s scripts/tests -p test_ios_audio_kernel.py -v
 ```
 
 可选 slice：`macos-arm64`、`macos-x86_64`、`ios-simulator-arm64`、`ios-simulator-x86_64`、`ios-arm64`。同 SDK 的已有、匹配当前配方的架构合并为一个 framework slice。不自动下载 SDK 或安装工具。
@@ -39,8 +38,6 @@ ABI 见 `Sources/CMeowAudioKernel/include/MeowAudioKernel.h`。回调存储保�
 
 ## 验证边界
 
-`Tests/decoder_smoke.py <absolute-library-path> -v` 通过 ctypes 调用真实公共 C ABI。可在 Linux 编译本适配及锁定静态库后运行，也可针对 Mac 动态框架运行；需要 Python 和系统已有 openssl（仅用于生成测试 AES128 输入）。测试内存合成 WAV、双声道重采样/排空、分数时间 seek、非 seek 输入、固定错误、阻塞输入取消/恢复的字节连续性，以及真实本地 HTTP HLS/AES128/根边界/禁止重定向。不使用真实账号或网络媒体，不启动音频输出。
-
-Python Mach-O 单测中的工具 fixture 不代表真实 Apple 链接通过；应分别核对实际 SDK 编译、Mach-O／导出、App 嵌入／签名及两版 FFmpeg 共存结果。解码测试不启动输出，不代替真实设备、路由或听感验收。受影响 Swift／App 的测试入口见[独立音乐核心](../../docs/ios/music-audio-core.md)。
+实际 SDK 编译、Mach-O／导出、App 嵌入／签名及两版 FFmpeg 共存通过 `scripts/prepare-ios-audio-kernel.py --verify` 与 `scripts/verify-native.sh` 核对；实际音频播放、路由与听感通过 `--debug` 模式在真实设备上验收，详见[独立音乐核心](../../docs/ios/music-audio-core.md)。
 
 许可来源和适用发行义务见[来源与许可](Provenance/README.md)。

@@ -40,7 +40,7 @@ runtime-bridge／script-host 及其运行依赖的原始声明由公共打包器
 
 .NET、音频与影片静态／共享依赖及其他传递组件的发行义务需单独核对。清单中的 `redistributionPermissionVerified` 始终为 false，文件哈希或许可清单不等于分发授权。
 
-新增或删除 Windows 使用的许可文件时，同步修改 `package-licenses.mjs` 的清单与 `tests/windows-licenses.test.mjs`；仅 iOS 使用的许可同步工程资源与 iOS 构建输入策略。
+新增或删除 Windows 使用的许可文件时，同步修改 `package-licenses.mjs` 的清单；仅 iOS 使用的许可同步工程资源与 iOS 构建输入策略。
 
 ## 文件安全
 

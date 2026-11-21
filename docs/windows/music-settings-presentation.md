@@ -80,16 +80,7 @@ official、metadata、quality、search、appearance、首页来源、设备、�
 
 ## 验证边界
 
-本节记录覆盖契约与测试归属；原生测试执行结果单独记录，不以本文作为通过证据。
-
-- 音源管理 UI 覆盖三内置平台与已安装网络源在同一列表中呈现、独立启停、混合启用与权威状态重读；管理条目选择不改变播放候选范围，手动录音选择只作用于对应歌曲。测试归属为 `MusicSourcesSettingsTests.cs` 与 `MusicOnlineTests.cs`。
-- 官方设置持久化覆盖缺省全开且读取不写入、`wy/tx/kg` 独立启停及全关、保存后重读与 owner 重启恢复，以及同职责未知 CAS 结算；测试归属为 `MusicOfficialSourcesPolicyTests.cs`。`MusicSourcesSettingsTests.cs` 覆盖设置页读写真实 owner、重载后反映权威状态。
-- 官方候选与音频原生门禁覆盖自动候选过滤，以及手动录音选择和直接官方音频解析无法绕过关闭状态；关闭内置平台仍允许已启用脚本提供同平台录音，同时验证开关不改变账号、搜索、歌词与封面行为。门禁测试归属为 `MusicOfficialSelectionTests.cs`。`MusicOfficialAudioTests.cs`、`MusicOfficialStandardTests.cs` 保留为现有音频解析、音质与授权基线。
-- 脚本源覆盖本地多选、真实 `music.sources.*` 安装及后续管理、HTTPS 下载拒绝重定向、网络和本地内容共用检查安装流程，以及超过原容量阈值的完整输入。适配与 UI 测试归属为 `MusicOnlineTests.cs`、`MusicScriptIntegrationTests.cs`、`MusicNativeScriptTests.cs`、`SelectedFileSnapshotTests.cs` 和 `MusicSourcesSettingsTests.cs`；公共下载、存储、检测契约由 `tests/music-management.test.mjs` 覆盖，不保留原生第二套目录与下载器测试。
-- 原生 UI 回归覆盖锚点、末段置顶、页头标题与类别切换、两块平铺、优先列表尺寸与移动、让位拖动、整页滚轮、开关、键盘、高对比、取消／资源释放，以及账号和偏好消费者；布局用例位于 `MusicSettingsLayoutTests.cs`。
-- 布局组件回归覆盖 640／544 DIP 临界值、宽窄连续切换、后代状态继承、卸载后停止响应、重载刷新及附加行为禁用／重新启用；设置视图同时检查上置标题、内容宽度和间距和通用外观分区间距。文字回归检查实际节点的系统常规字体与控件角色，保留非空／中性像素、对比度、字形底部及裁切断言；离屏位图 DPI 不代表物理显示器子像素或跨屏验收。
-- 数据源覆盖默认／重启恢复、保存确认、失败后权威回读与职责隔离（`MusicCatalogSourceSettingsTests.cs`），以及启动请求平台、切换旧结果隔离、跨平台详情、设置控件与窄窗布局（`MusicCatalogPersonalTests.cs`、`MusicSettingsLayoutTests.cs`）；酷狗协议与动作归属 `MusicKgDiscoveryTests.cs`。
-- 使用受控测试数据渲染真实 WinUI PNG，对照参考检查 1440、1110 和最小 860×600 的完整桌面壳，以及独立内容区的窄宽度状态。Taste 的浏览器 DOM 检查器不适用于 WinUI；不另造 HTML 冒充原生验证。编译、原生行为回归、截图和真实平台／扬声器／系统 DPI 验收分别记录，不能互相替代。
+音源管理、官方开关持久化与音频门禁、脚本源安装管理、设置锚点／布局／常规字体以及数据源切换，统一通过真实 WinUI 应用 `--debug` 模式（控制面导航、状态快照、分类日志与桌面窗口截图，详见[Debug 模式](debug-mode.md)）验收；不另造 HTML 冒充原生验证。编译、运行日志、截图和真实平台／扬声器／系统 DPI 验收分别记录，不能互相替代。
 
 ## 账号文件入口
 

@@ -1,4 +1,4 @@
-// Windows-owned trees and shared Node tools consumed by its build/test entries.
+// Windows-owned trees and shared Node tools consumed by its build and verification entries.
 // iOS templates are checked in their generated runtime, not as Windows sources.
 export const sourceDirectories = ['apps/windows', 'apps/runtime', 'packages', 'scripts/windows', 'scripts/quickjs'];
 

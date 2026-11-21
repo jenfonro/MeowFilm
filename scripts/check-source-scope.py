@@ -21,29 +21,18 @@ BINARY_TARGETS = {"MeowSQLite": "../SQLite/.cache/Artifacts/MeowSQLite.xcframewo
 def application_membership(base, project_text):
     """Exact source closure in each target, not just PBXFileReference presence."""
     failures = []
-    expected_app, expected_test, expected_runtime = set(), set(), set()
+    expected_app = set()
     for path in base.rglob("*.swift"):
         relative = path.relative_to(base)
         if relative.parts[0] == ".cache":
             continue
         if relative.parts[0] in APPLICATION_DIRECTORIES:
             expected_app.add(relative.as_posix())
-        elif relative.parts[0] == "UITests":
-            expected_test.add(relative.as_posix())
-        elif relative.parts[0] == "RuntimeTests":
-            expected_runtime.add(relative.as_posix())
-        elif relative.parts[0] == "TestSupport":
-            expected_test.add(relative.as_posix())
-            expected_runtime.add(relative.as_posix())
         else:
             failures.append("Unowned App source: " + relative.as_posix())
     objects = dict(re.findall(r"^\s*([A-F0-9]{24}) = \{ (.*) \};$", project_text, re.M))
     referenced = set()
-    for target_name, expected in (
-        ("Meowfilm", expected_app),
-        ("MeowfilmAcceptanceUITests", expected_test),
-        ("MeowfilmRuntimeTests", expected_runtime),
-    ):
+    for target_name, expected in (("Meowfilm", expected_app),):
         if not expected:
             failures.append("Empty App source target: " + target_name)
         targets = [text for text in objects.values()
@@ -79,7 +68,7 @@ def application_membership(base, project_text):
 
 
 def runtime_membership(project_text):
-    """The App owns one embedded framework; hosted tests share that instance."""
+    """The App owns one embedded MeowScriptHost framework."""
     failures = []
     objects = dict(re.findall(r"^\s*([A-F0-9]{24}) = \{ (.*) \};$", project_text, re.M))
     references = [key for key, text in objects.items() if "isa = PBXFileReference;" in text
@@ -247,7 +236,7 @@ def check(root):
             failures.append("Invalid binary target: " + name)
     if not sources:
         failures.append("No package source targets")
-    for folder, expected in (("Sources", sources | systems), ("Tests", tests)):
+    for folder, expected in (("Sources", sources | systems),):
         parent = package / folder
         expected_directories = {directories[target].relative_to(parent).parts[0] for target in expected
                                 if directories[target].is_relative_to(parent)}
@@ -311,9 +300,9 @@ def check(root):
             failures.extend(aether_membership(root))
         except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as error:
             failures.append("Cannot evaluate Aether package boundary: " + str(error))
-    for parent in (root / "apps/ios", package / "Sources", package / "Tests", *(
+    for parent in (root / "apps/ios", package / "Sources", *(
             directory for name, directory in directories.items()
-            if name not in binaries and not directory.is_relative_to(package / "Sources") and not directory.is_relative_to(package / "Tests"))):
+            if name not in binaries and not directory.is_relative_to(package / "Sources"))):
         for path in parent.rglob("*"):
             if parent == root / "apps/ios" and path.relative_to(parent).parts[0] == ".cache":
                 continue

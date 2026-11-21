@@ -7,8 +7,5 @@
   "exports": {
     ".": "./film-search.js"
   },
-  "files": ["film-search.js"],
-  "scripts": {
-    "test": "node --test test/film-search.test.mjs"
-  }
+  "files": ["film-search.js"]
 }

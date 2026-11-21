@@ -38,62 +38,6 @@ HTTP／设置／图片的唯一协议见[元数据运行器](../runtime/metadata
 
 `RuntimeHTTPClient.metadataImageURL` 保留合法 `/v1/tmdb/images/...` 或 `/v1/douban/images/...` 相对 URL；`MeowfilmAssembly.filmImages` 以该 URL 作为既有 `ArtworkImages` 的唯一缓存键，读时才通过 `readMetadataImage` 加入当前 endpoint／独立 request ID，不需要会话访问凭据，并按准确 provider 核对回执。编码数据不设传输／解码输入字节配额，完整结束后再交给 ImageIO 生成最长边不超过 1024 的缩略图；超过 4 MiB 的图片可显示但不进入共享图片缓存；这不等同于独立的原图像素或解码峰值内存上限。解码后容器和指定图片状态都必须完整，部分可解码图也不缓存。相对图片引用协议拒绝绝对、网络路径、穿越及 redirect，不限制运行器 endpoint 的域名或地址。502 模块错误、断流、错 ID、取消／关闭不能返回成功图片；取消仅撤销真实 URLSession task，完成以物理 didComplete 为准，owner 关闭等待 session 排空。普通外部图片仍由 `FilmHTTP.readArtwork` 的独立通道读取，上游 metadata API 凭据不会进入该通道。
 
-## 定向验证入口
+## 验证边界
 
-以下是可执行测试入口，不能代替具体测试运行结果：
-
-- Swift：`bash scripts/test-native.sh test --filter 'FilmSearchSessionTests|FilmSearchSelectionTests|FilmSearchAuthorizationScopeTests|FilmSearchStableIdentityTests|FilmPlaybackSearchContextTests|FilmPlaybackPresentationLifetimeTests|FilmTMDBServiceTests'`，验证完整 Node 卡片、两模式顺序、错误／空／不可用、SSE、停止即撤发布、同 session 恢复、来源准入、固定目标与活跃 reference、展示保留及关闭排空；播放 context 测试验证晚到 reference 更新和重进坐标。stop 迟到数据回归为 `FilmSearchSessionTests/testStopReceiptKeepsEveryDisplayedFieldAfterRejectedSSEUntilSameSessionResume`、`testCancelledAcceptedOpenBindsIdentityWithoutPublishingStopCardsAndResumesThenReleases`；保留既有 SSE／accepted more 取消断言。搜索算法、逐源游标和缓存行为由 Node 搜索测试覆盖，不再用 Swift 替身实现另一套算法。
-- 跨查询详情回归分别验证原生旧 UI 发布被撤销、真实 Node producer 优雅完成、同键缓存复用及配置失效后的物理取消；不能再以原生成功详情字典的调用次数证明统一缓存正确。可控 continuation gate 覆盖晚到旧读者；真实宿主补充 Node 缓存及网络证据。
-- scheme `MeowfilmAcceptance` 的 UIKit 精确方法：`MeowfilmAcceptanceUITests/FilmSearchUIKitTests/testExistingPosterAddsSearchBadgeAndSourceLabelAtNarrowAndWideWidths`、`testSearchContentUsesExistingPostersKeepsBothModesAndDeliversLiveContext`、`testRawTypedZeroCardsKeepSeparateNavigationAndRealFavoritesAcrossReload`（后两项使用同一 target/class 前缀）。使用真实 `FilmPosterCell` 断言长标题、窄宽、普通／聚合／电影／剧集文本、服务器角标和来源标签、深浅色及按压/复用，并保存附件 `film-search-server-posters-<width>-<light|dark>`；固定 Node wire 回执覆盖模式切换和 live context，不冒充引擎执行。
-- 同类的 `testSearchPresentation*` 方法覆盖无变化、前插／移动／删除、单字段更新、选择事实更新、精确不透明 key 及原始／聚合／TMDB 身份转换。`FilmSearchSessionTests` 另覆盖成功 SSE／更多／refresh 的错误通知去重和断流后一次清除；这些行为回归不替代真实页面性能采样。
-- 同 scheme 的 `MusicSearchResultsCellsTests/testTabsKeepStableFramesWhileIndicatorAndColorsFollowPaging`、`testFiveCategoryIndicatorsKeepFixedSizeAndCenterWhenThemeAndSelectionChange` 验证独立短横线、滑动插值、五分类点击／选中态和主题切换；附件 `search-five-category-centered-indicator` 为固定数据原生视图。
-- 同 scheme：`-only-testing:MeowfilmAcceptanceUITests/SearchPageViewControllerTests`；`MusicUIKitRegressionTests` 下的 `testAdditionalSearchCategoryIsLazyAndTargetSubmissionAlwaysSelectsRequestedCategory`、`testGlobalSearchAddsAllFourCategoriesWhenMusicPlaylistSearchIsDisabled`、`testNewMusicSubmissionDuringPendingAdditionalSwipeDoesNotStartSupersededDomain`。
-- 同 scheme 的真实 NodeMobile 精确入口如下。实际 App 协调器验证入口默认目标、真实卡片点击、在途成员交接、详情释放、第二轮后返回再进入及请求次数；临时 Cat HTTP 程序验证完整125条页与第二页；额外验证 Unicode 规则预览与真实搜索输入／聚合结果一致和孤立 UTF16。规则与搜索都经真实 NodeMobile，TMDB 使用 loopback 合成成功空上游并恢复原配置，不访问公网。通道不可用的独立语义仍由消费者协议测试覆盖。
-
-```text
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testRealCatSearchReadsCompleteInstalledSourcePagesAndRetainsDetailIdentity
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testActualCoordinatorEntryUsesMusicAndFilmPageDefaultsWithoutSubmitting
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testActualSearchTapUsesTheDataOwnerAndLiveGroupRawDirectoriesWithoutAnotherSearch
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testNodeMobilePreviewAndSearchUseIdenticalUnicodeRulesInputAndSnapshot
--only-testing:MeowfilmRuntimeTests/MeowfilmFilmSearchHostTests/testNodeMobileSearchKeepsDerivedLoneUTF16AndOriginalTypedMembers
-```
-
-- App 增量构建 scheme 为 `Meowfilm`；上述 UIKit／宿主测试及其构建使用 `MeowfilmAcceptance`。既有海报布局、按压和详情回归可选 `FilmUIKitTests` 的相关方法，不要求全量 UI 测试。
-
-### 真实 TMDB 宿主
-
-新增 Swift 精确 filter（`bash scripts/test-native.sh test --filter '<filter>'`）：
-
-```text
-FilmTMDBServiceTests
-RuntimeHTTPClientTests/testTMDB
-RuntimeHTTPClientTests/testAppDescribeRequiresExactEightModuleOrderVersionsContractsAndMethods
-RuntimeEmbeddedLauncherTests/testPayloadRequiresTheCompleteEightModuleHTTPAssembly
-RuntimeMetadataImageTests
-FilmSearchSessionTests/testNewWordFencesOldPublishingButKeepsRetainedNavigationIdentity
-FilmSearchSessionTests/testMetadataChangeNeedsExplicitNewSessionWithoutDiscardingRetainedDisplay
-```
-
-适配测试验证完整 JSON 和真实 HTTP 参数；HTTP 测试覆盖无访问凭据与端口变化下稳定身份、502／错 ID／redirect／断流／读取预算、物理取消与 owner 关闭。它们不是 NodeMobile 宿主的替代品。
-
-scheme `MeowfilmAcceptance` 的新增精确 `only-testing`：
-
-```text
--only-testing:MeowfilmRuntimeTests/MeowfilmTMDBHostTests/testActualTMDBSettingsSearchDetailsAndArtworkPreserveReplaceClearAndFailedSave
--only-testing:MeowfilmRuntimeTests/MeowfilmTMDBHostTests/testSuccessfulSettingsSaveCancelsActualOldDetailAndKeepsItsNavigationSnapshot
--only-testing:MeowfilmRuntimeTests/MeowfilmTMDBHostTests/testCancelledDetailWaiterLeavesActualProducerToPopulateTheSharedCache
--only-testing:MeowfilmRuntimeTests/MeowfilmTMDBHostTests/testActualArtworkRejectsModuleFailureTruncationAndCancellationWithoutCachingThenRetries
-```
-
-这些用例在实际 App TEST_HOST 中借用唯一 NodeMobile owner；`NWListener` 仅充当本机合成上游，不替换 runtime 模块、Film adapter 或 Artwork：
-
-1. 从真实影视设置菜单进入 TMDB 页，实际字段／保存动作完成配置；以单个明文输入中的合成 token／key 验证回显、替换、空值清除、失败不丢输入且不撤销有效会话、修正后重试。实际搜索／电影与剧集详情确认完整 JSON、zh-CN／page1、没有 configuration，FilmPosterCell 的 ArtworkView 通过实际 `assembly.filmImages` 解码图片；换图片基址不改 warm cache key，无凭据也可由代理正常返回。
-2. 旧 query 的实际上游 detail 挂起，设置保存成功后观察该连接真实断开；不自动搜索，下次同词取得新详情，旧 FilmDetailViewController 保留已得搜索简介／原查询，不接收新会话结果。不能用该真实取消测试代替“故意忽略取消、返回 late-old”的原生 gate 回归。
-3. 普通详情读者取消后，上游仍可完成，后续相同完整请求复用在途／缓存，实际只读上游一次；返回 seed 的原时间、revision、完整度及完整请求身份不变。与第 2 项配置撤权时真实断开分别验证。
-4. 实际 ArtworkView／ArtworkImages 经真实运行器处理上游错误、HTTP 断流、HTTP 200 且 Content-Length 准确但 PNG 缺少 IEND、无法解码和最后消费者取消，失败时图片和缓存均为空；同一相对引用随后显式重取完整 PNG 成功。缺少 IEND 的夹具只移除完整 PNG 最后 12 字节，不以 HTTP 断流或无效短数据代替容器不完整。断开以网络回执观察，不用 sleep。API 凭据不发图片，上游不接收 runtime session／request ID。
-
-本类只接受无凭据的专用模拟器；清理恢复本次读取的非敏感基址并清除合成密码。截图附件 `tmdb-settings-saved-plain-token`、`tmdb-settings-failed-save-retains-input` 由前台实际窗口生成，裁切并 JPEG 压缩、断言 <700KB。两进程设置恢复 selector 和环境见[影视设置](film-settings.md#既有-owner-与专用验证)。
-
-实际图片 owner 关闭另起进程执行 `-only-testing:MeowfilmRuntimeTests/MeowfilmTMDBShutdownHostTests/testAppShutdownDrainsPendingActualArtwork`，环境 `TEST_RUNNER_MEOWFILM_TMDB_SHUTDOWN=1`；不能与复用 App 的其他业务用例同次运行。用真实上游挂起图片，先恢复合成设置，再关闭 App；观察上游断开、共享 runtime 关闭及 Artwork 无成功缓存。未设环境会跳过，不算关闭通过。
-
-Swift、UIKit、真实宿主、独立生命周期和 App 构建须分别记录实际验证结果，不能互相替代。以上合成 HTTP 上游的真实接线不能冒充公网账号／代理可用性；豆瓣不参与当前搜索入口。智能匹配、正式媒体与后台／PiP 的验证范围另见[影视会话](../runtime/film-playback.md)，本页入口不能代替其通过证据。
+搜索会话、SSE 推送、跨查询详情缓存、TMDB 设置与图片加载以及关闭排空均通过真实 App `--debug` 模式验证（详见[Debug 模式](debug-mode.md)）；静态边界、Swift 编译、Simulator 构建与签名校验使用 `bash scripts/verify-native.sh`。构建、本地 `--debug` 观察与真实公网账号／代理及播放验收应分别记录，不能互相替代；智能匹配、正式媒体与后台／PiP 契约另见[影视会话](../runtime/film-playback.md)。

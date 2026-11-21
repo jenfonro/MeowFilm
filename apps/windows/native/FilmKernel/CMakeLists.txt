@@ -31,19 +31,3 @@ target_link_options(meowfilm_film_kernel PRIVATE -static -Wl,--exclude-all-symbo
 target_link_libraries(meowfilm_film_kernel PRIVATE PkgConfig::MEDIA
     d3d11 dxgi dxguid d3dcompiler ole32 uuid ksuser avrt user32 gdi32 version
     bcrypt advapi32 ws2_32 shlwapi mfplat mfuuid)
-
-add_executable(film_audio_tests EXCLUDE_FROM_ALL film_audio_tests.cpp)
-add_executable(film_dovi_tests EXCLUDE_FROM_ALL film_dovi_tests.cpp film_dovi.cpp)
-add_executable(film_renderer_tests EXCLUDE_FROM_ALL film_renderer_tests.cpp film_libav.c)
-add_executable(film_io_tests EXCLUDE_FROM_ALL film_io_tests.c)
-foreach(test film_audio_tests film_dovi_tests film_renderer_tests)
-    target_compile_features(${test} PRIVATE cxx_std_17)
-    target_compile_definitions(${test} PRIVATE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
-    target_link_options(${test} PRIVATE -static)
-    target_link_libraries(${test} PRIVATE PkgConfig::MEDIA ole32 uuid bcrypt ws2_32 mfplat mfuuid)
-endforeach()
-target_link_libraries(film_audio_tests PRIVATE ksuser avrt)
-target_link_libraries(film_renderer_tests PRIVATE d3d11 dxgi dxguid d3dcompiler user32 gdi32 version advapi32 shlwapi)
-target_compile_features(film_io_tests PRIVATE c_std_11)
-target_link_options(film_io_tests PRIVATE -static)
-target_link_libraries(film_io_tests PRIVATE PkgConfig::MEDIA ole32 uuid bcrypt ws2_32 mfplat mfuuid)

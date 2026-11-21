@@ -1,6 +1,6 @@
 # 内嵌 Node 运行底座预检
 
-本工具验证 iOS 的正式 NodeMobile／原生引擎载体，不维护另一套 LX、Cat 或 Reader 实现。独立诊断 App 复用正式构建输入，不能代替 `MeowfilmRuntimeTests` 的真实 App 装配、发布签名或真机验收。
+本工具验证 iOS 的正式 NodeMobile／原生引擎载体，不维护另一套 LX、Cat 或 Reader 实现。独立诊断 App 复用正式构建输入，不能代替完整 App 的 `--debug` 真实运行验证、发布签名或真机验收。
 
 ## 构建与运行
 
