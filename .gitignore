@@ -3,6 +3,7 @@
 !/.gitignore
 !/.gitattributes
 !/AGENTS.md
+!/AGENTS_DEBUG.md
 !/README.md
 !/build-ios.sh
 !/build-windows.ps1
