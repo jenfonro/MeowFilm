@@ -402,7 +402,15 @@ async function pullOnlineSession({ endpoint, sessionId, outDir }) {
     ? catEnv.data
     : Array.isArray(catEnv.data?.categories) ? catEnv.data.categories : [];
   for (const item of categories) {
-    const name = typeof item === 'string' ? item : (item.cat ?? item.name);
+    if (typeof item === 'string') {
+      if (item) knownFiles.add(`logs/${item}.jsonl`);
+      continue;
+    }
+    if (typeof item?.file === 'string' && item.file) {
+      knownFiles.add(item.file);
+      continue;
+    }
+    const name = item?.cat ?? item?.category ?? item?.name;
     if (name) knownFiles.add(`logs/${name}.jsonl`);
   }
   // Child stdout/stderr logs exist only where the platform captures them (Windows).

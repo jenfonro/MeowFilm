@@ -25,7 +25,7 @@ public class DesktopWindow : Window
     public event EventHandler<CancelEventArgs>? Closing;
     internal event DesktopWindowMessageHandler? NativeMessage;
     private readonly NativeSubclass callback;
-    private bool visible, sessionEnding, closingProgrammatically, closed;
+    private bool visible, sessionEnding, closingProgrammatically, closed, keepBackgroundOnShow;
     private DesktopWindowState state;
 
     public DesktopWindow()
@@ -108,6 +108,24 @@ public class DesktopWindow : Window
     }
     public void Show() => AppWindow.Show();
     public void Hide() => AppWindow.Hide();
+    /// <summary>
+    /// Displays the window at normal visible size at the bottom of the desktop Z-order
+    /// without activating or stealing foreground focus. Used by Windows --debug mode.
+    /// </summary>
+    public void ShowBackgroundInactive()
+    {
+        if (closed) return;
+        keepBackgroundOnShow = true;
+        try
+        {
+            AppWindow.Show(false);
+            SetWindowPos(Handle, HwndBottom, 0, 0, 0, 0, SwpNoSize | SwpNoMove | SwpNoActivate);
+        }
+        finally
+        {
+            keepBackgroundOnShow = false;
+        }
+    }
     public void Resize(double width, double height)
     {
         double scale = GetDpiForWindow(Handle) / 96d;
@@ -136,6 +154,13 @@ public class DesktopWindow : Window
             Marshal.StructureToPtr(limits, lParam, false);
             return systemResult;
         }
+        if (message == WmWindowPosChanging && keepBackgroundOnShow)
+        {
+            var pos = Marshal.PtrToStructure<WindowPos>(lParam);
+            pos.HwndInsertAfter = HwndBottom;
+            pos.Flags = (pos.Flags & ~SwpNoZOrder) | SwpNoActivate;
+            Marshal.StructureToPtr(pos, lParam, false);
+        }
         bool handled = false;
         nint result = 0;
         if (NativeMessage is { } handlers)
@@ -148,11 +173,19 @@ public class DesktopWindow : Window
     }
     [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] private struct MinMaxInfo { public NativePoint Reserved, MaxSize, MaxPosition, MinTrack, MaxTrack; }
+    [StructLayout(LayoutKind.Sequential)] private struct WindowPos { public nint Hwnd, HwndInsertAfter; public int X, Y, Cx, Cy; public uint Flags; }
+    private const uint WmWindowPosChanging = 0x0046;
+    private static readonly nint HwndBottom = (nint)1;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
     private delegate nint NativeSubclass(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data);
     [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowSubclass(nint hwnd, NativeSubclass callback, nuint id, nuint data);
     [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(nint hwnd, NativeSubclass callback, nuint id);
     [DllImport("comctl32.dll")] private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wParam, nint lParam);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hwnd);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hwnd, nint hwndInsertAfter, int x, int y, int cx, int cy, uint flags);
 }
 public enum DesktopWindowState { Normal, Minimized, Maximized }
 internal delegate nint DesktopWindowMessageHandler(nint hwnd, int message, nint wParam, nint lParam, ref bool handled);
