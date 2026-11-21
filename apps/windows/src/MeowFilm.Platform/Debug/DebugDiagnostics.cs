@@ -110,9 +110,7 @@ public sealed class DebugDiagnostics : IDisposable
             var forward = await runtime.SendNodeDebugRequestAsync(
                 HttpMethod.Get, "/v1/debug/diagnostics", null, TimeSpan.FromSeconds(10), cancellationToken)
                 .ConfigureAwait(false);
-            nodeSummary = forward.Available
-                ? new { available = true, status = forward.StatusCode, data = forward.Body }
-                : new { available = false, status = forward.StatusCode, reason = forward.Reason ?? "NODE_DEBUG_ENDPOINT_UNAVAILABLE" };
+            nodeSummary = forward.ToDiagnosticSection();
         }
 
         var result = new
@@ -180,15 +178,13 @@ public sealed class DebugDiagnostics : IDisposable
             }
         }
 
-        object? nodeInfo = null;
+        object nodeInfo = new { available = false, reason = "RUNTIME_UNAVAILABLE" };
         if (runtime is { IsConnected: true })
         {
             var forward = await runtime.SendNodeDebugRequestAsync(
                 HttpMethod.Get, "/v1/debug/diagnostics", null, TimeSpan.FromSeconds(5), cancellationToken)
                 .ConfigureAwait(false);
-            nodeInfo = forward.Available
-                ? new { available = true, data = forward.Body }
-                : new { available = false, reason = forward.Reason ?? "NODE_DEBUG_ENDPOINT_UNAVAILABLE" };
+            nodeInfo = forward.ToDiagnosticSection();
         }
 
         return new
@@ -234,9 +230,7 @@ public sealed class DebugDiagnostics : IDisposable
             var forward = await runtime.SendNodeDebugRequestAsync(
                 HttpMethod.Post, "/v1/debug/gc", new { }, TimeSpan.FromSeconds(15), cancellationToken)
                 .ConfigureAwait(false);
-            nodeGc = forward.Available
-                ? new { available = true, status = forward.StatusCode, data = forward.Body }
-                : new { available = false, status = forward.StatusCode, reason = forward.Reason ?? "NODE_DEBUG_ENDPOINT_UNAVAILABLE" };
+            nodeGc = forward.ToDiagnosticSection();
         }
 
         var result = new

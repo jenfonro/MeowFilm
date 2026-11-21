@@ -233,9 +233,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 var forward = await runtime.SendNodeDebugRequestAsync(HttpMethod.Post, "/v1/debug/config",
                     new { modules = handshake.Modules, inlineLimit = handshake.InlineLimit, eventBytesLimit = handshake.EventBytesLimit },
                     TimeSpan.FromSeconds(5), token).ConfigureAwait(false);
-                nodeSync = forward.Available
-                    ? new { available = true, status = forward.StatusCode, data = forward.Body }
-                    : new { available = false, reason = forward.Reason ?? "NODE_DEBUG_ENDPOINT_UNAVAILABLE" };
+                nodeSync = forward.ToDiagnosticSection();
             }
             await WriteOkAsync(stream, traceId, new { config = updated, node = nodeSync }, token).ConfigureAwait(false);
             return;
@@ -404,7 +402,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         }
         if (method == "GET" && path == "/debug/v1/logs/categories")
         {
-            await WriteOkAsync(stream, traceId, session.GetCategoriesSummary(), token).ConfigureAwait(false);
+            await WriteOkAsync(stream, traceId, session.GetCategoriesSummary(req.Query.GetValueOrDefault("sessionId")), token).ConfigureAwait(false);
             return;
         }
         if (method == "GET" && path == "/debug/v1/logs/tail")
@@ -419,7 +417,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                     throw DebugApiException.InvalidArgument("Query parameter 'sinceSeq' must be an integer.");
                 sinceSeq = sv;
             }
-            var items = session.TailLogs(
+            var (resolvedSessionId, events) = session.TailLogs(
                 cat: cat,
                 limit: limit,
                 sinceSeq: sinceSeq,
@@ -428,8 +426,9 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 eventName: req.Query.GetValueOrDefault("event"),
                 opId: req.Query.GetValueOrDefault("opId"),
                 traceId: req.Query.GetValueOrDefault("traceId"),
-                query: req.Query.GetValueOrDefault("q"));
-            await WriteOkAsync(stream, traceId, new { sessionId = session.SessionId, cat, count = items.Count, items }, token).ConfigureAwait(false);
+                query: req.Query.GetValueOrDefault("q"),
+                sessionId: req.Query.GetValueOrDefault("sessionId"));
+            await WriteOkAsync(stream, traceId, new { sessionId = resolvedSessionId, cat, count = events.Count, events }, token).ConfigureAwait(false);
             return;
         }
         if (method == "GET" && path.StartsWith("/debug/v1/blobs/", StringComparison.Ordinal))
@@ -447,31 +446,27 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         // Runtime Invoke & Storage Query
         if (method == "POST" && path == "/debug/v1/runtime/invoke")
         {
+            var body = ParseJsonBody(req.Body);
+            string? rpcMethod = TryOptionalString(body, "method");
+            string? explicitModule = TryOptionalString(body, "module");
+            string? explicitOperation = TryOptionalString(body, "operation");
+            var (targetModule, targetOperation, targetPath) = ResolveDebugInvokeTarget(rpcMethod, explicitModule, explicitOperation);
+            JsonElement? input = body.TryGetProperty("input", out var inp) ? inp : null;
+            int timeoutMs = body.TryGetProperty("timeoutMs", out var t) ? Math.Clamp(RequireInt(t, "timeoutMs"), 500, 120_000) : 30_000;
             var runtime = getRuntime();
             if (runtime is null || !runtime.IsConnected)
                 throw DebugApiException.RuntimeUnavailable("Node runtime is not connected.");
-            var body = ParseJsonBody(req.Body);
-            var rpcMethod = RequireString(body, "method");
-            JsonElement? input = body.TryGetProperty("input", out var inp) ? inp : null;
-            int timeoutMs = body.TryGetProperty("timeoutMs", out var t) ? Math.Clamp(RequireInt(t, "timeoutMs"), 500, 120_000) : 30_000;
-            try
+            var invokeResult = await runtime.InvokeDebugAsync(targetPath, input, TimeSpan.FromMilliseconds(timeoutMs), token).ConfigureAwait(false);
+            object? responseValue = invokeResult.JsonBody is { } json ? json : invokeResult.RawText;
+            await WriteOkAsync(stream, traceId, new
             {
-                var started = Stopwatch.GetTimestamp();
-                var reply = await runtime.InvokeMethodAsync(rpcMethod, input, TimeSpan.FromMilliseconds(timeoutMs), token).ConfigureAwait(false);
-                var elapsedMs = Math.Round(Stopwatch.GetElapsedTime(started).TotalMilliseconds, 3);
-                await WriteOkAsync(stream, traceId, new { method = rpcMethod, result = reply, durationMs = elapsedMs }, token).ConfigureAwait(false);
-            }
-            catch (MeowFilm.Core.Runtime.BridgeException ex)
-            {
-                throw ex.Code switch
-                {
-                    "METHOD_UNAVAILABLE" or "METHOD_NOT_FOUND" => DebugApiException.NotFound($"Runtime method not found: '{rpcMethod}'.", new { code = ex.Code }),
-                    "INVALID_REQUEST" => DebugApiException.InvalidArgument($"Invalid runtime request for '{rpcMethod}'.", new { code = ex.Code }),
-                    "TIMEOUT" => DebugApiException.Timeout($"Runtime method '{rpcMethod}' timed out.", new { code = ex.Code }),
-                    "CLOSED" => DebugApiException.RuntimeUnavailable("Node runtime connection closed.", new { code = ex.Code }),
-                    _ => DebugApiException.Internal($"Runtime invoke failed ({ex.Code}): {ex.Message}", new { code = ex.Code })
-                };
-            }
+                module = targetModule,
+                operation = targetOperation,
+                path = targetPath,
+                httpStatus = invokeResult.StatusCode,
+                durationMs = invokeResult.DurationMs,
+                response = responseValue
+            }, token).ConfigureAwait(false);
             return;
         }
         if (method == "POST" && path == "/debug/v1/storage/query")
@@ -527,13 +522,13 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             if (runtime is null || !runtime.IsConnected)
                 throw DebugApiException.RuntimeUnavailable("Node runtime is not connected.");
             var forward = await runtime.SendNodeDebugRequestAsync(
-                HttpMethod.Post, "/v1/debug/heapsnapshot", new { }, TimeSpan.FromSeconds(60), token).ConfigureAwait(false);
+                HttpMethod.Post, "/v1/debug/heapsnapshot", new { }, TimeSpan.FromSeconds(120), token).ConfigureAwait(false);
             if (!forward.Available)
                 throw DebugApiException.RuntimeUnavailable("Node debug endpoint /v1/debug/heapsnapshot is unavailable.",
                     new { reason = forward.Reason, status = forward.StatusCode });
             if (forward.StatusCode >= 400)
                 throw MapNodeForwardError("/v1/debug/heapsnapshot", forward);
-            await WriteOkAsync(stream, traceId, forward.Body, token).ConfigureAwait(false);
+            await WriteOkAsync(stream, traceId, DebugNodeForwardResult.UnwrapValue(forward.Body), token).ConfigureAwait(false);
             return;
         }
         if (method == "POST" && path == "/debug/v1/diag/node/cpu-profile")
@@ -546,13 +541,13 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 ? Math.Clamp(RequireInt(dp, "durationMs"), 500, 60_000) : 5000;
             var forward = await runtime.SendNodeDebugRequestAsync(
                 HttpMethod.Post, "/v1/debug/cpu-profile", new { durationMs },
-                TimeSpan.FromMilliseconds(durationMs + 15_000), token).ConfigureAwait(false);
+                TimeSpan.FromMilliseconds(durationMs + 30_000), token).ConfigureAwait(false);
             if (!forward.Available)
                 throw DebugApiException.RuntimeUnavailable("Node debug endpoint /v1/debug/cpu-profile is unavailable.",
                     new { reason = forward.Reason, status = forward.StatusCode });
             if (forward.StatusCode >= 400)
                 throw MapNodeForwardError("/v1/debug/cpu-profile", forward);
-            await WriteOkAsync(stream, traceId, forward.Body, token).ConfigureAwait(false);
+            await WriteOkAsync(stream, traceId, DebugNodeForwardResult.UnwrapValue(forward.Body), token).ConfigureAwait(false);
             return;
         }
         if (method == "GET" && path == "/debug/v1/diag/exceptions")
@@ -594,6 +589,108 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             prop.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(prop.GetString()))
             throw DebugApiException.InvalidArgument($"Missing or invalid string field '{name}'.");
         return prop.GetString()!;
+    }
+
+    private static string? TryOptionalString(JsonElement obj, string name)
+    {
+        if (obj.ValueKind != JsonValueKind.Object || !obj.TryGetProperty(name, out var prop) ||
+            prop.ValueKind == JsonValueKind.Null)
+            return null;
+        if (prop.ValueKind != JsonValueKind.String)
+            throw DebugApiException.InvalidArgument($"Field '{name}' must be a string.");
+        var value = prop.GetString()?.Trim();
+        return string.IsNullOrEmpty(value) ? null : value;
+    }
+
+    private static readonly (string Prefix, string Module)[] KnownInvokePrefixes =
+    [
+        ("music-platform.", "music-platform"),
+        ("music.platform.", "music-platform"),
+        ("music.script.", "music"),
+        ("cat.script.", "cat"),
+        ("source.runtime.", "source"),
+        ("tmdb.data.", "tmdb"),
+        ("douban.data.", "douban"),
+        ("netease.token.", "netease"),
+        ("netease.", "netease"),
+        ("music.", "music"),
+        ("cat.", "cat"),
+        ("source.", "source"),
+        ("pan.", "pan"),
+        ("tmdb.", "tmdb"),
+        ("douban.", "douban"),
+        ("film.", "film")
+    ];
+
+    private static (string Module, string Operation, string Path) ResolveDebugInvokeTarget(
+        string? method, string? explicitModule, string? explicitOperation)
+    {
+        string module, operation;
+        if (explicitModule is not null || explicitOperation is not null)
+        {
+            if (explicitModule is null || explicitOperation is null)
+                throw DebugApiException.InvalidArgument("Both 'module' and 'operation' must be provided together.");
+            module = explicitModule;
+            operation = explicitOperation;
+        }
+        else if (method is not null)
+        {
+            if (string.Equals(method, "runtime.settings.changed", StringComparison.Ordinal))
+            {
+                module = "settings";
+                operation = "changed";
+            }
+            else
+            {
+                int slash = method.IndexOf('/');
+                if (slash >= 0)
+                {
+                    module = method[..slash];
+                    operation = method[(slash + 1)..];
+                    if (module.Length == 0 || operation.Length == 0)
+                        throw DebugApiException.InvalidArgument($"Invalid method format: '{method}'.");
+                }
+                else
+                {
+                    string? matchedModule = null;
+                    string? matchedOperation = null;
+                    foreach (var (prefix, mod) in KnownInvokePrefixes)
+                    {
+                        if (!method.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                        var op = method[prefix.Length..];
+                        if (op.Length == 0)
+                            throw DebugApiException.InvalidArgument($"Empty operation in method: '{method}'.");
+                        matchedModule = mod;
+                        matchedOperation = op;
+                        break;
+                    }
+                    if (matchedModule is null || matchedOperation is null)
+                        throw DebugApiException.InvalidArgument($"Cannot map method '{method}' to a registered runtime module.");
+                    module = matchedModule;
+                    operation = matchedOperation;
+                }
+            }
+        }
+        else
+        {
+            throw DebugApiException.InvalidArgument("Missing 'method' or ('module' and 'operation').");
+        }
+
+        if (!IsSafePathSegment(module) || !IsSafePathSegment(operation))
+            throw DebugApiException.InvalidArgument("Invalid module or operation path segment.");
+        return (module, operation, $"/v1/{module}/{operation}");
+    }
+
+    private static bool IsSafePathSegment(string segment)
+    {
+        if (segment.Length == 0 || segment is "." or ".." || segment.Contains("..", StringComparison.Ordinal))
+            return false;
+        foreach (char c in segment)
+        {
+            bool ok = (c is >= '0' and <= '9') || (c is >= 'A' and <= 'Z') || (c is >= 'a' and <= 'z') || c is '.' or '-' or '_';
+            if (!ok) return false;
+        }
+        return true;
     }
 
     private static int RequireInt(JsonElement prop, string name)

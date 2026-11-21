@@ -370,20 +370,23 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         return (full, "screenshots/" + name);
     }
 
-    public object GetCategoriesSummary()
+    public object GetCategoriesSummary(string? sessionId = null)
     {
+        var targetSessionDir = ResolveSessionDirectory(sessionId);
+        var resolvedSessionId = Path.GetFileName(targetSessionDir);
+        var targetLogsDir = Path.Combine(targetSessionDir, "logs");
         var items = new List<object>();
-        if (!Directory.Exists(LogsDir)) return new { sessionId = SessionId, categories = items };
+        if (!Directory.Exists(targetLogsDir)) return new { sessionId = resolvedSessionId, categories = items };
         foreach (var cat in DebugCategories.All)
         {
-            var path = Path.Combine(LogsDir, cat + ".jsonl");
+            var path = Path.Combine(targetLogsDir, cat + ".jsonl");
             if (!File.Exists(path)) continue;
             var info = new FileInfo(path);
             long lines = 0, latestSeq = 0;
             var levels = new Dictionary<string, long>(StringComparer.Ordinal);
             try
             {
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 using var reader = new StreamReader(fs, Encoding.UTF8);
                 while (reader.ReadLine() is { } line)
                 {
@@ -417,7 +420,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         }
         foreach (var extra in new[] { "runtime-node.stdout.log", "runtime-node.stderr.log" })
         {
-            var path = Path.Combine(LogsDir, extra);
+            var path = Path.Combine(targetLogsDir, extra);
             if (!File.Exists(path)) continue;
             items.Add(new
             {
@@ -427,24 +430,27 @@ public sealed class DebugSession : IDebugLogger, IDisposable
                 rawText = true
             });
         }
-        return new { sessionId = SessionId, categories = items };
+        return new { sessionId = resolvedSessionId, categories = items };
     }
 
-    public List<JsonElement> TailLogs(string cat, int limit, long? sinceSeq, string? level,
-        string? sub, string? eventName, string? opId, string? traceId, string? query)
+    public (string SessionId, List<JsonElement> Events) TailLogs(string cat, int limit, long? sinceSeq, string? level,
+        string? sub, string? eventName, string? opId, string? traceId, string? query, string? sessionId = null)
     {
+        var targetSessionDir = ResolveSessionDirectory(sessionId);
+        var resolvedSessionId = Path.GetFileName(targetSessionDir);
+        var targetLogsDir = Path.Combine(targetSessionDir, "logs");
         limit = Math.Clamp(limit, 1, 2000);
         var files = new List<string>();
         if (string.Equals(cat, "all", StringComparison.OrdinalIgnoreCase))
         {
-            if (Directory.Exists(LogsDir))
-                files.AddRange(Directory.EnumerateFiles(LogsDir, "*.jsonl").OrderBy(f => f, StringComparer.Ordinal));
+            if (Directory.Exists(targetLogsDir))
+                files.AddRange(Directory.EnumerateFiles(targetLogsDir, "*.jsonl").OrderBy(f => f, StringComparer.Ordinal));
         }
         else
         {
             if (!DebugCategories.IsValid(cat))
                 throw DebugApiException.InvalidArgument($"Unknown log category: '{cat}'.");
-            var path = Path.Combine(LogsDir, cat + ".jsonl");
+            var path = Path.Combine(targetLogsDir, cat + ".jsonl");
             if (File.Exists(path)) files.Add(path);
         }
 
@@ -453,7 +459,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         {
             try
             {
-                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 using var reader = new StreamReader(fs, Encoding.UTF8);
                 while (reader.ReadLine() is { } line)
                 {
@@ -490,18 +496,19 @@ public sealed class DebugSession : IDebugLogger, IDisposable
 
         if (matches.Count > limit)
             matches.RemoveRange(0, matches.Count - limit);
-        return matches.Select(m => m.Element).ToList();
+        return (resolvedSessionId, matches.Select(m => m.Element).ToList());
     }
 
     public object ListSessions()
     {
         var list = new List<object>();
-        if (!Directory.Exists(SessionsRoot)) return new { currentSessionId = SessionId, sessions = list };
+        if (!Directory.Exists(SessionsRoot)) return new { currentSessionId = SessionId, debugRoot = DebugRoot, sessions = list };
         foreach (var dir in Directory.EnumerateDirectories(SessionsRoot).OrderByDescending(d => d, StringComparer.Ordinal))
         {
             var id = Path.GetFileName(dir);
             var metaPath = Path.Combine(dir, "session.json");
-            string? started = null, status = null;
+            string? started = null, ended = null, status = null;
+            int? sessionPid = null;
             if (File.Exists(metaPath))
             {
                 try
@@ -509,7 +516,9 @@ public sealed class DebugSession : IDebugLogger, IDisposable
                     using var doc = JsonDocument.Parse(File.ReadAllText(metaPath, Encoding.UTF8));
                     var r = doc.RootElement;
                     if (r.TryGetProperty("startedAt", out var s) && s.ValueKind == JsonValueKind.String) started = s.GetString();
+                    if (r.TryGetProperty("endedAt", out var e) && e.ValueKind == JsonValueKind.String) ended = e.GetString();
                     if (r.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String) status = st.GetString();
+                    if (r.TryGetProperty("pid", out var p) && p.ValueKind == JsonValueKind.Number && p.TryGetInt32(out var pv)) sessionPid = pv;
                 }
                 catch { }
             }
@@ -517,12 +526,25 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             int fileCount = 0;
             long logLines = 0;
             long errorCount = 0;
+            var downloadableFiles = new List<string>();
             try
             {
                 foreach (var f in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
                 {
                     fileCount++;
                     totalBytes += new FileInfo(f).Length;
+                }
+                foreach (var subdir in new[] { "logs", "dumps", "screenshots" })
+                {
+                    var subPath = Path.Combine(dir, subdir);
+                    if (!Directory.Exists(subPath)) continue;
+                    foreach (var f in Directory.EnumerateFiles(subPath, "*", SearchOption.AllDirectories)
+                        .OrderBy(p => p, StringComparer.Ordinal))
+                    {
+                        var name = Path.GetFileName(f);
+                        if (name.StartsWith('.')) continue;
+                        downloadableFiles.Add(Path.GetRelativePath(dir, f).Replace('\\', '/'));
+                    }
                 }
                 var logsPath = Path.Combine(dir, "logs");
                 if (Directory.Exists(logsPath))
@@ -549,20 +571,26 @@ public sealed class DebugSession : IDebugLogger, IDisposable
                 active = string.Equals(id, SessionId, StringComparison.Ordinal),
                 status = status ?? (string.Equals(id, SessionId, StringComparison.Ordinal) ? "running" : "unknown"),
                 startedAt = started,
-                bytes = totalBytes,
-                files = fileCount,
+                endedAt = ended,
+                pid = sessionPid,
+                sizeBytes = totalBytes,
+                fileCount,
                 logLines,
-                errorCount
+                errorCount,
+                files = downloadableFiles
             });
         }
-        return new { currentSessionId = SessionId, sessions = list };
+        return new { currentSessionId = SessionId, debugRoot = DebugRoot, sessions = list };
     }
 
     public string ResolveSessionDirectory(string? sessionId)
     {
         if (string.IsNullOrWhiteSpace(sessionId) || string.Equals(sessionId, SessionId, StringComparison.Ordinal))
             return SessionDir;
-        if (sessionId.Contains('/') || sessionId.Contains('\\') || sessionId.Contains("..") || sessionId.Any(char.IsControl))
+        if (sessionId != sessionId.Trim() || sessionId is "." or ".." ||
+            sessionId.Contains('/') || sessionId.Contains('\\') || sessionId.Contains("..") ||
+            sessionId.Contains(':') || sessionId.EndsWith('.') ||
+            sessionId.Any(char.IsControl) || sessionId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
             throw DebugApiException.InvalidArgument("Invalid sessionId.");
         var candidate = Path.GetFullPath(Path.Combine(SessionsRoot, sessionId));
         var rootPrefix = Path.GetFullPath(SessionsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;

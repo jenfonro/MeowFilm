@@ -66,6 +66,12 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         IsConnected
             ? client.SendNodeDebugRequestAsync(method, path, body, timeout, cancellationToken)
             : Task.FromResult(new DebugNodeForwardResult(false, 503, null, "RUNTIME_CLOSED"));
+
+    public Task<DebugNodeInvokeResult> InvokeDebugRawAsync(string path, JsonElement? input,
+        TimeSpan timeout, CancellationToken cancellationToken) =>
+        IsConnected
+            ? client.InvokeDebugRawAsync(path, input, timeout, cancellationToken)
+            : Task.FromException<DebugNodeInvokeResult>(DebugApiException.RuntimeUnavailable("Node runtime connection closed."));
     /// <summary>Proves release after the actual child, pipe and output drains stop;
     /// it is not a graceful-close acknowledgement.</summary>
     public Task Completion => completion.Task;

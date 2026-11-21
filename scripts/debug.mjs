@@ -473,6 +473,7 @@ Commands:
   playback [state|play|pause|toggle|stop|next|prev|seek <sec>|<cmd>] [--domain music|film] [--param k=v]
   novel <command> [--param k=v] [--json '<obj>']
   logs [cat] [-n 50] [--since-seq <n>] [--level <l>] [--sub <s>] [--event <e>] [--op <id>] [--trace <id>] [--q <str>] [--follow]
+       [--session <id>]
   blob <sha256> [--session <id>] [--out <file>]
   invoke <method> [--json '<obj>'|--input '<obj>'] [--timeout <ms>]
   sql "<SELECT ...>" [--params '<jsonArray>'] [--max-rows <n>]
@@ -722,7 +723,8 @@ export async function runCli(argv = process.argv.slice(2)) {
     case 'logs': {
       const cat = args[0];
       if (!cat) {
-        const res = await requestJson(endpoint, 'GET', '/debug/v1/logs/categories');
+        const qs = getOpt('session') !== undefined ? `?sessionId=${encodeURIComponent(getOpt('session'))}` : '';
+        const res = await requestJson(endpoint, 'GET', `/debug/v1/logs/categories${qs}`);
         printResult(res, { jsonOutput: global.jsonOutput });
         return 0;
       }
@@ -744,11 +746,12 @@ export async function runCli(argv = process.argv.slice(2)) {
         if (getOpt('op') !== undefined) qs.set('opId', String(getOpt('op')));
         if (getOpt('trace') !== undefined) qs.set('traceId', String(getOpt('trace')));
         if (getOpt('q') !== undefined) qs.set('q', String(getOpt('q')));
+        if (getOpt('session') !== undefined) qs.set('sessionId', String(getOpt('session')));
         return `/debug/v1/logs/tail?${qs.toString()}`;
       };
       if (!follow) {
         const res = await requestJson(endpoint, 'GET', buildQuery());
-        const entries = Array.isArray(res.data) ? res.data : (res.data?.entries ?? res.data?.events ?? []);
+        const entries = Array.isArray(res.data) ? res.data : (res.data?.events ?? res.data?.entries ?? res.data?.items ?? []);
         printResult(res, {
           jsonOutput: global.jsonOutput,
           format: () => entries.map(formatLogLine).join('\n'),
@@ -762,7 +765,7 @@ export async function runCli(argv = process.argv.slice(2)) {
       try {
         while (!stopped) {
           const res = await requestJson(endpoint, 'GET', buildQuery());
-          const entries = Array.isArray(res.data) ? res.data : (res.data?.entries ?? res.data?.events ?? []);
+          const entries = Array.isArray(res.data) ? res.data : (res.data?.events ?? res.data?.entries ?? res.data?.items ?? []);
           for (const entry of entries) {
             if (typeof entry.seq === 'number' && (sinceSeq === undefined || entry.seq > sinceSeq)) {
               sinceSeq = entry.seq;

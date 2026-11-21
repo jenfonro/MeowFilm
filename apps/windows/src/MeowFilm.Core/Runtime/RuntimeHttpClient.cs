@@ -267,7 +267,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
     {
         cancellationToken.ThrowIfCancellationRequested();
         var bytes = body is null ? ReadOnlyMemory<byte>.Empty : BridgeCodec.EncodeJSONValue(body);
-        var opId = DebugLog.IsEnabled ? DebugLog.NextOpId() : null;
+        var opId = DebugLog.IsEnabled ? (DebugLog.Correlation?.OpId ?? DebugLog.NextOpId()) : null;
         var traceId = DebugLog.IsEnabled ? DebugLog.Correlation?.TraceId : null;
         var started = Stopwatch.GetTimestamp();
         var owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -338,6 +338,110 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         }
         finally
         {
+            lock (gate) pending.Remove(owner);
+            owner.TrySetResult();
+        }
+    }
+
+    internal async Task<DebugNodeInvokeResult> InvokeDebugRawAsync(string path, JsonElement? input,
+        TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        object payloadObject = input is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null }
+            ? input.Value : new { };
+        var bytes = BridgeCodec.EncodeJSONValue(payloadObject);
+        bool debug = DebugLog.IsEnabled;
+        var opId = debug ? (DebugLog.Correlation?.OpId ?? DebugLog.NextOpId()) : null;
+        var traceId = debug ? DebugLog.Correlation?.TraceId : null;
+        string? requestText = debug && bytes.Length > 0 ? Encoding.UTF8.GetString(bytes) : null;
+        var started = Stopwatch.GetTimestamp();
+        var sub = SubFromPath(path);
+        if (debug)
+        {
+            var reqPayload = new { method = "POST", path, bodyBytes = bytes.Length, body = requestText };
+            DebugLog.Debug(DebugCategories.RuntimeBridge, sub, "rpc.request", reqPayload, opId: opId, traceId: traceId);
+            foreach (var domainCat in DomainCategoriesFromPath(path))
+                DebugLog.Debug(domainCat, sub, "rpc.request", reqPayload, opId: opId, traceId: traceId);
+        }
+
+        var owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        CancellationTokenSource deadline;
+        lock (gate)
+        {
+            if (disposal is not null)
+            {
+                Clear(bytes);
+                throw DebugApiException.RuntimeUnavailable("Node runtime connection closed.");
+            }
+            deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
+            pending.Add(owner);
+        }
+        using (deadline)
+        try
+        {
+            deadline.CancelAfter(timeout);
+            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint, path))
+            {
+                Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
+            };
+            request.Headers.Add("X-Meow-Request-Id", Guid.NewGuid().ToString("D"));
+            if (opId is not null) request.Headers.Add("X-Meow-Debug-Op", opId);
+            if (traceId is not null) request.Headers.Add("X-Meow-Debug-Trace", traceId);
+            request.Content = new ByteArrayContent(bytes);
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
+            var payloadBytes = await response.Content.ReadAsByteArrayAsync(deadline.Token).ConfigureAwait(false);
+            var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            int status = (int)response.StatusCode;
+            string responseText = payloadBytes.Length > 0 ? Encoding.UTF8.GetString(payloadBytes) : "";
+            JsonElement? parsed = null;
+            if (payloadBytes.Length > 0)
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(payloadBytes);
+                    parsed = doc.RootElement.Clone();
+                }
+                catch { }
+            }
+            if (debug)
+            {
+                bool ok = status == 200 && parsed is { ValueKind: JsonValueKind.Object } obj &&
+                    obj.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
+                string? code = !ok && parsed is { ValueKind: JsonValueKind.Object } errObj &&
+                    errObj.TryGetProperty("code", out var codeProp) && codeProp.ValueKind == JsonValueKind.String
+                    ? codeProp.GetString() : null;
+                var respPayload = new { method = "POST", path, status, ok, code, responseBytes = payloadBytes.Length, response = responseText };
+                DebugLog.Write(ok ? "info" : "warn", DebugCategories.RuntimeBridge, sub, "rpc.response",
+                    respPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
+                foreach (var domainCat in DomainCategoriesFromPath(path))
+                    DebugLog.Write(ok ? "info" : "warn", domainCat, sub, "rpc.response",
+                        respPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
+            }
+            return new DebugNodeInvokeResult(status, parsed, parsed is null ? responseText : null, Math.Round(elapsedMs, 3));
+        }
+        catch (OperationCanceledException)
+        {
+            if (lifetime.IsCancellationRequested)
+                throw DebugApiException.RuntimeUnavailable("Node runtime connection closed.");
+            if (cancellationToken.IsCancellationRequested)
+                throw;
+            throw DebugApiException.Timeout($"Node runtime request timed out: {path}");
+        }
+        catch (DebugApiException) { throw; }
+        catch (Exception ex)
+        {
+            if (debug)
+            {
+                DebugLog.Error(DebugCategories.RuntimeBridge, sub, "rpc.error", new { method = "POST", path },
+                    error: ex, opId: opId, traceId: traceId, durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            }
+            throw DebugApiException.RuntimeUnavailable($"Node runtime request failed: {ex.Message}");
+        }
+        finally
+        {
+            Clear(bytes);
             lock (gate) pending.Remove(owner);
             owner.TrySetResult();
         }
