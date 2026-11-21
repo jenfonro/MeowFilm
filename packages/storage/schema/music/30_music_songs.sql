@@ -1,0 +1,207 @@
+-- Shared native music owner state, permanent song identities, and platform source facts.
+CREATE TABLE music_owner_state (
+    scope TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991),
+    receipt TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE music_songs (
+    song_id TEXT PRIMARY KEY NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    duration REAL CHECK (duration IS NULL OR duration > 0),
+    baseline_duration REAL CHECK (baseline_duration IS NULL OR baseline_duration > 0),
+    cover_url TEXT NOT NULL DEFAULT '',
+    local_file_id TEXT,
+    artwork_source_key TEXT,
+    artwork_source_image TEXT,
+    lookup_key TEXT,
+    search_query TEXT,
+    fingerprint TEXT
+) STRICT;
+
+CREATE INDEX idx_music_songs_lookup ON music_songs(lookup_key);
+CREATE INDEX idx_music_songs_fingerprint ON music_songs(fingerprint);
+CREATE INDEX idx_music_songs_search ON music_songs(search_query);
+
+CREATE TABLE music_song_artists (
+    song_id TEXT NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL,
+    PRIMARY KEY (song_id, position)
+) STRICT;
+
+-- Each external recording source belongs uniquely to one permanent song_id.
+CREATE TABLE music_song_sources (
+    song_id TEXT NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
+    source_key TEXT NOT NULL UNIQUE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    platform TEXT NOT NULL,
+    info_source TEXT NOT NULL,
+    songmid_kind TEXT CHECK (songmid_kind IS NULL OR songmid_kind IN ('text', 'number')),
+    songmid_value TEXT,
+    mid_kind TEXT CHECK (mid_kind IS NULL OR mid_kind IN ('text', 'number')),
+    mid_value TEXT,
+    id_kind TEXT CHECK (id_kind IS NULL OR id_kind IN ('text', 'number')),
+    id_value TEXT,
+    song_id_kind TEXT CHECK (song_id_kind IS NULL OR song_id_kind IN ('text', 'number')),
+    song_id_value TEXT,
+    qq_song_id_kind TEXT CHECK (qq_song_id_kind IS NULL OR qq_song_id_kind IN ('text', 'number')),
+    qq_song_id_value TEXT,
+    song_type_kind TEXT CHECK (song_type_kind IS NULL OR song_type_kind IN ('text', 'number')),
+    song_type_value TEXT,
+    type_kind TEXT CHECK (type_kind IS NULL OR type_kind IN ('text', 'number')),
+    type_value TEXT,
+    copyright_id_kind TEXT CHECK (copyright_id_kind IS NULL OR copyright_id_kind IN ('text', 'number')),
+    copyright_id_value TEXT,
+    str_media_mid_kind TEXT CHECK (str_media_mid_kind IS NULL OR str_media_mid_kind IN ('text', 'number')),
+    str_media_mid_value TEXT,
+    hash TEXT,
+    album_id_kind TEXT CHECK (album_id_kind IS NULL OR album_id_kind IN ('text', 'number')),
+    album_id_value TEXT,
+    album_id_snake_kind TEXT CHECK (album_id_snake_kind IS NULL OR album_id_snake_kind IN ('text', 'number')),
+    album_id_snake_value TEXT,
+    album_mid_kind TEXT CHECK (album_mid_kind IS NULL OR album_mid_kind IN ('text', 'number')),
+    album_mid_value TEXT,
+    album_audio_id_kind TEXT CHECK (album_audio_id_kind IS NULL OR album_audio_id_kind IN ('text', 'number')),
+    album_audio_id_value TEXT,
+    mixsongid_kind TEXT CHECK (mixsongid_kind IS NULL OR mixsongid_kind IN ('text', 'number')),
+    mixsongid_value TEXT,
+    fileid_kind TEXT CHECK (fileid_kind IS NULL OR fileid_kind IN ('text', 'number')),
+    fileid_value TEXT,
+    file_id_camel_kind TEXT CHECK (file_id_camel_kind IS NULL OR file_id_camel_kind IN ('text', 'number')),
+    file_id_camel_value TEXT,
+    content_id_kind TEXT CHECK (content_id_kind IS NULL OR content_id_kind IN ('text', 'number')),
+    content_id_value TEXT,
+    md5 TEXT,
+    android_md5 TEXT,
+    name TEXT,
+    singer TEXT,
+    album_name TEXT,
+    duration REAL CHECK (duration IS NULL OR duration > 0),
+    size_kind TEXT CHECK (size_kind IS NULL OR size_kind IN ('text', 'number')),
+    size_value TEXT,
+    img TEXT,
+    quality_known INTEGER CHECK (quality_known IS NULL OR quality_known IN (0, 1)),
+    PRIMARY KEY (song_id, source_key),
+    CHECK ((songmid_kind IS NULL) = (songmid_value IS NULL)),
+    CHECK ((mid_kind IS NULL) = (mid_value IS NULL)),
+    CHECK ((id_kind IS NULL) = (id_value IS NULL)),
+    CHECK ((song_id_kind IS NULL) = (song_id_value IS NULL)),
+    CHECK ((qq_song_id_kind IS NULL) = (qq_song_id_value IS NULL)),
+    CHECK ((song_type_kind IS NULL) = (song_type_value IS NULL)),
+    CHECK ((type_kind IS NULL) = (type_value IS NULL)),
+    CHECK ((copyright_id_kind IS NULL) = (copyright_id_value IS NULL)),
+    CHECK ((str_media_mid_kind IS NULL) = (str_media_mid_value IS NULL)),
+    CHECK ((album_id_kind IS NULL) = (album_id_value IS NULL)),
+    CHECK ((album_id_snake_kind IS NULL) = (album_id_snake_value IS NULL)),
+    CHECK ((album_mid_kind IS NULL) = (album_mid_value IS NULL)),
+    CHECK ((album_audio_id_kind IS NULL) = (album_audio_id_value IS NULL)),
+    CHECK ((mixsongid_kind IS NULL) = (mixsongid_value IS NULL)),
+    CHECK ((fileid_kind IS NULL) = (fileid_value IS NULL)),
+    CHECK ((file_id_camel_kind IS NULL) = (file_id_camel_value IS NULL)),
+    CHECK ((content_id_kind IS NULL) = (content_id_value IS NULL)),
+    CHECK ((size_kind IS NULL) = (size_value IS NULL))
+) STRICT;
+
+CREATE INDEX idx_music_song_sources_order ON music_song_sources(song_id, position);
+
+CREATE TABLE music_song_source_artists (
+    song_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL,
+    PRIMARY KEY (song_id, source_key, position),
+    FOREIGN KEY (song_id, source_key) REFERENCES music_song_sources(song_id, source_key) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE music_song_source_types (
+    song_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    list_kind TEXT NOT NULL CHECK (list_kind IN ('types', '_types')),
+    entry_key TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    type_kind TEXT CHECK (type_kind IS NULL OR type_kind IN ('text', 'number')),
+    type_value TEXT,
+    hash TEXT,
+    size_kind TEXT CHECK (size_kind IS NULL OR size_kind IN ('text', 'number')),
+    size_value TEXT,
+    PRIMARY KEY (song_id, source_key, list_kind, entry_key),
+    CHECK ((type_kind IS NULL) = (type_value IS NULL)),
+    CHECK ((size_kind IS NULL) = (size_value IS NULL)),
+    FOREIGN KEY (song_id, source_key) REFERENCES music_song_sources(song_id, source_key) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE music_song_source_formats (
+    song_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    list_kind TEXT NOT NULL CHECK (list_kind IN ('audioFormats', 'newRateFormats')),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    format_type_kind TEXT CHECK (format_type_kind IS NULL OR format_type_kind IN ('text', 'number')),
+    format_type_value TEXT,
+    resource_type_kind TEXT CHECK (resource_type_kind IS NULL OR resource_type_kind IN ('text', 'number')),
+    resource_type_value TEXT,
+    size_kind TEXT CHECK (size_kind IS NULL OR size_kind IN ('text', 'number')),
+    size_value TEXT,
+    android_size_kind TEXT CHECK (android_size_kind IS NULL OR android_size_kind IN ('text', 'number')),
+    android_size_value TEXT,
+    ios_size_kind TEXT CHECK (ios_size_kind IS NULL OR ios_size_kind IN ('text', 'number')),
+    ios_size_value TEXT,
+    asize_kind TEXT CHECK (asize_kind IS NULL OR asize_kind IN ('text', 'number')),
+    asize_value TEXT,
+    isize_kind TEXT CHECK (isize_kind IS NULL OR isize_kind IN ('text', 'number')),
+    isize_value TEXT,
+    format_kind TEXT CHECK (format_kind IS NULL OR format_kind IN ('text', 'number')),
+    format_value TEXT,
+    android_format_kind TEXT CHECK (android_format_kind IS NULL OR android_format_kind IN ('text', 'number')),
+    android_format_value TEXT,
+    ios_format_kind TEXT CHECK (ios_format_kind IS NULL OR ios_format_kind IN ('text', 'number')),
+    ios_format_value TEXT,
+    aformat_kind TEXT CHECK (aformat_kind IS NULL OR aformat_kind IN ('text', 'number')),
+    aformat_value TEXT,
+    iformat_kind TEXT CHECK (iformat_kind IS NULL OR iformat_kind IN ('text', 'number')),
+    iformat_value TEXT,
+    bitrate_kind TEXT CHECK (bitrate_kind IS NULL OR bitrate_kind IN ('text', 'number')),
+    bitrate_value TEXT,
+    sample_rate_kind TEXT CHECK (sample_rate_kind IS NULL OR sample_rate_kind IN ('text', 'number')),
+    sample_rate_value TEXT,
+    bit_depth_kind TEXT CHECK (bit_depth_kind IS NULL OR bit_depth_kind IN ('text', 'number')),
+    bit_depth_value TEXT,
+    file_type_kind TEXT CHECK (file_type_kind IS NULL OR file_type_kind IN ('text', 'number')),
+    file_type_value TEXT,
+    android_file_type_kind TEXT CHECK (android_file_type_kind IS NULL OR android_file_type_kind IN ('text', 'number')),
+    android_file_type_value TEXT,
+    ios_file_type_kind TEXT CHECK (ios_file_type_kind IS NULL OR ios_file_type_kind IN ('text', 'number')),
+    ios_file_type_value TEXT,
+    ios_accuracy_level_kind TEXT CHECK (ios_accuracy_level_kind IS NULL OR ios_accuracy_level_kind IN ('text', 'number')),
+    ios_accuracy_level_value TEXT,
+    android_accuracy_level_kind TEXT CHECK (android_accuracy_level_kind IS NULL OR android_accuracy_level_kind IN ('text', 'number')),
+    android_accuracy_level_value TEXT,
+    hash TEXT,
+    md5 TEXT,
+    android_md5 TEXT,
+    file_id_kind TEXT CHECK (file_id_kind IS NULL OR file_id_kind IN ('text', 'number')),
+    file_id_value TEXT,
+    content_id_kind TEXT CHECK (content_id_kind IS NULL OR content_id_kind IN ('text', 'number')),
+    content_id_value TEXT,
+    PRIMARY KEY (song_id, source_key, list_kind, position),
+    FOREIGN KEY (song_id, source_key) REFERENCES music_song_sources(song_id, source_key) ON DELETE CASCADE
+) STRICT;
+
+-- Bounded third-party source metadata extras for unknown upstream fields only.
+CREATE TABLE music_song_source_extras (
+    song_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    node_id INTEGER NOT NULL CHECK (node_id >= 0),
+    parent_id INTEGER,
+    prop_key TEXT,
+    item_index INTEGER,
+    kind TEXT NOT NULL CHECK (kind IN ('null', 'boolean', 'integer', 'real', 'number_text', 'text', 'array', 'object')),
+    bool_value INTEGER CHECK (bool_value IN (0, 1)),
+    int_value INTEGER,
+    real_value REAL,
+    text_value TEXT,
+    PRIMARY KEY (song_id, source_key, node_id),
+    FOREIGN KEY (song_id, source_key) REFERENCES music_song_sources(song_id, source_key) ON DELETE CASCADE
+) STRICT;

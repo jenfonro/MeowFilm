@@ -1,17 +1,16 @@
-import { readFile, mkdir, lstat, realpath } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { mkdir, lstat, realpath } from 'node:fs/promises';
 import { resolve, join, dirname, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { storageError } from './errors.js';
+import { loadSchemaIdentity, resolveSchemaTarget } from '../schema/loader.js';
 
-const APPLICATION_ID = 0x4d464442;
 const MAX_PENDING = 64;
 const MAX_BYTES = 16 * 1024 * 1024;
 const roots = new Map();
 let platform;
-let schema;
 let observer = null;
 
-export const storageError = code => Object.assign(new Error(code), { code });
+export { storageError };
 
 /** Optional debug observer injected only in Debug mode; null disables all hooks. */
 export function setStorageObserver(value) {
@@ -29,6 +28,7 @@ export function getStorageDiagnostics() {
     pendingBytes += diag.pendingBytes;
     activeRoots.push({
       root,
+      target: owner.target,
       references: owner.references,
       closing: owner.closing,
       pendingCount: diag.pendingCount,
@@ -58,16 +58,16 @@ function summarizeStatement(input) {
   return { kind: input.kind, ...(input.path ? { path: input.path } : {}) };
 }
 
-/** Only the trusted platform bootstrap selects the driver, before opening owners. */
-export function configureStorage({ driver, initialize = true } = {}) {
+/** Only the trusted platform bootstrap selects the driver and schema target, before opening owners. */
+export function configureStorage({ driver, initialize = true, target = 'standalone' } = {}) {
   if (roots.size || platform || typeof driver !== 'function')
     throw storageError('STORAGE_CONFIGURATION');
-  platform = { driver, initialize };
+  platform = { driver, initialize, target: resolveSchemaTarget(target) };
 }
 
 /** Standalone assembly supplies its driver without replacing an App bootstrap. */
-export function configureStandaloneStorage(driver) {
-  if (!platform) configureStorage({ driver });
+export function configureStandaloneStorage(driver, { target = 'standalone' } = {}) {
+  if (!platform) configureStorage({ driver, target });
 }
 
 function cost(value) {
@@ -95,19 +95,10 @@ async function ensureDirectory(path, create) {
   }
 }
 
-async function schemaSource() {
-  schema ??= readFile(new URL('../schema.sql', import.meta.url), 'utf8').then(sql => ({
-    sql,
-    hash: createHash('sha256').update(sql).digest('hex'),
-    applicationId: APPLICATION_ID,
-    version: 1,
-  }));
-  return schema;
-}
-
 function createOwner(root, options) {
   let driver, pending = 0, bytes = 0, closing = false, disposal;
   let tail = Promise.resolve();
+  const target = resolveSchemaTarget(options.target ?? platform?.target ?? 'standalone');
   const ready = (async () => {
     const startedAt = observer ? performance.now() : 0;
     const factory = options.driver ?? platform?.driver;
@@ -117,12 +108,12 @@ function createOwner(root, options) {
     const file = join(directory, 'meowfilm.sqlite3');
     try {
       await ensureDirectory(directory, initialize);
-      driver = await factory(file, await schemaSource(), initialize);
+      driver = await factory(file, await loadSchemaIdentity(target), initialize);
       await driver.ready;
-      storageLog('info', 'database.open', { root, file, initialize },
+      storageLog('info', 'database.open', { root, file, initialize, target },
         { durationMs: observer ? performance.now() - startedAt : undefined });
     } catch (error) {
-      storageLog('error', 'database.open.error', { root, file, initialize },
+      storageLog('error', 'database.open.error', { root, file, initialize, target },
         { durationMs: observer ? performance.now() - startedAt : undefined, error });
       throw error;
     }
@@ -175,6 +166,7 @@ function createOwner(root, options) {
     return result;
   };
   return {
+    target,
     references: 0,
     get closing() { return closing; },
     ready,
@@ -189,7 +181,7 @@ function createOwner(root, options) {
         try { await driver?.close(); }
         finally {
           roots.delete(root);
-          storageLog('info', 'database.close', { root },
+          storageLog('info', 'database.close', { root, target },
             { durationMs: observer ? performance.now() - startedAt : undefined });
         }
       })();
@@ -204,6 +196,8 @@ export function openDatabase(dataRoot, options = {}) {
   const root = resolve(dataRoot);
   let owner = roots.get(root);
   if (owner?.closing) throw storageError('STORAGE_CLOSED');
+  if (owner && options.target !== undefined && resolveSchemaTarget(options.target) !== owner.target)
+    throw storageError('STORAGE_CONFIGURATION');
   if (!owner) { owner = createOwner(root, options); roots.set(root, owner); }
   ++owner.references;
   let closed = false, disposal, drain = Promise.resolve();

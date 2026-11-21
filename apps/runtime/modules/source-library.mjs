@@ -5,7 +5,7 @@ import { ScriptHostError, SCRIPT_LIMITS } from '@meowfilm/script-host';
 import { normalizeSourceDefinition } from '@meowfilm/source-runtime';
 import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { InstallationOperations } from './source-candidates.mjs';
-import { SourceStorage } from './source-storage.mjs';
+import { SourceStorage } from './storage/source-storage.mjs';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const emptyPrivate = () => ({ cookies: [], storage: [] });

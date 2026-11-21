@@ -6,15 +6,48 @@ import { acquireNativeStorageLock as acquire } from './native-engine.js';
 
 const { path, identity, initialize } = workerData;
 const fail = code => { throw Object.assign(new Error(code), { code }); };
+const MAX_PREPARED_STATEMENTS = 256;
+const MAX_CACHED_SQL_LENGTH = 4096;
+const statementCache = new Map();
 let db, fileIdentity, commits = 0, maintenanceFailure;
-const enter = (exclusive, timeout = 2500) =>
+const enter = (exclusive, timeout = 5000) =>
   acquire(dirname(path) + '/maintenance.lock', exclusive, timeout);
+
+function verifyFiles() {
+  if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
+  for (const suffix of ['', '-wal', '-shm', '-journal']) safeFile(path + suffix, suffix === '');
+  const current = lstatSync(path, { bigint: true });
+  if (current.ino !== fileIdentity.ino || current.dev !== fileIdentity.dev) fail('UNSAFE_PATH');
+}
+
+function prepare(sql) {
+  if (sql.length > MAX_CACHED_SQL_LENGTH || /^\s*PRAGMA\b/i.test(sql)) {
+    const statement = db.prepare(sql);
+    statement.setReadBigInts(true);
+    return statement;
+  }
+  let statement = statementCache.get(sql);
+  if (statement) {
+    statementCache.delete(sql);
+    statementCache.set(sql, statement);
+    return statement;
+  }
+  statement = db.prepare(sql);
+  statement.setReadBigInts(true);
+  if (statementCache.size >= MAX_PREPARED_STATEMENTS) {
+    statementCache.delete(statementCache.keys().next().value);
+  }
+  statementCache.set(sql, statement);
+  return statement;
+}
+
 function maintain() {
   let lease;
   try {
     lease = enter(true, 0);
+    verifyFiles();
     query('PRAGMA wal_checkpoint(PASSIVE)');
-    if (db.prepare('PRAGMA freelist_count').get().freelist_count >= 256)
+    if (Number(db.prepare('PRAGMA freelist_count').get().freelist_count) >= 256)
       db.exec('PRAGMA incremental_vacuum(128)');
   } catch (error) {
     if (code(error) !== 'STORAGE_BUSY') maintenanceFailure = code(error);
@@ -64,8 +97,7 @@ function value(item) {
 function query(sql, params = [], maximum = Number.MAX_SAFE_INTEGER) {
   if (typeof sql !== 'string' || !Number.isSafeInteger(maximum) || maximum < 1)
     fail('INVALID_REQUEST');
-  const statement = db.prepare(sql);
-  statement.setReadBigInts(true);
+  const statement = prepare(sql);
   const rows = [];
   for (const row of statement.iterate(...parameters(params))) {
     if (rows.length >= maximum) fail('STORAGE_RESULT_LIMIT');
@@ -81,11 +113,10 @@ function query(sql, params = [], maximum = Number.MAX_SAFE_INTEGER) {
 
 function execute(sql, params = [], expected) {
   if (typeof sql !== 'string') fail('INVALID_REQUEST');
-  try {
-    const result = db.prepare(sql).run(...parameters(params));
-    if (expected !== undefined && result.changes !== expected) fail('STORAGE_CONFLICT');
-    return { changes: Number(result.changes), lastInsertRowid: value(result.lastInsertRowid) };
-  } catch (error) { throw error; }
+  const result = prepare(sql).run(...parameters(params));
+  const changes = Number(result.changes);
+  if (expected !== undefined && changes !== expected) fail('STORAGE_CONFLICT');
+  return { changes, lastInsertRowid: value(result.lastInsertRowid) };
 }
 
 function transaction(statements, readOnly = false) {
@@ -108,6 +139,7 @@ let initializing, validating;
 try {
   initializing = acquire(dirname(path) + '/initialize.lock', true, 5000);
   validating = enter(false, 5000);
+  if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
   const existing = safeFile(path);
   for (const suffix of ['-wal', '-shm', '-journal']) {
     if (safeFile(path + suffix) && !existing) fail('STORAGE_CORRUPT');
@@ -128,14 +160,18 @@ try {
     if (existing || application !== 0 || version !== 0) fail('STORAGE_SCHEMA');
     db.exec('PRAGMA auto_vacuum=INCREMENTAL');
   } else if (application !== identity.applicationId || version !== identity.version) fail('STORAGE_SCHEMA');
-  db.exec('PRAGMA busy_timeout=2500; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; ' +
-    'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0;');
+  db.exec('PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; ' +
+    'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; ' +
+    'PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
   if (db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
       db.prepare('PRAGMA synchronous').get().synchronous !== 2 ||
       db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
       db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
       db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint !== 0 ||
-      db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2) fail('STORAGE_CONFIGURATION');
+      db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2 ||
+      db.prepare('PRAGMA busy_timeout').get().timeout !== 5000 ||
+      db.prepare('PRAGMA temp_store').get().temp_store !== 2 ||
+      db.prepare('PRAGMA cache_size').get().cache_size !== -16384) fail('STORAGE_CONFIGURATION');
   if (empty) {
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -157,6 +193,7 @@ try {
   fileIdentity = lstatSync(path, {bigint:true});
   parentPort.postMessage({ id: 0, value: true });
 } catch (error) {
+  statementCache.clear();
   try { db?.close(); } catch {}
   parentPort.postMessage({ id: 0, code: code(error) });
   parentPort.close();
@@ -164,7 +201,7 @@ try {
 
 parentPort.on('message', async ({ id, input }) => {
   if (input.kind === 'close') {
-    try { db.close(); parentPort.postMessage({ id, value: true }); }
+    try { statementCache.clear(); db.close(); parentPort.postMessage({ id, value: true }); }
     catch (error) { parentPort.postMessage({ id, code: code(error) }); }
     finally { parentPort.close(); }
     return;
@@ -172,11 +209,10 @@ parentPort.on('message', async ({ id, input }) => {
   let lease;
   try {
     if (maintenanceFailure) fail(maintenanceFailure);
-    if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
-    for (const suffix of ['', '-wal', '-shm', '-journal']) safeFile(path + suffix, suffix === '');
-    const current = lstatSync(path, {bigint:true});
-    if (current.ino !== fileIdentity.ino || current.dev !== fileIdentity.dev) fail('UNSAFE_PATH');
-    lease = enter(['checkpoint','backup'].includes(input.kind));
+    if (input.kind === 'checkpoint' || input.kind === 'backup') {
+      lease = enter(true);
+      verifyFiles();
+    }
     let result;
     if (input.kind === 'query') result = query(input.sql, input.params, input.maxRows);
     else if (input.kind === 'execute') result = transaction([input])[0];

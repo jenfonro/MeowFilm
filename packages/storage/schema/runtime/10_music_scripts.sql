@@ -1,4 +1,4 @@
--- Music script catalog and per-key LX guest storage
+-- Music script catalog, declared capabilities, check outcomes, and per-key LX guest KV.
 CREATE TABLE music_script_catalog_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     revision INTEGER NOT NULL CHECK (revision >= 0)
@@ -29,11 +29,13 @@ CREATE TABLE music_script_installations (
     check_failure TEXT
 ) STRICT;
 
+CREATE INDEX idx_music_script_installations_position ON music_script_installations(position);
+
 CREATE TABLE music_script_declared_sites (
     installation_id TEXT NOT NULL REFERENCES music_script_installations(installation_id) ON DELETE CASCADE,
     site_id TEXT NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
-    has_qualities INTEGER NOT NULL CHECK (has_qualities IN (0,1)),
+    has_qualities INTEGER NOT NULL CHECK (has_qualities IN (0, 1)),
     PRIMARY KEY (installation_id, site_id)
 ) STRICT;
 
@@ -64,6 +66,7 @@ CREATE TABLE music_script_kv_entries (
     PRIMARY KEY (installation_id, site_id, entry_key)
 ) STRICT;
 
+-- Third-party script declared extra capability fields (bounded typed value tree).
 CREATE TABLE music_script_declared_nodes (
     installation_id TEXT NOT NULL,
     site_id TEXT NOT NULL,
@@ -81,6 +84,7 @@ CREATE TABLE music_script_declared_nodes (
         REFERENCES music_script_declared_sites(installation_id, site_id) ON DELETE CASCADE
 ) STRICT;
 
+-- Third-party LX guest script per-key dynamic KV values (bounded typed value tree).
 CREATE TABLE music_script_kv_nodes (
     installation_id TEXT NOT NULL,
     site_id TEXT NOT NULL,
@@ -102,85 +106,9 @@ CREATE TABLE music_script_kv_nodes (
 CREATE TABLE music_script_checks (
     installation_id TEXT NOT NULL REFERENCES music_script_installations(installation_id) ON DELETE CASCADE,
     site_id TEXT NOT NULL,
-    state TEXT NOT NULL CHECK (state IN ('ok','failed','unsupported')),
+    state TEXT NOT NULL CHECK (state IN ('ok', 'failed', 'unsupported')),
     quality TEXT,
     sample TEXT,
     code TEXT,
-    PRIMARY KEY (installation_id,site_id)
-) STRICT;
-
--- Standalone Pan accounts (plaintext typed credentials)
-CREATE TABLE pan_standalone_accounts (
-    provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('baidu', 'quark', 'uc', 'tianyi', 'yidong')),
-    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 0 AND 9007199254740991),
-    status TEXT,
-    cookie TEXT,
-    username TEXT,
-    password TEXT,
-    authorization TEXT,
-    refreshed_at_ms INTEGER CHECK (refreshed_at_ms IS NULL OR refreshed_at_ms >= 0)
-) STRICT;
-INSERT INTO pan_standalone_accounts(provider,revision,row_revision) VALUES
- ('baidu',0,0),('quark',0,0),('uc',0,0),('tianyi',0,0),('yidong',0,0);
-
--- Standalone metadata settings (plaintext typed credentials)
-CREATE TABLE metadata_standalone_tmdb (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    api_base TEXT NOT NULL,
-    image_base TEXT NOT NULL,
-    api_key TEXT NOT NULL,
-    access_token TEXT NOT NULL,
-    language TEXT NOT NULL,
-    region TEXT NOT NULL,
-    include_adult INTEGER NOT NULL CHECK (include_adult IN (0, 1)),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
-) STRICT;
-
-CREATE TABLE metadata_standalone_douban (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    api_base TEXT NOT NULL,
-    search_base TEXT NOT NULL,
-    image_base TEXT NOT NULL,
-    api_proxy TEXT NOT NULL,
-    image_proxy TEXT NOT NULL,
-    cookie TEXT NOT NULL,
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
-) STRICT;
-
--- Music platform anonymous protocol state
-CREATE TABLE music_anonymous_state (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
-) STRICT;
-
-CREATE TABLE music_anonymous_wy_cookies (
-    cookie_name TEXT PRIMARY KEY NOT NULL,
-    cookie_value TEXT NOT NULL,
-    singleton INTEGER NOT NULL DEFAULT 1 CHECK(singleton=1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE music_anonymous_kg (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE,
-    seed TEXT NOT NULL,
-    mid TEXT NOT NULL,
-    dfid TEXT
-) STRICT;
-
-CREATE TABLE music_anonymous_tx (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE,
-    installation_id TEXT NOT NULL,
-    android_id TEXT NOT NULL,
-    open_udid TEXT NOT NULL,
-    open_udid2 TEXT NOT NULL,
-    imei TEXT NOT NULL,
-    qimei_q36 TEXT,
-    qimei_saved_at_ms INTEGER,
-    session_uid TEXT,
-    session_sid TEXT,
-    session_saved_at_ms INTEGER,
-    CHECK ((qimei_q36 IS NULL AND qimei_saved_at_ms IS NULL) OR
-      (qimei_q36 IS NOT NULL AND qimei_saved_at_ms IS NOT NULL AND qimei_saved_at_ms BETWEEN 0 AND 9007199254740991)),
-    CHECK ((session_uid IS NULL AND session_sid IS NULL AND session_saved_at_ms IS NULL) OR
-      (session_uid IS NOT NULL AND session_sid IS NOT NULL AND session_saved_at_ms IS NOT NULL AND session_saved_at_ms BETWEEN 0 AND 9007199254740991))
+    PRIMARY KEY (installation_id, site_id)
 ) STRICT;

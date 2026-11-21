@@ -1,4 +1,4 @@
--- Cat runtime gateway settings and installation facts
+-- CatNode standalone gateway configuration and shared script installation state.
 CREATE TABLE cat_gateway_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     port INTEGER NOT NULL CHECK (port BETWEEN 0 AND 65535)
@@ -7,7 +7,7 @@ CREATE TABLE cat_gateway_settings (
 CREATE TABLE cat_provider_entries (
     provider_id TEXT PRIMARY KEY NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
-    enabled INTEGER NOT NULL CHECK(enabled IN (0,1))
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
 ) STRICT;
 
 CREATE TABLE cat_mappings (
@@ -17,7 +17,7 @@ CREATE TABLE cat_mappings (
 
 CREATE TABLE cat_mapping_aliases (
     position INTEGER NOT NULL REFERENCES cat_mappings(position) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
     alias TEXT NOT NULL,
     PRIMARY KEY (position, ordinal)
 ) STRICT;
@@ -42,6 +42,8 @@ CREATE TABLE cat_installations (
     update_error TEXT,
     PRIMARY KEY (mode, installation_id)
 ) STRICT;
+
+CREATE INDEX idx_cat_installations_position ON cat_installations(mode, position);
 
 CREATE TABLE cat_installation_config_nodes (
     mode TEXT NOT NULL,

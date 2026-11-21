@@ -7,7 +7,7 @@ import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
 import { stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { contracts } from '../contracts.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
-import { createMusicStorage } from './music-storage.mjs';
+import { createMusicStorage } from './storage/music-storage.mjs';
 
 export const musicScriptContract = contracts.music.contract;
 /** Platforms an LX source can resolve for the native music catalog. */

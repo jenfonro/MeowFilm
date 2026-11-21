@@ -1,3 +1,5 @@
+import { storageError } from '../engine/errors.js';
+
 /** Repositories supply fixed identifiers; public requests never select tables or columns. */
 export function upsert(table, columns, values, keys) {
   const changed = columns.filter(column => !keys.includes(column));
@@ -29,7 +31,7 @@ export function reconcile(table, columns, keys, previous, proposed) {
   const writes = [], deletes = [];
   for (const row of proposed) {
     const id = identity(row), old = remaining.get(id);
-    if (seen.has(id)) throw Object.assign(new Error('INVALID_REQUEST'), {code:'INVALID_REQUEST'});
+    if (seen.has(id)) throw storageError('INVALID_REQUEST');
     seen.add(id);
     remaining.delete(id);
     if (!old || row.some((value, index) => !Object.is(value, old[index])))

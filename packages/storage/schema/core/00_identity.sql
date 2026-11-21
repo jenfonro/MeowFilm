@@ -1,3 +1,4 @@
+-- Core database identity, monotonic owner revisions, and idempotency receipts.
 CREATE TABLE storage_identity (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     schema_hash TEXT NOT NULL CHECK (length(schema_hash) = 64)

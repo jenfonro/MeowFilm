@@ -22,6 +22,7 @@ settings=(-configuration Debug -sdk iphonesimulator -destination 'generic/platfo
   -jobs 2 ARCHS="$arch" ONLY_ACTIVE_ARCH=YES
   CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=)
 logged source-scope python3 -I -B scripts/check-source-scope.py || status=4
+logged storage-schema python3 -I -B scripts/storage/generate-schema.py --check || status=4
 logged sqlite-kernel python3 -I -B scripts/prepare-ios-sqlite.py --target macos || exit 4
 logged audio-kernel python3 -I -B scripts/prepare-ios-audio-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4
 logged video-kernel python3 -I -B scripts/prepare-ios-video-kernel.py --target "macos-$arch" --target "ios-simulator-$arch" || exit 4

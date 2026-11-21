@@ -6,6 +6,6 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="[10.0.15]" />
     <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
-    <EmbeddedResource Include="../../../../packages/storage/schema.sql" LogicalName="MeowFilm.Storage.schema.sql" />
+    <EmbeddedResource Include="../../../../packages/storage/generated/schema-windows.sql" LogicalName="MeowFilm.Storage.schema.sql" />
   </ItemGroup>
 </Project>

@@ -1,5 +1,5 @@
 import { isRawJSON, rawJSON } from '@meowfilm/runtime-bridge/json';
-import { storageError } from './database.js';
+import { storageError } from '../engine/errors.js';
 
 const MAX_DEPTH = 64;
 const SAFE_MIN = -9007199254740991;

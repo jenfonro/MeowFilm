@@ -1,11 +1,23 @@
 # 共享 SQLite 存储契约
 
-每个 App 数据根只有一个在线 SQLite 数据库 `storage-v1/meowfilm.sqlite3`。iOS 原生客户端、Windows 原生客户端及同一 App 内的 Node 运行器连接到该库；iOS 和 Windows 各自使用本机数据根，不通过 SQLite 文件跨设备共享。统一表定义由 `packages/storage/schema/*.sql` 生成并校验，根 schema identity 不匹配即启动失败，不执行数据库升级。
+每个 App 数据根只有一个在线 SQLite 数据库 `storage-v1/meowfilm.sqlite3`。iOS 原生客户端、Windows 原生客户端及同一 App 内的 Node 运行器连接到该库；iOS 和 Windows 各自使用本机数据根，不通过 SQLite 文件跨设备共享。
+
+## 分平台 Schema 组织与产物隔离
+
+- Schema 源码按真实归属拆分为五层目录：`packages/storage/schema/{core,runtime,music,windows,ios}/`。严禁将双端表混装到同一份产物中。
+- 唯一生成与静态校验入口为 `scripts/storage/generate-schema.py`（支持 `--check` 门禁，并在内存 SQLite 中验证可执行性、外键合法性、全表 `STRICT`、零跨平台表污染与零伪关系位掩码回归）。
+- 固定输出三份独立产物：
+  - `packages/storage/generated/schema-standalone.sql`（`core + runtime`）：独立 Node 运行器与验收工具使用。
+  - `packages/storage/generated/schema-windows.sql`（`core + runtime + music + windows`）：Windows 原生客户端嵌入资源与 Windows Node 运行器校验使用，不得包含任何 `ios_*` 表。
+  - `packages/storage/generated/schema-ios.sql`（`core + runtime + music + ios`，同步镜像至 `native/MeowKit/Sources/MeowStorage/Resources/storage-schema.sql`）：iOS 原生客户端与 iOS Node 运行器校验使用，不得包含任何 `windows_*` 表。
+- `@meowfilm/storage`（目录按职责分为 `packages/storage/src/{engine,schema,query,values}/`）通过 `configureStorage({ driver, initialize, target })` 显式选定 `standalone | windows | ios` 目标 schema；根 schema identity（`application_id`、`user_version=1`、`storage_identity.schema_hash` 与 `sqlite_schema` 结构）不匹配即启动失败，不执行数据库升级。
 
 ## 存储格式与边界
 
 - 开发期数据库 `user_version`、内部业务记录的 `schema` 及同义格式 `version` 统一固定为 `1`，不因功能开发递增，不维护历史格式或迁移链。表定义只保留当前模型；固定版本号不代替产品身份、实际字段与关系约束的校验。并发控制的 revision／generation／队列序号，以及第三方协议或工具产物版本，不属于存储格式版本。
-- 应用内部业务记录和结构化缓存使用关系表、typed columns、外键、唯一约束、索引及有序子关系；关系和实体有明确 owner，不把整份业务对象序列化为 TEXT/BLOB 保存。第三方动态值只使用有界 typed value-tree relations。
+- 应用内部业务记录和结构化缓存必须使用手写、规范化的 SQLite `STRICT` 关系表、typed columns、外键、唯一约束、索引及有序子关系；关系和实体有明确 owner，原生仓库层直接执行强类型 SQL ↔ 强类型业务模型映射。
+- 严禁整份业务对象序列化为 TEXT/BLOB 保存，也严禁使用伪关系 JSON-AST 投影框架（禁止 `shape_mask`／`null_mask`、禁止由 JSON 往返生成的 `*StorageRecords` 胶水、禁止原生层通过 `JsonNode`/`JsonElement`/`JSONEncoder` 中转读写内部业务表、禁止给内部业务表加泛化 `*_extensions` 槽位）。
+- 有界 typed value-tree relations 仅允许用于极少数真正动态的第三方脚本或外部规则／元数据扩展（如 LX 脚本 KV／声明扩展、Reader 书源规则／变量、Cat 配置、TMDB／豆瓣未知扩展字段、第三方音乐源未知元数据字段、导入小说规则扩展）。
 - JSON 仅作为网络、Node/原生私密 IPC、脚本 API、构建元数据与用户明确导入／导出的交换格式；编码或解码 JSON 以形成 API 快照时不表示数据库储存 JSON 文档。
 - 第三方脚本自有 private volume 由脚本及宿主文件 capability 按第三方约定管理，不由应用把 JSON 文件禁令扩展到第三方格式，也不以扩展名过滤其内容。用户选择导出的 JSON 文件为正常外部交换文件。
 - 真实源代码、媒体、图片、歌词及其他不可变/流式二进制资源按所属资源 owner 使用文件；数据库保存强类型索引和身份，不将大块媒体嵌入 JSON。
@@ -26,7 +38,11 @@ SQLite 写事务序列化物理修改；跨 owner 的 stale-write 防护由 owne
 
 ## 事务、耐久与故障
 
-- 每个连接启用外键与 `trusted_schema=OFF`，WAL journal、`synchronous=FULL` 和关闭自动 checkpoint。SQLite 是本机事务型数据库；WAL 不意味着多主高可用或跨设备集群。
+- 统一连接 PRAGMA 基准：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`synchronous=FULL`、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`。SQLite 是本机事务型数据库；WAL 不意味着多主高可用或跨设备集群。
+- **热路径执行边界**：
+  - 常规读写查询与事务直接运行在已打开连接、有界 Prepared Statement 缓存和 SQLite WAL + `busy_timeout=5000` 之上；严禁在每次普通查询/写入前重复执行目录 `realpath`、文件 `stat`/`inode` 检查或获取跨进程 `maintenance.lock`。
+  - 目录与文件边界检查（含符号链接／硬链接／inode 校验）以及 `maintenance.lock` 仅在开库（open）、显式或周期维护（`wal_checkpoint(PASSIVE)` / `incremental_vacuum`）和在线备份（backup）时执行。
+  - 端侧原生数据库引擎（Windows / iOS）采用 WAL 读写分离：只读查询走独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`），写事务仍在单一写 lane 串行提交，避免长写事务阻塞首页、搜索和播放读取。
 - 普通打开只处理当前格式身份、真实结构、连接与文件边界，不执行全库存量外键数据审计；外键约束在写入时生效，所选关系在实际读取时解析。原生与附属运行器不重复审计全库业务内容，见[拒绝条件与数据消费边界](validation-boundaries.md)。显式整库备份的结果检查由备份 owner 承担。
 - 短事务保持同步一致性；单个用户动作涉及的字段、子关系、缓存索引和 revision 一并提交。UI/Node 之外的长计算或网络等待不得持有写事务。请求按读取窗口和查询边界执行，不为单条记录读写强制物化整表。
 - 已确认保存以事务 COMMIT 成功为准，不能只表示进入内存队列。进程被强制终止或 iOS 从后台被清除后，已提交事务由 SQLite 的正常 WAL 恢复保留，未提交事务不成为半份业务记录；正常退出、终止回调、checkpoint 或 vacuum 均不是已提交数据耐久的前提。播放／阅读进度等高频状态可以按业务定义合并保存，但尚未提交的最近变化不承诺在强制终止后保留。SQLite 事务恢复不属于旧 schema／旧数据迁移。
