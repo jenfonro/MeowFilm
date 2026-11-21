@@ -173,8 +173,45 @@ import Combine
     public init(database: SQLiteDatabase? = nil) { self.database = database }
     nonisolated private static func load(_ db: SQLiteConnection) throws -> MusicAppearancePreferences {
         guard let row = try db.query("SELECT * FROM ios_music_appearance WHERE singleton=1").first else { return .init() }
-        return try SQLiteRecord.decode(MusicAppearancePreferences.self, row: row, columns: columns,
-            booleans: ["lockLyric", "lyricTranslation", "lyricBackground"])
+        guard let playlistView = MusicPlaylistAppearance(rawValue: try row.text("playlistView")),
+              let playerTheme = MusicPlayerAppearance(rawValue: try row.text("playerTheme")),
+              let colorMode = MusicColorMode(rawValue: try row.text("colorMode")) else {
+            throw SQLiteStorageError.invalidValue
+        }
+        let colorPalette = try decodePalette(try row.text("colorPalette"))
+        return MusicAppearancePreferences(
+            playlistView: playlistView,
+            playerTheme: playerTheme,
+            colorMode: colorMode,
+            colorPalette: colorPalette,
+            lockLyric: try row.bool("lockLyric"),
+            lyricTranslation: try row.bool("lyricTranslation"),
+            lyricBackground: try row.bool("lyricBackground")
+        )
+    }
+    nonisolated private static func decodePalette(_ text: String) throws -> PagePalette {
+        if let preset = PageColorway(rawValue: text) { return .preset(preset) }
+        if text.count == 7, text.first == "#", let rgb = UInt32(text.dropFirst(), radix: 16) {
+            return .custom(rgb)
+        }
+        throw SQLiteStorageError.invalidValue
+    }
+    nonisolated private static func encodePalette(_ palette: PagePalette) -> String {
+        switch palette {
+        case .preset(let value): return value.rawValue
+        case .custom(let rgb): return String(format: "#%06X", rgb & 0xffffff)
+        }
+    }
+    nonisolated private static func rowValues(_ value: MusicAppearancePreferences) -> [SQLiteValue] {
+        [
+            .text(value.playlistView.rawValue),
+            .text(value.playerTheme.rawValue),
+            .text(value.colorMode.rawValue),
+            .text(encodePalette(value.colorPalette)),
+            .bool(value.lockLyric),
+            .bool(value.lyricTranslation),
+            .bool(value.lyricBackground)
+        ]
     }
     public func bind(database: SQLiteDatabase) async throws {
         guard self.database == nil || self.database === database, !closed else { return }
@@ -378,7 +415,7 @@ import Combine
                     var next = try Self.load(db); change(&next)
                     let revision = try db.query("SELECT row_revision FROM ios_music_appearance WHERE singleton=1").first?.integer("row_revision") ?? 0
                     try db.upsert("ios_music_appearance", columns: ["singleton"] + Self.columns + ["row_revision"],
-                        values: [.integer(1)] + (try SQLiteRecord.values(next, columns: Self.columns)) + [.integer(revision + 1)],
+                        values: [.integer(1)] + Self.rowValues(next) + [.integer(revision + 1)],
                         key: ["singleton"])
                     return next
                 }

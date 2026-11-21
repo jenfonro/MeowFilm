@@ -1,10 +1,14 @@
 # 本地存储
 
-iOS App 的所有内部业务数据和结构化缓存使用唯一 SQLite 数据库：Application Support 下 `meowfilm/storage-v1/meowfilm.sqlite3`。`MeowfilmResources` 创建数据库后，将同一 `SQLiteDatabase` 显式交给原生 owner；受信 Node runtime 通过 App 私密启动描述符和异步 SQLite binding 打开同一路径。两端使用各自的平台 SQLite driver，但 schema SQL、identity 和数据根相同。schema 不匹配、损坏或不支持的当前格式会阻止启动，不会探测、迁移、兼容或删除旧数据。
+iOS App 的所有内部业务数据和结构化缓存使用唯一 SQLite 数据库：Application Support 下 `meowfilm/storage-v1/meowfilm.sqlite3`。`MeowfilmResources` 创建数据库后，将同一 `SQLiteDatabase` 显式交给原生 owner；受信 Node runtime（`apps/ios/runtime/bootstrap.mjs` 显式传入 `target: 'ios'`）通过 App 私密启动描述符和原生异步 SQLite binding（`packages/script-host/native/sqlite-storage.cc`）打开同一路径。两端使用各自的平台 SQLite driver，但共享同一份 iOS schema SQL、identity 和数据根。schema 不匹配、损坏或不支持的当前格式会阻止启动，不会探测、迁移、兼容或删除旧数据。
 
 ## 数据模型与 owner
 
-关系模式位于 `packages/storage/schema/*.sql`，通过 `scripts/generate-storage-schema.py` 生成唯一完整 schema。规范化实体、typed columns、外键、唯一约束、索引和有序子关系是持久结构；结构化动态值使用有界关系型 value tree。内部业务对象不整份 JSON 编码后写成数据库 TEXT/BLOB。
+iOS 专属关系模式按职责分层位于 `packages/storage/schema/{core,runtime,music,ios}/`，由 `python3 -I -B scripts/storage/generate-schema.py` 合并生成 `packages/storage/generated/schema-ios.sql` 并镜像到 `native/MeowKit/Sources/MeowStorage/Resources/storage-schema.sql`（161 张 `STRICT` 表、43 个索引，不包含 `windows_*` 表，无 `shape_mask` / `null_mask`）。所有内部业务持久化均由各仓库手写强类型 SQL ↔ Swift 模型直接映射，禁止 `JSONEncoder`/`JSONDecoder` 数据库往返或伪关系 JSON-AST 抽象；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
+
+目录职责划分：
+- `native/MeowKit/Sources/MeowStorage/`：`Engine/`（`SQLiteDatabase.swift`）、`Schema/`（`SQLiteSchema.swift`）、`Files/`（原始资源与文件保护）、`Values/`（`SQLiteValueTree.swift`）、`Debug/`（`SQLiteDebugQuery.swift`）。
+- `native/MeowKit/Sources/MeowMusicNativeService/Persistence/`：`Core/`（库事务协调、模型清洗、通用 SQL helper、目录源与播放设置）、`Songs/`（曲目与来源事实）、`Library/`（收藏、歌单、网络歌单引用与同步状态）、`Queue/`（播放队列与相似推荐会话）、`History/`（历史歌单与按日播放记录）、`Discovery/`（多平台来源发现缓存）、`Home/`（首页展示快照）。
 
 | 数据 | 唯一 owner 与存储 |
 | --- | --- |
@@ -23,7 +27,12 @@ iOS App 的所有内部业务数据和结构化缓存使用唯一 SQLite 数据�
 
 ## 事务、性能与生命周期
 
-`SQLiteDatabase` 使用当前 schema identity，WAL、`synchronous=FULL`、外键及 bounded I/O queue；写入有 pending count/bytes 准入，短事务只读取和更改对应实体及关系。读路径按索引、身份和窗口分页，不因一次更新重写全部业务表；无变化更新不增加 WAL。关闭先拒绝新任务、排空已受理事务并释放连接，不在关闭时执行 checkpoint／vacuum。维护在运行期间按阈值尝试。跨连接维护使用协作锁，在线备份由 SQLite backup API 生成一致快照。
+`SQLiteDatabase` 与 `packages/script-host/native/sqlite-storage.cc` 统一执行相同的 PRAGMA 基准：`busy_timeout=5000`、`trusted_schema=OFF`、`foreign_keys=ON`、`journal_mode=WAL`、`synchronous=FULL`、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`temp_store=MEMORY`、`cache_size=-16384`，并在 `open` 阶段逐项校验生效。
+
+- **WAL 读写分离**：`SQLiteDatabase` 维护一条串行写连接（`writeQueue`）和一条独立只读连接（`readQueue`，`SQLITE_OPEN_READONLY` + `PRAGMA query_only=ON`）。常规只读查询与 `readSnapshot` 运行在只读连接上，不与写事务互斥；写事务内重入只读调用自动复用当前写连接以保持读己所写。
+- **Prepared Statement LRU 缓存**：`SQLiteDatabase` 的读写连接及 `sqlite-storage.cc` 均维护有界 Prepared Statement LRU 缓存（上限 256 条、SQL ≤ 4096 字节、跳过 `PRAGMA`），复用句柄并在连接关闭前统一 `sqlite3_finalize`。
+- **零每请求文件 syscall 与锁争用**：仅在打开库、显式 `checkpoint`、在线 `backup` 以及达到提交阈值（64 次提交）触发周期维护时执行文件/inode 校验并获取 `maintenance.lock`；常规 `query`/`execute`/`transaction`/`snapshot` 零额外文件 stat 与锁文件争用。
+- **写入准入与生命周期**：写入有 pending count/bytes 准入，短事务只读取和更改对应实体及关系；无变化更新不增加 WAL。关闭先拒绝新任务、排空已受理事务、释放全部缓存语句并关闭连接，不在关闭时执行 checkpoint／vacuum。在线备份由 SQLite backup API 生成一致快照。
 
 图片、音频、歌词和脚本源码字节不塞入 SQLite。原始资源目录与媒体 cache 各自持有文件生命周期和容量策略，数据库只做索引；缓存失效不能触发删除或重建整库。WAL 是单机本地事务机制，不表示跨设备多主或服务器集群高可用。
 

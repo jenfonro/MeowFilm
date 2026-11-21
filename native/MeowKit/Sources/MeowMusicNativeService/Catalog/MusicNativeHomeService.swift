@@ -249,8 +249,8 @@ extension NativeMusicService: MusicHomeBrowsing {
         let display = try access.perform {
             if !homeDisplayPrepared {
                 homeDisplayPrepared = true
-                if let data = try? homeSnapshot?.read() {
-                    homeDisplay = try? MusicNativeHomeSnapshot.restore(data)
+                if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
+                    homeDisplay = try? store.readDisplay()
                 }
             }
             return homeDisplay
@@ -485,10 +485,10 @@ extension NativeMusicService: MusicHomeBrowsing {
                     homeCache = (load.source, load.binding.scope, load.binding.revision,
                                  now().addingTimeInterval(600), cachedDisplay)
                 }
-                if let data = try? MusicNativeHomeSnapshot.encode(display, source: load.source) {
-                    // Serialization/storage failure keeps the previous durable
-                    // success without discarding the usable in-memory display.
-                    try? homeSnapshot?.write(data)
+                if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
+                    // Storage failure keeps the previous durable success
+                    // without discarding the usable in-memory display.
+                    try? store.writeDisplay(display, source: load.source)
                 }
                 return page
             }

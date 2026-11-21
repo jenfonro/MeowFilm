@@ -47,8 +47,7 @@ extension NativeMusicService: MusicCollectionMembershipServing {
         let managed: [MusicCollection] = try rows.filter {
             !$0["id"].string.isEmpty && identities[Data($0["id"].string.utf8)]?.count == 1 && $0["revision"].isInteger
         }.map { row in
-            let first = try row["order"].strings.first.flatMap { try state.songRows.songData(id: $0) }
-                .map { try MJ.parse($0) } ?? .null
+            let first = try row["order"].strings.first.flatMap { try state.songRows.song(id: $0) } ?? .null
             return .init(id: row["id"].string, title: row["name"].string, kind: row["kind"].string,
                 count: row["order"].array.count, revision: row["revision"].int,
                 artwork: MusicNativePublicBrowseSupport.artwork(first["cover_url"]))

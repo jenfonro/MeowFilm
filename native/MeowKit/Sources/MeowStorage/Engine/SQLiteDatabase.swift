@@ -1,6 +1,5 @@
 import Foundation
 import MeowSQLite
-import CryptoKit
 import MeowDebug
 #if canImport(Darwin)
 import Darwin
@@ -22,7 +21,10 @@ public enum SQLiteValue: Equatable, Hashable, Sendable {
     public static func optional(_ value: String?) -> Self { value.map(Self.text) ?? .null }
     public static func optional(_ value: Double?) -> Self { value.map(Self.real) ?? .null }
     public static func optional(_ value: Int?) -> Self { value.map(Self.integer) ?? .null }
+    public static func optional(_ value: Int64?) -> Self { value.map(Self.integer) ?? .null }
+    public static func optional(_ value: Bool?) -> Self { value.map(Self.bool) ?? .null }
     public static func optional(_ value: Date?) -> Self { value.map { .real($0.timeIntervalSince1970) } ?? .null }
+    public static func optional(_ value: Data?) -> Self { value.map(Self.blob) ?? .null }
     public var byteCount: Int {
         switch self {
         case .text(let text): return text.utf8.count
@@ -34,6 +36,7 @@ public enum SQLiteValue: Equatable, Hashable, Sendable {
 
 public struct SQLiteRow: Equatable, Sendable {
     public let values: [String: SQLiteValue]
+    public init(values: [String: SQLiteValue]) { self.values = values }
     public subscript(_ column: String) -> SQLiteValue { values[column] ?? .null }
     public func text(_ column: String) throws -> String {
         guard case .text(let value) = self[column] else { throw SQLiteStorageError.invalidValue }
@@ -41,6 +44,13 @@ public struct SQLiteRow: Equatable, Sendable {
     }
     public func optionalText(_ column: String) throws -> String? {
         self[column] == .null ? nil : try text(column)
+    }
+    public func int64(_ column: String) throws -> Int64 {
+        guard case .integer(let value) = self[column] else { throw SQLiteStorageError.invalidValue }
+        return value
+    }
+    public func optionalInt64(_ column: String) throws -> Int64? {
+        self[column] == .null ? nil : try int64(column)
     }
     public func integer(_ column: String) throws -> Int {
         guard case .integer(let value) = self[column], let result = Int(exactly: value) else {
@@ -66,18 +76,93 @@ public struct SQLiteRow: Equatable, Sendable {
         guard value == 0 || value == 1 else { throw SQLiteStorageError.invalidValue }
         return value == 1
     }
+    public func optionalBool(_ column: String) throws -> Bool? {
+        self[column] == .null ? nil : try bool(column)
+    }
+    public func blob(_ column: String) throws -> Data {
+        guard case .blob(let data) = self[column] else { throw SQLiteStorageError.invalidValue }
+        return data
+    }
+    public func optionalBlob(_ column: String) throws -> Data? {
+        self[column] == .null ? nil : try blob(column)
+    }
+    public func date(_ column: String) throws -> Date {
+        Date(timeIntervalSince1970: try double(column))
+    }
+    public func optionalDate(_ column: String) throws -> Date? {
+        try optionalDouble(column).map { Date(timeIntervalSince1970: $0) }
+    }
+    public func uuid(_ column: String) throws -> UUID {
+        guard let value = UUID(uuidString: try text(column)) else { throw SQLiteStorageError.invalidValue }
+        return value
+    }
+    public func optionalUUID(_ column: String) throws -> UUID? {
+        guard let raw = try optionalText(column) else { return nil }
+        guard let value = UUID(uuidString: raw) else { throw SQLiteStorageError.invalidValue }
+        return value
+    }
 }
 
 /// A connection is borrowed only during an executor closure. Domain repositories
-/// own SQL and projections; this layer never selects a business namespace.
+/// own SQL and typed projections; this layer never selects a business namespace.
 public final class SQLiteConnection {
+    private final class StatementNode {
+        let sql: String
+        let stmt: OpaquePointer
+        var prev: StatementNode?
+        var next: StatementNode?
+        init(sql: String, stmt: OpaquePointer) { self.sql = sql; self.stmt = stmt }
+    }
+
     let handle: OpaquePointer
-    fileprivate let maintenanceDescriptor: Int32
-    private var statements: [String: OpaquePointer] = [:]
-    private var statementOrder: [String] = []
-    private let maximumStatements = 128
-    fileprivate init(_ handle: OpaquePointer, maintenanceDescriptor: Int32) {
-        self.handle = handle; self.maintenanceDescriptor = maintenanceDescriptor
+    public let isReadOnly: Bool
+    private var statementMap: [String: StatementNode] = [:]
+    private var head: StatementNode?
+    private var tail: StatementNode?
+    private static let maximumStatements = 256
+    private static let maximumCachedSQLLength = 4096
+
+    init(_ handle: OpaquePointer, isReadOnly: Bool) {
+        self.handle = handle
+        self.isReadOnly = isReadOnly
+    }
+
+    private static func isPragmaSQL(_ sql: String) -> Bool {
+        let bytes = Array(sql.utf8)
+        var index = 0
+        while index < bytes.count && (bytes[index] == 0x20 || bytes[index] == 0x09 || bytes[index] == 0x0A || bytes[index] == 0x0D) {
+            index += 1
+        }
+        let prefix: [UInt8] = [0x70, 0x72, 0x61, 0x67, 0x6d, 0x61] // "pragma"
+        guard bytes.count - index >= prefix.count else { return false }
+        for offset in 0..<prefix.count {
+            let ch = bytes[index + offset]
+            let lower = (ch >= 0x41 && ch <= 0x5A) ? (ch + 0x20) : ch
+            if lower != prefix[offset] { return false }
+        }
+        if index + prefix.count == bytes.count { return true }
+        let next = bytes[index + prefix.count]
+        let isWord = (next >= 0x30 && next <= 0x39) || (next >= 0x41 && next <= 0x5A) ||
+            (next >= 0x61 && next <= 0x7A) || next == 0x5F
+        return !isWord
+    }
+
+    private static func isCacheable(_ sql: String) -> Bool {
+        sql.utf8.count <= maximumCachedSQLLength && !isPragmaSQL(sql)
+    }
+
+    private func unlink(_ node: StatementNode) {
+        if let prev = node.prev { prev.next = node.next } else { head = node.next }
+        if let next = node.next { next.prev = node.prev } else { tail = node.prev }
+        node.prev = nil
+        node.next = nil
+    }
+
+    private func insertAtFront(_ node: StatementNode) {
+        node.prev = nil
+        node.next = head
+        if let head { head.prev = node } else { tail = node }
+        head = node
     }
 
     private func prepare(_ sql: String, _ bindings: [SQLiteValue]) throws -> OpaquePointer {
@@ -85,14 +170,25 @@ public final class SQLiteConnection {
             throw SQLiteStorageError.invalidValue
         }
         let statement: OpaquePointer
-        if let cached = statements.removeValue(forKey: sql) {
-            statementOrder.removeAll { $0 == sql }
-            statement = cached
+        if let node = statementMap.removeValue(forKey: sql) {
+            unlink(node)
+            statement = node.stmt
         } else {
             var prepared: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &prepared, nil) == SQLITE_OK, let prepared else {
+            var trailing = ""
+            let rc: Int32 = sql.withCString { cSQL in
+                var remainder: UnsafePointer<CChar>?
+                let code = sqlite3_prepare_v2(handle, cSQL, -1, &prepared, &remainder)
+                if let remainder { trailing = String(cString: remainder).trimmingCharacters(in: .whitespacesAndNewlines) }
+                return code
+            }
+            guard rc == SQLITE_OK, let prepared else {
                 if let prepared { sqlite3_finalize(prepared) }
                 throw Self.failure(sqlite3_extended_errcode(handle))
+            }
+            guard trailing.isEmpty || trailing == ";" else {
+                sqlite3_finalize(prepared)
+                throw SQLiteStorageError.invalidValue
             }
             statement = prepared
         }
@@ -123,21 +219,36 @@ public final class SQLiteConnection {
     }
 
     private func recycle(_ statement: OpaquePointer, sql: String, succeeded: Bool) {
-        guard succeeded, ["SELECT ", "INSERT ", "UPDATE ", "DELETE "].contains(where: sql.hasPrefix),
-              sqlite3_reset(statement) == SQLITE_OK, sqlite3_clear_bindings(statement) == SQLITE_OK else {
+        guard succeeded, Self.isCacheable(sql),
+              sqlite3_reset(statement) == SQLITE_OK,
+              sqlite3_clear_bindings(statement) == SQLITE_OK else {
             sqlite3_finalize(statement); return
         }
-        if let previous = statements.removeValue(forKey: sql) { sqlite3_finalize(previous); statementOrder.removeAll { $0 == sql } }
-        if statements.count == maximumStatements {
-            let oldest = statementOrder.removeFirst()
-            if let previous = statements.removeValue(forKey: oldest) { sqlite3_finalize(previous) }
+        if let previous = statementMap.removeValue(forKey: sql) {
+            unlink(previous)
+            sqlite3_finalize(previous.stmt)
         }
-        statements[sql] = statement; statementOrder.append(sql)
+        while statementMap.count >= Self.maximumStatements, let oldest = tail {
+            unlink(oldest)
+            statementMap.removeValue(forKey: oldest.sql)
+            sqlite3_finalize(oldest.stmt)
+        }
+        let node = StatementNode(sql: sql, stmt: statement)
+        insertAtFront(node)
+        statementMap[sql] = node
     }
 
-    fileprivate func releaseStatements() {
-        for statement in statements.values { sqlite3_finalize(statement) }
-        statements.removeAll(); statementOrder.removeAll()
+    func releaseStatements() {
+        var cursor = head
+        while let node = cursor {
+            cursor = node.next
+            node.prev = nil
+            node.next = nil
+            sqlite3_finalize(node.stmt)
+        }
+        head = nil
+        tail = nil
+        statementMap.removeAll()
     }
 
     deinit { releaseStatements() }
@@ -155,41 +266,45 @@ public final class SQLiteConnection {
 
     public func query(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max) throws -> [SQLiteRow] {
         guard maximumRows > 0 else { throw SQLiteStorageError.invalidValue }
-        var result: [SQLiteRow] = []
-        try rows(sql, bindings) { row in
-            guard result.count < maximumRows else { throw SQLiteStorageError.queueFull }
-            result.append(row)
-        }
-        return result
+        var output: [SQLiteRow] = []
+        try rows(sql, bindings, maximumRows: maximumRows) { output.append($0) }
+        return output
     }
 
-    /// Streaming projections avoid retaining unrelated rows or duplicate DTOs.
-    public func rows(_ sql: String, _ bindings: [SQLiteValue] = [], _ consume: (SQLiteRow) throws -> Void) throws {
+    public func rows(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max,
+                     consume: (SQLiteRow) throws -> Void) throws {
+        guard maximumRows > 0 else { throw SQLiteStorageError.invalidValue }
         let statement = try prepare(sql, bindings)
         var succeeded = false
         defer { recycle(statement, sql: sql, succeeded: succeeded) }
+        let count = Int(sqlite3_column_count(statement))
+        let names = (0..<count).map { String(cString: sqlite3_column_name(statement, Int32($0))) }
+        var emitted = 0
         while true {
             let result = sqlite3_step(statement)
             if result == SQLITE_DONE { succeeded = true; return }
             guard result == SQLITE_ROW else { throw Self.failure(result) }
+            guard emitted < maximumRows else { throw SQLiteStorageError.queueFull }
+            emitted += 1
             var values: [String: SQLiteValue] = [:]
-            for column in 0..<sqlite3_column_count(statement) {
-                let name = String(cString: sqlite3_column_name(statement, column))
+            values.reserveCapacity(count)
+            for index in 0..<count {
+                let column = Int32(index), name = names[index]
                 switch sqlite3_column_type(statement, column) {
                 case SQLITE_INTEGER: values[name] = .integer(sqlite3_column_int64(statement, column))
                 case SQLITE_FLOAT: values[name] = .real(sqlite3_column_double(statement, column))
                 case SQLITE_TEXT:
-                    let count = Int(sqlite3_column_bytes(statement, column))
-                    guard let pointer = sqlite3_column_text(statement, column),
-                          let value = String(data: Data(bytes: pointer, count: count), encoding: .utf8) else {
-                        throw SQLiteStorageError.corrupt
-                    }
-                    values[name] = .text(value)
+                    let byteCount = Int(sqlite3_column_bytes(statement, column))
+                    if byteCount == 0 { values[name] = .text("") }
+                    else if let pointer = sqlite3_column_text(statement, column) {
+                        let text = String(decoding: UnsafeBufferPointer(start: pointer, count: byteCount), as: UTF8.self)
+                        values[name] = .text(text)
+                    } else { throw SQLiteStorageError.corrupt }
                 case SQLITE_BLOB:
-                    let count = Int(sqlite3_column_bytes(statement, column))
-                    if count == 0 { values[name] = .blob(Data()) }
+                    let byteCount = Int(sqlite3_column_bytes(statement, column))
+                    if byteCount == 0 { values[name] = .blob(Data()) }
                     else if let pointer = sqlite3_column_blob(statement, column) {
-                        values[name] = .blob(Data(bytes: pointer, count: count))
+                        values[name] = .blob(Data(bytes: pointer, count: byteCount))
                     } else { throw SQLiteStorageError.corrupt }
                 default: values[name] = .null
                 }
@@ -202,7 +317,6 @@ public final class SQLiteConnection {
     private static func identifier(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
-    /// Record descriptors compute their fixed SQL once, independent of row values.
     public static func upsertSQL(_ table: String, columns: [String], key: [String]) -> String {
         let changed = columns.filter { !key.contains($0) }
         let conflict = changed.isEmpty ? "DO NOTHING" : "DO UPDATE SET " +
@@ -274,25 +388,28 @@ public final class SQLiteConnection {
     }
 }
 
-/// The App owns one executor and lends it to native repositories. SQLite and
-/// raw resource I/O run on this dedicated serial queue, not a Swift actor's
-/// inherited executor. Admission includes captured bytes, not just task count.
+/// The App owns one database coordinator and lends dedicated WAL read/write lanes
+/// to native repositories. Writes serialize on the write lane; reads run
+/// concurrently on an independent read-only connection (`query_only=ON`).
 public final class SQLiteDatabase: @unchecked Sendable {
-    public static let applicationID = 1_296_450_626
-    public static let schemaVersion = 1
+    public static let applicationID = SQLiteSchema.applicationID
+    public static let schemaVersion = SQLiteSchema.version
     public let dataRoot: URL
     public let url: URL
-    private let queue = DispatchQueue(label: "meowfilm.storage.sqlite", qos: .utility)
-    private let queueKey = DispatchSpecificKey<UInt8>()
+    private let writeQueue = DispatchQueue(label: "meowfilm.storage.sqlite.write", qos: .utility)
+    private let readQueue = DispatchQueue(label: "meowfilm.storage.sqlite.read", qos: .utility)
+    private let writeQueueKey = DispatchSpecificKey<UInt8>()
+    private let readQueueKey = DispatchSpecificKey<UInt8>()
     private let admission = NSLock()
     private var pending = 0, pendingBytes = 0, closing = false
+    private var maintenanceFailure: Error?
     private let maximumPending = 128, maximumPendingBytes = 32 * 1024 * 1024
-    private var connection: SQLiteConnection?
+    private var writeConnection: SQLiteConnection?
+    private var readConnection: SQLiteConnection?
     private var maintenanceDescriptor: Int32 = -1
     private var databaseDevice: dev_t = 0
     private var databaseInode: ino_t = 0
     private var commits = 0
-    private var maintenanceFailure: Error?
 
     public convenience init(dataRoot: URL) throws {
         try self.init(url: dataRoot.appendingPathComponent("storage-v1", isDirectory: true)
@@ -308,14 +425,14 @@ public final class SQLiteDatabase: @unchecked Sendable {
         return URL(fileURLWithPath: String(cString: path), isDirectory: true)
     }
 
-    /// Explicit URL injection is for isolated native repository tests.
     public init(url: URL, dataRoot: URL? = nil) throws {
         guard url.isFileURL, !url.path.utf8.contains(0), url.path != "/" else { throw SQLiteStorageError.invalidPath }
         self.url = url
         self.dataRoot = dataRoot ?? url.deletingLastPathComponent()
-        queue.setSpecific(key: queueKey, value: 1)
+        writeQueue.setSpecific(key: writeQueueKey, value: 1)
+        readQueue.setSpecific(key: readQueueKey, value: 1)
         guard !Thread.isMainThread else { throw SQLiteStorageError.mainThreadAccess }
-        try queue.sync { try open() }
+        try writeQueue.sync { try open() }
     }
 
     private func open() throws {
@@ -325,12 +442,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 _ = closeFile(maintenanceDescriptor); maintenanceDescriptor = -1
             }
         }
-        guard let schemaURL = Bundle.module.url(forResource: "storage-schema", withExtension: "sql"),
-              let schemaBytes = try? Data(contentsOf: schemaURL),
-              let schema = String(data: schemaBytes, encoding: .utf8), !schema.isEmpty else {
-            throw SQLiteStorageError.invalidSchema
-        }
-        let schemaHash = SHA256.hash(data: schemaBytes).map { String(format: "%02x", $0) }.joined()
+        let definition = try SQLiteSchema.load()
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
@@ -343,9 +455,8 @@ public final class SQLiteDatabase: @unchecked Sendable {
         defer { _ = flock(lock, LOCK_UN); _ = closeFile(lock) }
         try Self.regular(lock)
         try Self.lock(lock, exclusive: true)
-        maintenanceDescriptor = directory.appendingPathComponent("maintenance.lock").path.withCString {
-            openFile($0, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
-        }
+        let maintenanceURL = directory.appendingPathComponent("maintenance.lock")
+        maintenanceDescriptor = maintenanceURL.path.withCString { openFile($0, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600) }
         guard maintenanceDescriptor >= 0 else { throw SQLiteStorageError.io }
         try Self.regular(maintenanceDescriptor)
         try Self.lock(maintenanceDescriptor, exclusive: false)
@@ -353,84 +464,129 @@ public final class SQLiteDatabase: @unchecked Sendable {
         let existing = try Self.regular(url, required: false)
         for suffix in ["-wal", "-shm", "-journal"] {
             let sidecar = try Self.regular(URL(fileURLWithPath: url.path + suffix), required: false)
-            if sidecar != nil && existing == nil { throw SQLiteStorageError.corrupt }
+            guard existing != nil || sidecar == nil else { throw SQLiteStorageError.corrupt }
         }
-        if existing?.st_size == 0 { throw SQLiteStorageError.corrupt }
+        guard existing?.st_size != 0 else { throw SQLiteStorageError.corrupt }
         if existing == nil {
-            let fd = url.path.withCString { openFile($0, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) }
-            guard fd >= 0 else { throw errno == ENOSPC ? SQLiteStorageError.full : SQLiteStorageError.io }
-            guard closeFile(fd) == 0 else { throw SQLiteStorageError.io }
+            let created = url.path.withCString { openFile($0, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) }
+            guard created >= 0 else { throw errno == ENOSPC ? SQLiteStorageError.full : SQLiteStorageError.io }
+            guard closeFile(created) == 0 else { throw SQLiteStorageError.io }
         }
-        var handle: OpaquePointer?
-        let status = sqlite3_open_v2(url.path, &handle,
+        var writeHandle: OpaquePointer?
+        let openStatus = sqlite3_open_v2(url.path, &writeHandle,
             SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
-        guard status == SQLITE_OK, let handle else {
-            if let handle { sqlite3_close_v2(handle) }
-            throw SQLiteConnection.failure(status)
+        guard openStatus == SQLITE_OK, let writeHandle else {
+            if let writeHandle { sqlite3_close_v2(writeHandle) }
+            throw SQLiteConnection.failure(openStatus)
         }
-        let db = SQLiteConnection(handle, maintenanceDescriptor: maintenanceDescriptor)
+        guard chmod(url.path, 0o600) == 0 else {
+            sqlite3_close_v2(writeHandle)
+            throw SQLiteStorageError.io
+        }
+        let writeDB = SQLiteConnection(writeHandle, isReadOnly: false)
+        var readHandle: OpaquePointer?
+        var readDB: SQLiteConnection?
         do {
-            guard String(cString: sqlite3_libversion()) == "3.53.4" else {
+            guard String(cString: sqlite3_libversion()) == SQLiteSchema.expectedSQLiteVersion else {
                 throw SQLiteStorageError.invalidSchema
             }
-            sqlite3_extended_result_codes(handle, 1)
-            sqlite3_busy_timeout(handle, 5_000)
-            guard meow_sqlite3_disable_close_checkpoint(handle) == SQLITE_OK else {
+            sqlite3_extended_result_codes(writeHandle, 1)
+            sqlite3_busy_timeout(writeHandle, 5_000)
+            guard meow_sqlite3_disable_close_checkpoint(writeHandle) == SQLITE_OK else {
                 throw SQLiteStorageError.io
             }
-            _ = try db.query("PRAGMA foreign_keys=ON")
-            _ = try db.query("PRAGMA trusted_schema=OFF")
-            let identity = try db.query("PRAGMA application_id").first!.integer("application_id")
-            let version = try db.query("PRAGMA user_version").first!.integer("user_version")
-            if identity == 0 && version == 0 {
-                guard existing == nil,
-                      try db.query("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").isEmpty else {
+            _ = try writeDB.query("PRAGMA foreign_keys=ON")
+            _ = try writeDB.query("PRAGMA trusted_schema=OFF")
+            let identity = try writeDB.query("PRAGMA application_id").first!.integer("application_id")
+            let version = try writeDB.query("PRAGMA user_version").first!.integer("user_version")
+            let empty = try writeDB.query("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").isEmpty
+            if empty {
+                guard existing == nil, identity == 0, version == 0 else {
                     throw SQLiteStorageError.invalidSchema
                 }
-                _ = try db.query("PRAGMA auto_vacuum=INCREMENTAL")
-                try Self.transaction(db) { db in
-                    guard sqlite3_exec(handle, schema, nil, nil, nil) == SQLITE_OK else {
-                        throw SQLiteConnection.failure(sqlite3_extended_errcode(handle))
-                    }
-                    try db.execute("INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)", [.text(schemaHash)])
-                    _ = try db.query("PRAGMA application_id=\(Self.applicationID)")
-                    _ = try db.query("PRAGMA user_version=\(Self.schemaVersion)")
-                }
+                _ = try writeDB.query("PRAGMA auto_vacuum=INCREMENTAL")
             } else if identity != Self.applicationID || version != Self.schemaVersion {
                 throw SQLiteStorageError.invalidSchema
             }
-            guard try db.query("PRAGMA journal_mode=WAL").first!.text("journal_mode") == "wal" else {
+            _ = try writeDB.query("PRAGMA busy_timeout=5000")
+            _ = try writeDB.query("PRAGMA trusted_schema=OFF")
+            _ = try writeDB.query("PRAGMA foreign_keys=ON")
+            guard try writeDB.query("PRAGMA journal_mode=WAL").first?.text("journal_mode") == "wal" else {
                 throw SQLiteStorageError.io
             }
-            _ = try db.query("PRAGMA synchronous=FULL")
-            _ = try db.query("PRAGMA wal_autocheckpoint=0")
-            guard try db.query("PRAGMA foreign_keys").first!.integer("foreign_keys") == 1,
-                  try db.query("PRAGMA synchronous").first!.integer("synchronous") == 2,
-                  try db.query("PRAGMA trusted_schema").first!.integer("trusted_schema") == 0,
-                  try db.query("PRAGMA wal_autocheckpoint").first!.integer("wal_autocheckpoint") == 0 else {
-                throw SQLiteStorageError.invalidSchema
+            _ = try writeDB.query("PRAGMA synchronous=FULL")
+            _ = try writeDB.query("PRAGMA wal_autocheckpoint=0")
+            _ = try writeDB.query("PRAGMA temp_store=MEMORY")
+            _ = try writeDB.query("PRAGMA cache_size=-16384")
+            try Self.verifyBaselinePragmas(on: writeDB, expectQueryOnly: false)
+            if empty {
+                try Self.transaction(writeDB) { db in
+                    guard sqlite3_exec(writeHandle, definition.sql, nil, nil, nil) == SQLITE_OK else {
+                        throw SQLiteConnection.failure(sqlite3_extended_errcode(writeHandle))
+                    }
+                    try db.execute("INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)", [.text(definition.hash)])
+                    _ = try db.query("PRAGMA application_id=\(Self.applicationID)")
+                    _ = try db.query("PRAGMA user_version=\(Self.schemaVersion)")
+                }
             }
-            _ = try db.query("SELECT owner,revision,receipt FROM owner_revisions LIMIT 0")
-            guard try db.query("SELECT schema_hash FROM storage_identity WHERE singleton=1").first?.text("schema_hash") == schemaHash else {
-                throw SQLiteStorageError.invalidSchema
+            try SQLiteSchema.verifyStructure(of: writeDB, against: definition)
+
+            let readStatus = sqlite3_open_v2(url.path, &readHandle,
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+            guard readStatus == SQLITE_OK, let openedReadHandle = readHandle else {
+                throw SQLiteConnection.failure(readStatus)
             }
-            var expectedHandle: OpaquePointer?
-            guard sqlite3_open_v2(":memory:", &expectedHandle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK,
-                  let expectedHandle else { throw SQLiteStorageError.io }
-            defer { sqlite3_close_v2(expectedHandle) }
-            guard sqlite3_exec(expectedHandle, schema, nil, nil, nil) == SQLITE_OK else { throw SQLiteStorageError.invalidSchema }
-            let structure = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
-            let expected = SQLiteConnection(expectedHandle, maintenanceDescriptor: -1)
-            guard try db.query(structure) == expected.query(structure),
-                  try db.query("PRAGMA auto_vacuum").first?.integer("auto_vacuum") == 2 else { throw SQLiteStorageError.invalidSchema }
+            let openedReadDB = SQLiteConnection(openedReadHandle, isReadOnly: true)
+            readDB = openedReadDB
+            sqlite3_extended_result_codes(openedReadHandle, 1)
+            sqlite3_busy_timeout(openedReadHandle, 5_000)
+            guard meow_sqlite3_disable_close_checkpoint(openedReadHandle) == SQLITE_OK else {
+                throw SQLiteStorageError.io
+            }
+            _ = try openedReadDB.query("PRAGMA busy_timeout=5000")
+            _ = try openedReadDB.query("PRAGMA trusted_schema=OFF")
+            _ = try openedReadDB.query("PRAGMA foreign_keys=ON")
+            _ = try openedReadDB.query("PRAGMA synchronous=FULL")
+            _ = try openedReadDB.query("PRAGMA wal_autocheckpoint=0")
+            _ = try openedReadDB.query("PRAGMA temp_store=MEMORY")
+            _ = try openedReadDB.query("PRAGMA cache_size=-16384")
+            _ = try openedReadDB.query("PRAGMA query_only=ON")
+            try Self.verifyBaselinePragmas(on: openedReadDB, expectQueryOnly: true)
+
+            writeDB.releaseStatements()
+            openedReadDB.releaseStatements()
             try Self.regular(url, required: true)
             var state = stat()
             guard lstat(url.path, &state) == 0 else { throw SQLiteStorageError.io }
             databaseDevice = state.st_dev; databaseInode = state.st_ino
-            connection = db; opened = true
+            writeConnection = writeDB
+            readConnection = openedReadDB
+            opened = true
         } catch {
-            sqlite3_close_v2(handle)
+            writeDB.releaseStatements()
+            readDB?.releaseStatements()
+            if let readHandle { sqlite3_close_v2(readHandle) }
+            sqlite3_close_v2(writeHandle)
             throw error
+        }
+    }
+
+    private static func verifyBaselinePragmas(on db: SQLiteConnection, expectQueryOnly: Bool) throws {
+        guard try db.query("PRAGMA journal_mode").first?.text("journal_mode") == "wal",
+              try db.query("PRAGMA synchronous").first?.integer("synchronous") == 2,
+              try db.query("PRAGMA foreign_keys").first?.integer("foreign_keys") == 1,
+              try db.query("PRAGMA trusted_schema").first?.integer("trusted_schema") == 0,
+              try db.query("PRAGMA wal_autocheckpoint").first?.integer("wal_autocheckpoint") == 0,
+              try db.query("PRAGMA auto_vacuum").first?.integer("auto_vacuum") == 2,
+              try db.query("PRAGMA busy_timeout").first?.integer("timeout") == 5_000,
+              try db.query("PRAGMA temp_store").first?.integer("temp_store") == 2,
+              try db.query("PRAGMA cache_size").first?.integer("cache_size") == -16_384 else {
+            throw SQLiteStorageError.invalidSchema
+        }
+        if expectQueryOnly {
+            guard try db.query("PRAGMA query_only").first?.integer("query_only") == 1 else {
+                throw SQLiteStorageError.invalidSchema
+            }
         }
     }
 
@@ -492,12 +648,43 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private func release(_ bytes: Int) {
         admission.lock(); pending -= 1; pendingBytes -= bytes; admission.unlock()
     }
-    private func borrow<T>(exclusive: Bool = false, _ action: (SQLiteConnection) throws -> T) throws -> T {
-        guard let connection else { throw SQLiteStorageError.closed }
-        if let maintenanceFailure { throw maintenanceFailure }
-        try checkFiles()
-        try Self.lock(maintenanceDescriptor, exclusive: exclusive)
-        defer { _ = flock(maintenanceDescriptor, LOCK_UN); scheduleMaintenance() }
+    private func currentMaintenanceFailure() -> Error? {
+        admission.withLock { maintenanceFailure }
+    }
+    private func recordMaintenanceFailure(_ error: Error) {
+        admission.withLock { if maintenanceFailure == nil { maintenanceFailure = error } }
+    }
+
+    private func borrowRead<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
+        guard let connection = readConnection else { throw SQLiteStorageError.closed }
+        if let failure = currentMaintenanceFailure() { throw failure }
+        let debugEnabled = DebugRuntime.isEnabled
+        let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        do {
+            return try action(connection)
+        } catch {
+            if debugEnabled {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
+                DebugRuntime.logError(.storage, sub: "sqlite", event: "operation.error", error: error,
+                                      durationMs: ms, data: .object(["lane": .string("read")]))
+            }
+            throw error
+        }
+    }
+
+    private func borrowWrite<T>(exclusive: Bool = false, _ action: (SQLiteConnection) throws -> T) throws -> T {
+        guard let connection = writeConnection else { throw SQLiteStorageError.closed }
+        if let failure = currentMaintenanceFailure() { throw failure }
+        if exclusive {
+            try Self.lock(maintenanceDescriptor, exclusive: true)
+        }
+        defer {
+            if exclusive { _ = flock(maintenanceDescriptor, LOCK_UN) }
+            scheduleMaintenance()
+        }
+        if exclusive {
+            try checkFiles()
+        }
         let changes = sqlite3_total_changes64(connection.handle)
         let debugEnabled = DebugRuntime.isEnabled
         let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
@@ -520,6 +707,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
                 DebugRuntime.logError(.storage, sub: "sqlite", event: "operation.error", error: error,
                                       durationMs: ms, data: .object([
+                    "lane": .string("write"),
                     "exclusive": .bool(exclusive)
                 ]))
             }
@@ -527,28 +715,39 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    /// Non-main synchronous owners can retain their generation/fence through a
-    /// short transaction. Nested calls already inside this queue reuse it.
+    /// Non-main synchronous reads reuse the active write lane when called
+    /// re-entrantly inside a write transaction; otherwise they use the read lane.
     public func readSync<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
-        if DispatchQueue.getSpecific(key: queueKey) != nil {
-            guard let connection else { throw SQLiteStorageError.closed }
+        if DispatchQueue.getSpecific(key: writeQueueKey) != nil {
+            guard let connection = writeConnection else { throw SQLiteStorageError.closed }
+            return try action(connection)
+        }
+        if DispatchQueue.getSpecific(key: readQueueKey) != nil {
+            guard let connection = readConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }
         guard !Thread.isMainThread else { throw SQLiteStorageError.mainThreadAccess }
         try admit(0); defer { release(0) }
-        return try queue.sync { try borrow(action) }
+        return try readQueue.sync { try borrowRead(action) }
     }
+
+    /// Non-main synchronous owners can retain their generation/fence through a
+    /// short transaction. Nested calls already inside the write lane reuse it.
     public func writeSync<T>(ownedBytes: Int = 0, _ action: (SQLiteConnection) throws -> T) throws -> T {
-        if DispatchQueue.getSpecific(key: queueKey) != nil {
-            guard let connection else { throw SQLiteStorageError.closed }
+        if DispatchQueue.getSpecific(key: readQueueKey) != nil {
+            throw SQLiteStorageError.readOnly
+        }
+        if DispatchQueue.getSpecific(key: writeQueueKey) != nil {
+            guard let connection = writeConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }
         guard !Thread.isMainThread else { throw SQLiteStorageError.mainThreadAccess }
         try admit(ownedBytes); defer { release(ownedBytes) }
-        return try queue.sync { try borrow(action) }
+        return try writeQueue.sync { try borrowWrite(exclusive: false, action) }
     }
+
     public func read<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
-        try await perform(ownedBytes: 0, action)
+        try await performRead(action)
     }
     public func snapshot<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try await read { db in try Self.readSnapshot(db, action) }
@@ -561,27 +760,40 @@ public final class SQLiteDatabase: @unchecked Sendable {
             try db.execute("COMMIT")
             return value
         } catch {
-            if db.isInTransaction { try? db.execute("ROLLBACK") }
+            if db.isInTransaction { _ = try? db.execute("ROLLBACK") }
             throw error
         }
     }
     public func write<T: Sendable>(ownedBytes: Int = 0,
                                   _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
-        try await perform(ownedBytes: ownedBytes, action)
+        try await performWrite(ownedBytes: ownedBytes, exclusive: false, action)
     }
-    private func perform<T: Sendable>(ownedBytes: Int, exclusive: Bool = false,
-                                     _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
+
+    private func performRead<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
+        try Task.checkCancellation()
+        try admit(0)
+        return try await withCheckedThrowingContinuation { continuation in
+            readQueue.async {
+                defer { self.release(0) }
+                continuation.resume(with: Result { try self.borrowRead(action) })
+            }
+        }
+    }
+
+    private func performWrite<T: Sendable>(ownedBytes: Int, exclusive: Bool,
+                                           _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try Task.checkCancellation()
         try admit(ownedBytes)
         // Once admitted a write settles and returns its actual result even if
         // the awaiting task is cancelled; no continuation drops an accepted commit.
         return try await withCheckedThrowingContinuation { continuation in
-            queue.async {
+            writeQueue.async {
                 defer { self.release(ownedBytes) }
-                continuation.resume(with: Result { try self.borrow(exclusive: exclusive, action) })
+                continuation.resume(with: Result { try self.borrowWrite(exclusive: exclusive, action) })
             }
         }
     }
+
     public func transactionSync<T>(ownedBytes: Int = 0, _ action: (SQLiteConnection) throws -> T) throws -> T {
         try writeSync(ownedBytes: ownedBytes) { db in try Self.transaction(db, action) }
     }
@@ -599,12 +811,15 @@ public final class SQLiteDatabase: @unchecked Sendable {
             try commit { try db.execute("COMMIT") }
             guard !db.isInTransaction else { throw SQLiteStorageError.conflict }
             return value
-        } catch { if db.isInTransaction { try? db.execute("ROLLBACK") }; throw error }
+        } catch { if db.isInTransaction { _ = try? db.execute("ROLLBACK") }; throw error }
     }
 
-    public func flush() async throws { try await read { _ in () } }
+    public func flush() async throws {
+        try await write { _ in () }
+        try await read { _ in () }
+    }
     public func checkpoint() async throws {
-        try await perform(ownedBytes: 0, exclusive: true) { db in try Self.maintain(db) }
+        try await performWrite(ownedBytes: 0, exclusive: true) { db in try Self.maintain(db) }
     }
     /// A new, consistent current-format snapshot. Never overwrites a recovery point.
     public func backup(to destination: URL) async throws {
@@ -612,7 +827,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
               ![".", ".."].contains(destination.lastPathComponent),
               try Self.canonicalSystemBaseURL(destination.deletingLastPathComponent()).path ==
                 destination.deletingLastPathComponent().path else { throw SQLiteStorageError.invalidPath }
-        try await perform(ownedBytes: destination.path.utf8.count, exclusive: true) { source in
+        try await performWrite(ownedBytes: destination.path.utf8.count, exclusive: true) { source in
             let file = destination.path.withCString { openFile($0, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) }
             guard file >= 0 else { throw errno == EEXIST ? SQLiteStorageError.conflict : SQLiteStorageError.io }
             var completed = false
@@ -624,7 +839,11 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 if let target { sqlite3_close_v2(target) }
                 throw SQLiteConnection.failure(opened)
             }
-            defer { sqlite3_close_v2(target) }
+            let snapshot = SQLiteConnection(target, isReadOnly: false)
+            defer {
+                snapshot.releaseStatements()
+                sqlite3_close_v2(target)
+            }
             guard let backup = sqlite3_backup_init(target, "main", source.handle, "main") else {
                 throw SQLiteConnection.failure(sqlite3_extended_errcode(target))
             }
@@ -633,7 +852,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
             guard copied == SQLITE_DONE, finished == SQLITE_OK else {
                 throw SQLiteConnection.failure(copied == SQLITE_DONE ? finished : copied)
             }
-            let snapshot = SQLiteConnection(target, maintenanceDescriptor: -1)
             guard try snapshot.query("PRAGMA quick_check").first?.text("quick_check") == "ok",
                   try snapshot.query("PRAGMA foreign_key_check").isEmpty else { throw SQLiteStorageError.corrupt }
             guard fsync(file) == 0 else { throw SQLiteStorageError.io }
@@ -647,14 +865,16 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
     private func scheduleMaintenance() {
-        guard commits >= 64, !admission.withLock({ closing }), let db = connection, maintenanceFailure == nil else { return }
+        guard commits >= 64, !admission.withLock({ closing }), let db = writeConnection,
+              currentMaintenanceFailure() == nil else { return }
         commits = 0
         do {
             try Self.lock(maintenanceDescriptor, exclusive: true, wait: false)
             defer { _ = flock(maintenanceDescriptor, LOCK_UN) }
+            try checkFiles()
             try Self.maintain(db)
         } catch SQLiteStorageError.busy { }
-        catch { maintenanceFailure = error }
+        catch { recordMaintenanceFailure(error) }
     }
     private static func maintain(_ db: SQLiteConnection) throws {
         guard !db.isInTransaction else { throw SQLiteStorageError.busy }
@@ -667,25 +887,39 @@ public final class SQLiteDatabase: @unchecked Sendable {
     }
     public func close() async throws {
         admission.withLock { closing = true }
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            queue.async {
-                continuation.resume(with: Result {
-                    if let db = self.connection {
-                        // Accepted transactions have already committed to the WAL.
-                        // Release does not contend with the other owner's maintenance.
-                        var failure: Error?
-                        db.releaseStatements()
-                        if sqlite3_close_v2(db.handle) != SQLITE_OK { failure = failure ?? SQLiteStorageError.io }
-                        self.connection = nil
-                        _ = closeFile(self.maintenanceDescriptor); self.maintenanceDescriptor = -1
-                        if let failure { throw failure }
-                    }
-                })
+        let readError: Error? = await withCheckedContinuation { continuation in
+            readQueue.async {
+                var failure: Error?
+                if let db = self.readConnection {
+                    db.releaseStatements()
+                    if sqlite3_close_v2(db.handle) != SQLITE_OK { failure = SQLiteStorageError.io }
+                    self.readConnection = nil
+                }
+                continuation.resume(returning: failure)
             }
         }
+        let writeError: Error? = await withCheckedContinuation { continuation in
+            writeQueue.async {
+                var failure: Error?
+                if let db = self.writeConnection {
+                    // Accepted transactions have already committed to the WAL.
+                    // Release does not contend with the other owner's maintenance.
+                    db.releaseStatements()
+                    if sqlite3_close_v2(db.handle) != SQLITE_OK { failure = SQLiteStorageError.io }
+                    self.writeConnection = nil
+                }
+                if self.maintenanceDescriptor >= 0 {
+                    _ = closeFile(self.maintenanceDescriptor)
+                    self.maintenanceDescriptor = -1
+                }
+                continuation.resume(returning: failure)
+            }
+        }
+        if let failure = writeError ?? readError { throw failure }
     }
     deinit {
-        if let connection { connection.releaseStatements(); sqlite3_close_v2(connection.handle) }
+        if let readConnection { readConnection.releaseStatements(); sqlite3_close_v2(readConnection.handle) }
+        if let writeConnection { writeConnection.releaseStatements(); sqlite3_close_v2(writeConnection.handle) }
         if maintenanceDescriptor >= 0 { _ = closeFile(maintenanceDescriptor) }
     }
 }

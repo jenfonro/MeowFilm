@@ -58,16 +58,10 @@ public actor NovelLibrary {
                     try Self.entry($0, nodes: variables[try $0.text("id")] ?? [])
                 }
             if let row = try db.query("SELECT * FROM ios_novel_reading_settings WHERE singleton=1").first {
-                result.settings = try SQLiteRecord.decode(NovelReadingSettings.self, row: row, columns: Self.settingsColumns)
-                switch row["background_image"] {
-                case .blob(let image): result.settings.backgroundImage = image
-                case .null: break
-                default: throw NovelError.corruptStorage
-                }
+                result.settings = try Self.decodeSettings(row)
             }
             result.rules = try db.query("SELECT * FROM ios_novel_rules ORDER BY \"order\",id").map {
-                try SQLiteRecord.decode(NovelRule.self, row: $0, columns: Self.ruleColumns,
-                    booleans: ["isEnabled", "isRegex", "scopeTitle", "scopeContent"])
+                try Self.decodeRule($0)
             }
             guard Self.valid(result) else { throw NovelError.corruptStorage }
             return result
@@ -91,7 +85,103 @@ public actor NovelLibrary {
         return .init(book: book, identity: try row.text("identity"), onShelf: try row.bool("onShelf"),
             pinnedAt: try row.optionalDouble("pinnedAt").map(Date.init(timeIntervalSince1970:)),
             addedAt: Date(timeIntervalSince1970: try row.double("addedAt")), readAt: readAt,
-            anchor: readAt == nil ? nil : try SQLiteRecord.decode(NovelAnchor.self, row: row, columns: anchorColumns))
+            anchor: readAt == nil ? nil : try decodeAnchor(row))
+    }
+    private static func decodeAnchor(_ row: SQLiteRow) throws -> NovelAnchor {
+        NovelAnchor(
+            chapterUrl: try row.text("chapterUrl"),
+            chapterTitle: try row.text("chapterTitle"),
+            chapterIndex: try row.integer("chapterIndex"),
+            blockIndex: try row.integer("blockIndex"),
+            utf16Offset: try row.integer("utf16Offset"),
+            ratio: try row.double("ratio")
+        )
+    }
+    private static func anchorValues(_ anchor: NovelAnchor) -> [SQLiteValue] {
+        [
+            .text(anchor.chapterUrl),
+            .text(anchor.chapterTitle),
+            .integer(anchor.chapterIndex),
+            .integer(anchor.blockIndex),
+            .integer(anchor.utf16Offset),
+            .real(anchor.ratio)
+        ]
+    }
+    private static func decodeSettings(_ row: SQLiteRow) throws -> NovelReadingSettings {
+        guard let mode = NovelReadingMode(rawValue: try row.text("mode")) else {
+            throw NovelError.corruptStorage
+        }
+        var settings = NovelReadingSettings()
+        settings.mode = mode
+        settings.fontSize = try row.double("fontSize")
+        settings.fontWeight = try row.double("fontWeight")
+        settings.fontName = try row.text("fontName")
+        settings.lineSpacing = try row.double("lineSpacing")
+        settings.paragraphSpacing = try row.double("paragraphSpacing")
+        settings.margin = try row.double("margin")
+        settings.contentWidth = try row.double("contentWidth")
+        settings.conversion = try row.text("conversion")
+        settings.theme = try row.integer("theme")
+        settings.foreground = try row.text("foreground")
+        settings.background = try row.text("background")
+        settings.automaticSpeed = try row.double("automaticSpeed")
+        switch row["background_image"] {
+        case .blob(let image): settings.backgroundImage = image
+        case .null: settings.backgroundImage = nil
+        default: throw NovelError.corruptStorage
+        }
+        return settings
+    }
+    private static func settingsValues(_ settings: NovelReadingSettings) -> [SQLiteValue] {
+        [
+            .text(settings.mode.rawValue),
+            .real(settings.fontSize),
+            .real(settings.fontWeight),
+            .text(settings.fontName),
+            .real(settings.lineSpacing),
+            .real(settings.paragraphSpacing),
+            .real(settings.margin),
+            .real(settings.contentWidth),
+            .text(settings.conversion),
+            .integer(settings.theme),
+            .text(settings.foreground),
+            .text(settings.background),
+            .real(settings.automaticSpeed)
+        ]
+    }
+    private static func decodeRule(_ row: SQLiteRow) throws -> NovelRule {
+        var rule = NovelRule()
+        rule.id = try row.text("id")
+        rule.name = try row.text("name")
+        rule.group = try row.text("group")
+        rule.isEnabled = try row.bool("isEnabled")
+        rule.order = try row.integer("order")
+        rule.timeoutMillisecond = try row.integer("timeoutMillisecond")
+        rule.pattern = try row.text("pattern")
+        rule.replacement = try row.text("replacement")
+        rule.isRegex = try row.bool("isRegex")
+        rule.scope = try row.text("scope")
+        rule.excludeScope = try row.text("excludeScope")
+        rule.scopeTitle = try row.bool("scopeTitle")
+        rule.scopeContent = try row.bool("scopeContent")
+        return rule
+    }
+    private static func ruleValues(_ rule: NovelRule) -> [SQLiteValue] {
+        [
+            .text(rule.id),
+            .text(rule.name),
+            .text(rule.group),
+            .bool(rule.isEnabled),
+            .integer(rule.order),
+            .integer(rule.timeoutMillisecond),
+            .text(rule.pattern),
+            .text(rule.replacement),
+            .bool(rule.isRegex),
+            .text(rule.scope),
+            .text(rule.excludeScope),
+            .bool(rule.scopeTitle),
+            .bool(rule.scopeContent)
+        ]
     }
     private static func saveBook(_ entry: NovelLibraryEntry, _ db: SQLiteConnection) throws {
         var value = NovelLibrarySnapshot(); value.entries = [entry]
@@ -168,15 +258,14 @@ public actor NovelLibrary {
                 "VALUES(?,?,?,?,?,?,?,?,1) ON CONFLICT(book_id) DO UPDATE SET chapterUrl=excluded.chapterUrl,chapterTitle=excluded.chapterTitle," +
                 "chapterIndex=excluded.chapterIndex,blockIndex=excluded.blockIndex,utf16Offset=excluded.utf16Offset,ratio=excluded.ratio," +
                 "readAt=excluded.readAt,row_revision=ios_novel_progress.row_revision+1",
-                [.text(book.id)] + (try SQLiteRecord.values(anchor, columns: Self.anchorColumns)) + [.optional(Date())])
+                [.text(book.id)] + Self.anchorValues(anchor) + [.optional(Date())])
         }
     }
     public func saveSettings(_ settings: NovelReadingSettings) async throws {
         try checkOpen()
         var value = NovelLibrarySnapshot(); value.settings = settings
         guard Self.valid(value) else { throw NovelError.corruptStorage }
-        var flat = settings; flat.backgroundImage = nil
-        let fields = try SQLiteRecord.values(flat, columns: Self.settingsColumns)
+        let fields = Self.settingsValues(settings)
         try await database.transaction(ownedBytes: settings.backgroundImage?.count ?? 0) { db in
             let revision = try db.query("SELECT row_revision FROM ios_novel_reading_settings WHERE singleton=1").first?.integer("row_revision") ?? 0
             try db.upsert("ios_novel_reading_settings", columns: ["singleton"] + Self.settingsColumns + ["background_image", "row_revision"],
@@ -187,7 +276,7 @@ public actor NovelLibrary {
         try checkOpen()
         var value = NovelLibrarySnapshot(); value.rules = rules
         guard Self.valid(value) else { throw NovelError.corruptStorage }
-        let rows = try rules.map { try SQLiteRecord.values($0, columns: Self.ruleColumns) }
+        let rows = rules.map(Self.ruleValues)
         try await database.transaction { db in
             try db.reconcile("ios_novel_rules", columns: Self.ruleColumns, key: ["id"], rows: rows)
         }

@@ -36,8 +36,7 @@ extension NativeMusicService {
             // A retained projection is a reference, not a new observation.
             // Reading it must never restore fields removed by a newer result.
             let explicit = proposed["songId"].string
-            if !authoritative, !explicit.isEmpty, let data = try store.songData(id: explicit) {
-                let stored = try MJ.parse(data)
+            if !authoritative, !explicit.isEmpty, let stored = try store.song(id: explicit) {
                 try MusicLibraryValidation.validateSong(stored, id: explicit)
                 project?(explicit, stored)
                 result.append(explicit)
@@ -53,14 +52,14 @@ extension NativeMusicService {
             else {
                 let matches = try evidence.lookupKey.map { key in
                     try candidateIDs[key, default: []].filter { candidate in
-                        guard let data = try store.songData(id: candidate) else { return false }
-                        return MusicModel.descriptor(try MJ.parse(data)).matches(evidence)
+                        guard let stored = try store.song(id: candidate) else { return false }
+                        return MusicModel.descriptor(stored).matches(evidence)
                     }
                 } ?? []
                 id = matches.count == 1 ? matches[0] : UUID().uuidString.lowercased()
             }
 
-            let existing = try store.songData(id: id).map { try MJ.parse($0) } ?? .null
+            let existing = try store.song(id: id) ?? .null
             if existing != .null && acceptObservation?(id) == false {
                 project?(id, existing)
                 result.append(id)
@@ -86,7 +85,7 @@ extension NativeMusicService {
             if song["baselineDuration"] == .null, let duration = evidence.duration { song["baselineDuration"] = .number(duration) }
             selectSongArtwork(&song, playback: preferences, freshSources: authoritative ? changedArtwork : [])
             if existing == .null || song.stable != existing.stable {
-                try writer.saveSong(song.bytes)
+                try writer.saveSong(song)
                 for source in ownedSources { sourceOwners[source["sourceKey"].string] = id }
             }
             project?(id, song)
@@ -100,7 +99,7 @@ extension NativeMusicService {
 
     func saveRepositorySong(_ song: MJ) throws {
         guard let writer = activeSongWriter else { throw MusicServiceError.storageConflict }
-        try writer.saveSong(song.bytes)
+        try writer.saveSong(song)
     }
     func repositorySong(_ id: String, _ state: MusicDocument) throws -> MJ {
         let song = try state.song(id)
@@ -254,8 +253,7 @@ extension NativeMusicService: MusicSongRepositoryReading {
     public func repositoryTracks(songIDs: Set<String>) async throws -> [String: MusicRemoteTrack] {
         let state = try read()
         return try Dictionary(uniqueKeysWithValues: songIDs.compactMap { id in
-            guard let data = try state.songRows.songData(id: id) else { return nil }
-            let song = try MJ.parse(data)
+            guard let song = try state.songRows.song(id: id) else { return nil }
             try musicRequire(UUID(uuidString: id) != nil && musicSame(song["songId"].string, id), .songIDConflict)
             return (id, try MusicModel.track(song, .init(kind: .library, id: id)))
         })

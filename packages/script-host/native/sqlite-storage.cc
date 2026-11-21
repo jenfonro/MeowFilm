@@ -11,11 +11,13 @@
 #include <CommonCrypto/CommonDigest.h>
 #include <condition_variable>
 #include <deque>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 #include <fcntl.h>
@@ -27,17 +29,31 @@ namespace meow {
 namespace {
 constexpr int64_t SafeInteger = 9007199254740991LL;
 constexpr size_t MaximumBytes = 16 * 1024 * 1024;
+constexpr size_t MaxPreparedStatements = 256;
+constexpr size_t MaxCachedSQLLength = 4096;
 using Blob = std::vector<unsigned char>;
 using Cell = std::variant<std::monostate, int64_t, double, std::string, Blob>;
 struct Fault : std::runtime_error { using std::runtime_error::runtime_error; };
 void Check(bool value, const char* code = "INVALID_REQUEST") { if (!value) throw Fault(code); }
+bool IsPragmaSQL(const std::string& sql) {
+  size_t index = 0;
+  while (index < sql.size() && std::isspace(static_cast<unsigned char>(sql[index]))) ++index;
+  static constexpr const char prefix[] = "pragma";
+  if (sql.size() - index < 6) return false;
+  for (size_t i = 0; i < 6; ++i) {
+    if (std::tolower(static_cast<unsigned char>(sql[index + i])) != prefix[i]) return false;
+  }
+  if (index + 6 == sql.size()) return true;
+  unsigned char next = static_cast<unsigned char>(sql[index + 6]);
+  return !(std::isalnum(next) || next == '_');
+}
 struct OwnedDescriptor {
   int value = -1;
   ~OwnedDescriptor() { if (value >= 0) close(value); }
 };
 struct AdvisoryLock {
   int descriptor;
-  AdvisoryLock(int descriptor, int mode, int timeout = 2500) : descriptor(descriptor) {
+  AdvisoryLock(int descriptor, int mode, int timeout = 5000) : descriptor(descriptor) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout);
     while (flock(descriptor, mode | LOCK_NB) != 0) {
       Check(errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR, "STORAGE_IO");
@@ -177,6 +193,9 @@ class Storage : public std::enable_shared_from_this<Storage> {
   dev_t device = 0;
   ino_t inode = 0;
   OwnedDescriptor maintenance;
+  using StatementOrder = std::list<std::pair<std::string, sqlite3_stmt*>>;
+  StatementOrder statementOrder;
+  std::unordered_map<std::string, StatementOrder::iterator> statementCache;
   int commits = 0;
   std::thread thread;
   napi_threadsafe_function messages = nullptr;
@@ -228,14 +247,69 @@ class Storage : public std::enable_shared_from_this<Storage> {
     int code = sqlite3_exec(database, sql.c_str(), nullptr, nullptr, nullptr);
     if (code != SQLITE_OK) throw Fault(SQLiteError(code));
   }
-  Result Execute(const Statement& input, size_t& bytes) {
-    sqlite3_stmt* raw = nullptr; const char* tail = nullptr;
-    int code = sqlite3_prepare_v2(database, input.sql.c_str(), -1, &raw, &tail);
-    if (code != SQLITE_OK) throw Fault(SQLiteError(code));
-    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(raw, sqlite3_finalize);
-    Check(raw != nullptr);
+  void ClearStatementCache() {
+    for (auto& entry : statementOrder) {
+      if (entry.second) sqlite3_finalize(entry.second);
+    }
+    statementCache.clear();
+    statementOrder.clear();
+  }
+  sqlite3_stmt* AcquireStatement(const std::string& sql, bool& cached) {
+    Check(sql.find('\0') == std::string::npos);
+    const bool cacheable = sql.size() <= MaxCachedSQLLength && !IsPragmaSQL(sql);
+    if (cacheable) {
+      auto found = statementCache.find(sql);
+      if (found != statementCache.end()) {
+        statementOrder.splice(statementOrder.begin(), statementOrder, found->second);
+        cached = true;
+        return found->second->second;
+      }
+    }
+    sqlite3_stmt* raw = nullptr;
+    const char* tail = nullptr;
+    int code = sqlite3_prepare_v2(database, sql.c_str(), int(sql.size()), &raw, &tail);
+    if (code != SQLITE_OK) {
+      if (raw) sqlite3_finalize(raw);
+      throw Fault(SQLiteError(code));
+    }
+    if (!raw) throw Fault("INVALID_REQUEST");
     while (tail && std::isspace(static_cast<unsigned char>(*tail))) ++tail;
-    Check(!tail || !*tail); Check(size_t(sqlite3_bind_parameter_count(raw)) == input.params.size());
+    if (tail && *tail) {
+      sqlite3_finalize(raw);
+      throw Fault("INVALID_REQUEST");
+    }
+    if (cacheable) {
+      if (statementCache.size() >= MaxPreparedStatements) {
+        auto& oldest = statementOrder.back();
+        if (oldest.second) sqlite3_finalize(oldest.second);
+        statementCache.erase(oldest.first);
+        statementOrder.pop_back();
+      }
+      statementOrder.emplace_front(sql, raw);
+      statementCache.emplace(statementOrder.front().first, statementOrder.begin());
+      cached = true;
+    } else {
+      cached = false;
+    }
+    return raw;
+  }
+  Result Execute(const Statement& input, size_t& bytes) {
+    bool cached = false;
+    sqlite3_stmt* raw = AcquireStatement(input.sql, cached);
+    struct StatementGuard {
+      sqlite3_stmt* stmt;
+      bool cached;
+      ~StatementGuard() {
+        if (!stmt) return;
+        if (cached) {
+          sqlite3_reset(stmt);
+          sqlite3_clear_bindings(stmt);
+        } else {
+          sqlite3_finalize(stmt);
+        }
+      }
+    } guard{raw, cached};
+    Check(size_t(sqlite3_bind_parameter_count(raw)) == input.params.size());
     for (size_t i = 0; i < input.params.size(); ++i) {
       const auto& cell = input.params[i]; int position = int(i + 1), bound;
       if (auto* integer = std::get_if<int64_t>(&cell)) bound = sqlite3_bind_int64(raw, position, *integer);
@@ -249,6 +323,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
       if (bound != SQLITE_OK) throw Fault(SQLiteError(bound));
     }
     Result result; result.rows = input.rows;
+    int code = SQLITE_OK;
     while ((code = sqlite3_step(raw)) == SQLITE_ROW) {
       if (!input.rows) continue;
       Check(result.values.size() < input.maximumRows, "STORAGE_RESULT_LIMIT");
@@ -325,10 +400,10 @@ class Storage : public std::enable_shared_from_this<Storage> {
     Check(chmod(path.c_str(), 0600) == 0, "STORAGE_IO");
     struct stat state{}; Check(lstat(path.c_str(), &state) == 0, "STORAGE_IO");
     device = state.st_dev; inode = state.st_ino;
-    sqlite3_extended_result_codes(database, 1); sqlite3_busy_timeout(database, 2500);
+    sqlite3_extended_result_codes(database, 1); sqlite3_busy_timeout(database, 5000);
     Check(sqlite3_db_config(database, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
     Check(sqlite3_db_config(database, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
-    Exec("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0;");
+    Exec("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON;");
     size_t bytes = 0;
     auto read = [&](const char* sql) {
       size_t retained = 0;
@@ -347,16 +422,20 @@ class Storage : public std::enable_shared_from_this<Storage> {
     if (empty) {
       Check(existing < 0 && !app && !current, "STORAGE_SCHEMA"); Exec("PRAGMA auto_vacuum=INCREMENTAL");
     } else Check(app == application && current == version, "STORAGE_SCHEMA");
-    Exec("PRAGMA journal_mode=WAL");
+    Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
+         "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; "
+         "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
     Check(std::get<std::string>(read("PRAGMA journal_mode").values[0][0].second) == "wal" &&
       integer("PRAGMA synchronous") == 2 && integer("PRAGMA foreign_keys") == 1 &&
-      integer("PRAGMA trusted_schema") == 0 && integer("PRAGMA wal_autocheckpoint") == 0, "STORAGE_CONFIGURATION");
+      integer("PRAGMA trusted_schema") == 0 && integer("PRAGMA wal_autocheckpoint") == 0 &&
+      integer("PRAGMA auto_vacuum") == 2 && integer("PRAGMA busy_timeout") == 5000 &&
+      integer("PRAGMA temp_store") == 2 && integer("PRAGMA cache_size") == -16384, "STORAGE_CONFIGURATION");
     if (empty) {
       Exec("BEGIN IMMEDIATE");
       try {
         if (!integer("SELECT count(*) FROM sqlite_schema WHERE name='storage_identity'")) {
           Exec(schema);
-          Execute({"INSERT INTO storage_identity VALUES(1,?)", {hash}}, bytes);
+          Execute({"INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)", {hash}}, bytes);
           Exec("PRAGMA application_id=" + std::to_string(application) + "; PRAGMA user_version=" + std::to_string(version));
         }
         Exec("COMMIT");
@@ -385,7 +464,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
       return values;
     };
     Check(structure(database) == structure(rawExpected), "STORAGE_SCHEMA");
-    Check(integer("PRAGMA auto_vacuum") == 2, "STORAGE_CONFIGURATION");
+    ClearStatementCache();
   }
   void Backup(const std::string& destination) {
     CheckPath(destination, false);
@@ -432,9 +511,11 @@ class Storage : public std::enable_shared_from_this<Storage> {
       try {
         if (request.kind == "close") { closeReply = std::move(reply); break; }
         if (!openFailure.empty()) throw Fault(openFailure);
-        CheckFiles();
-        AdvisoryLock maintenanceLock(maintenance.value,
-          request.kind == "checkpoint" || request.kind == "backup" ? LOCK_EX : LOCK_SH);
+        std::unique_ptr<AdvisoryLock> maintenanceLock;
+        if (request.kind == "checkpoint" || request.kind == "backup") {
+          maintenanceLock = std::make_unique<AdvisoryLock>(maintenance.value, LOCK_EX, 5000);
+          CheckFiles();
+        }
         if (request.kind == "backup") { Backup(request.destination); }
         const auto before = sqlite3_total_changes64(database);
         if (transaction) Exec(request.kind == "snapshot" ? "BEGIN DEFERRED" : "BEGIN IMMEDIATE");
@@ -452,6 +533,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
         commits = 0;
         try {
           AdvisoryLock maintenanceLock(maintenance.value, LOCK_EX, 0);
+          CheckFiles();
           Exec("PRAGMA wal_checkpoint(PASSIVE)");
           int freePages = 0;
           Check(sqlite3_exec(database, "PRAGMA freelist_count", [](void* result, int, char** values, char**) {
@@ -464,6 +546,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
       }
     }
     if (database) {
+      ClearStatementCache();
       // Closing releases this connection; committed WAL data needs no checkpoint.
       int code = sqlite3_close(database); database = nullptr;
       if (code != SQLITE_OK && closeReply) closeReply->code = SQLiteError(code);

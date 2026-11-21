@@ -51,7 +51,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | --- | --- | --- |
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
 | `MeowJSON` | Codable DTO 值、JSON 语法解析、UTF-8 成员与数字原文转发 | 无 |
-| `MeowStorage` | 共享 SQLite、类型化关系及原始资源目录 | Contracts |
+| `MeowStorage` | 共享 SQLite（`Engine`/`Schema`/`Files`/`Values`/`Debug`，WAL 读写分离与语句 LRU 缓存）及原始资源目录 | Contracts、MeowDebug |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、MeowAudio |
@@ -60,7 +60,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | `MeowRuntime` | runtime.http.v1 客户端、精确 JSON 值、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | JSON |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、JSON、Accounts、Storage |
-| `MeowMusicNativeService` | SQLite 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | 系统 CSQLite、Contracts、JSON、Feature、Runtime、Storage |
+| `MeowMusicNativeService` | SQLite 强类型音乐持久化（`Persistence/{Core,Songs,Library,Queue,History,Discovery,Home}`）、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、JSON、Feature、Runtime、Storage |
 | `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、UI、JSON、Storage、Runtime |
 | `native/VideoKernel` | 电影候选准备／提交、实际首帧、轨道与关闭适配 | 固定源码 KSPlayer，无业务或系统媒体会话 owner |
 | `native/KSPlayer` | core-only KSPlayer：解码、轨道／字幕、缓冲／同步、原生音频与 Metal／sample-buffer 输出 | FFmpeg 8.1.2 与 Apple 系统媒体框架，不编译上游播放控件 |
@@ -187,7 +187,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于原生 XCTest 执行
 | Application Support 下 `meowfilm/resources-v1` | 原始图片、歌词、音频等资源 owner 的文件目录 |
 | Application Support 下 `meowfilm/script-runtime/music-platform` | Node 唯一维护的匿名协议状态 |
 
-| `music_accounts` / 音乐相关关系表 | 音乐账号、歌曲、平台状态与缓存索引的 SQLite owner tables |
+| `music_*` / `ios_music_*` | 音乐曲库、队列、历史、账号、来源发现、首页快照与资源索引的 SQLite owner tables |
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
 | `music.presentation-resources.v2` | 共享图片／歌词原始字节叶子，首用文件 metadata 仅保留在内存 |

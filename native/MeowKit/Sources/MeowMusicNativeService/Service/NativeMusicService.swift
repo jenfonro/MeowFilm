@@ -14,20 +14,19 @@ struct MusicDocument: Sendable {
     let songRows: any MusicNativeLibraryReading
     init(snapshot: MusicNativeLibrarySnapshot, runID: String, songs: any MusicNativeLibraryReading) throws {
         revision = snapshot.revision; songRows = songs
-        func area(_ name: String, _ fallback: MJ) throws -> MJ { try snapshot.areas[name].map { try MJ.parse($0) } ?? fallback }
-        library = try area("library", MusicModel.library)
-        queue = try area("queue", MusicModel.queue)
-        playback = try area("playback", MusicModel.playback)
-        history = try area("history", MusicModel.history)
-        catalogSource = try area("catalogSource", MusicModel.catalogSource)
+        library = snapshot.areas["library"] ?? MusicModel.library
+        queue = snapshot.areas["queue"] ?? MusicModel.queue
+        playback = snapshot.areas["playback"] ?? MusicModel.playback
+        history = snapshot.areas["history"] ?? MusicModel.history
+        catalogSource = snapshot.areas["catalogSource"] ?? MusicModel.catalogSource
         if queue["runId"].string != runID { queue["history"] = .array([]); queue["failed"] = .array([]) }
         queue["runId"] = .string(runID)
         if playback["position"]["occurrenceId"] != queue["currentId"] { resetPosition() }
     }
     mutating func resetPosition() { playback["position"] = .obj([("occurrenceId", queue["currentId"]), ("seconds", .n(0))]) }
     func song(_ id: String) throws -> MJ {
-        guard let data = try songRows.songData(id: id) else { throw MusicServiceError.notFound }
-        return try MJ.parse(data)
+        guard let song = try songRows.song(id: id) else { throw MusicServiceError.notFound }
+        return song
     }
     func projectSongs(_ ids: [String]) throws -> MJ {
         var result = MJ.obj()
@@ -120,7 +119,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     /// Omission preserves the existing five-platform behavior. Disabling a
     /// platform does not rewrite or hide previously stored songs and sources.
     public nonisolated let enabledPlatforms: Set<MusicPublicBrowsePlatform>
-    let database: any MusicNativeLibraryStoring
+    let database: any MusicNativeLibraryEngine
     let repositoryReader: MusicNativeLibraryAccessReader
     var activeSongWriter: (any MusicNativeLibraryWriting)?
     let scripts: (any MusicScriptResolving)?
@@ -221,7 +220,10 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                 clock: @escaping @Sendable () -> Date = { Date() },
                 monotonicClock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
                 random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }) {
-        self.database = database; repositoryReader = MusicNativeLibraryAccessReader(database: database, access: access); self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
+        guard let engine = database as? any MusicNativeLibraryEngine else {
+            preconditionFailure("Unsupported MusicNativeLibraryStoring implementation")
+        }
+        self.database = engine; repositoryReader = MusicNativeLibraryAccessReader(database: engine, access: access); self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
         self.presentationCache = presentationCache
         self.sourceDiscovery = sourceDiscovery ?? MusicNativeMemorySourceDiscoveryCache()
@@ -456,7 +458,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                 }
                 if changed.contains("queue") { try draft.requireQueue(knownSongIDs: retained) }
                 if task?.isCancelled == true { throw MusicServiceError.cancelled }
-                for area in changed { try writer.saveArea(area, value: draft.area(area).storageValue) }
+                for area in changed { try writer.saveArea(area, value: draft.area(area)) }
                 changedSongs = writer.changedSongIDs
                 candidateReady = true
                 return result

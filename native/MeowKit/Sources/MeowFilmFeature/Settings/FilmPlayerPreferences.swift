@@ -91,8 +91,6 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
     nonisolated private static let columns = ["engine", "defaultRate", "holdRate", "seekStep", "showsControlCenter", "recognizesChapters",
         "singleTapCenter", "singleTapSides", "doubleTapCenter", "doubleTapSides", "swipeVolume", "swipeBrightness",
         "swipeSeek", "swipeEpisodes", "hapticHold", "hapticBrightness", "hapticVolume", "hapticSeek"]
-    nonisolated private static let booleans: Set<String> = ["showsControlCenter", "recognizesChapters", "swipeVolume", "swipeBrightness",
-        "swipeSeek", "swipeEpisodes", "hapticHold", "hapticBrightness", "hapticVolume", "hapticSeek"]
 
     /// An unbound owner is ephemeral. The product binds its one database before
     /// publishing settings or admitting playback.
@@ -107,9 +105,56 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
 
     nonisolated private static func load(_ db: SQLiteConnection) throws -> FilmPlayerPreferences {
         guard let row = try db.query("SELECT * FROM ios_film_player_preferences WHERE singleton=1").first else { return .init() }
-        var next = try SQLiteRecord.decode(FilmPlayerPreferences.self, row: row, columns: columns, booleans: booleans)
+        guard let engine = PlaybackVideoEngine(rawValue: try row.text("engine")),
+              let singleTapCenter = FilmPlayerTapAction(rawValue: try row.text("singleTapCenter")),
+              let singleTapSides = FilmPlayerTapAction(rawValue: try row.text("singleTapSides")),
+              let doubleTapCenter = FilmPlayerTapAction(rawValue: try row.text("doubleTapCenter")),
+              let doubleTapSides = FilmPlayerTapAction(rawValue: try row.text("doubleTapSides")) else {
+            throw SQLiteStorageError.invalidValue
+        }
+        var next = FilmPlayerPreferences()
+        next.engine = engine
+        next.defaultRate = try row.double("defaultRate")
+        next.holdRate = try row.double("holdRate")
+        next.seekStep = try row.double("seekStep")
+        next.showsControlCenter = try row.bool("showsControlCenter")
+        next.recognizesChapters = try row.bool("recognizesChapters")
+        next.singleTapCenter = singleTapCenter
+        next.singleTapSides = singleTapSides
+        next.doubleTapCenter = doubleTapCenter
+        next.doubleTapSides = doubleTapSides
+        next.swipeVolume = try row.bool("swipeVolume")
+        next.swipeBrightness = try row.bool("swipeBrightness")
+        next.swipeSeek = try row.bool("swipeSeek")
+        next.swipeEpisodes = try row.bool("swipeEpisodes")
+        next.hapticHold = try row.bool("hapticHold")
+        next.hapticBrightness = try row.bool("hapticBrightness")
+        next.hapticVolume = try row.bool("hapticVolume")
+        next.hapticSeek = try row.bool("hapticSeek")
         try next.normalize()
         return next
+    }
+    nonisolated private static func rowValues(_ value: FilmPlayerPreferences) -> [SQLiteValue] {
+        [
+            .text(value.engine.rawValue),
+            .real(value.defaultRate),
+            .real(value.holdRate),
+            .real(value.seekStep),
+            .bool(value.showsControlCenter),
+            .bool(value.recognizesChapters),
+            .text(value.singleTapCenter.rawValue),
+            .text(value.singleTapSides.rawValue),
+            .text(value.doubleTapCenter.rawValue),
+            .text(value.doubleTapSides.rawValue),
+            .bool(value.swipeVolume),
+            .bool(value.swipeBrightness),
+            .bool(value.swipeSeek),
+            .bool(value.swipeEpisodes),
+            .bool(value.hapticHold),
+            .bool(value.hapticBrightness),
+            .bool(value.hapticVolume),
+            .bool(value.hapticSeek)
+        ]
     }
     public func reload() async {
         guard !closed, let database else { return }
@@ -135,7 +180,7 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
                     var next = try Self.load(db); next[keyPath: keyPath] = value; try next.normalize()
                     let revision = try db.query("SELECT row_revision FROM ios_film_player_preferences WHERE singleton=1").first?.integer("row_revision") ?? 0
                     try db.upsert("ios_film_player_preferences", columns: ["singleton"] + Self.columns + ["row_revision"],
-                        values: [.integer(1)] + (try SQLiteRecord.values(next, columns: Self.columns)) + [.integer(revision + 1)],
+                        values: [.integer(1)] + Self.rowValues(next) + [.integer(revision + 1)],
                         key: ["singleton"])
                     return next
                 }
