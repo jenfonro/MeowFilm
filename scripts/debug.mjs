@@ -194,7 +194,7 @@ function discoverEndpoint(global) {
     const baseDir = global.debugDir
       ? resolve(global.debugDir)
       : process.env.LOCALAPPDATA
-        ? join(process.env.LOCALAPPDATA, 'meowfilm', 'aggregate', 'debug')
+        ? join(process.env.LOCALAPPDATA, 'meowfilm', 'aggregate-debug')
         : null;
     if (!baseDir) {
       throw new CliError('LOCALAPPDATA is not set; specify --debug-dir or --endpoint');
