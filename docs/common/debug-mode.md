@@ -560,7 +560,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 
 | 维度 | Windows | iOS | 共用 Node Runtime |
 | --- | --- | --- | --- |
-| 启动开关 | `meowfilm.exe --debug ...` | `simctl` / `devicectl` / Scheme 传 `--debug ...` | 仅接受宿主握手中的 `debug` 对象 |
+| 启动开关 | `meowfilm.exe --debug ...`（默认静默底层无焦点显示，不抢前台焦点且正常渲染/截图） | `simctl` / `devicectl` / Scheme 传 `--debug ...` | 仅接受宿主握手中的 `debug` 对象 |
 | HTTP Server | .NET 内置监听（`HttpListener` / `TcpListener`） | `Network.framework` `NWListener` | 现有 `packages/runtime-bridge` HTTP server 扩展仅 debug 路由 |
 | Node 形态 | 独立 `node.exe` 子进程 + Named Pipe + stdout/stderr 落盘 | 进程内 `NodeMobile` 线程 + Unix socketpair FD | 同一份 `apps/runtime/bootstrap.mjs` 与 9 个业务模块 |
 | 默认监听 | `127.0.0.1` | 模拟器 `127.0.0.1`；真机支持 `--debug-bind 0.0.0.0` | `127.0.0.1`（随既有随机端口） |

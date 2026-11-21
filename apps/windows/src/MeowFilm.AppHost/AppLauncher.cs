@@ -155,6 +155,7 @@ public static class AppLauncher
 
         void Launch(Application application)
         {
+        bool quietDebug = debugOptions is { Enabled: true };
         DesktopTypography.Install(application);
         var launchWindow = new DesktopWindow { Title = "meowfilm" };
         launchWindow.Resize(420, 220);
@@ -189,7 +190,7 @@ public static class AppLauncher
             ExitStartup();
         };
         retry.Click += async (_, _) => { if (exitRequested) ExitStartup(); else await StartAsync(); };
-        launchWindow.Activate();
+        if (!quietDebug) launchWindow.Activate();
         _ = StartAsync();
 
         async Task StartAsync()
@@ -202,6 +203,7 @@ public static class AppLauncher
             {
                 label.Text = "启动失败";
                 retry.Visibility = Visibility.Visible;
+                if (quietDebug) launchWindow.ShowBackgroundInactive();
             }
             else if (outcome == StartupOutcome.CleanupFailed)
             {
@@ -209,6 +211,7 @@ public static class AppLauncher
                 exitRequested = true;
                 retry.Content = "退出";
                 retry.Visibility = Visibility.Visible;
+                if (quietDebug) launchWindow.ShowBackgroundInactive();
             }
         }
 
@@ -326,10 +329,11 @@ public static class AppLauncher
                     await shell.ShutdownCompletion;
                     application.Exit();
                 };
-                shell.Activate();
+                if (quietDebug) shell.ShowBackgroundInactive();
+                else shell.Activate();
                 switched = true;
                 DebugLog.Info(DebugCategories.Lifecycle, "shell", "shell.activated",
-                    new { modules = modules.Select(m => m.Id).ToArray() });
+                    new { modules = modules.Select(m => m.Id).ToArray(), quietBackground = quietDebug });
                 // Keep the startup/retry surface for an in-process data reset.
                 launchWindow.Hide();
                 return StartupOutcome.Started;
@@ -374,7 +378,7 @@ public static class AppLauncher
                     finally { if (!shellClosed) replacing = false; }
                     if (exitRequested) return;
                     switched = false;
-                    launchWindow.Activate();
+                    if (!quietDebug) launchWindow.Activate();
                     startup.Dispose();
                     startup = new AppStartup();
                     starting = null;

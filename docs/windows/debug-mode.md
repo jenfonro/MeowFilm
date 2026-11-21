@@ -24,6 +24,7 @@
 
 ## 3. 本端实现细节与差异
 
+- **静默底层无焦点启动**：Windows 端在 `--debug` 模式下默认静默启动——启动过渡窗不弹出，主窗口通过 `DesktopWindow.ShowBackgroundInactive()`（`WM_WINDOWPOSCHANGING` 压至 `HWND_BOTTOM` + `AppWindow.Show(false)`）以正常可见尺寸落在桌面 Z-order 最底层，不抢占当前前台焦点、不遮挡用户当前窗口；窗口非隐藏/非最小化，WinUI 渲染与截图完整生效，用户可随时点击任务栏切回前台。`meowfilm.exe` 为 `WinExe` 且 `node.exe` 子进程以 `CreateNoWindow = true` 启动，本身不弹出任何控制台窗口；经 SSH／计划任务在交互桌面拉起时应直接执行 `meowfilm.exe --debug ...`，避免再通过交互 `cmd.exe` / `powershell.exe` 包装拉起而弹出控制台黑框抢焦点。未传 `--debug` 时保持原样前台 `Activate()`。
 - **本地 Control HTTP Server**：默认监听 `127.0.0.1:0`（支持 `--debug-bind` 与 `--debug-port`），使用纯托管 `TcpListener` 解析 HTTP/1.1 请求（单请求体上限 16 MiB），避免引入额外运行时依赖或需要管理员 `netsh http add urlacl` 权限。
 - **截图策略（`GET /debug/v1/ui/screenshot`）**：在 UI 线程优先使用 WinUI `RenderTargetBitmap.RenderAsync(Root)` 编码 PNG；若渲染缓冲不可用则回退至 Win32 `PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT)`。`save=true` 时同步落盘至 `<sessionDir>/screenshots/` 并返回 `X-Meow-Screenshot-Path` 响应头。
 - **只读 SQLite 查询（`POST /debug/v1/storage/query`）**：仅放行单条 `SELECT` / `WITH` / 只读 `PRAGMA`（禁止 `=` 写型赋值及 `query_only` 修改）/ `EXPLAIN` 语句，在 `NativeDatabase` 现有单一通道内以 `PRAGMA query_only = ON` 执行并在 `finally` 恢复，确保绝不写入并兼容 WAL 读一致性。
