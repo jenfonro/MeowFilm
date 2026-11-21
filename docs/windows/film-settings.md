@@ -94,9 +94,7 @@ TMDB／豆瓣凭据与设置保存为共享 SQLite 中的 plain typed fields；�
 
 沿用 WinUI 主题、原生键盘焦点、统一通知与确认浮层；来源管理使用既有公共 `ManagementList`，表头与真实行内容共享列布局，不以横向滚动容纳来源列。规则测试结果是业务内容，操作错误走通知，不插入教程／解释性占位文案。
 
-长期测试分别归属 `FilmRulesTests`、`FilmRulesRuntimeTests`、`FilmSourcesTests`、`FilmCatSettingsTests`、`FilmSourceRuntimeTests`、`FilmSettingsUiTests`、`FilmPlaybackSettingsTests`、`FilmLibraryTests`、`SettingsNavigationTests`；共享规则与 Cat 管理另有定向 Node 用例。规则原生文档保存和 Node 预览分别验证，不为测试保留第二份原生执行引擎。来源用例覆盖原生保存／通知、超时后延迟协调、失败回执、本地写失败、删除记录及关闭排空；真实运行器组通过同一原生文档 owner 与正式私密设置管道验证冷启动、输入替换和五阶段检测。测试入口不等于执行通过，Windows 界面／构建和实际载体须分别记录；不默认重跑不受本轮影响的来源或缓存组。
-
-来源回归还包含初次详情脚本错误的 search 回退、HTTP／导航失败边界及其真实 Node 对照；真实 Worker 单次内存超限用默认 256MiB 引擎上限和一次 512MiB 申请，验证未取消调用下失效检测不写入、同源码新代次经显式刷新后恢复。测试只在受控私有卷计数触发一次，关闭沿公开 owner 排空并验证 Node 进程退出，不修改宿主限制或模拟 failure。
+原生设置持久化、Node 规则预览、来源检测、Worker 内存限制与页面关闭排空均通过真实应用 `--debug` 模式核对（详见[Debug 模式](debug-mode.md)），不为验证保留第二份原生执行引擎或历史测试夹具；构建、界面截图与真实运行结果须分别记录。
 
 ### 通用视觉资源
 

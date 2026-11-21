@@ -1,8 +1,3 @@
-using System.Runtime.CompilerServices;
-
-[assembly: InternalsVisibleTo("MeowFilm.Windows.Tests")]
-[assembly: InternalsVisibleTo("MeowFilm.FilmKernel.Tests")]
-
 namespace MeowFilm.Media;
 
 // Per-owner seam: lifecycle tests can block native work without replacing process-wide exports.

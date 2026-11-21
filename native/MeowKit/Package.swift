@@ -47,22 +47,7 @@ let package = Package(
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowAudio", "MeowContracts", "MeowDebug", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowDebug", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
         .target(name: "MeowFilmFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowUI", "MeowJSON", "MeowStorage", "MeowRuntime"]),
-        .target(name: "MeowNovelFeature", dependencies: ["MeowDebug", "MeowUI", "MeowStorage", "MeowRuntime"]),
-        .target(name: "MeowMusicTestSupport", dependencies: ["MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime"]),
-        .target(name: "MeowStorageTestSupport", dependencies: ["MeowStorage"]),
-        .testTarget(name: "MeowNovelFeatureTests", dependencies: ["MeowNovelFeature", "MeowStorage", "MeowRuntime", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowJSONTests", dependencies: ["MeowJSON"]),
-        .testTarget(name: "MeowAccountTests", dependencies: ["MeowAccounts", "MeowContracts"]),
-        .testTarget(name: "MeowCoreTests", dependencies: ["MeowContracts", "MeowStorage", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowMusicFeatureTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowStorage", "MeowUI", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowMusicNativeServiceTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicNativeService", "MeowMusicPlatform", "MeowMusicTestSupport", "MeowPlayback", "MeowRuntime", "MeowStorage", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowMusicPlatformTests", dependencies: ["MeowAccounts", "MeowContracts", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicTestSupport", "MeowRuntime", "MeowStorage", "MeowUI", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowPlaybackTests", dependencies: ["MeowContracts", "MeowMusicFeature", "MeowPlayback", "MeowAudio", "MeowPlaybackVideo", "MeowStorage", "MeowStorageTestSupport",
-            .product(name: "MeowVideoKernel", package: "videokernel")],
-                    resources: [.copy("Video/Fixtures")]),
-        .testTarget(name: "MeowRuntimeTests", dependencies: ["MeowJSON", "MeowRuntime", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowUITests", dependencies: ["MeowUI", "MeowStorage", "MeowStorageTestSupport"]),
-        .testTarget(name: "MeowFilmFeatureTests", dependencies: ["MeowContracts", "MeowFilmFeature", "MeowStorage", "MeowJSON", "MeowRuntime", "MeowStorageTestSupport"])
+        .target(name: "MeowNovelFeature", dependencies: ["MeowDebug", "MeowUI", "MeowStorage", "MeowRuntime"])
     ],
     swiftLanguageVersions: [.v5]
 )

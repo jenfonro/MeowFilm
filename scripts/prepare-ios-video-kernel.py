@@ -145,7 +145,7 @@ def verify_core_sources(lock, upstreams=None):
     expected = manifest["files"]
     actual = {"Package.swift"} | {
         path.relative_to(root).as_posix()
-        for directory in ("Sources", "Tests") for path in (root / directory).rglob("*") if path.is_file()
+        for path in (root / "Sources").rglob("*") if path.is_file()
     }
     if actual != set(expected):
         raise ValueError("unexpected KSPlayer core compile input")

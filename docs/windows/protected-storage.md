@@ -26,7 +26,7 @@ Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/meowfilm.sqlite3` 
 
 缓存按所属表／记录策略失效，不因图片或 metadata cache 失败删除主数据库。图片、歌词、音频、源码等原始 bytes 不进入数据库。`resources-v1` 是资源文件目录，不是第二份结构化数据库。
 
-JSON 仍允许用于 HTTP/IPC、脚本 API、构建元数据、源码与锁文件、测试夹具，以及用户主动导入／导出的交换文件。第三方脚本自建 private volume 由其脚本和现有宿主文件 capability 管理，应用不按 `.json` 扩展名禁止或接管。仅禁止应用自身内部运行期业务／缓存 JSON 文档直接落盘或整文档 JSON 入数据库。
+JSON 仍允许用于 HTTP/IPC、脚本 API、构建元数据、源码与锁文件，以及用户主动导入／导出的交换文件。第三方脚本自建 private volume 由其脚本和现有宿主文件 capability 管理，应用不按 `.json` 扩展名禁止或接管。仅禁止应用自身内部运行期业务／缓存 JSON 文档直接落盘或整文档 JSON 入数据库。
 
 ## 清除本机数据
 

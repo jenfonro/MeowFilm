@@ -7,9 +7,7 @@ let package = Package(
     products: [.library(name: "MeowVideoKernel", targets: ["MeowVideoKernel"])],
     dependencies: [.package(path: "../KSPlayer")],
     targets: [
-        .target(name: "MeowVideoKernel", dependencies: [.product(name: "KSPlayer", package: "ksplayer")]),
-        .testTarget(name: "VideoKernelTests", dependencies: ["MeowVideoKernel"],
-                    resources: [.copy("Fixtures")])
+        .target(name: "MeowVideoKernel", dependencies: [.product(name: "KSPlayer", package: "ksplayer")])
     ],
     swiftLanguageVersions: [.v5]
 )

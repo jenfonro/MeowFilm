@@ -577,5 +577,5 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
    - 不再为既有旧测试做适配、维护或以旧测试结果作为验收依据。
 2. **保留的非测试完整性检查**：
    - 构建与依赖边界校验继续保留：`scripts/windows/verify-app-structure.mjs`、`scripts/windows/verify-projects.mjs`、`scripts/verify-boundaries.mjs`、`scripts/verify-dependency-lock.mjs`、`scripts/check-source-scope.py`、`scripts/package-runtime.mjs`、`scripts/accept-sources.mjs`、`scripts/accept-reader-sources.mjs`。
-3. **一次性旧测试清理（独立后续 PR）**：
-   - Debug 模式在对应端完成落地验收后，由独立清理 PR 一次性删除全部历史测试代码、夹具与测试门禁（`apps/windows/tests/`、`apps/windows/native/FilmKernel/*_tests.*`、`tests/`、`packages/*/test/`、`scripts/tests/`、`apps/ios/RuntimeTests/`、`apps/ios/TestSupport/`、`apps/ios/UITests/`、`native/*/Tests/`、相关测试脚本与测试 CI workflow 及 `InternalsVisibleTo` 等纯测试生产钩子）。
+3. **历史测试与夹具已全仓清理**：
+   - 全部历史回归测试代码、夹具、旧测试脚本与纯测试生产代码钩子已从仓库移除，仅保留第 2 项所列非测试完整性与构建/打包边界检查。

@@ -1,6 +1,6 @@
 {
   "files": {
-    "Package.swift": "758aad983fff0cfb304c5fdfaaa50e65d1cda22cd018dea071e97d3b6797e33b",
+    "Package.swift": "d925c5c2d9476f871bcece55275fb2182f51aa61a57b1978ca0021865c4a5ed2",
     "Sources/DisplayCriteria/DisplayCriteria.m": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
     "Sources/DisplayCriteria/include/AVDisplayCriteriaKS.h": "3e876b4b85906b324dcecaa9c2c11fe36c223997980ace08ef7fe41acbdad16f",
     "Sources/FFmpegKit/FFmpegKit.c": "1fb89a2d7ae5fef4b3b9423e358ae3e5c1b49bba24e22592b0d234d0f9a185aa",
@@ -58,10 +58,7 @@
     "Sources/Libswresample/include/Libswresample.h": "c300fae8613397d52504bb9ed40a2ae112f7b121e8ff1256d6d85edc6cfdf9a0",
     "Sources/Libswresample/module.c": "80681b6347daf9bfc8d6a1f0e0e06698a65e89fc543e2ebbfcf6797c7c6a15a7",
     "Sources/Libswscale/include/Libswscale.h": "b2ed112b35adfdc69f4d89bcb18036d2aadc8a10b7af0c2ae28f9fe3bc0a06cf",
-    "Sources/Libswscale/module.c": "9b673219c5255b0e2acc09d9a2c58d5224e1dbd903ff7a27d655f98962959308",
-    "Tests/KSPlayerTests/DolbyVisionCoreTests.swift": "88cd4b0566f7ecf9534e9bbfb7d11df3e054839e07de513ea9591d262b82ff21",
-    "Tests/KSPlayerTests/HDRMetadataCoreTests.swift": "9518fb774ff39d0e53fd3af217725f955b5d319e45f9e4c4a460eb02e59ff474",
-    "Tests/KSPlayerTests/VideoClockCoreTests.swift": "bcc61f8974db906f874d8771ea5af000949bf7bcc42a57b1c3cc87fdcf076c3e"
+    "Sources/Libswscale/module.c": "9b673219c5255b0e2acc09d9a2c58d5224e1dbd903ff7a27d655f98962959308"
   },
   "origins": {
     "Package.swift": {

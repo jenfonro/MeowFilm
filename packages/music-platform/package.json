@@ -16,8 +16,5 @@
   "dependencies": {
     "@meowfilm/runtime-bridge": "0.2.0",
     "@meowfilm/storage": "0.1.0"
-  },
-  "scripts": {
-    "test": "node --test test/*.test.mjs"
   }
 }

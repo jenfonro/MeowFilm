@@ -456,19 +456,11 @@ def verify_app(app, target, lock):
         if version_tuple(metadata["MinimumOSVersion"]) > version_tuple(config["minimum"]):
             raise ValueError("packaged Aether framework raises deployment floor")
     bundles = list(app.rglob("*_AetherEngine.bundle"))
-    application_bundles = [bundle for bundle in bundles if bundle.parent == app]
-    if len(application_bundles) != 1:
+    if len(bundles) != 1 or bundles[0].parent != app:
         raise ValueError("missing or duplicate Aether source resource bundle")
-    for bundle in bundles:
-        if bundle != application_bundles[0]:
-            parts = bundle.relative_to(app).parts
-            if (not target.startswith("ios-simulator-") or len(parts) != 3
-                    or parts[0] != "PlugIns" or not parts[1].endswith(".xctest")
-                    or bundle.name != application_bundles[0].name):
-                raise ValueError("missing or duplicate Aether source resource bundle")
-        for resource in ("silent-atmos.mp4", "PrivacyInfo.xcprivacy"):
-            if digest(bundle / resource) != digest(PACKAGE / ".cache/AetherEngine/Resources" / resource):
-                raise ValueError("missing or modified Aether source resource")
+    for resource in ("silent-atmos.mp4", "PrivacyInfo.xcprivacy"):
+        if digest(bundles[0] / resource) != digest(PACKAGE / ".cache/AetherEngine/Resources" / resource):
+            raise ValueError("missing or modified Aether source resource")
     for filename, checksum in lock["licenses"].items():
         if digest(app / filename) != checksum:
             raise ValueError("missing or modified packaged Aether license")

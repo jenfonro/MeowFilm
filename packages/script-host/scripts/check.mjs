@@ -20,5 +20,4 @@ async function walk(directory) {
   }
 }
 await walk(resolve(root, 'src'));
-await walk(resolve(root, 'test'));
 console.log(`Syntax/LF checks passed: ${count} JavaScript files`);

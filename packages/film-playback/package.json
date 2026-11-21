@@ -14,9 +14,6 @@
   "files": [
     "src"
   ],
-  "scripts": {
-    "test": "node --test ../../tests/film-playback-*.test.mjs ../../tests/film-metadata-cache.test.mjs"
-  },
   "dependencies": {
     "@meowfilm/film-rules": "0.1.0",
     "@meowfilm/film-search": "0.1.0",

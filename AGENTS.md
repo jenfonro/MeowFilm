@@ -11,19 +11,16 @@ meowfilm 的 iPhone 与 Windows 原生客户端：
 ```sh
 python3 -I -B scripts/generate-ios-project.py         # 生成 apps/ios/Meowfilm.xcodeproj
 python3 -I -B scripts/prepare-ios-runtime.py          # Node 24 + npm ci：准备内嵌运行器构建输入
-python3 -I -B scripts/prepare-ios-audio-kernel.py --target ios-arm64 # 锁定独立音乐内核；测试入口选择对应 Mac/模拟器目标
-python3 -I -B scripts/prepare-ios-video-kernel.py --target ios-arm64 # 锁定源码准备视频内核；测试入口选择对应 Mac/模拟器目标
+python3 -I -B scripts/prepare-ios-audio-kernel.py --target ios-arm64 # 锁定独立音乐内核；原生校验入口选择对应 Mac/模拟器目标
+python3 -I -B scripts/prepare-ios-video-kernel.py --target ios-arm64 # 锁定源码准备视频内核；原生校验入口选择对应 Mac/模拟器目标
 python3 -I -B scripts/prepare-ios-aether-kernel.py --target ios-arm64 # 锁定可选 Aether 内核及动态依赖；不代表编译或播放验收
 python3 -I -B scripts/check-source-scope.py           # 源码、依赖与工程成员检查
-python3 -I -B -m unittest discover -s scripts/tests -p "test_<area>.py" -v
-bash scripts/test-native.sh test --filter <pattern> # macOS：受影响的 Swift 测试
-bash scripts/test-native.sh all                    # 显式完整代码检查
-python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-results/<name>.xcresult [--test <name>]
+bash scripts/verify-native.sh                         # macOS：源码边界、原生编译、链接与 Simulator 签名校验
 ./build-ios.sh                                        # macOS：构建并替换 build/ios/
 ```
 
 - Windows 将 `python3` 换为 `python -X utf8`。
-- 需要 macOS、Xcode、Node 24 与 `npm ci --ignore-scripts`；参考环境为 Xcode 26.1.1。iOS 部署目标 18.0，macOS 15.0 仅用于原生单测执行，不提供 Mac 客户端。
+- 需要 macOS、Xcode、Node 24 与 `npm ci --ignore-scripts`；参考环境为 Xcode 26.1.1。iOS 部署目标 18.0，macOS 15.0 仅用于原生包编译与校验，不提供 Mac 客户端。
 
 ### Windows
 
@@ -32,10 +29,8 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 .\build-windows.ps1 -Configuration Debug   # Debug 构建；-FrameworkDependent 生成依赖系统 .NET 的版本
 .\scripts\windows\bootstrap.ps1            # 按锁安装 Node 工作区依赖
 .\scripts\windows\restore.ps1              # 按锁恢复原生依赖
-.\scripts\windows\test-node.ps1 -Path tests/<area>.test.mjs
-.\scripts\windows\test-node.ps1 -All       # 显式完整 Node 检查
-.\scripts\windows\test.ps1 -Group <names>  # 增量编译并运行所选原生测试组
-.\scripts\windows\test.ps1 -All            # 显式完整原生测试
+npm run verify                             # 依赖锁、包边界、原生 JS 与 Windows 应用结构静态检查
+node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 ```
 
 - 需要 PATH 上的 .NET SDK（10 或更高）、Node.js、npm 与 Git；参考环境为 .NET SDK 10.0.402，Node.js 版本以 `scripts/script-host-native.json` 的 `build.node` 为准。
@@ -48,13 +43,12 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `apps/ios/` — 唯一 iOS App 工程
   - `Application` — 应用与 scene 生命周期、窗口、产品身份
   - `Composition` — 资源、服务、播放、账号和同步装配
+  - `Debug` — iOS 端 `--debug` 调试控制面、诊断与日志宿主
   - `Navigation` — 根容器、页面导航与呈现路由
   - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
-  - `UITests` — 共享 UIKit 组件测试
-  - `RuntimeTests` — 真实 App 宿主的内嵌运行器与页面生命周期测试
   - `runtime` — iOS 受信启动／生命周期交接与公共 HTTP 运行器薄 entry
 - `native/MeowKit/` — iOS Swift Package
-  - `MeowContracts`、`MeowJSON`、`MeowStorage`、`MeowAccounts`、`MeowAudio`、`MeowPlayback`、`MeowPlaybackVideo`、`MeowUI`、`MeowRuntime` — 共享能力与平台播放适配
+  - `MeowContracts`、`MeowJSON`、`MeowDebug`、`MeowStorage`、`MeowAccounts`、`MeowAudio`、`MeowPlayback`、`MeowPlaybackVideo`、`MeowUI`、`MeowRuntime` — 共享能力与平台播放适配
   - `MeowMusicFeature`、`MeowMusicPlatform`、`MeowMusicNativeService` — 音乐界面、平台和原生业务
   - `MeowFilmFeature` — 影视数据源、首页、详情、收藏、规则设置与来源管理
   - `MeowNovelFeature` — 小说发现、搜索、书架／历史、阅读器、书源与净化设置
@@ -74,7 +68,6 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
   - `MeowFilm.SystemMedia` — 系统媒体传输控件
   - `MeowFilm.AppHost` — 启动、注入与关闭
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
-- `apps/windows/tests/` — Windows 原生测试
 - `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.3.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease、music-platform 九模块，保留各自平台受信启动；契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`、`docs/runtime/music-platform.md`。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
@@ -86,13 +79,12 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 - `packages/netease-token/` — 网易订阅实时 token 的按需 SDK Worker；账号和订阅写入仍由原生管理，契约与信任边界见 `docs/runtime/netease-token.md`
 - `packages/music-platform/` — 五平台现有请求配方、字段转换、匿名协议状态和 API 缓存的共同 Node owner；借用既有网易 token owner，不持久保存原生账号、歌曲仓库或图片。
 - `packages/novel-rules/` — source 运行器使用的小说身份、搜索归并、章节匹配、净化与简繁纯规则；客户端保留原生状态、排版与交互，不再链接独立规则引擎
-- `scripts/` — iOS 工程生成、结构检查、测试、构建打包与发布，`scripts/tests/` 为脚本测试；Node 共用工具
-- `scripts/windows/` — Windows 构建、测试、打包与结构检查
-- `tests/` — Node 测试
+- `scripts/` — iOS 工程生成、结构检查、原生校验、构建打包与发布，以及跨端 `--debug` CLI（`scripts/debug.mjs`）和 Node 共用工具
+- `scripts/windows/` — Windows 构建、打包与结构/项目边界检查
 - `docs/` — 架构、模块、契约与发布说明，索引见 `docs/README.md`
 - `LICENSES/` — 全部第三方许可与来源声明（`NOTICE.md`）；Windows 构建时复制到 `build/windows/licenses`
 - `build/ios/`、`build/windows/` — 各平台最新一份产物，每次构建成功后整体覆盖；不入 Git
-- `tmp/` — 日志、测试结果、构建暂存与任务工作记录（`tmp/working/`），可随时整体删除；不入 Git
+- `tmp/` — 日志、构建暂存与任务工作记录（`tmp/working/`），可随时整体删除；不入 Git
 - 许可文件只放在 `LICENSES/`，每种许可正文一份；改编新的上游代码时在 `NOTICE.md` 补充来源，增删时同步使用该组件的平台打包清单（Windows 为 `scripts/windows/package-licenses.mjs`，iOS 为工程资源及构建输入策略）。
 
 ## 代码组织
@@ -136,13 +128,13 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 ## 变更范围
 
 - 只修改当前任务必需的内容；每处改动能追溯到需求或必要影响。
-- 修改公共契约、数据格式或共享实现时，同步更新受影响的消费者、配置、资源、测试和 `docs`。
+- 修改公共契约、数据格式或共享实现时，同步更新受影响的消费者、配置、资源和 `docs`。
 - 清理本次修改产生的孤立代码；既有无关问题单独指出，不扩大为未经授权的重构。
 - 删除或移动移植代码前确认许可来源；仍在使用的许可文件随代码保留。
 
 ## 前端
 
-- Windows 全应用的栏目、卡片和列表显示投影只由内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动与布局事件不得扫描整页控件树来决定业务显示、重建投影或触发刷新。视口只准入尚未看过的资源；已准入请求、图像与取色在当前挂载页面／章节的 owner 内复用，滚出再滚回不得释放重载。原生容器滚动回收只归还视图借用，不退休数据项资源；数据项删除、页面真正卸载、资源身份或 owner 变化才退休；隐藏停止新准入并按 owner 契约取消未完成工作、关闭等待实际排空。共享机制及消费者行为测试固定这些约束，不设回退开关，不以源码关键字禁令替代行为门禁。尺寸、裁剪、命中区域和绘制等几何更新不得触发业务读取。
+- Windows 全应用的栏目、卡片和列表显示投影只由内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动与布局事件不得扫描整页控件树来决定业务显示、重建投影或触发刷新。视口只准入尚未看过的资源；已准入请求、图像与取色在当前挂载页面／章节的 owner 内复用，滚出再滚回不得释放重载。原生容器滚动回收只归还视图借用，不退休数据项资源；数据项删除、页面真正卸载、资源身份或 owner 变化才退休；隐藏停止新准入并按 owner 契约取消未完成工作、关闭等待实际排空。这些约束在真实运行与 `--debug` 模式中核对，不设回退开关，不以源码关键字禁令替代行为门禁。尺寸、裁剪、命中区域和绘制等几何更新不得触发业务读取。
 - 数据回执按稳定身份增量更新实际变化的元素，保留未变化的集合、控件和资源；加载状态、选择及无关属性通知不得清空重填列表或重建整页。验收检查集合通知、元素身份、读取次数和退休边界，性能数值仅作辅助证据，不能代替处理机制正确性。
 
 - Windows 与 iOS 的普通文字统一使用系统常规字体（Normal／Regular），包括标题、按钮、菜单、标签、选中态和歌词；层级只通过字号区分，不使用 Medium、SemiBold、Bold、斜体或状态切换粗细来强调。阅读器 UI 同样遵守；仅阅读器内可自定义的正文排版保留用户字体／加粗设置。纯图标／符号图形不属于普通文字，不通过该例外给文本加粗。
@@ -153,7 +145,7 @@ python3 -I -B scripts/test-ui-platform.py --simulator <UDID> --result tmp/test-r
 ## 验证
 
 - 校验、失败传播与清理遵循[拒绝条件与数据消费边界](docs/common/validation-boundaries.md)。普通 API 按实际字段消费；禁止未消费兄弟／全库业务预检、覆盖或删除前校验将被丢弃的旧业务值、静默吞错与完整实现镜像断言。typed 存储的实际列／关系、身份／权限、CAS、执行信任与排空边界继续保留。
-- **禁止新增或适配回归测试与测试夹具**：不再编写、扩展或适配单元测试、UI 回归测试、Mock/替身夹具及仅服务于测试的生产代码钩子，禁止以测试通过代替真实运行验收。既有历史测试目录与测试门禁脚本处于冻结状态，将由独立清理 PR 一次性删除。
+- **禁止新增或适配回归测试与测试夹具**：历史回归测试、测试夹具与旧测试入口已全仓移除；不再编写、扩展或适配单元测试、UI 回归测试、Mock/替身夹具及仅服务于测试的生产代码钩子，禁止以测试通过代替真实运行验收。
 - **统一使用 Debug 模式验收**：功能、数据产出、界面交互、状态流转与底层故障排查统一通过运行期 `--debug` 模式完成（契约唯一来源见 [docs/common/debug-mode.md](docs/common/debug-mode.md)），依据分类结构化日志、`blobs/` 不脱敏原文、本地 Control API（直达页面、结构化内容读取、索引操控、截屏）及底层内存/线程堆栈/GC/Dump/V8 Snapshot 进行真实运行验证。
 - **保留非测试构建与完整性检查**：可机械核对的目录、依赖、打包与边界约束继续保留在 `scripts`（如 `scripts/verify-boundaries.mjs`、`scripts/verify-dependency-lock.mjs`、`scripts/check-source-scope.py`、`scripts/windows/verify-app-structure.mjs`、`scripts/windows/verify-projects.mjs`）。
 - 构建与打包只检查实际输入、依赖边界和交付完整性，不增加逐文件／导入／target 名称批准表、固定数量或完整源码／方法清单快照；合法公开依赖和实际引用的 helper 不需要额外登记。启动只核对实际身份、权限、执行内容与生命周期，不预检未调用业务方法，不重复审计同一输入，不将普通描述扩展或无依赖的排列变化作为拒绝条件。

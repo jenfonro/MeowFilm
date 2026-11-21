@@ -1,4 +1,4 @@
-"""Generate the meowfilm iPhone app and component-test project."""
+"""Generate the meowfilm iPhone app Xcode project."""
 from pathlib import Path
 import argparse
 import hashlib
@@ -54,14 +54,11 @@ def write_lf(path, text):
 def generate():
     product, name = "meowfilm", "Meowfilm"
     app_sources = source_paths(ROOT, APPLICATION_DIRECTORIES)
-    test_sources = source_paths(ROOT, ("UITests",))
-    runtime_test_sources = source_paths(ROOT, ("RuntimeTests",))
-    shared_test_sources = source_paths(ROOT, ("TestSupport",))
     all_sources = {p.relative_to(ROOT / "apps/ios").as_posix()
                    for p in (ROOT / "apps/ios").rglob("*.swift")
                    if p.relative_to(ROOT / "apps/ios").parts[0] != ".cache"}
-    if all_sources != set(app_sources + test_sources + runtime_test_sources + shared_test_sources):
-        raise ValueError("App Swift sources must belong to an application responsibility or a test directory")
+    if all_sources != set(app_sources):
+        raise ValueError("App Swift sources must belong to a declared application directory")
     bundle_identifier = "dev.meowfilm.aggregate"
     base_info = plistlib.loads((ROOT / "apps/ios/Info.plist").read_bytes())
     project = ROOT / f"apps/ios/{name}.xcodeproj"
@@ -71,13 +68,6 @@ def generate():
         "target", "sources", "frameworks", "resources", "assets", "assetsBuild", "package",
         "projectConfigs", "targetConfigs", "projectDebug", "projectRelease", "targetDebug", "targetRelease",
     ]}
-    test_name = "MeowfilmAcceptanceUITests"
-    ids.update({key: identifier(f"{product}:{key}") for key in [
-        "uiTests", "uiTestGroup", "uiTestTarget",
-        "uiTestSources", "uiTestFrameworks", "uiTestConfigs", "uiTestDebug", "uiTestRelease",
-        "uiTestDependency", "uiTestProxy", "uiPlatformFramework",
-    ]})
-    runtime_test_name = "MeowfilmRuntimeTests"
     ids.update({key: identifier(f"{product}:{key}") for key in [
         "nodeFramework", "nodeFrameworkLink", "nodeFrameworkEmbed", "embedFrameworks",
         "scriptHostFramework", "scriptHostFrameworkEmbed",
@@ -85,9 +75,6 @@ def generate():
         "javascriptLicense", "javascriptLicenseBuild",
         "unicodeLicense", "unicodeLicenseBuild",
         "projectNotices", "projectNoticesBuild", "projectLicense", "projectLicenseBuild",
-        "runtimeTests", "runtimeTestGroup", "runtimeTestTarget", "runtimeTestSources",
-        "runtimeTestMovie", "runtimeTestMovieBuild", "runtimeTestResources",
-        "runtimeTestConfigs", "runtimeTestDebug", "runtimeTestRelease", "runtimeTestDependency", "runtimeTestProxy",
     ]})
     libraries = ["MeowContracts", "MeowDebug", "MeowStorage", "MeowPlayback", "MeowPlaybackVideo", "MeowAccounts", "MeowUI", "MeowRuntime",
                  "MeowMusicFeature", "MeowMusicPlatform", "MeowMusicNativeService", "MeowFilmFeature", "MeowNovelFeature"]
@@ -106,12 +93,6 @@ def generate():
             objects.append(f"\t\t{build} = {{ isa = PBXBuildFile; fileRef = {reference}; }};")
         return references, builds
     app_references, app_builds = source_objects(app_sources)
-    test_references, test_builds = source_objects(test_sources)
-    runtime_test_references, runtime_test_builds = source_objects(runtime_test_sources)
-    shared_test_references, shared_test_builds = source_objects(shared_test_sources)
-    test_references += shared_test_references
-    test_builds += shared_test_builds
-    runtime_test_builds += shared_test_builds
     obj("assets", 'isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>";')
     obj("assetsBuild", f"isa = PBXBuildFile; fileRef = {ids['assets']};")
     # The embedded runtime: the pinned Node Mobile framework (linked, embedded and
@@ -142,8 +123,8 @@ def generate():
         objects.append(f'\t\t{reference} = {{ isa = PBXFileReference; lastKnownFileType = text; name = {quoted(filename)}; path = {quoted("../../LICENSES/" + filename)}; sourceTree = "<group>"; }};')
         objects.append(f"\t\t{build} = {{ isa = PBXBuildFile; fileRef = {reference}; }};")
     obj("app", f'isa = PBXFileReference; explicitFileType = wrapper.application; path = {name}.app; sourceTree = BUILT_PRODUCTS_DIR;')
-    obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]}, {ids["uiTests"]}, {ids["runtimeTests"]},); name = Products; sourceTree = "<group>";')
-    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + media_license_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["projectNotices"], ids["projectLicense"], ids["uiTestGroup"], ids["runtimeTestGroup"], ids["productsGroup"]])}; sourceTree = "<group>";')
+    obj("productsGroup", f'isa = PBXGroup; children = ({ids["app"]},); name = Products; sourceTree = "<group>";')
+    obj("mainGroup", f'isa = PBXGroup; children = {seq(app_references + media_license_references + [ids["assets"], ids["nodeFramework"], ids["scriptHostFramework"], ids["runtimePayload"], ids["nodeLicense"], ids["javascriptLicense"], ids["unicodeLicense"], ids["projectNotices"], ids["projectLicense"], ids["productsGroup"]])}; sourceTree = "<group>";')
     obj("sources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(app_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     package_ids, framework_ids = [], []
     for library in libraries:
@@ -204,71 +185,7 @@ def generate():
     obj("projectConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["projectDebug"]}, {ids["projectRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
     obj("targetConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["targetDebug"]}, {ids["targetRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
     obj("target", f'isa = PBXNativeTarget; buildConfigurationList = {ids["targetConfigs"]}; buildPhases = ({ids["sources"]}, {ids["frameworks"]}, {ids["resources"]}, {ids["embedFrameworks"]},); buildRules = (); dependencies = (); name = {name}; productName = {name}; productReference = {ids["app"]}; productType = "com.apple.product-type.application"; packageProductDependencies = {seq(package_ids)};')
-    # The component runner links the host package products for App-owned symbols.
-    ui_packages = [identifier(f"{product}:dependency:{library}") for library in libraries]
-    ui_build_files = []
-    for index, package in enumerate(ui_packages):
-        key = "uiPlatformFramework" if index == 0 else "uiTestFeatureFramework{}".format(index)
-        ids[key] = identifier(f"{product}:uiTestFramework:{index}")
-        obj(key, "isa = PBXBuildFile; productRef = {};".format(package))
-        ui_build_files.append(ids[key])
-    obj("uiTestGroup", f'isa = PBXGroup; children = {seq(test_references)}; name = UITests; sourceTree = "<group>";')
-    obj("uiTests", f'isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = {test_name}.xctest; sourceTree = BUILT_PRODUCTS_DIR;')
-    obj("uiTestSources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(test_builds)}; runOnlyForDeploymentPostprocessing = 0;')
-    obj("uiTestFrameworks", f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = {seq(ui_build_files)}; runOnlyForDeploymentPostprocessing = 0;')
-    obj("uiTestProxy", f'isa = PBXContainerItemProxy; containerPortal = {ids["project"]}; proxyType = 1; remoteGlobalIDString = {ids["target"]}; remoteInfo = {name};')
-    obj("uiTestDependency", f'isa = PBXTargetDependency; target = {ids["target"]}; targetProxy = {ids["uiTestProxy"]};')
-    test_settings = (
-        f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}.acceptance-tests; PRODUCT_NAME = {test_name}; '
-        'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; TARGETED_DEVICE_FAMILY = 1; '
-        'SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; '
-        'CODE_SIGN_STYLE = Automatic; '
-        'SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)",); '
-        'LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; '
-        f'TEST_TARGET_NAME = {name}; '
-    )
-    for config in ["Debug", "Release"]:
-        optimization = "-Onone" if config == "Debug" else "-O"
-        active = ("DEBUG " if config == "Debug" else "") + conditions
-        obj("uiTest" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {test_settings} SWIFT_OPTIMIZATION_LEVEL = "{optimization}"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = {quoted(active)}; }};')
-    obj("uiTestConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["uiTestDebug"]}, {ids["uiTestRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
-    obj("uiTestTarget", f'isa = PBXNativeTarget; buildConfigurationList = {ids["uiTestConfigs"]}; buildPhases = ({ids["uiTestSources"]}, {ids["uiTestFrameworks"]},); buildRules = (); dependencies = ({ids["uiTestDependency"]},); name = {test_name}; productName = {test_name}; productReference = {ids["uiTests"]}; productType = "com.apple.product-type.bundle.ui-testing"; packageProductDependencies = {seq(ui_packages)};')
-    # Hosted in the real App process: no package products are linked again, so
-    # the App's single copy of each module (and of Node Mobile) is exercised.
-    obj("runtimeTestMovie", 'isa = PBXFileReference; lastKnownFileType = video.mp4; name = ordinary.mp4; path = "../../native/VideoKernel/Tests/VideoKernelTests/Fixtures/ordinary.mp4"; sourceTree = "<group>";')
-    obj("runtimeTestMovieBuild", f"isa = PBXBuildFile; fileRef = {ids['runtimeTestMovie']};")
-    obj("runtimeTestResources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = ({ids["runtimeTestMovieBuild"]},); runOnlyForDeploymentPostprocessing = 0;')
-    obj("runtimeTestGroup", f'isa = PBXGroup; children = {seq(runtime_test_references + [ids["runtimeTestMovie"]])}; name = RuntimeTests; sourceTree = "<group>";')
-    obj("runtimeTests", f'isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = {runtime_test_name}.xctest; sourceTree = BUILT_PRODUCTS_DIR;')
-    obj("runtimeTestSources", f'isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = {seq(runtime_test_builds)}; runOnlyForDeploymentPostprocessing = 0;')
-    obj("runtimeTestProxy", f'isa = PBXContainerItemProxy; containerPortal = {ids["project"]}; proxyType = 1; remoteGlobalIDString = {ids["target"]}; remoteInfo = {name};')
-    obj("runtimeTestDependency", f'isa = PBXTargetDependency; target = {ids["target"]}; targetProxy = {ids["runtimeTestProxy"]};')
-    runtime_test_settings = (
-        f'PRODUCT_BUNDLE_IDENTIFIER = {bundle_identifier}.runtime-tests; PRODUCT_NAME = {runtime_test_name}; '
-        'GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; TARGETED_DEVICE_FAMILY = 1; '
-        'INFOPLIST_KEY_NSPrincipalClass = MeowfilmRuntimeTestBundle; '
-        'SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SUPPORTS_MACCATALYST = NO; CODE_SIGN_STYLE = Automatic; '
-        # The test shares the App's products directory, so the host and its
-        # processed NodeMobile.framework are both found under BUILT_PRODUCTS_DIR.
-        f'TEST_HOST = "$(BUILT_PRODUCTS_DIR)/{name}.app/{name}"; BUNDLE_LOADER = "$(TEST_HOST)"; '
-        'SWIFT_INCLUDE_PATHS = ("$(inherited)", "$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)",); '
-        'FRAMEWORK_SEARCH_PATHS = ("$(inherited)", "$(BUILT_PRODUCTS_DIR)",); '
-        'LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks"; '
-    )
-    for config in ["Debug", "Release"]:
-        optimization = "-Onone" if config == "Debug" else "-O"
-        active = ("DEBUG " if config == "Debug" else "") + conditions
-        obj("runtimeTest" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {runtime_test_settings} SWIFT_OPTIMIZATION_LEVEL = "{optimization}"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = {quoted(active)}; }};')
-    obj("runtimeTestConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["runtimeTestDebug"]}, {ids["runtimeTestRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
-    obj("runtimeTestTarget", f'isa = PBXNativeTarget; buildConfigurationList = {ids["runtimeTestConfigs"]}; buildPhases = ({ids["runtimeTestSources"]}, {ids["runtimeTestResources"]},); buildRules = (); dependencies = ({ids["runtimeTestDependency"]},); name = {runtime_test_name}; productName = {runtime_test_name}; productReference = {ids["runtimeTests"]}; productType = "com.apple.product-type.bundle.unit-test";')
-    test_targets = f' {ids["uiTestTarget"]}, {ids["runtimeTestTarget"]},'
-    test_attributes = (
-        f' TargetAttributes = {{ '
-        f'{ids["uiTestTarget"]} = {{ TestTargetID = {ids["target"]}; }}; '
-        f'{ids["runtimeTestTarget"]} = {{ TestTargetID = {ids["target"]}; }}; '
-        '};'
-    )
-    obj("project", f'isa = PBXProject; attributes = {{ BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2610;{test_attributes} }}; buildConfigurationList = {ids["projectConfigs"]}; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; knownRegions = (en, zh_CN, Base,); mainGroup = {ids["mainGroup"]}; productRefGroup = {ids["productsGroup"]}; projectDirPath = ""; projectRoot = ""; targets = ({ids["target"]},{test_targets}); packageReferences = ({ids["package"]},);')
+    obj("project", f'isa = PBXProject; attributes = {{ BuildIndependentTargetsInParallel = YES; LastUpgradeCheck = 2610; }}; buildConfigurationList = {ids["projectConfigs"]}; compatibilityVersion = "Xcode 14.0"; developmentRegion = zh_CN; knownRegions = (en, zh_CN, Base,); mainGroup = {ids["mainGroup"]}; productRefGroup = {ids["productsGroup"]}; projectDirPath = ""; projectRoot = ""; targets = ({ids["target"]},); packageReferences = ({ids["package"]},);')
     text = "// !$*UTF8*$!\n{\n\tarchiveVersion = 1;\n\tclasses = {};\n\tobjectVersion = 56;\n\tobjects = {\n"
     text += "\n".join(objects) + f"\n\t}};\n\trootObject = {ids['project']};\n}}\n"
     write_lf(project / "project.pbxproj", text)
@@ -285,21 +202,6 @@ def generate():
 </Scheme>
 '''
     write_lf(scheme_dir / f"{name}.xcscheme", scheme)
-    test_reference = f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{ids["uiTestTarget"]}" BuildableName="{test_name}.xctest" BlueprintName="{test_name}" ReferencedContainer="container:{name}.xcodeproj"/>'
-    runtime_test_reference = f'<BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="{ids["runtimeTestTarget"]}" BuildableName="{runtime_test_name}.xctest" BlueprintName="{runtime_test_name}" ReferencedContainer="container:{name}.xcodeproj"/>'
-    test_entry = "".join(
-        f'<BuildActionEntry buildForTesting="YES" buildForRunning="NO" buildForProfiling="NO" buildForArchiving="NO" buildForAnalyzing="YES">{value}</BuildActionEntry>'
-        for value in (test_reference, runtime_test_reference))
-    test_action = f'''  <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.IDEFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
-    <Testables><TestableReference skipped="NO" parallelizable="NO">{test_reference}</TestableReference><TestableReference skipped="NO" parallelizable="NO">{runtime_test_reference}</TestableReference></Testables>
-    <MacroExpansion>{reference}</MacroExpansion>
-  </TestAction>
-'''
-    acceptance_scheme = scheme.replace(
-        "</BuildActionEntries>", test_entry + "</BuildActionEntries>"
-    )
-    acceptance_scheme = acceptance_scheme.replace("  <LaunchAction", test_action + "  <LaunchAction")
-    write_lf(scheme_dir / "MeowfilmAcceptance.xcscheme", acceptance_scheme)
     print(f"Generated {name}: meowfilm, enabled capabilities music, film, novel")
 
 

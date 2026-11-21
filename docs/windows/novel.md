@@ -79,18 +79,14 @@
 
 host-only 与同域 Domain Cookie 互换时，先回传旧 scope 删除、再回传新 scope 写入；避免运行器按归一域／路径／名称写入时误删替代值。双向回归经真实运行器 owner 和 WebView2，检查主域的新值及子域可见性，不仅检查 diff 顺序。
 
-验证入口：`scripts/windows/test.ps1 -Group NovelTests,NovelManagementTests,SearchResultsConsumerTests,SettingsNavigationTests,RuntimeHttpClientTests,RuntimeImageTests`；后两组覆盖新增 source 方法清单、受信二进制图片路由及原元数据图片消费者。增量 App 编译使用普通 `dotnet build`，保留项目正常原生目标；不调用会 publish 并替换安装目录的 `build-windows.ps1`。在仓库根目录、正常 Windows 开发环境中执行：
+章节选择、换源、购章确认、设置编辑、导入及 Web 交互统一使用 Shell 内的 `PlayerDialogHost`；未保存确认在当前编辑器内部的普通 `Grid` 嵌套，不替换正在编辑的父层。浮层实际移除与在途提交／继续动作全部结束后才完成操作回执，一次性解除可见性订阅、取消登记并释放取消源；关闭请求不代替真实排空。设置普通浮层宽度不超过520 DIP，书源编辑器不超过760 DIP，阅读交互的普通浮层不超过640 DIP，并由实际宿主视口约束。仅书源编辑器接受外点取消，并先完成未保存输入确认；其他浮层保持外点不关闭。仍打开的手工浮层通过统一通知显示错误并允许重试；已关闭浮层的非取消真实写失败交回页面或设置 owner 的现有通知，普通取消不报保存失败。Web使用 WinUI `WebView2`，先排空初始化及资源请求，`Close` 后等待环境级 `BrowserProcessExited` 确认整个进程组和用户目录资源释放，再删除临时profile并返回；不以主browser PID退出、固定延时或文件删除重试代替。
+
+小说存储、规则 RPC、发现／搜索／书架、WebView2 生命周期与页面视觉呈现统一通过真实应用 `--debug` 模式（控制面导航、状态快照、分类日志与窗口截图，详见[Debug 模式](debug-mode.md)）验证；增量 App 编译使用普通 `dotnet build`（不调用会 publish 并替换安装目录的 `build-windows.ps1`）：
 
 ```powershell
 dotnet restore apps/windows/app/MeowFilm.Windows.App.csproj --locked-mode --configfile apps/windows/NuGet.Config
 dotnet build apps/windows/app/MeowFilm.Windows.App.csproj --configuration Release --no-restore --nologo -nodeReuse:false
 ```
-
-`NovelTests` 包括原子存储失败与第二进程恢复、保留会话删除历史后加书架、冷库直读、真实 App Node 书源仓库重启、真实规则 RPC 超时与恢复、保留多书重处理／失败取消／最新设置与普通设置返回、共享 fixtures、多源搜索、换源／章节上下文、目录显式及自动重载的整体提交／失败／取消、购章确认、真实 WebView2 自动动态获取／隔离／退休及 Cookie scope 双向 owner 回传、封面裁剪视口与迟到隔离／关闭实际排空／新 owner 替换／失败布局不重试／隐藏卸载隔离、原生四模式和长图晚到锚点、布局刷新标签且不新增进度保存。发现用例覆盖真实入口与字段保留、分页去重、切源／切分类迟到隔离、取消实际收口、来源 revision／停用／删除、首次／刷新／更多失败与原页重试、刷新原子提交及失败／取消后旧数据和页码保留、应用内重试浮层、跨源同书收藏、侧栏设置事件及网络预览／选择确认、常规六／三列与窄窗布局、高对比及书源／分类焦点恢复和不抢搜索焦点。规则行为用例通过独立测试 owner 借用实际 Node HTTP 运行器；输入快照、RPC 错误、owner 排空及清数据隔离另用显式回执检查。共享 fixtures 只嵌入测试项目，不进入产品。运行器单次预算和排队预算回归归公共 source／NativeJsonProgram 测试所有。这些用例的存在不代表已对当前源码执行通过；实际结果以任务记录为准。
-
-章节选择、换源、购章确认、设置编辑、导入及 Web 交互统一使用 Shell 内的 `PlayerDialogHost`；未保存确认在当前编辑器内部的普通 `Grid` 嵌套，不替换正在编辑的父层。浮层实际移除与在途提交／继续动作全部结束后才完成操作回执，一次性解除可见性订阅、取消登记并释放取消源；关闭请求不代替真实排空。设置普通浮层宽度不超过520 DIP，书源编辑器不超过760 DIP，阅读交互的普通浮层不超过640 DIP，并由实际宿主视口约束。仅书源编辑器接受外点取消，并先完成未保存输入确认；其他浮层保持外点不关闭。仍打开的手工浮层通过统一通知显示错误并允许重试；已关闭浮层的非取消真实写失败交回页面或设置 owner 的现有通知，普通取消不报保存失败。Web使用 WinUI `WebView2`，先排空初始化及资源请求，`Close` 后等待环境级 `BrowserProcessExited` 确认整个进程组和用户目录资源释放，再删除临时profile并返回；不以主browser PID退出、固定延时或文件删除重试代替。`NovelTests` 的 dialog closure/cancellation/isolation、保存失败／owner 通知与 Web lifecycle 用例覆盖这些边界。
-
-呈现测试使用应用唯一 WinUI UI 线程和用例自有窗口，通过控件 automation pattern 调用，不模拟鼠标或键盘。`NovelTestUi.Preview` 从已挂载的真实 WinUI 树生成96／144／192缩放的 `RenderTargetBitmap` PNG，可由 `MEOWFILM_SETTINGS_PREVIEW_ROOT` 指定测试 DataRoot 内目录；它不是物理屏幕 DPI 测试，也不是桌面或网页内容截图。受控Web内容需另由 `CapturePreviewAsync` 采集，不能以普通树快照代替。测试选择、编译／执行结果及截图核对记录保留在本次任务的 `tmp/`，测试适配或历史证据不代表当前源码已验证；这些用例不使用第三方真实书源、账号或付费操作，也不发行或安装应用。首页／分类图稿验收另需实际 Windows 可见窗口截图；真实 `exploreKinds`／`explore` 的来源验收也不由测试替身代替。
 
 ## 原生书源与替换管理
 

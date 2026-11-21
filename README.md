@@ -21,24 +21,24 @@ Windows 安装包默认安装到当前用户的 `%LOCALAPPDATA%\Programs\meowfil
 
 影视规则／搜索由 Node film owner 加载共享程序，小说纯规则由 source owner 执行，复用通用脚本宿主的 QuickJS-NG 0.18.0 原生载体，各自保持独立 Runtime／Context。客户端保留原生业务状态、排版与交互，不另带规则 DLL／静态引擎。目标电脑不需要 CMake 或编译器。Windows 书源 Web 交互使用系统已安装的 Microsoft Edge WebView2 Runtime，不自动下载安装。
 
-## 测试
+## 静态校验与调试验证
 
 ```sh
+npm run verify
 python3 -I -B scripts/check-source-scope.py
-python3 -I -B -m unittest discover -s scripts/tests -p "test_<area>.py" -v
-bash scripts/test-native.sh test --filter <pattern>
+bash scripts/verify-native.sh
 ```
 
 ```powershell
 .\scripts\windows\bootstrap.ps1
 .\scripts\windows\restore.ps1
-.\scripts\windows\test-node.ps1 -Path tests/<area>.test.mjs
-.\scripts\windows\test.ps1 -Group <names>
+npm run verify
+node scripts/windows/verify-projects.mjs
 ```
 
-Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS 原生编译与测试需要 macOS 和 Xcode（参考环境 Xcode 26.1.1）。
+Windows 上运行 Python 脚本时将 `python3` 换为 `python -X utf8`。iOS 原生编译与校验需要 macOS 和 Xcode（参考环境 Xcode 26.1.1）。
 
-全量检查显式使用 `bash scripts/test-native.sh all`，或 Windows 测试入口的 `-All`。
+业务、界面与底层运行排查统一使用 `--debug` 模式与 `node scripts/debug.mjs`，详见 [Debug 模式契约](docs/common/debug-mode.md)。
 
 ## 脚本运行时
 

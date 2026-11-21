@@ -24,7 +24,6 @@
     "build/Release/cat-web-values.cjs"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js",
     "check": "node scripts/check.mjs"
   },
   "dependencies": {

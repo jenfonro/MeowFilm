@@ -103,7 +103,7 @@ python3 -I -B scripts/prepare-ios-aether-kernel.py \
 该入口不下载，核对 wrapper 的 two-level 动态边界、实际 FFmpeg undefined
 符号的库归属、九库闭包、架构、最低版本和许可证。打包的原生代码/数据
 sections 必须与锁定切片一致；签名及符号剥离导致的 LINKEDIT 变化不作为
-代码变更。`build-ios.sh` 和 `test-native.sh` 的 Simulator App 编译后调用该门禁；
+代码变更。`build-ios.sh` 和 `verify-native.sh` 的 Simulator App 编译后调用该门禁；
 其他直接构建入口须另行对实际 `.app` 执行。
 `--verify-app` 中的实际 symbol 归属读取使用 Mac 的 `xcrun nm`；Linux
 准备与单测不冒充已通过 App 链接、签名、设备播放或 HDR 验收。

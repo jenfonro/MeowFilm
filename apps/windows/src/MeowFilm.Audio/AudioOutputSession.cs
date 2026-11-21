@@ -4,8 +4,6 @@ using NAudio.Effects;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
 
-[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("MeowFilm.Windows.Tests")]
-
 namespace MeowFilm.Media;
 
 // A bounded producer keeps network/decoder work off the WASAPI render thread.

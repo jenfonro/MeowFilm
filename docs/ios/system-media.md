@@ -60,6 +60,6 @@ PiP 适配源码同时接收 `AVPlayerLayer` 和 sample-buffer 输出，并向�
 
 ## 验证边界
 
-Swift 测试覆盖元数据、身份、队列意图和播放策略；iOS 组件测试覆盖 UIKit 图片、系统元数据及通知适配。注入音频通知只证明桥接行为，模拟器和构建不能证明物理耳机点击、真实来电或灵动岛外观。系统滚动、支持机型上的灵动岛封面和指定耳机操作需要设备验收。
+元数据、身份、队列意图、系统媒体适配及播放策略通过 `--debug` 模式在真实运行期验证；模拟器和构建不能证明物理耳机点击、真实来电或灵动岛外观。系统滚动、支持机型上的灵动岛封面和指定耳机操作需要设备验收。
 
 公开接口依据：[MPNowPlayingInfoCenter](https://developer.apple.com/documentation/mediaplayer/mpnowplayinginfocenter)、[MPRemoteCommandCenter](https://developer.apple.com/documentation/mediaplayer/mpremotecommandcenter)、[EarPods 操作](https://support.apple.com/guide/iphone/use-earpods-iph7a203b610/ios)。成熟播放器如 VLC for iOS 同样直接使用 MediaPlayer；本实现复用项目已有能力，没有复制 VLC 代码或增加其播放器依赖。

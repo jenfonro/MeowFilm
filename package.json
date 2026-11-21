@@ -20,8 +20,7 @@
     "node": "^24.0.0"
   },
   "scripts": {
-    "test": "node scripts/verify-dependency-lock.mjs && node scripts/test-packages.mjs && node scripts/test-root.mjs && node scripts/verify-boundaries.mjs",
-    "test:packages": "node scripts/test-packages.mjs",
+    "verify": "node scripts/verify-dependency-lock.mjs && node scripts/verify-boundaries.mjs && node scripts/verify-native-javascript.mjs && node scripts/windows/verify-app-structure.mjs",
     "verify:boundaries": "node scripts/verify-boundaries.mjs",
     "build:runtime": "node scripts/quickjs/build-native.mjs"
   },

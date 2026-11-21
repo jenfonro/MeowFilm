@@ -55,6 +55,4 @@ Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.3.0`、`pa
 
 ## 验证入口
 
-`scripts/windows/test.ps1 -Group <names>` 准备同一真实原生 bundle 后编译并执行选定原生测试；`test-node.ps1 -Path tests/<area>.test.mjs` 执行选定 Node 测试。两者保留真实退出码，空集、跳过和未完成不算通过。测试副本/输出由本工作区固定 tmp 目录管理。
-
-显式 `-All` 才运行完整对应测试范围；默认按实际变更选择。Windows 根测试选择不加载 iOS 专属测试。真实运行器集成覆盖 HTTP、LX/source 原生执行、Cat Worker、取消、持久数据及资源关闭；合成场景不冒充真实第三方来源或媒体播放验收。外部来源可按[动态验收工具](../runtime/source-acceptance.md)的 `--payload` 指向完整载荷，但不属于每次平台迁移的默认验证。
+静态边界与打包完整性通过 `npm run verify`、`node scripts/windows/verify-projects.mjs` 和正常 App 构建校验；真实运行器集成（HTTP、LX/source 原生执行、Cat Worker、取消、持久数据及资源关闭）统一通过 `--debug` 模式核对（详见[Debug 模式](debug-mode.md)）。外部来源可按[动态验收工具](../runtime/source-acceptance.md)的 `--payload` 指向完整载荷，但不属于每次平台迁移的默认验证。

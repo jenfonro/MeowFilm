@@ -33,6 +33,4 @@ assertOwnedPath(windowsRoot, windowsRoot, { allowRoot: true });
 assertOwnedPath(windowsRoot, buildRoot, { allowMissing: true });
 assertOwnedPath(windowsRoot, tmpRoot, { allowMissing: true });
 assertOwnedPath(tmpRoot, workingRoot, { allowMissing: true });
-export const fixtureTools = assertOwnedPath(tmpRoot, join(tmpRoot, 'tools', 'fixtures'), { allowMissing: true });
 export const temporaryRoot = assertOwnedPath(tmpRoot, join(tmpRoot, 'temporary'), { allowMissing: true });
-export const testResultsRoot = assertOwnedPath(tmpRoot, join(tmpRoot, 'test-results'), { allowMissing: true });

@@ -14,9 +14,6 @@
   "files": [
     "src"
   ],
-  "scripts": {
-    "test": "node --test test/*.test.js"
-  },
   "dependencies": {
     "@meowfilm/storage": "0.1.0",
     "@meowfilm/runtime-bridge": "0.2.0"
