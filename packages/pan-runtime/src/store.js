@@ -8,10 +8,10 @@ const columns = ['cookie', 'username', 'password', 'authorization', 'refreshed_a
 const allowed = { baidu: ['cookie'], quark: ['cookie'], uc: ['cookie'],
   tianyi: ['cookie', 'username', 'password'], yidong: ['authorization', 'refreshedAt'] };
 const integer = value => Number.isSafeInteger(value) && value >= 0;
-const selectAccounts = 'SELECT provider,revision,row_revision,cookie,username,password,authorization,refreshed_at_ms FROM pan_standalone_accounts WHERE revision>0';
+const selectAccounts = 'SELECT provider,account_revision,row_revision,cookie,username,password,authorization,refreshed_at_ms FROM pan_accounts WHERE account_revision>0';
 function accounts(rows) {
   return { version: 1, accounts: Object.fromEntries(rows.map(row => [row.provider, {
-    revision: row.revision, rowRevision: row.row_revision,
+    revision: row.account_revision, rowRevision: row.row_revision,
     credentials: Object.fromEntries(fields.flatMap((field, index) =>
       row[columns[index]] === null ? [] : [[field, row[columns[index]]]])),
   }])) };
@@ -55,8 +55,8 @@ export class PanStore {
     requireValue(integer(next) && integer(rowRevision + 1), 'STORAGE_ERROR');
     try {
       const [, rows] = await this.#database.transaction([
-        { sql: 'UPDATE pan_standalone_accounts SET revision=?,row_revision=row_revision+1,' +
-            columns.map(key => key + '=?').join(',') + ' WHERE provider=? AND revision=? AND row_revision=?',
+        { sql: 'UPDATE pan_accounts SET account_revision=?,row_revision=row_revision+1,' +
+            columns.map(key => key + '=?').join(',') + ' WHERE provider=? AND account_revision=? AND row_revision=?',
           params: [next, ...values, provider, accountRevision, rowRevision], expectChanges: 1 },
         { sql: selectAccounts, rows: true, maxRows: 5 },
       ]);

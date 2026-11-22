@@ -53,7 +53,7 @@ internal sealed class MusicLibraryData
         return value is null ? null : new JsonObject(value.Where(pair => members.Contains(pair.Key))
             .Select(pair => KeyValuePair.Create(pair.Key, pair.Value?.DeepClone())));
     }
-    internal IReadOnlyList<RelationalRecord.SelectedRow> Rows(string area, string[] relations, object?[] prefix, params string[] members) =>
+    internal IReadOnlyList<MusicLibrarySelectedRow> Rows(string area, string[] relations, object?[] prefix, params string[] members) =>
         Songs.Store.ReadRows(scope, revision, area, relations, prefix, members);
     internal JsonObject Row(string area, string[] relations, object?[] key) =>
         Songs.Store.ReadRow(scope, revision, area, relations, key) ?? throw new MusicLibraryException("CORRUPT_STORAGE");

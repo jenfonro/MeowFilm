@@ -25,16 +25,16 @@ public sealed class GrantedMediaFiles
         var files = await Task.Run(() => selected.Select(Grant).DistinctBy(file => file.Id).ToArray(), cancellationToken).ConfigureAwait(false);
         try { await database.WriteAsync(db =>
         {
-            ValidateSchema(db);
-            if (db.Scalar<long>("SELECT count(*) FROM windows_file_grants WHERE scope_key='device'") == 0)
-                FileGrantRecords.Files.Save(db, new System.Text.Json.Nodes.JsonObject { ["Schema"] = 1, ["Items"] = new System.Text.Json.Nodes.JsonArray() }, null, ["device"]);
-            long count = db.Scalar<long>("SELECT count(*) FROM windows_file_grants_Items WHERE scope_key='device'");
+            long nextPosition = db.Scalar<long>("SELECT COALESCE(MAX(position) + 1, 0) FROM windows_file_grants");
             foreach (var file in files)
             {
                 if (Find(db, file.Id) is { } previous) ValidateCurrent(previous);
-                db.Execute("INSERT INTO windows_file_grants_Items(scope_key,Items_key,ordinal,shape_mask,null_mask,Path,Title) " +
-                    "VALUES('device',$id,$ordinal,3,0,$path,$title) ON CONFLICT(scope_key,Items_key) DO UPDATE SET Path=excluded.Path,Title=excluded.Title",
-                    ("$id", file.Id), ("$ordinal", count++), ("$path", file.Path), ("$title", file.Title));
+                db.Execute("""
+                    INSERT INTO windows_file_grants(grant_id,position,file_path,title)
+                    VALUES($id,$position,$path,$title)
+                    ON CONFLICT(grant_id) DO UPDATE SET file_path=excluded.file_path,title=excluded.title
+                    """,
+                    ("$id", file.Id), ("$position", nextPosition++), ("$path", file.Path), ("$title", file.Title));
             }
             return true;
         }, cancellationToken, files.Sum(file => (file.Id.Length + file.Path.Length + file.Title.Length) * 2)).ConfigureAwait(false); }
@@ -44,7 +44,7 @@ public sealed class GrantedMediaFiles
     }
     public async Task<Uri> ResolveAsync(string id, CancellationToken cancellationToken = default)
     {
-        var file = await database.ReadAsync(db => { ValidateSchema(db); return Find(db, id); }, cancellationToken).ConfigureAwait(false);
+        var file = await database.ReadAsync(db => Find(db, id), cancellationToken).ConfigureAwait(false);
         if (file is null) throw new InvalidDataException("FILE_UNAVAILABLE");
         ValidateCurrent(file);
         return await Task.Run(() =>
@@ -56,21 +56,18 @@ public sealed class GrantedMediaFiles
     }
     public Task<IReadOnlyList<GrantedFile>> ListAsync(CancellationToken cancellationToken = default) => database.ReadAsync(db =>
     {
-        ValidateSchema(db);
-        var files = db.Query("SELECT Items_key,Path,Title FROM windows_file_grants_Items WHERE scope_key='device' ORDER BY ordinal,Items_key",
+        var files = db.Query("SELECT grant_id,file_path,title FROM windows_file_grants ORDER BY position,grant_id",
             row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)));
         foreach (var file in files) ValidateCurrent(file);
         return files;
     }, cancellationToken);
-    private static GrantedFile? Find(DatabaseSession db, string id) => db.Query(
-        "SELECT Items_key,Path,Title FROM windows_file_grants_Items WHERE scope_key='device' AND Items_key=$id",
-        row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)), ("$id", id)).SingleOrDefault();
-    private static void ValidateSchema(DatabaseSession db)
-    {
-        var schemas = db.Query("SELECT Schema FROM windows_file_grants WHERE scope_key='device'", row => row.GetInt64(0));
-        if (schemas.Count > 0 && schemas[0] != 1)
-            throw Corrupt();
-    }
+    private static GrantedFile? Find(DatabaseSession db, string id) =>
+        db.TryQuerySingle(
+            "SELECT grant_id,file_path,title FROM windows_file_grants WHERE grant_id=$id",
+            row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)),
+            out var file, ("$id", id))
+            ? file
+            : null;
     private void ValidateCurrent(GrantedFile file)
     {
         if (file.Id.Length != 70 || !file.Id.StartsWith("local:", StringComparison.Ordinal) ||

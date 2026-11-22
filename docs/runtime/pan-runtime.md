@@ -50,7 +50,7 @@ await runtime.close();
 
 五个 provider 均支持 `refresh`。Cookie-only 账号使用只读账号接口检测，不列分享、不转存；支持密码或 token 的账号按其协议刷新。天翼只有 Cookie 时也可检测；用户名与密码仍用于普通登录，不绕过验证码。本地保存凭据不等于验证成功；需要验证时显式刷新，只有真实在线回执才报告已验证。
 
-运行器 standalone owner 和 App 注入模式均使用同一 SQLite schema 的 `pan` owner rows；App 模式原生 UI 直接写 `windows_pan_accounts` 或 iOS 对应 provider 行，Node 扫码／刷新只能经受信 provider revision CAS 回写当前账号。凭据为所属关系字段内的纯明文值，不使用 DPAPI、Keychain、应用层加密或第二凭据库。每个 provider 的 account revision、row revision 和凭据在同一事务提交。RPC、上游响应和显式用户账号导入／导出仍可使用 JSON，但内部不生成 `accounts.json`，不把整份账号 JSON 存入数据库。
+运行器 standalone owner 和 App 注入模式均使用同一 SQLite schema 的 `pan_accounts` 行（配合 `owner_revisions` 的 `pan.accounts` owner CAS）；App 模式原生 UI 直接写 `pan_accounts` 对应 provider 行，Node 扫码／刷新只能经受信 provider revision CAS 回写当前账号。凭据为所属关系字段内的纯明文值，不使用 DPAPI、Keychain、应用层加密或第二凭据库。每个 provider 的 account revision、row revision 和凭据在同一事务提交。RPC、上游响应和显式用户账号导入／导出仍可使用 JSON，但内部不生成 `accounts.json`，不把整份账号 JSON 存入数据库。
 
 手动换号／clear 撤销旧代次的进行中网络、登录和文件引用，旧结果不得覆盖新配置。自动刷新只 patch 当前代次，轮换凭据持久化成功后才报告成功。
 

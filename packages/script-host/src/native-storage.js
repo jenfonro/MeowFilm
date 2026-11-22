@@ -2,9 +2,9 @@ import { Worker } from 'node:worker_threads';
 import { storageError } from '@meowfilm/storage';
 import { loadNativeStorageBinding } from './native-engine.js';
 
-export function createDesktopStorageDriver(path, identity, initialize) {
+function spawnSqliteWorker(workerData) {
   const worker = new Worker(new URL('./sqlite-worker.js', import.meta.url), {
-    workerData: { path, identity, initialize },
+    workerData,
     execArgv: [],
   });
   let sequence = 0, stopped = false;
@@ -47,6 +47,51 @@ export function createDesktopStorageDriver(path, identity, initialize) {
         if (!stopped) await this.request({ kind: 'close' });
       }
       finally { if (await exited !== 0) throw storageError('STORAGE_ERROR'); }
+    },
+  };
+}
+
+/**
+ * WAL read/write dual-worker driver for Desktop Node runtime:
+ * - writer initializes/verifies schema and serializes writes, checkpoints, and backups.
+ * - reader opens a dedicated readOnly + query_only=ON connection after writer ready so reads
+ *   execute concurrently under SQLite WAL without queueing behind write transactions.
+ */
+export function createDesktopStorageDriver(path, identity, initialize) {
+  const writer = spawnSqliteWorker({ path, identity, initialize, role: 'writer' });
+  let reader = null;
+  const ready = (async () => {
+    await writer.ready;
+    reader = spawnSqliteWorker({ path, identity, initialize: false, role: 'reader' });
+    try {
+      await reader.ready;
+    } catch (error) {
+      const failedReader = reader;
+      reader = null;
+      await failedReader.close().catch(() => {});
+      await writer.close().catch(() => {});
+      throw error;
+    }
+    return true;
+  })();
+  ready.catch(() => {});
+  return {
+    ready,
+    request(input) {
+      const target = (input?.kind === 'query' || input?.kind === 'snapshot') && reader ? reader : writer;
+      return target.request(input);
+    },
+    async close() {
+      let closeError = null;
+      try { await ready; } catch {}
+      if (reader) {
+        try { await reader.close(); }
+        catch (error) { closeError ??= error; }
+        reader = null;
+      }
+      try { await writer.close(); }
+      catch (error) { closeError ??= error; }
+      if (closeError) throw closeError;
     },
   };
 }

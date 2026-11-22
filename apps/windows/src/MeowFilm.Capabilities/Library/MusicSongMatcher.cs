@@ -14,11 +14,11 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
     private readonly TimeProvider clock = time ?? TimeProvider.System;
     private readonly object gate = new();
     private readonly SemaphoreSlim storage = new(1, 1);
-    private readonly Dictionary<string, JsonObject> states = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string SongId, string Platform), SongMatchPlatformState> states = new();
     private readonly Dictionary<string, HashSet<string>> excluded = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, long> orders = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string SongId, string Platform), long> orders = new();
     private readonly Dictionary<string, int> generations = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
+    private readonly Dictionary<(string SongId, string Platform, string Context, string Query, int Generation), Flight> flights = new();
     private long observationOrder;
     private bool loaded;
     private sealed class Flight(string platform, int generation)
@@ -35,7 +35,6 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
     }
     internal sealed record MatchResult(JsonObject Song, string? Error = null);
     internal static string Query(JsonObject song) => (LJ.S(song["title"]) + " " + LJ.S(song["artist"])).Trim();
-    private static string Key(string songId, string platform) => LJ.Stringify(new JsonArray(songId, platform));
     internal long NextObservation() => Interlocked.Increment(ref observationOrder);
     internal (int Generation, long Order) BeginSearch(string platform)
     { lock (gate) return (generations.GetValueOrDefault(platform), NextObservation()); }
@@ -47,17 +46,16 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         {
             if (loaded) return;
             var saved = await store.ReadAsync(token).ConfigureAwait(false);
-            var current = await library.ReadMatchingSongIdsAsync(saved.Select(entry => LJ.S(entry["songId"])), token)
+            var current = await library.ReadMatchingSongIdsAsync(saved.Select(entry => entry.SongId), token)
                 .ConfigureAwait(false);
             lock (gate)
             {
                 foreach (var entry in saved)
                 {
-                    var songId = LJ.S(entry["songId"]);
-                    if (!current.Contains(songId)) continue; // Evict recoverable state whose current repository record no longer exists.
-                    foreach (var pair in entry["platforms"]!.AsObject())
-                        states[Key(songId, pair.Key)] = pair.Value!.DeepClone().AsObject();
-                    excluded[songId] = entry["excluded"]!.AsArray().Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
+                    if (!current.Contains(entry.SongId)) continue; // Evict recoverable state whose current repository record no longer exists.
+                    foreach (var (platform, state) in entry.Platforms)
+                        states[(entry.SongId, platform)] = state;
+                    excluded[entry.SongId] = entry.Excluded.ToHashSet(StringComparer.Ordinal);
                 }
                 loaded = true;
             }
@@ -75,7 +73,8 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         CancellationToken token, bool contentFailed = false)
     {
         song = await KnownAsync(song, token).ConfigureAwait(false);
-        string songId = LJ.S(song["songId"]), key = Key(songId, platform);
+        string songId = LJ.S(song["songId"]);
+        var key = (songId, platform);
         Flight flight;
         lock (gate)
         {
@@ -83,14 +82,15 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
             bool hasSource = sources.Any(source => LJ.S(source["source"]) == platform && !IsExcluded(song, LJ.S(source["sourceKey"])));
             var status = states.GetValueOrDefault(key);
             long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
-            bool same = status is not null && LJ.S(status["context"]) == context && LJ.S(status["query"]) == Query(song);
-            bool recheck = contentFailed && (!same || status!["matchedAt"] is null || now - LJ.I(status["matchedAt"]) >= Freshness);
-            if (hasSource && !recheck || same && now - LJ.I(status!["checkedAt"]) is >= 0 and < NotFoundRetry &&
-                LJ.S(status["state"]) == "notFound") return new(song);
+            string query = Query(song);
+            bool same = status is not null && status.Context == context && status.Query == query;
+            bool recheck = contentFailed && (!same || status!.MatchedAt is null || now - status.MatchedAt.Value >= Freshness);
+            if (hasSource && !recheck || same && now - status!.CheckedAt is >= 0 and < NotFoundRetry &&
+                status.State == "notFound") return new(song);
             if (!NativeMusicSong.IsOnline(song) || NativeMusicSong.Fingerprint(song).Length == 0 || LJ.N(song["duration"]) <= 0)
                 return new(song);
             int generation = generations.GetValueOrDefault(platform);
-            string flightKey = LJ.Stringify(new JsonArray(songId, platform, context, Query(song), generation));
+            var flightKey = (songId, platform, context, query, generation);
             if (!flights.TryGetValue(flightKey, out flight!))
             {
                 flight = new(platform, generation); flights.Add(flightKey, flight);
@@ -145,11 +145,12 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
     }
     private void Apply(string songId, string platform, string context, string query, long at, long order, string? error, bool found)
     {
-        string key = Key(songId, platform);
-        if (orders.GetValueOrDefault(key) >= order || states.TryGetValue(key, out var old) && LJ.I(old["checkedAt"]) > at) return;
-        states[key] = LJ.Obj(("state", error is not null ? "failed" : found ? "matched" : "notFound"),
-            ("checkedAt", at), ("context", context), ("query", query), ("code", error ?? ""),
-            ("matchedAt", found && error is null ? JsonValue.Create(at) : old?["matchedAt"]));
+        var key = (songId, platform);
+        if (orders.GetValueOrDefault(key) >= order || states.TryGetValue(key, out var old) && old.CheckedAt > at) return;
+        states[key] = new SongMatchPlatformState(
+            error is not null ? "failed" : found ? "matched" : "notFound",
+            at, context, query, error ?? "",
+            found && error is null ? at : old?.MatchedAt);
         orders[key] = order;
     }
     internal void ObservePage(MusicSearchRequest request, JsonElement? response, string error, string context,
@@ -215,7 +216,7 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         lock (gate)
         {
             generations[platform] = generations.GetValueOrDefault(platform) + 1;
-            foreach (var key in states.Keys.Where(key => JsonNode.Parse(key)![1]!.GetValue<string>() == platform).ToArray())
+            foreach (var key in states.Keys.Where(k => k.Platform == platform).ToArray())
             { states.Remove(key); orders.Remove(key); }
             work = flights.Values.Where(flight => flight.Platform == platform).ToArray();
         }
@@ -229,18 +230,19 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         {
             string[] ids;
             lock (gate)
-                ids = states.Keys.Select(key => LJ.S(JsonNode.Parse(key)![0])).Concat(excluded.Keys)
+                ids = states.Keys.Select(k => k.SongId).Concat(excluded.Keys)
                     .Distinct(StringComparer.Ordinal).ToArray();
             var songs = await library.ReadMatchingSongIdsAsync(ids, token).ConfigureAwait(false);
-            JsonObject[] snapshot;
+            SongMatchRecord[] snapshot;
             lock (gate)
                 snapshot = songs.Select(id =>
                 {
-                    var platforms = new JsonObject();
+                    var platforms = new Dictionary<string, SongMatchPlatformState>(StringComparer.Ordinal);
                     foreach (string platform in NativeMusicSong.Platforms)
-                        if (states.TryGetValue(Key(id, platform), out var state)) platforms[platform] = state.DeepClone();
-                    return LJ.Obj(("songId", id), ("platforms", platforms), ("excluded", LJ.Arr(excluded.GetValueOrDefault(id) ?? [])));
-                }).Where(entry => entry["platforms"]!.AsObject().Count > 0 || entry["excluded"]!.AsArray().Count > 0).ToArray();
+                        if (states.TryGetValue((id, platform), out var state)) platforms[platform] = state;
+                    var excl = excluded.TryGetValue(id, out var set) ? set.ToArray() : Array.Empty<string>();
+                    return new SongMatchRecord(id, platforms, excl);
+                }).Where(entry => entry.Platforms.Count > 0 || entry.Excluded.Count > 0).ToArray();
             await store.WriteAsync(snapshot, token).ConfigureAwait(false);
         }
         catch (MusicLibraryException) { /* Recoverable discovery state cannot change a library commit receipt. */ }

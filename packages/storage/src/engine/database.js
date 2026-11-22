@@ -81,6 +81,10 @@ function cost(value) {
   throw storageError('INVALID_REQUEST');
 }
 
+function isReadRequest(input) {
+  return input?.kind === 'query' || input?.kind === 'snapshot';
+}
+
 async function ensureDirectory(path, create) {
   try {
     if (await realpath(path) !== path || !(await lstat(path)).isDirectory()) throw storageError('UNSAFE_PATH');
@@ -97,7 +101,9 @@ async function ensureDirectory(path, create) {
 
 function createOwner(root, options) {
   let driver, pending = 0, bytes = 0, closing = false, disposal;
-  let tail = Promise.resolve();
+  // Separate read and write lanes under WAL so read queries/snapshots never queue behind writes/checkpoints/backups.
+  let readTail = Promise.resolve();
+  let writeTail = Promise.resolve();
   const target = resolveSchemaTarget(options.target ?? platform?.target ?? 'standalone');
   const ready = (async () => {
     const startedAt = observer ? performance.now() : 0;
@@ -130,7 +136,9 @@ function createOwner(root, options) {
     let owned;
     try { owned = structuredClone(input); }
     catch { --pending; bytes -= size; return Promise.reject(storageError('INVALID_REQUEST')); }
-    const result = tail.then(async () => {
+    const readLane = isReadRequest(owned);
+    const laneTail = readLane ? readTail : writeTail;
+    const result = laneTail.then(async () => {
       await ready;
       if (signal?.aborted) throw storageError('CANCELLED');
       const startedAt = observer ? performance.now() : 0;
@@ -143,6 +151,7 @@ function createOwner(root, options) {
             : Array.isArray(value?.rows) ? value.rows.length : undefined;
           storageLog('debug', `database.${owned.kind}`, {
             root,
+            lane: readLane ? 'read' : 'write',
             ...summarizeStatement(owned),
             ...(rowCount !== undefined ? { rowCount } : {}),
             ...(typeof value?.changes === 'number' ? { changes: value.changes } : {}),
@@ -154,6 +163,7 @@ function createOwner(root, options) {
       } catch (error) {
         storageLog('error', `database.${owned.kind}.error`, {
           root,
+          lane: readLane ? 'read' : 'write',
           ...summarizeStatement(owned),
           pendingCount: pending,
           pendingBytes: bytes,
@@ -161,8 +171,10 @@ function createOwner(root, options) {
         throw error;
       }
     }).finally(() => { --pending; bytes -= size; });
-    tail = result.then(() => {}, () => {});
-    admitted(tail);
+    const settled = result.then(() => {}, () => {});
+    if (readLane) readTail = settled;
+    else writeTail = settled;
+    admitted(settled, readLane);
     return result;
   };
   return {
@@ -176,7 +188,7 @@ function createOwner(root, options) {
       return disposal ??= (async () => {
         closing = true;
         const startedAt = observer ? performance.now() : 0;
-        await tail;
+        await Promise.all([readTail, writeTail]);
         try { await ready; } catch { /* Open failure is delivered by ready and requests. */ }
         try { await driver?.close(); }
         finally {
@@ -200,9 +212,13 @@ export function openDatabase(dataRoot, options = {}) {
     throw storageError('STORAGE_CONFIGURATION');
   if (!owner) { owner = createOwner(root, options); roots.set(root, owner); }
   ++owner.references;
-  let closed = false, disposal, drain = Promise.resolve();
+  let closed = false, disposal, readDrain = Promise.resolve(), writeDrain = Promise.resolve();
   const request = (input, signal) => closed
-    ? Promise.reject(storageError('STORAGE_CLOSED')) : owner.request(input, signal, end => { drain = end; });
+    ? Promise.reject(storageError('STORAGE_CLOSED'))
+    : owner.request(input, signal, (end, isRead) => {
+      if (isRead) readDrain = end;
+      else writeDrain = end;
+    });
   return {
     ready: owner.ready,
     query: (sql, params = [], { signal, maxRows = Number.MAX_SAFE_INTEGER } = {}) =>
@@ -220,7 +236,7 @@ export function openDatabase(dataRoot, options = {}) {
       return disposal ??= (async () => {
         closed = true;
         if (--owner.references === 0) await owner.close();
-        else { await drain; }
+        else { await Promise.all([readDrain, writeDrain]); }
       })();
     },
   };

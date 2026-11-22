@@ -234,9 +234,10 @@ public sealed partial class MusicNativeApplication
                         {
                             var value = JsonNode.Parse(input.GetRawText())!.AsObject();
                             var saved = await fmPreferences.ReadAsync(fmAccount.UserId, CancellationToken.None).ConfigureAwait(false);
-                            foreach (var pair in saved)
-                                if (pair.Key is "mode" or "submode" || pair.Value!.GetValue<string>().Length > 0)
-                                    value[pair.Key] = pair.Value!.DeepClone();
+                            value["mode"] = saved.Mode;
+                            value["submode"] = saved.Submode;
+                            if (saved.RuleId.Length > 0) value["ruleId"] = saved.RuleId;
+                            if (saved.TabTagId.Length > 0) value["tabTagId"] = saved.TabTagId;
                             parameters = value;
                         }
                     }

@@ -57,7 +57,7 @@ Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器
 `AppIdentity` 集中定义产品名称、当前数据/运行时身份和当前原生命名空间：
 
 - 名称：`meowfilm`。
-- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；应用内部结构化业务数据和缓存索引使用共享 SQLite `storage-v1/meowfilm.sqlite3`，原生客户端与 Node runtime 连接同一数据库。凭据以所属业务表中的明文 typed fields 保存；图片、歌词、音频、脚本源码等原始资源仍由各自 owner 管理文件目录。具体 schema 与 owner 见[本地存储](protected-storage.md)。
+- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；应用内部结构化业务数据（含结构化与手工歌词）和缓存索引使用共享 SQLite `storage-v1/meowfilm.sqlite3`，原生客户端与 Node runtime 连接同一数据库。凭据以所属业务表中的明文 typed fields 保存；图片、音频、脚本源码等原始资源仍由各自 owner 管理文件目录。具体 schema 与 owner 见[本地存储](protected-storage.md)。
 - 脚本协议/清单字段 `product` 等于 `aggregate`，是当前 wire 身份。
 - 活动产品只读取和写入 `AppIdentity.NativeNamespaces` 列出的当前格式。
 - 当前提供可淘汰的播放缓存，未提供用户下载管理。

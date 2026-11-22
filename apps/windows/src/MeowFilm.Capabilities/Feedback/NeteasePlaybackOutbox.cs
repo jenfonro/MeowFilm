@@ -10,7 +10,6 @@ namespace MeowFilm.Capabilities.Feedback;
 internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeedbackSettingsOwner settings,
     IMusicPlatformSessionSource accounts, NeteasePlaybackTransport transport, TimeProvider clock) : IAsyncDisposable
 {
-    private readonly TypedRecordRepository store = new(database, NeteasePlaybackOutboxDocument.Namespace, FeedbackStorageRecords.Outbox);
     private readonly object sync = new();
     private readonly SemaphoreSlim disk = new(1, 1);
     private readonly Dictionary<Guid, NeteasePlaybackPending> entries = [];
@@ -348,9 +347,8 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         if (loaded) return;
         try
         {
-            var snapshot = await store.ReadAsync().ConfigureAwait(false);
-            var saved = NeteasePlaybackOutboxDocument.Decode(snapshot);
-            storageRevision = snapshot.Revision;
+            var (saved, rev) = await NeteasePlaybackOutboxStore.ReadAsync(database).ConfigureAwait(false);
+            storageRevision = rev;
             entries.Clear();
             foreach (var value in saved) entries.Add(value.PlaybackId, value);
             loaded = true;
@@ -371,7 +369,7 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
     private bool Trim()
     {
         bool changed = false;
-        long oldest = (clock.GetUtcNow() - NeteasePlaybackOutboxDocument.Retention).ToUnixTimeMilliseconds();
+        long oldest = (clock.GetUtcNow() - NeteasePlaybackOutboxStore.Retention).ToUnixTimeMilliseconds();
         foreach (var value in entries.Values.ToArray())
             if (value.Count > 0 && value.Oldest < oldest && value.Start?.Inflight != true && value.End?.Inflight != true)
             { entries.Remove(value.PlaybackId); live.Remove(value.PlaybackId); changed = true; }
@@ -383,8 +381,7 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         GuardStorage();
         try
         {
-            var data = NeteasePlaybackOutboxDocument.Encode(entries.Values);
-            var receipt = await store.WriteAsync(data, storageRevision,
+            var receipt = await NeteasePlaybackOutboxStore.SaveAsync(database, entries.Values, storageRevision,
                 CancellationToken.None).ConfigureAwait(false);
             storageRevision = receipt;
         }

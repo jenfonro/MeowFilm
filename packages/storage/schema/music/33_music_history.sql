@@ -44,6 +44,7 @@ CREATE TABLE music_history_playlists (
 ) STRICT;
 
 CREATE INDEX idx_music_history_playlists_order ON music_history_playlists(scope, position);
+CREATE INDEX idx_music_history_playlists_similar_song ON music_history_playlists(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_history_playlist_entries (
     scope TEXT NOT NULL,
@@ -78,6 +79,8 @@ CREATE TABLE music_history_playlist_entries (
 ) STRICT;
 
 CREATE INDEX idx_music_history_playlist_entries_order ON music_history_playlist_entries(scope, playlist_id, position);
+CREATE INDEX idx_music_history_playlist_entries_song ON music_history_playlist_entries(song_id);
+CREATE INDEX idx_music_history_playlist_entries_similar_song ON music_history_playlist_entries(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_history_playlist_lists (
     scope TEXT NOT NULL,
@@ -133,3 +136,5 @@ CREATE TABLE music_history_day_songs (
 ) STRICT;
 
 CREATE INDEX idx_music_history_day_songs_order ON music_history_day_songs(scope, day_date, position);
+CREATE INDEX idx_music_history_day_songs_song ON music_history_day_songs(song_id);
+CREATE INDEX idx_music_history_day_songs_similar_song ON music_history_day_songs(ctx_similar_based_on_song_id);

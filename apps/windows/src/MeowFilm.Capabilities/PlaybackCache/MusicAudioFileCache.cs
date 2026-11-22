@@ -47,12 +47,12 @@ internal sealed partial class MusicAudioFileCache
     private sealed class Index
     {
         internal Dictionary<string, Entry> Entries { get; } = new(StringComparer.Ordinal);
-        internal Dictionary<string, JsonObject> Before { get; } = new(StringComparer.Ordinal);
+        internal Dictionary<string, AudioFileCacheRecord> Before { get; } = new(StringComparer.Ordinal);
         internal StorageRevision Revision = StorageRevision.Empty;
         internal long Epoch;
     }
     private sealed class Entry(string file, long size, string sha256, string signature, long confirmedAt,
-        double duration, JsonObject info)
+        double duration, AudioFileInfoRecord info)
     {
         internal string File { get; } = file;
         internal long Size { get; } = size;
@@ -60,7 +60,7 @@ internal sealed partial class MusicAudioFileCache
         internal string Signature { get; } = signature;
         internal long ConfirmedAt { get; set; } = confirmedAt;
         internal double Duration { get; } = duration;
-        internal JsonObject Info { get; } = info;
+        internal AudioFileInfoRecord Info { get; } = info;
     }
     internal sealed partial class PreparedFile : IDisposable
     {
@@ -159,28 +159,31 @@ internal sealed partial class MusicAudioFileCache
     {
         try
         {
-            return await database.ReadAsync(db =>
+            return await database.ReadSnapshotAsync(db =>
             {
                 var index = new Index { Revision = db.Revision(Namespace), Epoch = Interlocked.Read(ref clearEpoch) };
                 if (!Volatile.Read(ref readable)) return index;
-                IReadOnlyList<JsonObject> rows;
-                if (key is not null) rows = AudioStorageRecords.Index.Read(db, [key]) is { } one ? [one] : [];
-                else if (song is not null) rows = db.Query("SELECT resource_key FROM windows_audio_index_info WHERE songId=$song AND kind='script'",
-                    row => row.GetString(0), ("$song", song)).Select(id => AudioStorageRecords.Index.Read(db, [id])!).ToArray();
-                else rows = AudioStorageRecords.Index.ReadMany(db, []);
-                foreach (var value in rows)
+                IReadOnlyList<AudioFileCacheRecord> rows;
+                if (key is not null) rows = AudioFileCacheStore.ReadOne(db, key) is { } one ? [one] : [];
+                else if (song is not null) rows = AudioFileCacheStore.ReadByScriptSong(db, song);
+                else rows = AudioFileCacheStore.ReadAll(db);
+                foreach (var record in rows)
                 {
-                    string id = value["resourceKey"]!.GetValue<string>();
+                    string id = record.ResourceKey;
                     if (!LowerHex(id, 64)) throw MusicPlaybackCacheDataException.Corrupt();
-                    var row = JsonSerializer.SerializeToElement(value);
-                    var info = row.GetProperty("info");
-                    string file = Text(row.GetProperty("file"), 38), sha = Text(row.GetProperty("sha256"), 64), signature = Text(row.GetProperty("signature"), 64);
-                    long size = CanonicalLong(row.GetProperty("size")), confirmed = CanonicalLong(row.GetProperty("confirmedAt"));
-                    double duration = DurationValue(row.GetProperty("duration"), false);
-                    ValidateInfo(info, id, signature, size, duration);
-                    if (!ValidFileName(file) || size > Capacity || !LowerHex(sha, 64) || !LowerHex(signature, 64)) throw MusicPlaybackCacheDataException.Corrupt();
-                    index.Before.Add(id, value);
-                    index.Entries.Add(id, new Entry(file, size, sha, signature, confirmed, duration, value["info"]!.DeepClone().AsObject()));
+                    RequireText(record.FileName, 38);
+                    RequireText(record.Sha256, 64);
+                    RequireText(record.Signature, 64);
+                    if (record.FileSize <= 0 || record.ConfirmedAt <= 0 ||
+                        record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0)
+                        throw MusicPlaybackCacheDataException.Corrupt();
+                    ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration);
+                    if (!ValidFileName(record.FileName) || record.FileSize > Capacity ||
+                        !LowerHex(record.Sha256, 64) || !LowerHex(record.Signature, 64))
+                        throw MusicPlaybackCacheDataException.Corrupt();
+                    index.Before.Add(id, record);
+                    index.Entries.Add(id, new Entry(record.FileName, record.FileSize, record.Sha256,
+                        record.Signature, record.ConfirmedAt, duration, record.Info));
                 }
                 return index;
             }, token).ConfigureAwait(false);
@@ -283,21 +286,68 @@ internal sealed partial class MusicAudioFileCache
         _ = NullablePositiveLong(info.GetProperty("channels"));
         _ = NullablePositiveLong(info.GetProperty("bitrate"), true);
     }
-    private static JsonObject Row(string id, Entry value) => new()
+    private static void ValidateInfoRecord(AudioFileInfoRecord info, string key, string signature, long size,
+        double duration)
     {
-        ["resourceKey"] = id, ["file"] = value.File, ["size"] = value.Size, ["sha256"] = value.Sha256,
-        ["signature"] = value.Signature, ["confirmedAt"] = value.ConfirmedAt, ["duration"] = value.Duration, ["info"] = value.Info.DeepClone()
-    };
+        bool script = info.Kind == "script";
+        if (!script && info.Kind != "official")
+            throw MusicPlaybackCacheDataException.Corrupt();
+        string platform = RequireField(info.Platform, 16);
+        string song = RequireField(info.SongId, 2048);
+        string recording = RequireField(info.SourceKey, 8192);
+        string scope = RequireField(info.Scope, 128);
+        if (!(script ? Library.NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") || Key(scope, song) != key)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (!script && (info.Generation is null || info.Generation <= 0))
+            throw MusicPlaybackCacheDataException.Corrupt();
+        string quality = RequireField(info.Quality, 64);
+        if (script)
+        {
+            string installation = RequireField(info.InstallationId, 128);
+            _ = RequireField(info.ProviderName, 512, empty: true);
+            if (!MusicQualityPolicy.LxTypes.Contains(quality) ||
+                ScriptSignature(installation, platform, recording, quality) != signature || scope != "script:" + signature)
+                throw MusicPlaybackCacheDataException.Corrupt();
+        }
+        _ = RequireField(info.RequestedQuality, 64);
+        string actual = RequireField(info.ActualQuality, 64, empty: true);
+        if (info.QualityVerified is not { } qualityVerified || info.PlaybackVerified is not { } playbackVerified)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (qualityVerified && actual.Length == 0 || playbackVerified)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        string cache = RequireField(info.QualityCacheSignature, 64);
+        if (!script && !LowerHex(RequireField(info.QualityPolicySignature, 64), 64) ||
+            !LowerHex(cache, 64) || cache != signature)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (info.Duration is not { } infoDuration || !double.IsFinite(infoDuration) || infoDuration <= 0 || infoDuration != duration ||
+            info.Size is not { } infoSize || infoSize <= 0 || infoSize != size ||
+            info.Full is not true)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (!script && RequireField(info.Delivery, 128) != platform + "-official")
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (info.QualityEvidence is not null) RequireText(info.QualityEvidence, 128, empty: true);
+        if (info.Codec is not null) RequireText(info.Codec, 64, empty: true);
+        if (info.SampleRate is <= 0 || info.BitDepth is < 0 || info.Channels is <= 0 || info.Bitrate is < 0)
+            throw MusicPlaybackCacheDataException.Corrupt();
+    }
+    private static string RequireField(string? value, int maximum, bool empty = false)
+    {
+        if (value is null) throw MusicPlaybackCacheDataException.Corrupt();
+        RequireText(value, maximum, empty);
+        return value;
+    }
+    private static AudioFileCacheRecord Row(string id, Entry value) => new(
+        id, value.File, value.Size, value.Sha256, value.Signature, value.ConfirmedAt, value.Duration, value.Info);
     private async Task Write(Index index, CancellationToken token, Func<bool>? current = null)
     {
         if (index.Entries.Count > MaximumEntries) throw MusicPlaybackCacheDataException.Limit();
-        var changes = new Dictionary<string, JsonObject?>(); int bytes = 0;
+        var changes = new Dictionary<string, AudioFileCacheRecord?>(); int bytes = 0;
         foreach (var (id, entry) in index.Entries)
         {
             var row = Row(id, entry);
             index.Before.TryGetValue(id, out var previous);
-            if (JsonNode.DeepEquals(row, previous)) continue;
-            bytes = checked(bytes + JsonSerializer.SerializeToUtf8Bytes(row).Length);
+            if (row == previous) continue;
+            bytes = checked(bytes + row.EstimateBytes());
             if (bytes > MaximumIndexBytes) throw MusicPlaybackCacheDataException.Limit();
             changes.Add(id, row);
         }
@@ -305,13 +355,12 @@ internal sealed partial class MusicAudioFileCache
         await database.WriteAsync(db =>
         {
             if (db.Revision(Namespace) != index.Revision) throw new DocumentStoreException(DocumentStoreError.Conflict);
-            if (!Volatile.Read(ref readable)) db.Execute("DELETE FROM windows_audio_index");
+            if (!Volatile.Read(ref readable)) db.Execute("DELETE FROM windows_music_audio_files");
             foreach (var (id, value) in changes)
             {
-                index.Before.TryGetValue(id, out var previous);
-                AudioStorageRecords.Index.Save(db, value, previous, [id]);
+                AudioFileCacheStore.Save(db, id, value);
             }
-            db.Execute("DELETE FROM windows_audio_index WHERE resource_key IN (SELECT resource_key FROM windows_audio_index ORDER BY confirmedAt DESC,resource_key LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
+            db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key IN (SELECT resource_key FROM windows_music_audio_files ORDER BY confirmed_at DESC,resource_key LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
             return db.CommitRevision(Namespace, index.Revision, Guid.NewGuid().ToString("D"));
         }, token, bytes, commit: commit =>
         {
@@ -324,8 +373,8 @@ internal sealed partial class MusicAudioFileCache
         var epoch = Interlocked.Read(ref clearEpoch);
         var files = await database.WriteAsync(db =>
         {
-            var names = db.Query("SELECT file FROM windows_audio_index", row => row.GetString(0));
-            db.Execute("DELETE FROM windows_audio_index");
+            var names = db.Query("SELECT file_name FROM windows_music_audio_files", row => row.GetString(0));
+            db.Execute("DELETE FROM windows_music_audio_files");
             db.CommitRevision(Namespace, db.Revision(Namespace), Guid.NewGuid().ToString("D"));
             return names;
         }, token).ConfigureAwait(false);
@@ -378,7 +427,7 @@ internal sealed partial class MusicAudioFileCache
                 if (epoch != Interlocked.Read(ref clearEpoch) ||
                     !index.Entries.TryGetValue(Key(scope, song), out var entry) || !Accepted(entry, signature, Now) ||
                     !File.Exists(FilePath(entry.File))) return null;
-                return entry.Info.DeepClone().AsObject();
+                return entry.Info.ToJson();
             }
             finally { metadataGate.Release(); }
         }
@@ -392,16 +441,16 @@ internal sealed partial class MusicAudioFileCache
         long epoch = Interlocked.Read(ref clearEpoch);
         try
         {
-            var index = await Read(token).ConfigureAwait(false);
+            var index = await Read(token, song: song).ConfigureAwait(false);
             await metadataGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
                 token.ThrowIfCancellationRequested();
                 if (epoch != Interlocked.Read(ref clearEpoch)) return [];
-                return index.Entries.Values.Where(entry => entry.Info["kind"]?.GetValue<string>() == "script" &&
-                    entry.Info["songId"]?.GetValue<string>() == song && Accepted(entry, entry.Signature, Now) &&
+                return index.Entries.Values.Where(entry => entry.Info.Kind == "script" &&
+                    entry.Info.SongId == song && Accepted(entry, entry.Signature, Now) &&
                     File.Exists(FilePath(entry.File))).OrderByDescending(entry => entry.ConfirmedAt)
-                    .Select(entry => JsonSerializer.SerializeToElement(entry.Info)).ToArray();
+                    .Select(entry => JsonSerializer.SerializeToElement(entry.Info.ToJson())).ToArray();
             }
             finally { metadataGate.Release(); }
         }
@@ -557,7 +606,7 @@ internal sealed partial class MusicAudioFileCache
                     index.Entries.Remove(oldest.Key); evicted.Add(oldest.Value.File);
                 }
                 index.Entries[key] = new Entry(candidate, length, sha, signature, confirmed,
-                    duration, storedInfo);
+                    duration, AudioFileInfoRecord.FromJson(storedInfo));
                 if (!isCurrent() || epoch != Interlocked.Read(ref clearEpoch)) return;
                 await Write(index, ct, isCurrent).ConfigureAwait(false);
                 candidate = null; // Publish index last; crash before this is an orphan, never a cache hit.

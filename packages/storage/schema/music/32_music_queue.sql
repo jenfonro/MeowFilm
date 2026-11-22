@@ -50,6 +50,8 @@ CREATE TABLE music_queue_entries (
 ) STRICT;
 
 CREATE INDEX idx_music_queue_entries_order ON music_queue_entries(scope, position);
+CREATE INDEX idx_music_queue_entries_song ON music_queue_entries(song_id);
+CREATE INDEX idx_music_queue_entries_similar_song ON music_queue_entries(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_queue_list_items (
     scope TEXT NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
@@ -71,10 +73,8 @@ CREATE TABLE music_queue_similar_state (
     exhausted INTEGER CHECK (exhausted IS NULL OR exhausted IN (0, 1)),
     similar_scope TEXT,
     status TEXT,
-    provider_pid_kind TEXT CHECK (provider_pid_kind IS NULL OR provider_pid_kind IN ('text', 'number')),
-    provider_pid_value TEXT,
-    provider_sid_kind TEXT CHECK (provider_sid_kind IS NULL OR provider_sid_kind IN ('text', 'number')),
-    provider_sid_value TEXT,
+    provider_pid TEXT,
+    provider_sid TEXT,
     provider_count INTEGER,
     has_return_queue INTEGER NOT NULL DEFAULT 0 CHECK (has_return_queue IN (0, 1)),
     return_current_id TEXT,
@@ -89,10 +89,10 @@ CREATE TABLE music_queue_similar_state (
     return_source_seed_entry_id TEXT,
     return_source_remote_session TEXT,
     return_source_daily_branch TEXT,
-    return_source_search_keyword TEXT,
-    CHECK ((provider_pid_kind IS NULL) = (provider_pid_value IS NULL)),
-    CHECK ((provider_sid_kind IS NULL) = (provider_sid_value IS NULL))
+    return_source_search_keyword TEXT
 ) STRICT;
+
+CREATE INDEX idx_music_queue_similar_seed_song ON music_queue_similar_state(seed_song_id);
 
 CREATE TABLE music_queue_similar_return_entries (
     scope TEXT NOT NULL REFERENCES music_queue_similar_state(scope) ON DELETE CASCADE,
@@ -125,6 +125,8 @@ CREATE TABLE music_queue_similar_return_entries (
 ) STRICT;
 
 CREATE INDEX idx_music_queue_similar_return_order ON music_queue_similar_return_entries(scope, position);
+CREATE INDEX idx_music_queue_similar_return_song ON music_queue_similar_return_entries(song_id);
+CREATE INDEX idx_music_queue_similar_return_similar_song ON music_queue_similar_return_entries(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_queue_similar_list_items (
     scope TEXT NOT NULL REFERENCES music_queue_similar_state(scope) ON DELETE CASCADE,
@@ -143,6 +145,8 @@ CREATE TABLE music_queue_similar_batches (
     provider TEXT,
     PRIMARY KEY (scope, batch_id)
 ) STRICT;
+
+CREATE INDEX idx_music_queue_similar_batches_song ON music_queue_similar_batches(based_on_song_id);
 
 CREATE TABLE music_queue_similar_batch_entries (
     scope TEXT NOT NULL,

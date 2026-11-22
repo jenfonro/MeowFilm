@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.PlaybackCache;
 
@@ -27,19 +26,32 @@ internal sealed class MusicChorusCache(IStorageDatabase database, TimeProvider? 
         {
             (double Start, double End)? Read(DatabaseSession db)
             {
-                var row = PlaybackCacheRecords.Chorus.Read(db, [key]);
-                if (row is null || row["at"]!.GetValue<long>() > Now || row["at"]!.GetValue<long>() <= Now - Ttl) return null;
-                var start = row["start"]!.GetValue<double>(); var end = row["end"]!.GetValue<double>();
-                return Fits(start, end, duration) ? (start, end) : null;
+                if (!db.TryQuerySingle(
+                    "SELECT updated_at,start_sec,end_sec FROM windows_music_chorus WHERE resource_key=$key",
+                    row => (At: row.GetInt64(0), Start: row.GetDouble(1), End: row.GetDouble(2)),
+                    out var entry,
+                    ("$key", key)))
+                    return null;
+                if (entry.At > Now || entry.At <= Now - Ttl) return null;
+                return Fits(entry.Start, entry.End, duration) ? (entry.Start, entry.End) : null;
             }
             if (point is not { } value) return await database.ReadAsync(Read, token).ConfigureAwait(false);
             if (!Fits(value.Start, value.End, duration)) return null;
             return await database.WriteAsync(db =>
             {
-                var next = new JsonObject { ["at"] = Now, ["start"] = value.Start, ["end"] = value.End };
-                PlaybackCacheRecords.Chorus.Save(db, next, PlaybackCacheRecords.Chorus.Read(db, [key]), [key]);
-                db.Execute("DELETE FROM windows_chorus WHERE at<=$expired OR at>$now", ("$expired", Now - Ttl), ("$now", Now));
-                db.Execute("DELETE FROM windows_chorus WHERE resource_key IN (SELECT resource_key FROM windows_chorus ORDER BY at DESC,resource_key LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
+                long now = Now;
+                db.Execute("""
+                    INSERT INTO windows_music_chorus(resource_key,updated_at,start_sec,end_sec)
+                    VALUES($key,$at,$start,$end)
+                    ON CONFLICT(resource_key) DO UPDATE SET
+                        updated_at=excluded.updated_at,
+                        start_sec=excluded.start_sec,
+                        end_sec=excluded.end_sec
+                    """, ("$key", key), ("$at", now), ("$start", value.Start), ("$end", value.End));
+                db.Execute("DELETE FROM windows_music_chorus WHERE updated_at<=$expired OR updated_at>$now",
+                    ("$expired", now - Ttl), ("$now", now));
+                db.Execute("DELETE FROM windows_music_chorus WHERE resource_key IN (SELECT resource_key FROM windows_music_chorus ORDER BY updated_at DESC,resource_key LIMIT -1 OFFSET $limit)",
+                    ("$limit", MaximumEntries));
                 return Read(db);
             }, token, 512).ConfigureAwait(false);
         }

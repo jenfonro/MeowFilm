@@ -12,6 +12,7 @@ public sealed record MusicLibraryRevision(long Generation, string Receipt)
 /// <summary>Owner receipt and any explicitly supplied controls. Ordinary reads select controls on demand.</summary>
 public sealed record MusicLibrarySnapshot(MusicLibraryRevision Revision, IReadOnlyDictionary<string, JsonNode?> Areas);
 
+public sealed record MusicLibrarySelectedRow(object?[] Key, int Ordinal, JsonObject Value);
 public sealed record MusicLibraryRowChange(string Area, string[] Relations, object?[] Key, JsonObject? Value, int Ordinal, bool Insert = false);
 public sealed record MusicLibraryChanges(IReadOnlyDictionary<string, JsonObject> Areas,
     IReadOnlyDictionary<string, JsonObject> Songs)
@@ -28,7 +29,7 @@ public interface IMusicLibraryStore : IAsyncDisposable
 {
     Task<MusicLibrarySnapshot> ReadAsync(string scope, CancellationToken cancellationToken = default);
     JsonObject? ReadArea(string scope, MusicLibraryRevision revision, string area, string[]? members = null);
-    IReadOnlyList<RelationalRecord.SelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area,
+    IReadOnlyList<MusicLibrarySelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area,
         string[] relations, object?[] prefix, string[] members);
     JsonObject? ReadRow(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key);
     bool HasRelation(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, string relation);

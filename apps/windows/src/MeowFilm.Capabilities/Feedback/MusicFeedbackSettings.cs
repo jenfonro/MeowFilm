@@ -1,6 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Feedback;
@@ -10,14 +8,12 @@ public sealed record MusicFeedbackSettings(long Revision, IReadOnlyList<string> 
 /// <summary>One native-only preferences owner. It never stores listening instances or credentials.</summary>
 public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsyncDisposable
 {
-    private readonly TypedRecordRepository store = new(database, DocumentNamespace, FeedbackStorageRecords.Settings);
     public const string DocumentNamespace = "music.feedback.v2";
     public const string ContractVersion = "1.0.0";
     private const long MaximumRevision = 9007199254740991;
     private readonly SemaphoreSlim lane = new(1, 1);
     private readonly object sync = new();
     private MusicFeedbackSettings current = new(0, Array.Empty<string>());
-    private JsonObject document = new();
     private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, uncertain, closed, preservesWyConsent;
     public event Action? Changed;
@@ -58,14 +54,13 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
                     return current;
                 }
             }
-            var saved = await store.ReadAsync(token).ConfigureAwait(false);
-            var decoded = Decode(saved, out var raw);
+            var (decoded, savedRevision) = await MusicFeedbackSettingsStore.ReadAsync(database, token).ConfigureAwait(false);
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
                 preservesWyConsent = loaded && !uncertain && current.Revision == decoded.Revision &&
                     current.Enabled.Contains("wy") && decoded.Enabled.Contains("wy");
-                current = decoded; document = raw; storageRevision = saved.Revision; loaded = true; uncertain = false;
+                current = decoded; storageRevision = savedRevision; loaded = true; uncertain = false;
             }
             Notify(); return decoded;
         }
@@ -90,8 +85,7 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
         try
         {
             MusicFeedbackSettings next;
-            JsonObject nextDocument;
-            byte[] data;
+            StorageRevision expectedStorageRevision;
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
@@ -99,10 +93,7 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
                 if (current.Revision != expectedRevision) throw Error("REVISION_CONFLICT");
                 token.ThrowIfCancellationRequested();
                 next = new(expectedRevision + 1, new ReadOnlyCollection<string>(targets));
-                nextDocument = document.DeepClone().AsObject();
-                nextDocument["version"] = 1; nextDocument["revision"] = next.Revision;
-                nextDocument["enabled"] = JsonSerializer.SerializeToNode(targets);
-                data = JsonSerializer.SerializeToUtf8Bytes(nextDocument);
+                expectedStorageRevision = storageRevision;
                 preservesWyConsent = current.Enabled.Contains("wy") && targets.Contains("wy");
                 // Fence all reporting BEFORE admitting a settings mutation. A lost
                 // acknowledgment must not leave the old enabled policy operational.
@@ -112,8 +103,8 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
             try
             {
                 // A final CAS admission cannot be undone by UI cancellation.
-                var actual = await store.WriteAsync(data, storageRevision, CancellationToken.None).ConfigureAwait(false);
-                lock (sync) { current = next; document = nextDocument; storageRevision = actual; uncertain = false; }
+                var actual = await MusicFeedbackSettingsStore.SaveAsync(database, next, expectedStorageRevision, CancellationToken.None).ConfigureAwait(false);
+                lock (sync) { current = next; storageRevision = actual; uncertain = false; }
                 Notify(); return next;
             }
             catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
@@ -128,49 +119,6 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
             }
         }
         finally { lane.Release(); }
-    }
-
-    private static MusicFeedbackSettings Decode(RecordSnapshot saved, out JsonObject raw)
-    {
-        if (saved.Data is null)
-        {
-            if (saved.Revision != StorageRevision.Empty) throw Error("CORRUPT_STORAGE");
-            raw = new(); return new(0, Array.Empty<string>());
-        }
-        try
-        {
-            using var doc = JsonDocument.Parse(saved.Data, new() { MaxDepth = 4 });
-            var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object) throw Error("CORRUPT_STORAGE");
-            var keys = root.EnumerateObject().Select(p => p.Name).ToArray();
-            if (keys.Distinct(StringComparer.Ordinal).Count() != keys.Length ||
-                root.GetProperty("enabled").ValueKind != JsonValueKind.Array) throw Error("CORRUPT_STORAGE");
-            if (Integer(root.GetProperty("version"), 1) != 1)
-                throw Error("CORRUPT_STORAGE");
-            long revision = Integer(root.GetProperty("revision"), MaximumRevision);
-            var enabled = root.GetProperty("enabled").EnumerateArray().Select(value =>
-            {
-                if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } platform)
-                    throw Error("CORRUPT_STORAGE");
-                return platform;
-            }).ToArray();
-            if (enabled.Length > 3 || enabled.Distinct(StringComparer.Ordinal).Count() != enabled.Length ||
-                enabled.Any(v => v is not ("wy" or "tx" or "kg")))
-                throw Error("CORRUPT_STORAGE");
-            Array.Sort(enabled, StringComparer.Ordinal);
-            raw = JsonNode.Parse(saved.Data)!.AsObject();
-            return new(revision, new ReadOnlyCollection<string>(enabled));
-        }
-        catch (MusicFeedbackException) { throw; }
-        catch { throw Error("CORRUPT_STORAGE"); }
-    }
-
-    private static long Integer(JsonElement value, long maximum)
-    {
-        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDecimal(out decimal result) ||
-            result < 0 || result > maximum || decimal.Truncate(result) != result)
-            throw Error("CORRUPT_STORAGE");
-        return (long)result;
     }
 
     private void Notify() => Changed?.Invoke();

@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Text.Json;
 using Key = Windows.System.VirtualKey;
 using ModifierKeys = Windows.System.VirtualKeyModifiers;
 using MeowFilm.Desktop;
@@ -10,7 +9,6 @@ namespace MeowFilm.AppHost;
 
 public sealed class AppMediaControlSettings(IStorageDatabase database) : IDesktopMediaControlSettings, IAsyncDisposable
 {
-    private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.MediaControls);
     public const string DocumentNamespace = "app.media-controls.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
@@ -44,9 +42,12 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
 
     private async Task Read()
     {
-        var snapshot = await store.ReadAsync();
-        var preferences = snapshot.Data is { } bytes ? Decode(bytes) : MediaControlDefaults.Preferences;
-        storageRevision = snapshot.Revision;
+        var (preferences, revision) = await database.ReadAsync(db =>
+        {
+            var loadedPrefs = ReadFromDb(db) ?? MediaControlDefaults.Preferences;
+            return (loadedPrefs, db.Revision(DocumentNamespace));
+        });
+        storageRevision = revision;
         loaded = true;
         Publish(preferences);
     }
@@ -83,7 +84,35 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
             busy = true; Status = ""; StateChanged();
             try
             {
-                storageRevision = await store.WriteAsync(Encode(draft), storageRevision);
+                var expected = storageRevision;
+                storageRevision = await database.WriteAsync(db =>
+                {
+                    if (db.Revision(DocumentNamespace) != expected)
+                        throw new DocumentStoreException(DocumentStoreError.Conflict);
+                    var current = ReadFromDb(db);
+                    if (current is not null && Equal(current, draft)) return expected;
+                    db.Execute("""
+                        INSERT INTO windows_app_media_controls(singleton,global_enabled,system_media_enabled)
+                        VALUES(1,$global,$system)
+                        ON CONFLICT(singleton) DO UPDATE SET global_enabled=excluded.global_enabled,system_media_enabled=excluded.system_media_enabled
+                        """, ("$global", draft.GlobalEnabled), ("$system", draft.SystemMediaEnabled));
+                    db.Execute("DELETE FROM windows_app_media_bindings");
+                    for (int i = 0; i < draft.Bindings.Count; i++)
+                    {
+                        var binding = draft.Bindings[i];
+                        db.Execute("""
+                            INSERT INTO windows_app_media_bindings(action,position,local_key,local_modifiers,global_key,global_modifiers)
+                            VALUES($action,$pos,$lk,$lm,$gk,$gm)
+                            """,
+                            ("$action", binding.Action.ToString()),
+                            ("$pos", i),
+                            ("$lk", binding.Local?.Key.ToString()),
+                            ("$lm", binding.Local is { } l ? (long)(int)l.Modifiers : null),
+                            ("$gk", binding.Global?.Key.ToString()),
+                            ("$gm", binding.Global is { } g ? (long)(int)g.Modifiers : null));
+                    }
+                    return db.CommitRevision(DocumentNamespace, expected, Guid.NewGuid().ToString("D"));
+                });
                 Publish(draft);
             }
             catch
@@ -138,54 +167,39 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         await PrepareShutdownAsync();
     }
 
-    private static byte[] Encode(MediaControlPreferences value)
+    private static MediaControlPreferences? ReadFromDb(DatabaseSession db)
     {
-        static object? Gesture(MediaShortcutGesture? gesture) => gesture is null ? null :
-            new { key = gesture.Key.ToString(), modifiers = (int)gesture.Modifiers };
-        return JsonSerializer.SerializeToUtf8Bytes(new
-        {
-            schema = 1,
-            globalEnabled = value.GlobalEnabled,
-            systemMediaEnabled = value.SystemMediaEnabled,
-            bindings = value.Bindings.Select(binding => new
+        if (!db.TryQuerySingle(
+            "SELECT global_enabled,system_media_enabled FROM windows_app_media_controls WHERE singleton=1",
+            row => (Global: row.GetBool(0), System: row.GetBool(1)), out var head))
+            return null;
+
+        var bindings = db.Query(
+            "SELECT action,local_key,local_modifiers,global_key,global_modifiers FROM windows_app_media_bindings ORDER BY position,action",
+            row =>
             {
-                action = binding.Action.ToString(), local = Gesture(binding.Local), global = Gesture(binding.Global)
-            })
-        });
-    }
-    private static MediaControlPreferences Decode(byte[] bytes)
-    {
-        using var document = JsonDocument.Parse(bytes);
-        var root = document.RootElement;
-        if (!Fields(root, "schema", "globalEnabled", "systemMediaEnabled", "bindings") ||
-            root.GetProperty("schema").GetInt32() != 1 ||
-            root.GetProperty("bindings").ValueKind != JsonValueKind.Array)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        var bindings = new List<MediaShortcutBinding>();
-        foreach (var binding in root.GetProperty("bindings").EnumerateArray())
-        {
-            if (!Fields(binding, "action", "local", "global") ||
-                !Enum.TryParse<MediaShortcutAction>(binding.GetProperty("action").GetString(), out var action) ||
-                !Enum.IsDefined(action) || action.ToString() != binding.GetProperty("action").GetString())
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
-            bindings.Add(new(action, Gesture(binding.GetProperty("local")), Gesture(binding.GetProperty("global"))));
-        }
-        var value = new MediaControlPreferences(root.GetProperty("globalEnabled").GetBoolean(),
-            root.GetProperty("systemMediaEnabled").GetBoolean(), bindings);
+                var actionText = row.GetString(0);
+                if (!Enum.TryParse<MediaShortcutAction>(actionText, out var action) ||
+                    !Enum.IsDefined(action) || action.ToString() != actionText)
+                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                return new MediaShortcutBinding(
+                    action,
+                    DecodeGesture(row.GetNullableString(1), row.GetNullableInt32(2)),
+                    DecodeGesture(row.GetNullableString(3), row.GetNullableInt32(4)));
+            });
+
+        var value = new MediaControlPreferences(head.Global, head.System, bindings);
         if (MediaShortcutGestures.ValidationError(value) is not null)
             throw new DocumentStoreException(DocumentStoreError.Corrupt);
         return Snapshot(value);
 
-        static MediaShortcutGesture? Gesture(JsonElement element)
+        static MediaShortcutGesture? DecodeGesture(string? keyText, int? modifiers)
         {
-            if (element.ValueKind == JsonValueKind.Null) return null;
-            if (!Fields(element, "key", "modifiers") ||
-                !Enum.TryParse<Key>(element.GetProperty("key").GetString(), out var key) ||
-                key.ToString() != element.GetProperty("key").GetString())
+            if (keyText is null && modifiers is null) return null;
+            if (keyText is null || modifiers is null ||
+                !Enum.TryParse<Key>(keyText, out var key) || key.ToString() != keyText)
                 throw new DocumentStoreException(DocumentStoreError.Corrupt);
-            return new(key, (ModifierKeys)element.GetProperty("modifiers").GetInt32());
+            return new MediaShortcutGesture(key, (ModifierKeys)modifiers.Value);
         }
     }
-    private static bool Fields(JsonElement value, params string[] fields) =>
-        value.ValueKind == JsonValueKind.Object && fields.All(field => value.TryGetProperty(field, out _));
 }

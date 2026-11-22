@@ -4,7 +4,8 @@ import { lstatSync, chmodSync, openSync, closeSync, unlinkSync, realpathSync, fs
 import { dirname, isAbsolute } from 'node:path';
 import { acquireNativeStorageLock as acquire } from './native-engine.js';
 
-const { path, identity, initialize } = workerData;
+const { path, identity, initialize, role = 'writer' } = workerData;
+const isReader = role === 'reader';
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const MAX_PREPARED_STATEMENTS = 256;
 const MAX_CACHED_SQL_LENGTH = 4096;
@@ -50,7 +51,8 @@ function maintain() {
     if (Number(db.prepare('PRAGMA freelist_count').get().freelist_count) >= 256)
       db.exec('PRAGMA incremental_vacuum(128)');
   } catch (error) {
-    if (code(error) !== 'STORAGE_BUSY') maintenanceFailure = code(error);
+    const err = code(error);
+    if (err === 'UNSAFE_PATH' || err === 'STORAGE_CORRUPT') maintenanceFailure = err;
   } finally { lease?.release(); }
 }
 
@@ -103,8 +105,7 @@ function query(sql, params = [], maximum = Number.MAX_SAFE_INTEGER) {
     if (rows.length >= maximum) fail('STORAGE_RESULT_LIMIT');
     const result = {};
     for (const [key, item] of Object.entries(row)) {
-      const field = value(item);
-      result[key] = field;
+      result[key] = value(item);
     }
     rows.push(result);
   }
@@ -135,69 +136,92 @@ function transaction(statements, readOnly = false) {
   }
 }
 
-let initializing, validating;
-try {
-  initializing = acquire(dirname(path) + '/initialize.lock', true, 5000);
-  validating = enter(false, 5000);
-  if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
-  const existing = safeFile(path);
-  for (const suffix of ['-wal', '-shm', '-journal']) {
-    if (safeFile(path + suffix) && !existing) fail('STORAGE_CORRUPT');
-  }
-  if (existing?.size === 0) fail('STORAGE_CORRUPT');
-  if (!existing && !initialize) fail('STORAGE_SCHEMA');
-  if (!existing) closeSync(openSync(path, 'wx', 0o600));
-  db = new DatabaseSync(path, { enableForeignKeyConstraints: true, allowExtension: false });
-  if (process.platform !== 'win32') chmodSync(path, 0o600);
-  const engine = db.prepare('SELECT sqlite_version() AS version').get().version.split('.').map(Number);
-  if (!(engine[0] === 3 && (engine[1] > 51 || engine[1] === 51 && engine[2] >= 3 ||
-      engine[1] === 50 && engine[2] >= 7 || engine[1] === 44 && engine[2] >= 6)))
-    fail('STORAGE_ENGINE_UNSUPPORTED');
-  const application = db.prepare('PRAGMA application_id').get().application_id;
-  const version = db.prepare('PRAGMA user_version').get().user_version;
-  const empty = db.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").get().count === 0;
-  if (empty) {
-    if (existing || application !== 0 || version !== 0) fail('STORAGE_SCHEMA');
-    db.exec('PRAGMA auto_vacuum=INCREMENTAL');
-  } else if (application !== identity.applicationId || version !== identity.version) fail('STORAGE_SCHEMA');
-  db.exec('PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; ' +
-    'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; ' +
-    'PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
-  if (db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
-      db.prepare('PRAGMA synchronous').get().synchronous !== 2 ||
-      db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
-      db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
-      db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint !== 0 ||
-      db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2 ||
-      db.prepare('PRAGMA busy_timeout').get().timeout !== 5000 ||
-      db.prepare('PRAGMA temp_store').get().temp_store !== 2 ||
-      db.prepare('PRAGMA cache_size').get().cache_size !== -16384) fail('STORAGE_CONFIGURATION');
-  if (empty) {
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      db.exec(identity.sql);
-      db.prepare('INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)').run(identity.hash);
-      db.exec(`PRAGMA application_id=${identity.applicationId}; PRAGMA user_version=${identity.version};`);
-      db.exec('COMMIT');
-    } catch (error) { if (db.isTransaction) db.exec('ROLLBACK'); throw error; }
-  }
-  const stored = db.prepare('SELECT schema_hash FROM storage_identity WHERE singleton=1').get();
-  if (stored?.schema_hash !== identity.hash) fail('STORAGE_SCHEMA');
-  const expected = new DatabaseSync(':memory:', { allowExtension: false });
+if (isReader) {
   try {
-    expected.exec(identity.sql);
-    const structure = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
-    if (JSON.stringify(db.prepare(structure).all()) !== JSON.stringify(expected.prepare(structure).all()))
-      fail('STORAGE_SCHEMA');
-  } finally { expected.close(); }
-  fileIdentity = lstatSync(path, {bigint:true});
-  parentPort.postMessage({ id: 0, value: true });
-} catch (error) {
-  statementCache.clear();
-  try { db?.close(); } catch {}
-  parentPort.postMessage({ id: 0, code: code(error) });
-  parentPort.close();
-} finally { validating?.release(); initializing?.release(); }
+    if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
+    safeFile(path, true);
+    db = new DatabaseSync(path, { readOnly: true, enableForeignKeyConstraints: true, allowExtension: false });
+    db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; ' +
+      'PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
+    if (db.prepare('PRAGMA query_only').get().query_only !== 1 ||
+        db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
+        db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
+        db.prepare('PRAGMA busy_timeout').get().timeout !== 5000 ||
+        db.prepare('PRAGMA temp_store').get().temp_store !== 2 ||
+        db.prepare('PRAGMA cache_size').get().cache_size !== -16384) fail('STORAGE_CONFIGURATION');
+    fileIdentity = lstatSync(path, { bigint: true });
+    parentPort.postMessage({ id: 0, value: true });
+  } catch (error) {
+    statementCache.clear();
+    try { db?.close(); } catch {}
+    parentPort.postMessage({ id: 0, code: code(error) });
+    parentPort.close();
+  }
+} else {
+  let initializing, validating;
+  try {
+    initializing = acquire(dirname(path) + '/initialize.lock', true, 5000);
+    validating = enter(false, 5000);
+    if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
+    const existing = safeFile(path);
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      if (safeFile(path + suffix) && !existing) fail('STORAGE_CORRUPT');
+    }
+    if (existing?.size === 0) fail('STORAGE_CORRUPT');
+    if (!existing && !initialize) fail('STORAGE_SCHEMA');
+    if (!existing) closeSync(openSync(path, 'wx', 0o600));
+    db = new DatabaseSync(path, { enableForeignKeyConstraints: true, allowExtension: false });
+    if (process.platform !== 'win32') chmodSync(path, 0o600);
+    const engine = db.prepare('SELECT sqlite_version() AS version').get().version.split('.').map(Number);
+    if (!(engine[0] === 3 && (engine[1] > 51 || engine[1] === 51 && engine[2] >= 3 ||
+        engine[1] === 50 && engine[2] >= 7 || engine[1] === 44 && engine[2] >= 6)))
+      fail('STORAGE_ENGINE_UNSUPPORTED');
+    const application = db.prepare('PRAGMA application_id').get().application_id;
+    const version = db.prepare('PRAGMA user_version').get().user_version;
+    const empty = db.prepare("SELECT count(*) AS count FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").get().count === 0;
+    if (empty) {
+      if (existing || application !== 0 || version !== 0) fail('STORAGE_SCHEMA');
+      db.exec('PRAGMA auto_vacuum=INCREMENTAL');
+    } else if (application !== identity.applicationId || version !== identity.version) fail('STORAGE_SCHEMA');
+    db.exec('PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; ' +
+      'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; ' +
+      'PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
+    if (db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
+        db.prepare('PRAGMA synchronous').get().synchronous !== 2 ||
+        db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
+        db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
+        db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint !== 0 ||
+        db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2 ||
+        db.prepare('PRAGMA busy_timeout').get().timeout !== 5000 ||
+        db.prepare('PRAGMA temp_store').get().temp_store !== 2 ||
+        db.prepare('PRAGMA cache_size').get().cache_size !== -16384) fail('STORAGE_CONFIGURATION');
+    if (empty) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        db.exec(identity.sql);
+        db.prepare('INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)').run(identity.hash);
+        db.exec(`PRAGMA application_id=${identity.applicationId}; PRAGMA user_version=${identity.version};`);
+        db.exec('COMMIT');
+      } catch (error) { if (db.isTransaction) db.exec('ROLLBACK'); throw error; }
+    }
+    const stored = db.prepare('SELECT schema_hash FROM storage_identity WHERE singleton=1').get();
+    if (stored?.schema_hash !== identity.hash) fail('STORAGE_SCHEMA');
+    const expected = new DatabaseSync(':memory:', { allowExtension: false });
+    try {
+      expected.exec(identity.sql);
+      const structure = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name";
+      if (JSON.stringify(db.prepare(structure).all()) !== JSON.stringify(expected.prepare(structure).all()))
+        fail('STORAGE_SCHEMA');
+    } finally { expected.close(); }
+    fileIdentity = lstatSync(path, { bigint: true });
+    parentPort.postMessage({ id: 0, value: true });
+  } catch (error) {
+    statementCache.clear();
+    try { db?.close(); } catch {}
+    parentPort.postMessage({ id: 0, code: code(error) });
+    parentPort.close();
+  } finally { validating?.release(); initializing?.release(); }
+}
 
 parentPort.on('message', async ({ id, input }) => {
   if (input.kind === 'close') {
@@ -209,6 +233,14 @@ parentPort.on('message', async ({ id, input }) => {
   let lease;
   try {
     if (maintenanceFailure) fail(maintenanceFailure);
+    if (isReader) {
+      let result;
+      if (input.kind === 'query') result = query(input.sql, input.params, input.maxRows);
+      else if (input.kind === 'snapshot') result = transaction(input.statements, true);
+      else fail('STORAGE_READONLY');
+      parentPort.postMessage({ id, value: result });
+      return;
+    }
     if (input.kind === 'checkpoint' || input.kind === 'backup') {
       lease = enter(true);
       verifyFiles();
@@ -247,6 +279,6 @@ parentPort.on('message', async ({ id, input }) => {
     parentPort.postMessage({ id, code: code(error) });
   } finally {
     lease?.release();
-    if (commits >= 64) { commits = 0; maintain(); }
+    if (!isReader && commits >= 64) { commits = 0; maintain(); }
   }
 });

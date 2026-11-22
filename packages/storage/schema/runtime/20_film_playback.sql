@@ -1,9 +1,9 @@
--- Film playback library: preferences, history, manual matches, blocked sources, preview targets, groups, and standalone rules.
-CREATE TABLE film_preferences_state (
+-- Unified film playback preferences, rules, history, manual matches, blocked sources, preview targets, and groups.
+CREATE TABLE film_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ios_auto_prepare INTEGER NOT NULL CHECK (ios_auto_prepare IN (0, 1)),
     metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban')),
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
 ) STRICT;
 
 CREATE TABLE film_preference_items (
@@ -11,6 +11,25 @@ CREATE TABLE film_preference_items (
     position INTEGER NOT NULL CHECK (position >= 0),
     item_value TEXT NOT NULL,
     PRIMARY KEY (list_kind, position)
+) STRICT;
+
+CREATE TABLE film_rule_groups (
+    group_name TEXT PRIMARY KEY NOT NULL CHECK (group_name IN ('episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules')),
+    row_revision INTEGER NOT NULL DEFAULT 0 CHECK (row_revision BETWEEN 0 AND 9007199254740991),
+    overridden INTEGER NOT NULL DEFAULT 0 CHECK (overridden IN (0, 1))
+) STRICT;
+
+INSERT INTO film_rule_groups(group_name) VALUES
+    ('episodeCleanRegexRules'), ('episodeRules'), ('movieRules'), ('aggregateRegexRules');
+
+CREATE TABLE film_rules (
+    group_name TEXT NOT NULL REFERENCES film_rule_groups(group_name) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    pattern TEXT NOT NULL,
+    replacement TEXT,
+    flags TEXT,
+    PRIMARY KEY (group_name, position),
+    CHECK (group_name IN ('episodeRules', 'movieRules') OR (replacement IS NULL AND flags IS NULL))
 ) STRICT;
 
 CREATE TABLE film_history (
@@ -141,23 +160,3 @@ CREATE TABLE film_group_members (
 ) STRICT;
 
 CREATE INDEX idx_film_group_members_lookup ON film_group_members(member_identity);
-
--- Standalone film rules
-CREATE TABLE film_standalone_rule_groups (
-    group_name TEXT PRIMARY KEY NOT NULL CHECK (group_name IN ('episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules')),
-    row_revision INTEGER NOT NULL DEFAULT 0 CHECK (row_revision BETWEEN 0 AND 9007199254740991),
-    overridden INTEGER NOT NULL DEFAULT 0 CHECK (overridden IN (0, 1))
-) STRICT;
-
-INSERT INTO film_standalone_rule_groups(group_name) VALUES
-    ('episodeCleanRegexRules'), ('episodeRules'), ('movieRules'), ('aggregateRegexRules');
-
-CREATE TABLE film_standalone_rule_entries (
-    group_name TEXT NOT NULL REFERENCES film_standalone_rule_groups(group_name) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    pattern TEXT NOT NULL,
-    replacement TEXT,
-    flags TEXT,
-    PRIMARY KEY (group_name, position),
-    CHECK (group_name IN ('episodeRules', 'movieRules') OR (replacement IS NULL AND flags IS NULL))
-) STRICT;

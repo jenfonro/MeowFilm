@@ -29,7 +29,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     internal static string SongKey(JsonObject song) => LJ.S(song["songId"]);
     internal async Task LoadAsync(CancellationToken token)
     {
-        await database.ReadAsync(db =>
+        await database.ReadSnapshotAsync(db =>
         {
             lock (gate)
             {
@@ -49,7 +49,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         lock (gate) if (closed || !lyricsReadable) return null;
         try
         {
-            var value = await database.ReadAsync(db => PlaybackCacheRecords.Lyrics.Read(db, [songId]), token).ConfigureAwait(false);
+            var value = await database.ReadSnapshotAsync(db => LyricsCacheStore.Read(db, songId), token).ConfigureAwait(false);
             if (value is null || value["updatedAt"]!.GetValue<long>() > Now || value["updatedAt"]!.GetValue<long>() <= Now - Ttl) return null;
             lock (gate) if (closed || !lyricsReadable || epoch != lyricEpoch) return null;
             value.Remove("storedBytes"); return value;
@@ -129,18 +129,18 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     }
     internal async Task SaveLyricsAsync(string songId, string sourceKey, JsonArray lines, long epoch, CancellationToken token)
     {
-        var value = new JsonObject { ["sourceKey"] = sourceKey, ["lines"] = lines.DeepClone(), ["updatedAt"] = Now };
+        long now = Now;
+        var value = new JsonObject { ["sourceKey"] = sourceKey, ["lines"] = lines.DeepClone(), ["updatedAt"] = now };
         int bytes = JsonSerializer.SerializeToUtf8Bytes(value).Length;
         if (bytes > 512 * 1024) throw new DocumentStoreException(DocumentStoreError.Limit);
-        value["storedBytes"] = bytes;
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
             await database.WriteAsync(db =>
             {
                 Guard(db, epoch, false);
-                lock (gate) if (!lyricsReadable) db.Execute("DELETE FROM windows_lyrics");
-                PlaybackCacheRecords.Lyrics.Save(db, value, PlaybackCacheRecords.Lyrics.Read(db, [songId]), [songId]);
+                lock (gate) if (!lyricsReadable) db.Execute("DELETE FROM music_lyrics");
+                LyricsCacheStore.Save(db, songId, sourceKey, now, bytes, lines);
                 Trim(db); return true;
             }, token, bytes, commit: commit => { lock (gate) { if (closed || lyricEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict); commit(); } }).ConfigureAwait(false);
             lock (gate) { lyricVersion++; if (lyricEpoch == epoch) lyricsReadable = true; }
@@ -149,14 +149,17 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     }
     private void Trim(DatabaseSession db)
     {
-        db.Execute("DELETE FROM windows_images WHERE updated_at<=$expired OR updated_at>$now; DELETE FROM windows_lyrics WHERE updatedAt<=$expired OR updatedAt>$now",
-            ("$expired", Now - Ttl), ("$now", Now));
-        while (db.Scalar<long>("SELECT (SELECT coalesce(sum(bytes),0) FROM windows_images)+(SELECT coalesce(sum(storedBytes),0) FROM windows_lyrics)") > MaximumBytes)
+        long now = Now;
+        db.Execute("DELETE FROM windows_images WHERE updated_at<=$expired OR updated_at>$now",
+            ("$expired", now - Ttl), ("$now", now));
+        db.Execute("DELETE FROM music_lyrics WHERE updated_at<=$expired OR updated_at>$now",
+            ("$expired", (double)(now - Ttl)), ("$now", (double)now));
+        while (db.Scalar<long>("SELECT (SELECT coalesce(sum(bytes),0) FROM windows_images)+(SELECT coalesce(sum(stored_bytes),0) FROM music_lyrics)") > MaximumBytes)
         {
-            var oldest = db.Query("SELECT 'image',address,updated_at FROM windows_images UNION ALL SELECT 'lyrics',song_id,updatedAt FROM windows_lyrics ORDER BY 3,1,2 LIMIT 1",
+            var oldest = db.Query("SELECT 'image',address,CAST(updated_at AS REAL) FROM windows_images UNION ALL SELECT 'lyrics',song_id,updated_at FROM music_lyrics ORDER BY 3,1,2 LIMIT 1",
                 row => (Kind: row.GetString(0), Key: row.GetString(1))).Single();
             if (oldest.Kind == "image") db.Execute("DELETE FROM windows_images WHERE address=$key", ("$key", oldest.Key));
-            else db.Execute("DELETE FROM windows_lyrics WHERE song_id=$key", ("$key", oldest.Key));
+            else db.Execute("DELETE FROM music_lyrics WHERE song_id=$key", ("$key", oldest.Key));
         }
     }
     private Task CleanupFilesAsync() => database.ReadAsync(db =>
@@ -188,7 +191,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
                 db.Execute("DELETE FROM windows_images");
                 var image = db.CommitRevision(ImageOwner, db.Revision(ImageOwner), Guid.NewGuid().ToString("D"));
                 var lyric = db.Revision(LyricOwner);
-                if (lyrics) { db.Execute("DELETE FROM windows_lyrics"); lyric = db.CommitRevision(LyricOwner, lyric, Guid.NewGuid().ToString("D")); }
+                if (lyrics) { db.Execute("DELETE FROM music_lyrics"); lyric = db.CommitRevision(LyricOwner, lyric, Guid.NewGuid().ToString("D")); }
                 return (image, lyric);
             }, token).ConfigureAwait(false);
             lock (gate) { imageRevision = result.image; imagesReadable = true; if (lyrics) { lyricRevision = result.lyric; lyricsReadable = true; } }
@@ -200,7 +203,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     {
         await database.WriteAsync(db =>
         {
-            db.Execute("UPDATE windows_lyrics SET updatedAt=$now WHERE song_id=$id", ("$now", Now), ("$id", songId));
+            db.Execute("UPDATE music_lyrics SET updated_at=$now WHERE song_id=$id", ("$now", (double)Now), ("$id", songId));
             if (image.Length > 0) db.Execute("UPDATE windows_images SET updated_at=$now WHERE address=$address", ("$now", Now), ("$address", image));
             return true;
         }, token).ConfigureAwait(false);

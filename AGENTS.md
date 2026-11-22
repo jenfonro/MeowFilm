@@ -72,7 +72,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.3.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease、music-platform 九模块，保留各自平台受信启动；契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`、`docs/runtime/music-platform.md`。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
-- `packages/storage/` — 共享强类型 SQLite Schema 源码（`schema/{core,runtime,music,windows,ios}/`）、分平台独立生成产物（`generated/schema-{standalone,windows,ios}.sql`）与 `@meowfilm/storage` 引擎（`src/{engine,schema,query,values}/`）
+- `packages/storage/` — 共享强类型 SQLite Schema 源码（`schema/{core,runtime,shared,music,windows,ios}/`）、分平台独立生成产物（`generated/schema-{standalone,windows,ios}.sql`）与 `@meowfilm/storage` 引擎（`src/{engine,schema,query,values}/`）
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期

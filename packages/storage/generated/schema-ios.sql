@@ -162,25 +162,60 @@ CREATE TABLE source_installation_actions (
 
 CREATE TABLE source_definitions (
     installation_id TEXT PRIMARY KEY NOT NULL REFERENCES source_installations(installation_id) ON DELETE CASCADE,
-    bookSourceName TEXT, bookSourceUrl TEXT, bookSourceGroup TEXT,
-    bookSourceComment TEXT, bookUrlPattern TEXT, searchUrl TEXT, exploreUrl TEXT,
-    loginUrl TEXT, loginCheckJs TEXT, jsLib TEXT, coverDecodeJs TEXT,
-    concurrentRate TEXT, header TEXT, html TEXT,
-    bookSourceType INTEGER, weight REAL, respondTime REAL, lastUpdateTime REAL,
-    enabledCookieJar INTEGER CHECK (enabledCookieJar IN (0, 1))
+    book_source_name TEXT,
+    book_source_url TEXT,
+    book_source_group TEXT,
+    book_source_comment TEXT,
+    book_url_pattern TEXT,
+    search_url TEXT,
+    explore_url TEXT,
+    login_url TEXT,
+    login_check_js TEXT,
+    js_lib TEXT,
+    cover_decode_js TEXT,
+    concurrent_rate TEXT,
+    header TEXT,
+    html TEXT,
+    book_source_type INTEGER,
+    weight REAL,
+    respond_time REAL,
+    last_update_time REAL,
+    enabled_cookie_jar INTEGER CHECK (enabled_cookie_jar IN (0, 1))
 ) STRICT;
 
 CREATE TABLE source_definition_rules (
     installation_id TEXT NOT NULL REFERENCES source_installations(installation_id) ON DELETE CASCADE,
     rule_group TEXT NOT NULL CHECK (rule_group IN ('ruleSearch', 'ruleExplore', 'ruleBookInfo', 'ruleToc', 'ruleContent')),
     encoded INTEGER NOT NULL CHECK (encoded IN (0, 1)),
-    bookList TEXT, name TEXT, author TEXT, kind TEXT, wordCount TEXT, lastChapter TEXT,
-    intro TEXT, coverUrl TEXT, bookUrl TEXT, tocUrl TEXT, init TEXT,
-    chapterList TEXT, chapterName TEXT, chapterUrl TEXT, nextTocUrl TEXT,
-    isReverse TEXT, reverseToc TEXT, updateTime TEXT, preUpdateJs TEXT,
-    content TEXT, nextContentUrl TEXT, title TEXT, replaceRegex TEXT,
-    sourceRegex TEXT, webJs TEXT, payAction TEXT, imageStyle TEXT,
-    imageDecode TEXT, imageDecrypt TEXT,
+    book_list TEXT,
+    name TEXT,
+    author TEXT,
+    kind TEXT,
+    word_count TEXT,
+    last_chapter TEXT,
+    intro TEXT,
+    cover_url TEXT,
+    book_url TEXT,
+    toc_url TEXT,
+    init TEXT,
+    chapter_list TEXT,
+    chapter_name TEXT,
+    chapter_url TEXT,
+    next_toc_url TEXT,
+    is_reverse TEXT,
+    reverse_toc TEXT,
+    update_time TEXT,
+    pre_update_js TEXT,
+    content TEXT,
+    next_content_url TEXT,
+    title TEXT,
+    replace_regex TEXT,
+    source_regex TEXT,
+    web_js TEXT,
+    pay_action TEXT,
+    image_style TEXT,
+    image_decode TEXT,
+    image_decrypt TEXT,
     PRIMARY KEY (installation_id, rule_group)
 ) STRICT;
 
@@ -238,30 +273,41 @@ CREATE TABLE source_private_kv_entries (
 
 CREATE INDEX idx_source_private_kv_installation ON source_private_kv_entries(installation_id);
 
--- Reader synchronous source.get/put scope (separate from asynchronous cache KV).
+-- Reader synchronous source.get/put scope (UTF-16LE BLOBs preserve unpaired JS surrogates).
 CREATE TABLE source_reader_state (
     installation_id TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    login_header TEXT,
-    login_info TEXT,
-    variable TEXT
+    variable BLOB CHECK (length(variable) % 2 = 0)
 ) STRICT;
 
 CREATE TABLE source_reader_value_nodes (
     installation_id TEXT NOT NULL REFERENCES source_reader_state(installation_id) ON DELETE CASCADE,
-    scope_name TEXT NOT NULL CHECK (scope_name IN ('values', 'books')),
-    entry_key TEXT NOT NULL,
+    entry_key BLOB NOT NULL CHECK (length(entry_key) % 2 = 0),
     node_id INTEGER NOT NULL CHECK (node_id >= 0),
     parent_id INTEGER,
-    prop_key TEXT,
-    item_index INTEGER,
+    prop_key BLOB CHECK (length(prop_key) % 2 = 0),
+    item_index INTEGER CHECK (item_index >= 0),
     kind TEXT NOT NULL CHECK (kind IN ('null', 'boolean', 'integer', 'real', 'number_text', 'text', 'array', 'object')),
     bool_value INTEGER CHECK (bool_value IN (0, 1)),
     int_value INTEGER,
     real_value REAL,
-    text_value TEXT,
-    PRIMARY KEY (installation_id, scope_name, entry_key, node_id)
+    text_value ANY,
+    CHECK ((kind = 'boolean') = (bool_value IS NOT NULL)
+        AND (kind = 'integer') = (int_value IS NOT NULL)
+        AND (kind = 'real') = (real_value IS NOT NULL)),
+    CHECK (CASE kind
+        WHEN 'text' THEN typeof(text_value) = 'blob' AND length(text_value) % 2 = 0
+        WHEN 'number_text' THEN typeof(text_value) = 'text'
+        ELSE text_value IS NULL END),
+    CHECK (CASE WHEN node_id = 0 THEN parent_id IS NULL AND prop_key IS NULL AND item_index IS NULL
+        ELSE parent_id IS NOT NULL AND parent_id >= 0 AND parent_id < node_id AND (prop_key IS NULL) <> (item_index IS NULL) END),
+    PRIMARY KEY (installation_id, entry_key, node_id),
+    FOREIGN KEY (installation_id, entry_key, parent_id)
+        REFERENCES source_reader_value_nodes(installation_id, entry_key, node_id)
 ) STRICT;
+
+CREATE INDEX idx_source_reader_value_nodes_parent
+    ON source_reader_value_nodes(installation_id, entry_key, parent_id);
 
 CREATE TABLE source_private_kv_nodes (
     installation_id TEXT NOT NULL,
@@ -282,28 +328,28 @@ CREATE TABLE source_private_kv_nodes (
 ) STRICT;
 
 -- module: runtime/12_cat_runtime.sql
--- CatNode standalone gateway configuration and shared script installation state.
-CREATE TABLE cat_gateway_settings (
+-- Shared Cat gateway configuration (used by standalone runtime or native App owner) and CatNode script state.
+CREATE TABLE cat_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     port INTEGER NOT NULL CHECK (port BETWEEN 0 AND 65535)
 ) STRICT;
 
-CREATE TABLE cat_provider_entries (
-    provider_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
+CREATE TABLE cat_providers (
+    provider TEXT PRIMARY KEY NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
 ) STRICT;
 
 CREATE TABLE cat_mappings (
     position INTEGER PRIMARY KEY CHECK (position >= 0),
-    provider_id TEXT NOT NULL
+    provider TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE cat_mapping_aliases (
-    position INTEGER NOT NULL REFERENCES cat_mappings(position) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    mapping_position INTEGER NOT NULL REFERENCES cat_mappings(position) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
     alias TEXT NOT NULL,
-    PRIMARY KEY (position, ordinal)
+    PRIMARY KEY (mapping_position, position)
 ) STRICT;
 
 CREATE TABLE cat_installations (
@@ -382,26 +428,28 @@ CREATE TABLE cat_site_methods (
         REFERENCES cat_installation_sites(mode, installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
--- module: runtime/13_pan_standalone.sql
--- Standalone Pan accounts (plaintext typed credentials).
-CREATE TABLE pan_standalone_accounts (
+-- module: runtime/13_pan.sql
+-- Unified Pan accounts (owned by standalone runtime or native App; owner-level CAS uses owner_revisions).
+CREATE TABLE pan_accounts (
     provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('baidu', 'quark', 'uc', 'tianyi', 'yidong')),
-    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991),
+    account_revision INTEGER NOT NULL CHECK (account_revision BETWEEN 0 AND 9007199254740991),
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 0 AND 9007199254740991),
-    status TEXT,
     cookie TEXT,
     username TEXT,
     password TEXT,
     authorization TEXT,
-    refreshed_at_ms INTEGER CHECK (refreshed_at_ms IS NULL OR refreshed_at_ms >= 0)
+    refreshed_at_ms INTEGER CHECK (refreshed_at_ms IS NULL OR refreshed_at_ms BETWEEN 0 AND 9007199254740991),
+    CHECK (provider IN ('baidu', 'quark', 'uc', 'tianyi') OR cookie IS NULL),
+    CHECK (provider = 'tianyi' OR (username IS NULL AND password IS NULL)),
+    CHECK (provider = 'yidong' OR (authorization IS NULL AND refreshed_at_ms IS NULL))
 ) STRICT;
 
-INSERT INTO pan_standalone_accounts(provider, revision, row_revision) VALUES
+INSERT INTO pan_accounts(provider, account_revision, row_revision) VALUES
     ('baidu', 0, 0), ('quark', 0, 0), ('uc', 0, 0), ('tianyi', 0, 0), ('yidong', 0, 0);
 
--- module: runtime/14_metadata_standalone.sql
--- Standalone TMDB and Douban settings (plaintext typed credentials).
-CREATE TABLE metadata_standalone_tmdb (
+-- module: runtime/14_metadata_settings.sql
+-- Unified TMDB and Douban settings (owned by standalone runtime or native App; owner-level CAS uses owner_revisions).
+CREATE TABLE tmdb_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     api_base TEXT NOT NULL,
     image_base TEXT NOT NULL,
@@ -410,10 +458,10 @@ CREATE TABLE metadata_standalone_tmdb (
     language TEXT NOT NULL,
     region TEXT NOT NULL,
     include_adult INTEGER NOT NULL CHECK (include_adult IN (0, 1)),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
-CREATE TABLE metadata_standalone_douban (
+CREATE TABLE douban_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     api_base TEXT NOT NULL,
     search_base TEXT NOT NULL,
@@ -421,7 +469,7 @@ CREATE TABLE metadata_standalone_douban (
     api_proxy TEXT NOT NULL,
     image_proxy TEXT NOT NULL,
     cookie TEXT NOT NULL,
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
 ) STRICT;
 
 -- module: runtime/15_music_anonymous.sql
@@ -436,6 +484,8 @@ CREATE TABLE music_anonymous_wy_cookies (
     cookie_value TEXT NOT NULL,
     singleton INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_music_anonymous_wy_cookies_singleton ON music_anonymous_wy_cookies(singleton);
 
 CREATE TABLE music_anonymous_kg (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE,
@@ -463,12 +513,12 @@ CREATE TABLE music_anonymous_tx (
 ) STRICT;
 
 -- module: runtime/20_film_playback.sql
--- Film playback library: preferences, history, manual matches, blocked sources, preview targets, groups, and standalone rules.
-CREATE TABLE film_preferences_state (
+-- Unified film playback preferences, rules, history, manual matches, blocked sources, preview targets, and groups.
+CREATE TABLE film_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ios_auto_prepare INTEGER NOT NULL CHECK (ios_auto_prepare IN (0, 1)),
     metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban')),
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
 ) STRICT;
 
 CREATE TABLE film_preference_items (
@@ -476,6 +526,25 @@ CREATE TABLE film_preference_items (
     position INTEGER NOT NULL CHECK (position >= 0),
     item_value TEXT NOT NULL,
     PRIMARY KEY (list_kind, position)
+) STRICT;
+
+CREATE TABLE film_rule_groups (
+    group_name TEXT PRIMARY KEY NOT NULL CHECK (group_name IN ('episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules')),
+    row_revision INTEGER NOT NULL DEFAULT 0 CHECK (row_revision BETWEEN 0 AND 9007199254740991),
+    overridden INTEGER NOT NULL DEFAULT 0 CHECK (overridden IN (0, 1))
+) STRICT;
+
+INSERT INTO film_rule_groups(group_name) VALUES
+    ('episodeCleanRegexRules'), ('episodeRules'), ('movieRules'), ('aggregateRegexRules');
+
+CREATE TABLE film_rules (
+    group_name TEXT NOT NULL REFERENCES film_rule_groups(group_name) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    pattern TEXT NOT NULL,
+    replacement TEXT,
+    flags TEXT,
+    PRIMARY KEY (group_name, position),
+    CHECK (group_name IN ('episodeRules', 'movieRules') OR (replacement IS NULL AND flags IS NULL))
 ) STRICT;
 
 CREATE TABLE film_history (
@@ -607,28 +676,8 @@ CREATE TABLE film_group_members (
 
 CREATE INDEX idx_film_group_members_lookup ON film_group_members(member_identity);
 
--- Standalone film rules
-CREATE TABLE film_standalone_rule_groups (
-    group_name TEXT PRIMARY KEY NOT NULL CHECK (group_name IN ('episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules')),
-    row_revision INTEGER NOT NULL DEFAULT 0 CHECK (row_revision BETWEEN 0 AND 9007199254740991),
-    overridden INTEGER NOT NULL DEFAULT 0 CHECK (overridden IN (0, 1))
-) STRICT;
-
-INSERT INTO film_standalone_rule_groups(group_name) VALUES
-    ('episodeCleanRegexRules'), ('episodeRules'), ('movieRules'), ('aggregateRegexRules');
-
-CREATE TABLE film_standalone_rule_entries (
-    group_name TEXT NOT NULL REFERENCES film_standalone_rule_groups(group_name) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    pattern TEXT NOT NULL,
-    replacement TEXT,
-    flags TEXT,
-    PRIMARY KEY (group_name, position),
-    CHECK (group_name IN ('episodeRules', 'movieRules') OR (replacement IS NULL AND flags IS NULL))
-) STRICT;
-
 -- module: runtime/21_metadata_cache.sql
--- TMDB and Douban component-level metadata cache.
+-- TMDB and Douban component-level metadata cache (dynamic external upstream responses stored as bounded typed value trees).
 CREATE TABLE metadata_cache_entries (
     cache_key TEXT PRIMARY KEY NOT NULL,
     provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'douban')),
@@ -656,125 +705,9 @@ CREATE TABLE metadata_cache_components (
     PRIMARY KEY (cache_key, component_name)
 ) STRICT;
 
--- Normalized provider entities; unknown upstream fields use metadata_cache_extensions.
-CREATE TABLE metadata_cache_entities (
+CREATE TABLE metadata_cache_value_nodes (
     cache_key TEXT NOT NULL REFERENCES metadata_cache_entries(cache_key) ON DELETE CASCADE,
     slot_name TEXT NOT NULL CHECK (slot_name IN ('base', 'summary')),
-    entity_id INTEGER NOT NULL CHECK (entity_id >= 0),
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('object', 'array')),
-    id_kind TEXT CHECK (id_kind IN ('null', 'text', 'number', 'number_text')),
-    external_id TEXT,
-    presence_low INTEGER NOT NULL,
-    presence_high INTEGER NOT NULL,
-    field_title TEXT,
-    field_name TEXT,
-    field_original_title TEXT,
-    field_original_name TEXT,
-    field_overview TEXT,
-    field_intro TEXT,
-    field_status TEXT,
-    field_release_date TEXT,
-    field_first_air_date TEXT,
-    field_last_air_date TEXT,
-    field_air_date TEXT,
-    field_year TEXT,
-    field_poster_path TEXT,
-    field_backdrop_path TEXT,
-    field_still_path TEXT,
-    field_homepage TEXT,
-    field_imdb_id TEXT,
-    field_original_language TEXT,
-    field_media_type TEXT,
-    field_type TEXT,
-    field_character TEXT,
-    field_job TEXT,
-    field_department TEXT,
-    field_known_for_department TEXT,
-    field_profile_path TEXT,
-    field_gender_label TEXT,
-    field_iso_639_1 TEXT,
-    field_iso_3166_1 TEXT,
-    field_english_name TEXT,
-    field_file_path TEXT,
-    field_key TEXT,
-    field_site TEXT,
-    field_size TEXT,
-    field_aspect TEXT,
-    field_uri TEXT,
-    field_url TEXT,
-    field_subtype TEXT,
-    field_card_subtitle TEXT,
-    field_description TEXT,
-    field_subject_id TEXT,
-    field_episode_type TEXT,
-    field_production_code TEXT,
-    field_credit_id TEXT,
-    field_runtime INTEGER,
-    field_season_number INTEGER,
-    field_episode_number INTEGER,
-    field_episode_count INTEGER,
-    field_number_of_seasons INTEGER,
-    field_number_of_episodes INTEGER,
-    field_vote_count INTEGER,
-    field_budget INTEGER,
-    field_revenue INTEGER,
-    field_order INTEGER,
-    field_gender INTEGER,
-    field_width INTEGER,
-    field_height INTEGER,
-    field_page INTEGER,
-    field_total_pages INTEGER,
-    field_total_results INTEGER,
-    field_count INTEGER,
-    field_max INTEGER,
-    field_start INTEGER,
-    field_limit INTEGER,
-    field_vote_average REAL,
-    field_popularity REAL,
-    field_aspect_ratio REAL,
-    field_value REAL,
-    field_average REAL,
-    field_rating REAL,
-    field_adult INTEGER CHECK (field_adult IS NULL OR field_adult IN (0, 1)),
-    field_video INTEGER CHECK (field_video IS NULL OR field_video IN (0, 1)),
-    field_in_production INTEGER CHECK (field_in_production IS NULL OR field_in_production IN (0, 1)),
-    field_official INTEGER CHECK (field_official IS NULL OR field_official IN (0, 1)),
-    PRIMARY KEY (cache_key, slot_name, entity_id)
-) STRICT;
-
-CREATE TABLE metadata_cache_relations (
-    cache_key TEXT NOT NULL,
-    slot_name TEXT NOT NULL,
-    parent_id INTEGER NOT NULL,
-    relation_name TEXT NOT NULL,
-    relation_kind TEXT NOT NULL CHECK (relation_kind IN ('null', 'object', 'array')),
-    PRIMARY KEY (cache_key, slot_name, parent_id, relation_name),
-    FOREIGN KEY (cache_key, slot_name, parent_id)
-        REFERENCES metadata_cache_entities(cache_key, slot_name, entity_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE metadata_cache_members (
-    cache_key TEXT NOT NULL,
-    slot_name TEXT NOT NULL,
-    parent_id INTEGER NOT NULL,
-    relation_name TEXT NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    child_id INTEGER,
-    value_kind TEXT CHECK (value_kind IN ('null', 'text', 'boolean', 'real', 'number_text')),
-    text_value TEXT,
-    int_value INTEGER,
-    real_value REAL,
-    PRIMARY KEY (cache_key, slot_name, parent_id, relation_name, position),
-    FOREIGN KEY (cache_key, slot_name, parent_id, relation_name)
-        REFERENCES metadata_cache_relations(cache_key, slot_name, parent_id, relation_name) ON DELETE CASCADE,
-    FOREIGN KEY (cache_key, slot_name, child_id)
-        REFERENCES metadata_cache_entities(cache_key, slot_name, entity_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE metadata_cache_extensions (
-    cache_key TEXT NOT NULL,
-    slot_name TEXT NOT NULL,
-    entity_id INTEGER NOT NULL,
     node_id INTEGER NOT NULL CHECK (node_id >= 0),
     parent_id INTEGER,
     prop_key TEXT,
@@ -784,19 +717,106 @@ CREATE TABLE metadata_cache_extensions (
     int_value INTEGER,
     real_value REAL,
     text_value TEXT,
-    PRIMARY KEY (cache_key, slot_name, entity_id, node_id),
-    FOREIGN KEY (cache_key, slot_name, entity_id)
-        REFERENCES metadata_cache_entities(cache_key, slot_name, entity_id) ON DELETE CASCADE
+    PRIMARY KEY (cache_key, slot_name, node_id)
 ) STRICT;
+
+-- module: shared/25_shared_film.sql
+-- Shared native App film configuration inputs, favorites, and deleted source tombstones (Windows & iOS).
+CREATE TABLE cat_scripts (
+    installation_id TEXT PRIMARY KEY NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL,
+    source_type TEXT NOT NULL CHECK (source_type IN ('local', 'network')),
+    source_url TEXT,
+    local_path TEXT,
+    local_hash TEXT,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    input_revision INTEGER NOT NULL CHECK (input_revision BETWEEN 1 AND 9007199254740991),
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+) STRICT;
+
+CREATE INDEX idx_cat_scripts_order ON cat_scripts(position);
+
+CREATE TABLE film_source_deletions (
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    PRIMARY KEY (installation_id, site_key)
+) STRICT;
+
+CREATE TABLE film_favorites (
+    favorite_id TEXT PRIMARY KEY NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    source_id TEXT NOT NULL DEFAULT '',
+    item_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    kind TEXT,
+    poster TEXT NOT NULL DEFAULT '',
+    score TEXT NOT NULL DEFAULT '',
+    text_badge TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT '',
+    target_id TEXT,
+    target_kind TEXT CHECK (target_kind IS NULL OR target_kind IN ('movie', 'tv', 'source', 'group')),
+    target_title TEXT,
+    target_year INTEGER,
+    metadata_provider TEXT,
+    metadata_id_kind TEXT CHECK (metadata_id_kind IS NULL OR metadata_id_kind IN ('text', 'integer')),
+    metadata_id_text TEXT,
+    season INTEGER,
+    episode INTEGER,
+    global_episode INTEGER,
+    source_key TEXT,
+    source_engine TEXT,
+    source_installation_id TEXT,
+    source_site_kind TEXT CHECK (source_site_kind IS NULL OR source_site_kind IN ('text', 'integer')),
+    source_site_text TEXT,
+    source_detail_kind TEXT CHECK (source_detail_kind IS NULL OR source_detail_kind IN ('text', 'integer')),
+    source_detail_text TEXT,
+    source_line_kind TEXT CHECK (source_line_kind IS NULL OR source_line_kind IN ('text', 'integer')),
+    source_line_text TEXT,
+    added_at REAL NOT NULL DEFAULT 0,
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
+    CHECK ((metadata_id_kind IS NULL) = (metadata_id_text IS NULL)),
+    CHECK ((source_site_kind IS NULL) = (source_site_text IS NULL)),
+    CHECK ((source_detail_kind IS NULL) = (source_detail_text IS NULL)),
+    CHECK ((source_line_kind IS NULL) = (source_line_text IS NULL))
+) STRICT;
+
+CREATE INDEX idx_film_favorites_order ON film_favorites(position);
+CREATE INDEX idx_film_favorites_recent ON film_favorites(added_at DESC, favorite_id);
+
+CREATE TABLE film_favorite_members (
+    favorite_id TEXT NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    source_key TEXT NOT NULL,
+    detail_kind TEXT NOT NULL CHECK (detail_kind IN ('text', 'integer')),
+    detail_text TEXT NOT NULL,
+    PRIMARY KEY (favorite_id, position)
+) STRICT;
+
+-- module: shared/26_shared_novel.sql
+-- Shared native App novel replacement rules (Windows & iOS).
+CREATE TABLE novel_rules (
+    rule_id TEXT PRIMARY KEY NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    name TEXT NOT NULL,
+    rule_group TEXT NOT NULL DEFAULT '',
+    pattern TEXT NOT NULL,
+    replacement TEXT NOT NULL DEFAULT '',
+    is_regex INTEGER NOT NULL CHECK (is_regex IN (0, 1)),
+    is_enabled INTEGER NOT NULL CHECK (is_enabled IN (0, 1)),
+    scope_title INTEGER NOT NULL CHECK (scope_title IN (0, 1)),
+    scope_content INTEGER NOT NULL CHECK (scope_content IN (0, 1)),
+    scope TEXT NOT NULL DEFAULT '',
+    exclude_scope TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    timeout_ms INTEGER NOT NULL DEFAULT 3000 CHECK (timeout_ms > 0)
+) STRICT;
+
+CREATE INDEX idx_novel_rules_order ON novel_rules(position);
 
 -- module: music/30_music_songs.sql
--- Shared native music owner state, permanent song identities, and platform source facts.
-CREATE TABLE music_owner_state (
-    scope TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991),
-    receipt TEXT NOT NULL
-) STRICT;
-
+-- Shared native music permanent song identities and platform source facts (owner CAS uses owner_revisions).
 CREATE TABLE music_songs (
     song_id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL DEFAULT '',
@@ -825,76 +845,24 @@ CREATE TABLE music_song_artists (
 ) STRICT;
 
 -- Each external recording source belongs uniquely to one permanent song_id.
+-- Opaque third-party platform wire fields and format lists live in music_song_source_extras.
 CREATE TABLE music_song_sources (
     song_id TEXT NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
     source_key TEXT NOT NULL UNIQUE,
     position INTEGER NOT NULL CHECK (position >= 0),
     platform TEXT NOT NULL,
     info_source TEXT NOT NULL,
-    songmid_kind TEXT CHECK (songmid_kind IS NULL OR songmid_kind IN ('text', 'number')),
-    songmid_value TEXT,
-    mid_kind TEXT CHECK (mid_kind IS NULL OR mid_kind IN ('text', 'number')),
-    mid_value TEXT,
-    id_kind TEXT CHECK (id_kind IS NULL OR id_kind IN ('text', 'number')),
-    id_value TEXT,
-    song_id_kind TEXT CHECK (song_id_kind IS NULL OR song_id_kind IN ('text', 'number')),
-    song_id_value TEXT,
-    qq_song_id_kind TEXT CHECK (qq_song_id_kind IS NULL OR qq_song_id_kind IN ('text', 'number')),
-    qq_song_id_value TEXT,
-    song_type_kind TEXT CHECK (song_type_kind IS NULL OR song_type_kind IN ('text', 'number')),
-    song_type_value TEXT,
-    type_kind TEXT CHECK (type_kind IS NULL OR type_kind IN ('text', 'number')),
-    type_value TEXT,
-    copyright_id_kind TEXT CHECK (copyright_id_kind IS NULL OR copyright_id_kind IN ('text', 'number')),
-    copyright_id_value TEXT,
-    str_media_mid_kind TEXT CHECK (str_media_mid_kind IS NULL OR str_media_mid_kind IN ('text', 'number')),
-    str_media_mid_value TEXT,
+    songmid TEXT,
+    mid TEXT,
+    native_id TEXT,
     hash TEXT,
-    album_id_kind TEXT CHECK (album_id_kind IS NULL OR album_id_kind IN ('text', 'number')),
-    album_id_value TEXT,
-    album_id_snake_kind TEXT CHECK (album_id_snake_kind IS NULL OR album_id_snake_kind IN ('text', 'number')),
-    album_id_snake_value TEXT,
-    album_mid_kind TEXT CHECK (album_mid_kind IS NULL OR album_mid_kind IN ('text', 'number')),
-    album_mid_value TEXT,
-    album_audio_id_kind TEXT CHECK (album_audio_id_kind IS NULL OR album_audio_id_kind IN ('text', 'number')),
-    album_audio_id_value TEXT,
-    mixsongid_kind TEXT CHECK (mixsongid_kind IS NULL OR mixsongid_kind IN ('text', 'number')),
-    mixsongid_value TEXT,
-    fileid_kind TEXT CHECK (fileid_kind IS NULL OR fileid_kind IN ('text', 'number')),
-    fileid_value TEXT,
-    file_id_camel_kind TEXT CHECK (file_id_camel_kind IS NULL OR file_id_camel_kind IN ('text', 'number')),
-    file_id_camel_value TEXT,
-    content_id_kind TEXT CHECK (content_id_kind IS NULL OR content_id_kind IN ('text', 'number')),
-    content_id_value TEXT,
-    md5 TEXT,
-    android_md5 TEXT,
     name TEXT,
     singer TEXT,
     album_name TEXT,
     duration REAL CHECK (duration IS NULL OR duration > 0),
-    size_kind TEXT CHECK (size_kind IS NULL OR size_kind IN ('text', 'number')),
-    size_value TEXT,
     img TEXT,
     quality_known INTEGER CHECK (quality_known IS NULL OR quality_known IN (0, 1)),
-    PRIMARY KEY (song_id, source_key),
-    CHECK ((songmid_kind IS NULL) = (songmid_value IS NULL)),
-    CHECK ((mid_kind IS NULL) = (mid_value IS NULL)),
-    CHECK ((id_kind IS NULL) = (id_value IS NULL)),
-    CHECK ((song_id_kind IS NULL) = (song_id_value IS NULL)),
-    CHECK ((qq_song_id_kind IS NULL) = (qq_song_id_value IS NULL)),
-    CHECK ((song_type_kind IS NULL) = (song_type_value IS NULL)),
-    CHECK ((type_kind IS NULL) = (type_value IS NULL)),
-    CHECK ((copyright_id_kind IS NULL) = (copyright_id_value IS NULL)),
-    CHECK ((str_media_mid_kind IS NULL) = (str_media_mid_value IS NULL)),
-    CHECK ((album_id_kind IS NULL) = (album_id_value IS NULL)),
-    CHECK ((album_id_snake_kind IS NULL) = (album_id_snake_value IS NULL)),
-    CHECK ((album_mid_kind IS NULL) = (album_mid_value IS NULL)),
-    CHECK ((album_audio_id_kind IS NULL) = (album_audio_id_value IS NULL)),
-    CHECK ((mixsongid_kind IS NULL) = (mixsongid_value IS NULL)),
-    CHECK ((fileid_kind IS NULL) = (fileid_value IS NULL)),
-    CHECK ((file_id_camel_kind IS NULL) = (file_id_camel_value IS NULL)),
-    CHECK ((content_id_kind IS NULL) = (content_id_value IS NULL)),
-    CHECK ((size_kind IS NULL) = (size_value IS NULL))
+    PRIMARY KEY (song_id, source_key)
 ) STRICT;
 
 CREATE INDEX idx_music_song_sources_order ON music_song_sources(song_id, position);
@@ -908,80 +876,7 @@ CREATE TABLE music_song_source_artists (
     FOREIGN KEY (song_id, source_key) REFERENCES music_song_sources(song_id, source_key) ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE music_song_source_types (
-    song_id TEXT NOT NULL,
-    source_key TEXT NOT NULL,
-    list_kind TEXT NOT NULL CHECK (list_kind IN ('types', '_types')),
-    entry_key TEXT NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    type_kind TEXT CHECK (type_kind IS NULL OR type_kind IN ('text', 'number')),
-    type_value TEXT,
-    hash TEXT,
-    size_kind TEXT CHECK (size_kind IS NULL OR size_kind IN ('text', 'number')),
-    size_value TEXT,
-    PRIMARY KEY (song_id, source_key, list_kind, entry_key),
-    CHECK ((type_kind IS NULL) = (type_value IS NULL)),
-    CHECK ((size_kind IS NULL) = (size_value IS NULL)),
-    FOREIGN KEY (song_id, source_key) REFERENCES music_song_sources(song_id, source_key) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE music_song_source_formats (
-    song_id TEXT NOT NULL,
-    source_key TEXT NOT NULL,
-    list_kind TEXT NOT NULL CHECK (list_kind IN ('audioFormats', 'newRateFormats')),
-    position INTEGER NOT NULL CHECK (position >= 0),
-    format_type_kind TEXT CHECK (format_type_kind IS NULL OR format_type_kind IN ('text', 'number')),
-    format_type_value TEXT,
-    resource_type_kind TEXT CHECK (resource_type_kind IS NULL OR resource_type_kind IN ('text', 'number')),
-    resource_type_value TEXT,
-    size_kind TEXT CHECK (size_kind IS NULL OR size_kind IN ('text', 'number')),
-    size_value TEXT,
-    android_size_kind TEXT CHECK (android_size_kind IS NULL OR android_size_kind IN ('text', 'number')),
-    android_size_value TEXT,
-    ios_size_kind TEXT CHECK (ios_size_kind IS NULL OR ios_size_kind IN ('text', 'number')),
-    ios_size_value TEXT,
-    asize_kind TEXT CHECK (asize_kind IS NULL OR asize_kind IN ('text', 'number')),
-    asize_value TEXT,
-    isize_kind TEXT CHECK (isize_kind IS NULL OR isize_kind IN ('text', 'number')),
-    isize_value TEXT,
-    format_kind TEXT CHECK (format_kind IS NULL OR format_kind IN ('text', 'number')),
-    format_value TEXT,
-    android_format_kind TEXT CHECK (android_format_kind IS NULL OR android_format_kind IN ('text', 'number')),
-    android_format_value TEXT,
-    ios_format_kind TEXT CHECK (ios_format_kind IS NULL OR ios_format_kind IN ('text', 'number')),
-    ios_format_value TEXT,
-    aformat_kind TEXT CHECK (aformat_kind IS NULL OR aformat_kind IN ('text', 'number')),
-    aformat_value TEXT,
-    iformat_kind TEXT CHECK (iformat_kind IS NULL OR iformat_kind IN ('text', 'number')),
-    iformat_value TEXT,
-    bitrate_kind TEXT CHECK (bitrate_kind IS NULL OR bitrate_kind IN ('text', 'number')),
-    bitrate_value TEXT,
-    sample_rate_kind TEXT CHECK (sample_rate_kind IS NULL OR sample_rate_kind IN ('text', 'number')),
-    sample_rate_value TEXT,
-    bit_depth_kind TEXT CHECK (bit_depth_kind IS NULL OR bit_depth_kind IN ('text', 'number')),
-    bit_depth_value TEXT,
-    file_type_kind TEXT CHECK (file_type_kind IS NULL OR file_type_kind IN ('text', 'number')),
-    file_type_value TEXT,
-    android_file_type_kind TEXT CHECK (android_file_type_kind IS NULL OR android_file_type_kind IN ('text', 'number')),
-    android_file_type_value TEXT,
-    ios_file_type_kind TEXT CHECK (ios_file_type_kind IS NULL OR ios_file_type_kind IN ('text', 'number')),
-    ios_file_type_value TEXT,
-    ios_accuracy_level_kind TEXT CHECK (ios_accuracy_level_kind IS NULL OR ios_accuracy_level_kind IN ('text', 'number')),
-    ios_accuracy_level_value TEXT,
-    android_accuracy_level_kind TEXT CHECK (android_accuracy_level_kind IS NULL OR android_accuracy_level_kind IN ('text', 'number')),
-    android_accuracy_level_value TEXT,
-    hash TEXT,
-    md5 TEXT,
-    android_md5 TEXT,
-    file_id_kind TEXT CHECK (file_id_kind IS NULL OR file_id_kind IN ('text', 'number')),
-    file_id_value TEXT,
-    content_id_kind TEXT CHECK (content_id_kind IS NULL OR content_id_kind IN ('text', 'number')),
-    content_id_value TEXT,
-    PRIMARY KEY (song_id, source_key, list_kind, position),
-    FOREIGN KEY (song_id, source_key) REFERENCES music_song_sources(song_id, source_key) ON DELETE CASCADE
-) STRICT;
-
--- Bounded third-party source metadata extras for unknown upstream fields only.
+-- Bounded third-party platform wire metadata (types, audioFormats, newRateFormats, upstream IDs & extra fields).
 CREATE TABLE music_song_source_extras (
     song_id TEXT NOT NULL,
     source_key TEXT NOT NULL,
@@ -1084,10 +979,12 @@ CREATE TABLE music_collection_binding_map (
     binding_index INTEGER NOT NULL,
     song_id TEXT NOT NULL REFERENCES music_songs(song_id),
     remote_entry_id TEXT NOT NULL,
-    PRIMARY KEY (scope, collection_id, binding_index, song_id),
+    PRIMARY KEY (scope, collection_id, binding_index, remote_entry_id),
     FOREIGN KEY (scope, collection_id, binding_index)
         REFERENCES music_collection_bindings(scope, collection_id, binding_index) ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_music_collection_binding_map_song ON music_collection_binding_map(song_id);
 
 CREATE TABLE music_collection_intents (
     scope TEXT NOT NULL,
@@ -1164,6 +1061,8 @@ CREATE TABLE music_queue_entries (
 ) STRICT;
 
 CREATE INDEX idx_music_queue_entries_order ON music_queue_entries(scope, position);
+CREATE INDEX idx_music_queue_entries_song ON music_queue_entries(song_id);
+CREATE INDEX idx_music_queue_entries_similar_song ON music_queue_entries(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_queue_list_items (
     scope TEXT NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
@@ -1185,10 +1084,8 @@ CREATE TABLE music_queue_similar_state (
     exhausted INTEGER CHECK (exhausted IS NULL OR exhausted IN (0, 1)),
     similar_scope TEXT,
     status TEXT,
-    provider_pid_kind TEXT CHECK (provider_pid_kind IS NULL OR provider_pid_kind IN ('text', 'number')),
-    provider_pid_value TEXT,
-    provider_sid_kind TEXT CHECK (provider_sid_kind IS NULL OR provider_sid_kind IN ('text', 'number')),
-    provider_sid_value TEXT,
+    provider_pid TEXT,
+    provider_sid TEXT,
     provider_count INTEGER,
     has_return_queue INTEGER NOT NULL DEFAULT 0 CHECK (has_return_queue IN (0, 1)),
     return_current_id TEXT,
@@ -1203,10 +1100,10 @@ CREATE TABLE music_queue_similar_state (
     return_source_seed_entry_id TEXT,
     return_source_remote_session TEXT,
     return_source_daily_branch TEXT,
-    return_source_search_keyword TEXT,
-    CHECK ((provider_pid_kind IS NULL) = (provider_pid_value IS NULL)),
-    CHECK ((provider_sid_kind IS NULL) = (provider_sid_value IS NULL))
+    return_source_search_keyword TEXT
 ) STRICT;
+
+CREATE INDEX idx_music_queue_similar_seed_song ON music_queue_similar_state(seed_song_id);
 
 CREATE TABLE music_queue_similar_return_entries (
     scope TEXT NOT NULL REFERENCES music_queue_similar_state(scope) ON DELETE CASCADE,
@@ -1239,6 +1136,8 @@ CREATE TABLE music_queue_similar_return_entries (
 ) STRICT;
 
 CREATE INDEX idx_music_queue_similar_return_order ON music_queue_similar_return_entries(scope, position);
+CREATE INDEX idx_music_queue_similar_return_song ON music_queue_similar_return_entries(song_id);
+CREATE INDEX idx_music_queue_similar_return_similar_song ON music_queue_similar_return_entries(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_queue_similar_list_items (
     scope TEXT NOT NULL REFERENCES music_queue_similar_state(scope) ON DELETE CASCADE,
@@ -1257,6 +1156,8 @@ CREATE TABLE music_queue_similar_batches (
     provider TEXT,
     PRIMARY KEY (scope, batch_id)
 ) STRICT;
+
+CREATE INDEX idx_music_queue_similar_batches_song ON music_queue_similar_batches(based_on_song_id);
 
 CREATE TABLE music_queue_similar_batch_entries (
     scope TEXT NOT NULL,
@@ -1314,6 +1215,7 @@ CREATE TABLE music_history_playlists (
 ) STRICT;
 
 CREATE INDEX idx_music_history_playlists_order ON music_history_playlists(scope, position);
+CREATE INDEX idx_music_history_playlists_similar_song ON music_history_playlists(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_history_playlist_entries (
     scope TEXT NOT NULL,
@@ -1348,6 +1250,8 @@ CREATE TABLE music_history_playlist_entries (
 ) STRICT;
 
 CREATE INDEX idx_music_history_playlist_entries_order ON music_history_playlist_entries(scope, playlist_id, position);
+CREATE INDEX idx_music_history_playlist_entries_song ON music_history_playlist_entries(song_id);
+CREATE INDEX idx_music_history_playlist_entries_similar_song ON music_history_playlist_entries(ctx_similar_based_on_song_id);
 
 CREATE TABLE music_history_playlist_lists (
     scope TEXT NOT NULL,
@@ -1403,329 +1307,265 @@ CREATE TABLE music_history_day_songs (
 ) STRICT;
 
 CREATE INDEX idx_music_history_day_songs_order ON music_history_day_songs(scope, day_date, position);
+CREATE INDEX idx_music_history_day_songs_song ON music_history_day_songs(song_id);
+CREATE INDEX idx_music_history_day_songs_similar_song ON music_history_day_songs(ctx_similar_based_on_song_id);
 
--- module: ios/40_settings.sql
--- Native iOS settings blocks, TMDB, Douban, Pan credentials, Cat settings, film rules, and preferences.
-CREATE TABLE ios_settings_blocks (
-    block TEXT PRIMARY KEY CHECK (block IN ('cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences')),
-    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991)
+-- module: music/34_music_common.sql
+-- Shared native music settings, appearance, source exclusions, and lyrics cache (Windows & iOS).
+CREATE TABLE music_catalog_source (
+    scope TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
+    platform TEXT NOT NULL DEFAULT 'wy'
 ) STRICT;
 
-INSERT INTO ios_settings_blocks VALUES
-    ('cat.sources', 0), ('pan.accounts', 0), ('tmdb', 0), ('douban', 0), ('film.rules', 0), ('film.preferences', 0);
-
-CREATE TABLE ios_tmdb_settings (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    apiBase TEXT NOT NULL,
-    imageBase TEXT NOT NULL,
-    apiKey TEXT NOT NULL,
-    accessToken TEXT NOT NULL,
-    language TEXT NOT NULL,
-    region TEXT NOT NULL,
-    includeAdult INTEGER NOT NULL CHECK (includeAdult IN (0, 1))
+CREATE TABLE music_appearance (
+    scope TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
+    playlist_view TEXT NOT NULL,
+    player_theme TEXT NOT NULL,
+    color_mode TEXT NOT NULL,
+    color_palette TEXT NOT NULL,
+    lock_lyric INTEGER NOT NULL DEFAULT 0 CHECK (lock_lyric IN (0, 1)),
+    lyric_translation INTEGER NOT NULL DEFAULT 1 CHECK (lyric_translation IN (0, 1)),
+    lyric_background INTEGER NOT NULL DEFAULT 0 CHECK (lyric_background IN (0, 1))
 ) STRICT;
 
-CREATE TABLE ios_douban_settings (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    apiBase TEXT NOT NULL,
-    searchBase TEXT NOT NULL,
-    imageBase TEXT NOT NULL,
-    apiProxy TEXT NOT NULL,
-    imageProxy TEXT NOT NULL,
-    cookie TEXT NOT NULL
+CREATE TABLE music_playback_settings (
+    scope TEXT PRIMARY KEY NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
+    mode INTEGER NOT NULL DEFAULT 1,
+    has_mode INTEGER NOT NULL DEFAULT 0 CHECK (has_mode IN (0, 1)),
+    lyrics_enabled INTEGER NOT NULL DEFAULT 1 CHECK (lyrics_enabled IN (0, 1)),
+    online_revision INTEGER CHECK (online_revision IS NULL OR online_revision BETWEEN 0 AND 9007199254740991),
+    show_translation INTEGER NOT NULL DEFAULT 1 CHECK (show_translation IN (0, 1)),
+    quality_request TEXT,
+    quality_revision INTEGER CHECK (quality_revision IS NULL OR quality_revision BETWEEN 0 AND 9007199254740991),
+    official_revision INTEGER CHECK (official_revision IS NULL OR official_revision BETWEEN 0 AND 9007199254740991),
+    metadata_revision INTEGER CHECK (metadata_revision IS NULL OR metadata_revision BETWEEN 0 AND 9007199254740991),
+    exclusions_revision INTEGER CHECK (exclusions_revision IS NULL OR exclusions_revision BETWEEN 0 AND 9007199254740991),
+    position_occurrence_id TEXT,
+    position_seconds REAL NOT NULL DEFAULT 0
 ) STRICT;
 
-CREATE TABLE ios_pan_accounts (
-    provider TEXT PRIMARY KEY CHECK (provider IN ('baidu', 'quark', 'uc', 'tianyi', 'yidong')),
-    account_revision INTEGER NOT NULL CHECK (account_revision BETWEEN 0 AND 9007199254740991),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 0 AND 9007199254740991),
-    cookie TEXT,
-    username TEXT,
-    password TEXT,
-    authorization TEXT,
-    refreshedAt INTEGER,
-    CHECK (refreshedAt IS NULL OR refreshedAt BETWEEN 0 AND 9007199254740991),
-    CHECK (provider IN ('baidu', 'quark', 'uc', 'tianyi') OR cookie IS NULL),
-    CHECK (provider = 'tianyi' OR (username IS NULL AND password IS NULL)),
-    CHECK (provider = 'yidong' OR (authorization IS NULL AND refreshedAt IS NULL))
+CREATE TABLE music_playback_lists (
+    scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
+    list_kind TEXT NOT NULL CHECK (list_kind IN (
+        'qualityOrder', 'qualityEnabled', 'spatialOrder', 'spatialEnabled',
+        'officialPlatforms', 'officialEnabled', 'metadataPlatforms', 'metadataEnabled'
+    )),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    item_value TEXT NOT NULL,
+    PRIMARY KEY (scope, list_kind, position)
 ) STRICT;
 
-INSERT INTO ios_pan_accounts(provider, account_revision, row_revision) VALUES
-    ('baidu', 0, 0), ('quark', 0, 0), ('uc', 0, 0), ('tianyi', 0, 0), ('yidong', 0, 0);
-
-CREATE TABLE ios_cat_settings (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    port INTEGER NOT NULL CHECK (port BETWEEN 0 AND 65535)
-) STRICT;
-
-CREATE TABLE ios_cat_providers (
-    provider TEXT PRIMARY KEY,
-    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
-) STRICT;
-
-CREATE TABLE ios_cat_mappings (
-    ordinal INTEGER PRIMARY KEY CHECK (ordinal >= 0),
-    provider TEXT NOT NULL
-) STRICT;
-
-CREATE TABLE ios_cat_mapping_aliases (
-    mapping_ordinal INTEGER NOT NULL REFERENCES ios_cat_mappings(ordinal) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-    alias TEXT NOT NULL,
-    PRIMARY KEY (mapping_ordinal, ordinal)
-) STRICT;
-
-CREATE TABLE ios_cat_inputs (
-    installationId TEXT PRIMARY KEY,
-    ordinal INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    sourceType TEXT NOT NULL CHECK (sourceType IN ('local', 'network')),
-    sourceUrl TEXT,
-    localPath TEXT,
-    localHash TEXT,
-    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    inputRevision INTEGER NOT NULL CHECK (inputRevision BETWEEN 1 AND 9007199254740991),
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
-) STRICT;
-
-CREATE TABLE ios_film_rules (
-    rule_group TEXT NOT NULL CHECK (rule_group IN ('episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules')),
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-    pattern TEXT NOT NULL,
-    replacement TEXT NOT NULL,
-    flags TEXT NOT NULL,
-    PRIMARY KEY (rule_group, ordinal)
-) STRICT;
-
-CREATE TABLE ios_film_preferences (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    iosAutoPrepare INTEGER NOT NULL CHECK (iosAutoPrepare IN (0, 1)),
-    metadataViewProvider TEXT NOT NULL CHECK (metadataViewProvider IN ('tmdb', 'douban'))
-) STRICT;
-
-CREATE TABLE ios_film_preference_items (
-    list TEXT NOT NULL CHECK (list IN ('ruleOrder', 'panOrder', 'keywords', 'siteCleanKeywords')),
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-    value TEXT NOT NULL,
-    PRIMARY KEY (list, ordinal),
-    UNIQUE (list, value)
-) STRICT;
-
--- module: ios/41_film.sql
--- Native iOS film favorites, player preferences, source probes, video intents, and deletions.
-CREATE TABLE ios_film_favorites (
-    businessID TEXT PRIMARY KEY,
-    sourceID TEXT NOT NULL,
-    itemID TEXT NOT NULL,
-    kind TEXT,
-    target_kind TEXT NOT NULL CHECK (target_kind IN ('movie', 'tv', 'source', 'group')),
-    target_title TEXT NOT NULL,
-    target_year INTEGER,
-    metadata_provider TEXT,
-    metadata_id_kind TEXT,
-    metadata_id_text TEXT,
-    season INTEGER,
-    episode INTEGER,
-    global_episode INTEGER,
+CREATE TABLE music_source_exclusions (
+    scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
+    exclusion_kind TEXT NOT NULL DEFAULT 'source' CHECK (exclusion_kind IN ('source', 'recording')),
+    exclusion_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    song_id TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL DEFAULT '',
+    provider_name TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
     source_key TEXT,
-    source_engine TEXT,
-    source_installation_id TEXT,
-    source_site_kind TEXT,
-    source_site_text TEXT,
-    source_detail_kind TEXT,
-    source_detail_text TEXT,
-    source_line_kind TEXT,
-    source_line_text TEXT,
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
-    added_at REAL NOT NULL,
-    CHECK ((metadata_id_kind IS NULL AND metadata_id_text IS NULL) OR
-           (metadata_id_kind IN ('text', 'integer') AND metadata_id_text IS NOT NULL)),
-    CHECK ((source_site_kind IS NULL AND source_site_text IS NULL) OR
-           (source_site_kind IN ('text', 'integer') AND source_site_text IS NOT NULL)),
-    CHECK ((source_detail_kind IS NULL AND source_detail_text IS NULL) OR
-           (source_detail_kind IN ('text', 'integer') AND source_detail_text IS NOT NULL)),
-    CHECK ((source_line_kind IS NULL AND source_line_text IS NULL) OR
-           (source_line_kind IN ('text', 'integer') AND source_line_text IS NOT NULL))
+    excluded_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, exclusion_kind, exclusion_id)
 ) STRICT;
 
-CREATE INDEX ios_film_favorites_page ON ios_film_favorites(added_at DESC, businessID);
+CREATE INDEX idx_music_source_exclusions_order ON music_source_exclusions(scope, exclusion_kind, position);
+CREATE INDEX idx_music_source_exclusions_song ON music_source_exclusions(song_id);
 
-CREATE TABLE ios_film_favorite_members (
-    businessID TEXT NOT NULL REFERENCES ios_film_favorites(businessID) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+CREATE TABLE music_lyrics (
+    song_id TEXT PRIMARY KEY NOT NULL,
     source_key TEXT NOT NULL,
-    detail_kind TEXT NOT NULL CHECK (detail_kind IN ('text', 'integer')),
-    detail_text TEXT NOT NULL,
-    PRIMARY KEY (businessID, ordinal)
+    updated_at REAL NOT NULL,
+    stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
 
+CREATE INDEX idx_music_lyrics_updated ON music_lyrics(updated_at);
+
+CREATE TABLE music_lyric_lines (
+    song_id TEXT NOT NULL REFERENCES music_lyrics(song_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    line_index INTEGER NOT NULL CHECK (line_index >= 0),
+    time_sec REAL NOT NULL,
+    end_sec REAL,
+    text TEXT NOT NULL,
+    translation TEXT,
+    romanization TEXT,
+    PRIMARY KEY (song_id, position)
+) STRICT;
+
+CREATE TABLE music_lyric_words (
+    song_id TEXT NOT NULL,
+    line_position INTEGER NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    time_sec REAL NOT NULL,
+    duration_sec REAL NOT NULL,
+    offset_sec REAL,
+    text TEXT NOT NULL,
+    PRIMARY KEY (song_id, line_position, position),
+    FOREIGN KEY (song_id, line_position) REFERENCES music_lyric_lines(song_id, position) ON DELETE CASCADE
+) STRICT;
+
+-- module: ios/40_film_ios.sql
+-- iOS-specific film player preferences, source probes, and video site intents (owner CAS uses owner_revisions).
 CREATE TABLE ios_film_player_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     engine TEXT NOT NULL,
-    defaultRate REAL NOT NULL,
-    holdRate REAL NOT NULL,
-    seekStep REAL NOT NULL,
-    showsControlCenter INTEGER NOT NULL CHECK (showsControlCenter IN (0, 1)),
-    recognizesChapters INTEGER NOT NULL CHECK (recognizesChapters IN (0, 1)),
-    singleTapCenter TEXT NOT NULL,
-    singleTapSides TEXT NOT NULL,
-    doubleTapCenter TEXT NOT NULL,
-    doubleTapSides TEXT NOT NULL,
-    swipeVolume INTEGER NOT NULL CHECK (swipeVolume IN (0, 1)),
-    swipeBrightness INTEGER NOT NULL CHECK (swipeBrightness IN (0, 1)),
-    swipeSeek INTEGER NOT NULL CHECK (swipeSeek IN (0, 1)),
-    swipeEpisodes INTEGER NOT NULL CHECK (swipeEpisodes IN (0, 1)),
-    hapticHold INTEGER NOT NULL CHECK (hapticHold IN (0, 1)),
-    hapticBrightness INTEGER NOT NULL CHECK (hapticBrightness IN (0, 1)),
-    hapticVolume INTEGER NOT NULL CHECK (hapticVolume IN (0, 1)),
-    hapticSeek INTEGER NOT NULL CHECK (hapticSeek IN (0, 1)),
+    default_rate REAL NOT NULL,
+    hold_rate REAL NOT NULL,
+    seek_step REAL NOT NULL,
+    shows_control_center INTEGER NOT NULL CHECK (shows_control_center IN (0, 1)),
+    recognizes_chapters INTEGER NOT NULL CHECK (recognizes_chapters IN (0, 1)),
+    single_tap_center TEXT NOT NULL,
+    single_tap_sides TEXT NOT NULL,
+    double_tap_center TEXT NOT NULL,
+    double_tap_sides TEXT NOT NULL,
+    swipe_volume INTEGER NOT NULL CHECK (swipe_volume IN (0, 1)),
+    swipe_brightness INTEGER NOT NULL CHECK (swipe_brightness IN (0, 1)),
+    swipe_seek INTEGER NOT NULL CHECK (swipe_seek IN (0, 1)),
+    swipe_episodes INTEGER NOT NULL CHECK (swipe_episodes IN (0, 1)),
+    haptic_hold INTEGER NOT NULL CHECK (haptic_hold IN (0, 1)),
+    haptic_brightness INTEGER NOT NULL CHECK (haptic_brightness IN (0, 1)),
+    haptic_volume INTEGER NOT NULL CHECK (haptic_volume IN (0, 1)),
+    haptic_seek INTEGER NOT NULL CHECK (haptic_seek IN (0, 1)),
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
-CREATE TABLE ios_film_source_state (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991)
-) STRICT;
-
-INSERT INTO ios_film_source_state VALUES (1, 0);
-
 CREATE TABLE ios_film_source_probes (
-    installationId TEXT PRIMARY KEY,
-    inputRevision INTEGER NOT NULL,
-    importedAt INTEGER,
-    updatedAt INTEGER,
-    updateState TEXT NOT NULL,
-    updateError TEXT,
-    sourceHash TEXT
+    installation_id TEXT PRIMARY KEY NOT NULL,
+    input_revision INTEGER NOT NULL,
+    imported_at INTEGER,
+    updated_at INTEGER,
+    update_state TEXT NOT NULL,
+    update_error TEXT,
+    source_hash TEXT
 ) STRICT;
 
 CREATE TABLE ios_film_source_sites (
-    installationId TEXT NOT NULL REFERENCES ios_film_source_probes(installationId) ON DELETE CASCADE,
-    siteKey TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
+    installation_id TEXT NOT NULL REFERENCES ios_film_source_probes(installation_id) ON DELETE CASCADE,
+    site_key TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
     name TEXT NOT NULL,
     api TEXT NOT NULL,
-    PRIMARY KEY (installationId, siteKey)
+    PRIMARY KEY (installation_id, site_key)
 ) STRICT;
 
 CREATE TABLE ios_film_source_actions (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
     action TEXT NOT NULL,
-    PRIMARY KEY (installationId, siteKey, ordinal),
-    FOREIGN KEY (installationId, siteKey) REFERENCES ios_film_source_sites(installationId, siteKey) ON DELETE CASCADE
+    PRIMARY KEY (installation_id, site_key, position),
+    FOREIGN KEY (installation_id, site_key) REFERENCES ios_film_source_sites(installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE ios_film_source_methods (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
     action TEXT NOT NULL,
     method TEXT NOT NULL,
-    PRIMARY KEY (installationId, siteKey, action),
-    FOREIGN KEY (installationId, siteKey) REFERENCES ios_film_source_sites(installationId, siteKey) ON DELETE CASCADE
+    PRIMARY KEY (installation_id, site_key, action),
+    FOREIGN KEY (installation_id, site_key) REFERENCES ios_film_source_sites(installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE ios_film_video_intents (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
     name TEXT NOT NULL,
     api TEXT NOT NULL,
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    homeVisible INTEGER NOT NULL CHECK (homeVisible IN (0, 1)),
-    searchEnabled INTEGER NOT NULL CHECK (searchEnabled IN (0, 1)),
-    aggregateImages INTEGER NOT NULL CHECK (aggregateImages IN (0, 1)),
-    PRIMARY KEY (installationId, siteKey)
+    home_visible INTEGER NOT NULL CHECK (home_visible IN (0, 1)),
+    search_enabled INTEGER NOT NULL CHECK (search_enabled IN (0, 1)),
+    aggregate_images INTEGER NOT NULL CHECK (aggregate_images IN (0, 1)),
+    PRIMARY KEY (installation_id, site_key)
 ) STRICT;
 
-CREATE UNIQUE INDEX ios_film_one_aggregate_images ON ios_film_video_intents(aggregateImages) WHERE aggregateImages = 1;
+CREATE UNIQUE INDEX idx_ios_film_one_aggregate_images ON ios_film_video_intents(aggregate_images) WHERE aggregate_images = 1;
 
 CREATE TABLE ios_film_video_actions (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
     action TEXT NOT NULL,
-    PRIMARY KEY (installationId, siteKey, ordinal),
-    FOREIGN KEY (installationId, siteKey) REFERENCES ios_film_video_intents(installationId, siteKey) ON DELETE CASCADE
+    PRIMARY KEY (installation_id, site_key, position),
+    FOREIGN KEY (installation_id, site_key) REFERENCES ios_film_video_intents(installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE ios_film_video_methods (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
     action TEXT NOT NULL,
     method TEXT NOT NULL,
-    PRIMARY KEY (installationId, siteKey, action),
-    FOREIGN KEY (installationId, siteKey) REFERENCES ios_film_video_intents(installationId, siteKey) ON DELETE CASCADE
+    PRIMARY KEY (installation_id, site_key, action),
+    FOREIGN KEY (installation_id, site_key) REFERENCES ios_film_video_intents(installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE ios_film_video_detections (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
     result TEXT NOT NULL,
-    checkedAt INTEGER NOT NULL CHECK (checkedAt BETWEEN 0 AND 9007199254740991),
-    playbackResolved INTEGER NOT NULL CHECK (playbackResolved IN (0, 1)),
-    PRIMARY KEY (installationId, siteKey),
-    FOREIGN KEY (installationId, siteKey) REFERENCES ios_film_video_intents(installationId, siteKey) ON DELETE CASCADE
+    checked_at INTEGER NOT NULL CHECK (checked_at BETWEEN 0 AND 9007199254740991),
+    playback_resolved INTEGER NOT NULL CHECK (playback_resolved IN (0, 1)),
+    PRIMARY KEY (installation_id, site_key),
+    FOREIGN KEY (installation_id, site_key) REFERENCES ios_film_video_intents(installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE ios_film_video_probe_steps (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,
+    installation_id TEXT NOT NULL,
+    site_key TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
     operation TEXT NOT NULL,
     state TEXT NOT NULL,
     error TEXT,
-    PRIMARY KEY (installationId, siteKey, ordinal),
-    FOREIGN KEY (installationId, siteKey) REFERENCES ios_film_video_detections(installationId, siteKey) ON DELETE CASCADE
+    PRIMARY KEY (installation_id, site_key, position),
+    FOREIGN KEY (installation_id, site_key) REFERENCES ios_film_video_detections(installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE ios_film_source_deletions (
-    installationId TEXT NOT NULL,
-    siteKey TEXT NOT NULL,
-    PRIMARY KEY (installationId, siteKey)
-) STRICT;
-
--- module: ios/42_novel.sql
--- Native iOS novel shelf, reading progress, dynamic source variables, reading settings, and replacement rules.
+-- module: ios/41_novel_ios.sql
+-- iOS-specific novel shelf, reading progress, dynamic source variables, and reading settings.
 CREATE TABLE ios_novel_books (
-    id TEXT PRIMARY KEY,
-    installationId TEXT NOT NULL,
-    bookUrl TEXT NOT NULL,
+    book_id TEXT PRIMARY KEY NOT NULL,
+    installation_id TEXT NOT NULL,
+    book_url TEXT NOT NULL,
     identity TEXT NOT NULL,
     name TEXT NOT NULL,
     author TEXT NOT NULL,
-    tocUrl TEXT NOT NULL,
-    coverUrl TEXT NOT NULL,
+    toc_url TEXT NOT NULL,
+    cover_url TEXT NOT NULL,
     intro TEXT NOT NULL,
-    latestChapterTitle TEXT NOT NULL,
-    onShelf INTEGER NOT NULL CHECK (onShelf IN (0, 1)),
-    pinnedAt REAL,
-    addedAt REAL NOT NULL,
+    latest_chapter_title TEXT NOT NULL,
+    on_shelf INTEGER NOT NULL CHECK (on_shelf IN (0, 1)),
+    pinned_at REAL,
+    added_at REAL NOT NULL,
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
-    UNIQUE (installationId, bookUrl)
+    UNIQUE (installation_id, book_url)
 ) STRICT;
 
-CREATE UNIQUE INDEX ios_novel_book_identity ON ios_novel_books(identity) WHERE identity <> '';
-CREATE INDEX ios_novel_shelf ON ios_novel_books(onShelf, pinnedAt DESC, addedAt DESC, id);
+CREATE UNIQUE INDEX idx_ios_novel_book_identity ON ios_novel_books(identity) WHERE identity <> '';
+CREATE INDEX idx_ios_novel_shelf ON ios_novel_books(on_shelf, pinned_at DESC, added_at DESC, book_id);
 
 CREATE TABLE ios_novel_progress (
-    book_id TEXT PRIMARY KEY REFERENCES ios_novel_books(id) ON DELETE CASCADE,
-    chapterUrl TEXT NOT NULL,
-    chapterTitle TEXT NOT NULL,
-    chapterIndex INTEGER NOT NULL CHECK (chapterIndex >= 0),
-    blockIndex INTEGER NOT NULL CHECK (blockIndex >= 0),
-    utf16Offset INTEGER NOT NULL CHECK (utf16Offset >= 0),
+    book_id TEXT PRIMARY KEY NOT NULL REFERENCES ios_novel_books(book_id) ON DELETE CASCADE,
+    chapter_url TEXT NOT NULL,
+    chapter_title TEXT NOT NULL,
+    chapter_index INTEGER NOT NULL CHECK (chapter_index >= 0),
+    block_index INTEGER NOT NULL CHECK (block_index >= 0),
+    utf16_offset INTEGER NOT NULL CHECK (utf16_offset >= 0),
     ratio REAL NOT NULL CHECK (ratio BETWEEN 0 AND 1),
-    readAt REAL NOT NULL,
+    read_at REAL NOT NULL,
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
-CREATE INDEX ios_novel_history ON ios_novel_progress(readAt DESC, book_id);
+CREATE INDEX idx_ios_novel_history ON ios_novel_progress(read_at DESC, book_id);
 
 -- Third-party book source dynamic variable tree.
 CREATE TABLE ios_novel_variable_nodes (
-    book_id TEXT NOT NULL REFERENCES ios_novel_books(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES ios_novel_books(book_id) ON DELETE CASCADE,
     node_id INTEGER NOT NULL CHECK (node_id >= 0),
     parent_id INTEGER,
     prop_key TEXT,
@@ -1741,50 +1581,34 @@ CREATE TABLE ios_novel_variable_nodes (
 CREATE TABLE ios_novel_reading_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     mode TEXT NOT NULL,
-    fontSize REAL NOT NULL,
-    fontWeight REAL NOT NULL,
-    fontName TEXT NOT NULL,
-    lineSpacing REAL NOT NULL,
-    paragraphSpacing REAL NOT NULL,
+    font_size REAL NOT NULL,
+    font_weight REAL NOT NULL,
+    font_name TEXT NOT NULL,
+    line_spacing REAL NOT NULL,
+    paragraph_spacing REAL NOT NULL,
     margin REAL NOT NULL,
-    contentWidth REAL NOT NULL,
+    content_width REAL NOT NULL,
     conversion TEXT NOT NULL,
     theme INTEGER NOT NULL,
     foreground TEXT NOT NULL,
     background TEXT NOT NULL,
     background_image BLOB,
-    automaticSpeed REAL NOT NULL,
+    automatic_speed REAL NOT NULL,
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
-CREATE TABLE ios_novel_rules (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    "group" TEXT NOT NULL,
-    isEnabled INTEGER NOT NULL CHECK (isEnabled IN (0, 1)),
-    "order" INTEGER NOT NULL,
-    timeoutMillisecond INTEGER NOT NULL CHECK (timeoutMillisecond > 0),
-    pattern TEXT NOT NULL,
-    replacement TEXT NOT NULL,
-    isRegex INTEGER NOT NULL CHECK (isRegex IN (0, 1)),
-    scope TEXT NOT NULL,
-    excludeScope TEXT NOT NULL,
-    scopeTitle INTEGER NOT NULL CHECK (scopeTitle IN (0, 1)),
-    scopeContent INTEGER NOT NULL CHECK (scopeContent IN (0, 1))
-) STRICT;
-
--- module: ios/43_music_domain.sql
--- Native iOS music preferences, accounts, network references, sync state, playback prefs, source discovery, and home snapshot.
+-- module: ios/42_music_ios.sql
+-- iOS-specific music preferences, accounts, network references, sync fences, discovery cache, home snapshot, and media caches.
 CREATE TABLE ios_search_history (
-    text TEXT PRIMARY KEY,
+    text TEXT PRIMARY KEY NOT NULL,
     used_at REAL NOT NULL
 ) STRICT;
 
-CREATE INDEX ios_search_history_recent ON ios_search_history(used_at DESC, text);
+CREATE INDEX idx_ios_search_history_recent ON ios_search_history(used_at DESC, text);
 
 CREATE TABLE ios_music_search_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    searchPlaylists INTEGER NOT NULL CHECK (searchPlaylists IN (0, 1)),
+    search_playlists INTEGER NOT NULL CHECK (search_playlists IN (0, 1)),
     song_pages INTEGER NOT NULL CHECK (song_pages >= 1),
     song_concurrency INTEGER NOT NULL CHECK (song_concurrency >= 1),
     song_cache_minutes INTEGER NOT NULL CHECK (song_cache_minutes BETWEEN 1 AND 1440),
@@ -1796,31 +1620,19 @@ CREATE TABLE ios_music_search_preferences (
 
 CREATE TABLE ios_music_search_platforms (
     kind TEXT NOT NULL CHECK (kind IN ('song', 'playlist')),
-    ordinal INTEGER NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
     platform TEXT NOT NULL,
-    PRIMARY KEY (kind, ordinal),
+    PRIMARY KEY (kind, position),
     UNIQUE (kind, platform)
 ) STRICT;
 
-CREATE TABLE ios_music_appearance (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    playlistView TEXT NOT NULL,
-    playerTheme TEXT NOT NULL,
-    colorMode TEXT NOT NULL,
-    colorPalette TEXT NOT NULL,
-    lockLyric INTEGER NOT NULL CHECK (lockLyric IN (0, 1)),
-    lyricTranslation INTEGER NOT NULL CHECK (lyricTranslation IN (0, 1)),
-    lyricBackground INTEGER NOT NULL CHECK (lyricBackground IN (0, 1)),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
-) STRICT;
-
 CREATE TABLE ios_music_song_palettes (
-    song_key TEXT PRIMARY KEY,
+    song_key TEXT PRIMARY KEY NOT NULL,
     palette TEXT NOT NULL,
     used_at REAL NOT NULL
 ) STRICT;
 
-CREATE INDEX ios_music_song_palettes_recent ON ios_music_song_palettes(used_at DESC, song_key);
+CREATE INDEX idx_ios_music_song_palettes_recent ON ios_music_song_palettes(used_at DESC, song_key);
 
 CREATE TABLE ios_music_palette_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -1833,7 +1645,7 @@ CREATE TABLE ios_music_channel_selection (
 ) STRICT;
 
 CREATE TABLE ios_playback_volume (
-    owner TEXT PRIMARY KEY,
+    owner TEXT PRIMARY KEY NOT NULL,
     volume REAL NOT NULL CHECK (volume BETWEEN 0 AND 1)
 ) STRICT;
 
@@ -1847,12 +1659,6 @@ CREATE TABLE ios_music_accounts (
     credential_revision TEXT NOT NULL,
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     PRIMARY KEY (installation_id, site_key, account_id)
-) STRICT;
-
-CREATE TABLE ios_music_catalog_source (
-    scope TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    platform TEXT NOT NULL DEFAULT 'wy'
 ) STRICT;
 
 CREATE TABLE ios_music_network_references (
@@ -1877,7 +1683,6 @@ CREATE TABLE ios_music_network_references (
 
 CREATE INDEX idx_ios_music_network_references_order ON ios_music_network_references(scope, position);
 
--- iOS music library sync state, automatic sync selections/bindings, and mutation fences.
 CREATE TABLE ios_music_sync_state (
     scope TEXT PRIMARY KEY NOT NULL REFERENCES music_library_state(scope) ON DELETE CASCADE,
     phase TEXT NOT NULL DEFAULT 'idle',
@@ -1971,46 +1776,6 @@ CREATE TABLE ios_music_sync_fence_members (
     FOREIGN KEY (scope, fence_index) REFERENCES ios_music_sync_fences(scope, fence_index) ON DELETE CASCADE
 ) STRICT;
 
--- iOS music playback preferences, quality/official/metadata lists, and source exclusions.
-CREATE TABLE ios_music_playback_settings (
-    scope TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    mode INTEGER NOT NULL DEFAULT 1,
-    lyrics_enabled INTEGER NOT NULL DEFAULT 1 CHECK (lyrics_enabled IN (0, 1)),
-    show_translation INTEGER NOT NULL DEFAULT 1 CHECK (show_translation IN (0, 1)),
-    quality_request TEXT,
-    position_occurrence_id TEXT,
-    position_seconds REAL NOT NULL DEFAULT 0
-) STRICT;
-
-CREATE TABLE ios_music_playback_lists (
-    scope TEXT NOT NULL REFERENCES ios_music_playback_settings(scope) ON DELETE CASCADE,
-    list_kind TEXT NOT NULL CHECK (list_kind IN (
-        'qualityOrder', 'qualityEnabled', 'spatialOrder', 'spatialEnabled',
-        'officialSources', 'metadataPlatforms', 'metadataEnabled'
-    )),
-    position INTEGER NOT NULL CHECK (position >= 0),
-    item_value TEXT NOT NULL,
-    PRIMARY KEY (scope, list_kind, position)
-) STRICT;
-
-CREATE TABLE ios_music_source_exclusions (
-    scope TEXT NOT NULL REFERENCES ios_music_playback_settings(scope) ON DELETE CASCADE,
-    exclusion_kind TEXT NOT NULL CHECK (exclusion_kind IN ('source', 'recording')),
-    exclusion_id TEXT NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    song_id TEXT NOT NULL REFERENCES music_songs(song_id),
-    title TEXT NOT NULL DEFAULT '',
-    artist TEXT NOT NULL DEFAULT '',
-    provider TEXT NOT NULL DEFAULT '',
-    platform TEXT NOT NULL DEFAULT '',
-    source_key TEXT,
-    PRIMARY KEY (scope, exclusion_kind, exclusion_id)
-) STRICT;
-
-CREATE INDEX idx_ios_music_source_exclusions_order ON ios_music_source_exclusions(scope, exclusion_kind, position);
-
--- iOS music source discovery cache (replaces music_source_discovery_* generated trees).
 CREATE TABLE ios_music_source_discovery (
     song_id TEXT PRIMARY KEY NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
@@ -2054,7 +1819,6 @@ CREATE TABLE ios_music_source_discovery_observations (
         REFERENCES ios_music_source_discovery_platforms(song_id, platform) ON DELETE CASCADE
 ) STRICT;
 
--- iOS music home display snapshot (normalized flat tables, no shape_mask/null_mask).
 CREATE TABLE ios_music_home_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     source TEXT NOT NULL
@@ -2174,8 +1938,6 @@ CREATE TABLE ios_music_home_item_previews (
     PRIMARY KEY (item_uid, preview_kind, position)
 ) STRICT;
 
--- module: ios/44_music_resources.sql
--- Native iOS music resource caches, playback feedback outbox, lyrics, and audio file index.
 CREATE TABLE ios_music_audio_urls (
     scope TEXT NOT NULL,
     platform TEXT NOT NULL,
@@ -2193,40 +1955,40 @@ CREATE TABLE ios_music_audio_urls (
     PRIMARY KEY (scope, platform, native_id, quality)
 ) STRICT;
 
-CREATE INDEX ios_music_audio_urls_age ON ios_music_audio_urls(saved_at);
+CREATE INDEX idx_ios_music_audio_urls_age ON ios_music_audio_urls(saved_at);
 
 CREATE TABLE ios_music_chorus (
     scope TEXT NOT NULL,
     platform TEXT NOT NULL,
     native_id TEXT NOT NULL,
     recording_duration REAL NOT NULL CHECK (recording_duration > 0),
-    start REAL NOT NULL CHECK (start >= 0),
-    end REAL NOT NULL CHECK (end >= start),
+    start_sec REAL NOT NULL CHECK (start_sec >= 0),
+    end_sec REAL NOT NULL CHECK (end_sec >= start_sec),
     expires_at REAL NOT NULL,
     PRIMARY KEY (scope, platform, native_id, recording_duration)
 ) STRICT;
 
 CREATE TABLE ios_music_feedback_outbox (
-    id TEXT PRIMARY KEY NOT NULL,
+    event_id TEXT PRIMARY KEY NOT NULL,
     instance TEXT NOT NULL,
     scope TEXT NOT NULL,
     generation INTEGER NOT NULL CHECK (generation >= 0),
     phase TEXT NOT NULL CHECK (phase IN ('start', 'end')),
-    nativeID TEXT NOT NULL,
+    native_id TEXT NOT NULL,
     source TEXT NOT NULL,
-    sourceID TEXT NOT NULL,
+    source_id TEXT NOT NULL,
     algorithm TEXT NOT NULL,
     heartbeat INTEGER NOT NULL CHECK (heartbeat IN (0, 1)),
     listened REAL NOT NULL CHECK (listened >= 0),
     media REAL NOT NULL CHECK (media >= 0),
     rate REAL NOT NULL CHECK (rate > 0),
-    occurredAt REAL NOT NULL CHECK (occurredAt >= 0),
+    occurred_at REAL NOT NULL CHECK (occurred_at >= 0),
     reason TEXT,
     state TEXT NOT NULL CHECK (state IN ('pending', 'inflight')),
-    startConfirmed INTEGER NOT NULL CHECK (startConfirmed IN (0, 1))
+    start_confirmed INTEGER NOT NULL CHECK (start_confirmed IN (0, 1))
 ) STRICT;
 
-CREATE INDEX ios_music_feedback_dispatch ON ios_music_feedback_outbox(scope, state, occurredAt);
+CREATE INDEX idx_ios_music_feedback_dispatch ON ios_music_feedback_outbox(scope, state, occurred_at);
 
 CREATE TABLE ios_music_images (
     resource TEXT NOT NULL,
@@ -2236,37 +1998,8 @@ CREATE TABLE ios_music_images (
     ready INTEGER NOT NULL CHECK (ready IN (0, 1))
 ) STRICT;
 
-CREATE UNIQUE INDEX ios_music_images_ready ON ios_music_images(resource) WHERE ready = 1;
-CREATE INDEX ios_music_images_age ON ios_music_images(updated_at);
-
-CREATE TABLE ios_music_lyrics (
-    song_id TEXT PRIMARY KEY NOT NULL,
-    source_key TEXT NOT NULL,
-    updated_at REAL NOT NULL,
-    bytes INTEGER NOT NULL CHECK (bytes > 0)
-) STRICT;
-
-CREATE TABLE ios_music_lyric_lines (
-    song_id TEXT NOT NULL REFERENCES ios_music_lyrics(song_id) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    line_index INTEGER NOT NULL,
-    time REAL NOT NULL CHECK (time >= 0),
-    end REAL NOT NULL CHECK (end >= time),
-    text TEXT NOT NULL,
-    translation TEXT NOT NULL,
-    PRIMARY KEY (song_id, position)
-) STRICT;
-
-CREATE TABLE ios_music_lyric_words (
-    song_id TEXT NOT NULL,
-    line_position INTEGER NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    time REAL NOT NULL,
-    duration REAL NOT NULL CHECK (duration >= 0),
-    text TEXT NOT NULL,
-    PRIMARY KEY (song_id, line_position, position),
-    FOREIGN KEY (song_id, line_position) REFERENCES ios_music_lyric_lines(song_id, position) ON DELETE CASCADE
-) STRICT;
+CREATE UNIQUE INDEX idx_ios_music_images_ready ON ios_music_images(resource) WHERE ready = 1;
+CREATE INDEX idx_ios_music_images_age ON ios_music_images(updated_at);
 
 CREATE TABLE ios_music_audio_files (
     cache_key TEXT PRIMARY KEY NOT NULL CHECK (length(cache_key) = 64),
@@ -2301,5 +2034,5 @@ CREATE TABLE ios_music_audio_files (
     protected INTEGER NOT NULL CHECK (protected IN (0, 1))
 ) STRICT;
 
-CREATE INDEX ios_music_audio_files_song ON ios_music_audio_files(scope, song_id, last_played_at);
-CREATE INDEX ios_music_audio_files_age ON ios_music_audio_files(expires_at);
+CREATE INDEX idx_ios_music_audio_files_song ON ios_music_audio_files(scope, song_id, last_played_at);
+CREATE INDEX idx_ios_music_audio_files_age ON ios_music_audio_files(expires_at);

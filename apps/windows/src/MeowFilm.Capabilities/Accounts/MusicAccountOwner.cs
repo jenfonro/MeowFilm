@@ -183,8 +183,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             finally { Leave(isPhysical: true); }
         }
     }
-    private async Task<AccountDocument> ReadDocument(CancellationToken token, string? platform = null) =>
-        AccountDocument.Decode(await store.ReadAsync(platform, token).ConfigureAwait(false));
+    private Task<AccountSnapshot> ReadDocument(CancellationToken token, string? platform = null) =>
+        store.ReadAsync(platform, token);
     private Task<StoredAccount> Load(string platform, CancellationToken token) =>
         DiskAsync(async () => (await ReadDocument(token, platform).ConfigureAwait(false)).Get(platform), token);
 
@@ -262,10 +262,17 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 ["platform"] = platform, ["generation"] = value.Generation,
                 ["state"] = revoked ? "revoked" : value.Cookie is null ? "none" :
                     state.Verified is { } verified && Same(verified, value) ? "verified" : "saved",
-                ["profile"] = revoked ? null : AccountDocument.ProfileNode(value.Profile),
+                ["profile"] = revoked ? null : ProfileNode(value.Profile),
                 ["validatedAt"] = revoked ? null : value.ValidatedAt
             };
         }
+    }
+    private static JsonObject? ProfileNode(MusicAccountProfile? profile)
+    {
+        if (profile is null) return null;
+        var node = new JsonObject { ["platform"] = profile.Platform, ["userId"] = profile.UserId, ["displayName"] = profile.DisplayName };
+        if (profile.Avatar is not null) node["avatar"] = profile.Avatar;
+        return node;
     }
     private async Task<JsonObject> List(CancellationToken token, bool awaitPhysical = false)
     {
@@ -335,31 +342,30 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             writeToken.ThrowIfCancellationRequested();
             var document = await ReadDocument(writeToken, op.Platform).ConfigureAwait(false);
             Guard(op);
-            byte[] bytes = document.Replace(op.Platform, before, next);
+            var current = document.Get(op.Platform);
+            AccountRules.Require(current.Generation == before.Generation &&
+                current.ValueFingerprint == before.ValueFingerprint, "STORAGE_CONFLICT");
+            AccountRules.Require(next.Generation == current.Generation + 1 && next.Generation <= AccountRules.MaxInteger, "LIMIT");
+            lock (gate)
+            {
+                Guard(op);
+                writeToken.ThrowIfCancellationRequested();
+                states[op.Platform].Uncertain = true;
+                op.Admitted = true;
+            }
             try
             {
-                lock (gate)
-                {
-                    Guard(op);
-                    writeToken.ThrowIfCancellationRequested();
-                    states[op.Platform].Uncertain = true;
-                    op.Admitted = true;
-                }
-                StorageRevision actual;
-                try
-                {
-                    actual = await store.WriteAsync(bytes, document.Revision, writeToken).ConfigureAwait(false);
-                    AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
-                }
-                catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
-                {
-                    lock (gate) if (states[op.Platform].Epoch == op.Epoch) states[op.Platform].Uncertain = false;
-                    throw new MusicAccountException("STORAGE_CONFLICT");
-                }
-                catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
-                return document.Get(op.Platform);
+                var (committed, actual) = await store.ReplaceAsync(op.Platform, before, next, document.Revision, writeToken).ConfigureAwait(false);
+                AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
+                return committed;
             }
-            finally { CryptographicOperations.ZeroMemory(bytes); }
+            catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
+            {
+                lock (gate) if (states[op.Platform].Epoch == op.Epoch) states[op.Platform].Uncertain = false;
+                throw new MusicAccountException("STORAGE_CONFLICT");
+            }
+            catch (MusicAccountException) { throw; }
+            catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
         }, writeToken);
         try
         {

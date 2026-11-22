@@ -8,12 +8,12 @@ App 原生 owner 使用同一 `NativeDatabase`，将以下配置写入规范化�
 
 | 通知块 | 数据表/关系 | 内容与 owner |
 | --- | --- | --- |
-| `cat.sources` | `windows_cat_settings` 及子表 | 网关选项与猫源来源意图；原生 owner |
-| `pan.accounts` | `windows_pan_accounts` | provider 单行凭据与 account/row revision；原生 owner |
-| `tmdb` | `windows_tmdb`、`windows_tmdb_settings` | typed 设置字段；原生 owner |
-| `douban` | `windows_douban`、`windows_douban_settings` | typed 设置字段；原生 owner |
-| `film.rules` | `windows_film_rules` 及规则子表 | 分组规则与排序关系；原生 owner |
-| `film.preferences` | `windows_film_preferences` 及列表子表 | typed 偏好与有序项；原生 owner |
+| `cat.sources` | `cat_settings`、`cat_providers`、`cat_mappings`、`cat_mapping_aliases`、`cat_scripts` | 网关选项与猫源来源意图；原生 owner（`Film/Storage/CatSourceSettingsStore.cs`） |
+| `pan.accounts` | `pan_accounts`、`owner_revisions` | provider 单行凭据与 account/row revision；原生 owner（`Pan/Storage/PanCredentialRepository.cs`） |
+| `tmdb` | `tmdb_settings` | typed 设置字段；原生 owner（`Film/Storage/FilmMetadataSettingsStore.cs`） |
+| `douban` | `douban_settings` | typed 设置字段；原生 owner（`Film/Storage/FilmMetadataSettingsStore.cs`） |
+| `film.rules` | `film_rule_groups`、`film_rules` | 分组规则与顺序行；原生 owner（`Film/Storage/FilmRulesStore.cs`） |
+| `film.preferences` | `film_preferences`、`film_preference_items` | typed 偏好与有序项；原生 owner（`Film/Storage/FilmPreferencesStore.cs`） |
 
 凭据在所属业务表中纯明文保存；不使用 DPAPI、Keychain、应用层加密或独立凭据存储。密码、Cookie、Token 不进入通知、日志或第二份运行器设置副本。没有运行器消费者的纯原生设置不发送通知。
 

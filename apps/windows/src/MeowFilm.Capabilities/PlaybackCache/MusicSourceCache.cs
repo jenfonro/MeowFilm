@@ -136,11 +136,9 @@ internal sealed class MusicSourceCache(IStorageDatabase database, TimeProvider? 
             {
                 long now = Now;
                 var current = new JsonObject { ["urls"] = new JsonObject(), ["pointers"] = new JsonObject() };
-                var previous = new Dictionary<string, JsonObject?>();
                 foreach (var kind in new[] { "urls", "pointers" })
                 {
-                    var row = PlaybackCacheRecords.Sources.Read(db, [scope, song, kind]);
-                    previous.Add(kind, row);
+                    var row = PlaybackSourceCacheStore.Read(db, scope, song, kind);
                     if (row is null || row["at"]!.GetValue<long>() > now || row["at"]!.GetValue<long>() <= now - HistoryTtl ||
                         kind == "urls" && row["until"]!.GetValue<long>() <= now) continue;
                     bool hidden;
@@ -170,13 +168,13 @@ internal sealed class MusicSourceCache(IStorageDatabase database, TimeProvider? 
                             if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
                             value["storedBytes"] = bytes;
                         }
-                        PlaybackCacheRecords.Sources.Save(db, value, previous[kind], [scope, song, kind]);
+                        PlaybackSourceCacheStore.Save(db, scope, song, kind, value);
                     }
                 Trim(db, now);
                 return result;
             }
             var result = write ? await database.WriteAsync(Apply, token, 65536).ConfigureAwait(false) :
-                await database.ReadAsync(Apply, token).ConfigureAwait(false);
+                await database.ReadSnapshotAsync(Apply, token).ConfigureAwait(false);
             if (write && create && changedEntry)
             {
                 lock (gate) { invalidated.Remove((scope, song)); rejected.RemoveWhere(key => key.Scope == scope && key.Song == song); }
@@ -188,14 +186,14 @@ internal sealed class MusicSourceCache(IStorageDatabase database, TimeProvider? 
     }
     private static void Trim(DatabaseSession db, long now)
     {
-        db.Execute("DELETE FROM windows_playback_source WHERE at<=$expired OR at>$now OR until<=$now", ("$expired", now - HistoryTtl), ("$now", now));
-        db.Execute("DELETE FROM windows_playback_source WHERE account_scope IN (SELECT account_scope FROM windows_playback_source GROUP BY account_scope ORDER BY max(at) DESC LIMIT -1 OFFSET $limit)", ("$limit", MaximumScopes));
+        db.Execute("DELETE FROM windows_music_playback_sources WHERE updated_at<=$expired OR updated_at>$now OR expires_until<=$now", ("$expired", now - HistoryTtl), ("$now", now));
+        db.Execute("DELETE FROM windows_music_playback_sources WHERE account_scope IN (SELECT account_scope FROM windows_music_playback_sources GROUP BY account_scope ORDER BY max(updated_at) DESC LIMIT -1 OFFSET $limit)", ("$limit", MaximumScopes));
         foreach (var (kind, limit) in new[] { ("urls", 50), ("pointers", 200) })
-            foreach (var scope in db.Query("SELECT DISTINCT account_scope FROM windows_playback_source", row => row.GetString(0)))
-                db.Execute("DELETE FROM windows_playback_source WHERE rowid IN (SELECT rowid FROM windows_playback_source WHERE account_scope=$scope AND entry_kind=$kind ORDER BY at DESC,song_id LIMIT -1 OFFSET $limit)",
+            foreach (var scope in db.Query("SELECT DISTINCT account_scope FROM windows_music_playback_sources", row => row.GetString(0)))
+                db.Execute("DELETE FROM windows_music_playback_sources WHERE rowid IN (SELECT rowid FROM windows_music_playback_sources WHERE account_scope=$scope AND entry_kind=$kind ORDER BY updated_at DESC,song_id LIMIT -1 OFFSET $limit)",
                     ("$scope", scope), ("$kind", kind), ("$limit", limit));
-        while (db.Scalar<long>("SELECT coalesce(sum(storedBytes),0) FROM windows_playback_source") > MaximumBytes)
-            db.Execute("DELETE FROM windows_playback_source WHERE rowid=(SELECT rowid FROM windows_playback_source ORDER BY at,account_scope,song_id LIMIT 1)");
+        while (db.Scalar<long>("SELECT coalesce(sum(stored_bytes),0) FROM windows_music_playback_sources") > MaximumBytes)
+            db.Execute("DELETE FROM windows_music_playback_sources WHERE rowid=(SELECT rowid FROM windows_music_playback_sources ORDER BY updated_at,account_scope,song_id LIMIT 1)");
     }
 
     internal static long? ValidateCandidate(JsonElement info, string scope, string song, string signature)

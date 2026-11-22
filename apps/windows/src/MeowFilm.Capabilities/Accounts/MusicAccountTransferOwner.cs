@@ -150,11 +150,13 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
     {
         CheckTransferBaseline(platform, epoch); token.ThrowIfCancellationRequested();
         var document = await ReadDocument(token).ConfigureAwait(false);
+        var current = document.Get(platform);
+        AccountRules.Require(current.Generation == before.Generation &&
+            current.ValueFingerprint == before.ValueFingerprint, "STORAGE_CONFLICT");
         AccountRules.Require(before.Generation < AccountRules.MaxInteger, "LIMIT");
         var next = new StoredAccount { Generation = before.Generation + 1, Cookie = cookie,
             Profile = observation.Profile, Scope = Guid.NewGuid().ToString("D"),
             ValidatedAt = clock.GetUtcNow().ToUnixTimeMilliseconds() };
-        byte[] bytes = document.Replace(platform, before, next);
         bool admitted = false;
         try
         {
@@ -164,7 +166,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
                 states[platform].Uncertain = true; admitted = true;
             }
             // Once admitted, settle the physical write/readback. Cancellation never invents a failed receipt.
-            var actual = await store.WriteAsync(bytes, document.Revision, CancellationToken.None).ConfigureAwait(false);
+            var (_, actual) = await store.ReplaceAsync(platform, before, next, document.Revision, CancellationToken.None).ConfigureAwait(false);
             AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
             var readback = await ReadDocument(CancellationToken.None).ConfigureAwait(false);
             AccountRules.Require(readback.Revision == actual, "COMMIT_UNKNOWN");
@@ -197,6 +199,5 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
             if (admitted) { Notify(platform); throw new MusicAccountException("COMMIT_UNKNOWN"); }
             throw;
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
     }, token);
 }

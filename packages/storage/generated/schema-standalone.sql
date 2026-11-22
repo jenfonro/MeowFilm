@@ -162,25 +162,60 @@ CREATE TABLE source_installation_actions (
 
 CREATE TABLE source_definitions (
     installation_id TEXT PRIMARY KEY NOT NULL REFERENCES source_installations(installation_id) ON DELETE CASCADE,
-    bookSourceName TEXT, bookSourceUrl TEXT, bookSourceGroup TEXT,
-    bookSourceComment TEXT, bookUrlPattern TEXT, searchUrl TEXT, exploreUrl TEXT,
-    loginUrl TEXT, loginCheckJs TEXT, jsLib TEXT, coverDecodeJs TEXT,
-    concurrentRate TEXT, header TEXT, html TEXT,
-    bookSourceType INTEGER, weight REAL, respondTime REAL, lastUpdateTime REAL,
-    enabledCookieJar INTEGER CHECK (enabledCookieJar IN (0, 1))
+    book_source_name TEXT,
+    book_source_url TEXT,
+    book_source_group TEXT,
+    book_source_comment TEXT,
+    book_url_pattern TEXT,
+    search_url TEXT,
+    explore_url TEXT,
+    login_url TEXT,
+    login_check_js TEXT,
+    js_lib TEXT,
+    cover_decode_js TEXT,
+    concurrent_rate TEXT,
+    header TEXT,
+    html TEXT,
+    book_source_type INTEGER,
+    weight REAL,
+    respond_time REAL,
+    last_update_time REAL,
+    enabled_cookie_jar INTEGER CHECK (enabled_cookie_jar IN (0, 1))
 ) STRICT;
 
 CREATE TABLE source_definition_rules (
     installation_id TEXT NOT NULL REFERENCES source_installations(installation_id) ON DELETE CASCADE,
     rule_group TEXT NOT NULL CHECK (rule_group IN ('ruleSearch', 'ruleExplore', 'ruleBookInfo', 'ruleToc', 'ruleContent')),
     encoded INTEGER NOT NULL CHECK (encoded IN (0, 1)),
-    bookList TEXT, name TEXT, author TEXT, kind TEXT, wordCount TEXT, lastChapter TEXT,
-    intro TEXT, coverUrl TEXT, bookUrl TEXT, tocUrl TEXT, init TEXT,
-    chapterList TEXT, chapterName TEXT, chapterUrl TEXT, nextTocUrl TEXT,
-    isReverse TEXT, reverseToc TEXT, updateTime TEXT, preUpdateJs TEXT,
-    content TEXT, nextContentUrl TEXT, title TEXT, replaceRegex TEXT,
-    sourceRegex TEXT, webJs TEXT, payAction TEXT, imageStyle TEXT,
-    imageDecode TEXT, imageDecrypt TEXT,
+    book_list TEXT,
+    name TEXT,
+    author TEXT,
+    kind TEXT,
+    word_count TEXT,
+    last_chapter TEXT,
+    intro TEXT,
+    cover_url TEXT,
+    book_url TEXT,
+    toc_url TEXT,
+    init TEXT,
+    chapter_list TEXT,
+    chapter_name TEXT,
+    chapter_url TEXT,
+    next_toc_url TEXT,
+    is_reverse TEXT,
+    reverse_toc TEXT,
+    update_time TEXT,
+    pre_update_js TEXT,
+    content TEXT,
+    next_content_url TEXT,
+    title TEXT,
+    replace_regex TEXT,
+    source_regex TEXT,
+    web_js TEXT,
+    pay_action TEXT,
+    image_style TEXT,
+    image_decode TEXT,
+    image_decrypt TEXT,
     PRIMARY KEY (installation_id, rule_group)
 ) STRICT;
 
@@ -238,30 +273,41 @@ CREATE TABLE source_private_kv_entries (
 
 CREATE INDEX idx_source_private_kv_installation ON source_private_kv_entries(installation_id);
 
--- Reader synchronous source.get/put scope (separate from asynchronous cache KV).
+-- Reader synchronous source.get/put scope (UTF-16LE BLOBs preserve unpaired JS surrogates).
 CREATE TABLE source_reader_state (
     installation_id TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    login_header TEXT,
-    login_info TEXT,
-    variable TEXT
+    variable BLOB CHECK (length(variable) % 2 = 0)
 ) STRICT;
 
 CREATE TABLE source_reader_value_nodes (
     installation_id TEXT NOT NULL REFERENCES source_reader_state(installation_id) ON DELETE CASCADE,
-    scope_name TEXT NOT NULL CHECK (scope_name IN ('values', 'books')),
-    entry_key TEXT NOT NULL,
+    entry_key BLOB NOT NULL CHECK (length(entry_key) % 2 = 0),
     node_id INTEGER NOT NULL CHECK (node_id >= 0),
     parent_id INTEGER,
-    prop_key TEXT,
-    item_index INTEGER,
+    prop_key BLOB CHECK (length(prop_key) % 2 = 0),
+    item_index INTEGER CHECK (item_index >= 0),
     kind TEXT NOT NULL CHECK (kind IN ('null', 'boolean', 'integer', 'real', 'number_text', 'text', 'array', 'object')),
     bool_value INTEGER CHECK (bool_value IN (0, 1)),
     int_value INTEGER,
     real_value REAL,
-    text_value TEXT,
-    PRIMARY KEY (installation_id, scope_name, entry_key, node_id)
+    text_value ANY,
+    CHECK ((kind = 'boolean') = (bool_value IS NOT NULL)
+        AND (kind = 'integer') = (int_value IS NOT NULL)
+        AND (kind = 'real') = (real_value IS NOT NULL)),
+    CHECK (CASE kind
+        WHEN 'text' THEN typeof(text_value) = 'blob' AND length(text_value) % 2 = 0
+        WHEN 'number_text' THEN typeof(text_value) = 'text'
+        ELSE text_value IS NULL END),
+    CHECK (CASE WHEN node_id = 0 THEN parent_id IS NULL AND prop_key IS NULL AND item_index IS NULL
+        ELSE parent_id IS NOT NULL AND parent_id >= 0 AND parent_id < node_id AND (prop_key IS NULL) <> (item_index IS NULL) END),
+    PRIMARY KEY (installation_id, entry_key, node_id),
+    FOREIGN KEY (installation_id, entry_key, parent_id)
+        REFERENCES source_reader_value_nodes(installation_id, entry_key, node_id)
 ) STRICT;
+
+CREATE INDEX idx_source_reader_value_nodes_parent
+    ON source_reader_value_nodes(installation_id, entry_key, parent_id);
 
 CREATE TABLE source_private_kv_nodes (
     installation_id TEXT NOT NULL,
@@ -282,28 +328,28 @@ CREATE TABLE source_private_kv_nodes (
 ) STRICT;
 
 -- module: runtime/12_cat_runtime.sql
--- CatNode standalone gateway configuration and shared script installation state.
-CREATE TABLE cat_gateway_settings (
+-- Shared Cat gateway configuration (used by standalone runtime or native App owner) and CatNode script state.
+CREATE TABLE cat_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     port INTEGER NOT NULL CHECK (port BETWEEN 0 AND 65535)
 ) STRICT;
 
-CREATE TABLE cat_provider_entries (
-    provider_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
+CREATE TABLE cat_providers (
+    provider TEXT PRIMARY KEY NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
 ) STRICT;
 
 CREATE TABLE cat_mappings (
     position INTEGER PRIMARY KEY CHECK (position >= 0),
-    provider_id TEXT NOT NULL
+    provider TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE cat_mapping_aliases (
-    position INTEGER NOT NULL REFERENCES cat_mappings(position) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    mapping_position INTEGER NOT NULL REFERENCES cat_mappings(position) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
     alias TEXT NOT NULL,
-    PRIMARY KEY (position, ordinal)
+    PRIMARY KEY (mapping_position, position)
 ) STRICT;
 
 CREATE TABLE cat_installations (
@@ -382,26 +428,28 @@ CREATE TABLE cat_site_methods (
         REFERENCES cat_installation_sites(mode, installation_id, site_key) ON DELETE CASCADE
 ) STRICT;
 
--- module: runtime/13_pan_standalone.sql
--- Standalone Pan accounts (plaintext typed credentials).
-CREATE TABLE pan_standalone_accounts (
+-- module: runtime/13_pan.sql
+-- Unified Pan accounts (owned by standalone runtime or native App; owner-level CAS uses owner_revisions).
+CREATE TABLE pan_accounts (
     provider TEXT PRIMARY KEY NOT NULL CHECK (provider IN ('baidu', 'quark', 'uc', 'tianyi', 'yidong')),
-    revision INTEGER NOT NULL CHECK (revision BETWEEN 0 AND 9007199254740991),
+    account_revision INTEGER NOT NULL CHECK (account_revision BETWEEN 0 AND 9007199254740991),
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 0 AND 9007199254740991),
-    status TEXT,
     cookie TEXT,
     username TEXT,
     password TEXT,
     authorization TEXT,
-    refreshed_at_ms INTEGER CHECK (refreshed_at_ms IS NULL OR refreshed_at_ms >= 0)
+    refreshed_at_ms INTEGER CHECK (refreshed_at_ms IS NULL OR refreshed_at_ms BETWEEN 0 AND 9007199254740991),
+    CHECK (provider IN ('baidu', 'quark', 'uc', 'tianyi') OR cookie IS NULL),
+    CHECK (provider = 'tianyi' OR (username IS NULL AND password IS NULL)),
+    CHECK (provider = 'yidong' OR (authorization IS NULL AND refreshed_at_ms IS NULL))
 ) STRICT;
 
-INSERT INTO pan_standalone_accounts(provider, revision, row_revision) VALUES
+INSERT INTO pan_accounts(provider, account_revision, row_revision) VALUES
     ('baidu', 0, 0), ('quark', 0, 0), ('uc', 0, 0), ('tianyi', 0, 0), ('yidong', 0, 0);
 
--- module: runtime/14_metadata_standalone.sql
--- Standalone TMDB and Douban settings (plaintext typed credentials).
-CREATE TABLE metadata_standalone_tmdb (
+-- module: runtime/14_metadata_settings.sql
+-- Unified TMDB and Douban settings (owned by standalone runtime or native App; owner-level CAS uses owner_revisions).
+CREATE TABLE tmdb_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     api_base TEXT NOT NULL,
     image_base TEXT NOT NULL,
@@ -410,10 +458,10 @@ CREATE TABLE metadata_standalone_tmdb (
     language TEXT NOT NULL,
     region TEXT NOT NULL,
     include_adult INTEGER NOT NULL CHECK (include_adult IN (0, 1)),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
-CREATE TABLE metadata_standalone_douban (
+CREATE TABLE douban_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     api_base TEXT NOT NULL,
     search_base TEXT NOT NULL,
@@ -421,7 +469,7 @@ CREATE TABLE metadata_standalone_douban (
     api_proxy TEXT NOT NULL,
     image_proxy TEXT NOT NULL,
     cookie TEXT NOT NULL,
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
 ) STRICT;
 
 -- module: runtime/15_music_anonymous.sql
@@ -436,6 +484,8 @@ CREATE TABLE music_anonymous_wy_cookies (
     cookie_value TEXT NOT NULL,
     singleton INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE
 ) STRICT;
+
+CREATE INDEX idx_music_anonymous_wy_cookies_singleton ON music_anonymous_wy_cookies(singleton);
 
 CREATE TABLE music_anonymous_kg (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE,
@@ -463,12 +513,12 @@ CREATE TABLE music_anonymous_tx (
 ) STRICT;
 
 -- module: runtime/20_film_playback.sql
--- Film playback library: preferences, history, manual matches, blocked sources, preview targets, groups, and standalone rules.
-CREATE TABLE film_preferences_state (
+-- Unified film playback preferences, rules, history, manual matches, blocked sources, preview targets, and groups.
+CREATE TABLE film_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ios_auto_prepare INTEGER NOT NULL CHECK (ios_auto_prepare IN (0, 1)),
     metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban')),
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
 ) STRICT;
 
 CREATE TABLE film_preference_items (
@@ -476,6 +526,25 @@ CREATE TABLE film_preference_items (
     position INTEGER NOT NULL CHECK (position >= 0),
     item_value TEXT NOT NULL,
     PRIMARY KEY (list_kind, position)
+) STRICT;
+
+CREATE TABLE film_rule_groups (
+    group_name TEXT PRIMARY KEY NOT NULL CHECK (group_name IN ('episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules')),
+    row_revision INTEGER NOT NULL DEFAULT 0 CHECK (row_revision BETWEEN 0 AND 9007199254740991),
+    overridden INTEGER NOT NULL DEFAULT 0 CHECK (overridden IN (0, 1))
+) STRICT;
+
+INSERT INTO film_rule_groups(group_name) VALUES
+    ('episodeCleanRegexRules'), ('episodeRules'), ('movieRules'), ('aggregateRegexRules');
+
+CREATE TABLE film_rules (
+    group_name TEXT NOT NULL REFERENCES film_rule_groups(group_name) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    pattern TEXT NOT NULL,
+    replacement TEXT,
+    flags TEXT,
+    PRIMARY KEY (group_name, position),
+    CHECK (group_name IN ('episodeRules', 'movieRules') OR (replacement IS NULL AND flags IS NULL))
 ) STRICT;
 
 CREATE TABLE film_history (
@@ -607,28 +676,8 @@ CREATE TABLE film_group_members (
 
 CREATE INDEX idx_film_group_members_lookup ON film_group_members(member_identity);
 
--- Standalone film rules
-CREATE TABLE film_standalone_rule_groups (
-    group_name TEXT PRIMARY KEY NOT NULL CHECK (group_name IN ('episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules')),
-    row_revision INTEGER NOT NULL DEFAULT 0 CHECK (row_revision BETWEEN 0 AND 9007199254740991),
-    overridden INTEGER NOT NULL DEFAULT 0 CHECK (overridden IN (0, 1))
-) STRICT;
-
-INSERT INTO film_standalone_rule_groups(group_name) VALUES
-    ('episodeCleanRegexRules'), ('episodeRules'), ('movieRules'), ('aggregateRegexRules');
-
-CREATE TABLE film_standalone_rule_entries (
-    group_name TEXT NOT NULL REFERENCES film_standalone_rule_groups(group_name) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    pattern TEXT NOT NULL,
-    replacement TEXT,
-    flags TEXT,
-    PRIMARY KEY (group_name, position),
-    CHECK (group_name IN ('episodeRules', 'movieRules') OR (replacement IS NULL AND flags IS NULL))
-) STRICT;
-
 -- module: runtime/21_metadata_cache.sql
--- TMDB and Douban component-level metadata cache.
+-- TMDB and Douban component-level metadata cache (dynamic external upstream responses stored as bounded typed value trees).
 CREATE TABLE metadata_cache_entries (
     cache_key TEXT PRIMARY KEY NOT NULL,
     provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'douban')),
@@ -656,125 +705,9 @@ CREATE TABLE metadata_cache_components (
     PRIMARY KEY (cache_key, component_name)
 ) STRICT;
 
--- Normalized provider entities; unknown upstream fields use metadata_cache_extensions.
-CREATE TABLE metadata_cache_entities (
+CREATE TABLE metadata_cache_value_nodes (
     cache_key TEXT NOT NULL REFERENCES metadata_cache_entries(cache_key) ON DELETE CASCADE,
     slot_name TEXT NOT NULL CHECK (slot_name IN ('base', 'summary')),
-    entity_id INTEGER NOT NULL CHECK (entity_id >= 0),
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('object', 'array')),
-    id_kind TEXT CHECK (id_kind IN ('null', 'text', 'number', 'number_text')),
-    external_id TEXT,
-    presence_low INTEGER NOT NULL,
-    presence_high INTEGER NOT NULL,
-    field_title TEXT,
-    field_name TEXT,
-    field_original_title TEXT,
-    field_original_name TEXT,
-    field_overview TEXT,
-    field_intro TEXT,
-    field_status TEXT,
-    field_release_date TEXT,
-    field_first_air_date TEXT,
-    field_last_air_date TEXT,
-    field_air_date TEXT,
-    field_year TEXT,
-    field_poster_path TEXT,
-    field_backdrop_path TEXT,
-    field_still_path TEXT,
-    field_homepage TEXT,
-    field_imdb_id TEXT,
-    field_original_language TEXT,
-    field_media_type TEXT,
-    field_type TEXT,
-    field_character TEXT,
-    field_job TEXT,
-    field_department TEXT,
-    field_known_for_department TEXT,
-    field_profile_path TEXT,
-    field_gender_label TEXT,
-    field_iso_639_1 TEXT,
-    field_iso_3166_1 TEXT,
-    field_english_name TEXT,
-    field_file_path TEXT,
-    field_key TEXT,
-    field_site TEXT,
-    field_size TEXT,
-    field_aspect TEXT,
-    field_uri TEXT,
-    field_url TEXT,
-    field_subtype TEXT,
-    field_card_subtitle TEXT,
-    field_description TEXT,
-    field_subject_id TEXT,
-    field_episode_type TEXT,
-    field_production_code TEXT,
-    field_credit_id TEXT,
-    field_runtime INTEGER,
-    field_season_number INTEGER,
-    field_episode_number INTEGER,
-    field_episode_count INTEGER,
-    field_number_of_seasons INTEGER,
-    field_number_of_episodes INTEGER,
-    field_vote_count INTEGER,
-    field_budget INTEGER,
-    field_revenue INTEGER,
-    field_order INTEGER,
-    field_gender INTEGER,
-    field_width INTEGER,
-    field_height INTEGER,
-    field_page INTEGER,
-    field_total_pages INTEGER,
-    field_total_results INTEGER,
-    field_count INTEGER,
-    field_max INTEGER,
-    field_start INTEGER,
-    field_limit INTEGER,
-    field_vote_average REAL,
-    field_popularity REAL,
-    field_aspect_ratio REAL,
-    field_value REAL,
-    field_average REAL,
-    field_rating REAL,
-    field_adult INTEGER CHECK (field_adult IS NULL OR field_adult IN (0, 1)),
-    field_video INTEGER CHECK (field_video IS NULL OR field_video IN (0, 1)),
-    field_in_production INTEGER CHECK (field_in_production IS NULL OR field_in_production IN (0, 1)),
-    field_official INTEGER CHECK (field_official IS NULL OR field_official IN (0, 1)),
-    PRIMARY KEY (cache_key, slot_name, entity_id)
-) STRICT;
-
-CREATE TABLE metadata_cache_relations (
-    cache_key TEXT NOT NULL,
-    slot_name TEXT NOT NULL,
-    parent_id INTEGER NOT NULL,
-    relation_name TEXT NOT NULL,
-    relation_kind TEXT NOT NULL CHECK (relation_kind IN ('null', 'object', 'array')),
-    PRIMARY KEY (cache_key, slot_name, parent_id, relation_name),
-    FOREIGN KEY (cache_key, slot_name, parent_id)
-        REFERENCES metadata_cache_entities(cache_key, slot_name, entity_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE metadata_cache_members (
-    cache_key TEXT NOT NULL,
-    slot_name TEXT NOT NULL,
-    parent_id INTEGER NOT NULL,
-    relation_name TEXT NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    child_id INTEGER,
-    value_kind TEXT CHECK (value_kind IN ('null', 'text', 'boolean', 'real', 'number_text')),
-    text_value TEXT,
-    int_value INTEGER,
-    real_value REAL,
-    PRIMARY KEY (cache_key, slot_name, parent_id, relation_name, position),
-    FOREIGN KEY (cache_key, slot_name, parent_id, relation_name)
-        REFERENCES metadata_cache_relations(cache_key, slot_name, parent_id, relation_name) ON DELETE CASCADE,
-    FOREIGN KEY (cache_key, slot_name, child_id)
-        REFERENCES metadata_cache_entities(cache_key, slot_name, entity_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE metadata_cache_extensions (
-    cache_key TEXT NOT NULL,
-    slot_name TEXT NOT NULL,
-    entity_id INTEGER NOT NULL,
     node_id INTEGER NOT NULL CHECK (node_id >= 0),
     parent_id INTEGER,
     prop_key TEXT,
@@ -784,7 +717,5 @@ CREATE TABLE metadata_cache_extensions (
     int_value INTEGER,
     real_value REAL,
     text_value TEXT,
-    PRIMARY KEY (cache_key, slot_name, entity_id, node_id),
-    FOREIGN KEY (cache_key, slot_name, entity_id)
-        REFERENCES metadata_cache_entities(cache_key, slot_name, entity_id) ON DELETE CASCADE
+    PRIMARY KEY (cache_key, slot_name, node_id)
 ) STRICT;
