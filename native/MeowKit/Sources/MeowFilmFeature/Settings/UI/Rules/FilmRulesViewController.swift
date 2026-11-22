@@ -157,7 +157,8 @@ final class FilmRulePageViewController: FilmSettingsListController {
         runPageTask { [weak self] in
             guard let self else { return }
             do { try await owner.load(); render() }
-            catch { failure(error, retry: { [weak self] in self?.pageDidBecomeActive() }) }
+            catch is CancellationError { }
+            catch { if !Task.isCancelled { failure(error, retry: { [weak self] in self?.pageDidBecomeActive() }) } }
         }
     }
     override func pageDidBecomeVisible() { render(); startPendingTest() }
@@ -324,7 +325,10 @@ final class FilmRulePageViewController: FilmSettingsListController {
             do {
                 try await owner.restore(group)
                 try Task.checkCancellation()
-            } catch { failure(error, retry: { [weak self] in self?.restore() }) }
+            } catch is CancellationError {
+            } catch {
+                if !Task.isCancelled { failure(error, retry: { [weak self] in self?.restore() }) }
+            }
         }
     }
     override func pageDidBecomeHidden() { cancelTest() }

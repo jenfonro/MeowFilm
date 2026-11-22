@@ -61,7 +61,9 @@ open class SettingsFormViewController: PageViewController {
     }
 
     public func registerThemeable(_ item: any PageThemeable) {
-        formThemeables.append(WeakThemeable(item))
+        if !formThemeables.contains(where: { $0.value === item }) {
+            formThemeables.append(WeakThemeable(item))
+        }
         if isViewLoaded { item.applyTheme(theme) }
     }
 

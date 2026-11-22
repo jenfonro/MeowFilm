@@ -269,7 +269,9 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     }
 
     public func registerThemeable(_ item: any PageThemeable) {
-        themeables.append(WeakThemeable(value: item))
+        if !themeables.contains(where: { $0.value === item }) {
+            themeables.append(WeakThemeable(value: item))
+        }
         if isViewLoaded { item.applyTheme(theme) }
     }
 

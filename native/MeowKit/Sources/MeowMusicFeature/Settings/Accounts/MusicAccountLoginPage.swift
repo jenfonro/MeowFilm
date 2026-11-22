@@ -123,7 +123,6 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             state.selectMethod(method)
         }, for: .valueChanged)
         addBodyView(methodControl)
-        registerThemeable(methodControl)
     }
 
     private func buildQRView() {
@@ -510,6 +509,9 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         }
         guard let chosen else {
             throw DebugAPIError.notFound("Dialog action not found")
+        }
+        guard chosen.enabled else {
+            throw DebugAPIError.invalidState("Dialog action '\(chosen.label)' is disabled")
         }
         switch chosen.label {
         case "关闭":

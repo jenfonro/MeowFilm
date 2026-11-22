@@ -62,6 +62,7 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
     }
 
     public func registerThemeable(_ item: any PageThemeable) {
+        guard !themeables.contains(where: { $0.value === item }) else { return }
         themeables.append(WeakThemeable(value: item))
     }
 
@@ -107,8 +108,7 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
         if let text = input as? UITextField { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }
         if let text = input as? UITextView { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }
         input.accessibilityIdentifier = id; input.accessibilityLabel = label
-        registerThemeable(section)
-        if let container { addSection(section, to: container, theme: theme) }
+        if let container { registerThemeable(section); addSection(section, to: container, theme: theme) }
         else { addSection(section) }
         return input
     }

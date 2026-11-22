@@ -176,7 +176,6 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         profileRow.addArrangedSubview(infoStack)
         addBodyView(profileRow)
         addBodyView(profileDivider)
-        registerThemeable(profileDivider)
     }
 
     private func buildExpirySection() {
@@ -457,6 +456,9 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         }
         guard let chosen else {
             throw DebugAPIError.notFound("Dialog action not found")
+        }
+        guard chosen.enabled else {
+            throw DebugAPIError.invalidState("Dialog action '\(chosen.label)' is disabled")
         }
         switch chosen.label {
         case "关闭": actions.close()
