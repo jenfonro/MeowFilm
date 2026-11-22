@@ -107,7 +107,7 @@ final class MusicQualitySettingsViewController: SettingsListViewController {
                 accessory: .toggle(
                     isOn: state.enabled(id, spatial: spatial),
                     enabled: toggleEnabled,
-                    onChange: { [weak state] value in state?.setEnabled(id, value, spatial: self.spatial) }
+                    onChange: { [weak state, spatial = self.spatial] value in state?.setEnabled(id, value, spatial: spatial) }
                 ),
                 enabled: interactive,
                 canMove: interactive

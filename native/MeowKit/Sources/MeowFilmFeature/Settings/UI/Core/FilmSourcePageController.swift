@@ -23,7 +23,8 @@ class FilmSourcePageController: FilmSettingsListController {
     override func pageDidBecomeActive() {
         runPageTask { [weak self, service] in
             do { try await service.initialize() }
-            catch { self?.failure(error); return }
+            catch is CancellationError { return }
+            catch { if !Task.isCancelled { self?.failure(error) }; return }
             for await snapshot in await service.snapshots() {
                 guard !Task.isCancelled, let self else { return }
                 self.snapshot = snapshot

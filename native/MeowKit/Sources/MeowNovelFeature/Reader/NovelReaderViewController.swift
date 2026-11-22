@@ -379,7 +379,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             if elapsed >= max(3.5, 26 - settings.automaticSpeed * 2.25) { elapsed = 0; showPage(currentPage + 1, animated: true) }
         }
     }
-    deinit { displayLink?.invalidate(); for task in imageTasks.values { task.cancel() } }
+    deinit { displayLink?.invalidate(); backdropDecodeTask?.cancel(); for task in imageTasks.values { task.cancel() } }
 }
 
 @MainActor

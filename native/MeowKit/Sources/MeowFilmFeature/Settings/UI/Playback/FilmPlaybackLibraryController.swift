@@ -89,7 +89,8 @@ final class FilmPlaybackLibraryController: FilmSettingsListController {
             guard let self else { return }
             defer { task = nil }
             do { try await action(); update() }
-            catch { failure(error, retry: { [weak self] in self?.run(action) }) }
+            catch is CancellationError { }
+            catch { if !Task.isCancelled { failure(error, retry: { [weak self] in self?.run(action) }) } }
         }
     }
 }

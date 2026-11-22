@@ -43,6 +43,7 @@ struct FilmSearchResultsPresentation {
         nextIDs.reserveCapacity(visible.count); nextCards.reserveCapacity(visible.count)
         for card in visible {
             let id = Identifier(displayKey: Data(card.businessID.utf8))
+            guard nextCards[id] == nil else { continue }
             let previous = cards[id]
             let content: Content
             if let previous, previous.selection == card { content = previous.content }

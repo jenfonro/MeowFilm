@@ -123,7 +123,7 @@ final class FilmPanInterceptionViewController: FilmSettingsListController {
 
     private func load() {
         guard !busy else { return }
-        perform { [service] in try await service.readPanInterception() }
+        perform(cancellable: true) { [service] in try await service.readPanInterception() }
     }
 
     private func update() {
@@ -131,21 +131,23 @@ final class FilmPanInterceptionViewController: FilmSettingsListController {
             filmSwitchRow(provider.title, id: "film.panInterception.\(provider.rawValue)",
                           isOn: saved?[provider] ?? true, enabled: saved != nil && !busy) { [weak self] enabled in
                 guard let self, !busy else { return }
-                perform { [service] in try await service.savePanInterception(provider, enabled: enabled) }
+                perform(cancellable: false) { [service] in try await service.savePanInterception(provider, enabled: enabled) }
             }
         })]
         render()
     }
 
-    private func perform(_ operation: @escaping @Sendable () async throws -> [PanProviderID: Bool]) {
+    private func perform(cancellable: Bool, _ operation: @escaping @Sendable () async throws -> [PanProviderID: Bool]) {
         guard isPageActive, !busy else { return }
         busy = true; update()
-        Task { [weak self] in
+        let body: @MainActor () async -> Void = { [weak self] in
             guard let self else { return }
             defer { busy = false; update() }
             do { saved = try await operation() }
-            catch { failure(error, retry: { [weak self] in self?.load() }) }
+            catch is CancellationError { }
+            catch { if !Task.isCancelled && isPageActive { failure(error, retry: { [weak self] in self?.load() }) } }
         }
+        if cancellable { runPageTask(body) } else { Task { await body() } }
     }
 }
 

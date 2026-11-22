@@ -86,7 +86,8 @@ public final class NovelAppearanceViewController: NovelTablePage, PHPickerViewCo
         runPageTask { [weak self] in
             guard let self else { return }
             do { try await feature.saveSettings(next); draft = feature.local.settings; render() }
-            catch { draft = feature.local.settings; render(); enqueueError(error.localizedDescription) }
+            catch is CancellationError { }
+            catch { if !Task.isCancelled { draft = feature.local.settings; render(); enqueueError(error.localizedDescription) } }
         }
     }
     private func numeric(_ title: String, value: Double, key: WritableKeyPath<NovelReadingSettings, Double>, valid: @escaping (Double) -> Bool) -> Row {

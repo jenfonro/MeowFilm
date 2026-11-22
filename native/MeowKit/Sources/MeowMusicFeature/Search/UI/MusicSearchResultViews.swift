@@ -224,6 +224,11 @@ final class MusicSearchSectionHeaderCell: UITableViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        action = nil
+    }
+
     func configure(title: String, showsPlay: Bool, theme: PageTheme, action: @escaping () -> Void) {
         self.action = action
         titleLabel.text = title

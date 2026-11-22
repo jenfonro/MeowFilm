@@ -128,10 +128,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
 
             let accessory: SettingsListRow.Accessory
             if loading {
-                let spinner = UIActivityIndicatorView(style: .medium)
-                spinner.color = UIColor(theme.settings.muted)
-                spinner.accessibilityLabel = "读取账号"
-                spinner.startAnimating()
+                let spinner = MusicAccountLoadingSpinner(theme: theme, accessibilityLabel: "读取账号")
                 accessory = .custom(spinner)
             } else if let account = summary?.account {
                 if account.phase == .signedOut, account.canLogin {
@@ -181,10 +178,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             ),
         ]
         if transfer.busy {
-            let spinner = UIActivityIndicatorView(style: .medium)
-            spinner.color = UIColor(theme.settings.muted)
-            spinner.accessibilityLabel = "账号导入导出中"
-            spinner.startAnimating()
+            let spinner = MusicAccountLoadingSpinner(theme: theme, accessibilityLabel: "账号导入导出中")
             transferRows.append(SettingsListRow(
                 id: "music.accounts.transfer.busy",
                 title: "账号导入导出中",
@@ -425,6 +419,23 @@ private final class MusicAccountLoginHintLabel: UILabel, PageThemeable {
 
     func applyTheme(_ theme: PageTheme) {
         textColor = UIColor(theme.settings.accent)
+    }
+}
+
+@MainActor
+private final class MusicAccountLoadingSpinner: UIActivityIndicatorView, PageThemeable {
+    init(theme: PageTheme, accessibilityLabel: String) {
+        super.init(style: .medium)
+        self.accessibilityLabel = accessibilityLabel
+        applyTheme(theme)
+        startAnimating()
+    }
+
+    @available(*, unavailable)
+    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func applyTheme(_ theme: PageTheme) {
+        color = UIColor(theme.settings.muted)
     }
 }
 #endif

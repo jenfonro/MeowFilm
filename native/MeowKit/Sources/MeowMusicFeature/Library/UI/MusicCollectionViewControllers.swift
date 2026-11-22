@@ -123,9 +123,6 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         table.rowHeight = 72
         table.estimatedRowHeight = 72
         table.contentInset.bottom = 18
-        displayedTracks = currentTracks()
-        displayedTracksByRef = Dictionary(uniqueKeysWithValues: displayedTracks.map { ($0.ref, $0) })
-        rebuildDisplayedIndices()
         table.delegate = self
         table.register(MusicCollectionEditorTrackCell.self,
                        forCellReuseIdentifier: MusicCollectionEditorTrackCell.reuseIdentifier)
@@ -141,10 +138,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         }
         dataSource.owner = self
         dataSource.defaultRowAnimation = .none
-        var initialSnapshot = NSDiffableDataSourceSnapshot<Int, MusicReference>()
-        initialSnapshot.appendSections([0])
-        initialSnapshot.appendItems(displayedTracks.map(\.ref), toSection: 0)
-        dataSource.apply(initialSnapshot, animatingDifferences: false)
+        renderTracks()
         table.isEditing = localContent != nil
         table.allowsSelectionDuringEditing = true
         toolbar.onSelectAll = { [weak self] in self?.toggleAll() }
@@ -398,19 +392,21 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         }
         let oldByRef = displayedTracksByRef
         var nextByRef: [MusicReference: MusicRemoteTrack] = [:]
+        var uniqueTracks: [MusicRemoteTrack] = []
         var refs: [MusicReference] = []
         var toReconfigure: [MusicReference] = []
         var seen: Set<MusicReference> = []
         for track in next {
             guard seen.insert(track.ref).inserted else { continue }
             nextByRef[track.ref] = track
+            uniqueTracks.append(track)
             refs.append(track.ref)
             if let prev = oldByRef[track.ref], prev != track {
                 toReconfigure.append(track.ref)
             }
         }
-        let orderChanged = refs != displayedTracks.map(\.ref)
-        displayedTracks = next
+        let orderChanged = refs != displayedTracks.map(\.ref) || dataSource.snapshot().numberOfSections == 0
+        displayedTracks = uniqueTracks
         displayedTracksByRef = nextByRef
         guard orderChanged || !toReconfigure.isEmpty else { return }
         rebuildDisplayedIndices()

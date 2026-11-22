@@ -297,16 +297,26 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         guard isPageVisible || page?.sections.isEmpty != false else { return }
         let previousSections = sections
         let previousRows = rows
-        sections = page?.sections ?? []
+        var uniqueSections: [MusicPublicBrowseSection] = []
+        var seenSections: Set<String> = []
         rows = [:]
         var snapshot = NSDiffableDataSourceSnapshot<String, ItemID>()
-        for section in sections {
+        for section in page?.sections ?? [] {
+            guard seenSections.insert(section.id).inserted else { continue }
+            uniqueSections.append(section)
             snapshot.appendSections([section.id])
             let items = section.layout == .banner ? Array(section.items.prefix(1)) : section.items
-            let ids = items.map { ItemID(section: section.id, item: section.layout == .banner ? nil : $0.id) }
-            for (id, item) in zip(ids, items) { rows[id] = (section, item) }
+            var seenItems: Set<ItemID> = []
+            var ids: [ItemID] = []
+            for item in items {
+                let id = ItemID(section: section.id, item: section.layout == .banner ? nil : item.id)
+                guard seenItems.insert(id).inserted else { continue }
+                rows[id] = (section, item)
+                ids.append(id)
+            }
             snapshot.appendItems(ids, toSection: section.id)
         }
+        sections = uniqueSections
         let previous = dataSource.snapshot()
         let changedItems = Set(rows.keys.filter { id in
             guard let old = previousRows[id], let row = rows[id] else { return true }

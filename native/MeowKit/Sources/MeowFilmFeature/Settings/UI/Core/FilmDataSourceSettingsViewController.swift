@@ -82,7 +82,12 @@ public final class FilmDataSourceSettingsViewController: SettingsFormViewControl
             do {
                 if isTMDB { try await tmdb.load() } else { try await douban.load() }
                 render()
-            } catch { enqueueError(error.localizedDescription, retry: { [weak self] in self?.loadSelectedProvider() }) }
+            } catch is CancellationError {
+            } catch {
+                if !Task.isCancelled {
+                    enqueueError(error.localizedDescription, retry: { [weak self] in self?.loadSelectedProvider() })
+                }
+            }
         }
     }
 

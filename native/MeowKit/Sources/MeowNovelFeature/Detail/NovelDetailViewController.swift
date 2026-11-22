@@ -27,7 +27,9 @@ public final class NovelDetailViewController: PageViewController {
             guard let self else { return }
             runPageTask { [weak self] in
                 guard let self else { return }
-                do { try await feature.setShelf(book, present: !onShelf); render() } catch { enqueueError(error.localizedDescription) }
+                do { try await feature.setShelf(book, present: !onShelf); render() }
+                catch is CancellationError { }
+                catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
             }
         }, for: .touchUpInside)
         let buttons = UIStackView(arrangedSubviews: [shelf, read]); buttons.distribution = .fillEqually

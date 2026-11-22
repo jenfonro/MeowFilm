@@ -6,21 +6,30 @@ import MeowUI
 extension MusicCollectionViewController {
     func applyRows(_ next: [(id: RowID, row: Row)]) {
         let previous = rows
-        orderedRows = next
-        rows = Dictionary(uniqueKeysWithValues: next.map { ($0.id, $0.row) })
+        var deduped: [(id: RowID, row: Row)] = []
+        deduped.reserveCapacity(next.count)
+        var nextRows: [RowID: Row] = [:]
+        nextRows.reserveCapacity(next.count)
+        for entry in next {
+            guard nextRows[entry.id] == nil else { continue }
+            nextRows[entry.id] = entry.row
+            deduped.append(entry)
+        }
+        orderedRows = deduped
+        rows = nextRows
         var snapshot = NSDiffableDataSourceSnapshot<Int, RowID>()
         snapshot.appendSections([0])
-        snapshot.appendItems(next.map(\.id))
-        let changed = next.compactMap { value -> RowID? in
+        snapshot.appendItems(deduped.map(\.id))
+        let changed = deduped.compactMap { value -> RowID? in
             guard let old = previous[value.id] else { return nil }
             return old.track != value.row.track ||
                 old.filteredIndex != value.row.filteredIndex ||
                 old.originalIndex != value.row.originalIndex ? value.id : nil
         }
-        if dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers {
-            dataSource.apply(snapshot, animatingDifferences: false)
-        } else if !changed.isEmpty {
+        if !changed.isEmpty {
             snapshot.reconfigureItems(changed)
+        }
+        if dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
     }

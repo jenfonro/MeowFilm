@@ -170,7 +170,8 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
     }
 
     open func applySections(_ sections: [SettingsListSection], animated: Bool = false) {
-        currentSections = sections
+        var normalizedSections: [SettingsListSection] = []
+        normalizedSections.reserveCapacity(sections.count)
         var nextRows: [String: SettingsListRow] = [:]
         var nextMeta: [String: (first: Bool, last: Bool)] = [:]
         var nextSections: [String: SettingsListSection] = [:]
@@ -179,13 +180,22 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
         var toReconfigure: [String] = []
 
         for section in sections {
-            nextSections[section.id] = section
+            guard nextSections[section.id] == nil else { continue }
+            var dedupedRows: [SettingsListRow] = []
+            dedupedRows.reserveCapacity(section.rows.count)
+            for row in section.rows {
+                guard nextRows[row.id] == nil else { continue }
+                nextRows[row.id] = row
+                dedupedRows.append(row)
+            }
+            let normalized = SettingsListSection(id: section.id, title: section.title, rows: dedupedRows)
+            normalizedSections.append(normalized)
+            nextSections[section.id] = normalized
             snapshot.appendSections([section.id])
-            let count = section.rows.count
+            let count = dedupedRows.count
             var ids: [String] = []
             ids.reserveCapacity(count)
-            for (index, row) in section.rows.enumerated() {
-                nextRows[row.id] = row
+            for (index, row) in dedupedRows.enumerated() {
                 nextMeta[row.id] = (index == 0, index == count - 1)
                 ids.append(row.id)
                 if existingIDs.remove(row.id) != nil {
@@ -194,6 +204,7 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
             }
             snapshot.appendItems(ids, toSection: section.id)
         }
+        currentSections = normalizedSections
         rowsByID = nextRows
         sectionMetaByRowID = nextMeta
         sectionsByID = nextSections

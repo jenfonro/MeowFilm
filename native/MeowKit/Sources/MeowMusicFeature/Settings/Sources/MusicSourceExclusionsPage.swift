@@ -43,7 +43,8 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
 
     override func pageDidBecomeVisible() {
         super.pageDidBecomeVisible()
-        perform { try await self.state.reload() }
+        let state = self.state
+        perform { try await state.reload() }
     }
 
     private func perform(_ work: @escaping @MainActor () async throws -> Void) {
@@ -52,25 +53,28 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
         runPageTask { [weak self] in
             defer { self?.state.busy = false }
             do { try await work() }
+            catch is CancellationError { }
             catch { if !Task.isCancelled { self?.enqueueError(MusicServiceError.sanitized(error).localizedDescription) } }
         }
     }
 
     private func add() {
+        let state = self.state
         guard let track = state.model.queue.first(where: { $0.id == state.song })?.track,
               let service = state.service else { return }
         let provider = state.provider, platform = state.platform
         perform {
             try await service.excludeSource(for: track.ref, provider: provider, platform: platform)
-            try await self.state.reload()
+            try await state.reload()
         }
     }
 
     private func restore(_ id: String) {
         guard let service = state.service else { return }
+        let state = self.state
         perform {
             try await service.restoreSourceExclusion(id: id)
-            try await self.state.reload()
+            try await state.reload()
         }
     }
 
@@ -145,12 +149,9 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
             ]
         } else {
             exclusionRows = state.rows.map { row in
-                let restoreButton = UIButton(type: .system)
-                restoreButton.setTitle("恢复", for: .normal)
-                restoreButton.titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
-                restoreButton.setTitleColor(UIColor(interactive ? theme.settings.accent : theme.settings.muted), for: .normal)
-                restoreButton.isEnabled = interactive
-                restoreButton.addAction(UIAction { [weak self] _ in self?.restore(row.id) }, for: .touchUpInside)
+                let restoreButton = MusicExclusionRestoreButton(interactive: interactive, theme: theme) { [weak self] in
+                    self?.restore(row.id)
+                }
                 return SettingsListRow(
                     id: "music.exclusions.row.\(row.id)",
                     title: row.title + " — " + row.artist,
@@ -177,6 +178,29 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
 
     private func providerName(_ row: MusicSourceExclusion) -> String {
         row.provider.hasPrefix("official:") ? "官方音源" : state.scripts.first { $0.id == row.provider }?.name ?? row.provider
+    }
+}
+
+@MainActor
+private final class MusicExclusionRestoreButton: UIButton, PageThemeable {
+    private let interactive: Bool
+
+    init(interactive: Bool, theme: PageTheme, action: @escaping @MainActor () -> Void) {
+        self.interactive = interactive
+        super.init(frame: .zero)
+        setTitle("恢复", for: .normal)
+        titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
+        titleLabel?.adjustsFontForContentSizeCategory = true
+        isEnabled = interactive
+        addAction(UIAction { _ in action() }, for: .touchUpInside)
+        applyTheme(theme)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func applyTheme(_ theme: PageTheme) {
+        setTitleColor(UIColor(interactive ? theme.settings.accent : theme.settings.muted), for: .normal)
     }
 }
 #endif

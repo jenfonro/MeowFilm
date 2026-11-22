@@ -14,6 +14,7 @@ final class NovelSourceEditor: ManagementPageViewController {
     private lazy var tabsHeight = tabScroll.heightAnchor.constraint(equalToConstant: 46)
     private let panel = UIView()
     private let typeLabel = UILabel(), typeButton = UIButton(type: .system)
+    private var optionChecks: [UIButton] = []
     private var tabButtons: [UIButton] = [], indicators: [UIView] = [], separators: [UIView] = []
     private let saveButton = PageHeaderButton(image: ManagementIcon.save, accessibilityLabel: "保存") {}
     private var activeTab = 0, saving = false
@@ -43,7 +44,9 @@ final class NovelSourceEditor: ManagementPageViewController {
         } })
         controls.addArrangedSubview(typeButton)
         for (key, label) in [("enabled", "启用"), ("enabledExplore", "发现"), ("enabledCookieJar", "CookieJar")] {
-            controls.addArrangedSubview(ManagementFormView.check(label, value: draft.bool(key)) { [weak self] value in self?.draft.setBool(key, value) })
+            let check = ManagementFormView.check(label, value: draft.bool(key)) { [weak self] value in self?.draft.setBool(key, value) }
+            optionChecks.append(check)
+            controls.addArrangedSubview(check)
         }
         options.showsHorizontalScrollIndicator = false; options.addSubview(controls); controls.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([controls.leadingAnchor.constraint(equalTo: options.contentLayoutGuide.leadingAnchor, constant: 16), controls.trailingAnchor.constraint(equalTo: options.contentLayoutGuide.trailingAnchor, constant: -16), controls.topAnchor.constraint(equalTo: options.contentLayoutGuide.topAnchor, constant: 12), controls.bottomAnchor.constraint(equalTo: options.contentLayoutGuide.bottomAnchor, constant: -12), controls.heightAnchor.constraint(equalTo: options.frameLayoutGuide.heightAnchor, constant: -24)])
@@ -111,6 +114,7 @@ final class NovelSourceEditor: ManagementPageViewController {
         typeButton.configuration?.baseForegroundColor = UIColor(settings.ink)
         typeButton.configuration?.background.backgroundColor = UIColor(settings.input)
         for line in separators { line.backgroundColor = UIColor(settings.separator) }
+        for check in optionChecks { (check as? any PageThemeable)?.applyTheme(theme) }
         updateTabAppearance()
         form.applyTheme(theme)
     }
