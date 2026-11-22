@@ -94,7 +94,8 @@ internal static class MusicSongStore
     internal static void SaveIncremental(DatabaseSession db, MusicSongRecord next, MusicSongRecord? previous,
         string fingerprint, double? baselineDuration, string searchQuery)
     {
-        if (previous is null || !next.ScalarEquals(previous))
+        bool artistsChanged = previous is null || !next.ArtistNames.SequenceEqual(previous.ArtistNames, StringComparer.Ordinal);
+        if (previous is null || !next.ScalarEquals(previous) || artistsChanged)
         {
             db.Execute("""
                 INSERT INTO music_songs(
@@ -131,7 +132,7 @@ internal static class MusicSongStore
                 ("$fp", string.IsNullOrEmpty(fingerprint) ? null : fingerprint));
         }
 
-        if (previous is null || !next.ArtistNames.SequenceEqual(previous.ArtistNames, StringComparer.Ordinal))
+        if (artistsChanged)
         {
             int prefix = previous is null ? 0 : CommonPrefixLength(previous.ArtistNames, next.ArtistNames, StringComparer.Ordinal);
             if (previous is not null && prefix < previous.ArtistNames.Length)

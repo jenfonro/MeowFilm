@@ -42,7 +42,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
 
     private async Task Read()
     {
-        var (preferences, revision) = await database.ReadAsync(db =>
+        var (preferences, revision) = await database.ReadSnapshotAsync(db =>
         {
             var loadedPrefs = ReadFromDb(db) ?? MediaControlDefaults.Preferences;
             return (loadedPrefs, db.Revision(DocumentNamespace));

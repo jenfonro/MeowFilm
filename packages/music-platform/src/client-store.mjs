@@ -78,7 +78,7 @@ export function createAnonymousClientStore(dataRoot) {
   }
   async function commit(changes) {
     const gate = revision ? {sql:'UPDATE music_anonymous_state SET row_revision=row_revision+1 WHERE singleton=1 AND row_revision=?',
-      params:[revision],expectChanges:1} : {sql:'INSERT INTO music_anonymous_state VALUES(1,1)',expectChanges:1};
+      params:[revision],expectChanges:1} : {sql:'INSERT INTO music_anonymous_state(singleton,row_revision) VALUES(1,1)',expectChanges:1};
     await database.transaction([gate,...changes]); ++revision;
   }
   return {read,

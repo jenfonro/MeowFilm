@@ -1,4 +1,4 @@
-using System.Text.Json;
+using System.Text;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop.Artwork;
@@ -122,7 +122,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         }
         catch
         {
-            if (created is { } id) await database.ReadAsync(_ => { Files.Delete(id); return true; }).ConfigureAwait(false);
+            if (created is { } id) { try { Files.Delete(id); } catch { } }
             throw;
         }
         finally { writes.Release(); }
@@ -130,8 +130,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     internal async Task SaveLyricsAsync(string songId, string sourceKey, JsonArray lines, long epoch, CancellationToken token)
     {
         long now = Now;
-        var value = new JsonObject { ["sourceKey"] = sourceKey, ["lines"] = lines.DeepClone(), ["updatedAt"] = now };
-        int bytes = JsonSerializer.SerializeToUtf8Bytes(value).Length;
+        int bytes = EstimateLyricsBytes(sourceKey, lines);
         if (bytes > 512 * 1024) throw new DocumentStoreException(DocumentStoreError.Limit);
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
@@ -146,6 +145,28 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             lock (gate) { lyricVersion++; if (lyricEpoch == epoch) lyricsReadable = true; }
         }
         finally { writes.Release(); }
+    }
+    private static int EstimateLyricsBytes(string sourceKey, JsonArray lines)
+    {
+        int bytes = 48 + Encoding.UTF8.GetByteCount(sourceKey);
+        foreach (var item in lines)
+        {
+            if (item is not JsonObject line) continue;
+            bytes += 48;
+            if (line["text"] is JsonValue tv && tv.TryGetValue<string>(out var text)) bytes += Encoding.UTF8.GetByteCount(text);
+            if (line["translation"] is JsonValue trv && trv.TryGetValue<string>(out var tr)) bytes += 16 + Encoding.UTF8.GetByteCount(tr);
+            if (line["romanization"] is JsonValue rmv && rmv.TryGetValue<string>(out var rm)) bytes += 16 + Encoding.UTF8.GetByteCount(rm);
+            if (line["words"] is JsonArray words)
+            {
+                foreach (var wItem in words)
+                {
+                    if (wItem is not JsonObject word) continue;
+                    bytes += 32;
+                    if (word["text"] is JsonValue wv && wv.TryGetValue<string>(out var wt)) bytes += Encoding.UTF8.GetByteCount(wt);
+                }
+            }
+        }
+        return bytes;
     }
     private void Trim(DatabaseSession db)
     {

@@ -98,6 +98,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         EnqueueWrite(session =>
         {
             var started = DebugLog.IsEnabled ? Stopwatch.GetTimestamp() : 0L;
+            int beforeChanges = SQLitePCL.raw.sqlite3_total_changes(session.Connection.Handle);
             using var transaction = session.Connection.BeginTransaction();
             try
             {
@@ -106,7 +107,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 void Commit() { transaction.Commit(); committed = true; }
                 if (commit is null) Commit(); else commit(Commit);
                 if (!committed) throw new DocumentStoreException(DocumentStoreError.Conflict);
-                commits++;
+                if (SQLitePCL.raw.sqlite3_total_changes(session.Connection.Handle) != beforeChanges)
+                    commits++;
                 if (started != 0)
                 {
                     DebugLog.Trace(DebugCategories.Storage, "sqlite", "tx.commit",
@@ -589,6 +591,13 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                     {
                         try
                         {
+                            Exception? latched;
+                            lock (admission) latched = openError;
+                            if (latched is not null)
+                            {
+                                operation.Fail(latched);
+                                continue;
+                            }
                             if (operation.Exclusive)
                             {
                                 using var lease = EnterMaintenance(exclusive: true, wait: true);
@@ -679,6 +688,13 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 {
                     try
                     {
+                        Exception? latched;
+                        lock (admission) latched = openError;
+                        if (latched is not null)
+                        {
+                            operation.Fail(latched);
+                            continue;
+                        }
                         operation.Execute(new(readConnection!, null, readStatements));
                     }
                     catch (Exception error) { operation.Fail(error); }
@@ -702,88 +718,109 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         if (productRoot is not null) directory = new DatabaseDirectory(Path.Combine(productRoot, "storage-v1"), "meowfilm.sqlite3");
         using var initialize = directory is null ? null : EnterLock("initialize.lock", exclusive: true, wait: true);
         directory?.OpenDatabase();
-        using var validation = EnterMaintenance(exclusive: false, wait: true);
-        writeConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+        bool schemaCommitted = false;
+        try
         {
-            DataSource = directory?.DatabasePath ?? ":memory:", Pooling = false,
-            Mode = directory is null ? SqliteOpenMode.Memory : SqliteOpenMode.ReadWrite,
-            Cache = SqliteCacheMode.Private, DefaultTimeout = 5
-        }.ToString());
-        writeConnection.Open();
-        if (SQLitePCL.raw.sqlite3_db_config(writeConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
-            throw new DocumentStoreException(DocumentStoreError.Storage);
-        var session = new DatabaseSession(writeConnection);
-        SQLiteVersion = session.Scalar<string>("SELECT sqlite_version()")!;
-        SQLiteSourceId = session.Scalar<string>("SELECT sqlite_source_id()")!;
-        SQLiteCompileOptions = session.Query("PRAGMA compile_options", row => row.GetString(0));
-        if (directory is not null && !SafeWalVersion(SQLiteVersion))
-            throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
-        session.ExecuteScript(
-            "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
-            "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
-        long identity = session.Scalar<long>("PRAGMA application_id");
-        long version = session.Scalar<long>("PRAGMA user_version");
-        long tableCount = session.Scalar<long>("SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
-        if (identity == 0 && version == 0 && tableCount == 0)
-        {
-            if (directory is { Created: false }) throw new DocumentStoreException(DocumentStoreError.Corrupt);
-            // The current namespace starts empty. No probes, upgrades or conversions.
-            session.Execute("PRAGMA auto_vacuum=INCREMENTAL");
-            using var transaction = writeConnection.BeginTransaction();
-            var creating = new DatabaseSession(writeConnection, transaction);
-            creating.ExecuteScript(schema.Sql);
-            creating.Execute("INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,$hash)", ("$hash", schema.Hash));
-            creating.ExecuteScript($"PRAGMA application_id={ApplicationId}; PRAGMA user_version={FormatVersion};");
-            transaction.Commit();
-        }
-        else if (identity != ApplicationId || version != FormatVersion)
-            throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
-        StorageSchema.Verify(session, schema);
-        string mode = session.Scalar<string>("PRAGMA journal_mode=WAL")!;
-        if (mode != (directory is null ? "memory" : "wal") ||
-            session.Scalar<long>("PRAGMA synchronous") != 2 ||
-            session.Scalar<long>("PRAGMA foreign_keys") != 1 ||
-            session.Scalar<long>("PRAGMA trusted_schema") != 0 ||
-            session.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
-            session.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
-            session.Scalar<long>("PRAGMA temp_store") != 2 ||
-            session.Scalar<long>("PRAGMA cache_size") != -16384 ||
-            session.Scalar<long>("PRAGMA busy_timeout") != 5000)
-            throw new DocumentStoreException(DocumentStoreError.Storage);
-        // Attach this long-lived connection to the WAL before another process
-        // can become its only shared-memory participant and exit.
-        _ = session.Scalar<long>("SELECT count(*) FROM storage_identity");
-        directory?.Check();
-        writeStatements = new PreparedStatementCache(writeConnection, PreparedStatementCacheCapacity);
-
-        if (directory is not null)
-        {
-            readConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+            using var validation = EnterMaintenance(exclusive: false, wait: true);
+            writeConnection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = directory.DatabasePath, Pooling = false,
-                Mode = SqliteOpenMode.ReadOnly,
+                DataSource = directory?.DatabasePath ?? ":memory:", Pooling = false,
+                Mode = directory is null ? SqliteOpenMode.Memory : SqliteOpenMode.ReadWrite,
                 Cache = SqliteCacheMode.Private, DefaultTimeout = 5
             }.ToString());
-            readConnection.Open();
-            if (SQLitePCL.raw.sqlite3_db_config(readConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
+            writeConnection.Open();
+            if (SQLitePCL.raw.sqlite3_db_config(writeConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
                 throw new DocumentStoreException(DocumentStoreError.Storage);
-            var readSession = new DatabaseSession(readConnection);
-            readSession.ExecuteScript(
+            var session = new DatabaseSession(writeConnection);
+            SQLiteVersion = session.Scalar<string>("SELECT sqlite_version()")!;
+            SQLiteSourceId = session.Scalar<string>("SELECT sqlite_source_id()")!;
+            SQLiteCompileOptions = session.Query("PRAGMA compile_options", row => row.GetString(0));
+            if (directory is not null && !SafeWalVersion(SQLiteVersion))
+                throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
+            session.ExecuteScript(
                 "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
-                "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
-                "PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
-            if (readSession.Scalar<long>("PRAGMA query_only") != 1 ||
-                readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
-                readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
-                readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
-                readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
-                readSession.Scalar<long>("PRAGMA cache_size") != -16384)
+                "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
+            long identity = session.Scalar<long>("PRAGMA application_id");
+            long version = session.Scalar<long>("PRAGMA user_version");
+            long tableCount = session.Scalar<long>("SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
+            if (identity == 0 && version == 0 && tableCount == 0)
+            {
+                if (directory is { Created: false }) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                // The current namespace starts empty. No probes, upgrades or conversions.
+                session.Execute("PRAGMA auto_vacuum=INCREMENTAL");
+                using var transaction = writeConnection.BeginTransaction();
+                var creating = new DatabaseSession(writeConnection, transaction);
+                creating.ExecuteScript(schema.Sql);
+                creating.Execute("INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,$hash)", ("$hash", schema.Hash));
+                creating.ExecuteScript($"PRAGMA application_id={ApplicationId}; PRAGMA user_version={FormatVersion};");
+                transaction.Commit();
+                schemaCommitted = true;
+            }
+            else if (identity != ApplicationId || version != FormatVersion)
+                throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
+            StorageSchema.Verify(session, schema);
+            string mode = session.Scalar<string>("PRAGMA journal_mode=WAL")!;
+            if (mode != (directory is null ? "memory" : "wal") ||
+                session.Scalar<long>("PRAGMA synchronous") != 2 ||
+                session.Scalar<long>("PRAGMA foreign_keys") != 1 ||
+                session.Scalar<long>("PRAGMA trusted_schema") != 0 ||
+                session.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
+                session.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
+                session.Scalar<long>("PRAGMA temp_store") != 2 ||
+                session.Scalar<long>("PRAGMA cache_size") != -16384 ||
+                session.Scalar<long>("PRAGMA busy_timeout") != 5000)
                 throw new DocumentStoreException(DocumentStoreError.Storage);
-            _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
-            readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
-            var readThread = new Thread(RunReadLane) { IsBackground = true, Name = "meowfilm native database read" };
-            readThread.Start();
-            readLaneStarted = true;
+            // Attach this long-lived connection to the WAL before another process
+            // can become its only shared-memory participant and exit.
+            _ = session.Scalar<long>("SELECT count(*) FROM storage_identity");
+            directory?.Check();
+            writeStatements = new PreparedStatementCache(writeConnection, PreparedStatementCacheCapacity);
+
+            if (directory is not null)
+            {
+                readConnection = new SqliteConnection(new SqliteConnectionStringBuilder
+                {
+                    DataSource = directory.DatabasePath, Pooling = false,
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Cache = SqliteCacheMode.Private, DefaultTimeout = 5
+                }.ToString());
+                readConnection.Open();
+                if (SQLitePCL.raw.sqlite3_db_config(readConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
+                    throw new DocumentStoreException(DocumentStoreError.Storage);
+                var readSession = new DatabaseSession(readConnection);
+                readSession.ExecuteScript(
+                    "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
+                    "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
+                    "PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
+                if (readSession.Scalar<long>("PRAGMA query_only") != 1 ||
+                    readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
+                    readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
+                    readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
+                    readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
+                    readSession.Scalar<long>("PRAGMA cache_size") != -16384)
+                    throw new DocumentStoreException(DocumentStoreError.Storage);
+                _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
+                readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
+                var readThread = new Thread(RunReadLane) { IsBackground = true, Name = "meowfilm native database read" };
+                readThread.Start();
+                readLaneStarted = true;
+            }
+        }
+        catch
+        {
+            if (directory is { Created: true } && !schemaCommitted)
+            {
+                try { readStatements?.Dispose(); } catch { }
+                readStatements = null;
+                try { readConnection?.Dispose(); } catch { }
+                readConnection = null;
+                try { writeStatements?.Dispose(); } catch { }
+                writeStatements = null;
+                try { writeConnection?.Dispose(); } catch { }
+                writeConnection = null;
+                directory.DeleteFailedCreation();
+            }
+            throw;
         }
     }
 
@@ -822,7 +859,12 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         catch (SqliteException error) when (error.SqliteErrorCode is 5 or 6) { }
         catch (Exception error)
         {
-            DebugLog.Warn(DebugCategories.Storage, "sqlite", "maintain.error", new { commits }, error: error);
+            var translated = Translate(error);
+            DebugLog.Warn(DebugCategories.Storage, "sqlite", "maintain.error", new { commits }, error: translated);
+            if (translated is DocumentStoreException { Error: DocumentStoreError.Corrupt or DocumentStoreError.UnsafePath } fatal)
+            {
+                lock (admission) { openError ??= fatal; }
+            }
         }
     }
     private void MaintainLocked()
@@ -830,8 +872,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         if (directory is null || writeConnection is null) return;
         var session = new DatabaseSession(writeConnection, null, writeStatements);
         // PASSIVE never waits for another App/runtime reader or truncates its files.
-        session.Execute("PRAGMA wal_checkpoint(PASSIVE)");
-        if (session.Scalar<long>("PRAGMA freelist_count") >= 256) session.Execute("PRAGMA incremental_vacuum(128)");
+        bool busy = !session.TryQuerySingle("PRAGMA wal_checkpoint(PASSIVE)", row => row.GetInt64(0), out var checkpointBusy) || checkpointBusy != 0;
+        if (!busy && session.Scalar<long>("PRAGMA freelist_count") >= 256) session.Execute("PRAGMA incremental_vacuum(128)");
     }
     private static Exception Translate(Exception error) => error is SqliteException sqlite
         ? new DocumentStoreException(sqlite.SqliteErrorCode switch

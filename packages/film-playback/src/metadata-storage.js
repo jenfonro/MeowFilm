@@ -57,7 +57,10 @@ export function createMetadataStorage(dataRoot, now) {
     const statements = [
       { sql: 'DELETE FROM metadata_cache_entries WHERE cache_key=?', params: [key] },
       {
-        sql: 'INSERT INTO metadata_cache_entries VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+        sql: 'INSERT INTO metadata_cache_entries(' +
+          'cache_key,provider,request_path,entity_kind,settings_revision,image_size,' +
+          'parent_signature,summary_parent_signature,updated_at_ms,expires_at_ms,estimated_bytes' +
+          ') VALUES(?,?,?,?,?,?,?,?,?,?,?)',
         params: [
           key, request.provider, request.path, metadataKind(request),
           request.settings.revision, request.imageSize ?? null,
@@ -66,7 +69,7 @@ export function createMetadataStorage(dataRoot, now) {
         ],
       },
       ...Object.entries(state.components).map(([name, row]) => ({
-        sql: 'INSERT INTO metadata_cache_components VALUES(?,?,?,?,?,?)',
+        sql: 'INSERT INTO metadata_cache_components(cache_key,component_name,status,error_code,fetched_at_ms,expires_at_ms) VALUES(?,?,?,?,?,?)',
         params: [key, name, row.status, row.error?.code ?? null, row.fetchedAt ?? null, row.expiresAt ?? null],
       })),
       ...nodeInserts('metadata_cache_value_nodes', ['cache_key', 'slot_name'], [key, 'base'], baseNodes),

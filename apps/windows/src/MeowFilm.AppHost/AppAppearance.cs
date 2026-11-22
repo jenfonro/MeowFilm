@@ -21,7 +21,7 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
     }
     private async Task Read()
     {
-        var (saved, revision) = await database.ReadAsync(db =>
+        var (saved, revision) = await database.ReadSnapshotAsync(db =>
         {
             string? value = db.TryQuerySingle(
                 "SELECT theme_color FROM windows_app_appearance WHERE singleton=1",

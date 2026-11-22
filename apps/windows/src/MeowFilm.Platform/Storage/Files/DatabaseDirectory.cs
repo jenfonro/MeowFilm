@@ -64,6 +64,22 @@ public sealed class DatabaseDirectory : IDisposable
         }
     }
 
+    public void DeleteFailedCreation()
+    {
+        if (!Created) return;
+        database?.Dispose();
+        database = null;
+        foreach (string suffix in new[] { "", "-wal", "-shm", "-journal" })
+        {
+            try
+            {
+                using var entry = WindowsDocumentFiles.OpenDeletionEntry(DatabasePath + suffix);
+                if (entry is not null) WindowsDocumentFiles.DeleteEntry(entry);
+            }
+            catch { }
+        }
+    }
+
     public void Dispose()
     {
         database?.Dispose(); database = null;

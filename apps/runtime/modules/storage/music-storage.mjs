@@ -100,7 +100,7 @@ export function createMusicStorage(dataRoot) {
   async function save(next) {
     const old = relations(previous,declarations), proposed = relations(next,declarations);
     const gate = previous.revision ? {sql:'UPDATE music_script_catalog_state SET revision=? WHERE singleton=1 AND revision=?',
-      params:[next.revision,previous.revision],expectChanges:1} : {sql:'INSERT INTO music_script_catalog_state VALUES(1,?)',params:[next.revision],expectChanges:1};
+      params:[next.revision,previous.revision],expectChanges:1} : {sql:'INSERT INTO music_script_catalog_state(singleton,revision) VALUES(1,?)',params:[next.revision],expectChanges:1};
     const changes = proposed.flatMap(([table,columns,keys,rows],index) => reconcile(table,columns,keys,old[index][3],rows));
     const removed = previous.installations.filter(row => !next.installations.some(item => item.id === row.id));
     await database.transaction([gate,...removed.map(row => ({sql:'DELETE FROM music_script_kv_entries WHERE installation_id=?',params:[row.id]})),...catalogBatch(changes)]);
@@ -120,7 +120,7 @@ export function createMusicStorage(dataRoot) {
       }
       const changes = [{sql:'DELETE FROM music_script_kv_entries WHERE '+where,params:scope}];
       if (operation === 'set') {
-        changes.push({sql:'INSERT INTO music_script_kv_entries VALUES(?,?,?)',params:scope});
+        changes.push({sql:'INSERT INTO music_script_kv_entries(installation_id,site_id,entry_key) VALUES(?,?,?)',params:scope});
         for (const statement of nodeInserts('music_script_kv_nodes',['installation_id','site_id','entry_key'],scope,encodeValueNodes(input.value)))
           changes.push(statement);
       }

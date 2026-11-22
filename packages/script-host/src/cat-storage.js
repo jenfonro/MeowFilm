@@ -94,7 +94,7 @@ export class CatStorage {
   }
   async _reload() {
     await this.db.ready;
-    await this.db.execute('INSERT INTO owner_revisions VALUES(?,1,?) ON CONFLICT DO NOTHING', [this.owner, 'initial']);
+    await this.db.execute('INSERT INTO owner_revisions(owner,revision,receipt) VALUES(?,1,?) ON CONFLICT DO NOTHING', [this.owner, 'initial']);
     const tables = Object.keys(relations).filter(table => this.mode === 'standalone' || table.includes('installation') ||
       table.startsWith('cat_site_'));
     const results = await this.db.snapshot([
@@ -150,8 +150,10 @@ export class CatStorage {
       await this.ready;
       for (;;) {
         const value = change(cloneJSONValue(this.value)), next = project(value, this.mode), statements = [];
-        for (const [table, [keys, fields]] of Object.entries(relations))
+        for (const [table, [keys, fields]] of Object.entries(relations)) {
+          if (this.mode !== 'standalone' && !table.includes('installation') && !table.startsWith('cat_site_')) continue;
           statements.push(...reconcile(table, fields, keys, this.rows[table], next[table]));
+        }
         if (!statements.length) return this.value;
         statements.unshift({ sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=?',
           params: [this.owner, this.revision], expectChanges: 1 });

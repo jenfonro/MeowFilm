@@ -419,107 +419,129 @@ class Storage : public std::enable_shared_from_this<Storage> {
       Check(existing >= 0 || sidecar < 0, "STORAGE_CORRUPT");
     }
     Check(existing != 0, "STORAGE_CORRUPT");
-    if (existing < 0) {
-      Check(initialize, "STORAGE_SCHEMA");
-      const int fd = open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-      Check(fd >= 0, errno == ENOSPC ? "STORAGE_FULL" : "STORAGE_IO");
-      Check(close(fd) == 0, "STORAGE_IO");
-    }
-    int code = sqlite3_open_v2(path.c_str(), &writeSlot.db,
-      SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
-    if (code != SQLITE_OK) throw Fault(SQLiteError(code));
-    Check(std::string(sqlite3_libversion()) == "3.53.4", "STORAGE_ENGINE_UNSUPPORTED");
-    Check(chmod(path.c_str(), 0600) == 0, "STORAGE_IO");
-    struct stat state{}; Check(lstat(path.c_str(), &state) == 0, "STORAGE_IO");
-    device = state.st_dev; inode = state.st_ino;
-    sqlite3_extended_result_codes(writeSlot.db, 1); sqlite3_busy_timeout(writeSlot.db, 5000);
-    Check(sqlite3_db_config(writeSlot.db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
-    Check(sqlite3_db_config(writeSlot.db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
-    writeSlot.Exec("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON;");
-
-    auto retain = [this](size_t s, size_t& o) { RetainResult(s, o); };
-    auto readFrom = [&](ConnectionSlot& slot, const char* sql) {
-      size_t retained = 0;
-      try {
-        auto result = slot.Execute({sql, {}, -1, true}, retained, retain);
-        std::lock_guard<std::mutex> lock(mutex); pendingBytes -= retained;
-        return result;
-      } catch (...) {
-        std::lock_guard<std::mutex> lock(mutex); pendingBytes -= retained;
-        throw;
+    bool createdFresh = false;
+    bool committedSchema = false;
+    try {
+      if (existing < 0) {
+        Check(initialize, "STORAGE_SCHEMA");
+        const int fd = open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        Check(fd >= 0, errno == ENOSPC ? "STORAGE_FULL" : "STORAGE_IO");
+        createdFresh = true;
+        Check(close(fd) == 0, "STORAGE_IO");
       }
-    };
-    auto intFrom = [&](ConnectionSlot& slot, const char* sql) {
-      return std::get<int64_t>(readFrom(slot, sql).values[0][0].second);
-    };
-    auto verifyPragmas = [&](ConnectionSlot& slot, bool expectQueryOnly) {
-      Check(std::get<std::string>(readFrom(slot, "PRAGMA journal_mode").values[0][0].second) == "wal" &&
-        intFrom(slot, "PRAGMA synchronous") == 2 && intFrom(slot, "PRAGMA foreign_keys") == 1 &&
-        intFrom(slot, "PRAGMA trusted_schema") == 0 && intFrom(slot, "PRAGMA wal_autocheckpoint") == 0 &&
-        intFrom(slot, "PRAGMA auto_vacuum") == 2 && intFrom(slot, "PRAGMA busy_timeout") == 5000 &&
-        intFrom(slot, "PRAGMA temp_store") == 2 && intFrom(slot, "PRAGMA cache_size") == -16384 &&
-        (!expectQueryOnly || intFrom(slot, "PRAGMA query_only") == 1), "STORAGE_CONFIGURATION");
-    };
+      int code = sqlite3_open_v2(path.c_str(), &writeSlot.db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
+      if (code != SQLITE_OK) throw Fault(SQLiteError(code));
+      Check(std::string(sqlite3_libversion()) == "3.53.4", "STORAGE_ENGINE_UNSUPPORTED");
+      Check(chmod(path.c_str(), 0600) == 0, "STORAGE_IO");
+      struct stat state{}; Check(lstat(path.c_str(), &state) == 0, "STORAGE_IO");
+      device = state.st_dev; inode = state.st_ino;
+      sqlite3_extended_result_codes(writeSlot.db, 1); sqlite3_busy_timeout(writeSlot.db, 5000);
+      Check(sqlite3_db_config(writeSlot.db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
+      Check(sqlite3_db_config(writeSlot.db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
+      writeSlot.Exec("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON;");
 
-    auto app = intFrom(writeSlot, "PRAGMA application_id"), current = intFrom(writeSlot, "PRAGMA user_version");
-    bool empty = intFrom(writeSlot, "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'") == 0;
-    if (empty) {
-      Check(existing < 0 && !app && !current, "STORAGE_SCHEMA"); writeSlot.Exec("PRAGMA auto_vacuum=INCREMENTAL");
-    } else Check(app == application && current == version, "STORAGE_SCHEMA");
-    writeSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
-                   "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; "
-                   "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
-    verifyPragmas(writeSlot, false);
-    if (empty) {
-      size_t bytes = 0;
-      writeSlot.Exec("BEGIN IMMEDIATE");
-      try {
-        if (!intFrom(writeSlot, "SELECT count(*) FROM sqlite_schema WHERE name='storage_identity'")) {
-          writeSlot.Exec(schema);
-          writeSlot.Execute({"INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)", {hash}}, bytes, retain);
-          writeSlot.Exec("PRAGMA application_id=" + std::to_string(application) + "; PRAGMA user_version=" + std::to_string(version));
+      auto retain = [this](size_t s, size_t& o) { RetainResult(s, o); };
+      auto readFrom = [&](ConnectionSlot& slot, const char* sql) {
+        size_t retained = 0;
+        try {
+          auto result = slot.Execute({sql, {}, -1, true}, retained, retain);
+          std::lock_guard<std::mutex> lock(mutex); pendingBytes -= retained;
+          return result;
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(mutex); pendingBytes -= retained;
+          throw;
         }
-        writeSlot.Exec("COMMIT");
-      } catch (...) { writeSlot.Exec("ROLLBACK"); throw; }
+      };
+      auto intFrom = [&](ConnectionSlot& slot, const char* sql) {
+        return std::get<int64_t>(readFrom(slot, sql).values[0][0].second);
+      };
+      auto verifyPragmas = [&](ConnectionSlot& slot, bool expectQueryOnly) {
+        Check(std::get<std::string>(readFrom(slot, "PRAGMA journal_mode").values[0][0].second) == "wal" &&
+          intFrom(slot, "PRAGMA synchronous") == 2 && intFrom(slot, "PRAGMA foreign_keys") == 1 &&
+          intFrom(slot, "PRAGMA trusted_schema") == 0 && intFrom(slot, "PRAGMA wal_autocheckpoint") == 0 &&
+          intFrom(slot, "PRAGMA auto_vacuum") == 2 && intFrom(slot, "PRAGMA busy_timeout") == 5000 &&
+          intFrom(slot, "PRAGMA temp_store") == 2 && intFrom(slot, "PRAGMA cache_size") == -16384 &&
+          (!expectQueryOnly || intFrom(slot, "PRAGMA query_only") == 1), "STORAGE_CONFIGURATION");
+      };
+
+      auto app = intFrom(writeSlot, "PRAGMA application_id"), current = intFrom(writeSlot, "PRAGMA user_version");
+      bool empty = intFrom(writeSlot, "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'") == 0;
+      if (empty) {
+        Check(existing < 0 && !app && !current, "STORAGE_SCHEMA"); writeSlot.Exec("PRAGMA auto_vacuum=INCREMENTAL");
+      } else Check(app == application && current == version, "STORAGE_SCHEMA");
+      writeSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
+                     "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; "
+                     "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
+      verifyPragmas(writeSlot, false);
+      if (empty) {
+        size_t bytes = 0;
+        writeSlot.Exec("BEGIN IMMEDIATE");
+        try {
+          if (!intFrom(writeSlot, "SELECT count(*) FROM sqlite_schema WHERE name='storage_identity'")) {
+            writeSlot.Exec(schema);
+            writeSlot.Execute({"INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)", {hash}}, bytes, retain);
+            writeSlot.Exec("PRAGMA application_id=" + std::to_string(application) + "; PRAGMA user_version=" + std::to_string(version));
+          }
+          writeSlot.Exec("COMMIT");
+          committedSchema = true;
+          std::lock_guard<std::mutex> lock(mutex); pendingBytes -= bytes;
+        } catch (...) {
+          { std::lock_guard<std::mutex> lock(mutex); pendingBytes -= bytes; }
+          if (writeSlot.db && !sqlite3_get_autocommit(writeSlot.db))
+            sqlite3_exec(writeSlot.db, "ROLLBACK", nullptr, nullptr, nullptr);
+          throw;
+        }
+      }
+      auto rows = readFrom(writeSlot, "SELECT schema_hash FROM storage_identity WHERE singleton=1");
+      Check(rows.values.size() == 1 && std::get<std::string>(rows.values[0][0].second) == hash, "STORAGE_SCHEMA");
+      sqlite3* rawExpected = nullptr;
+      int expectedCode = sqlite3_open_v2(":memory:", &rawExpected, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+      std::unique_ptr<sqlite3, decltype(&sqlite3_close_v2)> expected(rawExpected, sqlite3_close_v2);
+      Check(expectedCode == SQLITE_OK && rawExpected, "STORAGE_IO");
+      Check(sqlite3_exec(rawExpected, schema.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "STORAGE_SCHEMA");
+      auto structure = [](sqlite3* connection) {
+        sqlite3_stmt* raw = nullptr;
+        int code = sqlite3_prepare_v2(connection,
+          "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name", -1, &raw, nullptr);
+        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(raw, sqlite3_finalize);
+        Check(code == SQLITE_OK && raw, "STORAGE_SCHEMA");
+        std::vector<std::string> values;
+        while ((code = sqlite3_step(raw)) == SQLITE_ROW)
+          for (int column = 0; column < 4; ++column) {
+            const char* text = reinterpret_cast<const char*>(sqlite3_column_text(raw, column));
+            values.emplace_back(text ? text : "");
+          }
+        Check(code == SQLITE_DONE, "STORAGE_SCHEMA");
+        return values;
+      };
+      Check(structure(writeSlot.db) == structure(rawExpected), "STORAGE_SCHEMA");
+
+      // Dedicated WAL read-only connection on its own thread (`query_only=ON`).
+      code = sqlite3_open_v2(path.c_str(), &readSlot.db,
+        SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
+      if (code != SQLITE_OK) throw Fault(SQLiteError(code));
+      sqlite3_extended_result_codes(readSlot.db, 1); sqlite3_busy_timeout(readSlot.db, 5000);
+      Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
+      Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
+      readSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
+                    "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; "
+                    "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
+      verifyPragmas(readSlot, true);
+
+      writeSlot.ClearStatementCache();
+      readSlot.ClearStatementCache();
+    } catch (...) {
+      readSlot.Close();
+      writeSlot.Close();
+      if (createdFresh && !committedSchema) {
+        unlink(path.c_str());
+        unlink((path + "-wal").c_str());
+        unlink((path + "-shm").c_str());
+        unlink((path + "-journal").c_str());
+      }
+      throw;
     }
-    auto rows = readFrom(writeSlot, "SELECT schema_hash FROM storage_identity WHERE singleton=1");
-    Check(rows.values.size() == 1 && std::get<std::string>(rows.values[0][0].second) == hash, "STORAGE_SCHEMA");
-    sqlite3* rawExpected = nullptr;
-    int expectedCode = sqlite3_open_v2(":memory:", &rawExpected, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
-    std::unique_ptr<sqlite3, decltype(&sqlite3_close_v2)> expected(rawExpected, sqlite3_close_v2);
-    Check(expectedCode == SQLITE_OK && rawExpected, "STORAGE_IO");
-    Check(sqlite3_exec(rawExpected, schema.c_str(), nullptr, nullptr, nullptr) == SQLITE_OK, "STORAGE_SCHEMA");
-    auto structure = [](sqlite3* connection) {
-      sqlite3_stmt* raw = nullptr;
-      int code = sqlite3_prepare_v2(connection,
-        "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name", -1, &raw, nullptr);
-      std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(raw, sqlite3_finalize);
-      Check(code == SQLITE_OK && raw, "STORAGE_SCHEMA");
-      std::vector<std::string> values;
-      while ((code = sqlite3_step(raw)) == SQLITE_ROW)
-        for (int column = 0; column < 4; ++column) {
-          const char* text = reinterpret_cast<const char*>(sqlite3_column_text(raw, column));
-          values.emplace_back(text ? text : "");
-        }
-      Check(code == SQLITE_DONE, "STORAGE_SCHEMA");
-      return values;
-    };
-    Check(structure(writeSlot.db) == structure(rawExpected), "STORAGE_SCHEMA");
-
-    // Dedicated WAL read-only connection on its own thread (`query_only=ON`).
-    code = sqlite3_open_v2(path.c_str(), &readSlot.db,
-      SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nullptr);
-    if (code != SQLITE_OK) throw Fault(SQLiteError(code));
-    sqlite3_extended_result_codes(readSlot.db, 1); sqlite3_busy_timeout(readSlot.db, 5000);
-    Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
-    Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
-    readSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
-                  "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; "
-                  "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
-    verifyPragmas(readSlot, true);
-
-    writeSlot.ClearStatementCache();
-    readSlot.ClearStatementCache();
   }
   void Backup(const std::string& destination) {
     CheckPath(destination, false);
@@ -750,12 +772,13 @@ napi_value RequestValue(napi_env env, napi_callback_info info) {
     }
     else Check(request.kind == "close");
     const bool isRead = request.kind == "query" || request.kind == "snapshot";
+    const bool isClose = request.kind == "close";
     {
       std::lock_guard<std::mutex> lock(storage.mutex);
       Check(!storage.stopping, "STORAGE_CLOSED");
       Check(storage.pendingCount < 64 && (storage.pendingCount == 0 ||
         (storage.pendingBytes <= MaximumBytes && request.bytes <= MaximumBytes - storage.pendingBytes)), "STORAGE_BUSY");
-      if (request.kind == "close") storage.stopping = true;
+      if (isClose) storage.stopping = true;
       ++storage.pendingCount; storage.pendingBytes += request.bytes;
       if (isRead) storage.readPending.push_back(std::move(request));
       else storage.writePending.push_back(std::move(request));
@@ -763,7 +786,7 @@ napi_value RequestValue(napi_env env, napi_callback_info info) {
     if (isRead) storage.readChanged.notify_one();
     else {
       storage.writeChanged.notify_one();
-      if (storage.stopping) storage.readChanged.notify_all();
+      if (isClose) storage.readChanged.notify_all();
     }
     napi_value undefined; N(napi_get_undefined(env, &undefined)); return undefined;
   });

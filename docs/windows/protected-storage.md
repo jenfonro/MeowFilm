@@ -2,7 +2,7 @@
 
 Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/meowfilm.sqlite3` 使用唯一内部数据库。原生 App owner 直接借用一个 `NativeDatabase`；随 App 启动的 Node Worker 通过受限私密启动管道，以相同数据根和平台 SQLite driver 打开同一路径。它们共享 schema identity、事务和持久事实，不再有业务 JSON 文档库、单独缓存数据库或凭据文件库。
 
-Windows 平台表定义按域组织在 `packages/storage/schema/{core,runtime,music,windows}/`，由 `scripts/storage/generate-schema.py` 生成独立的 `packages/storage/generated/schema-windows.sql`（不含任何 `ios_*` 表），嵌入 `MeowFilm.Platform.csproj`（逻辑名 `MeowFilm.Storage.schema.sql`），同时由 Windows 聚合 Node runtime 以 `target: 'windows'` 校验同一份 schema identity。所有表均为手写强类型 `STRICT` 关系表，零 `shape_mask`/`null_mask`/泛化内部扩展槽；仅对第三方来源/规则定义等真正动态结构使用 `TypedValueNodes` 有界节点表。当前 schema identity／版本／hash 不匹配、损坏或孤立 journal 失败关闭，不执行升级或旧数据转换。
+Windows 平台表定义按域组织在 `packages/storage/schema/{core,runtime,shared,music,windows}/`，由 `scripts/storage/generate-schema.py` 生成独立的 `packages/storage/generated/schema-windows.sql`（146 张 `STRICT` 表、68 个索引，不含任何 `ios_*` 表），嵌入 `MeowFilm.Platform.csproj`（逻辑名 `MeowFilm.Storage.schema.sql`），同时由 Windows 聚合 Node runtime 以 `target: 'windows'` 校验同一份 schema identity。所有表均为手写强类型 `STRICT` 关系表，零 `shape_mask`/`null_mask`/泛化内部扩展槽；仅对第三方来源/规则定义等真正动态结构使用 `TypedValueNodes` 有界节点表。当前 schema identity／版本／hash 不匹配、损坏或孤立 journal 失败关闭，不执行升级或旧数据转换。
 
 ## 目录归属
 

@@ -103,7 +103,9 @@ export function decodeValueNodes(rows, { rawNumbers = false } = {}) {
     if (!Number.isSafeInteger(nodeId) || nodeId < 0) throw storageError('STORAGE_CORRUPT');
   }
   if (!root) throw storageError('STORAGE_CORRUPT');
+  let visited = 0;
   function build(row) {
+    if (++visited > ordered.length) throw storageError('STORAGE_CORRUPT');
     const nodeId = row.node_id ?? row.nodeId;
     const kind = row.kind;
     const boolValue = row.bool_value ?? row.boolValue;
@@ -154,5 +156,7 @@ export function decodeValueNodes(rows, { rawNumbers = false } = {}) {
         throw storageError('STORAGE_CORRUPT');
     }
   }
-  return build(root);
+  const value = build(root);
+  if (visited !== ordered.length) throw storageError('STORAGE_CORRUPT');
+  return value;
 }

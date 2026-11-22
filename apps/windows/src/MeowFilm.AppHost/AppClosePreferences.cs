@@ -21,7 +21,7 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
     }
     private async Task Read()
     {
-        var (saved, revision) = await database.ReadAsync(db =>
+        var (saved, revision) = await database.ReadSnapshotAsync(db =>
         {
             string? value = db.TryQuerySingle(
                 "SELECT close_behavior FROM windows_app_window WHERE singleton=1",
