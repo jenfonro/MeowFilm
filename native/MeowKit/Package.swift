@@ -1,7 +1,7 @@
 // swift-tools-version: 5.10
 import PackageDescription
 
-// iOS is the product; macOS is only the native XCTest executor.
+// iOS is the product; macOS is only used for host SwiftPM compile verification.
 let package = Package(
     name: "MeowKit",
     platforms: [.iOS("18.0"), .macOS("15.0")],

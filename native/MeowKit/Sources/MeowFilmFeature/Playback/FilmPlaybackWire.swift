@@ -728,6 +728,38 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
         result.episodes = []; result.candidates = []
         return result
     }
+
+    /// True when only high-frequency playback telemetry (`sequence` or `current` position/duration/paused) changed.
+    func hasSamePresentation(as other: Self) -> Bool {
+        sessionID == other.sessionID &&
+        target == other.target &&
+        entryTarget == other.entryTarget &&
+        entrySurface == other.entrySurface &&
+        entryResolution == other.entryResolution &&
+        stage == other.stage &&
+        error == other.error &&
+        initializationError == other.initializationError &&
+        retryMediaAttemptID == other.retryMediaAttemptID &&
+        workInfo == other.workInfo &&
+        metadata == other.metadata &&
+        metadataCache == other.metadataCache &&
+        metadataSupplement == other.metadataSupplement &&
+        metadataSources == other.metadataSources &&
+        metadataSourceID == other.metadataSourceID &&
+        metadataError == other.metadataError &&
+        sources == other.sources &&
+        browsing == other.browsing &&
+        episodes == other.episodes &&
+        candidates == other.candidates &&
+        attempt == other.attempt &&
+        current?.attemptID == other.current?.attemptID &&
+        current?.candidate == other.current?.candidate &&
+        searchComplete == other.searchComplete &&
+        shortVideo == other.shortVideo &&
+        previewEpisodes == other.previewEpisodes &&
+        reportError == other.reportError &&
+        prefetch == other.prefetch
+    }
 }
 
 /// Sensitive input: consumed by the native media owner, never ordinary presentation.

@@ -426,7 +426,65 @@ public final class DebugAlertActionRegistry {
         entries = entries.filter { $0.value.weakAlert.value != nil }
     }
 }
+
+public struct DebugDialogActionDescriptor: Sendable {
+    public let index: Int
+    public let label: String
+    public let kind: String
+    public let enabled: Bool
+
+    public init(index: Int, label: String, kind: String, enabled: Bool = true) {
+        self.index = index
+        self.label = label
+        self.kind = kind
+        self.enabled = enabled
+    }
+}
+
+public struct DebugDialogSnapshot: Sendable {
+    public let typeName: String
+    public let title: String
+    public let message: String?
+    public let errorText: String?
+    public let actions: [DebugDialogActionDescriptor]
+
+    public init(typeName: String, title: String, message: String? = nil,
+                errorText: String? = nil, actions: [DebugDialogActionDescriptor]) {
+        self.typeName = typeName
+        self.title = title
+        self.message = message
+        self.errorText = errorText
+        self.actions = actions
+    }
+}
+
+@MainActor
+public protocol DebugDialogControllable: AnyObject {
+    func debugDialogSnapshot() -> DebugDialogSnapshot
+    func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String
+}
 #endif
+
+/// Lightweight debug-only UI render/cache counters (no-op when DebugRuntime is disabled).
+public final class DebugUIMetrics: @unchecked Sendable {
+    public static let shared = DebugUIMetrics()
+    private let lock = NSLock()
+    private var counters: [String: Int64] = [:]
+
+    public func increment(_ key: String, by delta: Int64 = 1) {
+        guard DebugRuntime.isEnabled else { return }
+        lock.lock()
+        counters[key, default: 0] += delta
+        lock.unlock()
+    }
+
+    public func snapshot() -> [String: DebugJSONValue] {
+        lock.lock()
+        let copy = counters
+        lock.unlock()
+        return copy.mapValues { .integer($0) }
+    }
+}
 
 public struct DebugBinaryResponse: Sendable {
     public let data: Data

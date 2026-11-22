@@ -1,4 +1,5 @@
 import UIKit
+import MeowUI
 
 /// No business models, preferences or runtime are opened on this surface.
 @MainActor
@@ -42,19 +43,23 @@ final class MeowfilmLaunchViewController: UIViewController {
 
     func showStatus() {
         guard viewIfLoaded?.window != nil, presentedViewController == nil else { return }
-        let alert: UIAlertController
         switch phase {
         case .restartRequired:
-            alert = UIAlertController(title: "清除尚未完成",
+            presentPageAlert(
+                title: "清除尚未完成",
                 message: "请从多任务列表关闭 App 后重新打开。下次启动会先清除本机用户数据，再进入应用。",
-                preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "知道了", style: .cancel))
+                actions: [PageAlertAction(title: "知道了", style: .cancel)]
+            )
         case .failed(let error):
-            alert = UIAlertController(title: "清除未完成", message: error.localizedDescription, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "重试", style: .default) { [retry] _ in retry() })
-            alert.addAction(UIAlertAction(title: "稍后", style: .cancel))
+            presentPageAlert(
+                title: "清除未完成",
+                message: error.localizedDescription,
+                actions: [
+                    PageAlertAction(title: "重试", style: .default) { [retry] in retry() },
+                    PageAlertAction(title: "稍后", style: .cancel),
+                ]
+            )
         case .loading, .ready: return
         }
-        present(alert, animated: true)
     }
 }

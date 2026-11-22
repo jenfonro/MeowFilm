@@ -13,7 +13,7 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 - 小说侧边栏显示“首页”及全部已添加书源，观察 `NovelFeature.sources` 的既有顺序和名称，
   可发现的源直接选择同一个 `NovelDiscoverySession`，停用或没有发现能力的源禁用。
   不另建来源仓库。旧首页的书架／历史切换和独立分类入口已移除，不迁移或增加兼容入口；
-  原有本地书架／历史数据及独立业务保持不变，入口暂时孤立，不在本轮补接。
+  原有本地书架／历史数据及独立业务保持不变，独立书架页面入口尚未接入。
 - `NovelDiscoverySession` 拥有当前来源、频道、入口、页码与结果；无 URL 的标题形成分组，
   同名分组保留独立身份，仅 URL 项保留入口且不显示原始请求模板。切换目标清除旧结果，
   同目标刷新只在频道及第一页全部成功后替换；分页去重且成功后才推进，失败可重试同一页。
@@ -23,7 +23,9 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
   防止启动与页面并发读取时迟到清单回退已接受的 revision。
 - 首页与搜索结果共用 `NovelBookCell`：74×104 封面、书名、作者、单行简介、原始字数、
   来源名／实际候选来源数量，章节可覆盖在封面底部。字段缺失不编造、不额外逐本抓详情，
-  普通文字 Regular，使用 Dynamic Type 和自适应行高，封面沿受信图片获取／取消／释放路径。
+  普通文字 Regular，使用 Dynamic Type 和自适应行高，封面经 `NovelImageStore` 后台解码、
+  按稳定资源身份缓存并合并并发请求；滚出视口只归还视图借用，滚回直接命中缓存零重复 IPC，
+  页面卸载或源版本变化时沿受信释放路径排空。
   搜索支持音乐／影视／小说三个目标，各结果分类保留独立消费者，返回详情后保留原查询。
   搜索逐源记录失败与页码，来源 revision 变化取消旧代；隐藏查询返回后才恢复。
   `NovelSourceClient` 在搜索／发现页内隔离不可消费的书籍，保留健康兄弟；空页正常结束追加，
@@ -128,24 +130,25 @@ helper ABI 见[书源仓库](../runtime/source-library.md)；本页只说明端�
 | `native/MeowKit/Sources/MeowNovelFeature/NovelModels.swift` | A2/A3/A7/A8：本地身份、完整业务字段、锚点、排版、规则 |
 | `native/MeowKit/Sources/MeowNovelFeature/Library/NovelLibrary.swift` | A3/A5/A7/A10：原子文档、书架／历史独立、语义校验 |
 | `native/MeowKit/Sources/MeowNovelFeature/NovelFeature.swift` | A1–A10：装配、管理操作、错误及关闭 |
-| `native/MeowKit/Sources/MeowNovelFeature/NovelSearchSession.swift` | A2/A6/A10：多源分页、归并、换源候选、代次 |
+| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelSearchSession.swift` | A2/A6/A10：多源分页、归并、换源候选、代次 |
 | `native/MeowKit/Sources/MeowNovelFeature/Runtime/NovelRuntime.swift` | A4/A8/A10：library RPC、原字段 payload、图片收据／释放排空 |
 | `native/MeowKit/Sources/MeowNovelFeature/Runtime/NovelRuleProcessor.swift` | A2/A5/A6/D7：公开纯规则 RPC 消费、取消与排空 |
 | `native/MeowKit/Sources/MeowNovelFeature/Runtime/NovelWebBroker.swift` | A9/A10：活动轮询、取消／退休 fence |
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelReadingSession.swift` | A3/A5/A6/A9/A10：正文、目录、换源、购章、保存 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelAnchorResolver.swift` | A5/A6：内容改变后锚点核验与比例回退 |
 | `native/MeowKit/Sources/MeowNovelFeature/Reading/NovelReaderLayout.swift` | A6/A7：CoreText 四模式布局、字重、文字／图片锚点 |
-| `native/MeowKit/Sources/MeowNovelFeature/NovelDiscoverySession.swift` | A1/A2/A10：发现频道、来源与入口选择、刷新／分页、代次和取消 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelBrowsePages.swift` | A1/A2/A10：合并发现首页、搜索、标签展开与错误浮层 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelBookCell.swift` | A1/A2/A10：共用书籍信息、动态字体与受信封面消费者 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelDetailViewController.swift` | A1/A3/A6：详情与真实目录选择／刷新／顺倒序 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelReaderViewController.swift` | A1/A6/A7/A9/A10：原生阅读、高清图、换源与购章确认组件 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelSettingsPages.swift` | A1/A7：小说设置、完整排版与背景 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelSourcesViewController.swift` | A4/A9：导入导出／编辑／管理与登录 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelRulesViewController.swift` | A5：净化 CRUD、分组、顺序与导入导出 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelWebViewController.swift` | A9/A10：受控 WK、Web ABI、脚本类型与取消 |
-| `native/MeowKit/Sources/MeowNovelFeature/UIKit/NovelWebCookies.swift` | A9：精确种子、baseline diff、跨域与删除 |
-| `native/MeowKit/Sources/MeowMusicFeature/Search/UIKit/MusicSearchPages.swift` | A1/A10：多个附加类别的独立消费者与取消 |
+| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelDiscoverySession.swift` | A1/A2/A10：发现频道、来源与入口选择、刷新／分页、代次和取消 |
+| `native/MeowKit/Sources/MeowNovelFeature/Artwork/NovelImageStore.swift` | A1/A2/A10：受信封面与正文图片缓存、并发合并、后台解码与释放排空 |
+| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBrowsePages.swift` | A1/A2/A10：合并发现首页、搜索、标签展开与错误浮层 |
+| `native/MeowKit/Sources/MeowNovelFeature/Browse/NovelBookCell.swift` | A1/A2/A10：共用书籍信息、动态字体与受信封面消费者 |
+| `native/MeowKit/Sources/MeowNovelFeature/Detail/NovelDetailViewController.swift` | A1/A3/A6：详情与真实目录选择／刷新／顺倒序 |
+| `native/MeowKit/Sources/MeowNovelFeature/Reader/NovelReaderViewController.swift` | A1/A6/A7/A9/A10：原生阅读、高清图、换源与购章确认组件 |
+| `native/MeowKit/Sources/MeowNovelFeature/Settings/NovelSettingsPages.swift` | A1/A7：小说设置、完整排版与背景 |
+| `native/MeowKit/Sources/MeowNovelFeature/Settings/NovelSourcesViewController.swift` | A4/A9：导入导出／编辑／管理与登录 |
+| `native/MeowKit/Sources/MeowNovelFeature/Settings/NovelRulesViewController.swift` | A5：净化 CRUD、分组、顺序与导入导出 |
+| `native/MeowKit/Sources/MeowNovelFeature/Web/NovelWebViewController.swift` | A9/A10：受控 WK、Web ABI、脚本类型与取消 |
+| `native/MeowKit/Sources/MeowNovelFeature/Web/NovelWebCookies.swift` | A9：精确种子、baseline diff、跨域与删除 |
+| `native/MeowKit/Sources/MeowMusicFeature/Search/UI/MusicSearchViewController.swift`、`MusicSearchResultsViewController.swift` | A1/A10：多个附加类别的独立消费者与取消 |
 | `native/MeowKit/Sources/MeowRuntime/RuntimeHTTPClient.swift` | A4/A7/A8/A10：版本、受信图片通道、成功获取收据 |
 | `native/MeowKit/Sources/MeowRuntime/RuntimeModule.swift` | A4/A10：允许 source 的 CORRUPT_STORAGE |
 | `native/MeowKit/Package.swift` | A1/A5/D7：小说 product 与原生依赖 |
