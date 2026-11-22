@@ -9,6 +9,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
 {
     internal IMusicLibraryStore Store { get; } = store;
     private readonly Dictionary<string, JsonObject?> original = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MusicSongRecord?> originalRecords = new(StringComparer.Ordinal);
     private readonly Dictionary<string, JsonObject> changed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> stagedSources = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> stagedFiles = new(StringComparer.Ordinal);
@@ -19,20 +20,47 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
     internal IReadOnlyDictionary<string, JsonObject?> BeforeChanges => changed.Keys
         .ToDictionary(id => id, id => Original(id), StringComparer.Ordinal);
 
+    internal IReadOnlyList<MusicSongMutation> BuildMutations()
+    {
+        if (changed.Count == 0) return [];
+        var list = new List<MusicSongMutation>(changed.Count);
+        foreach (var (id, raw) in changed)
+        {
+            var copy = raw.DeepClone().AsObject();
+            ValidateSong(id, copy, DocumentStoreError.InvalidRequest);
+            var nextRecord = MusicLibraryProjection.SongFromJson(id, copy);
+            originalRecords.TryGetValue(id, out var prevRecord);
+            list.Add(new MusicSongMutation(
+                nextRecord,
+                prevRecord,
+                NativeMusicSong.Fingerprint(copy),
+                MusicSongMatcher.Query(copy)));
+        }
+        return list;
+    }
+
     private JsonObject? Original(string id)
     {
         if (before is not null && before.TryGetValue(id, out var saved)) return saved;
         if (original.TryGetValue(id, out saved)) return saved;
-        saved = Store.ReadSong(id);
+        var record = Store.ReadSong(id);
+        if (record is not null)
+        {
+            saved = MusicLibraryProjection.ToJson(record);
+            ValidateSong(id, saved, DocumentStoreError.Corrupt);
+        }
         if (cacheReads)
         {
             original[id] = saved;
+            originalRecords[id] = record;
             if (saved is not null) knownSongs?.Add(id);
         }
         return saved;
     }
+
     internal JsonObject? Read(string id) =>
         (changed.TryGetValue(id, out var song) ? song : Original(id))?.DeepClone().AsObject();
+
     internal bool Contains(string id)
     {
         if (changed.ContainsKey(id)) return true;
@@ -48,6 +76,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         }
         return found;
     }
+
     internal void Set(JsonObject song)
     {
         string id = LJ.S(song["songId"]);
@@ -75,6 +104,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
             }
         }
     }
+
     internal string? SourceOwner(string key)
     {
         if (key.Length == 0) return null;
@@ -89,6 +119,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         if (cacheReads) knownSources[key] = id;
         return id;
     }
+
     internal string? Registered(JsonObject song)
     {
         foreach (var source in Sources(song))
@@ -105,6 +136,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         string explicitId = LJ.S(song["songId"]);
         return explicitId.Length > 0 && Contains(explicitId) ? explicitId : null;
     }
+
     internal string? Find(JsonObject song, IReadOnlySet<string>? allowed = null)
     {
         if (Registered(song) is { } known) return allowed is null || allowed.Contains(known) ? known : null;
@@ -135,6 +167,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         }
         return match;
     }
+
     internal JsonObject Register(JsonObject normalized, string? existingId, bool authoritative)
     {
         var incoming = new NativeMusicSong.Recordings(normalized);
@@ -152,6 +185,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         record.TryMerge(update, authoritative);
         return record.ToSong();
     }
+
     internal IReadOnlyList<string> Artwork(string address)
     {
         var ids = Store.FindArtwork(address).Where(id => before is null || !before.ContainsKey(id))
@@ -166,6 +200,7 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         }
         return ids.ToArray();
     }
+
     internal IReadOnlyList<string> Query(string query)
     {
         var ids = Store.FindQuery(query).Where(id => before is null || !before.ContainsKey(id))
@@ -180,14 +215,37 @@ internal sealed class MusicSongSession(IMusicLibraryStore store,
         }
         return ids.ToArray();
     }
+
     internal IEnumerable<string> Ids() => Store.SongIds().Concat(changed.Keys).Distinct(StringComparer.Ordinal);
+
     private static IEnumerable<JsonObject> Sources(JsonObject song) =>
         (song["sources"] as JsonArray ?? []).OfType<JsonObject>();
+
+    private static void ValidateSong(string id, JsonObject song, DocumentStoreError failure)
+    {
+        try
+        {
+            if (!Guid.TryParseExact(id, "D", out var parsed) || id != parsed.ToString("D") ||
+                LJ.S(song["songId"]) != id)
+                throw new DocumentStoreException(failure);
+            _ = NativeMusicSong.Normalize(song);
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
+            {
+                var info = LJ.Object(source["musicInfo"]);
+                string platform = LJ.S(source["source"]), key = LJ.S(source["sourceKey"]);
+                if (!NativeMusicSong.Platforms.Contains(platform) || LJ.S(info["source"]) != platform ||
+                    NativeMusicSong.InfoId(info).Length == 0 || key != NativeMusicSong.InfoKey(info) || !keys.Add(key))
+                    throw new DocumentStoreException(failure);
+            }
+        }
+        catch (MusicLibraryException) { throw new DocumentStoreException(failure); }
+    }
+
     private static JsonObject MergeStoredSong(JsonObject? previous, JsonObject song)
     {
         if (previous is null) return song;
         var projection = NativeMusicSong.Normalize(previous);
-        // Missing projected fields belong to the current observation, not to stored extensions.
         static void KeepExtensions(JsonObject raw, JsonObject projected, JsonObject current)
         {
             foreach (var field in raw)

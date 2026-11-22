@@ -54,7 +54,7 @@ KSPlayer 的临时倍率上限8X；偏好持久化、UIKit触摸、取消／换�
 
 `FilmRuleSettings` 在原生保存边界完成同语义的纯字符串规范化、默认值及新规则文本解析，不编译正则；草稿测试不提前套用保存归一化，匹配规则 JSON 内的 pattern／replace 保持原文。空集数匹配组仍返回清理结果与 previews，同时报告“无匹配规则”，不自动回填规则。
 
-`FilmRuleService(settingsDocument:connection:)` 的 initialize、保存和默认值直接访问原生文档；分组保存通过 `FilmSettingsDocument.update` 在最新规则上只合并本组，保留其他原始组字段。`FilmRulesDraft` 仅替换保存成功的那组草稿，其他未保存组原样保留。只有 `rules.group.preview`／`rules.preview` 等实际执行借用 App runtime epoch，关联组读取 Node 当前已保存快照；iOS 不通过 HTTP 修改规则。正常空／非法正则的业务结果与运行器不可用明确区分；离线仍可保存，测试执行真实失败，不启用旧引擎。
+`FilmRuleService(settingsRepository:connection:)` 的 initialize、保存和默认值直接访问强类型 `FilmSettingsRepository`；分组保存通过 `FilmSettingsRepository` 事务更新对应规则组，保留其他组字段。`FilmRulesDraft` 仅替换保存成功的那组草稿，其他未保存组原样保留。只有 `rules.group.preview`／`rules.preview` 等实际执行借用 App runtime epoch，关联组读取 Node 当前已保存快照；iOS 不通过 HTTP 修改规则。正常空／非法正则的业务结果与运行器不可用明确区分；离线仍可保存，测试执行真实失败，不启用旧引擎。
 
 initialize、两种 save、defaults、restoreDefaults 及两种 normalize 在 actor 的无 await 执行段完成本地读取／CAS／发布，不排在在线预览的 tail 后；只有两个 process 入口进入可取消的串行预览队列。本地操作仍遵守关闭、preparation 及调用者取消门禁；prepareShutdown／close 继续取消并等待真实预览排空，clearData 仍先排空再清理，不因本地保存独立而提前释放在线资源。
 

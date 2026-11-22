@@ -45,7 +45,8 @@ public sealed partial class MusicCapability
                 await EnsureCatalogSourceSettingsAsync(request.Token);
                 if (!homeSnapshotRead)
                 {
-                    homeSnapshot = await homeSnapshotStore.ReadAsync(
+                    homeSnapshot = await MusicHomeSnapshotCodec.ReadAsync(
+                        homeSnapshotStore,
                         id => application is MusicNativeApplication owner ? owner.SongSnapshot(id) : null, request.Token);
                     homeSnapshotRead = true;
                 }
@@ -151,7 +152,7 @@ public sealed partial class MusicCapability
         _ = Observe();
         async Task Save()
         {
-            try { await homeSnapshotStore.SaveAsync(saved, lifetime.Token); }
+            try { await MusicHomeSnapshotCodec.SaveAsync(homeSnapshotStore, saved, lifetime.Token); }
             catch (OperationCanceledException) { }
         }
         async Task Observe()

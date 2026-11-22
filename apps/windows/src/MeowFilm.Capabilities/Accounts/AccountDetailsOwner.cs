@@ -243,7 +243,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
     {
         try
         {
-            return await AccountDetailsStore.ReadAsync(database, platform, token).ConfigureAwait(false);
+            return await AccountDetailsStore.ReadAsync(cacheDatabase, platform, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch { return null; }
@@ -257,7 +257,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         {
             try
             {
-                await database.WriteAsync(db =>
+                await cacheDatabase.WriteAsync(db =>
                 {
                     lock (gate) guard();
                     AccountDetailsStore.Write(db, platform, next);

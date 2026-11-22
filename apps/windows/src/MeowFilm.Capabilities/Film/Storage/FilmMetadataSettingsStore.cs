@@ -1,5 +1,3 @@
-using System.Text.Json;
-using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -46,6 +44,10 @@ internal static class FilmMetadataSettingsStore
     internal static Task<FilmMetadataSettings> ReadTmdbAsync(IStorageDatabase database, CancellationToken token) =>
         database.ReadAsync(db => ReadTmdb(db) ?? TmdbDefaults, token);
 
+    internal static Task<(FilmMetadataSettings? Settings, long Revision)> ReadTmdbSnapshotAsync(
+        IStorageDatabase database, CancellationToken token) =>
+        database.ReadSnapshotAsync(db => (ReadTmdb(db), db.Revision(TmdbOwner).Revision), token);
+
     internal static Task<FilmMetadataSettings> UpdateTmdbAsync(
         IStorageDatabase database,
         Func<FilmMetadataSettings, FilmMetadataSettings> update,
@@ -75,32 +77,8 @@ internal static class FilmMetadataSettingsStore
                 ("$language", next.Language),
                 ("$region", next.Region),
                 ("$includeAdult", next.IncludeAdult));
-            db.CommitRevision(TmdbOwner, expected, Guid.NewGuid().ToString("D"));
+            db.CommitRevision(TmdbOwner, expected);
             return next;
-        }, token);
-
-    internal static Task<RuntimeSettingsSnapshot> ReadTmdbRuntimeSnapshotAsync(
-        IStorageDatabase database, CancellationToken token) =>
-        database.ReadSnapshotAsync(db =>
-        {
-            var rev = db.Revision(TmdbOwner).Revision;
-            var settings = ReadTmdb(db);
-            if (settings is null) return new RuntimeSettingsSnapshot(null, rev);
-            var doc = JsonSerializer.SerializeToElement(new
-            {
-                version = 1,
-                settings = new
-                {
-                    apiBase = settings.ApiBase,
-                    imageBase = settings.ImageBase,
-                    apiKey = settings.ApiKey,
-                    accessToken = settings.AccessToken,
-                    language = settings.Language,
-                    region = settings.Region,
-                    includeAdult = settings.IncludeAdult
-                }
-            });
-            return new RuntimeSettingsSnapshot(doc, rev);
         }, token);
 
     internal static FilmDoubanSettings? ReadDouban(DatabaseSession db) =>
@@ -121,6 +99,10 @@ internal static class FilmMetadataSettingsStore
 
     internal static Task<FilmDoubanSettings> ReadDoubanAsync(IStorageDatabase database, CancellationToken token) =>
         database.ReadAsync(db => ReadDouban(db) ?? DoubanDefaults, token);
+
+    internal static Task<(FilmDoubanSettings? Settings, long Revision)> ReadDoubanSnapshotAsync(
+        IStorageDatabase database, CancellationToken token) =>
+        database.ReadSnapshotAsync(db => (ReadDouban(db), db.Revision(DoubanOwner).Revision), token);
 
     internal static Task<FilmDoubanSettings> UpdateDoubanAsync(
         IStorageDatabase database,
@@ -149,30 +131,7 @@ internal static class FilmMetadataSettingsStore
                 ("$apiProxy", next.ApiProxy),
                 ("$imageProxy", next.ImageProxy),
                 ("$cookie", next.Cookie));
-            db.CommitRevision(DoubanOwner, expected, Guid.NewGuid().ToString("D"));
+            db.CommitRevision(DoubanOwner, expected);
             return next;
-        }, token);
-
-    internal static Task<RuntimeSettingsSnapshot> ReadDoubanRuntimeSnapshotAsync(
-        IStorageDatabase database, CancellationToken token) =>
-        database.ReadSnapshotAsync(db =>
-        {
-            var rev = db.Revision(DoubanOwner).Revision;
-            var settings = ReadDouban(db);
-            if (settings is null) return new RuntimeSettingsSnapshot(null, rev);
-            var doc = JsonSerializer.SerializeToElement(new
-            {
-                version = 1,
-                settings = new
-                {
-                    apiBase = settings.ApiBase,
-                    searchBase = settings.SearchBase,
-                    imageBase = settings.ImageBase,
-                    apiProxy = settings.ApiProxy,
-                    imageProxy = settings.ImageProxy,
-                    cookie = settings.Cookie
-                }
-            });
-            return new RuntimeSettingsSnapshot(doc, rev);
         }, token);
 }

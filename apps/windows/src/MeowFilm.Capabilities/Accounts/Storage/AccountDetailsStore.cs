@@ -27,10 +27,10 @@ internal static class AccountDetailsStore
 
         if (!db.TryQuerySingle("""
             SELECT account_generation,account_scope,account_fingerprint,user_id,
-                   profile_fetched_at,profile_expires_at,
+                   profile_fetched_at_ms,profile_expires_at_ms,
                    profile_platform,profile_user_id,profile_display_name,profile_avatar,
-                   rights_vip,rights_tier,rights_expires_at,rights_checked_at,rights_recheck_at,
-                   rights_verification_deferred,rights_error_code,rights_retry_at
+                   rights_vip,rights_tier,rights_expires_at_ms,rights_checked_at_ms,rights_recheck_at_ms,
+                   rights_verification_deferred,rights_error_code,rights_retry_at_ms
             FROM windows_music_account_details
             WHERE platform=$plat
             """,
@@ -90,10 +90,10 @@ internal static class AccountDetailsStore
         db.Execute("""
             INSERT INTO windows_music_account_details(
                 platform,account_generation,account_scope,account_fingerprint,user_id,
-                profile_fetched_at,profile_expires_at,
+                profile_fetched_at_ms,profile_expires_at_ms,
                 profile_platform,profile_user_id,profile_display_name,profile_avatar,
-                rights_vip,rights_tier,rights_expires_at,rights_checked_at,rights_recheck_at,
-                rights_verification_deferred,rights_error_code,rights_retry_at)
+                rights_vip,rights_tier,rights_expires_at_ms,rights_checked_at_ms,rights_recheck_at_ms,
+                rights_verification_deferred,rights_error_code,rights_retry_at_ms)
             VALUES(
                 $plat,$gen,$scope,$fp,$uid,
                 $pf,$pe,
@@ -105,20 +105,20 @@ internal static class AccountDetailsStore
                 account_scope=excluded.account_scope,
                 account_fingerprint=excluded.account_fingerprint,
                 user_id=excluded.user_id,
-                profile_fetched_at=excluded.profile_fetched_at,
-                profile_expires_at=excluded.profile_expires_at,
+                profile_fetched_at_ms=excluded.profile_fetched_at_ms,
+                profile_expires_at_ms=excluded.profile_expires_at_ms,
                 profile_platform=excluded.profile_platform,
                 profile_user_id=excluded.profile_user_id,
                 profile_display_name=excluded.profile_display_name,
                 profile_avatar=excluded.profile_avatar,
                 rights_vip=excluded.rights_vip,
                 rights_tier=excluded.rights_tier,
-                rights_expires_at=excluded.rights_expires_at,
-                rights_checked_at=excluded.rights_checked_at,
-                rights_recheck_at=excluded.rights_recheck_at,
+                rights_expires_at_ms=excluded.rights_expires_at_ms,
+                rights_checked_at_ms=excluded.rights_checked_at_ms,
+                rights_recheck_at_ms=excluded.rights_recheck_at_ms,
                 rights_verification_deferred=excluded.rights_verification_deferred,
                 rights_error_code=excluded.rights_error_code,
-                rights_retry_at=excluded.rights_retry_at
+                rights_retry_at_ms=excluded.rights_retry_at_ms
             """,
             ("$plat", platform),
             ("$gen", next.AccountGeneration),

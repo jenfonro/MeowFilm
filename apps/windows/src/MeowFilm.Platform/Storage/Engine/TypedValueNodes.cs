@@ -1,13 +1,136 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
+using System.Globalization;
+using System.Text;
 using Microsoft.Data.Sqlite;
 
 namespace MeowFilm.Platform.Storage;
 
+public enum StorageValueKind
+{
+    Null,
+    Boolean,
+    Integer,
+    Real,
+    ExactNumber,
+    Text,
+    Array,
+    Object
+}
+
+public readonly record struct StorageValueField(string Name, StorageValue Value);
+
 /// <summary>
-/// Bounded typed value-tree codec strictly for declared third-party extension node tables
-/// (e.g. third-party music source extras, imported novel book/source definition extensions).
-/// Never used for internal business entities.
+/// Pure strongly-typed bounded value tree strictly for declared third-party extension node tables
+/// (music_song_source_extras, novel_book_variables, windows_novel_source_definition_nodes,
+/// windows_music_playback_source_rec_extras). Zero JSON-AST dependency.
+/// </summary>
+public sealed class StorageValue : IEquatable<StorageValue>
+{
+    public static StorageValue Null { get; } = new(StorageValueKind.Null, false, 0, 0, null, null, null);
+    public static StorageValue True { get; } = new(StorageValueKind.Boolean, true, 0, 0, null, null, null);
+    public static StorageValue False { get; } = new(StorageValueKind.Boolean, false, 0, 0, null, null, null);
+
+    public StorageValueKind Kind { get; }
+    public bool BoolValue { get; }
+    public long IntValue { get; }
+    public double RealValue { get; }
+    public string? TextValue { get; }
+    public IReadOnlyList<StorageValue>? ArrayItems { get; }
+    public IReadOnlyList<StorageValueField>? ObjectFields { get; }
+
+    private StorageValue(
+        StorageValueKind kind, bool boolValue, long intValue, double realValue,
+        string? textValue, IReadOnlyList<StorageValue>? arrayItems, IReadOnlyList<StorageValueField>? objectFields)
+    {
+        Kind = kind;
+        BoolValue = boolValue;
+        IntValue = intValue;
+        RealValue = realValue;
+        TextValue = textValue;
+        ArrayItems = arrayItems;
+        ObjectFields = objectFields;
+    }
+
+    public static StorageValue FromBool(bool value) => value ? True : False;
+    public static StorageValue FromInt64(long value) => new(StorageValueKind.Integer, false, value, 0, null, null, null);
+    public static StorageValue FromReal(double value, string? literal = null)
+    {
+        if (!double.IsFinite(value)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (BitConverter.DoubleToInt64Bits(value) == BitConverter.DoubleToInt64Bits(-0.0))
+            return FromExactNumber("-0");
+        return new(StorageValueKind.Real, false, 0, value, literal ?? value.ToString("R", CultureInfo.InvariantCulture), null, null);
+    }
+    public static StorageValue FromExactNumber(string literal)
+    {
+        if (string.IsNullOrEmpty(literal)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        return new(StorageValueKind.ExactNumber, false, 0, 0, literal, null, null);
+    }
+    public static StorageValue FromText(string value) => new(StorageValueKind.Text, false, 0, 0, value ?? throw new DocumentStoreException(DocumentStoreError.InvalidRequest), null, null);
+    public static StorageValue FromArray(IReadOnlyList<StorageValue> items) => new(StorageValueKind.Array, false, 0, 0, null, items, null);
+    public static StorageValue FromObject(IReadOnlyList<StorageValueField> fields) => new(StorageValueKind.Object, false, 0, 0, null, null, fields);
+
+    public bool IsEmptyObject => Kind == StorageValueKind.Object && (ObjectFields?.Count ?? 0) == 0;
+
+    public int EstimateBytes() => Kind switch
+    {
+        StorageValueKind.Null or StorageValueKind.Boolean => 4,
+        StorageValueKind.Integer or StorageValueKind.Real => 16,
+        StorageValueKind.ExactNumber or StorageValueKind.Text => 2 + Encoding.UTF8.GetByteCount(TextValue ?? ""),
+        StorageValueKind.Array => 2 + (ArrayItems?.Sum(item => 1 + item.EstimateBytes()) ?? 0),
+        StorageValueKind.Object => 2 + (ObjectFields?.Sum(f => 4 + Encoding.UTF8.GetByteCount(f.Name) + f.Value.EstimateBytes()) ?? 0),
+        _ => 8
+    };
+
+    public bool Equals(StorageValue? other)
+    {
+        if (ReferenceEquals(this, other)) return true;
+        if (other is null || Kind != other.Kind) return false;
+        return Kind switch
+        {
+            StorageValueKind.Null => true,
+            StorageValueKind.Boolean => BoolValue == other.BoolValue,
+            StorageValueKind.Integer => IntValue == other.IntValue,
+            StorageValueKind.Real => BitConverter.DoubleToInt64Bits(RealValue) == BitConverter.DoubleToInt64Bits(other.RealValue),
+            StorageValueKind.ExactNumber or StorageValueKind.Text => string.Equals(TextValue, other.TextValue, StringComparison.Ordinal),
+            StorageValueKind.Array => ArrayEquals(ArrayItems!, other.ArrayItems!),
+            StorageValueKind.Object => ObjectEquals(ObjectFields!, other.ObjectFields!),
+            _ => false
+        };
+    }
+
+    public override bool Equals(object? obj) => obj is StorageValue other && Equals(other);
+    public override int GetHashCode() => HashCode.Combine(Kind, BoolValue, IntValue, RealValue, TextValue);
+
+    private static bool ArrayEquals(IReadOnlyList<StorageValue> left, IReadOnlyList<StorageValue> right)
+    {
+        if (left.Count != right.Count) return false;
+        for (int i = 0; i < left.Count; i++)
+            if (!left[i].Equals(right[i])) return false;
+        return true;
+    }
+
+    private static bool ObjectEquals(IReadOnlyList<StorageValueField> left, IReadOnlyList<StorageValueField> right)
+    {
+        if (left.Count != right.Count) return false;
+        bool sameOrder = true;
+        for (int i = 0; i < left.Count; i++)
+        {
+            if (!string.Equals(left[i].Name, right[i].Name, StringComparison.Ordinal)) { sameOrder = false; break; }
+            if (!left[i].Value.Equals(right[i].Value)) return false;
+        }
+        if (sameOrder) return true;
+        var map = new Dictionary<string, StorageValue>(right.Count, StringComparer.Ordinal);
+        foreach (var f in right) map[f.Name] = f.Value;
+        foreach (var f in left)
+            if (!map.TryGetValue(f.Name, out var rv) || !f.Value.Equals(rv)) return false;
+        return true;
+    }
+
+    public static bool StructuralEquals(StorageValue? left, StorageValue? right) =>
+        left is null ? right is null : left.Equals(right);
+}
+
+/// <summary>
+/// Bounded typed value-tree SQLite codec strictly for declared third-party extension node tables.
 /// </summary>
 public static class TypedValueNodes
 {
@@ -28,102 +151,52 @@ public static class TypedValueNodes
         return identifier;
     }
 
-    public static IReadOnlyList<NodeRow> Encode(JsonNode? root)
+    public static IReadOnlyList<NodeRow> Encode(StorageValue root)
     {
         var rows = new List<NodeRow>();
-        void Visit(JsonNode? node, int? parent, string? propKey, int? itemIndex, int depth)
+        void Visit(StorageValue node, int? parent, string? propKey, int? itemIndex, int depth)
         {
             if (depth > MaxDepth) throw new DocumentStoreException(DocumentStoreError.Limit);
             int id = rows.Count;
-            string kind;
-            long? flag = null, integer = null;
-            double? real = null;
-            string? text = null;
-            if (node is null) kind = "null";
-            else if (node is JsonObject) kind = "object";
-            else if (node is JsonArray) kind = "array";
-            else if (node is JsonValue scalar)
+            switch (node.Kind)
             {
-                if (scalar.TryGetValue<string>(out var str)) { kind = "text"; text = str; }
-                else if (scalar.TryGetValue<bool>(out bool boolean)) { kind = "boolean"; flag = boolean ? 1L : 0L; }
-                else if (scalar.TryGetValue<long>(out long number)) { kind = "integer"; integer = number; }
-                else if (scalar.TryGetValue<int>(out int i32)) { kind = "integer"; integer = i32; }
-                else if (scalar.TryGetValue<double>(out double d))
-                {
-                    if (!double.IsFinite(d)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-                    if (BitConverter.DoubleToInt64Bits(d) == BitConverter.DoubleToInt64Bits(-0.0))
-                    {
-                        kind = "number_text";
-                        text = "-0";
-                    }
-                    else
-                    {
-                        kind = "real";
-                        real = d;
-                        text = d.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
-                    }
-                }
-                else if (scalar.TryGetValue<float>(out float f))
-                {
-                    if (!float.IsFinite(f)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-                    double fd = f;
-                    if (BitConverter.DoubleToInt64Bits(fd) == BitConverter.DoubleToInt64Bits(-0.0))
-                    {
-                        kind = "number_text";
-                        text = "-0";
-                    }
-                    else
-                    {
-                        kind = "real";
-                        real = fd;
-                        text = fd.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
-                    }
-                }
-                else
-                {
-                    string literal;
-                    try { literal = scalar.ToJsonString(); }
-                    catch (ArgumentException) { throw new DocumentStoreException(DocumentStoreError.InvalidRequest); }
-                    using var parsed = JsonDocument.Parse(literal);
-                    if (parsed.RootElement.ValueKind != JsonValueKind.Number) throw Invalid();
-                    if (literal == "-0")
-                    {
-                        kind = "number_text";
-                        text = "-0";
-                    }
-                    else if (parsed.RootElement.TryGetInt64(out long parsedLong) &&
-                             parsedLong.ToString(System.Globalization.CultureInfo.InvariantCulture) == literal)
-                    {
-                        kind = "integer";
-                        integer = parsedLong;
-                    }
-                    else if (parsed.RootElement.TryGetDouble(out double parsedDouble) && double.IsFinite(parsedDouble) &&
-                             parsedDouble.ToString("R", System.Globalization.CultureInfo.InvariantCulture) == literal)
-                    {
-                        kind = "real";
-                        real = parsedDouble;
-                        text = literal;
-                    }
-                    else
-                    {
-                        kind = "number_text";
-                        text = literal;
-                    }
-                }
+                case StorageValueKind.Null:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "null", null, null, null, null));
+                    break;
+                case StorageValueKind.Boolean:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "boolean", node.BoolValue ? 1L : 0L, null, null, null));
+                    break;
+                case StorageValueKind.Integer:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "integer", null, node.IntValue, null, null));
+                    break;
+                case StorageValueKind.Real:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "real", null, null, node.RealValue, node.TextValue));
+                    break;
+                case StorageValueKind.ExactNumber:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "number_text", null, null, null, node.TextValue));
+                    break;
+                case StorageValueKind.Text:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "text", null, null, null, node.TextValue));
+                    break;
+                case StorageValueKind.Array:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "array", null, null, null, null));
+                    if (node.ArrayItems is { } items)
+                        for (int i = 0; i < items.Count; i++) Visit(items[i], id, null, i, depth + 1);
+                    break;
+                case StorageValueKind.Object:
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "object", null, null, null, null));
+                    if (node.ObjectFields is { } fields)
+                        foreach (var field in fields) Visit(field.Value, id, field.Name, null, depth + 1);
+                    break;
+                default:
+                    throw Invalid();
             }
-            else throw Invalid();
-
-            rows.Add(new NodeRow(id, parent, propKey, itemIndex, kind, flag, integer, real, text));
-            if (node is JsonObject obj)
-                foreach (var pair in obj) Visit(pair.Value, id, pair.Key, null, depth + 1);
-            else if (node is JsonArray array)
-                for (int i = 0; i < array.Count; i++) Visit(array[i], id, null, i, depth + 1);
         }
         Visit(root, null, null, null, 0);
         return rows;
     }
 
-    public static JsonNode? Decode(IReadOnlyList<NodeRow> rows)
+    public static StorageValue? Decode(IReadOnlyList<NodeRow> rows)
     {
         if (rows.Count == 0) return null;
         var byId = new Dictionary<int, NodeRow>(rows.Count);
@@ -146,60 +219,63 @@ public static class TypedValueNodes
             throw Invalid();
 
         var consumed = new HashSet<int>();
-        JsonNode? Read(int id, int depth)
+        StorageValue Read(int id, int depth)
         {
             if (depth > MaxDepth || !consumed.Add(id) || !byId.TryGetValue(id, out var row)) throw Invalid();
             var children = childrenByParent.GetValueOrDefault(id);
             if (row.Kind is not ("array" or "object") && children is { Count: > 0 }) throw Invalid();
             switch (row.Kind)
             {
-                case "null": return null;
-                case "text": return JsonValue.Create(row.TextValue ?? throw Invalid());
+                case "null": return StorageValue.Null;
+                case "text": return StorageValue.FromText(row.TextValue ?? throw Invalid());
                 case "boolean":
                     long flag = row.BoolValue ?? throw Invalid();
                     if (flag is not (0 or 1)) throw Invalid();
-                    return JsonValue.Create(flag == 1);
-                case "integer": return JsonValue.Create(row.IntValue ?? throw Invalid());
+                    return StorageValue.FromBool(flag == 1);
+                case "integer": return StorageValue.FromInt64(row.IntValue ?? throw Invalid());
                 case "real":
                 {
                     double realValue = row.RealValue ?? throw Invalid();
                     if (!double.IsFinite(realValue)) throw Invalid();
-                    return JsonValue.Create(realValue);
+                    return StorageValue.FromReal(realValue, row.TextValue);
                 }
                 case "number_text":
                 {
-                    JsonNode? value;
-                    try { value = JsonNode.Parse(row.TextValue ?? throw Invalid()); }
-                    catch (JsonException) { throw Invalid(); }
-                    if (value is not JsonValue scalar || scalar.GetValueKind() != JsonValueKind.Number) throw Invalid();
-                    return value;
+                    string literal = row.TextValue ?? throw Invalid();
+                    if (literal.Length == 0) throw Invalid();
+                    return StorageValue.FromExactNumber(literal);
                 }
                 case "array":
-                    var array = new JsonArray();
+                {
+                    var items = new List<StorageValue>(children?.Count ?? 0);
                     if (children is not null)
                     {
                         children.Sort((a, b) => Nullable.Compare(a.ItemIndex, b.ItemIndex));
                         foreach (var child in children)
                         {
-                            if (child.PropKey is not null || child.ItemIndex is null || child.ItemIndex != array.Count)
+                            if (child.PropKey is not null || child.ItemIndex is null || child.ItemIndex != items.Count)
                                 throw Invalid();
-                            array.Add(Read(child.NodeId, depth + 1));
+                            items.Add(Read(child.NodeId, depth + 1));
                         }
                     }
-                    return array;
+                    return StorageValue.FromArray(items);
+                }
                 case "object":
-                    var obj = new JsonObject();
+                {
+                    var fields = new List<StorageValueField>(children?.Count ?? 0);
+                    var seen = new HashSet<string>(StringComparer.Ordinal);
                     if (children is not null)
                     {
                         children.Sort((a, b) => a.NodeId.CompareTo(b.NodeId));
                         foreach (var child in children)
                         {
                             string key = child.PropKey ?? throw Invalid();
-                            if (child.ItemIndex is not null || obj.ContainsKey(key)) throw Invalid();
-                            obj.Add(key, Read(child.NodeId, depth + 1));
+                            if (child.ItemIndex is not null || !seen.Add(key)) throw Invalid();
+                            fields.Add(new StorageValueField(key, Read(child.NodeId, depth + 1)));
                         }
                     }
-                    return obj;
+                    return StorageValue.FromObject(fields);
+                }
                 default: throw Invalid();
             }
         }
@@ -220,7 +296,7 @@ public static class TypedValueNodes
         reader.GetNullableDouble(offset + 7),
         reader.GetNullableString(offset + 8));
 
-    public static void Replace(DatabaseSession db, string table, (string Column, object Value)[] keys, JsonNode? value,
+    public static void Replace(DatabaseSession db, string table, (string Column, object Value)[] keys, StorageValue? value,
         bool omitEmptyObject = true)
     {
         if (keys.Length == 0) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
@@ -228,7 +304,7 @@ public static class TypedValueNodes
         var where = string.Join(" AND ", keys.Select((k, i) => $"{Ident(k.Column)}=$k{i}"));
         var keyParams = keys.Select((k, i) => ($"$k{i}", (object?)k.Value)).ToArray();
         db.Execute($"DELETE FROM {safeTable} WHERE {where}", keyParams);
-        if (value is null || (omitEmptyObject && value is JsonObject obj && obj.Count == 0)) return;
+        if (value is null || (omitEmptyObject && value.IsEmptyObject)) return;
 
         var keyCols = string.Join(",", keys.Select(k => Ident(k.Column)));
         var keyPlaceholders = string.Join(",", keys.Select((_, i) => $"$k{i}"));
@@ -252,7 +328,7 @@ public static class TypedValueNodes
         }
     }
 
-    public static JsonObject? ReadObject(DatabaseSession db, string table, (string Column, object Value)[] keys)
+    public static StorageValue? ReadObject(DatabaseSession db, string table, (string Column, object Value)[] keys)
     {
         if (keys.Length == 0) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         var safeTable = Ident(table);
@@ -262,6 +338,8 @@ public static class TypedValueNodes
             $"SELECT node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value FROM {safeTable} WHERE {where} ORDER BY node_id",
             r => ReadRow(r, 0), keyParams);
         if (rows.Count == 0) return null;
-        return Decode(rows) as JsonObject ?? throw Invalid();
+        var decoded = Decode(rows);
+        if (decoded is null || decoded.Kind != StorageValueKind.Object) throw Invalid();
+        return decoded;
     }
 }

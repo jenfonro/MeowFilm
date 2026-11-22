@@ -72,7 +72,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.3.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease、music-platform 九模块，保留各自平台受信启动；契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`、`docs/runtime/music-platform.md`。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
-- `packages/storage/` — 共享强类型 SQLite Schema 源码（`schema/{core,runtime,shared,music,windows,ios}/`）、分平台独立生成产物（`generated/schema-{standalone,windows,ios}.sql`）与 `@meowfilm/storage` 引擎（`src/{engine,schema,query,values}/`）
+- `packages/storage/` — 共享强类型双库 SQLite Schema 源码（`schema/{data,cache}/`）、分角色分平台独立生成产物（`generated/schema-{data,cache}-{standalone,windows,ios}.sql`）与 `@meowfilm/storage` 引擎（`src/{engine,schema,query,values}/`）
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
@@ -123,7 +123,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 - **当前处于开发期，禁止旧数据兼容与旧逻辑兼容**：
   - 数据库、本地配置与内部业务记录的 schema／格式版本统一固定为 1，不递增、不识别旧表／旧字段、不建历史版本链、不写迁移或自动升级／回退分支；不匹配的旧数据直接拒绝，并发 revision／generation 仍按事务变化递增。已确认保存的数据必须在运行中完成持久化，不能依赖正常退出或 iOS 终止回调才能保存。
   - 接口、协议、状态与内部逻辑改动直接落到最新实现并清理失效路径；禁止保留旧字段别名、旧参数／旧枚举兜底、过渡兼容层、回退开关或新旧逻辑并存。
-- 内部业务数据与结构化缓存遵循[共享 SQLite 存储契约](docs/common/settings-storage.md)，使用每个 App 数据根的同一数据库及明确 owner 的手写强类型 `STRICT` 关系表、事务和 revision；禁止内部 JSON 文件、整份业务 JSON TEXT/BLOB 入库，以及伪关系 JSON-AST 投影框架（如 `shape_mask`／`null_mask`、内部业务对象经 `JsonNode`/`JSONEncoder` 往返入库、泛化 `*_extensions` 扩展槽）。第三方自管文件、用户主动导出、网络／IPC JSON 及极少数真正动态的第三方脚本／外部元数据有界 typed value-tree 不在禁令内。
+- 内部业务数据与结构化缓存遵循[共享 SQLite 存储契约](docs/common/settings-storage.md)，在每个 App 数据根的 `storage-v1/` 下物理分离为永久数据库（`meowfilm-data.sqlite3`）与可重建缓存数据库（`meowfilm-cache.sqlite3`），均使用 `user_version = 1` 及明确 owner 的手写强类型 `STRICT` 关系表、事务、纯整数 `owner_revisions` CAS 与 `INTEGER` UTC 毫秒时间戳；禁止内部 JSON 文件、整份业务 JSON TEXT/BLOB 入库，以及伪关系 JSON-AST 投影框架（如 `shape_mask`／`null_mask`、内部业务对象经 `JsonNode`/`JSONEncoder`/`MJ` 往返入库、泛化 `*_extensions` 扩展槽）。第三方自管文件、用户主动导出、网络／IPC JSON 及极少数真正动态的第三方脚本／外部元数据有界 typed value-tree 不在禁令内。
 - 满足需求及必要的可控、可观测、可验证和生命周期要求后，综合运行性能、实现复杂度和长期维护成本选择方案；单处性能差异较小也计入，避免各处开销叠加。不增加未要求的功能、框架、配置或扩展点。
 - 技术栈、框架与实现方式按具体职责逐项选择，同样综合运行性能、可控性、实现复杂度和长期维护成本。
 - 优先复用已有实现、标准库和平台能力；替代实现保持所需业务语义。类型准确表达身份、状态和约束，不用任意字符串和静默默认值掩盖错误。

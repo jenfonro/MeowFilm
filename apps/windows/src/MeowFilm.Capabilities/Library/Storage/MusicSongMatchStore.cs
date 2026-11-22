@@ -132,7 +132,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
                     }
                     SaveEntryIncremental(db, id, ordinal, value, old);
                 }
-                return db.CommitRevision(Namespace, revision, Guid.NewGuid().ToString("D"));
+                return db.CommitRevision(Namespace, revision);
             }, token, checked((int)bytes)).ConfigureAwait(false);
             previous = next;
             revision = committed;
@@ -163,11 +163,11 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
                 continue;
             db.Execute("""
                 INSERT INTO windows_music_source_match_platforms(
-                    song_id,platform,state,checked_at,context,query_text,code,matched_at)
+                    song_id,platform,state,checked_at_ms,context,query_text,code,matched_at_ms)
                 VALUES($id,$plat,$state,$chk,$ctx,$q,$code,$mat)
                 ON CONFLICT(song_id,platform) DO UPDATE SET
-                    state=excluded.state,checked_at=excluded.checked_at,context=excluded.context,
-                    query_text=excluded.query_text,code=excluded.code,matched_at=excluded.matched_at
+                    state=excluded.state,checked_at_ms=excluded.checked_at_ms,context=excluded.context,
+                    query_text=excluded.query_text,code=excluded.code,matched_at_ms=excluded.matched_at_ms
                 """,
                 ("$id", songId), ("$plat", plat),
                 ("$state", st.State), ("$chk", st.CheckedAt),
@@ -192,7 +192,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
     {
         var platformsBySong = new Dictionary<string, Dictionary<string, SongMatchPlatformState>>(StringComparer.Ordinal);
         foreach (var p in db.Query("""
-            SELECT song_id,platform,state,checked_at,context,query_text,code,matched_at
+            SELECT song_id,platform,state,checked_at_ms,context,query_text,code,matched_at_ms
             FROM windows_music_source_match_platforms
             ORDER BY song_id, platform
             """, r => (

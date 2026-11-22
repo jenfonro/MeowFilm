@@ -57,7 +57,7 @@ Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器
 `AppIdentity` 集中定义产品名称、当前数据/运行时身份和当前原生命名空间：
 
 - 名称：`meowfilm`。
-- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；应用内部结构化业务数据（含结构化与手工歌词）和缓存索引使用共享 SQLite `storage-v1/meowfilm.sqlite3`，原生客户端与 Node runtime 连接同一数据库。凭据以所属业务表中的明文 typed fields 保存；图片、音频、脚本源码等原始资源仍由各自 owner 管理文件目录。具体 schema 与 owner 见[本地存储](protected-storage.md)。
+- 数据根为 `%LOCALAPPDATA%/meowfilm/aggregate`；应用内部结构化持久数据与可重建缓存索引物理分离于共享 SQLite 双库 `storage-v1/meowfilm-data.sqlite3` 与 `storage-v1/meowfilm-cache.sqlite3`（均固定 `user_version = 1`），原生客户端与 Node runtime 按 owner 职责连接对应数据库。凭据以永久库所属业务表中的明文 typed fields 保存；图片、音频、脚本源码等原始资源仍由各自 owner 管理文件目录。具体 schema 与 owner 见[本地存储](protected-storage.md)。
 - 脚本协议/清单字段 `product` 等于 `aggregate`，是当前 wire 身份。
 - 活动产品只读取和写入 `AppIdentity.NativeNamespaces` 列出的当前格式。
 - 当前提供可淘汰的播放缓存，未提供用户下载管理。
@@ -69,9 +69,9 @@ Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器
 
 `AppLauncher` 通过 WinUI `Application.Start` 建立唯一 UI 线程及其同步上下文，在创建首个启动窗口前安装 Desktop 的唯一排版默认，再完成模块装配、外观和窗口关闭偏好读取，依次等待实现 `IDesktopStartupParticipant` 的模块完成 `PrepareStartupAsync`，随后才构造 `ShellWindow` 并调用 `Activate()`。现有启动窗口承载等待、失败和重试；模块完整的 `InitializeAsync` 仍由桌面壳的选中模块生命周期负责。外观与关闭偏好作为 App 共享参与者加入同进程退役；主窗口拥有原生托盘，隐藏到托盘不进入 App 关闭流程，具体行为见[桌面壳](desktop-shell.md#系统托盘与关闭选择)。
 
-音乐参与者只完成最小本地准备：通过 `music.accounts.list` 恢复账号状态，读取 `music.catalogSource.settings.get` 和 `music.home.v3`。账号与来源恢复失败不能冒充游客或默认来源；不等待网络登录验证、账号资料或首页 HTTP。快照缺失、不可读取或不能解码为可用展示时均视为未命中，允许正常首载；不把缓存错误变成启动门槛，也不把真实首页请求失败改写为成功空结果。
+音乐参与者只完成最小本地准备：通过 `music.accounts.list` 恢复账号状态，读取 `music.catalogSource.settings.get` 和 `music.home.v1`。账号与来源恢复失败不能冒充游客或默认来源；不等待网络登录验证、账号资料或首页 HTTP。快照缺失、不可读取或不能解码为可用展示时均视为未命中，允许正常首载；不把缓存错误变成启动门槛，也不把真实首页请求失败改写为成功空结果。
 
-`music.home.v3` 是全应用唯一的最近成功首页展示，带平台身份，不按账号分仓、无 TTL，也不携带执行权限；显示相符快照后的网络更新由首页 owner 负责。持久化、失败保留与认证失效恢复见[首页启动与展示快照](music-catalog.md#首页启动与展示快照)。
+`music.home.v1` 是全应用唯一的最近成功首页展示（存于缓存库 `meowfilm-cache.sqlite3`），带平台身份，不按账号分仓、无 TTL，也不携带执行权限；显示相符快照后的网络更新由首页 owner 负责。持久化、失败保留与认证失效恢复见[首页启动与展示快照](music-catalog.md#首页启动与展示快照)。
 
 ## 原生和脚本边界
 

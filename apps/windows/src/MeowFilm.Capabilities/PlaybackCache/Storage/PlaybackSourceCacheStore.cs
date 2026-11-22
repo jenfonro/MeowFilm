@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 using Microsoft.Data.Sqlite;
 
@@ -42,25 +40,17 @@ internal sealed record PlaybackRecordingSnapshot(
     double? Duration,
     string? Img,
     bool? QualityKnown,
-    JsonObject? WireExtras);
+    StorageValue? WireExtras);
 
 internal static class PlaybackSourceCacheStore
 {
-    private static readonly HashSet<string> CoreMusicInfoFields = new(StringComparer.Ordinal)
-    {
-        "source", "name", "singer", "albumName", "duration", "img", "qualityKnown"
-    };
-
-    internal static JsonObject? Read(DatabaseSession db, string scope, string songId, string entryKind) =>
-        ReadEntry(db, scope, songId, entryKind) is { } entry ? ToJson(entry, songId, entryKind) : null;
-
     internal static PlaybackSourceEntry? ReadEntry(DatabaseSession db, string scope, string songId, string entryKind)
     {
         if (!db.TryQuerySingle("""
-            SELECT signature,updated_at,expires_until,stored_bytes,
+            SELECT signature,updated_at_ms,expires_until_ms,stored_bytes,
                    info_ok,info_kind,info_platform,info_source_key,info_scope,info_generation,
                    info_quality,info_actual_quality,info_quality_verified,info_playback_verified,
-                   info_quality_policy_signature,info_quality_cache_signature,info_url,info_expires_at,
+                   info_quality_policy_signature,info_quality_cache_signature,info_url,info_expires_at_ms,
                    info_duration,info_size,info_full,info_delivery,info_requested_quality,
                    rec_source_key,rec_platform,rec_info_source,rec_name,rec_singer,rec_album_name,
                    rec_duration,rec_img,rec_quality_known
@@ -74,17 +64,12 @@ internal static class PlaybackSourceCacheStore
         return result;
     }
 
-    internal static void Save(DatabaseSession db, string scope, string songId, string entryKind, JsonObject? value)
+    internal static void DeleteEntry(DatabaseSession db, string scope, string songId, string entryKind)
     {
-        if (value is null)
-        {
-            db.Execute("""
-                DELETE FROM windows_music_playback_sources
-                WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
-                """, ("$scope", scope), ("$song", songId), ("$kind", entryKind));
-            return;
-        }
-        SaveEntry(db, scope, songId, entryKind, FromJson(value));
+        db.Execute("""
+            DELETE FROM windows_music_playback_sources
+            WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
+            """, ("$scope", scope), ("$song", songId), ("$kind", entryKind));
     }
 
     internal static void SaveEntry(DatabaseSession db, string scope, string songId, string entryKind, PlaybackSourceEntry entry)
@@ -92,10 +77,10 @@ internal static class PlaybackSourceCacheStore
         var rec = entry.Recording;
         db.Execute("""
             INSERT INTO windows_music_playback_sources(
-                account_scope,song_id,entry_kind,signature,updated_at,expires_until,stored_bytes,
+                account_scope,song_id,entry_kind,signature,updated_at_ms,expires_until_ms,stored_bytes,
                 info_ok,info_kind,info_platform,info_source_key,info_scope,info_generation,
                 info_quality,info_actual_quality,info_quality_verified,info_playback_verified,
-                info_quality_policy_signature,info_quality_cache_signature,info_url,info_expires_at,
+                info_quality_policy_signature,info_quality_cache_signature,info_url,info_expires_at_ms,
                 info_duration,info_size,info_full,info_delivery,info_requested_quality,
                 rec_source_key,rec_platform,rec_info_source,rec_name,rec_singer,rec_album_name,
                 rec_duration,rec_img,rec_quality_known)
@@ -108,8 +93,8 @@ internal static class PlaybackSourceCacheStore
                 $rskey,$rplat,$risrc,$rname,$rsinger,$ralbname,$rdur,$rimg,$rqk)
             ON CONFLICT(account_scope,song_id,entry_kind) DO UPDATE SET
                 signature=excluded.signature,
-                updated_at=excluded.updated_at,
-                expires_until=excluded.expires_until,
+                updated_at_ms=excluded.updated_at_ms,
+                expires_until_ms=excluded.expires_until_ms,
                 stored_bytes=excluded.stored_bytes,
                 info_ok=excluded.info_ok,
                 info_kind=excluded.info_kind,
@@ -124,7 +109,7 @@ internal static class PlaybackSourceCacheStore
                 info_quality_policy_signature=excluded.info_quality_policy_signature,
                 info_quality_cache_signature=excluded.info_quality_cache_signature,
                 info_url=excluded.info_url,
-                info_expires_at=excluded.info_expires_at,
+                info_expires_at_ms=excluded.info_expires_at_ms,
                 info_duration=excluded.info_duration,
                 info_size=excluded.info_size,
                 info_full=excluded.info_full,
@@ -212,144 +197,4 @@ internal static class PlaybackSourceCacheStore
             row.GetNullableBool(20), row.GetNullableString(21), row.GetNullableString(22),
             headers, recording);
     }
-
-    private static PlaybackSourceEntry FromJson(JsonObject value)
-    {
-        var info = value["info"] as JsonObject ?? new JsonObject();
-        Dictionary<string, string>? headers = null;
-        if (info["headers"] is JsonObject hdrs)
-        {
-            headers = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var pair in hdrs)
-                if (pair.Value is JsonValue v && v.TryGetValue<string>(out var text))
-                    headers[pair.Key] = text;
-        }
-
-        PlaybackRecordingSnapshot? recording = null;
-        if (info["recording"] is JsonObject rec)
-        {
-            var mi = rec["musicInfo"] as JsonObject;
-            JsonObject? wireExtras = null;
-            if (mi is not null)
-            {
-                foreach (var pair in mi)
-                {
-                    if (CoreMusicInfoFields.Contains(pair.Key)) continue;
-                    wireExtras ??= new JsonObject();
-                    wireExtras[pair.Key] = pair.Value?.DeepClone();
-                }
-            }
-            recording = new PlaybackRecordingSnapshot(
-                Str(rec, "sourceKey"), Str(rec, "source"), Str(mi, "source"),
-                Str(mi, "name"), Str(mi, "singer"), Str(mi, "albumName"),
-                Dbl(mi, "duration"), Str(mi, "img"), Bool(mi, "qualityKnown"),
-                wireExtras);
-        }
-
-        return new PlaybackSourceEntry(
-            Str(value, "signature")!, Int64(value, "at")!.Value, Int64(value, "until")!.Value, Int64(value, "storedBytes")!.Value,
-            Bool(info, "ok"), Str(info, "kind"), Str(info, "platform"), Str(info, "sourceKey"), Str(info, "scope"),
-            Int64(info, "generation"), Str(info, "quality"), Str(info, "actualQuality"),
-            Bool(info, "qualityVerified"), Bool(info, "playbackVerified"),
-            Str(info, "qualityPolicySignature"), Str(info, "qualityCacheSignature"),
-            Str(info, "url"), Int64(info, "expiresAt"), Dbl(info, "duration"), Int64(info, "size"),
-            Bool(info, "full"), Str(info, "delivery"), Str(info, "requestedQuality"),
-            headers, recording);
-    }
-
-    private static JsonObject ToJson(PlaybackSourceEntry e, string songId, string entryKind)
-    {
-        var info = new JsonObject { ["songId"] = songId };
-        SetNonNull(info, "ok", e.Ok);
-        SetNonNull(info, "kind", e.Kind);
-        SetNonNull(info, "platform", e.Platform);
-        SetNonNull(info, "sourceKey", e.SourceKey);
-        SetNonNull(info, "scope", e.Scope);
-        SetNonNull(info, "generation", e.Generation);
-        SetNonNull(info, "quality", e.Quality);
-        if (entryKind == "pointers") info["actualQuality"] = e.ActualQuality;
-        else SetNonNull(info, "actualQuality", e.ActualQuality);
-        SetNonNull(info, "qualityVerified", e.QualityVerified);
-        SetNonNull(info, "playbackVerified", e.PlaybackVerified);
-        SetNonNull(info, "qualityPolicySignature", e.QualityPolicySignature);
-        SetNonNull(info, "qualityCacheSignature", e.QualityCacheSignature);
-        SetNonNull(info, "url", e.Url);
-        if (entryKind == "urls") info["expiresAt"] = e.ExpiresAt;
-        else SetNonNull(info, "expiresAt", e.ExpiresAt);
-        if (entryKind == "pointers") info["duration"] = e.Duration;
-        else SetNonNull(info, "duration", e.Duration);
-        SetNonNull(info, "size", e.Size);
-        SetNonNull(info, "full", e.Full);
-        if (entryKind == "pointers") info["delivery"] = e.Delivery;
-        else SetNonNull(info, "delivery", e.Delivery);
-        SetNonNull(info, "requestedQuality", e.RequestedQuality);
-
-        if (entryKind == "urls")
-        {
-            var headers = new JsonObject();
-            if (e.Headers is not null)
-                foreach (var (k, v) in e.Headers) headers[k] = v;
-            info["headers"] = headers;
-        }
-
-        if (e.Recording is { } rec)
-        {
-            var mi = new JsonObject();
-            SetNonNull(mi, "source", rec.InfoSource);
-            SetNonNull(mi, "name", rec.Name);
-            SetNonNull(mi, "singer", rec.Singer);
-            SetNonNull(mi, "albumName", rec.AlbumName);
-            mi["duration"] = rec.Duration;
-            SetNonNull(mi, "img", rec.Img);
-            SetNonNull(mi, "qualityKnown", rec.QualityKnown);
-            if (rec.WireExtras is not null)
-                foreach (var pair in rec.WireExtras)
-                    mi[pair.Key] = pair.Value?.DeepClone();
-
-            var recObj = new JsonObject { ["musicInfo"] = mi };
-            if (rec.SourceKey is not null) recObj["sourceKey"] = rec.SourceKey;
-            if (rec.Platform is not null) recObj["source"] = rec.Platform;
-            info["recording"] = recObj;
-        }
-
-        return new JsonObject
-        {
-            ["signature"] = e.Signature,
-            ["at"] = e.At,
-            ["until"] = e.Until,
-            ["storedBytes"] = e.StoredBytes,
-            ["info"] = info
-        };
-    }
-
-    private static void SetNonNull(JsonObject obj, string key, string? val) { if (val is not null) obj[key] = val; }
-    private static void SetNonNull(JsonObject obj, string key, long? val) { if (val is { } v) obj[key] = v; }
-    private static void SetNonNull(JsonObject obj, string key, double? val) { if (val is { } v) obj[key] = v; }
-    private static void SetNonNull(JsonObject obj, string key, bool? val) { if (val is { } v) obj[key] = v; }
-
-    private static string? Str(JsonObject? obj, string key) =>
-        obj is not null && obj[key] is JsonValue v
-            ? v.TryGetValue<string>(out var s) ? s
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.String ? el.GetString()
-            : null : null;
-    private static long? Int64(JsonObject? obj, string key) =>
-        obj is not null && obj[key] is JsonValue v
-            ? v.TryGetValue<long>(out var n) ? n
-            : v.TryGetValue<int>(out var i) ? i
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetInt64(out var en) ? en
-            : null : null;
-    private static double? Dbl(JsonObject? obj, string key) =>
-        obj is not null && obj[key] is JsonValue v
-            ? v.TryGetValue<double>(out var d) ? d
-            : v.TryGetValue<long>(out var l) ? l
-            : v.TryGetValue<int>(out var i) ? i
-            : v.TryGetValue<float>(out var f) ? f
-            : v.TryGetValue<decimal>(out var m) ? (double)m
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var ed) ? ed
-            : null : null;
-    private static bool? Bool(JsonObject? obj, string key) =>
-        obj is not null && obj[key] is JsonValue v
-            ? v.TryGetValue<bool>(out var b) ? b
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind is JsonValueKind.True or JsonValueKind.False ? el.GetBoolean()
-            : null : null;
 }

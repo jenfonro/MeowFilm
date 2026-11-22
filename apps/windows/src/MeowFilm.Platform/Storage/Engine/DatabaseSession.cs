@@ -88,27 +88,23 @@ public sealed class DatabaseSession
 
     public StorageRevision Revision(string owner) =>
         TryQuerySingle(
-            "SELECT revision,receipt FROM owner_revisions WHERE owner=$owner",
-            row => new StorageRevision(row.GetInt64(0), row.GetString(1)),
+            "SELECT revision FROM owner_revisions WHERE owner=$owner",
+            row => new StorageRevision(row.GetInt64(0)),
             out var revision,
             ("$owner", owner))
             ? revision
             : StorageRevision.Empty;
 
-    public StorageRevision CommitRevision(string owner, StorageRevision expected, string operationId)
+    public StorageRevision CommitRevision(string owner, StorageRevision expected)
     {
-        if (expected.Revision is < 0 or >= 9007199254740991 || string.IsNullOrEmpty(operationId))
+        if (expected.Revision is < 0 or >= 9007199254740991)
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         if (Revision(owner) != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
-        var next = new StorageRevision(expected.Revision + 1, operationId);
+        var next = new StorageRevision(expected.Revision + 1);
         Execute("""
-            INSERT INTO owner_revisions(owner,revision,receipt) VALUES($owner,$revision,$receipt)
-            ON CONFLICT(owner) DO UPDATE SET revision=excluded.revision,receipt=excluded.receipt
-            """, ("$owner", owner), ("$revision", next.Revision), ("$receipt", operationId));
-        Execute("INSERT INTO operation_receipts(owner,operation_id,revision) VALUES($owner,$id,$revision)",
-            ("$owner", owner), ("$id", operationId), ("$revision", next.Revision));
-        Execute("DELETE FROM operation_receipts WHERE owner=$owner AND revision<$revision-256",
-            ("$owner", owner), ("$revision", next.Revision));
+            INSERT INTO owner_revisions(owner,revision) VALUES($owner,$revision)
+            ON CONFLICT(owner) DO UPDATE SET revision=excluded.revision
+            """, ("$owner", owner), ("$revision", next.Revision));
         return next;
     }
 

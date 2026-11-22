@@ -1,6 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
-using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -79,6 +76,10 @@ internal static class CatSourceSettingsStore
     internal static Task<CatSettingsState> ReadOrEmptyAsync(IStorageDatabase database, CancellationToken token) =>
         database.ReadSnapshotAsync(db => Read(db) ?? new CatSettingsState(0, [], [], []), token);
 
+    internal static Task<(CatSettingsState? State, long Revision)> ReadSnapshotAsync(
+        IStorageDatabase database, CancellationToken token) =>
+        database.ReadSnapshotAsync(db => (Read(db), db.Revision(Owner).Revision), token);
+
     internal static Task<CatSettingsState> UpdateAsync(
         IStorageDatabase database,
         Func<CatSettingsState, CatSettingsState> update,
@@ -95,15 +96,15 @@ internal static class CatSourceSettingsStore
                 ON CONFLICT(singleton) DO UPDATE SET port=excluded.port
                 """, ("$port", next.Port));
 
-            ReconcileProviders(db, existing?.Providers, next.Providers);
-            ReconcileMappings(db, existing?.Mappings, next.Mappings);
-            ReconcileScripts(db, existing?.Scripts, next.Scripts);
+            WriteProviders(db, existing?.Providers, next.Providers);
+            WriteMappings(db, existing?.Mappings, next.Mappings);
+            WriteScripts(db, existing?.Scripts, next.Scripts);
 
-            db.CommitRevision(Owner, expected, Guid.NewGuid().ToString("D"));
+            db.CommitRevision(Owner, expected);
             return next;
         }, token);
 
-    private static void ReconcileProviders(
+    private static void WriteProviders(
         DatabaseSession db,
         IReadOnlyList<(string Provider, bool Enabled)>? previous,
         IReadOnlyList<(string Provider, bool Enabled)> next)
@@ -128,7 +129,7 @@ internal static class CatSourceSettingsStore
         }
     }
 
-    private static void ReconcileMappings(
+    private static void WriteMappings(
         DatabaseSession db,
         IReadOnlyList<CatProviderMapping>? previous,
         IReadOnlyList<CatProviderMapping> next)
@@ -167,7 +168,7 @@ internal static class CatSourceSettingsStore
         }
     }
 
-    private static void ReconcileScripts(
+    private static void WriteScripts(
         DatabaseSession db,
         IReadOnlyList<CatSourceConfiguration>? previous,
         IReadOnlyList<CatSourceConfiguration> next)
@@ -211,51 +212,4 @@ internal static class CatSourceSettingsStore
                 ("$rev", s.InputRevision));
         }
     }
-
-    internal static Task<RuntimeSettingsSnapshot> ReadRuntimeSnapshotAsync(
-        IStorageDatabase database, CancellationToken token) =>
-        database.ReadSnapshotAsync(db =>
-        {
-            var rev = db.Revision(Owner).Revision;
-            var state = Read(db);
-            if (state is null) return new RuntimeSettingsSnapshot(null, rev);
-
-            var providersObj = new JsonObject();
-            foreach (var (provider, enabled) in state.Providers)
-                providersObj[provider] = enabled;
-
-            var mappingsArr = new JsonArray();
-            foreach (var m in state.Mappings)
-            {
-                var aliasesArr = new JsonArray();
-                foreach (var a in m.Aliases) aliasesArr.Add(a);
-                mappingsArr.Add(new JsonObject { ["provider"] = m.Provider, ["aliases"] = aliasesArr });
-            }
-
-            var scriptsArr = new JsonArray();
-            foreach (var s in state.Scripts)
-            {
-                scriptsArr.Add(new JsonObject
-                {
-                    ["installationId"] = s.InstallationId,
-                    ["name"] = s.Name,
-                    ["sourceType"] = s.SourceType,
-                    ["enabled"] = s.Enabled,
-                    ["inputRevision"] = s.InputRevision,
-                    ["sourceUrl"] = s.SourceUrl,
-                    ["localPath"] = s.LocalPath,
-                    ["localHash"] = s.LocalHash
-                });
-            }
-
-            var root = new JsonObject
-            {
-                ["version"] = 1,
-                ["port"] = state.Port,
-                ["providers"] = providersObj,
-                ["mappings"] = mappingsArr,
-                ["scripts"] = scriptsArr
-            };
-            return new RuntimeSettingsSnapshot(JsonSerializer.SerializeToElement(root), rev);
-        }, token);
 }

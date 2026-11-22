@@ -69,14 +69,14 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
             var committed = WithFingerprint(target, next);
             db.Execute("""
                 INSERT INTO windows_music_accounts(
-                    platform,generation,cookie,scope,validated_at,
+                    platform,generation,cookie,scope,validated_at_ms,
                     profile_platform,profile_user_id,profile_display_name,profile_avatar)
                 VALUES($plat,$gen,$cookie,$scope,$valAt,$pPlat,$pUid,$pName,$pAvatar)
                 ON CONFLICT(platform) DO UPDATE SET
                     generation=excluded.generation,
                     cookie=excluded.cookie,
                     scope=excluded.scope,
-                    validated_at=excluded.validated_at,
+                    validated_at_ms=excluded.validated_at_ms,
                     profile_platform=excluded.profile_platform,
                     profile_user_id=excluded.profile_user_id,
                     profile_display_name=excluded.profile_display_name,
@@ -92,7 +92,7 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
                 ("$pName", committed.Profile?.DisplayName),
                 ("$pAvatar", committed.Profile?.Avatar));
 
-            var actual = db.CommitRevision(MusicAccountOwner.DocumentNamespace, expectedRevision, Guid.NewGuid().ToString("D"));
+            var actual = db.CommitRevision(MusicAccountOwner.DocumentNamespace, expectedRevision);
             return (committed, actual);
         }, token, (next.Cookie?.Length ?? 0) * 2 + 256);
     }
@@ -100,7 +100,7 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
     private static StoredAccount? ReadPlatform(DatabaseSession db, string platform)
     {
         if (!db.TryQuerySingle("""
-            SELECT generation,cookie,scope,validated_at,
+            SELECT generation,cookie,scope,validated_at_ms,
                    profile_platform,profile_user_id,profile_display_name,profile_avatar
             FROM windows_music_accounts
             WHERE platform=$plat

@@ -111,7 +111,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
                             ("$gk", binding.Global?.Key.ToString()),
                             ("$gm", binding.Global is { } g ? (long)(int)g.Modifiers : null));
                     }
-                    return db.CommitRevision(DocumentNamespace, expected, Guid.NewGuid().ToString("D"));
+                    return db.CommitRevision(DocumentNamespace, expected);
                 });
                 Publish(draft);
             }

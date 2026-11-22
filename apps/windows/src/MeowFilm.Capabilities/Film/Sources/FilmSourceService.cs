@@ -562,7 +562,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         {
             try
             {
-                after = await FilmSourceStore.SaveAsync(database, candidate, storageRevision, CancellationToken.None).ConfigureAwait(false);
+                after = await FilmSourceStore.SaveAsync(database, document, candidate, storageRevision, CancellationToken.None).ConfigureAwait(false);
             }
             catch
             {

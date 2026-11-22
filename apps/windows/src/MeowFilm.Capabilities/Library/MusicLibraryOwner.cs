@@ -47,12 +47,15 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         IReadOnlyDictionary<(string SongId, string Platform), long>? Observations = null,
         QueueNavigation? BeforeQueue = null, QueueNavigation? AfterQueue = null);
 
-    public MusicLibraryOwner(IMusicLibraryStore store, IStorageDatabase? database = null) : this(store, "local", database) { }
-    public MusicLibraryOwner(IMusicLibraryStore store, string scope, IStorageDatabase? database = null)
+    public MusicLibraryOwner(IMusicLibraryStore store, IStorageDatabase cacheDatabase) : this(store, "local", cacheDatabase) { }
+    public MusicLibraryOwner(IMusicLibraryStore store, string scope, IStorageDatabase cacheDatabase)
     {
-        ArgumentNullException.ThrowIfNull(store); LJ.Require(LJ.Id(scope)); this.store = store; this.scope = scope;
-        var shared = database ?? (store as MusicLibraryDatabase)?.Database ?? throw new ArgumentException("SHARED_DATABASE_REQUIRED", nameof(database));
-        PresentationCache = new(shared);
+        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(cacheDatabase);
+        LJ.Require(LJ.Id(scope));
+        this.store = store;
+        this.scope = scope;
+        PresentationCache = new(cacheDatabase);
     }
 
     public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
@@ -87,16 +90,16 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         if (document is null || force)
         {
-            var saved = await store.ReadAsync(scope, token).ConfigureAwait(false);
-            var candidate = document is not null && saved.Revision == revision ? document :
-                new MusicLibraryData(store, saved.Areas, scope: scope, revision: saved.Revision);
+            var savedRevision = await store.ReadRevisionAsync(scope, token).ConfigureAwait(false);
+            var candidate = document is not null && savedRevision == revision ? document :
+                new MusicLibraryData(store, new Dictionary<string, JsonNode?>(StringComparer.Ordinal), scope: scope, revision: savedRevision);
             if (force && (pending ?? recommendationUnknown) is { } attempt)
-                LJ.Require(saved.Revision == attempt.Before || saved.Revision == attempt.After, "STORAGE_CONFLICT");
+                LJ.Require(savedRevision == attempt.Before || savedRevision == attempt.After, "STORAGE_CONFLICT");
             if (!ReferenceEquals(document, candidate) && document?.IsLoaded("queue") == true && queueLoaded)
                 queueLoaded = document.Value("queue") is JsonObject queue && candidate.Matches("queue", [], [scope], queue) && queueLoaded;
             lock (repositoryGate)
             {
-                document = candidate; revision = saved.Revision;
+                document = candidate; revision = savedRevision;
                 visibleSongs = new(store, cacheReads: false);
                 songPublication++;
             }
@@ -155,22 +158,22 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     {
         token.ThrowIfCancellationRequested();
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-        var changes = candidate.Changes();
-        if (changes.Areas.Count == 0 && changes.Songs.Count == 0 && changes.Rows.Count == 0) { AcceptSongObservations(observations); return; }
+        var commit = candidate.BuildCommit();
+        if (commit.IsEmpty) { AcceptSongObservations(observations); return; }
         ValidateChangedSongs(candidate);
-        var expected = new MusicLibraryRevision(checked(revision.Generation + 1), Guid.NewGuid().ToString("D"));
-        bool artworkPolicyChanged = changes.Areas.ContainsKey(MetadataPolicyArea);
+        var expected = new MusicLibraryRevision(checked(revision.Generation + 1));
+        bool artworkPolicyChanged = commit.MetadataPolicy is not null;
         // A physical commit may precede its receipt. Until it settles, readers
         // retain only the previous versions of the affected records.
         lock (repositoryGate) visibleSongs = new(store, candidate.Songs.BeforeChanges, cacheReads: false);
         try
         {
             // Transaction admission is final. Cancellation cannot imply rollback.
-            var result = await store.CommitAsync(scope, revision, expected, changes, CancellationToken.None).ConfigureAwait(false);
+            var result = await store.CommitAsync(scope, revision, commit, CancellationToken.None).ConfigureAwait(false);
             LJ.Require(result == expected, "COMMIT_UNKNOWN");
             lock (repositoryGate)
             {
-                document = candidate.Publish(result); revision = result;
+                document = candidate.Publish(result, commit); revision = result;
                 visibleSongs = new(store, cacheReads: false);
                 songPublication++;
             }
@@ -187,7 +190,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         AcceptSongObservations(observations);
         if (artworkPolicyChanged) failedArtwork.Clear();
-        if (changes.Songs.Count > 0) NotifySongMetadataChanged(changes.Songs.Keys.ToHashSet(StringComparer.Ordinal));
+        if (commit.Songs.Count > 0) NotifySongMetadataChanged(commit.Songs.Select(s => s.Record.SongId).ToHashSet(StringComparer.Ordinal));
     }
     private async Task ReconcileLockedAsync(CancellationToken token)
     {

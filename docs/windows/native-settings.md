@@ -1,6 +1,6 @@
 # Windows 原生设置与运行器消费
 
-通用、音乐、影视的设置由相应原生 owner 直接读写每个 App 唯一的 SQLite 数据库。运行器停止或故障不阻止本地设置，不因查看、保存设置启动或恢复运行器。影视规则执行、元数据请求、网盘验证及二维码登录仍由公共 Node owner 完成；离线时这些在线操作真实失败。共同 schema、事务及凭据边界见[共享 SQLite 契约](../common/settings-storage.md)。
+通用、音乐、影视的设置由相应原生 owner 直接读写每个 App 永久 SQLite 数据库（`storage-v1/meowfilm-data.sqlite3`）。运行器停止或故障不阻止本地设置，不因查看、保存设置启动或恢复运行器。影视规则执行、元数据请求、网盘验证及二维码登录仍由公共 Node owner 完成；离线时这些在线操作真实失败。共同 schema、事务及凭据边界见[共享 SQLite 契约](../common/settings-storage.md)。
 
 ## Typed settings 与提交
 

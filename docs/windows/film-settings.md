@@ -40,7 +40,7 @@ Node 管理已完成、客户端同步文档保存失败时，也先撤销旧代
 
 ## 视频源管理
 
-`FilmSourceService` 是本地清单与用户配置的唯一 owner，通过 `MeowFilm.Capabilities/Film/Storage/FilmSourceStore` 使用 `film.video-sources.v1` revision 和共享 SQLite 的 `windows_film_source_videos`、`windows_film_source_cats`、`film_source_deletions` 及其子表（`windows_film_source_video_*`、`windows_film_source_cat_site*`）。稳定身份为 `installationId + siteKey`；端口和 generation 只用于运行期路由／迟到结果隔离，不是持久主键。首页等未来消费者直接读取本地 `Videos`，不需为每次列表访问调用 Node。
+`FilmSourceService` 是本地清单与用户配置的唯一 owner，通过 `MeowFilm.Capabilities/Film/Storage/FilmSourceStore` 使用 `film.video-sources.v1` revision 和永久库 `meowfilm-data.sqlite3` 的跨端共享表 `film_source_probes`、`film_source_sites`、`film_source_site_actions`、`film_source_site_methods`、`film_video_sources`、`film_video_actions`、`film_video_methods`、`film_video_probe_steps` 与 `film_source_deletions`。稳定身份为 `installationId + siteKey`；端口和 generation 只用于运行期路由／迟到结果隔离，不是持久主键。首页等未来消费者直接读取本地 `Videos`，不需为每次列表访问调用 Node。
 
 这些 typed 关系保存可重建的 cat／site 元数据和不可当缓存清空的 Options、Order、Deleted 用户事实；没有任意根或嵌套 JSON 扩展槽。不可用缓存可由真实状态重建，不会因此重置选项／排序／删除意图。管理投影隔离不可消费或歧义的用户选项身份，不把它们猜成新默认；健康兄弟仍可编辑。稳定身份和真实 CAS 保护实际提交，存储关系损坏与不支持的当前版本仍明确失败。
 

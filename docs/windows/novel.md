@@ -47,7 +47,7 @@
 
 ## 阅读数据与生命周期
 
-`NovelLibrary` 通过 `Novel/Storage/NovelLibraryStore.cs` 使用共享 `NativeDatabase` 中 `windows_novel_entries`、`windows_novel_book_extras`、`novel_rules` 与 `windows_novel_appearance` 等强类型 `STRICT` 表，保存稳定 bookId、书架、历史、阅读位置、用户净化规则与排版；来源配置由 `Novel/Storage/NovelSourceStore.cs` 读写 `owner_revisions`、`windows_novel_sources` 与 `windows_novel_source_definition_nodes`。内部业务字段使用声明类型，仅第三方书籍扩展与书源开放定义使用 `TypedValueNodes`，保留精确数值和 UTF-8 键身份。单书、排版和规则在事务中分别更新，不把完整业务 JSON 文档存入数据库。损坏的根或当前编辑记录拒绝提交，不覆盖其他记录；SQLite 提交失败不会发布候选快照。
+`NovelLibrary` 通过 `Novel/Storage/NovelLibraryStore.cs` 使用永久库 `NativeDatabase`（`meowfilm-data.sqlite3`）中跨端共享表 `novel_books`、`novel_progress`、`novel_book_variables`、`novel_rules` 与 `novel_reading_settings` 等强类型 `STRICT` 表，保存稳定 bookId、书架、历史、阅读位置、用户净化规则与排版；来源配置由 `Novel/Storage/NovelSourceStore.cs` 读写 `owner_revisions`、`windows_novel_sources` 与 `windows_novel_source_definition_nodes`。内部业务字段使用声明类型，仅第三方书籍扩展与书源开放定义使用纯强类型 `StorageValue` + `TypedValueNodes`，保留精确数值和 UTF-8 键身份。单书、排版和规则在事务中分别更新，不把完整业务 JSON 文档存入数据库。损坏的根或当前编辑记录拒绝提交，不覆盖其他记录；SQLite 提交失败不会发布候选快照。
 
 外观未知模式、简繁值、主题或不可消费字段只在当前控件／阅读消费时回退；打开编辑器或修改其他字段不会把回退值写回，明确修改该字段才替换原值。
 

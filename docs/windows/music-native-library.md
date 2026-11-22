@@ -6,7 +6,7 @@
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- App 持有唯一 `NativeDatabase`，文件为业务数据根下 `storage-v1/meowfilm.sqlite3`；`MeowFilm.Capabilities/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsAreaStore`）通过 `IMusicLibraryStore` 直接读写 `music_*` 与 `windows_music_*` 强类型 `STRICT` 表，owner 不释放 App 的数据库。
+- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsAreaStore`）通过纯强类型 `IMusicLibraryStore` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（零 `JsonObject`/`JsonNode` 持久化读写），owner 不释放 App 的数据库。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
@@ -54,24 +54,25 @@ ValueTask DisposeAsync();
 
 ## 唯一当前数据库
 
-音乐原生 owner 借用 App 唯一 `NativeDatabase`，由官方 `Microsoft.Data.Sqlite` 10.0.15／SQLitePCLRaw 2.1.13 的 NuGet 资产提供 SQLite；不单建音乐数据库。当前统一 schema 见[共享存储契约](../common/settings-storage.md)。
+音乐原生 owner 借用 App 的永久 `NativeDatabase`（`meowfilm-data.sqlite3`），由官方 `Microsoft.Data.Sqlite` 10.0.15／SQLitePCLRaw 2.1.13 的 NuGet 资产提供 SQLite；不单建音乐数据库。当前双库统一 schema 见[共享存储契约](../common/settings-storage.md)。
 
 | 关系 | 内容与索引 |
 | --- | --- |
-| `owner_revisions` / `operation_receipts` | 以 `music.library:<scope>` 维护 scope、revision 与唯一 receipt；真实变更同事务推进 |
-| `music_songs` | 永久 UUID、类型化单曲字段、录音 fingerprint、固定 baseline_duration、本地 locator、封面 URL 与精确查询索引 |
+| `owner_revisions` | 以 `music.library:<scope>` 维护纯整数 owner revision；真实变更同事务推进 |
+| `music_songs` | 永久 UUID、类型化单曲字段、统一录音匹配键 `match_key`、固定 `baseline_duration`、本地 locator、封面 URL 与精确查询索引 |
 | `music_song_sources` 及来源资料子关系 | 来源稳定键、song_id 外键、平台／原生 ID／必要变体和顺序；已登记来源不可删除或重绑 |
+| `music_play_contexts` | 内容寻址（SHA-256 `context_id`）播放上下文去重表，供队列与历史各表外键引用并按需清理孤立行 |
 | 队列、历史、集合及偏好专属关系 | 类型化控制字段、按身份组织的有序成员和引用；不嵌入歌曲实体 |
 
-所有连接使用 WAL／FULL，同库原生和 Node writer 以短事务及 owner revision CAS 协作。一次提交只更新本轮实际改变的歌曲、来源、控制关系与回执；路径、维护锁、备份和故障语义见[存储](protected-storage.md)。
+所有永久库连接使用 WAL／FULL，同库原生和 Node writer 以短事务及纯整数 owner revision CAS 协作。一次提交只更新本轮实际改变的歌曲、来源、控制关系与 revision；路径、维护锁、备份和故障语义见[存储](protected-storage.md)。
 
-普通读先取得 owner revision/receipt，再按实际动作读取所选 area／关系／成员；显式诊断导出才展开所有 area。history 列表只读摘要与计数，详情只展开所选分页，恢复校验所选完整 archive 和当前队列，播放记录只合并当天真实字段。
+普通读先取得 owner revision，再按实际动作读取所选 area／关系／成员；显式诊断导出才展开所有 area。history 列表只读摘要与计数，详情只展开所选分页，恢复校验所选完整 archive 和当前队列，播放记录只合并当天真实字段。
 
-完整覆盖设置只消费旧 schema/revision；准确成员删除按原表键执行。局部写入保留未提供的列与未读关系，不把部分投影当完整 previous 覆写无关表项。所选内容、全量覆盖和局部字段更新在提交中显式区分，仍与同一 owner receipt 在同一 CAS 事务提交。
+完整覆盖设置只消费旧 schema/revision；准确成员删除按原表键执行。局部写入保留未提供的列与未读关系，不把部分投影当完整 previous 覆写无关表项。所选内容、全量覆盖和局部字段更新在提交中显式区分，仍与同一 owner revision 在同一 CAS 事务提交。
 
 普通歌曲读按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。
 
-- 控制与单记录的内存／协议投影保留实际字节和深度预算；数据库使用手写强类型 `STRICT` 固定列及关系表，不为内部设置建泛化扩展槽或保存整份 JSON。owner 状态仍须满足 scope／generation／receipt。
+- 控制与单记录的内存／协议投影保留实际字节和深度预算；数据库使用手写强类型 `STRICT` 固定列及关系表，不为内部设置建泛化扩展槽或保存整份 JSON。owner 状态仍须满足 scope／revision。
 - 仅在实际 getter／command 处校验当前动作涉及的 area；未知 area 不获得命令权限，也不阻断其他 area，未修改值原样保留。脚本实例私有存储不在此库。
 - 缺少可选 area 表示该 area 尚未创建；已有 `null`、错误类型或错误 schema 不是空状态，在实际消费时明确失败，不写回修复或覆盖为空库。
 - 不在加载／每次提交时遍历所有 area 或要求歌曲等于 Normalize 投影。所选歌曲身份、录音唯一 owner、队列引用／current、修订与账号绑定仍须成立；持久化的非法策略不当作用户写入参数返回。整库同步仍核对其实际遍历的集合／绑定／journal 关系。
@@ -102,7 +103,7 @@ native-desktop-lyrics
 playback-settings
 ```
 
-共享图片与展示歌词由 `MusicPresentationCache` 维护（图片原字节存于 `resources-v1/music-images` 并在 SQLite `windows_images` 索引，展示歌词由 `LyricsCacheStore` 存于共享强类型表 `music_lyrics` / `music_lyric_lines` / `music_lyric_words`），不属于业务 area，不参与歌曲数据库提交；手工歌词仍属于 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
+共享图片与展示歌词由 `MusicPresentationCache` 维护（图片原字节存于 `resources-v1/music-images` 并在缓存库 `meowfilm-cache.sqlite3` 的 `cached_images` 索引，展示歌词由 `LyricsCacheStore` 存于缓存库共享强类型表 `cached_music_lyrics` / `cached_music_lyric_lines` / `cached_music_lyric_words`），不属于业务 area，不参与永久歌曲数据库提交；手工歌词仍属于永久库 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
 本 owner 只从空数据建立并读取当前数据库，不检查或承接历史脚本条目。

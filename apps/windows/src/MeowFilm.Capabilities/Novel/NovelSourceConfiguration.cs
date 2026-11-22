@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -71,6 +72,7 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
     private const long MaximumRevision = 9007199254740991;
     private readonly SemaphoreSlim serial = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
+    private StoredNovelSourceRow[] savedRows = [];
     private NovelSourceConfigurationSnapshot? saved;
     internal NovelSourceConfigurationSnapshot Snapshot => saved ?? throw new InvalidOperationException("NOT_INITIALIZED");
 
@@ -83,9 +85,10 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
     private async Task LoadCoreAsync(CancellationToken token, bool reload = false)
     {
         if (saved is not null && !reload) return;
-        var (next, rev) = await database.ReadSnapshotAsync(db => NovelSourceStore.Load(db, DocumentNamespace), token);
+        var (rows, revision, rev) = await database.ReadSnapshotAsync(db => NovelSourceStore.Load(db, DocumentNamespace), token);
         storageRevision = rev;
-        saved = next;
+        savedRows = rows;
+        saved = new NovelSourceConfigurationSnapshot(1, revision, rows.Select(FromRow).ToArray());
     }
     internal NovelSourceDefinition Require(NovelSource source) =>
         Snapshot.Sources.FirstOrDefault(s => s.InstallationId == source.InstallationId && s.Revision == source.Revision)
@@ -170,13 +173,31 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
             if (current.Revision == MaximumRevision) throw new BridgeException("LIMIT");
             long nextRevision = current.Revision + 1;
             var expected = storageRevision;
+            var previousRows = savedRows;
+            var nextRows = values.Select(ToRow).ToArray();
             var receipt = await database.WriteAsync(
-                db => NovelSourceStore.Save(db, DocumentNamespace, expected, nextRevision, values),
+                db => NovelSourceStore.Save(db, DocumentNamespace, expected, nextRevision, previousRows, nextRows),
                 token);
             storageRevision = receipt;
+            savedRows = nextRows;
             saved = new NovelSourceConfigurationSnapshot(1, nextRevision, values);
         }
         finally { serial.Release(); }
+    }
+
+    private static NovelSourceDefinition FromRow(StoredNovelSourceRow row) => new(
+        row.InstallationId, row.Revision, row.Name, row.SourceUrl, row.Group, row.Order,
+        row.Enabled, row.EnabledExplore, row.Protocol,
+        (StorageValueJson.ToJsonObject(row.Definition) ?? throw new DocumentStoreException(DocumentStoreError.Corrupt)).ToJsonString());
+
+    private static StoredNovelSourceRow ToRow(NovelSourceDefinition source)
+    {
+        var definitionObj = JsonNode.Parse(source.Definition) as JsonObject
+            ?? throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        return new StoredNovelSourceRow(
+            source.InstallationId, source.Revision, source.Name, source.SourceUrl, source.Group, source.Order,
+            source.Enabled, source.EnabledExplore, source.Protocol,
+            StorageValueJson.FromJsonNode(definitionObj));
     }
     private static IEnumerable<string> Entries(string input)
     {

@@ -1,13 +1,24 @@
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
+
+internal sealed record StoredNovelSourceRow(
+    string InstallationId,
+    long Revision,
+    string Name,
+    string SourceUrl,
+    string Group,
+    long Order,
+    bool Enabled,
+    bool EnabledExplore,
+    string Protocol,
+    StorageValue Definition);
 
 internal static class NovelSourceStore
 {
     private const long MaximumRevision = 9007199254740991;
 
-    internal static (NovelSourceConfigurationSnapshot Snapshot, StorageRevision StorageRevision) Load(DatabaseSession db, string owner)
+    internal static (StoredNovelSourceRow[] Sources, long Revision, StorageRevision StorageRevision) Load(DatabaseSession db, string owner)
     {
         var storageRevision = db.Revision(owner);
         var definitionsById = LoadAllDefinitions(db);
@@ -30,31 +41,34 @@ internal static class NovelSourceStore
                     sourceRev is < 1 or > MaximumRevision || protocol is not ("legado" or "qysg") ||
                     !definitionsById.TryGetValue(id, out var definitionNode))
                     throw new DocumentStoreException(DocumentStoreError.Corrupt);
-                return new NovelSourceDefinition(id, sourceRev, name, url, group, order, enabled, enabledExplore, protocol,
-                    definitionNode.ToJsonString());
+                return new StoredNovelSourceRow(id, sourceRev, name, url, group, order, enabled, enabledExplore, protocol, definitionNode);
             }).ToArray();
 
         if (storageRevision == StorageRevision.Empty)
         {
             if (sources.Length > 0) throw new DocumentStoreException(DocumentStoreError.Corrupt);
-            return (new NovelSourceConfigurationSnapshot(1, 1, []), storageRevision);
+            return ([], 1, storageRevision);
         }
         long revision = checked(storageRevision.Revision + 1);
         if (revision is < 1 or > MaximumRevision)
             throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        return (new NovelSourceConfigurationSnapshot(1, revision, sources), storageRevision);
+        return (sources, revision, storageRevision);
     }
 
-    internal static StorageRevision Save(DatabaseSession db, string owner, StorageRevision expected,
-        long nextRevision, IReadOnlyList<NovelSourceDefinition> sources)
+    internal static StorageRevision Save(
+        DatabaseSession db,
+        string owner,
+        StorageRevision expected,
+        long nextRevision,
+        IReadOnlyList<StoredNovelSourceRow> previous,
+        IReadOnlyList<StoredNovelSourceRow> sources)
     {
         if (db.Revision(owner) != expected)
             throw new DocumentStoreException(DocumentStoreError.Conflict);
         if (nextRevision != expected.Revision + 2)
             throw new DocumentStoreException(DocumentStoreError.Conflict);
 
-        var (existingSnapshot, _) = Load(db, owner);
-        var prevMap = existingSnapshot.Sources.Select((s, i) => (s.InstallationId, Pos: i, Source: s))
+        var prevMap = previous.Select((s, i) => (s.InstallationId, Pos: i, Source: s))
             .ToDictionary(x => x.InstallationId, x => (x.Pos, x.Source), StringComparer.Ordinal);
         var desiredIds = sources.Select(s => s.InstallationId).ToHashSet(StringComparer.Ordinal);
         foreach (var id in prevMap.Keys)
@@ -64,10 +78,12 @@ internal static class NovelSourceStore
         for (int i = 0; i < sources.Count; i++)
         {
             var source = sources[i];
-            if (prevMap.TryGetValue(source.InstallationId, out var old) && old.Pos == i && old.Source == source)
+            if (source.Definition.Kind != StorageValueKind.Object)
+                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+            bool hadOld = prevMap.TryGetValue(source.InstallationId, out var old);
+            if (hadOld && old.Pos == i && RowEquals(old.Source, source))
                 continue;
-            var definitionObj = JsonNode.Parse(source.Definition) as JsonObject
-                ?? throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+
             db.Execute("""
                 INSERT INTO windows_novel_sources(
                     installation_id,position,revision,name,source_url,source_group,sort_order,enabled,enabled_explore,protocol)
@@ -93,15 +109,22 @@ internal static class NovelSourceStore
                 ("$enabled", source.Enabled),
                 ("$explore", source.EnabledExplore),
                 ("$proto", source.Protocol));
-            if (old.Source is null || old.Source.Definition != source.Definition)
+
+            if (!hadOld || !StorageValue.StructuralEquals(old.Source.Definition, source.Definition))
                 TypedValueNodes.Replace(db, "windows_novel_source_definition_nodes",
-                    [("installation_id", source.InstallationId)], definitionObj, omitEmptyObject: false);
+                    [("installation_id", source.InstallationId)], source.Definition, omitEmptyObject: false);
         }
 
-        return db.CommitRevision(owner, expected, Guid.NewGuid().ToString("D"));
+        return db.CommitRevision(owner, expected);
     }
 
-    private static Dictionary<string, JsonObject> LoadAllDefinitions(DatabaseSession db)
+    private static bool RowEquals(StoredNovelSourceRow a, StoredNovelSourceRow b) =>
+        a.InstallationId == b.InstallationId && a.Revision == b.Revision && a.Name == b.Name &&
+        a.SourceUrl == b.SourceUrl && a.Group == b.Group && a.Order == b.Order &&
+        a.Enabled == b.Enabled && a.EnabledExplore == b.EnabledExplore && a.Protocol == b.Protocol &&
+        StorageValue.StructuralEquals(a.Definition, b.Definition);
+
+    private static Dictionary<string, StorageValue> LoadAllDefinitions(DatabaseSession db)
     {
         var grouped = new Dictionary<string, List<TypedValueNodes.NodeRow>>(StringComparer.Ordinal);
         foreach (var item in db.Query("""
@@ -117,10 +140,14 @@ internal static class NovelSourceStore
             }
             list.Add(item.Node);
         }
-        var result = new Dictionary<string, JsonObject>(grouped.Count, StringComparer.Ordinal);
+        var result = new Dictionary<string, StorageValue>(grouped.Count, StringComparer.Ordinal);
         foreach (var (id, rows) in grouped)
-            result[id] = TypedValueNodes.Decode(rows) as JsonObject
-                ?? throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        {
+            var decoded = TypedValueNodes.Decode(rows);
+            if (decoded is null || decoded.Kind != StorageValueKind.Object)
+                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            result[id] = decoded;
+        }
         return result;
     }
 }

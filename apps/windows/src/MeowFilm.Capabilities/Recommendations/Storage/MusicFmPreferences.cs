@@ -1,4 +1,3 @@
-using System.Text.Json;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Recommendations;
@@ -11,7 +10,7 @@ internal readonly record struct MusicFmSelection(string Mode, string Submode, st
 /// <summary>Device-only choices read and update one actual account row.</summary>
 internal sealed class MusicFmPreferences(IStorageDatabase database)
 {
-    internal const string DocumentNamespace = "music.fm-selection.v2";
+    internal const string DocumentNamespace = "music.fm-selection.v1";
 
     internal Task<MusicFmSelection> ReadAsync(string accountId, CancellationToken token) => database.ReadAsync(db =>
     {
@@ -34,13 +33,9 @@ internal sealed class MusicFmPreferences(IStorageDatabase database)
         return new MusicFmSelection(value.Mode!, value.Submode!, value.RuleId!, value.TabTagId!);
     }, token);
 
-    internal async Task SaveAsync(string accountId, JsonElement snapshot, Func<bool> current, CancellationToken token)
+    internal async Task SaveAsync(string accountId, MusicFmSelection selection, Func<bool> current, CancellationToken token)
     {
-        string? mode = snapshot.GetProperty("mode").GetString();
-        string? submode = snapshot.GetProperty("submode").GetString();
-        string? ruleId = snapshot.GetProperty("ruleId").GetString();
-        string? tabTagId = snapshot.GetProperty("tabTagId").GetString();
-        Validate(mode, submode, ruleId, tabTagId);
+        Validate(selection.Mode, selection.Submode, selection.RuleId, selection.TabTagId);
         if (!current()) return;
         await database.WriteAsync(db =>
         {
@@ -55,10 +50,10 @@ internal sealed class MusicFmPreferences(IStorageDatabase database)
                     tab_tag_id=excluded.tab_tag_id
                 """,
                 ("$id", accountId),
-                ("$mode", mode!),
-                ("$submode", submode!),
-                ("$ruleId", ruleId!),
-                ("$tabTagId", tabTagId!));
+                ("$mode", selection.Mode),
+                ("$submode", selection.Submode),
+                ("$ruleId", selection.RuleId),
+                ("$tabTagId", selection.TabTagId));
             return true;
         }, token, 256, commit: commit => { if (!current()) throw new OperationCanceledException(token); commit(); }).ConfigureAwait(false);
     }

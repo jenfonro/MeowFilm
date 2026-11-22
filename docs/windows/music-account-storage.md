@@ -4,7 +4,7 @@
 
 ## 唯一 owner 与数据身份
 
-- `MusicAccountOwner` 是 `music.accounts.v2` 的唯一原生 writer；底层使用当前 App 唯一 `NativeDatabase` 的 `windows_music_accounts` 强类型表。
+- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一原生 writer；底层使用永久 `NativeDatabase`（`meowfilm-data.sqlite3`）的 `windows_music_accounts` 强类型表，账号展示详情缓存使用缓存库（`meowfilm-cache.sqlite3`）的 `windows_music_account_details` / `windows_music_account_audio_levels`。
 - Cookie、设备密钥及协议材料与账号字段同库同事务以明文 typed columns 保存，不使用 DPAPI、Keychain、应用层加密或第二凭据仓库。新 schema 不探测、迁移或兼容旧存储。
 - 凭据由账号 owner 严格事务管理；账号详情是独立可选展示缓存，不能由页面、平台 HTTP 或脚本直接写入。
 - 账号类型行保存原生凭据；匿名设备／prepare 状态由 Node 保存，不由原生账号 owner 代管。

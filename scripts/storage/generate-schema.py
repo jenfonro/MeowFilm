@@ -1,4 +1,4 @@
-"""Assemble platform-isolated SQLite schemas from packages/storage/schema/ and validate them."""
+"""Assemble platform-isolated dual-database SQLite schemas (data & cache) and enforce structural invariants."""
 import argparse
 import re
 import sqlite3
@@ -9,17 +9,27 @@ SCHEMA_ROOT = ROOT / "packages/storage/schema"
 GENERATED_ROOT = ROOT / "packages/storage/generated"
 
 SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+TIMESTAMP_COL_RE = re.compile(r"(?:_at|_at_ms|_until|_until_ms|_time)$")
+FORBIDDEN_TABLES = frozenset((
+    "operation_receipts",
+    "music_script_catalog_state",
+    "music_anonymous_state",
+    "windows_music_search_history_state",
+))
 FORBIDDEN_COLUMNS = frozenset(("shape_mask", "null_mask", "presence_low", "presence_high"))
 
 TARGETS = {
-    "standalone": {
-        "layers": ("core", "runtime"),
-        "outputs": (GENERATED_ROOT / "schema-standalone.sql",),
+    "data-standalone": {
+        "role": "data",
+        "layers": ("data/core", "data/runtime"),
+        "outputs": (GENERATED_ROOT / "schema-data-standalone.sql",),
         "forbidden_prefixes": (
             "windows_",
             "ios_",
+            "cached_",
+            "metadata_cache_",
             "music_songs",
-            "music_owner_state",
+            "music_play_contexts",
             "music_library_",
             "music_collections",
             "music_queue_",
@@ -28,25 +38,50 @@ TARGETS = {
             "music_appearance",
             "music_playback_",
             "music_source_exclusions",
-            "music_lyrics",
-            "music_lyric_",
+            "music_search_",
+            "music_feedback_",
             "cat_scripts",
             "film_favorites",
             "film_favorite_",
-            "film_source_deletions",
-            "novel_rules",
+            "film_source_",
+            "film_video_",
+            "novel_",
+            "playback_volume",
         ),
     },
-    "windows": {
-        "layers": ("core", "runtime", "shared", "music", "windows"),
-        "outputs": (GENERATED_ROOT / "schema-windows.sql",),
+    "data-windows": {
+        "role": "data",
+        "layers": ("data/core", "data/runtime", "data/shared", "data/music", "data/windows"),
+        "outputs": (GENERATED_ROOT / "schema-data-windows.sql",),
+        "forbidden_prefixes": ("ios_", "cached_", "metadata_cache_"),
+    },
+    "data-ios": {
+        "role": "data",
+        "layers": ("data/core", "data/runtime", "data/shared", "data/music", "data/ios"),
+        "outputs": (
+            GENERATED_ROOT / "schema-data-ios.sql",
+            ROOT / "native/MeowKit/Sources/MeowStorage/Resources/storage-data-schema.sql",
+        ),
+        "forbidden_prefixes": ("windows_", "cached_", "metadata_cache_"),
+    },
+    "cache-standalone": {
+        "role": "cache",
+        "layers": ("cache/core", "cache/runtime"),
+        "outputs": (GENERATED_ROOT / "schema-cache-standalone.sql",),
+        "forbidden_prefixes": ("windows_", "ios_", "cached_", "music_", "film_", "novel_", "cat_", "source_", "pan_"),
+    },
+    "cache-windows": {
+        "role": "cache",
+        "layers": ("cache/core", "cache/runtime", "cache/shared", "cache/windows"),
+        "outputs": (GENERATED_ROOT / "schema-cache-windows.sql",),
         "forbidden_prefixes": ("ios_",),
     },
-    "ios": {
-        "layers": ("core", "runtime", "shared", "music", "ios"),
+    "cache-ios": {
+        "role": "cache",
+        "layers": ("cache/core", "cache/runtime", "cache/shared", "cache/ios"),
         "outputs": (
-            GENERATED_ROOT / "schema-ios.sql",
-            ROOT / "native/MeowKit/Sources/MeowStorage/Resources/storage-schema.sql",
+            GENERATED_ROOT / "schema-cache-ios.sql",
+            ROOT / "native/MeowKit/Sources/MeowStorage/Resources/storage-cache-schema.sql",
         ),
         "forbidden_prefixes": ("windows_",),
     },
@@ -70,7 +105,6 @@ def collect_sql(layers: tuple[str, ...]) -> str:
 
 def index_column_lists(conn: sqlite3.Connection, table_name: str) -> list[list[str]]:
     covered: list[list[str]] = []
-    # Explicit primary key (including WITHOUT ROWID or composite / single INTEGER PK).
     pk_cols = [
         (row[5], row[1])
         for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
@@ -113,27 +147,38 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
             raise SystemExit(f"[{target_name}] schema produced no tables")
 
         table_names = {name for name, _ in tables}
-        for required in ("storage_identity", "owner_revisions", "operation_receipts"):
+        for required in ("storage_identity", "owner_revisions"):
             if required not in table_names:
                 raise SystemExit(f"[{target_name}] missing required core table: {required}")
 
         for name, ddl in tables:
             if not SNAKE_CASE_RE.match(name):
                 raise SystemExit(f"[{target_name}] non-snake_case table name: {name}")
+            if name in FORBIDDEN_TABLES:
+                raise SystemExit(f"[{target_name}] forbidden legacy/dead table: {name}")
             for prefix in forbidden_prefixes:
                 if name.startswith(prefix):
-                    raise SystemExit(f"[{target_name}] forbidden cross-platform table: {name}")
+                    raise SystemExit(f"[{target_name}] forbidden cross-role/cross-platform table: {name}")
             if not re.search(r"\bSTRICT\b", ddl or "", re.I):
                 raise SystemExit(f"[{target_name}] table is not STRICT: {name}")
 
-            cols = [row[1] for row in conn.execute(f'PRAGMA table_info("{name}")').fetchall()]
-            for col in cols:
+            col_rows = conn.execute(f'PRAGMA table_info("{name}")').fetchall()
+            if name == "owner_revisions":
+                col_names = [row[1] for row in col_rows]
+                if col_names != ["owner", "revision"]:
+                    raise SystemExit(f"[{target_name}] owner_revisions must have exact columns [owner, revision], got {col_names}")
+
+            for row in col_rows:
+                col, col_type = row[1], (row[2] or "").upper()
                 if not SNAKE_CASE_RE.match(col):
                     raise SystemExit(f"[{target_name}] non-snake_case column name: {name}.{col}")
                 if col in FORBIDDEN_COLUMNS:
                     raise SystemExit(f"[{target_name}] forbidden pseudo-relational/bitmask column: {name}.{col}")
+                if col.startswith("ctx_"):
+                    raise SystemExit(f"[{target_name}] duplicated ctx_* column outside music_play_contexts: {name}.{col}")
+                if TIMESTAMP_COL_RE.search(col) and col_type != "INTEGER":
+                    raise SystemExit(f"[{target_name}] non-INTEGER timestamp column: {name}.{col} ({col_type})")
 
-            # Group composite FKs by FK id and verify each FK target exists AND has a covering index prefix.
             fk_groups: dict[int, tuple[str, list[tuple[int, str]]]] = {}
             for fk in conn.execute(f'PRAGMA foreign_key_list("{name}")').fetchall():
                 fk_id, seq, ref_table, from_col = fk[0], fk[1], fk[2], fk[3]
@@ -148,7 +193,6 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
                 for fk_id, (ref_table, items) in fk_groups.items():
                     fk_cols = [col for _, col in sorted(items, key=lambda item: item[0])]
                     fk_len = len(fk_cols)
-                    # Any non-partial index whose leading N columns are a permutation of the FK columns covers lookups/deletes.
                     fk_set = set(fk_cols)
                     if not any(len(idx) >= fk_len and set(idx[:fk_len]) == fk_set for idx in indexed_lists):
                         raise SystemExit(
@@ -164,7 +208,7 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate or verify platform-isolated SQLite schemas.")
+    parser = argparse.ArgumentParser(description="Generate or verify dual-database platform-isolated SQLite schemas.")
     parser.add_argument("--check", action="store_true", help="Verify generated outputs match source modules.")
     args = parser.parse_args()
 
@@ -178,6 +222,8 @@ def main() -> None:
         sql = collect_sql(config["layers"])
         stats[target_name] = validate_sql(target_name, sql, config["forbidden_prefixes"])
         for output in config["outputs"]:
+            if not output.parent.is_dir() and "native/MeowKit" in output.as_posix() and not (ROOT / "native/MeowKit").is_dir():
+                continue
             if args.check:
                 if not output.is_file() or output.read_text(encoding="utf-8") != sql:
                     raise SystemExit(f"generated storage schema differs: {output.relative_to(ROOT)}")

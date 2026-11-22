@@ -1,6 +1,5 @@
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
-using static MeowFilm.Capabilities.Library.LibraryStorageHelpers;
+using static MeowFilm.Capabilities.Library.MusicStorageModelHelpers;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -10,263 +9,88 @@ internal static class MusicHistoryStore
         db.Scalar<long>("SELECT count(*) FROM music_history_playlists WHERE scope=$scope", ("$scope", scope)) > 0 ||
         db.Scalar<long>("SELECT count(*) FROM music_history_days WHERE scope=$scope", ("$scope", scope)) > 0;
 
-    internal static JsonObject? ReadArea(DatabaseSession db, string scope, string[]? members)
+    internal static MusicHistoryAreaRecord? ReadArea(DatabaseSession db, string scope)
     {
         if (!Exists(db, scope)) return null;
-        if (members is not null && members.Length == 1 && members[0] == "schema")
-            return new JsonObject { ["schema"] = 1 };
-
-        var playlists = new JsonArray();
+        var playlists = new List<MusicHistoryPlaylistRecord>();
         foreach (var pid in db.Query("SELECT playlist_id FROM music_history_playlists WHERE scope=$scope ORDER BY position",
             r => r.GetString(0), ("$scope", scope)))
             if (ReadPlaylist(db, scope, pid) is { } pl) playlists.Add(pl);
 
-        var days = new JsonArray();
+        var days = new List<MusicHistoryDayRecord>();
         foreach (var date in db.Query("SELECT day_date FROM music_history_days WHERE scope=$scope ORDER BY position",
             r => r.GetString(0), ("$scope", scope)))
             if (ReadDay(db, scope, date) is { } d) days.Add(d);
 
-        var full = new JsonObject
-        {
-            ["schema"] = 1,
-            ["playlists"] = playlists,
-            ["days"] = days
-        };
-        return SelectMembers(full, members);
+        return new MusicHistoryAreaRecord(playlists.ToArray(), days.ToArray());
     }
 
-    internal static void SaveAreaIncremental(DatabaseSession db, string scope, JsonObject value)
+    internal static IReadOnlyList<MusicHistoryPlaylistSummaryRecord> ReadPlaylistSummaries(
+        DatabaseSession db, string scope, string? playlistId = null)
     {
-        var nextPlaylistIds = new HashSet<string>(StringComparer.Ordinal);
-        var playlists = value["playlists"] as JsonArray;
-        if (playlists is not null)
-        {
-            foreach (var item in playlists)
-                if (item is JsonObject pl && Str(pl, "id") is { } pid)
-                    nextPlaylistIds.Add(pid);
-        }
-        foreach (var oldPid in db.Query("SELECT playlist_id FROM music_history_playlists WHERE scope=$scope",
-            r => r.GetString(0), ("$scope", scope)))
-        {
-            if (!nextPlaylistIds.Contains(oldPid))
-                db.Execute("DELETE FROM music_history_playlists WHERE scope=$scope AND playlist_id=$pid",
-                    ("$scope", scope), ("$pid", oldPid));
-        }
-        if (playlists is not null)
-        {
-            for (int i = 0; i < playlists.Count; i++)
-                if (playlists[i] is JsonObject pl)
-                    SavePlaylistIncremental(db, scope, Str(pl, "id")!, pl, i, insert: false);
-        }
+        string sql = playlistId is not null
+            ? """
+              SELECT p.playlist_id,p.position,p.played_at_ms,p.title,p.current_id,
+                     p.source_id,p.source_title,p.source_kind,p.source_platform,p.source_type,
+                     p.source_source_title,p.source_source_id,p.source_playlist,p.source_seed_entry_id,
+                     p.source_remote_session,p.source_daily_branch,p.source_search_keyword,
+                     (SELECT count(*) FROM music_history_playlist_entries e
+                      WHERE e.scope=p.scope AND e.playlist_id=p.playlist_id)
+              FROM music_history_playlists p
+              WHERE p.scope=$scope AND p.playlist_id=$pid
+              ORDER BY p.position
+              """
+            : """
+              SELECT p.playlist_id,p.position,p.played_at_ms,p.title,p.current_id,
+                     p.source_id,p.source_title,p.source_kind,p.source_platform,p.source_type,
+                     p.source_source_title,p.source_source_id,p.source_playlist,p.source_seed_entry_id,
+                     p.source_remote_session,p.source_daily_branch,p.source_search_keyword,
+                     (SELECT count(*) FROM music_history_playlist_entries e
+                      WHERE e.scope=p.scope AND e.playlist_id=p.playlist_id)
+              FROM music_history_playlists p
+              WHERE p.scope=$scope
+              ORDER BY p.position
+              """;
+        var parameters = playlistId is not null
+            ? new (string, object?)[] { ("$scope", scope), ("$pid", playlistId) }
+            : new (string, object?)[] { ("$scope", scope) };
 
-        var nextDayDates = new HashSet<string>(StringComparer.Ordinal);
-        var days = value["days"] as JsonArray;
-        if (days is not null)
-        {
-            foreach (var item in days)
-                if (item is JsonObject d && Str(d, "date") is { } date)
-                    nextDayDates.Add(date);
-        }
-        foreach (var oldDate in db.Query("SELECT day_date FROM music_history_days WHERE scope=$scope",
-            r => r.GetString(0), ("$scope", scope)))
-        {
-            if (!nextDayDates.Contains(oldDate))
-                db.Execute("DELETE FROM music_history_days WHERE scope=$scope AND day_date=$date",
-                    ("$scope", scope), ("$date", oldDate));
-        }
-        if (days is not null)
-        {
-            for (int i = 0; i < days.Count; i++)
-                if (days[i] is JsonObject d)
-                    SaveDayIncremental(db, scope, Str(d, "date")!, d, i, insert: false);
-        }
+        return db.Query(sql, r => new MusicHistoryPlaylistSummaryRecord(
+            r.GetString(0),
+            r.GetInt32(1),
+            r.GetInt64(2),
+            r.GetString(3),
+            r.GetNullableString(4),
+            MusicQueueSourceRecord.ReadFrom(r, 5),
+            r.GetInt32(17)), parameters);
     }
 
-    internal static bool HasRelation(DatabaseSession db, string[] relations, object?[] key, string relation) =>
-        (relations, relation) switch
-        {
-            ([], "playlists" or "days") => Exists(db, (string)key[0]!),
-            (["playlists"], "entries") => db.Scalar<long>(
-                "SELECT count(*) FROM music_history_playlists WHERE scope=$scope AND playlist_id=$pid",
-                ("$scope", key[0]), ("$pid", key[1])) > 0,
-            (["days"], "songs") => db.Scalar<long>(
-                "SELECT count(*) FROM music_history_days WHERE scope=$scope AND day_date=$date",
-                ("$scope", key[0]), ("$date", key[1])) > 0,
-            _ => false
-        };
-
-    internal static IReadOnlyList<MusicLibrarySelectedRow> ReadRows(
-        DatabaseSession db, string[] relations, object?[] prefix, string[] members)
+    internal static MusicHistoryPlaylistRecord? ReadPlaylist(DatabaseSession db, string scope, string playlistId)
     {
-        if (relations is ["playlists"])
-        {
-            string scope = (string)prefix[0]!;
-            bool single = prefix.Length == 2;
-            string sql = single
-                ? """
-                  SELECT playlist_id,position,played_at,title,current_id,
-                         source_id,source_title,source_kind,source_platform,source_type,
-                         source_source_title,source_source_id,source_playlist,source_seed_entry_id,
-                         source_remote_session,source_daily_branch,source_search_keyword
-                  FROM music_history_playlists WHERE scope=$scope AND playlist_id=$pid ORDER BY position
-                  """
-                : """
-                  SELECT playlist_id,position,played_at,title,current_id,
-                         source_id,source_title,source_kind,source_platform,source_type,
-                         source_source_title,source_source_id,source_playlist,source_seed_entry_id,
-                         source_remote_session,source_daily_branch,source_search_keyword
-                  FROM music_history_playlists WHERE scope=$scope ORDER BY position
-                  """;
-            var parameters = single
-                ? new (string, object?)[] { ("$scope", scope), ("$pid", prefix[1]) }
-                : new (string, object?)[] { ("$scope", scope) };
-            return db.Query(sql, r =>
-            {
-                string pid = r.GetString(0);
-                var header = new JsonObject
-                {
-                    ["id"] = pid,
-                    ["at"] = WholeOrDouble(r.GetDouble(2)),
-                    ["title"] = r.GetString(3),
-                    ["currentId"] = r.GetNullableString(4),
-                    ["source"] = ReadQueueSource(r, 5)
-                };
-                return new MusicLibrarySelectedRow([scope, pid], r.GetInt32(1), SelectMembers(header, members)!);
-            }, parameters);
-        }
-
-        if (relations is ["playlists", "entries"])
-        {
-            string scope = (string)prefix[0]!;
-            string pid = (string)prefix[1]!;
-            bool single = prefix.Length == 3;
-            string sql = single
-                ? "SELECT entry_id,position,song_id FROM music_history_playlist_entries WHERE scope=$scope AND playlist_id=$pid AND entry_id=$eid ORDER BY position"
-                : "SELECT entry_id,position,song_id FROM music_history_playlist_entries WHERE scope=$scope AND playlist_id=$pid ORDER BY position";
-            var parameters = single
-                ? new (string, object?)[] { ("$scope", scope), ("$pid", pid), ("$eid", prefix[2]) }
-                : new (string, object?)[] { ("$scope", scope), ("$pid", pid) };
-            return db.Query(sql, r =>
-            {
-                string eid = r.GetString(0);
-                var obj = new JsonObject { ["id"] = eid, ["songId"] = r.GetString(2) };
-                return new MusicLibrarySelectedRow([scope, pid, eid], r.GetInt32(1), SelectMembers(obj, members)!);
-            }, parameters);
-        }
-
-        if (relations is ["days"])
-        {
-            string scope = (string)prefix[0]!;
-            bool single = prefix.Length == 2;
-            string sql = single
-                ? "SELECT day_date,position FROM music_history_days WHERE scope=$scope AND day_date=$date ORDER BY position"
-                : "SELECT day_date,position FROM music_history_days WHERE scope=$scope ORDER BY position";
-            var parameters = single
-                ? new (string, object?)[] { ("$scope", scope), ("$date", prefix[1]) }
-                : new (string, object?)[] { ("$scope", scope) };
-            return db.Query(sql, r =>
-            {
-                string date = r.GetString(0);
-                var obj = new JsonObject { ["date"] = date };
-                return new MusicLibrarySelectedRow([scope, date], r.GetInt32(1), SelectMembers(obj, members)!);
-            }, parameters);
-        }
-
-        if (relations is ["days", "songs"])
-        {
-            string scope = (string)prefix[0]!;
-            string date = (string)prefix[1]!;
-            bool single = prefix.Length == 3;
-            string sql = single
-                ? "SELECT song_id,position,played_at FROM music_history_day_songs WHERE scope=$scope AND day_date=$date AND song_id=$sid ORDER BY position"
-                : "SELECT song_id,position,played_at FROM music_history_day_songs WHERE scope=$scope AND day_date=$date ORDER BY position";
-            var parameters = single
-                ? new (string, object?)[] { ("$scope", scope), ("$date", date), ("$sid", prefix[2]) }
-                : new (string, object?)[] { ("$scope", scope), ("$date", date) };
-            return db.Query(sql, r =>
-            {
-                string sid = r.GetString(0);
-                var obj = new JsonObject { ["songId"] = sid, ["at"] = WholeOrDouble(r.GetDouble(2)) };
-                return new MusicLibrarySelectedRow([scope, date, sid], r.GetInt32(1), SelectMembers(obj, members)!);
-            }, parameters);
-        }
-
-        throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-    }
-
-    internal static JsonObject? ReadRow(DatabaseSession db, string[] relations, object?[] key) =>
-        relations switch
-        {
-            ["playlists"] => ReadPlaylist(db, (string)key[0]!, (string)key[1]!),
-            ["playlists", "entries"] => ReadPlaylistEntry(db, (string)key[0]!, (string)key[1]!, (string)key[2]!),
-            ["days"] => ReadDay(db, (string)key[0]!, (string)key[1]!),
-            ["days", "songs"] => ReadDaySong(db, (string)key[0]!, (string)key[1]!, (string)key[2]!),
-            _ => throw new DocumentStoreException(DocumentStoreError.InvalidRequest)
-        };
-
-    internal static void ApplyRowChange(DatabaseSession db, MusicLibraryRowChange row)
-    {
-        string scope = (string)row.Key[0]!;
-        if (row.Relations is ["playlists"])
-        {
-            string pid = row.Value is not null ? Str(row.Value, "id") ?? (string)row.Key[1]! : (string)row.Key[1]!;
-            if (row.Value is null)
-                db.Execute("DELETE FROM music_history_playlists WHERE scope=$scope AND playlist_id=$pid",
-                    ("$scope", scope), ("$pid", pid));
-            else
-                SavePlaylistIncremental(db, scope, pid, row.Value, row.Ordinal, row.Insert);
-            return;
-        }
-        if (row.Relations is ["days"])
-        {
-            string date = row.Value is not null ? Str(row.Value, "date") ?? (string)row.Key[1]! : (string)row.Key[1]!;
-            if (row.Value is null)
-                db.Execute("DELETE FROM music_history_days WHERE scope=$scope AND day_date=$date",
-                    ("$scope", scope), ("$date", date));
-            else
-                SaveDayIncremental(db, scope, date, row.Value, row.Ordinal, row.Insert);
-            return;
-        }
-        throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-    }
-
-    private static JsonObject? ReadPlaylist(DatabaseSession db, string scope, string playlistId)
-    {
-        if (!db.TryQuerySingle("""
-            SELECT played_at,title,current_id,
-                   source_id,source_title,source_kind,source_platform,source_type,
-                   source_source_title,source_source_id,source_playlist,source_seed_entry_id,
-                   source_remote_session,source_daily_branch,source_search_keyword
-            FROM music_history_playlists
-            WHERE scope=$scope AND playlist_id=$pid
+        if (!db.TryQuerySingle($"""
+            SELECT p.played_at_ms,p.title,p.current_id,
+                   p.source_id,p.source_title,p.source_kind,p.source_platform,p.source_type,
+                   p.source_source_title,p.source_source_id,p.source_playlist,p.source_seed_entry_id,
+                   p.source_remote_session,p.source_daily_branch,p.source_search_keyword,
+                   {MusicPlayContextStore.SelectColumns}
+            FROM music_history_playlists p
+            LEFT JOIN music_play_contexts c ON c.context_id = p.context_id
+            WHERE p.scope=$scope AND p.playlist_id=$pid
             """,
-            r => (At: r.GetDouble(0), Title: r.GetString(1), CurrentId: r.GetNullableString(2), Source: ReadQueueSource(r, 3)),
+            r => (
+                PlayedAtMs: r.GetInt64(0),
+                Title: r.GetString(1),
+                CurrentId: r.GetNullableString(2),
+                Source: MusicQueueSourceRecord.ReadFrom(r, 3),
+                Context: MusicPlayContextRecord.ReadFrom(r, 15)),
             out var header,
             ("$scope", scope), ("$pid", playlistId)))
             return null;
 
-        var entries = new JsonArray();
-        foreach (var e in db.Query("""
-            SELECT entry_id,song_id,
-                   ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                   ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                   ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                   ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                   ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider
-            FROM music_history_playlist_entries
-            WHERE scope=$scope AND playlist_id=$pid
-            ORDER BY position
-            """,
-            r => new JsonObject
-            {
-                ["id"] = r.GetString(0),
-                ["songId"] = r.GetString(1),
-                ["context"] = ReadContext(r, 2)
-            }, ("$scope", scope), ("$pid", playlistId)))
-            entries.Add(e);
+        var entries = ReadPlaylistEntries(db, scope, playlistId);
 
-        var priority = new JsonArray();
-        var history = new JsonArray();
+        var priority = new List<string>();
+        var history = new List<string>();
         foreach (var (lk, val) in db.Query("""
             SELECT list_kind,item_value FROM music_history_playlist_lists
             WHERE scope=$scope AND playlist_id=$pid
@@ -277,141 +101,181 @@ internal static class MusicHistoryStore
             else history.Add(val);
         }
 
-        return new JsonObject
-        {
-            ["id"] = playlistId,
-            ["title"] = header.Title,
-            ["at"] = WholeOrDouble(header.At),
-            ["currentId"] = header.CurrentId,
-            ["entries"] = entries,
-            ["priority"] = priority,
-            ["history"] = history,
-            ["source"] = header.Source
-        };
+        return new MusicHistoryPlaylistRecord(
+            playlistId,
+            header.PlayedAtMs,
+            header.Title,
+            header.CurrentId,
+            header.Source,
+            header.Context,
+            entries.ToArray(),
+            priority.ToArray(),
+            history.ToArray());
     }
 
-    private static JsonObject? ReadPlaylistEntry(DatabaseSession db, string scope, string playlistId, string entryId) =>
-        db.TryQuerySingle("""
-            SELECT song_id,
-                   ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                   ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                   ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                   ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                   ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider
-            FROM music_history_playlist_entries
-            WHERE scope=$scope AND playlist_id=$pid AND entry_id=$eid
-            """,
-            r => new JsonObject
-            {
-                ["id"] = entryId,
-                ["songId"] = r.GetString(0),
-                ["context"] = ReadContext(r, 1)
-            },
-            out var entry,
-            ("$scope", scope), ("$pid", playlistId), ("$eid", entryId))
-            ? entry
-            : null;
-
-    private static JsonObject? ReadDay(DatabaseSession db, string scope, string dayDate)
+    internal static IReadOnlyList<MusicQueueEntryRecord> ReadPlaylistEntries(
+        DatabaseSession db, string scope, string playlistId, string? entryId = null)
     {
-        if (db.Scalar<long>("SELECT count(*) FROM music_history_days WHERE scope=$scope AND day_date=$date",
-            ("$scope", scope), ("$date", dayDate)) == 0)
+        string sql = entryId is not null
+            ? $"""
+               SELECT e.entry_id,e.song_id,{MusicPlayContextStore.SelectColumns}
+               FROM music_history_playlist_entries e
+               LEFT JOIN music_play_contexts c ON c.context_id = e.context_id
+               WHERE e.scope=$scope AND e.playlist_id=$pid AND e.entry_id=$eid
+               ORDER BY e.position
+               """
+            : $"""
+               SELECT e.entry_id,e.song_id,{MusicPlayContextStore.SelectColumns}
+               FROM music_history_playlist_entries e
+               LEFT JOIN music_play_contexts c ON c.context_id = e.context_id
+               WHERE e.scope=$scope AND e.playlist_id=$pid
+               ORDER BY e.position
+               """;
+        var parameters = entryId is not null
+            ? new (string, object?)[] { ("$scope", scope), ("$pid", playlistId), ("$eid", entryId) }
+            : new (string, object?)[] { ("$scope", scope), ("$pid", playlistId) };
+        return db.Query(sql, r => new MusicQueueEntryRecord(
+            r.GetString(0), r.GetString(1), MusicPlayContextRecord.ReadFrom(r, 2)), parameters);
+    }
+
+    internal static IReadOnlyList<MusicHistoryDaySummaryRecord> ReadDaySummaries(
+        DatabaseSession db, string scope, string? dayDate = null)
+    {
+        string sql = dayDate is not null
+            ? """
+              SELECT d.day_date,d.position,
+                     (SELECT count(*) FROM music_history_day_songs s
+                      WHERE s.scope=d.scope AND s.day_date=d.day_date)
+              FROM music_history_days d
+              WHERE d.scope=$scope AND d.day_date=$date
+              ORDER BY d.position
+              """
+            : """
+              SELECT d.day_date,d.position,
+                     (SELECT count(*) FROM music_history_day_songs s
+                      WHERE s.scope=d.scope AND s.day_date=d.day_date)
+              FROM music_history_days d
+              WHERE d.scope=$scope
+              ORDER BY d.position
+              """;
+        var parameters = dayDate is not null
+            ? new (string, object?)[] { ("$scope", scope), ("$date", dayDate) }
+            : new (string, object?)[] { ("$scope", scope) };
+        return db.Query(sql, r => new MusicHistoryDaySummaryRecord(r.GetString(0), r.GetInt32(1), r.GetInt32(2)), parameters);
+    }
+
+    internal static MusicHistoryDayRecord? ReadDay(DatabaseSession db, string scope, string dayDate)
+    {
+        if (!db.TryQuerySingle("""
+            SELECT day_id,updated_at_ms FROM music_history_days WHERE scope=$scope AND day_date=$date
+            """, r => (DayId: r.GetString(0), UpdatedAtMs: r.GetInt64(1)), out var header,
+            ("$scope", scope), ("$date", dayDate)))
             return null;
 
-        var songs = new JsonArray();
-        foreach (var s in db.Query("""
-            SELECT song_id,played_at,
-                   ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                   ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                   ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                   ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                   ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider
-            FROM music_history_day_songs
-            WHERE scope=$scope AND day_date=$date
-            ORDER BY position
-            """,
-            r => new JsonObject
-            {
-                ["songId"] = r.GetString(0),
-                ["at"] = WholeOrDouble(r.GetDouble(1)),
-                ["context"] = ReadContext(r, 2)
-            }, ("$scope", scope), ("$date", dayDate)))
-            songs.Add(s);
-
-        return new JsonObject
-        {
-            ["date"] = dayDate,
-            ["songs"] = songs
-        };
+        var songs = ReadDaySongs(db, scope, dayDate);
+        return new MusicHistoryDayRecord(dayDate, header.DayId, header.UpdatedAtMs, songs.ToArray());
     }
 
-    private static JsonObject? ReadDaySong(DatabaseSession db, string scope, string dayDate, string songId) =>
-        db.TryQuerySingle("""
-            SELECT played_at,
-                   ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                   ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                   ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                   ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                   ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider
-            FROM music_history_day_songs
-            WHERE scope=$scope AND day_date=$date AND song_id=$sid
-            """,
-            r => new JsonObject
-            {
-                ["songId"] = songId,
-                ["at"] = WholeOrDouble(r.GetDouble(0)),
-                ["context"] = ReadContext(r, 1)
-            },
-            out var item,
-            ("$scope", scope), ("$date", dayDate), ("$sid", songId))
-            ? item
-            : null;
-
-    private static void SavePlaylistIncremental(DatabaseSession db, string scope, string playlistId, JsonObject pl, int ordinal, bool insert)
+    internal static IReadOnlyList<MusicHistoryDaySongRecord> ReadDaySongs(
+        DatabaseSession db, string scope, string dayDate, string? songId = null)
     {
-        bool existed = db.Scalar<long>(
-            "SELECT count(*) FROM music_history_playlists WHERE scope=$scope AND playlist_id=$pid",
-            ("$scope", scope), ("$pid", playlistId)) > 0;
-        if (insert && !existed)
+        string sql = songId is not null
+            ? $"""
+               SELECT s.song_id,s.played_at_ms,{MusicPlayContextStore.SelectColumns}
+               FROM music_history_day_songs s
+               LEFT JOIN music_play_contexts c ON c.context_id = s.context_id
+               WHERE s.scope=$scope AND s.day_date=$date AND s.song_id=$sid
+               ORDER BY s.position
+               """
+            : $"""
+               SELECT s.song_id,s.played_at_ms,{MusicPlayContextStore.SelectColumns}
+               FROM music_history_day_songs s
+               LEFT JOIN music_play_contexts c ON c.context_id = s.context_id
+               WHERE s.scope=$scope AND s.day_date=$date
+               ORDER BY s.position
+               """;
+        var parameters = songId is not null
+            ? new (string, object?)[] { ("$scope", scope), ("$date", dayDate), ("$sid", songId) }
+            : new (string, object?)[] { ("$scope", scope), ("$date", dayDate) };
+        return db.Query(sql, r => new MusicHistoryDaySongRecord(
+            r.GetString(0), r.GetInt64(1), MusicPlayContextRecord.ReadFrom(r, 2)), parameters);
+    }
+
+    internal static bool ReplaceArea(DatabaseSession db, string scope, MusicHistoryAreaRecord area)
+    {
+        db.Execute("DELETE FROM music_history_playlists WHERE scope=$scope", ("$scope", scope));
+        for (int i = 0; i < area.Playlists.Length; i++)
+            SavePlaylist(db, scope, previous: null, area.Playlists[i], i, insert: false);
+
+        db.Execute("DELETE FROM music_history_days WHERE scope=$scope", ("$scope", scope));
+        for (int i = 0; i < area.Days.Length; i++)
+            SaveDay(db, scope, previous: null, area.Days[i], i, insert: false);
+
+        return true;
+    }
+
+    internal static bool ApplyPlaylistMutation(DatabaseSession db, string scope, MusicHistoryPlaylistMutation mutation)
+    {
+        if (mutation.Next is null)
+        {
+            db.Execute("DELETE FROM music_history_playlists WHERE scope=$scope AND playlist_id=$pid",
+                ("$scope", scope), ("$pid", mutation.PlaylistId));
+            return true;
+        }
+        return SavePlaylist(db, scope, mutation.Previous, mutation.Next, mutation.Ordinal, mutation.Insert);
+    }
+
+    internal static bool ApplyDayMutation(DatabaseSession db, string scope, MusicHistoryDayMutation mutation)
+    {
+        if (mutation.Next is null)
+        {
+            db.Execute("DELETE FROM music_history_days WHERE scope=$scope AND day_date=$date",
+                ("$scope", scope), ("$date", mutation.DayDate));
+            return true;
+        }
+        return SaveDay(db, scope, mutation.Previous, mutation.Next, mutation.Ordinal, mutation.Insert);
+    }
+
+    private static bool SavePlaylist(DatabaseSession db, string scope, MusicHistoryPlaylistRecord? previous,
+        MusicHistoryPlaylistRecord next, int ordinal, bool insert)
+    {
+        bool contextsRemoved = false;
+        if (insert && previous is null)
             db.Execute("UPDATE music_history_playlists SET position=position+1 WHERE scope=$scope AND position>=$ord",
                 ("$scope", scope), ("$ord", ordinal));
+
+        string? playlistCtxId = MusicPlayContextStore.Ensure(db, next.Context);
+        if (previous is not null && previous.Context != next.Context && !previous.Context.IsEmpty)
+            contextsRemoved = true;
 
         var p = new List<(string, object?)>
         {
             ("$scope", scope),
-            ("$pid", playlistId),
+            ("$pid", next.PlaylistId),
             ("$pos", ordinal),
-            ("$at", Dbl(pl, "at") ?? 0d),
-            ("$title", Str(pl, "title") ?? ""),
-            ("$cid", Str(pl, "currentId"))
+            ("$at", next.PlayedAtMs),
+            ("$title", next.Title),
+            ("$cid", next.CurrentId),
+            ("$ctx", playlistCtxId)
         };
-        p.AddRange(QueueSourceParams("s_", pl["source"] as JsonObject));
-        p.AddRange(ContextParams(pl["context"] as JsonObject));
+        p.AddRange((next.Source ?? MusicQueueSourceRecord.Empty).ToParams("s_"));
 
         db.Execute("""
             INSERT INTO music_history_playlists(
-                scope,playlist_id,position,played_at,title,current_id,
+                scope,playlist_id,position,played_at_ms,title,current_id,
                 source_id,source_title,source_kind,source_platform,source_type,
                 source_source_title,source_source_id,source_playlist,source_seed_entry_id,
                 source_remote_session,source_daily_branch,source_search_keyword,
-                ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider)
+                context_id)
             VALUES(
                 $scope,$pid,$pos,$at,$title,$cid,
                 $s_id,$s_title,$s_kind,$s_plat,$s_stype,
                 $s_stitle,$s_sid,$s_pl,$s_seed,
                 $s_rs,$s_db,$s_sq,
-                $ccid,$cplid,$cstitle,$cpl,$cstype,
-                $csid,$csplat,$cplat,$cslbl,$csq,
-                $cdb,$chpid,$chaid,$cprov,
-                $crs,$cqsid,$cqst,$cqsk,
-                $cqsp,$csbid,$csbos,$csprov)
+                $ctx)
             ON CONFLICT(scope,playlist_id) DO UPDATE SET
                 position=excluded.position,
-                played_at=excluded.played_at,
+                played_at_ms=excluded.played_at_ms,
                 title=excluded.title,
                 current_id=excluded.current_id,
                 source_id=excluded.source_id,
@@ -426,69 +290,37 @@ internal static class MusicHistoryStore
                 source_remote_session=excluded.source_remote_session,
                 source_daily_branch=excluded.source_daily_branch,
                 source_search_keyword=excluded.source_search_keyword,
-                ctx_collection_id=excluded.ctx_collection_id,
-                ctx_playlist_id=excluded.ctx_playlist_id,
-                ctx_source_title=excluded.ctx_source_title,
-                ctx_playlist=excluded.ctx_playlist,
-                ctx_source_type=excluded.ctx_source_type,
-                ctx_source_id=excluded.ctx_source_id,
-                ctx_source_platform=excluded.ctx_source_platform,
-                ctx_platform=excluded.ctx_platform,
-                ctx_source_label=excluded.ctx_source_label,
-                ctx_search_keyword=excluded.ctx_search_keyword,
-                ctx_daily_branch=excluded.ctx_daily_branch,
-                ctx_heartbeat_playlist_id=excluded.ctx_heartbeat_playlist_id,
-                ctx_heartbeat_account_id=excluded.ctx_heartbeat_account_id,
-                ctx_provider=excluded.ctx_provider,
-                ctx_remote_session=excluded.ctx_remote_session,
-                ctx_queue_source_id=excluded.ctx_queue_source_id,
-                ctx_queue_source_title=excluded.ctx_queue_source_title,
-                ctx_queue_source_kind=excluded.ctx_queue_source_kind,
-                ctx_queue_source_platform=excluded.ctx_queue_source_platform,
-                ctx_similar_batch_id=excluded.ctx_similar_batch_id,
-                ctx_similar_based_on_song_id=excluded.ctx_similar_based_on_song_id,
-                ctx_similar_provider=excluded.ctx_similar_provider
+                context_id=excluded.context_id
             """, p.ToArray());
 
-        var prevEntries = new Dictionary<string, (int Position, MusicQueueEntryRecord Entry)>(StringComparer.Ordinal);
-        if (existed)
+        var prevById = new Dictionary<string, (int Position, MusicQueueEntryRecord Entry)>(StringComparer.Ordinal);
+        if (previous is null)
         {
-            foreach (var row in db.Query("""
-                SELECT entry_id,position,song_id,
-                       ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                       ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                       ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                       ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                       ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider
-                FROM music_history_playlist_entries
-                WHERE scope=$scope AND playlist_id=$pid
-                """,
-                r => (
-                    Pos: r.GetInt32(1),
-                    Entry: new MusicQueueEntryRecord(r.GetString(0), r.GetString(2), MusicPlayContextRecord.ReadFrom(r, 3))),
-                ("$scope", scope), ("$pid", playlistId)))
-                prevEntries[row.Entry.EntryId] = (row.Pos, row.Entry);
+            if (!insert)
+            {
+                db.Execute("DELETE FROM music_history_playlist_entries WHERE scope=$scope AND playlist_id=$pid",
+                    ("$scope", scope), ("$pid", next.PlaylistId));
+                contextsRemoved = true;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < previous.Entries.Length; i++)
+                prevById[previous.Entries[i].EntryId] = (i, previous.Entries[i]);
+            var nextIds = new HashSet<string>(next.Entries.Select(e => e.EntryId), StringComparer.Ordinal);
+            foreach (var old in previous.Entries)
+                if (!nextIds.Contains(old.EntryId))
+                {
+                    db.Execute("DELETE FROM music_history_playlist_entries WHERE scope=$scope AND playlist_id=$pid AND entry_id=$eid",
+                        ("$scope", scope), ("$pid", next.PlaylistId), ("$eid", old.EntryId));
+                    if (!old.Context.IsEmpty) contextsRemoved = true;
+                }
         }
 
-        var nextEntries = new List<MusicQueueEntryRecord>();
-        if (pl["entries"] is JsonArray entries)
+        for (int i = 0; i < next.Entries.Length; i++)
         {
-            foreach (var item in entries)
-                if (item is JsonObject e)
-                    nextEntries.Add(new MusicQueueEntryRecord(
-                        Str(e, "id")!, Str(e, "songId")!, MusicPlayContextRecord.FromJson(e["context"] as JsonObject)));
-        }
-
-        var nextEntryIds = new HashSet<string>(nextEntries.Select(e => e.EntryId), StringComparer.Ordinal);
-        foreach (var oldId in prevEntries.Keys)
-            if (!nextEntryIds.Contains(oldId))
-                db.Execute("DELETE FROM music_history_playlist_entries WHERE scope=$scope AND playlist_id=$pid AND entry_id=$eid",
-                    ("$scope", scope), ("$pid", playlistId), ("$eid", oldId));
-
-        for (int i = 0; i < nextEntries.Count; i++)
-        {
-            var e = nextEntries[i];
-            if (prevEntries.TryGetValue(e.EntryId, out var oldEntry))
+            var e = next.Entries[i];
+            if (prevById.TryGetValue(e.EntryId, out var oldEntry))
             {
                 if (oldEntry.Position == i && oldEntry.Entry == e) continue;
                 if (oldEntry.Entry == e)
@@ -496,202 +328,135 @@ internal static class MusicHistoryStore
                     db.Execute("""
                         UPDATE music_history_playlist_entries SET position=$pos
                         WHERE scope=$scope AND playlist_id=$pid AND entry_id=$eid
-                        """, ("$pos", i), ("$scope", scope), ("$pid", playlistId), ("$eid", e.EntryId));
+                        """, ("$pos", i), ("$scope", scope), ("$pid", next.PlaylistId), ("$eid", e.EntryId));
                     continue;
                 }
+                if (oldEntry.Entry.Context != e.Context && !oldEntry.Entry.Context.IsEmpty)
+                    contextsRemoved = true;
             }
-            var ep = new List<(string, object?)>
-            {
-                ("$scope", scope), ("$pid", playlistId), ("$eid", e.EntryId), ("$pos", i), ("$sid", e.SongId)
-            };
-            ep.AddRange(e.Context.ToParams());
+
+            string? ctxId = MusicPlayContextStore.Ensure(db, e.Context);
             db.Execute("""
-                INSERT INTO music_history_playlist_entries(
-                    scope,playlist_id,entry_id,position,song_id,
-                    ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                    ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                    ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                    ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                    ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider)
-                VALUES(
-                    $scope,$pid,$eid,$pos,$sid,
-                    $ccid,$cplid,$cstitle,$cpl,$cstype,
-                    $csid,$csplat,$cplat,$cslbl,$csq,
-                    $cdb,$chpid,$chaid,$cprov,
-                    $crs,$cqsid,$cqst,$cqsk,
-                    $cqsp,$csbid,$csbos,$csprov)
+                INSERT INTO music_history_playlist_entries(scope,playlist_id,entry_id,position,song_id,context_id)
+                VALUES($scope,$pid,$eid,$pos,$sid,$ctx)
                 ON CONFLICT(scope,playlist_id,entry_id) DO UPDATE SET
                     position=excluded.position,
                     song_id=excluded.song_id,
-                    ctx_collection_id=excluded.ctx_collection_id,
-                    ctx_playlist_id=excluded.ctx_playlist_id,
-                    ctx_source_title=excluded.ctx_source_title,
-                    ctx_playlist=excluded.ctx_playlist,
-                    ctx_source_type=excluded.ctx_source_type,
-                    ctx_source_id=excluded.ctx_source_id,
-                    ctx_source_platform=excluded.ctx_source_platform,
-                    ctx_platform=excluded.ctx_platform,
-                    ctx_source_label=excluded.ctx_source_label,
-                    ctx_search_keyword=excluded.ctx_search_keyword,
-                    ctx_daily_branch=excluded.ctx_daily_branch,
-                    ctx_heartbeat_playlist_id=excluded.ctx_heartbeat_playlist_id,
-                    ctx_heartbeat_account_id=excluded.ctx_heartbeat_account_id,
-                    ctx_provider=excluded.ctx_provider,
-                    ctx_remote_session=excluded.ctx_remote_session,
-                    ctx_queue_source_id=excluded.ctx_queue_source_id,
-                    ctx_queue_source_title=excluded.ctx_queue_source_title,
-                    ctx_queue_source_kind=excluded.ctx_queue_source_kind,
-                    ctx_queue_source_platform=excluded.ctx_queue_source_platform,
-                    ctx_similar_batch_id=excluded.ctx_similar_batch_id,
-                    ctx_similar_based_on_song_id=excluded.ctx_similar_based_on_song_id,
-                    ctx_similar_provider=excluded.ctx_similar_provider
-                """, ep.ToArray());
+                    context_id=excluded.context_id
+                """,
+                ("$scope", scope), ("$pid", next.PlaylistId), ("$eid", e.EntryId),
+                ("$pos", i), ("$sid", e.SongId), ("$ctx", ctxId));
         }
 
-        foreach (var (lk, arr) in new[] { ("priority", pl["priority"] as JsonArray), ("history", pl["history"] as JsonArray) })
+        ReplacePlaylistList(db, scope, next.PlaylistId, "priority", previous?.Priority, next.Priority, insert);
+        ReplacePlaylistList(db, scope, next.PlaylistId, "history", previous?.History, next.History, insert);
+        return contextsRemoved;
+    }
+
+    private static void ReplacePlaylistList(DatabaseSession db, string scope, string playlistId, string listKind,
+        string[]? previous, string[] next, bool insert)
+    {
+        if (previous is not null && previous.SequenceEqual(next, StringComparer.Ordinal)) return;
+        if (previous is null)
         {
-            var prevList = existed
-                ? db.Query("""
-                    SELECT item_value FROM music_history_playlist_lists
-                    WHERE scope=$scope AND playlist_id=$pid AND list_kind=$lk
-                    ORDER BY position
-                    """, r => r.GetString(0), ("$scope", scope), ("$pid", playlistId), ("$lk", lk))
-                : [];
-            var nextList = new List<string>();
-            if (arr is not null)
-                foreach (var item in arr)
-                    if (item is JsonValue v && v.TryGetValue<string>(out var s))
-                        nextList.Add(s);
-            if (prevList.Count == nextList.Count && prevList.SequenceEqual(nextList, StringComparer.Ordinal))
-                continue;
-            int prefix = CommonPrefixLength(prevList, nextList, StringComparer.Ordinal);
-            if (prefix < prevList.Count)
+            if (!insert)
                 db.Execute("""
                     DELETE FROM music_history_playlist_lists
-                    WHERE scope=$scope AND playlist_id=$pid AND list_kind=$lk AND position>=$pos
-                    """, ("$scope", scope), ("$pid", playlistId), ("$lk", lk), ("$pos", prefix));
-            for (int i = prefix; i < nextList.Count; i++)
+                    WHERE scope=$scope AND playlist_id=$pid AND list_kind=$lk
+                    """, ("$scope", scope), ("$pid", playlistId), ("$lk", listKind));
+            for (int i = 0; i < next.Length; i++)
                 db.Execute("""
                     INSERT INTO music_history_playlist_lists(scope,playlist_id,list_kind,position,item_value)
                     VALUES($scope,$pid,$lk,$pos,$val)
-                    """, ("$scope", scope), ("$pid", playlistId), ("$lk", lk), ("$pos", i), ("$val", nextList[i]));
+                    """, ("$scope", scope), ("$pid", playlistId), ("$lk", listKind), ("$pos", i), ("$val", next[i]));
+            return;
         }
+        int prefix = CommonPrefixLength(previous, next, StringComparer.Ordinal);
+        if (prefix < previous.Length)
+            db.Execute("""
+                DELETE FROM music_history_playlist_lists
+                WHERE scope=$scope AND playlist_id=$pid AND list_kind=$lk AND position>=$pos
+                """, ("$scope", scope), ("$pid", playlistId), ("$lk", listKind), ("$pos", prefix));
+        for (int i = prefix; i < next.Length; i++)
+            db.Execute("""
+                INSERT INTO music_history_playlist_lists(scope,playlist_id,list_kind,position,item_value)
+                VALUES($scope,$pid,$lk,$pos,$val)
+                """, ("$scope", scope), ("$pid", playlistId), ("$lk", listKind), ("$pos", i), ("$val", next[i]));
     }
 
-    private static void SaveDayIncremental(DatabaseSession db, string scope, string dayDate, JsonObject day, int ordinal, bool insert)
+    private static bool SaveDay(DatabaseSession db, string scope, MusicHistoryDayRecord? previous,
+        MusicHistoryDayRecord next, int ordinal, bool insert)
     {
-        bool existed = db.Scalar<long>(
-            "SELECT count(*) FROM music_history_days WHERE scope=$scope AND day_date=$date",
-            ("$scope", scope), ("$date", dayDate)) > 0;
-        if (insert && !existed)
+        bool contextsRemoved = false;
+        if (insert && previous is null)
             db.Execute("UPDATE music_history_days SET position=position+1 WHERE scope=$scope AND position>=$ord",
                 ("$scope", scope), ("$ord", ordinal));
 
         db.Execute("""
-            INSERT INTO music_history_days(scope,day_date,position,day_id,updated_at)
+            INSERT INTO music_history_days(scope,day_date,position,day_id,updated_at_ms)
             VALUES($scope,$date,$pos,$did,$at)
             ON CONFLICT(scope,day_date) DO UPDATE SET
                 position=excluded.position,
                 day_id=excluded.day_id,
-                updated_at=excluded.updated_at
+                updated_at_ms=excluded.updated_at_ms
             """,
-            ("$scope", scope), ("$date", dayDate), ("$pos", ordinal),
-            ("$did", Str(day, "id") ?? dayDate), ("$at", Dbl(day, "at") ?? 0d));
+            ("$scope", scope), ("$date", next.DayDate), ("$pos", ordinal),
+            ("$did", next.DayId), ("$at", next.UpdatedAtMs));
 
-        var prevSongs = new Dictionary<string, (int Position, double At, MusicPlayContextRecord Ctx)>(StringComparer.Ordinal);
-        if (existed)
+        var prevById = new Dictionary<string, (int Position, MusicHistoryDaySongRecord Song)>(StringComparer.Ordinal);
+        if (previous is null)
         {
-            foreach (var row in db.Query("""
-                SELECT song_id,position,played_at,
-                       ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                       ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                       ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                       ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                       ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider
-                FROM music_history_day_songs
-                WHERE scope=$scope AND day_date=$date
-                """,
-                r => (SongId: r.GetString(0), Pos: r.GetInt32(1), At: r.GetDouble(2), Ctx: MusicPlayContextRecord.ReadFrom(r, 3)),
-                ("$scope", scope), ("$date", dayDate)))
-                prevSongs[row.SongId] = (row.Pos, row.At, row.Ctx);
-        }
-
-        var nextSongs = new List<(string SongId, double At, MusicPlayContextRecord Ctx)>();
-        if (day["songs"] is JsonArray songs)
-        {
-            foreach (var item in songs)
-                if (item is JsonObject s)
-                    nextSongs.Add((Str(s, "songId")!, Dbl(s, "at") ?? 0d, MusicPlayContextRecord.FromJson(s["context"] as JsonObject)));
-        }
-
-        var nextSongIds = new HashSet<string>(nextSongs.Select(s => s.SongId), StringComparer.Ordinal);
-        foreach (var oldId in prevSongs.Keys)
-            if (!nextSongIds.Contains(oldId))
-                db.Execute("DELETE FROM music_history_day_songs WHERE scope=$scope AND day_date=$date AND song_id=$sid",
-                    ("$scope", scope), ("$date", dayDate), ("$sid", oldId));
-
-        for (int i = 0; i < nextSongs.Count; i++)
-        {
-            var s = nextSongs[i];
-            if (prevSongs.TryGetValue(s.SongId, out var old))
+            if (!insert)
             {
-                bool sameContent = BitConverter.DoubleToInt64Bits(old.At) == BitConverter.DoubleToInt64Bits(s.At) && old.Ctx == s.Ctx;
-                if (old.Position == i && sameContent) continue;
-                if (sameContent)
+                db.Execute("DELETE FROM music_history_day_songs WHERE scope=$scope AND day_date=$date",
+                    ("$scope", scope), ("$date", next.DayDate));
+                contextsRemoved = true;
+            }
+        }
+        else
+        {
+            for (int i = 0; i < previous.Songs.Length; i++)
+                prevById[previous.Songs[i].SongId] = (i, previous.Songs[i]);
+            var nextIds = new HashSet<string>(next.Songs.Select(s => s.SongId), StringComparer.Ordinal);
+            foreach (var old in previous.Songs)
+                if (!nextIds.Contains(old.SongId))
+                {
+                    db.Execute("DELETE FROM music_history_day_songs WHERE scope=$scope AND day_date=$date AND song_id=$sid",
+                        ("$scope", scope), ("$date", next.DayDate), ("$sid", old.SongId));
+                    if (!old.Context.IsEmpty) contextsRemoved = true;
+                }
+        }
+
+        for (int i = 0; i < next.Songs.Length; i++)
+        {
+            var s = next.Songs[i];
+            if (prevById.TryGetValue(s.SongId, out var old))
+            {
+                if (old.Position == i && old.Song == s) continue;
+                if (old.Song == s)
                 {
                     db.Execute("""
                         UPDATE music_history_day_songs SET position=$pos
                         WHERE scope=$scope AND day_date=$date AND song_id=$sid
-                        """, ("$pos", i), ("$scope", scope), ("$date", dayDate), ("$sid", s.SongId));
+                        """, ("$pos", i), ("$scope", scope), ("$date", next.DayDate), ("$sid", s.SongId));
                     continue;
                 }
+                if (old.Song.Context != s.Context && !old.Song.Context.IsEmpty)
+                    contextsRemoved = true;
             }
-            var sp = new List<(string, object?)>
-            {
-                ("$scope", scope), ("$date", dayDate), ("$sid", s.SongId), ("$pos", i), ("$at", s.At)
-            };
-            sp.AddRange(s.Ctx.ToParams());
+            string? ctxId = MusicPlayContextStore.Ensure(db, s.Context);
             db.Execute("""
-                INSERT INTO music_history_day_songs(
-                    scope,day_date,song_id,position,played_at,
-                    ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                    ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                    ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                    ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                    ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider)
-                VALUES(
-                    $scope,$date,$sid,$pos,$at,
-                    $ccid,$cplid,$cstitle,$cpl,$cstype,
-                    $csid,$csplat,$cplat,$cslbl,$csq,
-                    $cdb,$chpid,$chaid,$cprov,
-                    $crs,$cqsid,$cqst,$cqsk,
-                    $cqsp,$csbid,$csbos,$csprov)
+                INSERT INTO music_history_day_songs(scope,day_date,song_id,position,played_at_ms,context_id)
+                VALUES($scope,$date,$sid,$pos,$at,$ctx)
                 ON CONFLICT(scope,day_date,song_id) DO UPDATE SET
                     position=excluded.position,
-                    played_at=excluded.played_at,
-                    ctx_collection_id=excluded.ctx_collection_id,
-                    ctx_playlist_id=excluded.ctx_playlist_id,
-                    ctx_source_title=excluded.ctx_source_title,
-                    ctx_playlist=excluded.ctx_playlist,
-                    ctx_source_type=excluded.ctx_source_type,
-                    ctx_source_id=excluded.ctx_source_id,
-                    ctx_source_platform=excluded.ctx_source_platform,
-                    ctx_platform=excluded.ctx_platform,
-                    ctx_source_label=excluded.ctx_source_label,
-                    ctx_search_keyword=excluded.ctx_search_keyword,
-                    ctx_daily_branch=excluded.ctx_daily_branch,
-                    ctx_heartbeat_playlist_id=excluded.ctx_heartbeat_playlist_id,
-                    ctx_heartbeat_account_id=excluded.ctx_heartbeat_account_id,
-                    ctx_provider=excluded.ctx_provider,
-                    ctx_remote_session=excluded.ctx_remote_session,
-                    ctx_queue_source_id=excluded.ctx_queue_source_id,
-                    ctx_queue_source_title=excluded.ctx_queue_source_title,
-                    ctx_queue_source_kind=excluded.ctx_queue_source_kind,
-                    ctx_queue_source_platform=excluded.ctx_queue_source_platform,
-                    ctx_similar_batch_id=excluded.ctx_similar_batch_id,
-                    ctx_similar_based_on_song_id=excluded.ctx_similar_based_on_song_id,
-                    ctx_similar_provider=excluded.ctx_similar_provider
-                """, sp.ToArray());
+                    played_at_ms=excluded.played_at_ms,
+                    context_id=excluded.context_id
+                """,
+                ("$scope", scope), ("$date", next.DayDate), ("$sid", s.SongId),
+                ("$pos", i), ("$at", s.PlayedAtMs), ("$ctx", ctxId));
         }
+
+        return contextsRemoved;
     }
 }

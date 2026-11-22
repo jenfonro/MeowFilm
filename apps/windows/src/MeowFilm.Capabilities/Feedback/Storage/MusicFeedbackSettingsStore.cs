@@ -6,6 +6,7 @@ namespace MeowFilm.Capabilities.Feedback;
 internal static class MusicFeedbackSettingsStore
 {
     internal const string Owner = MusicFeedbackSettingsOwner.DocumentNamespace;
+    private const string DefaultScope = "local";
     private const long MaximumRevision = 9007199254740991;
 
     internal static Task<(MusicFeedbackSettings Settings, StorageRevision StorageRevision)> ReadAsync(
@@ -13,9 +14,14 @@ internal static class MusicFeedbackSettingsStore
         database.ReadSnapshotAsync(db =>
         {
             var storageRevision = db.Revision(Owner);
-            var enabled = db.Query(
-                "SELECT platform FROM windows_music_feedback_enabled ORDER BY position",
-                row => row.GetString(0)).ToArray();
+            var enabled = db.Query("""
+                SELECT platform
+                FROM music_feedback_settings
+                WHERE scope=$scope AND enabled=1
+                ORDER BY position
+                """,
+                row => row.GetString(0),
+                ("$scope", DefaultScope)).ToArray();
 
             if (storageRevision == StorageRevision.Empty)
             {
@@ -44,19 +50,14 @@ internal static class MusicFeedbackSettingsStore
             if (db.Revision(Owner) != expected || next.Revision != expected.Revision + 1)
                 throw new DocumentStoreException(DocumentStoreError.Conflict);
 
-            var existing = db.Query("SELECT platform FROM windows_music_feedback_enabled ORDER BY position",
-                row => row.GetString(0));
-            var nextSet = next.Enabled.ToHashSet(StringComparer.Ordinal);
-            foreach (var removed in existing)
-                if (!nextSet.Contains(removed))
-                    db.Execute("DELETE FROM windows_music_feedback_enabled WHERE platform=$plat", ("$plat", removed));
+            db.Execute("DELETE FROM music_feedback_settings WHERE scope=$scope", ("$scope", DefaultScope));
 
             for (int i = 0; i < next.Enabled.Count; i++)
                 db.Execute("""
-                    INSERT INTO windows_music_feedback_enabled(platform,position) VALUES($plat,$pos)
-                    ON CONFLICT(platform) DO UPDATE SET position=excluded.position
-                    """, ("$plat", next.Enabled[i]), ("$pos", i));
+                    INSERT INTO music_feedback_settings(scope,platform,enabled,generation,position)
+                    VALUES($scope,$plat,1,0,$pos)
+                    """, ("$scope", DefaultScope), ("$plat", next.Enabled[i]), ("$pos", i));
 
-            return db.CommitRevision(Owner, expected, Guid.NewGuid().ToString("D"));
+            return db.CommitRevision(Owner, expected);
         }, token);
 }

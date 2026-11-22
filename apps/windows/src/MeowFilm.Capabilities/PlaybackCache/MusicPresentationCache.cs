@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop.Artwork;
@@ -49,10 +50,10 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         lock (gate) if (closed || !lyricsReadable) return null;
         try
         {
-            var value = await database.ReadSnapshotAsync(db => LyricsCacheStore.Read(db, songId), token).ConfigureAwait(false);
-            if (value is null || value["updatedAt"]!.GetValue<long>() > Now || value["updatedAt"]!.GetValue<long>() <= Now - Ttl) return null;
+            var record = await database.ReadSnapshotAsync(db => LyricsCacheStore.ReadRecord(db, songId), token).ConfigureAwait(false);
+            if (record is null || record.UpdatedAt > Now || record.UpdatedAt <= Now - Ttl) return null;
             lock (gate) if (closed || !lyricsReadable || epoch != lyricEpoch) return null;
-            value.Remove("storedBytes"); return value;
+            return LyricsToJson(record);
         }
         catch (OperationCanceledException) { throw; }
         catch (DocumentStoreException) { return null; }
@@ -67,7 +68,11 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             var result = await database.ReadAsync(db =>
             {
                 lock (gate) if (closed || !imagesReadable || epoch != imageEpoch) return null;
-                var rows = db.Query("SELECT file_id,bytes,updated_at FROM windows_images WHERE address=$address AND updated_at>$expired AND updated_at<=$now",
+                var rows = db.Query("""
+                    SELECT filename,bytes,updated_at_ms
+                    FROM cached_images
+                    WHERE resource_key=$address AND ready=1 AND updated_at_ms>$expired AND updated_at_ms<=$now
+                    """,
                     row => (Id: row.GetString(0), Bytes: row.GetInt32(1), At: row.GetInt64(2)), ("$address", address), ("$expired", Now - Ttl), ("$now", Now));
                 return rows.Count == 0 ? null : new ArtworkBytes(Files.Read(rows[0].Id, rows[0].Bytes), DateTimeOffset.FromUnixTimeMilliseconds(rows[0].At + Ttl));
             }, token).ConfigureAwait(false);
@@ -109,10 +114,18 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             await database.WriteAsync(db =>
             {
                 Guard(db, epoch, true);
-                lock (gate) if (!imagesReadable) db.Execute("DELETE FROM windows_images");
+                lock (gate) if (!imagesReadable) db.Execute("DELETE FROM cached_images");
                 var file = Files.Write(owned); if (file.Created) created = file.Id;
-                db.Execute("INSERT INTO windows_images(address,file_id,bytes,updated_at) VALUES($address,$file,$bytes,$at) " +
-                    "ON CONFLICT(address) DO UPDATE SET file_id=excluded.file_id,bytes=excluded.bytes,updated_at=excluded.updated_at",
+                db.Execute("DELETE FROM cached_images WHERE resource_key=$address AND filename<>$file",
+                    ("$address", address), ("$file", file.Id));
+                db.Execute("""
+                    INSERT INTO cached_images(resource_key,filename,bytes,ready,updated_at_ms)
+                    VALUES($address,$file,$bytes,1,$at)
+                    ON CONFLICT(resource_key,filename) DO UPDATE SET
+                        bytes=excluded.bytes,
+                        ready=1,
+                        updated_at_ms=excluded.updated_at_ms
+                    """,
                     ("$address", address), ("$file", file.Id), ("$bytes", bytes.Length), ("$at", Now));
                 Trim(db); return true;
             }, token, bytes.Length, commit: commit => { lock (gate) { if (closed || imageEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict); commit(); } }).ConfigureAwait(false);
@@ -132,14 +145,15 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         long now = Now;
         int bytes = EstimateLyricsBytes(sourceKey, lines);
         if (bytes > 512 * 1024) throw new DocumentStoreException(DocumentStoreError.Limit);
+        var record = LyricsFromJson(sourceKey, now, bytes, lines);
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
             await database.WriteAsync(db =>
             {
                 Guard(db, epoch, false);
-                lock (gate) if (!lyricsReadable) db.Execute("DELETE FROM music_lyrics");
-                LyricsCacheStore.Save(db, songId, sourceKey, now, bytes, lines);
+                lock (gate) if (!lyricsReadable) db.Execute("DELETE FROM cached_music_lyrics");
+                LyricsCacheStore.SaveRecord(db, songId, record);
                 Trim(db); return true;
             }, token, bytes, commit: commit => { lock (gate) { if (closed || lyricEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict); commit(); } }).ConfigureAwait(false);
             lock (gate) { lyricVersion++; if (lyricEpoch == epoch) lyricsReadable = true; }
@@ -171,21 +185,26 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     private void Trim(DatabaseSession db)
     {
         long now = Now;
-        db.Execute("DELETE FROM windows_images WHERE updated_at<=$expired OR updated_at>$now",
+        db.Execute("DELETE FROM cached_images WHERE updated_at_ms<=$expired OR updated_at_ms>$now",
             ("$expired", now - Ttl), ("$now", now));
-        db.Execute("DELETE FROM music_lyrics WHERE updated_at<=$expired OR updated_at>$now",
-            ("$expired", (double)(now - Ttl)), ("$now", (double)now));
-        while (db.Scalar<long>("SELECT (SELECT coalesce(sum(bytes),0) FROM windows_images)+(SELECT coalesce(sum(stored_bytes),0) FROM music_lyrics)") > MaximumBytes)
+        db.Execute("DELETE FROM cached_music_lyrics WHERE updated_at_ms<=$expired OR updated_at_ms>$now",
+            ("$expired", now - Ttl), ("$now", now));
+        while (db.Scalar<long>("SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images WHERE ready=1)+(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)") > MaximumBytes)
         {
-            var oldest = db.Query("SELECT 'image',address,CAST(updated_at AS REAL) FROM windows_images UNION ALL SELECT 'lyrics',song_id,updated_at FROM music_lyrics ORDER BY 3,1,2 LIMIT 1",
+            var oldest = db.Query("""
+                SELECT 'image',resource_key,updated_at_ms FROM cached_images WHERE ready=1
+                UNION ALL
+                SELECT 'lyrics',song_id,updated_at_ms FROM cached_music_lyrics
+                ORDER BY 3,1,2 LIMIT 1
+                """,
                 row => (Kind: row.GetString(0), Key: row.GetString(1))).Single();
-            if (oldest.Kind == "image") db.Execute("DELETE FROM windows_images WHERE address=$key", ("$key", oldest.Key));
-            else db.Execute("DELETE FROM music_lyrics WHERE song_id=$key", ("$key", oldest.Key));
+            if (oldest.Kind == "image") db.Execute("DELETE FROM cached_images WHERE resource_key=$key", ("$key", oldest.Key));
+            else db.Execute("DELETE FROM cached_music_lyrics WHERE song_id=$key", ("$key", oldest.Key));
         }
     }
     private Task CleanupFilesAsync() => database.ReadAsync(db =>
     {
-        if (files is not null) files.RemoveUnreferenced(db.Query("SELECT DISTINCT file_id FROM windows_images", row => row.GetString(0)).ToHashSet(StringComparer.Ordinal));
+        if (files is not null) files.RemoveUnreferenced(db.Query("SELECT DISTINCT filename FROM cached_images", row => row.GetString(0)).ToHashSet(StringComparer.Ordinal));
         return true;
     });
     public async Task RemoveAsync(string address, long epoch, CancellationToken token)
@@ -193,7 +212,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            await database.WriteAsync(db => { Guard(db, epoch, true); db.Execute("DELETE FROM windows_images WHERE address=$address", ("$address", address)); return true; }, token).ConfigureAwait(false);
+            await database.WriteAsync(db => { Guard(db, epoch, true); db.Execute("DELETE FROM cached_images WHERE resource_key=$address", ("$address", address)); return true; }, token).ConfigureAwait(false);
             await CleanupFilesAsync().ConfigureAwait(false);
         }
         finally { writes.Release(); }
@@ -209,10 +228,10 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         {
             var result = await database.WriteAsync(db =>
             {
-                db.Execute("DELETE FROM windows_images");
-                var image = db.CommitRevision(ImageOwner, db.Revision(ImageOwner), Guid.NewGuid().ToString("D"));
+                db.Execute("DELETE FROM cached_images");
+                var image = db.CommitRevision(ImageOwner, db.Revision(ImageOwner));
                 var lyric = db.Revision(LyricOwner);
-                if (lyrics) { db.Execute("DELETE FROM music_lyrics"); lyric = db.CommitRevision(LyricOwner, lyric, Guid.NewGuid().ToString("D")); }
+                if (lyrics) { db.Execute("DELETE FROM cached_music_lyrics"); lyric = db.CommitRevision(LyricOwner, lyric); }
                 return (image, lyric);
             }, token).ConfigureAwait(false);
             lock (gate) { imageRevision = result.image; imagesReadable = true; if (lyrics) { lyricRevision = result.lyric; lyricsReadable = true; } }
@@ -224,8 +243,9 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     {
         await database.WriteAsync(db =>
         {
-            db.Execute("UPDATE music_lyrics SET updated_at=$now WHERE song_id=$id", ("$now", (double)Now), ("$id", songId));
-            if (image.Length > 0) db.Execute("UPDATE windows_images SET updated_at=$now WHERE address=$address", ("$now", Now), ("$address", image));
+            long now = Now;
+            db.Execute("UPDATE cached_music_lyrics SET updated_at_ms=$now WHERE song_id=$id", ("$now", now), ("$id", songId));
+            if (image.Length > 0) db.Execute("UPDATE cached_images SET updated_at_ms=$now WHERE resource_key=$address AND ready=1", ("$now", now), ("$address", image));
             return true;
         }, token).ConfigureAwait(false);
     }
@@ -242,4 +262,75 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         try { await database.DrainAsync().ConfigureAwait(false); }
         finally { files?.Dispose(); files = null; writes.Release(); }
     }
+
+    private static JsonObject LyricsToJson(CachedLyricsRecord rec)
+    {
+        var lines = new JsonArray();
+        foreach (var line in rec.Lines)
+        {
+            var obj = new JsonObject { ["time"] = line.TimeSec, ["text"] = line.Text };
+            if (line.Translation is not null) obj["translation"] = line.Translation;
+            if (line.Romanization is not null) obj["romanization"] = line.Romanization;
+            if (line.EndSec is { } end) obj["end"] = end;
+            if (line.Words is { Count: > 0 } words)
+            {
+                var wArr = new JsonArray();
+                foreach (var w in words)
+                {
+                    var wObj = new JsonObject { ["time"] = w.TimeSec, ["text"] = w.Text, ["duration"] = w.DurationSec };
+                    if (w.OffsetSec is { } off) wObj["offset"] = off;
+                    wArr.Add(wObj);
+                }
+                obj["words"] = wArr;
+            }
+            lines.Add(obj);
+        }
+        return new JsonObject
+        {
+            ["sourceKey"] = rec.SourceKey,
+            ["updatedAt"] = rec.UpdatedAt,
+            ["lines"] = lines
+        };
+    }
+
+    private static CachedLyricsRecord LyricsFromJson(string sourceKey, long updatedAt, int storedBytes, JsonArray lines)
+    {
+        var parsed = new List<CachedLyricLine>(lines.Count);
+        for (int i = 0; i < lines.Count; i++)
+        {
+            if (lines[i] is not JsonObject line) continue;
+            List<CachedLyricWord>? words = null;
+            if (line["words"] is JsonArray wArr)
+            {
+                words = new List<CachedLyricWord>(wArr.Count);
+                for (int w = 0; w < wArr.Count; w++)
+                {
+                    if (wArr[w] is not JsonObject word) continue;
+                    words.Add(new CachedLyricWord(
+                        Dbl(word, "time") ?? 0d, Str(word, "text") ?? "",
+                        Dbl(word, "duration") ?? 0d, Dbl(word, "offset")));
+                }
+            }
+            parsed.Add(new CachedLyricLine(
+                Dbl(line, "time") ?? 0d, Str(line, "text") ?? "",
+                Str(line, "translation"), Str(line, "romanization"), Dbl(line, "end"), words));
+        }
+        return new CachedLyricsRecord(sourceKey, updatedAt, storedBytes, parsed);
+    }
+
+    private static string? Str(JsonObject obj, string key) =>
+        obj[key] is JsonValue v
+            ? v.TryGetValue<string>(out var s) ? s
+            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.String ? el.GetString()
+            : null : null;
+
+    private static double? Dbl(JsonObject obj, string key) =>
+        obj[key] is JsonValue v
+            ? v.TryGetValue<double>(out var d) ? d
+            : v.TryGetValue<long>(out var l) ? l
+            : v.TryGetValue<int>(out var i) ? i
+            : v.TryGetValue<float>(out var f) ? f
+            : v.TryGetValue<decimal>(out var m) ? (double)m
+            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var eld) ? eld
+            : null : null;
 }

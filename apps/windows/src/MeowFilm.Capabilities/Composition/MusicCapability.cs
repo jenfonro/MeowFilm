@@ -23,7 +23,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private readonly GrantedMediaFiles files;
     private readonly PlaybackCache.MusicAudioFileCache? audioFileCache;
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
-    private readonly IStorageDatabase database;
+    private readonly IStorageDatabase dataDatabase;
+    private readonly IStorageDatabase cacheDatabase;
     private readonly PlaybackCache.MusicPresentationCache presentationCache;
     internal MeowFilm.Desktop.Artwork.ArtworkService ArtworkLoader { get; }
     private readonly bool ownsPresentationCache;
@@ -43,31 +44,32 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
     private string? openedEntry;
 
-    public MusicCapability(IRuntimeClient runtime, IStorageDatabase store, IMusicLibraryStore libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null)
-        : this(new MusicNativeApplication(store, libraryStore, runtime),
-            store, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot) { }
+    public MusicCapability(IRuntimeClient runtime, IStorageDatabase dataStore, IStorageDatabase cacheStore, IMusicLibraryStore libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null)
+        : this(new MusicNativeApplication(dataStore, cacheStore, libraryStore, runtime),
+            dataStore, cacheStore, new NativeMusicPlayback(playback), playbackCacheRoot: playbackCacheRoot) { }
 
-    public MusicCapability(IMusicApplication application, IStorageDatabase store, NativeAudioPlayback playback,
+    public MusicCapability(IMusicApplication application, IStorageDatabase dataStore, IStorageDatabase cacheStore, NativeAudioPlayback playback,
         IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
-        : this(application, store, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot) { }
+        : this(application, dataStore, cacheStore, new NativeMusicPlayback(playback), dialogs, playbackCacheRoot) { }
 
-    public MusicCapability(IRuntimeClient runtime, IStorageDatabase store, IMusicLibraryStore libraryStore, IMusicPlayback playback,
+    public MusicCapability(IRuntimeClient runtime, IStorageDatabase dataStore, IStorageDatabase cacheStore, IMusicLibraryStore libraryStore, IMusicPlayback playback,
         IMusicDialogs? dialogs = null)
-        : this(new MusicNativeApplication(store, libraryStore, runtime), store, playback, dialogs) { }
+        : this(new MusicNativeApplication(dataStore, cacheStore, libraryStore, runtime), dataStore, cacheStore, playback, dialogs) { }
 
-    public MusicCapability(IMusicApplication application, IStorageDatabase store, IMusicPlayback playback,
+    public MusicCapability(IMusicApplication application, IStorageDatabase dataStore, IStorageDatabase cacheStore, IMusicPlayback playback,
         IMusicDialogs? dialogs = null, string? playbackCacheRoot = null)
-        : this(application, store, playback, null, dialogs, playbackCacheRoot) { }
+        : this(application, dataStore, cacheStore, playback, null, dialogs, playbackCacheRoot) { }
 
-    internal MusicCapability(IMusicApplication application, IStorageDatabase store, IMusicPlayback playback,
+    internal MusicCapability(IMusicApplication application, IStorageDatabase dataStore, IStorageDatabase cacheStore, IMusicPlayback playback,
         PlaybackCache.MusicAudioFileCache? playbackCache, IMusicDialogs? dialogs = null,
         string? playbackCacheRoot = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
         this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
-        database = store;
+        dataDatabase = dataStore ?? throw new ArgumentNullException(nameof(dataStore));
+        cacheDatabase = cacheStore ?? throw new ArgumentNullException(nameof(cacheStore));
         ownsPresentationCache = application is not MusicNativeApplication;
-        presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new(store);
+        presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new(cacheStore);
         ArtworkLoader = new(byteCache: presentationCache, loadCompleted:
             application is MusicNativeApplication artworkOwner ? artworkOwner.ArtworkLoadCompletedAsync : null);
         if (application is MusicNativeApplication repositoryOwner)
@@ -75,10 +77,10 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         Presentation = new(this);
         playbackPresentation = new(this, property => Changed(property));
         audioFileCache = playbackCache ?? (playbackCacheRoot is null ? null :
-            new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, store));
-        persistentChorus = new(store);
-        homeSnapshotStore = new(store);
-        files = new(store, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
+            new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, cacheStore));
+        persistentChorus = new(cacheStore);
+        homeSnapshotStore = new(cacheStore);
+        files = new(dataStore, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Lyrics.CollectionChanged += OnLyricRowsChanged;
         InitializeLibrarySync();
         vipPage = new(application, OwnerDispatcher.Current);
@@ -1093,7 +1095,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         catch (Exception error) { failure ??= error; }
         try { await application.PrepareShutdownAsync(); }
         catch (Exception error) { failure ??= error; }
-        await database.DrainAsync();
+        await Task.WhenAll(cacheDatabase.DrainAsync(), dataDatabase.DrainAsync());
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
     public ValueTask DisposeAsync() => new(AbortAsync());

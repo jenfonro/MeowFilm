@@ -9,17 +9,17 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Accounts;
 
 /// <summary>
-/// The sole native writer of music.accounts.v2. The injected store is BORROWED:
+/// The sole native writer of music.accounts.v1. The injected store is BORROWED:
 /// this owner never disposes it, including unsuccessful preparation for shutdown.
 /// Constructing an owner does not read disk, contact a platform or start Node.
 /// </summary>
 public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAsyncDisposable
 {
-    public const string DocumentNamespace = "music.accounts.v2";
+    public const string DocumentNamespace = "music.accounts.v1";
     public const string Version = "1.3.0";
     private readonly MusicAccountRepository store;
-    private readonly IStorageDatabase database;
-    public const string DetailsCacheNamespace = "music.account-details.v2";
+    private readonly IStorageDatabase cacheDatabase;
+    public const string DetailsCacheNamespace = "music.account-details.v1";
     private readonly IMusicAccountProtocol protocol;
     private readonly TimeProvider clock;
     private readonly object gate = new();
@@ -34,12 +34,12 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     /// <summary>Synchronous invalidation only; subscriber errors cannot change a committed result.</summary>
     public event Action<string>? SessionChanged;
 
-    internal MusicAccountOwner(IStorageDatabase database, IMusicAccountProtocol protocol, TimeProvider? clock = null)
+    internal MusicAccountOwner(IStorageDatabase dataDatabase, IStorageDatabase cacheDatabase, IMusicAccountProtocol protocol, TimeProvider? clock = null)
     {
-        store = new(database ?? throw new ArgumentNullException(nameof(database)));
+        store = new(dataDatabase ?? throw new ArgumentNullException(nameof(dataDatabase)));
+        this.cacheDatabase = cacheDatabase ?? throw new ArgumentNullException(nameof(cacheDatabase));
         this.protocol = protocol ?? throw new ArgumentNullException(nameof(protocol));
         this.clock = clock ?? TimeProvider.System;
-        this.database = database;
     }
     private sealed class State
     {

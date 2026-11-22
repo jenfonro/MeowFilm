@@ -1,5 +1,3 @@
-using System.Text.Json;
-using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -57,6 +55,10 @@ internal static class FilmPreferencesStore
     internal static Task<FilmPreferences> ReadAsync(IStorageDatabase database, CancellationToken token) =>
         database.ReadSnapshotAsync(db => Read(db) ?? FilmPreferences.Defaults, token);
 
+    internal static Task<(FilmPreferences? Preferences, long Revision)> ReadSnapshotAsync(
+        IStorageDatabase database, CancellationToken token) =>
+        database.ReadSnapshotAsync(db => (Read(db), db.Revision(Owner).Revision), token);
+
     internal static Task<FilmPreferences> UpdateAsync(
         IStorageDatabase database,
         Func<FilmPreferences, FilmPreferences> update,
@@ -79,16 +81,16 @@ internal static class FilmPreferencesStore
                 ("$ios", next.IosAutoPrepare),
                 ("$provider", next.MetadataViewProvider));
 
-            ReconcileList(db, "ruleOrder", current?.RuleOrder, next.RuleOrder);
-            ReconcileList(db, "panOrder", current?.PanOrder, next.PanOrder);
-            ReconcileList(db, "keywords", current?.Keywords, next.Keywords);
-            ReconcileList(db, "siteCleanKeywords", current?.SiteCleanKeywords, next.SiteCleanKeywords);
+            WriteList(db, "ruleOrder", current?.RuleOrder, next.RuleOrder);
+            WriteList(db, "panOrder", current?.PanOrder, next.PanOrder);
+            WriteList(db, "keywords", current?.Keywords, next.Keywords);
+            WriteList(db, "siteCleanKeywords", current?.SiteCleanKeywords, next.SiteCleanKeywords);
 
-            db.CommitRevision(Owner, expected, Guid.NewGuid().ToString("D"));
+            db.CommitRevision(Owner, expected);
             return next;
         }, token);
 
-    private static void ReconcileList(DatabaseSession db, string kind, string[]? previous, string[] next)
+    private static void WriteList(DatabaseSession db, string kind, string[]? previous, string[] next)
     {
         if (previous is not null && previous.AsSpan().SequenceEqual(next)) return;
         int prevLen = previous?.Length ?? 0;
@@ -105,27 +107,4 @@ internal static class FilmPreferencesStore
                 """, ("$kind", kind), ("$pos", i), ("$val", next[i]));
         }
     }
-
-    internal static Task<RuntimeSettingsSnapshot> ReadRuntimeSnapshotAsync(
-        IStorageDatabase database, CancellationToken token) =>
-        database.ReadSnapshotAsync(db =>
-        {
-            var rev = db.Revision(Owner).Revision;
-            var prefs = Read(db);
-            if (prefs is null) return new RuntimeSettingsSnapshot(null, rev);
-            var doc = JsonSerializer.SerializeToElement(new
-            {
-                version = 1,
-                preferences = new
-                {
-                    ruleOrder = prefs.RuleOrder,
-                    panOrder = prefs.PanOrder,
-                    keywords = prefs.Keywords,
-                    siteCleanKeywords = prefs.SiteCleanKeywords,
-                    iosAutoPrepare = prefs.IosAutoPrepare,
-                    metadataViewProvider = prefs.MetadataViewProvider
-                }
-            });
-            return new RuntimeSettingsSnapshot(doc, rev);
-        }, token);
 }

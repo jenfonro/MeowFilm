@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -8,6 +9,10 @@ namespace MeowFilm.Capabilities;
 public sealed class NovelLibrary(IStorageDatabase database)
 {
     public const string DocumentNamespace = "novel.library.v1";
+    private static readonly HashSet<string> StandardBookFields = new(StringComparer.Ordinal)
+    {
+        "installationId", "revision", "bookUrl", "name", "author", "coverUrl", "intro", "tocUrl", "latestChapterTitle"
+    };
     private sealed record State(NovelEntry[] Entries, NovelAppearance Appearance, NovelRule[] Rules);
     private NovelEntry[]? entries;
     private NovelAppearance? appearance;
@@ -33,7 +38,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
         if (initialized) return;
         var loaded = await database.ReadSnapshotAsync(db =>
         {
-            var (loadedEntries, loadedAppearance, loadedRules) = NovelLibraryStore.LoadAll(db);
+            var (loadedRecords, loadedAppearance, loadedRules) = NovelLibraryStore.LoadAll(db);
+            var loadedEntries = loadedRecords.Select(FromRecord).ToArray();
             foreach (var entry in loadedEntries) Validate(entry, stored: true);
             if (loadedEntries.Select(e => e.BookId).Distinct(StringComparer.Ordinal).Count() != loadedEntries.Length)
                 throw Corrupt();
@@ -64,6 +70,75 @@ public sealed class NovelLibrary(IStorageDatabase database)
             throw new DocumentStoreException(stored ? DocumentStoreError.Corrupt : DocumentStoreError.InvalidRequest);
     }
 
+    private static NovelEntry FromRecord(NovelEntryRecord record)
+    {
+        var extrasJson = StorageValueJson.ToJsonObject(record.Book.Extras);
+        var dataElement = extrasJson is { Count: > 0 }
+            ? JsonSerializer.SerializeToElement(extrasJson, NovelJson.Options)
+            : default;
+        var book = new NovelBook(
+            record.Book.InstallationId,
+            record.Book.Revision,
+            record.Book.BookUrl,
+            record.Book.Name,
+            record.Book.Author,
+            record.Book.CoverUrl,
+            record.Book.Intro,
+            record.Book.TocUrl,
+            record.Book.LatestChapterTitle,
+            dataElement);
+        return new NovelEntry(
+            record.BookId,
+            record.IdentityKey,
+            book,
+            record.OnShelf,
+            record.AddedAtMs is { } added ? DateTimeOffset.FromUnixTimeMilliseconds(added) : null,
+            record.PinnedAtMs is { } pinned ? DateTimeOffset.FromUnixTimeMilliseconds(pinned) : null,
+            record.ReadAtMs is { } readAt ? DateTimeOffset.FromUnixTimeMilliseconds(readAt) : null,
+            record.Anchor,
+            record.ChapterCount,
+            record.ContentSignature);
+    }
+
+    private static NovelEntryRecord ToRecord(NovelEntry entry)
+    {
+        StorageValue? extras = null;
+        if (entry.Book.Data.ValueKind == JsonValueKind.Object)
+        {
+            List<StorageValueField>? fields = null;
+            foreach (var prop in entry.Book.Data.EnumerateObject())
+            {
+                if (StandardBookFields.Contains(prop.Name)) continue;
+                fields ??= [];
+                fields.Add(new StorageValueField(prop.Name, StorageValueJson.FromJsonElement(prop.Value)));
+            }
+            if (fields is { Count: > 0 })
+                extras = StorageValue.FromObject(fields);
+        }
+        var book = new NovelBookRecord(
+            entry.Book.InstallationId,
+            entry.Book.Revision,
+            entry.Book.BookUrl,
+            entry.Book.Name,
+            entry.Book.Author,
+            entry.Book.CoverUrl,
+            entry.Book.Intro,
+            entry.Book.TocUrl,
+            entry.Book.LatestChapterTitle,
+            extras);
+        return new NovelEntryRecord(
+            entry.BookId,
+            entry.IdentityKey,
+            book,
+            entry.OnShelf,
+            entry.AddedAt?.ToUnixTimeMilliseconds(),
+            entry.PinnedAt?.ToUnixTimeMilliseconds(),
+            entry.ReadAt?.ToUnixTimeMilliseconds(),
+            entry.Anchor,
+            entry.ChapterCount,
+            entry.ContentSignature);
+    }
+
     private Task EditEntry(string id, Func<NovelEntry?, NovelEntry?> edit, CancellationToken token, bool consumeCurrent = true) => work.Run(async ct =>
     {
         await serial.WaitAsync(ct);
@@ -71,7 +146,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
         {
             var result = await database.WriteAsync(db =>
             {
-                NovelEntry? current = consumeCurrent ? NovelLibraryStore.FindEntry(db, id) : null;
+                NovelEntryRecord? currentRecord = consumeCurrent ? NovelLibraryStore.FindEntry(db, id) : null;
+                NovelEntry? current = currentRecord is null ? null : FromRecord(currentRecord);
                 if (current is not null) Validate(current, stored: true);
                 var next = edit(current);
                 if (next is not null)
@@ -79,9 +155,10 @@ public sealed class NovelLibrary(IStorageDatabase database)
                     Validate(next);
                     if (next.BookId != id) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
                 }
-                if (consumeCurrent && NovelLibraryStore.EntryEquals(next, current))
+                var nextRecord = next is null ? null : ToRecord(next);
+                if (consumeCurrent && NovelLibraryStore.EntryEquals(nextRecord, currentRecord))
                     return (Changed: false, Entry: next);
-                if (next is null)
+                if (nextRecord is null)
                 {
                     if (!consumeCurrent && NovelLibraryStore.FindEntry(db, id) is null)
                         return (Changed: false, Entry: null);
@@ -89,9 +166,9 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 }
                 else
                 {
-                    NovelLibraryStore.UpsertEntry(db, next);
+                    NovelLibraryStore.UpsertEntry(db, nextRecord);
                 }
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace));
                 return (Changed: true, Entry: next);
             }, ct);
             if (result.Changed)
@@ -147,7 +224,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 var previous = NovelLibraryStore.ReadAppearance(db);
                 if (Equals(previous, value)) return false;
                 NovelLibraryStore.SaveAppearance(db, value);
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace));
                 return true;
             }, ct);
             appearance = value;
@@ -167,8 +244,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
             {
                 var previous = NovelLibraryStore.ReadRules(db);
                 if (NovelLibraryStore.RulesEqual(previous, values)) return false;
-                NovelLibraryStore.ReplaceRules(db, values);
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                NovelLibraryStore.ReplaceRules(db, previous, values);
+                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace));
                 return true;
             }, ct);
             this.rules = values;

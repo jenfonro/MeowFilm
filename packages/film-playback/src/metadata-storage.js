@@ -8,12 +8,21 @@ const fault = code => Object.assign(new Error(code), { code });
 
 /** External TMDB/Douban dynamic responses stored cleanly as bounded typed value trees. */
 export function createMetadataStorage(dataRoot, now) {
-  const database = openDatabase(dataRoot);
+  const database = openDatabase(dataRoot, { role: 'cache' });
 
   async function read(key) {
     const [[entry], components, nodes] = await database.snapshot([
-      { sql: 'SELECT * FROM metadata_cache_entries WHERE cache_key=?', params: [key], rows: true },
-      { sql: 'SELECT * FROM metadata_cache_components WHERE cache_key=?', params: [key], rows: true, maxRows: 256 },
+      {
+        sql: 'SELECT parent_signature,summary_parent_signature FROM metadata_cache_entries WHERE cache_key=?',
+        params: [key],
+        rows: true,
+      },
+      {
+        sql: 'SELECT component_name,status,error_code,fetched_at_ms,expires_at_ms FROM metadata_cache_components WHERE cache_key=?',
+        params: [key],
+        rows: true,
+        maxRows: 256,
+      },
       {
         sql: 'SELECT slot_name,node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value ' +
           'FROM metadata_cache_value_nodes WHERE cache_key=? ORDER BY slot_name,node_id',

@@ -1,14 +1,10 @@
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
-using static MeowFilm.Capabilities.Library.LibraryStorageHelpers;
+using static MeowFilm.Capabilities.Library.MusicStorageModelHelpers;
 
 namespace MeowFilm.Capabilities.Library;
 
 internal static class MusicSongStore
 {
-    internal static JsonObject? Read(DatabaseSession db, string songId) =>
-        ReadRecord(db, songId)?.ToJson();
-
     internal static MusicSongRecord? ReadRecord(DatabaseSession db, string songId)
     {
         if (!db.TryQuerySingle("""
@@ -92,7 +88,7 @@ internal static class MusicSongStore
     }
 
     internal static void SaveIncremental(DatabaseSession db, MusicSongRecord next, MusicSongRecord? previous,
-        string fingerprint, double? baselineDuration, string searchQuery)
+        string matchKey, string searchQuery)
     {
         bool artistsChanged = previous is null || !next.ArtistNames.SequenceEqual(previous.ArtistNames, StringComparer.Ordinal);
         if (previous is null || !next.ScalarEquals(previous) || artistsChanged)
@@ -101,8 +97,8 @@ internal static class MusicSongStore
                 INSERT INTO music_songs(
                     song_id,title,artist,album,duration,baseline_duration,cover_url,
                     local_file_id,artwork_source_key,artwork_source_image,
-                    lookup_key,search_query,fingerprint)
-                VALUES($id,$title,$artist,$album,$dur,$bdur,$cover,$local,$ask,$asi,$lk,$sq,$fp)
+                    match_key,search_query)
+                VALUES($id,$title,$artist,$album,$dur,$bdur,$cover,$local,$ask,$asi,$mk,$sq)
                 ON CONFLICT(song_id) DO UPDATE SET
                     title=excluded.title,
                     artist=excluded.artist,
@@ -113,34 +109,42 @@ internal static class MusicSongStore
                     local_file_id=excluded.local_file_id,
                     artwork_source_key=excluded.artwork_source_key,
                     artwork_source_image=excluded.artwork_source_image,
-                    lookup_key=excluded.lookup_key,
-                    search_query=excluded.search_query,
-                    fingerprint=excluded.fingerprint
+                    match_key=excluded.match_key,
+                    search_query=excluded.search_query
                 """,
                 ("$id", next.SongId),
                 ("$title", next.Title),
                 ("$artist", next.Artist),
                 ("$album", next.Album),
                 ("$dur", next.Duration),
-                ("$bdur", baselineDuration),
+                ("$bdur", next.BaselineDuration),
                 ("$cover", next.CoverUrl),
                 ("$local", next.LocalFileId),
                 ("$ask", next.ArtworkSourceKey),
                 ("$asi", next.ArtworkSourceImage),
-                ("$lk", (string?)null),
-                ("$sq", string.IsNullOrEmpty(searchQuery) ? null : searchQuery),
-                ("$fp", string.IsNullOrEmpty(fingerprint) ? null : fingerprint));
+                ("$mk", string.IsNullOrEmpty(matchKey) ? null : matchKey),
+                ("$sq", string.IsNullOrEmpty(searchQuery) ? null : searchQuery));
         }
 
         if (artistsChanged)
         {
-            int prefix = previous is null ? 0 : CommonPrefixLength(previous.ArtistNames, next.ArtistNames, StringComparer.Ordinal);
-            if (previous is not null && prefix < previous.ArtistNames.Length)
-                db.Execute("DELETE FROM music_song_artists WHERE song_id=$id AND position>=$pos",
-                    ("$id", next.SongId), ("$pos", prefix));
-            for (int pos = prefix; pos < next.ArtistNames.Length; pos++)
-                db.Execute("INSERT INTO music_song_artists(song_id,position,name) VALUES($id,$pos,$name)",
-                    ("$id", next.SongId), ("$pos", pos), ("$name", next.ArtistNames[pos]));
+            if (previous is null)
+            {
+                db.Execute("DELETE FROM music_song_artists WHERE song_id=$id", ("$id", next.SongId));
+                for (int pos = 0; pos < next.ArtistNames.Length; pos++)
+                    db.Execute("INSERT INTO music_song_artists(song_id,position,name) VALUES($id,$pos,$name)",
+                        ("$id", next.SongId), ("$pos", pos), ("$name", next.ArtistNames[pos]));
+            }
+            else
+            {
+                int prefix = CommonPrefixLength(previous.ArtistNames, next.ArtistNames, StringComparer.Ordinal);
+                if (prefix < previous.ArtistNames.Length)
+                    db.Execute("DELETE FROM music_song_artists WHERE song_id=$id AND position>=$pos",
+                        ("$id", next.SongId), ("$pos", prefix));
+                for (int pos = prefix; pos < next.ArtistNames.Length; pos++)
+                    db.Execute("INSERT INTO music_song_artists(song_id,position,name) VALUES($id,$pos,$name)",
+                        ("$id", next.SongId), ("$pos", pos), ("$name", next.ArtistNames[pos]));
+            }
         }
 
         var prevByKey = new Dictionary<string, (int Position, MusicSongSourceRecord Source)>(StringComparer.Ordinal);
@@ -148,15 +152,6 @@ internal static class MusicSongStore
         {
             for (int i = 0; i < previous.Sources.Length; i++)
                 prevByKey[previous.Sources[i].SourceKey] = (i, previous.Sources[i]);
-        }
-
-        var nextKeys = new HashSet<string>(next.Sources.Select(s => s.SourceKey), StringComparer.Ordinal);
-        if (previous is not null)
-        {
-            foreach (var oldSrc in previous.Sources)
-                if (!nextKeys.Contains(oldSrc.SourceKey))
-                    db.Execute("DELETE FROM music_song_sources WHERE song_id=$id AND source_key=$skey",
-                        ("$id", next.SongId), ("$skey", oldSrc.SourceKey));
         }
 
         for (int i = 0; i < next.Sources.Length; i++)
@@ -207,16 +202,27 @@ internal static class MusicSongStore
 
             if (!existed || !src.ArtistNames.SequenceEqual(oldEntry.Source.ArtistNames, StringComparer.Ordinal))
             {
-                int prefix = existed ? CommonPrefixLength(oldEntry.Source.ArtistNames, src.ArtistNames, StringComparer.Ordinal) : 0;
-                if (existed && prefix < oldEntry.Source.ArtistNames.Length)
-                    db.Execute("DELETE FROM music_song_source_artists WHERE song_id=$id AND source_key=$skey AND position>=$pos",
-                        ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", prefix));
-                for (int apos = prefix; apos < src.ArtistNames.Length; apos++)
-                    db.Execute("INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES($id,$skey,$pos,$name)",
-                        ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", apos), ("$name", src.ArtistNames[apos]));
+                if (!existed)
+                {
+                    db.Execute("DELETE FROM music_song_source_artists WHERE song_id=$id AND source_key=$skey",
+                        ("$id", next.SongId), ("$skey", src.SourceKey));
+                    for (int apos = 0; apos < src.ArtistNames.Length; apos++)
+                        db.Execute("INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES($id,$skey,$pos,$name)",
+                            ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", apos), ("$name", src.ArtistNames[apos]));
+                }
+                else
+                {
+                    int prefix = CommonPrefixLength(oldEntry.Source.ArtistNames, src.ArtistNames, StringComparer.Ordinal);
+                    if (prefix < oldEntry.Source.ArtistNames.Length)
+                        db.Execute("DELETE FROM music_song_source_artists WHERE song_id=$id AND source_key=$skey AND position>=$pos",
+                            ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", prefix));
+                    for (int apos = prefix; apos < src.ArtistNames.Length; apos++)
+                        db.Execute("INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES($id,$skey,$pos,$name)",
+                            ("$id", next.SongId), ("$skey", src.SourceKey), ("$pos", apos), ("$name", src.ArtistNames[apos]));
+                }
             }
 
-            if (!existed || !JsonValuesEqual(src.WireExtras, oldEntry.Source.WireExtras))
+            if (!existed || !StorageValue.StructuralEquals(src.WireExtras, oldEntry.Source.WireExtras))
             {
                 TypedValueNodes.Replace(db, "music_song_source_extras",
                     [("song_id", next.SongId), ("source_key", src.SourceKey)], src.WireExtras);
@@ -224,7 +230,7 @@ internal static class MusicSongStore
         }
     }
 
-    private static Dictionary<string, JsonObject> ReadSourceExtras(DatabaseSession db, string songId)
+    private static Dictionary<string, StorageValue> ReadSourceExtras(DatabaseSession db, string songId)
     {
         var grouped = new Dictionary<string, List<TypedValueNodes.NodeRow>>(StringComparer.Ordinal);
         foreach (var item in db.Query("""
@@ -238,10 +244,14 @@ internal static class MusicSongStore
                 grouped[item.SourceKey] = list = [];
             list.Add(item.Node);
         }
-        var result = new Dictionary<string, JsonObject>(grouped.Count, StringComparer.Ordinal);
+        var result = new Dictionary<string, StorageValue>(grouped.Count, StringComparer.Ordinal);
         foreach (var (sKey, rows) in grouped)
-            result[sKey] = TypedValueNodes.Decode(rows) as JsonObject
-                ?? throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        {
+            var decoded = TypedValueNodes.Decode(rows);
+            if (decoded is null || decoded.Kind != StorageValueKind.Object)
+                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            result[sKey] = decoded;
+        }
         return result;
     }
 }

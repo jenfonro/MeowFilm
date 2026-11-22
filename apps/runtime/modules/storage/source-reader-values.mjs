@@ -9,7 +9,7 @@ const corrupt = () => Object.assign(new Error('STORAGE_CORRUPT'), { code: 'STORA
 export async function readReaderValues(database, id) {
   const [state, nodes] = await database.snapshot([
     { sql: 'SELECT revision,variable FROM source_reader_state WHERE installation_id=?', params: [id], rows: true },
-    { sql: 'SELECT * FROM source_reader_value_nodes WHERE installation_id=? ORDER BY entry_key,node_id',
+    { sql: 'SELECT entry_key,node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value FROM source_reader_value_nodes WHERE installation_id=? ORDER BY entry_key,node_id',
       params: [id], rows: true, maxRows: 65536 },
   ]);
   const groups = new Map();

@@ -1,14 +1,10 @@
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
-using static MeowFilm.Capabilities.Library.LibraryStorageHelpers;
+using static MeowFilm.Capabilities.Library.MusicStorageModelHelpers;
 
 namespace MeowFilm.Capabilities.Library;
 
 internal static class MusicQueueStore
 {
-    internal static JsonObject? Read(DatabaseSession db, string scope) =>
-        ReadRecord(db, scope) is { } rec ? ToJson(rec) : null;
-
     internal static MusicQueueStateRecord? ReadRecord(DatabaseSession db, string scope)
     {
         if (!db.TryQuerySingle("""
@@ -29,16 +25,12 @@ internal static class MusicQueueStore
             ("$scope", scope)))
             return null;
 
-        var entries = db.Query("""
-            SELECT entry_id,song_id,
-                   ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                   ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                   ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                   ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                   ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider
-            FROM music_queue_entries
-            WHERE scope=$scope
-            ORDER BY position
+        var entries = db.Query($"""
+            SELECT e.entry_id,e.song_id,{MusicPlayContextStore.SelectColumns}
+            FROM music_queue_entries e
+            LEFT JOIN music_play_contexts c ON c.context_id = e.context_id
+            WHERE e.scope=$scope
+            ORDER BY e.position
             """,
             r => new MusicQueueEntryRecord(
                 r.GetString(0),
@@ -57,11 +49,8 @@ internal static class MusicQueueStore
             state.Source, entries, priority);
     }
 
-    internal static void SaveIncremental(DatabaseSession db, string scope, JsonObject value)
+    internal static bool Save(DatabaseSession db, string scope, MusicQueueStateRecord? previous, MusicQueueStateRecord next)
     {
-        var previous = ReadRecord(db, scope);
-        var next = FromJson(value);
-
         if (previous is null || !next.HeaderEquals(previous))
         {
             var p = new List<(string, object?)>
@@ -72,7 +61,7 @@ internal static class MusicQueueStore
                 ("$rev", next.Revision),
                 ("$run", next.RunId)
             };
-            p.AddRange((next.Source ?? new MusicQueueSourceRecord(null, null, null, null, null, null, null, null, null, null, null, null)).ToParams("s_"));
+            p.AddRange((next.Source ?? MusicQueueSourceRecord.Empty).ToParams("s_"));
 
             db.Execute("""
                 INSERT INTO music_queue_state(
@@ -105,41 +94,61 @@ internal static class MusicQueueStore
                 """, p.ToArray());
         }
 
-        DiffEntries(db, scope, previous?.Entries, next.Entries);
+        bool contextsTouched = DiffEntries(db, scope, previous?.Entries, next.Entries);
 
         if (previous is null || !next.Priority.SequenceEqual(previous.Priority, StringComparer.Ordinal))
         {
-            int prefix = previous is null ? 0 : CommonPrefixLength(previous.Priority, next.Priority, StringComparer.Ordinal);
-            if (previous is not null && prefix < previous.Priority.Length)
-                db.Execute("""
-                    DELETE FROM music_queue_list_items
-                    WHERE scope=$scope AND list_kind='priority' AND position>=$pos
-                    """, ("$scope", scope), ("$pos", prefix));
-            for (int i = prefix; i < next.Priority.Length; i++)
-                db.Execute("""
-                    INSERT INTO music_queue_list_items(scope,list_kind,position,item_value)
-                    VALUES($scope,'priority',$pos,$val)
-                    """, ("$scope", scope), ("$pos", i), ("$val", next.Priority[i]));
+            if (previous is null)
+            {
+                db.Execute("DELETE FROM music_queue_list_items WHERE scope=$scope AND list_kind='priority'", ("$scope", scope));
+                for (int i = 0; i < next.Priority.Length; i++)
+                    db.Execute("""
+                        INSERT INTO music_queue_list_items(scope,list_kind,position,item_value)
+                        VALUES($scope,'priority',$pos,$val)
+                        """, ("$scope", scope), ("$pos", i), ("$val", next.Priority[i]));
+            }
+            else
+            {
+                int prefix = CommonPrefixLength(previous.Priority, next.Priority, StringComparer.Ordinal);
+                if (prefix < previous.Priority.Length)
+                    db.Execute("""
+                        DELETE FROM music_queue_list_items
+                        WHERE scope=$scope AND list_kind='priority' AND position>=$pos
+                        """, ("$scope", scope), ("$pos", prefix));
+                for (int i = prefix; i < next.Priority.Length; i++)
+                    db.Execute("""
+                        INSERT INTO music_queue_list_items(scope,list_kind,position,item_value)
+                        VALUES($scope,'priority',$pos,$val)
+                        """, ("$scope", scope), ("$pos", i), ("$val", next.Priority[i]));
+            }
         }
+        return contextsTouched;
     }
 
-    private static void DiffEntries(DatabaseSession db, string scope,
+    private static bool DiffEntries(DatabaseSession db, string scope,
         MusicQueueEntryRecord[]? previous, MusicQueueEntryRecord[] next)
     {
+        bool contextsRemovedOrReplaced = false;
         var prevById = new Dictionary<string, (int Position, MusicQueueEntryRecord Entry)>(StringComparer.Ordinal);
-        if (previous is not null)
+        if (previous is null)
+        {
+            db.Execute("DELETE FROM music_queue_entries WHERE scope=$scope", ("$scope", scope));
+            contextsRemovedOrReplaced = true;
+        }
+        else
         {
             for (int i = 0; i < previous.Length; i++)
                 prevById[previous[i].EntryId] = (i, previous[i]);
-        }
-
-        var nextIds = new HashSet<string>(next.Select(e => e.EntryId), StringComparer.Ordinal);
-        if (previous is not null)
-        {
+            var nextIds = new HashSet<string>(next.Select(e => e.EntryId), StringComparer.Ordinal);
             foreach (var old in previous)
+            {
                 if (!nextIds.Contains(old.EntryId))
+                {
                     db.Execute("DELETE FROM music_queue_entries WHERE scope=$scope AND entry_id=$eid",
                         ("$scope", scope), ("$eid", old.EntryId));
+                    if (!old.Context.IsEmpty) contextsRemovedOrReplaced = true;
+                }
+            }
         }
 
         for (int i = 0; i < next.Length; i++)
@@ -154,105 +163,22 @@ internal static class MusicQueueStore
                         ("$pos", i), ("$scope", scope), ("$eid", e.EntryId));
                     continue;
                 }
+                if (oldEntry.Entry.Context != e.Context && !oldEntry.Entry.Context.IsEmpty)
+                    contextsRemovedOrReplaced = true;
             }
 
-            var ep = new List<(string, object?)>
-            {
-                ("$scope", scope), ("$eid", e.EntryId), ("$pos", i), ("$sid", e.SongId)
-            };
-            ep.AddRange(e.Context.ToParams());
+            string? ctxId = MusicPlayContextStore.Ensure(db, e.Context);
             db.Execute("""
-                INSERT INTO music_queue_entries(
-                    scope,entry_id,position,song_id,
-                    ctx_collection_id,ctx_playlist_id,ctx_source_title,ctx_playlist,ctx_source_type,
-                    ctx_source_id,ctx_source_platform,ctx_platform,ctx_source_label,ctx_search_keyword,
-                    ctx_daily_branch,ctx_heartbeat_playlist_id,ctx_heartbeat_account_id,ctx_provider,
-                    ctx_remote_session,ctx_queue_source_id,ctx_queue_source_title,ctx_queue_source_kind,
-                    ctx_queue_source_platform,ctx_similar_batch_id,ctx_similar_based_on_song_id,ctx_similar_provider)
-                VALUES(
-                    $scope,$eid,$pos,$sid,
-                    $ccid,$cplid,$cstitle,$cpl,$cstype,
-                    $csid,$csplat,$cplat,$cslbl,$csq,
-                    $cdb,$chpid,$chaid,$cprov,
-                    $crs,$cqsid,$cqst,$cqsk,
-                    $cqsp,$csbid,$csbos,$csprov)
+                INSERT INTO music_queue_entries(scope,entry_id,position,song_id,context_id)
+                VALUES($scope,$eid,$pos,$sid,$ctx)
                 ON CONFLICT(scope,entry_id) DO UPDATE SET
                     position=excluded.position,
                     song_id=excluded.song_id,
-                    ctx_collection_id=excluded.ctx_collection_id,
-                    ctx_playlist_id=excluded.ctx_playlist_id,
-                    ctx_source_title=excluded.ctx_source_title,
-                    ctx_playlist=excluded.ctx_playlist,
-                    ctx_source_type=excluded.ctx_source_type,
-                    ctx_source_id=excluded.ctx_source_id,
-                    ctx_source_platform=excluded.ctx_source_platform,
-                    ctx_platform=excluded.ctx_platform,
-                    ctx_source_label=excluded.ctx_source_label,
-                    ctx_search_keyword=excluded.ctx_search_keyword,
-                    ctx_daily_branch=excluded.ctx_daily_branch,
-                    ctx_heartbeat_playlist_id=excluded.ctx_heartbeat_playlist_id,
-                    ctx_heartbeat_account_id=excluded.ctx_heartbeat_account_id,
-                    ctx_provider=excluded.ctx_provider,
-                    ctx_remote_session=excluded.ctx_remote_session,
-                    ctx_queue_source_id=excluded.ctx_queue_source_id,
-                    ctx_queue_source_title=excluded.ctx_queue_source_title,
-                    ctx_queue_source_kind=excluded.ctx_queue_source_kind,
-                    ctx_queue_source_platform=excluded.ctx_queue_source_platform,
-                    ctx_similar_batch_id=excluded.ctx_similar_batch_id,
-                    ctx_similar_based_on_song_id=excluded.ctx_similar_based_on_song_id,
-                    ctx_similar_provider=excluded.ctx_similar_provider
-                """, ep.ToArray());
+                    context_id=excluded.context_id
+                """,
+                ("$scope", scope), ("$eid", e.EntryId), ("$pos", i), ("$sid", e.SongId), ("$ctx", ctxId));
         }
-    }
 
-    private static JsonObject ToJson(MusicQueueStateRecord rec)
-    {
-        var entries = new JsonArray();
-        foreach (var e in rec.Entries)
-            entries.Add(new JsonObject
-            {
-                ["id"] = e.EntryId,
-                ["songId"] = e.SongId,
-                ["context"] = e.Context.ToJson()
-            });
-        var priority = new JsonArray();
-        foreach (var p in rec.Priority) priority.Add(p);
-
-        return new JsonObject
-        {
-            ["schema"] = 1,
-            ["entries"] = entries,
-            ["currentId"] = rec.CurrentId,
-            ["priority"] = priority,
-            ["source"] = rec.Source?.ToJson()
-        };
-    }
-
-    private static MusicQueueStateRecord FromJson(JsonObject value)
-    {
-        var entries = new List<MusicQueueEntryRecord>();
-        if (value["entries"] is JsonArray entriesArr)
-        {
-            foreach (var item in entriesArr)
-                if (item is JsonObject e)
-                    entries.Add(new MusicQueueEntryRecord(
-                        Str(e, "id")!,
-                        Str(e, "songId")!,
-                        MusicPlayContextRecord.FromJson(e["context"] as JsonObject)));
-        }
-        var priority = new List<string>();
-        if (value["priority"] is JsonArray priArr)
-            foreach (var item in priArr)
-                if (item is JsonValue v && v.TryGetValue<string>(out var s))
-                    priority.Add(s);
-
-        return new MusicQueueStateRecord(
-            Str(value, "currentId"),
-            Int64(value, "serial") ?? 0,
-            Int64(value, "revision") ?? 0,
-            Str(value, "runId"),
-            MusicQueueSourceRecord.FromJson(value["source"] as JsonObject),
-            entries.ToArray(),
-            priority.ToArray());
+        return contextsRemovedOrReplaced;
     }
 }

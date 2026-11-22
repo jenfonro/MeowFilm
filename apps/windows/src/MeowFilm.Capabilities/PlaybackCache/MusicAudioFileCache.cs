@@ -11,7 +11,7 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// <summary>Evictable playback bytes. No DownloadService, export target or durable download task.</summary>
 internal sealed partial class MusicAudioFileCache
 {
-    internal const string Namespace = "music.playback-files.v2";
+    internal const string Namespace = "music.playback-files.v1";
     internal const long Capacity = 256L * 1024 * 1024, Ttl = 30L * 86400000;
     private const int MaximumIndexBytes = 1024 * 1024, MaximumEntries = 2048;
     private static readonly string[] InfoFields =
@@ -360,8 +360,8 @@ internal sealed partial class MusicAudioFileCache
             {
                 AudioFileCacheStore.Save(db, id, value);
             }
-            db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key IN (SELECT resource_key FROM windows_music_audio_files ORDER BY confirmed_at DESC,resource_key LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
-            return db.CommitRevision(Namespace, index.Revision, Guid.NewGuid().ToString("D"));
+            db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key IN (SELECT resource_key FROM windows_music_audio_files ORDER BY confirmed_at_ms DESC,resource_key LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
+            return db.CommitRevision(Namespace, index.Revision);
         }, token, bytes, commit: commit =>
         {
             if (index.Epoch != Interlocked.Read(ref clearEpoch) || current is not null && !current()) throw new OperationCanceledException(token);
@@ -375,7 +375,7 @@ internal sealed partial class MusicAudioFileCache
         {
             var names = db.Query("SELECT file_name FROM windows_music_audio_files", row => row.GetString(0));
             db.Execute("DELETE FROM windows_music_audio_files");
-            db.CommitRevision(Namespace, db.Revision(Namespace), Guid.NewGuid().ToString("D"));
+            db.CommitRevision(Namespace, db.Revision(Namespace));
             return names;
         }, token).ConfigureAwait(false);
         if (epoch == Interlocked.Read(ref clearEpoch)) Volatile.Write(ref readable, true);
@@ -388,7 +388,7 @@ internal sealed partial class MusicAudioFileCache
         FileStream? file = null;
         try
         {
-            var index = await Read(token).ConfigureAwait(false);
+            var index = await Read(token, key: Key(scope, song)).ConfigureAwait(false);
             // Initial disk reads do not own the mutation gate. File access and hit
             // publication do: clear cannot finish between eligibility and opening.
             await metadataGate.WaitAsync(token).ConfigureAwait(false);
@@ -427,7 +427,7 @@ internal sealed partial class MusicAudioFileCache
                 if (epoch != Interlocked.Read(ref clearEpoch) ||
                     !index.Entries.TryGetValue(Key(scope, song), out var entry) || !Accepted(entry, signature, Now) ||
                     !File.Exists(FilePath(entry.File))) return null;
-                return entry.Info.ToJson();
+                return InfoToJson(entry.Info);
             }
             finally { metadataGate.Release(); }
         }
@@ -450,7 +450,7 @@ internal sealed partial class MusicAudioFileCache
                 return index.Entries.Values.Where(entry => entry.Info.Kind == "script" &&
                     entry.Info.SongId == song && Accepted(entry, entry.Signature, Now) &&
                     File.Exists(FilePath(entry.File))).OrderByDescending(entry => entry.ConfirmedAt)
-                    .Select(entry => JsonSerializer.SerializeToElement(entry.Info.ToJson())).ToArray();
+                    .Select(entry => JsonSerializer.SerializeToElement(InfoToJson(entry.Info))).ToArray();
             }
             finally { metadataGate.Release(); }
         }
@@ -606,7 +606,7 @@ internal sealed partial class MusicAudioFileCache
                     index.Entries.Remove(oldest.Key); evicted.Add(oldest.Value.File);
                 }
                 index.Entries[key] = new Entry(candidate, length, sha, signature, confirmed,
-                    duration, AudioFileInfoRecord.FromJson(storedInfo));
+                    duration, InfoFromJson(storedInfo));
                 if (!isCurrent() || epoch != Interlocked.Read(ref clearEpoch)) return;
                 await Write(index, ct, isCurrent).ConfigureAwait(false);
                 candidate = null; // Publish index last; crash before this is an orphan, never a cache hit.
@@ -768,6 +768,95 @@ internal sealed partial class MusicAudioFileCache
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* Active read leases keep the file; prune on next use. */ }
     }
     private static bool OptionalFileFailure(Exception e) => e is IOException or UnauthorizedAccessException;
+    private static JsonObject InfoToJson(AudioFileInfoRecord record)
+    {
+        var info = new JsonObject();
+        SetNonNull(info, "kind", record.Kind);
+        SetNonNull(info, "platform", record.Platform);
+        SetNonNull(info, "songId", record.SongId);
+        SetNonNull(info, "sourceKey", record.SourceKey);
+        SetNonNull(info, "scope", record.Scope);
+        SetNonNull(info, "generation", record.Generation);
+        SetNonNull(info, "installationId", record.InstallationId);
+        SetNonNull(info, "providerName", record.ProviderName);
+        SetNonNull(info, "quality", record.Quality);
+        SetNonNull(info, "requestedQuality", record.RequestedQuality);
+        SetNonNull(info, "actualQuality", record.ActualQuality);
+        SetNonNull(info, "qualityVerified", record.QualityVerified);
+        SetNonNull(info, "playbackVerified", record.PlaybackVerified);
+        SetNonNull(info, "qualityPolicySignature", record.QualityPolicySignature);
+        SetNonNull(info, "qualityCacheSignature", record.QualityCacheSignature);
+        SetNonNull(info, "duration", record.Duration);
+        SetNonNull(info, "size", record.Size);
+        SetNonNull(info, "full", record.Full);
+        SetNonNull(info, "delivery", record.Delivery);
+        info["qualityEvidence"] = record.QualityEvidence;
+        info["codec"] = record.Codec;
+        info["sampleRate"] = record.SampleRate;
+        info["bitDepth"] = record.BitDepth;
+        info["channels"] = record.Channels;
+        info["bitrate"] = record.Bitrate;
+        return info;
+    }
+
+    private static AudioFileInfoRecord InfoFromJson(JsonObject info) => new(
+        JsonStr(info, "kind"),
+        JsonStr(info, "platform"),
+        JsonStr(info, "songId"),
+        JsonStr(info, "sourceKey"),
+        JsonStr(info, "scope"),
+        JsonInt64(info, "generation"),
+        JsonStr(info, "installationId"),
+        JsonStr(info, "providerName"),
+        JsonStr(info, "quality"),
+        JsonStr(info, "requestedQuality"),
+        JsonStr(info, "actualQuality"),
+        JsonBool(info, "qualityVerified"),
+        JsonBool(info, "playbackVerified"),
+        JsonStr(info, "qualityPolicySignature"),
+        JsonStr(info, "qualityCacheSignature"),
+        JsonDbl(info, "duration"),
+        JsonInt64(info, "size"),
+        JsonBool(info, "full"),
+        JsonStr(info, "delivery"),
+        JsonStr(info, "qualityEvidence"),
+        JsonStr(info, "codec"),
+        JsonInt64(info, "sampleRate"),
+        JsonInt64(info, "bitDepth"),
+        JsonInt64(info, "channels"),
+        JsonInt64(info, "bitrate"));
+
+    private static void SetNonNull(JsonObject obj, string key, string? val) { if (val is not null) obj[key] = val; }
+    private static void SetNonNull(JsonObject obj, string key, long? val) { if (val is { } v) obj[key] = v; }
+    private static void SetNonNull(JsonObject obj, string key, double? val) { if (val is { } v) obj[key] = v; }
+    private static void SetNonNull(JsonObject obj, string key, bool? val) { if (val is { } v) obj[key] = v; }
+
+    private static string? JsonStr(JsonObject obj, string key) =>
+        obj[key] is JsonValue v
+            ? v.TryGetValue<string>(out var s) ? s
+            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.String ? el.GetString()
+            : null : null;
+    private static long? JsonInt64(JsonObject obj, string key) =>
+        obj[key] is JsonValue v
+            ? v.TryGetValue<long>(out var n) ? n
+            : v.TryGetValue<int>(out var i) ? i
+            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetInt64(out var en) ? en
+            : null : null;
+    private static double? JsonDbl(JsonObject obj, string key) =>
+        obj[key] is JsonValue v
+            ? v.TryGetValue<double>(out var d) ? d
+            : v.TryGetValue<long>(out var l) ? l
+            : v.TryGetValue<int>(out var i) ? i
+            : v.TryGetValue<float>(out var f) ? f
+            : v.TryGetValue<decimal>(out var m) ? (double)m
+            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var ed) ? ed
+            : null : null;
+    private static bool? JsonBool(JsonObject obj, string key) =>
+        obj[key] is JsonValue v
+            ? v.TryGetValue<bool>(out var b) ? b
+            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind is JsonValueKind.True or JsonValueKind.False ? el.GetBoolean()
+            : null : null;
+
     private sealed class ReadLease(FileStream file, CancellationToken revoked) : INativeMediaReadLease
     {
         public Stream Content => file;

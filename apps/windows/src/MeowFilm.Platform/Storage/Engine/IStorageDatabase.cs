@@ -3,6 +3,7 @@ namespace MeowFilm.Platform.Storage;
 /// <summary>Borrowed database I/O. Repositories declare tables, transactions and owner policy.</summary>
 public interface IStorageDatabase : IAsyncDisposable
 {
+    DatabaseRole Role { get; }
     Task Ready { get; }
     string? ProductRoot { get; }
     string? DatabasePath { get; }

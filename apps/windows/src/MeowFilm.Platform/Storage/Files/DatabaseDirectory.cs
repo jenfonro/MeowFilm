@@ -15,7 +15,7 @@ public sealed class DatabaseDirectory : IDisposable
     public DatabaseDirectory(string databaseRoot, string fileName)
     {
         if (!OperatingSystem.IsWindows()) throw new DocumentStoreException(DocumentStoreError.Unavailable);
-        if (fileName != "meowfilm.sqlite3")
+        if (fileName is not (NativeDatabase.DataFileName or NativeDatabase.CacheFileName))
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         string validatedRoot = WindowsDocumentFiles.ValidateRoot(databaseRoot);
         using (var parent = WindowsDocumentFiles.Root.OpenParent(validatedRoot))
@@ -24,7 +24,7 @@ public sealed class DatabaseDirectory : IDisposable
         DatabasePath = Path.Combine(root.Path, fileName);
     }
 
-    // The coordinator holds initialize.lock before checking or creating this name.
+    // The coordinator holds role-specific initialize lock before checking or creating this name.
     public void OpenDatabase()
     {
         try

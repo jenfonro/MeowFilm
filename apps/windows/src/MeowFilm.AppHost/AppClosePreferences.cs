@@ -90,7 +90,7 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                         INSERT INTO windows_app_window(singleton,close_behavior) VALUES(1,$behavior)
                         ON CONFLICT(singleton) DO UPDATE SET close_behavior=excluded.close_behavior
                         """, ("$behavior", saved));
-                    return db.CommitRevision(DocumentNamespace, expected, Guid.NewGuid().ToString("D"));
+                    return db.CommitRevision(DocumentNamespace, expected);
                 });
                 Behavior = behavior;
                 return true;

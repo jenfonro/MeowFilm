@@ -1,6 +1,4 @@
-using System.Text.Json;
 using MeowFilm.Capabilities.Film.Rules;
-using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -8,8 +6,6 @@ namespace MeowFilm.Capabilities;
 internal static class FilmRulesStore
 {
     internal const string Owner = "film.rules.v1";
-
-    private readonly record struct RuleRow(string Pattern, string? Replacement, string? Flags);
 
     internal static (FilmRuleSet? Rules, StorageRevision Revision) Read(DatabaseSession db)
     {
@@ -80,74 +76,40 @@ internal static class FilmRulesStore
             if (db.Revision(Owner) != expected)
                 throw new DocumentStoreException(DocumentStoreError.Conflict);
 
-            var currentByGroup = db.Query("""
-                SELECT group_name,pattern,replacement,flags
-                FROM film_rules
-                ORDER BY group_name, position
-                """, r => (Group: r.GetString(0), Row: new RuleRow(r.GetString(1), r.GetNullableString(2), r.GetNullableString(3))))
-                .GroupBy(x => x.Group, StringComparer.Ordinal)
-                .ToDictionary(g => g.Key, g => g.Select(x => x.Row).ToList(), StringComparer.Ordinal);
+            db.Execute("DELETE FROM film_rules");
 
-            ReconcileGroup(db, "episodeCleanRegexRules",
-                currentByGroup.GetValueOrDefault("episodeCleanRegexRules"),
-                rules.EpisodeCleanRegexRules.Select(p => new RuleRow(p, null, null)).ToList());
-            ReconcileGroup(db, "episodeRules",
-                currentByGroup.GetValueOrDefault("episodeRules"),
-                rules.EpisodeRules.Select(r => new RuleRow(r.Pattern, r.Replace ?? "", r.Flags ?? "")).ToList());
-            ReconcileGroup(db, "movieRules",
-                currentByGroup.GetValueOrDefault("movieRules"),
-                rules.MovieRules.Select(r => new RuleRow(r.Pattern, r.Replace ?? "", r.Flags ?? "")).ToList());
-            ReconcileGroup(db, "aggregateRegexRules",
-                currentByGroup.GetValueOrDefault("aggregateRegexRules"),
-                rules.AggregateRegexRules.Select(p => new RuleRow(p, null, null)).ToList());
+            for (int i = 0; i < rules.EpisodeCleanRegexRules.Count; i++)
+                db.Execute("""
+                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
+                    VALUES('episodeCleanRegexRules',$pos,$pat,NULL,NULL)
+                    """, ("$pos", i), ("$pat", rules.EpisodeCleanRegexRules[i]));
 
-            return db.CommitRevision(Owner, expected, Guid.NewGuid().ToString("D"));
-        }, token);
+            for (int i = 0; i < rules.EpisodeRules.Count; i++)
+            {
+                var r = rules.EpisodeRules[i];
+                db.Execute("""
+                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
+                    VALUES('episodeRules',$pos,$pat,$rep,$flags)
+                    """, ("$pos", i), ("$pat", r.Pattern), ("$rep", r.Replace ?? ""), ("$flags", r.Flags ?? ""));
+            }
 
-    private static void ReconcileGroup(DatabaseSession db, string groupName, List<RuleRow>? previous, List<RuleRow> next)
-    {
-        int prevCount = previous?.Count ?? 0;
-        bool same = prevCount == next.Count;
-        if (same && previous is not null)
-        {
-            for (int i = 0; i < next.Count; i++)
-                if (previous[i] != next[i]) { same = false; break; }
-        }
-        if (same)
-        {
-            db.Execute("UPDATE film_rule_groups SET overridden=1 WHERE group_name=$grp AND overridden=0", ("$grp", groupName));
-            return;
-        }
+            for (int i = 0; i < rules.MovieRules.Count; i++)
+            {
+                var r = rules.MovieRules[i];
+                db.Execute("""
+                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
+                    VALUES('movieRules',$pos,$pat,$rep,$flags)
+                    """, ("$pos", i), ("$pat", r.Pattern), ("$rep", r.Replace ?? ""), ("$flags", r.Flags ?? ""));
+            }
 
-        if (prevCount > next.Count)
-            db.Execute("DELETE FROM film_rules WHERE group_name=$grp AND position>=$len",
-                ("$grp", groupName), ("$len", next.Count));
+            for (int i = 0; i < rules.AggregateRegexRules.Count; i++)
+                db.Execute("""
+                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
+                    VALUES('aggregateRegexRules',$pos,$pat,NULL,NULL)
+                    """, ("$pos", i), ("$pat", rules.AggregateRegexRules[i]));
 
-        for (int i = 0; i < next.Count; i++)
-        {
-            if (previous is not null && i < previous.Count && previous[i] == next[i]) continue;
-            var r = next[i];
-            db.Execute("""
-                INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
-                VALUES($grp,$pos,$pat,$rep,$flags)
-                ON CONFLICT(group_name,position) DO UPDATE SET
-                    pattern=excluded.pattern,
-                    replacement=excluded.replacement,
-                    flags=excluded.flags
-                """, ("$grp", groupName), ("$pos", i), ("$pat", r.Pattern), ("$rep", r.Replacement), ("$flags", r.Flags));
-        }
+            db.Execute("UPDATE film_rule_groups SET overridden=1,row_revision=row_revision+1");
 
-        db.Execute("UPDATE film_rule_groups SET overridden=1,row_revision=row_revision+1 WHERE group_name=$grp",
-            ("$grp", groupName));
-    }
-
-    internal static Task<RuntimeSettingsSnapshot> ReadRuntimeSnapshotAsync(
-        IStorageDatabase database, CancellationToken token) =>
-        database.ReadSnapshotAsync(db =>
-        {
-            var (rules, revision) = Read(db);
-            if (rules is null) return new RuntimeSettingsSnapshot(null, revision.Revision);
-            var doc = JsonSerializer.SerializeToElement(new { version = 1, rules }, FilmRuleService.Json);
-            return new RuntimeSettingsSnapshot(doc, revision.Revision);
+            return db.CommitRevision(Owner, expected);
         }, token);
 }

@@ -8,12 +8,20 @@ internal readonly record struct EmbeddedStorageSchema(string Sql, string Hash);
 
 internal static class StorageSchema
 {
-    public const string ResourceName = "MeowFilm.Storage.schema.sql";
+    public const string DataResourceName = "MeowFilm.Storage.data-schema.sql";
+    public const string CacheResourceName = "MeowFilm.Storage.cache-schema.sql";
 
-    public static EmbeddedStorageSchema Read()
+    public static string ResourceNameFor(DatabaseRole role) => role switch
+    {
+        DatabaseRole.Data => DataResourceName,
+        DatabaseRole.Cache => CacheResourceName,
+        _ => throw new DocumentStoreException(DocumentStoreError.InvalidRequest)
+    };
+
+    public static EmbeddedStorageSchema Read(DatabaseRole role = DatabaseRole.Data)
     {
         var assembly = typeof(NativeDatabase).Assembly;
-        using var stream = assembly.GetManifestResourceStream(ResourceName)
+        using var stream = assembly.GetManifestResourceStream(ResourceNameFor(role))
             ?? throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
         using var memory = new MemoryStream();
         stream.CopyTo(memory);

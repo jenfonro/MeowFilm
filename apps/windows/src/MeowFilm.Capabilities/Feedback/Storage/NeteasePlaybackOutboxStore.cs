@@ -26,7 +26,7 @@ internal sealed record NeteasePlaybackPending(Guid PlaybackId, NeteasePlaybackAc
 
 internal static class NeteasePlaybackOutboxStore
 {
-    internal const string Namespace = "music.playback-outbox.v2";
+    internal const string Namespace = "music.playback-outbox.v1";
     // Retention is a privacy boundary, not minimum listening time,
     // a counting threshold or a retry allowance.
     internal static readonly TimeSpan Retention = TimeSpan.FromDays(7);
@@ -40,8 +40,8 @@ internal static class NeteasePlaybackOutboxStore
                 SELECT playback_id,consent_revision,recording_id,source,source_id,algorithm,
                        start_confirmed,play_scene,
                        account_scope,account_generation,account_user_id,
-                       start_event_id,start_at,start_inflight,start_time,start_realtime,start_reason,start_rate,
-                       end_event_id,end_at,end_inflight,end_time,end_realtime,end_reason,end_rate
+                       start_event_id,start_at_ms,start_inflight,start_position_sec,start_realtime_sec,start_reason,start_rate,
+                       end_event_id,end_at_ms,end_inflight,end_position_sec,end_realtime_sec,end_reason,end_rate
                 FROM windows_music_feedback_outbox
                 ORDER BY position
                 """,
@@ -87,11 +87,7 @@ internal static class NeteasePlaybackOutboxStore
             if (db.Revision(Namespace) != expected)
                 throw new DocumentStoreException(DocumentStoreError.Conflict);
 
-            var existingIds = db.Query("SELECT playback_id FROM windows_music_feedback_outbox", row => row.GetString(0));
-            var desiredIds = list.Select(e => e.PlaybackId.ToString("D")).ToHashSet(StringComparer.Ordinal);
-            foreach (var id in existingIds)
-                if (!desiredIds.Contains(id))
-                    db.Execute("DELETE FROM windows_music_feedback_outbox WHERE playback_id=$pid", ("$pid", id));
+            db.Execute("DELETE FROM windows_music_feedback_outbox");
 
             for (int i = 0; i < list.Length; i++)
             {
@@ -101,40 +97,14 @@ internal static class NeteasePlaybackOutboxStore
                         playback_id,position,consent_revision,recording_id,source,source_id,algorithm,
                         start_confirmed,play_scene,
                         account_scope,account_generation,account_user_id,
-                        start_event_id,start_at,start_inflight,start_time,start_realtime,start_reason,start_rate,
-                        end_event_id,end_at,end_inflight,end_time,end_realtime,end_reason,end_rate)
+                        start_event_id,start_at_ms,start_inflight,start_position_sec,start_realtime_sec,start_reason,start_rate,
+                        end_event_id,end_at_ms,end_inflight,end_position_sec,end_realtime_sec,end_reason,end_rate)
                     VALUES(
                         $pid,$pos,$crev,$rid,$src,$srcId,$alg,
                         $sconf,$scene,
                         $ascope,$agen,$auid,
                         $seid,$sat,$sinf,$stime,$sreal,$sres,$srate,
                         $eeid,$eat,$einf,$etime,$ereal,$eres,$erate)
-                    ON CONFLICT(playback_id) DO UPDATE SET
-                        position=excluded.position,
-                        consent_revision=excluded.consent_revision,
-                        recording_id=excluded.recording_id,
-                        source=excluded.source,
-                        source_id=excluded.source_id,
-                        algorithm=excluded.algorithm,
-                        start_confirmed=excluded.start_confirmed,
-                        play_scene=excluded.play_scene,
-                        account_scope=excluded.account_scope,
-                        account_generation=excluded.account_generation,
-                        account_user_id=excluded.account_user_id,
-                        start_event_id=excluded.start_event_id,
-                        start_at=excluded.start_at,
-                        start_inflight=excluded.start_inflight,
-                        start_time=excluded.start_time,
-                        start_realtime=excluded.start_realtime,
-                        start_reason=excluded.start_reason,
-                        start_rate=excluded.start_rate,
-                        end_event_id=excluded.end_event_id,
-                        end_at=excluded.end_at,
-                        end_inflight=excluded.end_inflight,
-                        end_time=excluded.end_time,
-                        end_realtime=excluded.end_realtime,
-                        end_reason=excluded.end_reason,
-                        end_rate=excluded.end_rate
                     """,
                     ("$pid", e.PlaybackId.ToString("D")),
                     ("$pos", i),
@@ -164,7 +134,7 @@ internal static class NeteasePlaybackOutboxStore
                     ("$erate", e.End?.Rate));
             }
 
-            return db.CommitRevision(Namespace, expected, Guid.NewGuid().ToString("D"));
+            return db.CommitRevision(Namespace, expected);
         }, token);
     }
 

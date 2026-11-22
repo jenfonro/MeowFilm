@@ -28,7 +28,6 @@ public sealed class GrantedMediaFiles
             long nextPosition = db.Scalar<long>("SELECT COALESCE(MAX(position) + 1, 0) FROM windows_file_grants");
             foreach (var file in files)
             {
-                if (Find(db, file.Id) is { } previous) ValidateCurrent(previous);
                 db.Execute("""
                     INSERT INTO windows_file_grants(grant_id,position,file_path,title)
                     VALUES($id,$position,$path,$title)

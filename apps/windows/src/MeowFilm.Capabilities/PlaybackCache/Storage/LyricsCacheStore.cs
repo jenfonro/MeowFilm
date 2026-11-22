@@ -1,5 +1,3 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
@@ -23,11 +21,11 @@ internal static class LyricsCacheStore
     internal static CachedLyricsRecord? ReadRecord(DatabaseSession db, string songId)
     {
         if (!db.TryQuerySingle("""
-            SELECT source_key,updated_at,stored_bytes
-            FROM music_lyrics
+            SELECT source_key,updated_at_ms,stored_bytes
+            FROM cached_music_lyrics
             WHERE song_id=$id
             """,
-            row => (SourceKey: row.GetString(0), UpdatedAt: (long)row.GetDouble(1), StoredBytes: row.GetInt64(2)),
+            row => (SourceKey: row.GetString(0), UpdatedAt: row.GetInt64(1), StoredBytes: row.GetInt64(2)),
             out var header,
             ("$id", songId)))
             return null;
@@ -35,7 +33,7 @@ internal static class LyricsCacheStore
         var wordsByLine = new Dictionary<int, List<CachedLyricWord>>();
         foreach (var item in db.Query("""
             SELECT line_position,time_sec,text,duration_sec,offset_sec
-            FROM music_lyric_words
+            FROM cached_music_lyric_words
             WHERE song_id=$id
             ORDER BY line_position, position
             """,
@@ -50,7 +48,7 @@ internal static class LyricsCacheStore
 
         var lines = db.Query("""
             SELECT position,time_sec,text,translation,romanization,end_sec
-            FROM music_lyric_lines
+            FROM cached_music_lyric_lines
             WHERE song_id=$id
             ORDER BY position
             """,
@@ -67,77 +65,19 @@ internal static class LyricsCacheStore
         return new CachedLyricsRecord(header.SourceKey, header.UpdatedAt, header.StoredBytes, lines);
     }
 
-    internal static JsonObject? Read(DatabaseSession db, string songId)
-    {
-        var rec = ReadRecord(db, songId);
-        if (rec is null) return null;
-        var lines = new JsonArray();
-        foreach (var line in rec.Lines)
-        {
-            var obj = new JsonObject { ["time"] = line.TimeSec, ["text"] = line.Text };
-            if (line.Translation is not null) obj["translation"] = line.Translation;
-            if (line.Romanization is not null) obj["romanization"] = line.Romanization;
-            if (line.EndSec is { } end) obj["end"] = end;
-            if (line.Words is { Count: > 0 } words)
-            {
-                var wArr = new JsonArray();
-                foreach (var w in words)
-                {
-                    var wObj = new JsonObject { ["time"] = w.TimeSec, ["text"] = w.Text, ["duration"] = w.DurationSec };
-                    if (w.OffsetSec is { } off) wObj["offset"] = off;
-                    wArr.Add(wObj);
-                }
-                obj["words"] = wArr;
-            }
-            lines.Add(obj);
-        }
-        return new JsonObject
-        {
-            ["sourceKey"] = rec.SourceKey,
-            ["updatedAt"] = rec.UpdatedAt,
-            ["storedBytes"] = rec.StoredBytes,
-            ["lines"] = lines
-        };
-    }
-
-    internal static void Save(DatabaseSession db, string songId, string sourceKey, long updatedAt, int storedBytes, JsonArray lines)
-    {
-        var parsed = new List<CachedLyricLine>(lines.Count);
-        for (int i = 0; i < lines.Count; i++)
-        {
-            if (lines[i] is not JsonObject line) continue;
-            List<CachedLyricWord>? words = null;
-            if (line["words"] is JsonArray wArr)
-            {
-                words = new List<CachedLyricWord>(wArr.Count);
-                for (int w = 0; w < wArr.Count; w++)
-                {
-                    if (wArr[w] is not JsonObject word) continue;
-                    words.Add(new CachedLyricWord(
-                        Dbl(word, "time") ?? 0d, Str(word, "text") ?? "",
-                        Dbl(word, "duration") ?? 0d, Dbl(word, "offset")));
-                }
-            }
-            parsed.Add(new CachedLyricLine(
-                Dbl(line, "time") ?? 0d, Str(line, "text") ?? "",
-                Str(line, "translation"), Str(line, "romanization"), Dbl(line, "end"), words));
-        }
-        SaveRecord(db, songId, new CachedLyricsRecord(sourceKey, updatedAt, storedBytes, parsed));
-    }
-
     internal static void SaveRecord(DatabaseSession db, string songId, CachedLyricsRecord record)
     {
-        db.Execute("DELETE FROM music_lyrics WHERE song_id=$id", ("$id", songId));
+        db.Execute("DELETE FROM cached_music_lyrics WHERE song_id=$id", ("$id", songId));
         db.Execute("""
-            INSERT INTO music_lyrics(song_id,source_key,updated_at,stored_bytes)
+            INSERT INTO cached_music_lyrics(song_id,source_key,updated_at_ms,stored_bytes)
             VALUES($id,$skey,$at,$bytes)
-            """, ("$id", songId), ("$skey", record.SourceKey), ("$at", (double)record.UpdatedAt), ("$bytes", record.StoredBytes));
+            """, ("$id", songId), ("$skey", record.SourceKey), ("$at", record.UpdatedAt), ("$bytes", record.StoredBytes));
 
         for (int i = 0; i < record.Lines.Count; i++)
         {
             var line = record.Lines[i];
             db.Execute("""
-                INSERT INTO music_lyric_lines(song_id,position,line_index,time_sec,end_sec,text,translation,romanization)
+                INSERT INTO cached_music_lyric_lines(song_id,position,line_index,time_sec,end_sec,text,translation,romanization)
                 VALUES($id,$pos,$idx,$time,$end,$text,$tr,$roma)
                 """,
                 ("$id", songId), ("$pos", i), ("$idx", i),
@@ -150,7 +90,7 @@ internal static class LyricsCacheStore
                 {
                     var word = words[w];
                     db.Execute("""
-                        INSERT INTO music_lyric_words(song_id,line_position,position,time_sec,duration_sec,offset_sec,text)
+                        INSERT INTO cached_music_lyric_words(song_id,line_position,position,time_sec,duration_sec,offset_sec,text)
                         VALUES($id,$lpos,$wpos,$time,$dur,$off,$text)
                         """,
                         ("$id", songId), ("$lpos", i), ("$wpos", w),
@@ -159,20 +99,4 @@ internal static class LyricsCacheStore
             }
         }
     }
-
-    private static string? Str(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<string>(out var s) ? s
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.String ? el.GetString()
-            : null : null;
-
-    private static double? Dbl(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<double>(out var d) ? d
-            : v.TryGetValue<long>(out var l) ? l
-            : v.TryGetValue<int>(out var i) ? i
-            : v.TryGetValue<float>(out var f) ? f
-            : v.TryGetValue<decimal>(out var m) ? (double)m
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var eld) ? eld
-            : null : null;
 }

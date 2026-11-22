@@ -7,22 +7,27 @@ using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Platform.Storage;
 
-public sealed record StorageRevision(long Revision, string Receipt)
+public readonly record struct StorageRevision(long Revision)
 {
-    public static StorageRevision Empty { get; } = new(0, "");
+    public static StorageRevision Empty { get; } = new(0);
 }
 
 /// <summary>
 /// WAL-separated native SQLite engine: dedicated write lane and dedicated read-only lane,
-/// each with a bounded prepared-statement LRU cache. Repositories own typed SQL and policy.
+/// each with a bounded prepared-statement LRU cache. Supports dual roles (Data vs Cache).
 /// </summary>
 public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
 {
-    public const int ApplicationId = 1296450626;
+    public const int DataApplicationId = 0x4D464442;
+    public const int CacheApplicationId = 0x4D464348;
+    public const int ApplicationId = DataApplicationId;
     public const int FormatVersion = 1;
-    public const string RelativePath = "storage-v1/meowfilm.sqlite3";
+    public const string DataFileName = "meowfilm-data.sqlite3";
+    public const string CacheFileName = "meowfilm-cache.sqlite3";
+    public const string RelativePath = "storage-v1/" + DataFileName;
+    public const string CacheRelativePath = "storage-v1/" + CacheFileName;
     private const int MaximumPendingOperations = 128;
-    private const int MaximumPendingBytes = 16 * 1024 * 1024;
+    private const int MaximumPendingBytes = 32 * 1024 * 1024;
     private const int PreparedStatementCacheCapacity = 256;
     private readonly Channel<Operation> writeOperations = Channel.CreateBounded<Operation>(new BoundedChannelOptions(MaximumPendingOperations)
     {
@@ -37,6 +42,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource readStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly string? productRoot;
+    private readonly DatabaseRole role;
     private SqliteConnection? writeConnection;
     private PreparedStatementCache? writeStatements;
     private SqliteConnection? readConnection;
@@ -49,21 +55,32 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private int commits;
     private bool closing;
     private Exception? openError;
+    public DatabaseRole Role => role;
     public Task Ready => ready.Task;
     public string? ProductRoot => productRoot;
-    public string? DatabasePath => productRoot is null ? null : Path.Combine(productRoot, "storage-v1", "meowfilm.sqlite3");
+    private string FileName => role == DatabaseRole.Cache ? CacheFileName : DataFileName;
+    private int ExpectedApplicationId => role == DatabaseRole.Cache ? CacheApplicationId : DataApplicationId;
+    private string SynchronousMode => role == DatabaseRole.Cache ? "NORMAL" : "FULL";
+    private long ExpectedSynchronousLevel => role == DatabaseRole.Cache ? 1L : 2L;
+    private string InitializeLockName => role == DatabaseRole.Cache ? "cache-initialize.lock" : "data-initialize.lock";
+    private string MaintenanceLockName => role == DatabaseRole.Cache ? "cache-maintenance.lock" : "data-maintenance.lock";
+    public string? DatabasePath => productRoot is null ? null : Path.Combine(productRoot, "storage-v1", FileName);
     public string SQLiteVersion { get; private set; } = "";
     public string SQLiteSourceId { get; private set; } = "";
     public IReadOnlyList<string> SQLiteCompileOptions { get; private set; } = [];
 
-    public NativeDatabase(string productRoot) : this(productRoot, false) { }
-    private NativeDatabase(string? productRoot, bool memory)
+    public NativeDatabase(string productRoot, DatabaseRole role = DatabaseRole.Data) : this(productRoot, role, false) { }
+    private NativeDatabase(string? productRoot, DatabaseRole role, bool memory)
     {
         if (!memory && string.IsNullOrEmpty(productRoot)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (!Enum.IsDefined(role)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         this.productRoot = productRoot;
-        new Thread(RunWriteLane) { IsBackground = true, Name = "meowfilm native database write" }.Start();
+        this.role = role;
+        new Thread(RunWriteLane) { IsBackground = true, Name = $"meowfilm native {role.ToString().ToLowerInvariant()} db write" }.Start();
     }
-    public static NativeDatabase CreateMemory() => new(null, true);
+    public static NativeDatabase OpenData(string productRoot) => new(productRoot, DatabaseRole.Data);
+    public static NativeDatabase OpenCache(string productRoot) => new(productRoot, DatabaseRole.Cache);
+    public static NativeDatabase CreateMemory(DatabaseRole role = DatabaseRole.Data) => new(null, role, true);
 
     public Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) =>
         EnqueueRead(session =>
@@ -209,11 +226,13 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             }
         }, cancellationToken).ConfigureAwait(false);
         var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        var dbLabel = role == DatabaseRole.Cache ? "cache" : "data";
         DebugLog.Info(DebugCategories.Storage, "debug-sql", "query.readonly",
-            new { sql, rowCount = result.rows.Count, truncated = result.truncated },
+            new { db = dbLabel, sql, rowCount = result.rows.Count, truncated = result.truncated },
             durationMs: elapsedMs);
         return new
         {
+            db = dbLabel,
             columns = result.columns,
             rows = result.rows,
             rowCount = result.rows.Count,
@@ -488,14 +507,17 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         if (productRoot is not null)
             await EnqueueRead(_ => true, CancellationToken.None).ConfigureAwait(false);
     }
-    public Task BackupAsync(string destination, CancellationToken token = default) =>
-        EnqueueWrite(source =>
+    public Task BackupAsync(string destination, CancellationToken token = default)
+    {
+        if (role != DatabaseRole.Data)
+            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        return EnqueueWrite(source =>
         {
             string root = WindowsDocumentFiles.ValidateRoot(Path.GetDirectoryName(destination)!);
-            if (Path.GetFileName(destination) != "meowfilm.sqlite3")
+            if (Path.GetFileName(destination) != DataFileName)
                 throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
             using var parent = new WindowsDocumentFiles.Root(root);
-            using var claimed = WindowsDocumentFiles.OpenFile(Path.Combine(root, "meowfilm.sqlite3"),
+            using var claimed = WindowsDocumentFiles.OpenFile(Path.Combine(root, DataFileName),
                 WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 3, WindowsDocumentFiles.CreateNew)!;
             bool completed = false;
             try
@@ -507,7 +529,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 }.ToString());
                 target.Open(); source.Connection.BackupDatabase(target);
                 var snapshot = new DatabaseSession(target);
-                StorageSchema.Verify(snapshot, StorageSchema.Read());
+                StorageSchema.Verify(snapshot, StorageSchema.Read(DatabaseRole.Data));
                 if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok" ||
                     snapshot.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
                     throw new DocumentStoreException(DocumentStoreError.Corrupt);
@@ -521,6 +543,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 if (!completed) File.Delete(destination);
             }
         }, token, 0, exclusive: true);
+    }
 
     private abstract class Operation(int bytes, bool exclusive)
     {
@@ -714,9 +737,9 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
 
     private void Open()
     {
-        var schema = StorageSchema.Read();
-        if (productRoot is not null) directory = new DatabaseDirectory(Path.Combine(productRoot, "storage-v1"), "meowfilm.sqlite3");
-        using var initialize = directory is null ? null : EnterLock("initialize.lock", exclusive: true, wait: true);
+        var schema = StorageSchema.Read(role);
+        if (productRoot is not null) directory = new DatabaseDirectory(Path.Combine(productRoot, "storage-v1"), FileName);
+        using var initialize = directory is null ? null : EnterLock(InitializeLockName, exclusive: true, wait: true);
         directory?.OpenDatabase();
         bool schemaCommitted = false;
         try
@@ -738,8 +761,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             if (directory is not null && !SafeWalVersion(SQLiteVersion))
                 throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
             session.ExecuteScript(
-                "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
-                "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
+                $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
+                $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
             long identity = session.Scalar<long>("PRAGMA application_id");
             long version = session.Scalar<long>("PRAGMA user_version");
             long tableCount = session.Scalar<long>("SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
@@ -752,16 +775,16 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 var creating = new DatabaseSession(writeConnection, transaction);
                 creating.ExecuteScript(schema.Sql);
                 creating.Execute("INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,$hash)", ("$hash", schema.Hash));
-                creating.ExecuteScript($"PRAGMA application_id={ApplicationId}; PRAGMA user_version={FormatVersion};");
+                creating.ExecuteScript($"PRAGMA application_id={ExpectedApplicationId}; PRAGMA user_version={FormatVersion};");
                 transaction.Commit();
                 schemaCommitted = true;
             }
-            else if (identity != ApplicationId || version != FormatVersion)
+            else if (identity != ExpectedApplicationId || version != FormatVersion)
                 throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
             StorageSchema.Verify(session, schema);
             string mode = session.Scalar<string>("PRAGMA journal_mode=WAL")!;
             if (mode != (directory is null ? "memory" : "wal") ||
-                session.Scalar<long>("PRAGMA synchronous") != 2 ||
+                session.Scalar<long>("PRAGMA synchronous") != ExpectedSynchronousLevel ||
                 session.Scalar<long>("PRAGMA foreign_keys") != 1 ||
                 session.Scalar<long>("PRAGMA trusted_schema") != 0 ||
                 session.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
@@ -789,9 +812,9 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                     throw new DocumentStoreException(DocumentStoreError.Storage);
                 var readSession = new DatabaseSession(readConnection);
                 readSession.ExecuteScript(
-                    "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
-                    "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
-                    "PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
+                    $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
+                    $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
+                    $"PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
                 if (readSession.Scalar<long>("PRAGMA query_only") != 1 ||
                     readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
                     readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
@@ -801,7 +824,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                     throw new DocumentStoreException(DocumentStoreError.Storage);
                 _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
                 readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
-                var readThread = new Thread(RunReadLane) { IsBackground = true, Name = "meowfilm native database read" };
+                var readThread = new Thread(RunReadLane) { IsBackground = true, Name = $"meowfilm native {role.ToString().ToLowerInvariant()} db read" };
                 readThread.Start();
                 readLaneStarted = true;
             }
@@ -829,7 +852,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             version.Major == 3 && version.Minor == 50 && version.Build >= 7 ||
             version.Major == 3 && version.Minor == 44 && version.Build >= 6);
 
-    private SafeFileHandle? EnterMaintenance(bool exclusive, bool wait) => EnterLock("maintenance.lock", exclusive, wait);
+    private SafeFileHandle? EnterMaintenance(bool exclusive, bool wait) => EnterLock(MaintenanceLockName, exclusive, wait);
     private SafeFileHandle? EnterLock(string name, bool exclusive, bool wait)
     {
         if (directory is null) return null;
@@ -879,7 +902,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         ? new DocumentStoreException(sqlite.SqliteErrorCode switch
         {
             11 or 26 => DocumentStoreError.Corrupt,
-            19 => DocumentStoreError.Conflict,
+            19 => DocumentStoreError.Constraint,
             5 or 6 => DocumentStoreError.Busy,
             13 => DocumentStoreError.Full,
             18 => DocumentStoreError.Limit,

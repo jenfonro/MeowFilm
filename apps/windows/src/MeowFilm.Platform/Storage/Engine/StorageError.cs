@@ -1,8 +1,14 @@
 namespace MeowFilm.Platform.Storage;
 
+public enum DatabaseRole
+{
+    Data,
+    Cache
+}
+
 public enum DocumentStoreError
 {
-    InvalidRequest, Unavailable, UnsafePath, Limit, Conflict, Corrupt,
+    InvalidRequest, Unavailable, UnsafePath, Limit, Conflict, Constraint, Corrupt,
     UnsupportedVersion, Storage, Closed, Busy, Full, ReadOnly, Io
 }
 

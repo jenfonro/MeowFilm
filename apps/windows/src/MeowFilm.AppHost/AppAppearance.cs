@@ -79,7 +79,7 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
                         INSERT INTO windows_app_appearance(singleton,theme_color) VALUES(1,$color)
                         ON CONFLICT(singleton) DO UPDATE SET theme_color=excluded.theme_color
                         """, ("$color", color));
-                    return db.CommitRevision(DocumentNamespace, expected, Guid.NewGuid().ToString("D"));
+                    return db.CommitRevision(DocumentNamespace, expected);
                 });
                 ThemeColor = color;
             }

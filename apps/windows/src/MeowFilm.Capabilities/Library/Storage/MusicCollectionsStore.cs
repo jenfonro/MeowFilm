@@ -1,14 +1,10 @@
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
-using static MeowFilm.Capabilities.Library.LibraryStorageHelpers;
+using static MeowFilm.Capabilities.Library.MusicStorageModelHelpers;
 
 namespace MeowFilm.Capabilities.Library;
 
 internal static class MusicCollectionsStore
 {
-    internal static JsonObject? Read(DatabaseSession db, string scope) =>
-        ReadRecord(db, scope) is { } rec ? ToJson(scope, rec) : null;
-
     internal static MusicLibraryAreaRecord? ReadRecord(DatabaseSession db, string scope)
     {
         if (!db.TryQuerySingle("""
@@ -177,11 +173,8 @@ internal static class MusicCollectionsStore
             accounts, collections, networkPlaylists);
     }
 
-    internal static void SaveIncremental(DatabaseSession db, string scope, JsonObject value)
+    internal static void Save(DatabaseSession db, string scope, MusicLibraryAreaRecord? previous, MusicLibraryAreaRecord next)
     {
-        var previous = ReadRecord(db, scope);
-        var next = FromJson(scope, value);
-
         if (previous is null ||
             previous.StateRevision != next.StateRevision ||
             previous.OwnerId != next.OwnerId ||
@@ -189,8 +182,8 @@ internal static class MusicCollectionsStore
             previous.NextId != next.NextId)
         {
             db.Execute("""
-                INSERT INTO music_library_state(scope,revision,owner_id,library_revision,next_id,status_phase,status_at,status_code)
-                VALUES($scope,$rev,$owner,$lrev,$next,'idle',0,NULL)
+                INSERT INTO music_library_state(scope,revision,owner_id,library_revision,next_id)
+                VALUES($scope,$rev,$owner,$lrev,$next)
                 ON CONFLICT(scope) DO UPDATE SET
                     revision=excluded.revision,
                     owner_id=excluded.owner_id,
@@ -209,7 +202,9 @@ internal static class MusicCollectionsStore
     private static void DiffAccounts(DatabaseSession db, string scope,
         IReadOnlyDictionary<string, string>? previous, IReadOnlyDictionary<string, string> next)
     {
-        if (previous is not null)
+        if (previous is null)
+            db.Execute("DELETE FROM music_library_accounts WHERE scope=$scope", ("$scope", scope));
+        else
         {
             foreach (var plat in previous.Keys)
                 if (!next.ContainsKey(plat))
@@ -231,15 +226,15 @@ internal static class MusicCollectionsStore
         MusicCollectionRecord[]? previous, MusicCollectionRecord[] next)
     {
         var prevById = new Dictionary<string, (int Position, MusicCollectionRecord Col)>(StringComparer.Ordinal);
-        if (previous is not null)
+        if (previous is null)
+        {
+            db.Execute("DELETE FROM music_collections WHERE scope=$scope", ("$scope", scope));
+        }
+        else
         {
             for (int i = 0; i < previous.Length; i++)
                 prevById[previous[i].CollectionId] = (i, previous[i]);
-        }
-
-        var nextIds = new HashSet<string>(next.Select(c => c.CollectionId), StringComparer.Ordinal);
-        if (previous is not null)
-        {
+            var nextIds = new HashSet<string>(next.Select(c => c.CollectionId), StringComparer.Ordinal);
             foreach (var col in previous)
                 if (!nextIds.Contains(col.CollectionId))
                     db.Execute("DELETE FROM music_collections WHERE scope=$scope AND collection_id=$cid",
@@ -355,15 +350,15 @@ internal static class MusicCollectionsStore
         MusicNetworkPlaylistRecord[]? previous, MusicNetworkPlaylistRecord[] next)
     {
         var prevById = new Dictionary<string, (int Position, MusicNetworkPlaylistRecord Playlist)>(StringComparer.Ordinal);
-        if (previous is not null)
+        if (previous is null)
+        {
+            db.Execute("DELETE FROM windows_music_network_playlists WHERE scope=$scope", ("$scope", scope));
+        }
+        else
         {
             for (int i = 0; i < previous.Length; i++)
                 prevById[previous[i].PlaylistId] = (i, previous[i]);
-        }
-
-        var nextIds = new HashSet<string>(next.Select(p => p.PlaylistId), StringComparer.Ordinal);
-        if (previous is not null)
-        {
+            var nextIds = new HashSet<string>(next.Select(p => p.PlaylistId), StringComparer.Ordinal);
             foreach (var np in previous)
                 if (!nextIds.Contains(np.PlaylistId))
                     db.Execute("DELETE FROM windows_music_network_playlists WHERE scope=$scope AND playlist_id=$pid",
@@ -398,238 +393,5 @@ internal static class MusicCollectionsStore
                 ("$sl", np.SubListId), ("$sc", np.SubCreatorId), ("$scl", np.SubCreatorListId),
                 ("$ia", np.IntentAccountId), ("$ip", np.IntentPresent));
         }
-    }
-
-    private static JsonObject ToJson(string scope, MusicLibraryAreaRecord rec)
-    {
-        var accounts = new JsonObject();
-        foreach (var (plat, accId) in rec.Accounts) accounts[plat] = accId;
-
-        var collections = new JsonArray();
-        foreach (var col in rec.Collections)
-        {
-            var bindings = new JsonArray();
-            foreach (var b in col.Bindings)
-            {
-                var mp = new JsonObject();
-                foreach (var (reid, sid) in b.Map) mp[reid] = sid;
-                bindings.Add(new JsonObject
-                {
-                    ["platform"] = b.Platform,
-                    ["accountId"] = b.AccountId,
-                    ["id"] = b.RemoteId,
-                    ["writable"] = b.Writable,
-                    ["baseline"] = new JsonArray(b.Baseline.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()),
-                    ["map"] = mp,
-                    ["name"] = b.Name
-                });
-            }
-
-            var intents = new JsonObject();
-            foreach (var (ikey, it) in col.Intents)
-            {
-                var iObj = new JsonObject
-                {
-                    ["present"] = it.Present,
-                    ["pending"] = it.Pending,
-                    ["origin"] = it.Origin
-                };
-                if (it.Acknowledged is not null)
-                    iObj["acknowledged"] = new JsonArray(it.Acknowledged.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray());
-                intents[ikey] = iObj;
-            }
-
-            var cObj = new JsonObject
-            {
-                ["id"] = col.CollectionId,
-                ["name"] = col.Name,
-                ["kind"] = col.Kind,
-                ["revision"] = col.Revision,
-                ["manualOrder"] = col.ManualOrder,
-                ["order"] = new JsonArray(col.Order.Select(x => (JsonNode?)JsonValue.Create(x)).ToArray()),
-                ["bindings"] = bindings,
-                ["intents"] = intents
-            };
-            if (col.Deleted) cObj["deleted"] = true;
-            if (col.LocallyCreated) cObj["locallyCreated"] = true;
-            collections.Add(cObj);
-        }
-
-        var networkPlaylists = new JsonArray();
-        foreach (var np in rec.NetworkPlaylists)
-        {
-            JsonObject? subscription = null;
-            if (np.SubAccountId is not null)
-            {
-                var locator = new JsonObject();
-                SetNonNull(locator, "listId", np.SubListId);
-                SetNonNull(locator, "creatorId", np.SubCreatorId);
-                SetNonNull(locator, "creatorListId", np.SubCreatorListId);
-                subscription = new JsonObject
-                {
-                    ["accountId"] = np.SubAccountId,
-                    ["present"] = np.SubPresent ?? false,
-                    ["locator"] = locator
-                };
-            }
-            JsonObject? intent = np.IntentAccountId is not null
-                ? new JsonObject { ["accountId"] = np.IntentAccountId, ["present"] = np.IntentPresent ?? false }
-                : null;
-            networkPlaylists.Add(new JsonObject
-            {
-                ["id"] = np.PlaylistId,
-                ["platform"] = np.Platform,
-                ["remoteId"] = np.RemoteId,
-                ["name"] = np.Name,
-                ["cover"] = np.Cover,
-                ["count"] = np.SongCount,
-                ["revision"] = np.Revision,
-                ["present"] = np.Present,
-                ["subscription"] = subscription,
-                ["intent"] = intent
-            });
-        }
-
-        return new JsonObject
-        {
-            ["schema"] = 1,
-            ["scope"] = scope,
-            ["revision"] = rec.StateRevision,
-            ["library"] = new JsonObject
-            {
-                ["version"] = 1,
-                ["ownerId"] = rec.OwnerId,
-                ["revision"] = rec.LibraryRevision,
-                ["nextId"] = rec.NextId,
-                ["collections"] = collections,
-                ["accounts"] = accounts,
-                ["networkPlaylists"] = networkPlaylists
-            }
-        };
-    }
-
-    private static MusicLibraryAreaRecord FromJson(string scope, JsonObject value)
-    {
-        var lib = value["library"] as JsonObject ?? new JsonObject();
-        long stateRev = Int64(value, "revision") ?? 0;
-        string ownerId = Str(lib, "ownerId") ?? scope;
-        long libRev = Int64(lib, "revision") ?? stateRev;
-        long nextId = Int64(lib, "nextId") ?? 1;
-
-        var accounts = new Dictionary<string, string>(StringComparer.Ordinal);
-        if (lib["accounts"] is JsonObject accObj)
-        {
-            foreach (var pair in accObj)
-                if (pair.Value is JsonValue v && v.TryGetValue<string>(out var accId))
-                    accounts[pair.Key] = accId;
-        }
-
-        var collections = new List<MusicCollectionRecord>();
-        if (lib["collections"] is JsonArray colArr)
-        {
-            foreach (var item in colArr)
-            {
-                if (item is not JsonObject col) continue;
-                var order = new List<string>();
-                if (col["order"] is JsonArray orderArr)
-                    foreach (var o in orderArr)
-                        if (o is JsonValue sv && sv.TryGetValue<string>(out var sid))
-                            order.Add(sid);
-
-                var bindings = new List<MusicCollectionBindingRecord>();
-                if (col["bindings"] is JsonArray bArr)
-                {
-                    foreach (var bItem in bArr)
-                    {
-                        if (bItem is not JsonObject b) continue;
-                        var baseline = new List<string>();
-                        if (b["baseline"] is JsonArray blArr)
-                            foreach (var bl in blArr)
-                                if (bl is JsonValue bv && bv.TryGetValue<string>(out var nid))
-                                    baseline.Add(nid);
-                        var map = new Dictionary<string, string>(StringComparer.Ordinal);
-                        if (b["map"] is JsonObject mapObj)
-                            foreach (var pair in mapObj)
-                                if (pair.Value is JsonValue mv && mv.TryGetValue<string>(out var sid))
-                                    map[pair.Key] = sid;
-                        bindings.Add(new MusicCollectionBindingRecord(
-                            Str(b, "platform")!,
-                            Str(b, "accountId")!,
-                            Str(b, "id")!,
-                            Bool(b, "writable") ?? false,
-                            Str(b, "name") ?? "",
-                            baseline.ToArray(),
-                            map));
-                    }
-                }
-
-                var intents = new Dictionary<string, MusicCollectionIntentRecord>(StringComparer.Ordinal);
-                if (col["intents"] is JsonObject intObj)
-                {
-                    foreach (var pair in intObj)
-                    {
-                        if (pair.Value is not JsonObject it) continue;
-                        string[]? acks = null;
-                        if (it["acknowledged"] is JsonArray ackArr)
-                        {
-                            var list = new List<string>(ackArr.Count);
-                            foreach (var a in ackArr)
-                                if (a is JsonValue av && av.TryGetValue<string>(out var val))
-                                    list.Add(val);
-                            acks = list.ToArray();
-                        }
-                        intents[pair.Key] = new MusicCollectionIntentRecord(
-                            Bool(it, "present") ?? false,
-                            Bool(it, "pending") ?? false,
-                            Str(it, "origin") ?? "local",
-                            acks);
-                    }
-                }
-
-                collections.Add(new MusicCollectionRecord(
-                    Str(col, "id")!,
-                    Str(col, "name") ?? "",
-                    Str(col, "kind") ?? "playlist",
-                    Int64(col, "revision") ?? 0,
-                    Bool(col, "manualOrder") ?? false,
-                    Bool(col, "deleted") ?? false,
-                    Bool(col, "locallyCreated") ?? false,
-                    order.ToArray(),
-                    bindings.ToArray(),
-                    intents));
-            }
-        }
-
-        var networkPlaylists = new List<MusicNetworkPlaylistRecord>();
-        if (lib["networkPlaylists"] is JsonArray npArr)
-        {
-            foreach (var item in npArr)
-            {
-                if (item is not JsonObject np) continue;
-                var sub = np["subscription"] as JsonObject;
-                var loc = sub?["locator"] as JsonObject;
-                var intent = np["intent"] as JsonObject;
-                networkPlaylists.Add(new MusicNetworkPlaylistRecord(
-                    Str(np, "id")!,
-                    Str(np, "platform")!,
-                    Str(np, "remoteId")!,
-                    Str(np, "name")!,
-                    Str(np, "cover") ?? "",
-                    Int64(np, "count") ?? 0,
-                    Int64(np, "revision") ?? 0,
-                    Bool(np, "present") ?? true,
-                    Str(sub, "accountId"),
-                    Bool(sub, "present"),
-                    Str(loc, "listId"),
-                    Str(loc, "creatorId"),
-                    Str(loc, "creatorListId"),
-                    Str(intent, "accountId"),
-                    Bool(intent, "present")));
-            }
-        }
-
-        return new MusicLibraryAreaRecord(
-            stateRev, ownerId, libRev, nextId,
-            accounts, collections.ToArray(), networkPlaylists.ToArray());
     }
 }
