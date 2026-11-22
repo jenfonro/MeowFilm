@@ -267,10 +267,10 @@ public static class AppLauncher
                 cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(paths.Documents);
                 var dataDb = NativeDatabase.OpenData(paths.Documents);
-                var cacheDb = NativeDatabase.OpenCache(paths.Documents);
                 dataStore = dataDb;
-                cacheStore = cacheDb;
                 Volatile.Write(ref activeDataStore, dataDb);
+                var cacheDb = NativeDatabase.OpenCache(paths.Documents);
+                cacheStore = cacheDb;
                 Volatile.Write(ref activeCacheStore, cacheDb);
                 await Task.WhenAll(dataStore.Ready, cacheStore.Ready);
                 DebugLog.Info(DebugCategories.Lifecycle, "storage", "database.ready",
