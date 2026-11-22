@@ -32,6 +32,13 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
     public override var prefersStatusBarHidden: Bool { true }
     public override func loadView() { view = playerView }
     public override var usesPageHeader: Bool { false }
+    var isLyricExpanded: Bool { playerView.lyricExpanded }
+
+    func setLyricExpanded(_ expanded: Bool) {
+        if playerView.lyricExpanded != expanded {
+            playerView.toggleLyrics()
+        }
+    }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
@@ -118,7 +125,7 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         let sourceAttempt = content.model.activeNativeAttemptID
         if content.model.canRejectCurrentSource {
             actions.append(PageAlertAction(title: "音源不对", style: .destructive) { [weak self] in
-                Task {
+                Task { [weak self] in
                     guard let self, self.content.model.current?.id == occurrence,
                           self.content.model.activeNativeAttemptID == sourceAttempt,
                           self.content.model.accountAccessGeneration == access else { return }

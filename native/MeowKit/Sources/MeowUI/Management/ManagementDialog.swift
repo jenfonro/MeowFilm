@@ -23,12 +23,6 @@ public final class ManagementDialog: FloatingCardDialogController {
     public override var usesCompactHeader: Bool { true }
     public override var cardCornerRadius: CGFloat { 20 }
 
-    public var debugHeading: String { cardTitle }
-    public var debugActionTitle: String { actionTitle }
-    public var debugErrorText: String? { debugDialogMessage }
-    public func debugConfirm() { commit() }
-    public func debugCancel() { requestDismiss() }
-
     public init(title: String, action: String = "确定", themeProvider: any PageThemeProviding) {
         self.actionTitle = action
         super.init(title: title, themeProvider: themeProvider)
@@ -93,17 +87,9 @@ public final class ManagementDialog: FloatingCardDialogController {
     public override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
-        let current = theme
-        let settings = current.settings
+        let settings = theme.settings
         cancelButton.setTitleColor(UIColor(settings.muted), for: .normal)
         acceptButton.setTitleColor(UIColor(settings.accent), for: .normal)
-        for child in bodyStack.arrangedSubviews {
-            if let themeable = child as? any PageThemeable {
-                themeable.applyTheme(current)
-            } else if let label = child as? UILabel {
-                label.textColor = UIColor(settings.muted)
-            }
-        }
     }
 
     public static func input(placeholder: String, multiline: Bool = false) -> SettingsTextField {
@@ -126,7 +112,6 @@ public final class ManagementDialog: FloatingCardDialogController {
         (input as? SettingsTextField)?.inputAppearance = .underline
         let section = SettingsInputSection(title: title, input: input)
         addBodyView(section)
-        registerThemeable(section)
     }
 
     public func showError(_ message: String) {

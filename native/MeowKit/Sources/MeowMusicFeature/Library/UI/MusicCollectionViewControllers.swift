@@ -37,7 +37,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     private let toolbar = MusicCollectionEditorToolbarView()
     private let actions = MusicCollectionEditorActionsView()
     private var closing = false
-    private var shownActionError: String?
+    private var shownReadError: String?
     private var displayedTracks: [MusicRemoteTrack] = []
     private var displayedTracksByRef: [MusicReference: MusicRemoteTrack] = [:]
     private var displayedTrackIndices: [MusicReference: Int] = [:]
@@ -212,10 +212,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     }
 
     public override func pageDidFinishAppearing() {
-        if let local = localContent,
-           local.page.editor !== local.draft || local.page.error != nil || local.page.actionError != nil {
-            renderActions()
-        } else if remotePage?.actionError != nil {
+        if let local = localContent, local.page.editor !== local.draft {
             renderActions()
         }
     }
@@ -378,14 +375,16 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         updateEditorTitle()
         switch content {
         case .local(let page, _):
-            let message = page.actionError ?? page.error?.localizedDescription
-            if let message, !message.isEmpty {
-                if shownActionError != message {
-                    shownActionError = message
-                    enqueueError(message)
+            if let actionError = page.actionError, !actionError.isEmpty {
+                enqueueError(actionError, acknowledged: { [weak page] in page?.clearActionError() })
+            }
+            if let readError = page.error?.localizedDescription, !readError.isEmpty {
+                if shownReadError != readError {
+                    shownReadError = readError
+                    enqueueError(readError)
                 }
             } else {
-                shownActionError = nil
+                shownReadError = nil
             }
         case .remote(let page):
             showRemoteActionError(page)
@@ -526,7 +525,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     private func showRemoteActionError(_ page: MusicPublicBrowseViewModel) {
         guard let error = page.actionError, let id = page.actionErrorID else { return }
         let message = error.message(operation: page.actionOperation, diagnosticID: page.actionDiagnosticID)
-        showError(message) { [weak page] in page?.dismissActionError(id: id) }
+        enqueueError(message, acknowledged: { [weak page] in page?.dismissActionError(id: id) })
     }
 }
 

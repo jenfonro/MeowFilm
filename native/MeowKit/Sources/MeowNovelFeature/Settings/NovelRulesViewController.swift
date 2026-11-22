@@ -98,8 +98,8 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
         let current = Dictionary(feature.local.rules.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
         let statuses = rules.map { NovelRuleImport.status($0, existing: current[$0.id]) }
         let selection = ManagementImportView(items: rules.enumerated().map { index, rule in .init(title: rule.name.isEmpty ? rule.pattern : rule.name, detail: rule.group, status: statuses[index]) }, selected: Set(rules.indices.filter { statuses[$0] != "已有" }))
-        let dialog = ManagementDialog(title: "导入替换规则", action: "确定导入", themeProvider: themeProvider); dialog.body.addArrangedSubview(selection)
-        if !failures.isEmpty { let label = UILabel(); label.text = failures.joined(separator: "\n"); label.numberOfLines = 0; label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).danger) }; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; dialog.body.addArrangedSubview(label) }
+        let dialog = ManagementDialog(title: "导入替换规则", action: "确定导入", themeProvider: themeProvider); dialog.addBodyView(selection)
+        if !failures.isEmpty { let label = UILabel(); label.text = failures.joined(separator: "\n"); label.numberOfLines = 0; label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).danger) }; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; dialog.addBodyView(label) }
         dialog.submit = { [feature] in
             guard !selection.selected.isEmpty else { throw NovelError.invalidRule(["请选择要导入的替换规则"]) }
             var next = feature.local.rules
@@ -142,7 +142,10 @@ final class NovelRuleEditor: ManagementPageViewController {
         text("替换规则（pattern）", \.pattern, rows: 5, id: "pattern")
         form.addSection(ManagementFormView.check("使用正则表达式", value: rule.isRegex, round: true) { [weak self] in self?.rule.isRegex = $0 })
         text("替换为（replacement）", \.replacement, rows: 4, id: "replacement")
-        let checks = UIStackView(arrangedSubviews: [ManagementFormView.check("作用于标题", value: rule.scopeTitle, round: true) { [weak self] in self?.rule.scopeTitle = $0 }, ManagementFormView.check("作用于正文", value: rule.scopeContent, round: true) { [weak self] in self?.rule.scopeContent = $0 }, UIView()]); checks.spacing = 14; form.addSection(checks)
+        form.addCheckRow([
+            ManagementFormView.check("作用于标题", value: rule.scopeTitle, round: true) { [weak self] in self?.rule.scopeTitle = $0 },
+            ManagementFormView.check("作用于正文", value: rule.scopeContent, round: true) { [weak self] in self?.rule.scopeContent = $0 },
+        ])
         text("替换范围（scope）", \.scope, id: "scope"); text("排除范围（excludeScope）", \.excludeScope, id: "excludeScope")
         form.text("超时毫秒数（timeoutMillisecond）", value: timeout, id: "novel.rule.field.timeoutMillisecond") { [weak self] in self?.timeout = $0 }
         form.applyTheme(theme)

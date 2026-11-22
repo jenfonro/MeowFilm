@@ -106,7 +106,6 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         resetPressFeedback()
         cancelVisibleArtworks()
     }
-    public override func pageDidFinishAppearing() { presentError() }
 
     public override func applyTheme() {
         super.applyTheme()
@@ -183,9 +182,11 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
 
     private func presentError() {
         guard let error = model.error, shownError != error else { return }
-        if showRetryableError(error.localizedDescription, retry: { [weak self] in
+        shownError = error
+        enqueueError(error.localizedDescription, retry: { [weak self] in
+            self?.shownError = nil
             self?.model.refresh()
-        }) { shownError = error }
+        })
     }
 
     private func makeLayout() -> UICollectionViewLayout {

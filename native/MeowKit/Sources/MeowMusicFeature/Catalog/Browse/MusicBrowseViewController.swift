@@ -138,12 +138,12 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         if let page {
-            observe(page.$sections.map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.render() }
-            observe(page) { [weak self] in self?.renderState() }
+            observe(page.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
+            observe(page, whenVisible: true) { [weak self] in self?.renderState() }
         }
         observe(model.accessChanges) { [weak self] in self?.activatePage() }
         observe(model.accountChanges) { [weak self] platform in self?.accountChanged(platform) }
-        observe(model.fmArtworkChanges) { [weak self] in self?.updateFMArtwork() }
+        observe(model.fmArtworkChanges, whenVisible: true) { [weak self] in self?.updateFMArtwork() }
         render()
     }
 
@@ -198,18 +198,19 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         for cell in collection.visibleCells.compactMap({ $0 as? MusicBannerCarouselCell }) { cell.setActive(false) }
     }
 
-    public override func pageDidFinishAppearing() {
-        showReadErrorIfNeeded()
-        showActionErrorIfNeeded()
-    }
-
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded {
+            statusView.textColor = UIColor(theme.muted)
+            loadingSkeleton.configure(
+                loading: (page?.sections.allSatisfy({ $0.items.isEmpty }) ?? true) && page?.isLoading == true && page?.loaded == false,
+                visible: isPageVisible,
+                theme: theme
+            )
+            collection.refreshControl?.tintColor = UIColor(theme.accent)
             updateVisibleCells()
             updateVisibleHeaders()
             if tagsHeight != nil { configureTags(force: true) }
-            renderState()
         }
     }
 

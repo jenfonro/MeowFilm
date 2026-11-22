@@ -12,7 +12,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
     private let model: MusicViewModel
     private var summary: MusicPlayedPlaylist
     private let table = UITableView(frame: .zero, style: .plain)
-    private let heading = UILabel(), source = UILabel(), count = UILabel()
+    private let heading = UILabel(), source = UILabel(), count = UILabel(), emptyLabel = UILabel()
     private let resume = UIButton(type: .system), remove = UIButton(type: .system)
     private let fade = CAGradientLayer()
     private var detail: MusicHistoryDetail?
@@ -92,9 +92,6 @@ final class MusicHistoryCardViewController: MusicPageViewController,
 
     override func pageDidBecomeActive() { reconcileSummary() }
     override func pageDidBecomeVisible() { renderState() }
-    override func pageDidFinishAppearing() {
-        if error != nil { renderState() }
-    }
 
     func selectionDidChange() { if isPageActive { renderState() } }
 
@@ -106,8 +103,8 @@ final class MusicHistoryCardViewController: MusicPageViewController,
     override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
+        applyChromeTheme()
         updateVisiblePlayback(force: true)
-        renderState()
     }
 
     func update(summary: MusicPlayedPlaylist) {
@@ -208,7 +205,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         guard permitted, let detail else { return }
         let captured = intent(detail)
         presentPageConfirmation(title: "删除这份已播歌单？", confirmTitle: "确认删除", destructive: true, onConfirm: { [weak self] in
-            self?.runPageTask {
+            self?.runPageTask { [weak self] in
                 guard let self, self.admits(captured) else { return }
                 await self.model.removeHistory(detail: detail)
             }
@@ -239,6 +236,19 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         }
     }
 
+    private func applyChromeTheme() {
+        resume.configuration?.background.backgroundColor = UIColor(theme.surface)
+        resume.configuration?.baseForegroundColor = UIColor(theme.ink)
+        heading.textColor = UIColor(theme.ink)
+        count.textColor = UIColor(theme.muted)
+        source.textColor = UIColor(theme.muted)
+        remove.tintColor = UIColor(theme.muted)
+        emptyLabel.textColor = UIColor(theme.muted)
+        view.backgroundColor = UIColor(theme.bottom)
+        view.layer.borderColor = UIColor(theme.border).withAlphaComponent(0.45).cgColor
+        fade.colors = [UIColor(theme.bottom).withAlphaComponent(0).cgColor, UIColor(theme.bottom).cgColor]
+    }
+
     private func renderState() {
         guard isViewLoaded else { return }
         heading.text = missing ? nil : detail?.summary.title ?? summary.title
@@ -261,25 +271,19 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         remove.isHidden = detail == nil || missing
         resume.contentHorizontalAlignment = .leading
         resume.titleLabel?.lineBreakMode = .byTruncatingTail
-        heading.textColor = UIColor(theme.ink)
-        count.textColor = UIColor(theme.muted)
-        source.textColor = UIColor(theme.muted)
-        remove.tintColor = UIColor(theme.muted)
-        view.backgroundColor = UIColor(theme.bottom)
-        view.layer.borderColor = UIColor(theme.border).withAlphaComponent(0.45).cgColor
-        fade.colors = [UIColor(theme.bottom).withAlphaComponent(0).cgColor, UIColor(theme.bottom).cgColor]
-        let label = UILabel()
-        label.text = reading && detail == nil ? "正在读取已播歌单" : nil
-        label.textAlignment = .center; label.textColor = UIColor(theme.muted)
-        table.backgroundView = label.text == nil ? nil : label
+        applyChromeTheme()
+        emptyLabel.text = reading && detail == nil ? "正在读取已播歌单" : nil
+        emptyLabel.textAlignment = .center
+        table.backgroundView = emptyLabel.text == nil ? nil : emptyLabel
         view.setNeedsLayout()
-        guard isSelectedPage?() == true, canPresentPageAlert, let error, shownReadError != error else { return }
+        guard isSelectedPage?() == true, let error, shownReadError != error else { return }
         let expected = identity
         shownReadError = error
-        showRetryableError(error) { [weak self] in
+        enqueueError(error, retry: { [weak self] in
             guard let self, self.identity == expected else { return }
+            self.shownReadError = nil
             self.read(force: true)
-        }
+        })
     }
 
 }

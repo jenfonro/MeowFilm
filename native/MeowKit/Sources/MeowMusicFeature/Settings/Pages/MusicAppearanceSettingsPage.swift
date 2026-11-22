@@ -168,6 +168,7 @@ final class MusicColorSettingsViewController: SettingsListViewController {
 final class MusicCustomColorPickerController: UIColorPickerViewController, UIColorPickerViewControllerDelegate {
     private let store: MusicAppearancePreferencesStore
     private var finished = false
+    private var committing = false
 
     init(store: MusicAppearancePreferencesStore) {
         self.store = store
@@ -219,15 +220,21 @@ final class MusicCustomColorPickerController: UIColorPickerViewController, UICol
         dismiss(animated: true)
     }
     @objc func commit() {
+        guard !committing else { return }
+        committing = true
         let selected = rgb
-        Task {
-            guard await store.selectFixedPalette(.custom(selected)) else {
-                presentPageAlert(title: "错误", message: store.persistenceError,
-                                 actions: [PageAlertAction(title: "确定", style: .default)])
+        let store = self.store
+        Task { [weak self] in
+            let saved = await store.selectFixedPalette(.custom(selected))
+            guard let self else { return }
+            self.committing = false
+            guard saved else {
+                self.presentPageAlert(title: "错误", message: store.persistenceError,
+                                      actions: [PageAlertAction(title: "确定", style: .default)])
                 return
             }
-            finished = true; store.endColorPreview()
-            dismiss(animated: true)
+            self.finished = true; store.endColorPreview()
+            self.dismiss(animated: true)
         }
     }
 }

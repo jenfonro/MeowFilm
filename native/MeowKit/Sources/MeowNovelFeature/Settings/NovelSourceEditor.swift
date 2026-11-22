@@ -14,7 +14,7 @@ final class NovelSourceEditor: ManagementPageViewController {
     private lazy var tabsHeight = tabScroll.heightAnchor.constraint(equalToConstant: 46)
     private let panel = UIView()
     private let typeLabel = UILabel(), typeButton = UIButton(type: .system)
-    private var indicators: [UIView] = [], separators: [UIView] = []
+    private var tabButtons: [UIButton] = [], indicators: [UIView] = [], separators: [UIView] = []
     private let saveButton = PageHeaderButton(image: ManagementIcon.save, accessibilityLabel: "保存") {}
     private var activeTab = 0, saving = false
     init(source: NovelSource?, protocol: NovelSourceProtocol, definition: String?, feature: NovelFeature, themeProvider: any PageThemeProviding) throws {
@@ -51,13 +51,18 @@ final class NovelSourceEditor: ManagementPageViewController {
         NSLayoutConstraint.activate([tabs.leadingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.leadingAnchor, constant: 12), tabs.trailingAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.trailingAnchor, constant: -12), tabs.topAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.topAnchor), tabs.bottomAnchor.constraint(equalTo: tabScroll.contentLayoutGuide.bottomAnchor), tabs.heightAnchor.constraint(equalTo: tabScroll.frameLayoutGuide.heightAnchor)])
         let titles = draft.tabs.map(\.title) + (draft.extensionFields.isEmpty ? [] : ["扩展字段"])
         for (index, title) in titles.enumerated() {
-            let button = UIButton(type: .system); button.setTitle(title, for: .normal); button.titleLabel?.adjustsFontForContentSizeCategory = true
-            button.contentEdgeInsets = .init(top: 12, left: 14, bottom: 12, right: 14)
+            let button = UIButton(type: .system)
+            var tabConfig = UIButton.Configuration.plain()
+            tabConfig.title = title
+            tabConfig.contentInsets = .init(top: 12, leading: 14, bottom: 12, trailing: 14)
+            button.configuration = tabConfig
+            button.titleLabel?.adjustsFontForContentSizeCategory = true
             button.setContentCompressionResistancePriority(.required, for: .horizontal); button.setContentCompressionResistancePriority(.required, for: .vertical)
             button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true; button.accessibilityIdentifier = "novel.source.tab.\(index)"
             let indicator = UIView(); indicator.layer.cornerRadius = 1.5; button.addSubview(indicator); indicator.translatesAutoresizingMaskIntoConstraints = false
             NSLayoutConstraint.activate([indicator.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 14), indicator.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -14), indicator.bottomAnchor.constraint(equalTo: button.bottomAnchor), indicator.heightAnchor.constraint(equalToConstant: 3)]); indicators.append(indicator)
-            button.addAction(UIAction { [weak self] _ in self?.view.endEditing(true); self?.activeTab = index; self?.render() }, for: .touchUpInside); tabs.addArrangedSubview(button)
+            button.addAction(UIAction { [weak self] _ in self?.view.endEditing(true); self?.activeTab = index; self?.render() }, for: .touchUpInside)
+            tabButtons.append(button); tabs.addArrangedSubview(button)
         }
         view.addSubview(panel); panel.translatesAutoresizingMaskIntoConstraints = false; panel.accessibilityIdentifier = "novel.source.panel"; panel.layer.cornerRadius = 22; panel.clipsToBounds = true
         for child in [options, tabScroll, form] { panel.addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false }
@@ -82,11 +87,21 @@ final class NovelSourceEditor: ManagementPageViewController {
             var attributes = attributes; attributes.font = font; return attributes
         }
         let tabFont = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 14), compatibleWith: traitCollection)
-        for case let button as UIButton in tabs.arrangedSubviews {
-            button.titleLabel?.font = tabFont
+        for button in tabButtons {
+            button.configuration?.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                var attributes = attributes; attributes.font = tabFont; return attributes
+            }
         }
         optionsHeight.constant = max(64, ceil(font.lineHeight) + 10 + 24)
         tabsHeight.constant = max(46, ceil(tabFont.lineHeight) + 24)
+    }
+    private func updateTabAppearance() {
+        let settings = theme.settings
+        for (index, button) in tabButtons.enumerated() {
+            button.configuration?.baseForegroundColor = UIColor(index == activeTab ? settings.ink : settings.muted)
+            indicators[index].backgroundColor = UIColor(settings.accent)
+            indicators[index].isHidden = index != activeTab
+        }
     }
     override func applyTheme() {
         super.applyTheme()
@@ -96,15 +111,12 @@ final class NovelSourceEditor: ManagementPageViewController {
         typeButton.configuration?.baseForegroundColor = UIColor(settings.ink)
         typeButton.configuration?.background.backgroundColor = UIColor(settings.input)
         for line in separators { line.backgroundColor = UIColor(settings.separator) }
-        for (index, view) in tabs.arrangedSubviews.enumerated() {
-            (view as? UIButton)?.setTitleColor(UIColor(index == activeTab ? settings.ink : settings.muted), for: .normal)
-            indicators[index].backgroundColor = UIColor(settings.accent)
-        }
+        updateTabAppearance()
         form.applyTheme(theme)
     }
     private func render() {
         form.clear()
-        for (index, indicator) in indicators.enumerated() { indicator.isHidden = index != activeTab }
+        updateTabAppearance()
         let fields = activeTab < draft.tabs.count ? draft.tabs[activeTab].fields : draft.extensionFields
         for field in fields {
             if field.kind == .bool {
@@ -112,7 +124,8 @@ final class NovelSourceEditor: ManagementPageViewController {
                 form.addSection(button)
             } else { form.text(field.label, value: draft.text(field), rows: field.rows, id: "novel.source.field.\(field.path)") { [weak self] value in self?.draft.set(field, value) } }
         }
-        form.setContentOffset(.zero, animated: false); applyTheme()
+        form.setContentOffset(.zero, animated: false)
+        form.applyTheme(theme)
     }
     private func save() {
         guard !saving else { return }; view.endEditing(true)

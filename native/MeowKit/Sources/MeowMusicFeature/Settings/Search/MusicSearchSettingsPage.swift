@@ -58,9 +58,9 @@ final class MusicSearchSettingsState: ObservableObject {
 
 @MainActor
 final class MusicSearchSettingsViewController: SettingsListViewController {
-    private let state: MusicSearchSettingsState
+    let state: MusicSearchSettingsState
     private let appearance: MusicAppearancePreferencesStore
-    private weak var platformWindow: MusicSearchPlatformsViewController?
+    weak var platformWindow: MusicSearchPlatformsViewController?
     private var steppers: [String: MusicSearchStepperRowView] = [:]
 
     init(appearance: MusicAppearancePreferencesStore, store: MusicSearchPreferencesStore) {

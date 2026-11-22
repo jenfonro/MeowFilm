@@ -82,10 +82,6 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
         updateFooterMenu()
         presentRuntimeError()
     }
-    override func pageDidFinishAppearing() {
-        super.pageDidFinishAppearing()
-        presentRuntimeError()
-    }
     private func presentRuntimeError() {
         guard let runtimeError = snapshot?.runtimeError, !runtimeError.isEmpty else {
             shownRuntimeError = nil

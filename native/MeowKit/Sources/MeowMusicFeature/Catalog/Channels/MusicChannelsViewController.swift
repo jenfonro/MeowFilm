@@ -77,12 +77,12 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         ])
         pager.didMove(toParent: self)
         if let catalogue {
-            observe(catalogue.$sections.map { _ in }.eraseToAnyPublisher()) {
+            observe(catalogue.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) {
                 [weak self] in self?.renderCatalogue()
             }
-            observe(catalogue) { [weak self] in self?.renderCatalogueState() }
+            observe(catalogue, whenVisible: true) { [weak self] in self?.renderCatalogueState() }
         }
-        observe(selection) { [weak self] in self?.renderSelection() }
+        observe(selection, whenVisible: true) { [weak self] in self?.renderSelection() }
         observe(model.accessChanges) { [weak self] in self?.activateCatalogue() }
     }
 
@@ -99,16 +99,14 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         catalogue?.setDisplayVisible(false)
         loadingSkeleton.setDisplayVisible(false)
     }
-    public override func pageDidFinishAppearing() {
-        if catalogue?.error != nil { renderCatalogueState() }
-    }
 
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded {
             cataloguePlaceholder.textColor = UIColor(theme.muted)
+            let loading = channels.isEmpty && catalogue?.isLoading == true && catalogue?.loaded == false
+            loadingSkeleton.configure(loading: loading, visible: isPageVisible, theme: theme)
             updateChannelTabs()
-            renderCatalogueState()
         }
     }
 
@@ -219,16 +217,16 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         cataloguePlaceholder.text = text
         cataloguePlaceholder.isHidden = text == nil
         if catalogue?.error == nil { shownCatalogueError = nil; return }
-        guard canPresentPageAlert, let catalogue, let error = catalogue.error else { return }
+        guard let catalogue, let error = catalogue.error else { return }
         let message = error.message(operation: catalogue.errorContext, diagnosticID: catalogue.errorDiagnosticID)
         guard shownCatalogueError != message else { return }
         let request = catalogue.actionPageID
         shownCatalogueError = message
-        showRetryableError(message) { [weak self] in
+        enqueueError(message, retry: { [weak self] in
             guard let self, catalogue.actionPageID == request else { return }
             self.shownCatalogueError = nil
             self.runPageTask { await catalogue.retry() }
-        }
+        })
     }
 
     private func renderSelection() {

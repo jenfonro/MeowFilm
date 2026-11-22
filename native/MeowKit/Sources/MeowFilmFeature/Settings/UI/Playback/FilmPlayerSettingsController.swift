@@ -87,9 +87,13 @@ final class FilmPlayerSettingsController: FilmSettingsListController {
             displayedError = error
             failure(NSError(domain: "FilmPlayerPreferences", code: 1,
                             userInfo: [NSLocalizedDescriptionKey: error]), retry: { [weak self] in
-                self?.displayedError = nil
-                Task { await self?.owner.reload() }
-                self?.update()
+                guard let self else { return }
+                self.displayedError = nil
+                let owner = self.owner
+                self.runPageTask { [weak self] in
+                    await owner.reload()
+                    self?.update()
+                }
             })
         } else { displayedError = nil }
     }

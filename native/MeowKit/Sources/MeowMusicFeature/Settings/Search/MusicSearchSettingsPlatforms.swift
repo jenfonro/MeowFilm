@@ -26,8 +26,8 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
     }
 
     private let state: MusicSearchSettingsState
-    private let kind: MusicSearchSettingsKind
-    private var order: [MusicPublicBrowsePlatform]
+    let kind: MusicSearchSettingsKind
+    var order: [MusicPublicBrowsePlatform]
     private var isActive = true
     private var observation: AnyCancellable?
     private let table = MusicSearchPlatformTableView(frame: .zero, style: .plain)
@@ -75,7 +75,7 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        if isBeingDismissed {
+        if isBeingDismissed || presentingViewController == nil {
             isActive = false
             observation?.cancel(); observation = nil
         }
@@ -123,26 +123,32 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         }
     }
 
-    private func movePlatform(from source: Int, to destination: Int) {
+    @discardableResult
+    func movePlatform(from source: Int, to destination: Int) -> Task<Void, Never>? {
         guard isActive, table.window != nil,
-              order.indices.contains(source), order.indices.contains(destination) else { return }
+              order.indices.contains(source), order.indices.contains(destination) else { return nil }
         let platform = order.remove(at: source)
         order.insert(platform, at: destination)
         let enabled = state.settings(kind).platforms
-        Task {
-            if !(await state.setPlatforms(order.filter { enabled.contains($0) }, kind: kind)) {
+        let updated = order.filter { enabled.contains($0) }
+        let state = self.state, kind = self.kind
+        return Task { [weak self] in
+            if !(await state.setPlatforms(updated, kind: kind)) {
                 await state.reload()
             }
-            syncOrderAndRender()
+            self?.syncOrderAndRender()
         }
     }
 
-    private func setEnabled(_ platform: MusicPublicBrowsePlatform, enabled: Bool) {
-        guard isActive, table.window != nil else { return }
+    @discardableResult
+    func setEnabled(_ platform: MusicPublicBrowsePlatform, enabled: Bool) -> Task<Void, Never>? {
+        guard isActive, table.window != nil else { return nil }
         var platforms = Set(state.settings(kind).platforms)
         if enabled { platforms.insert(platform) } else { platforms.remove(platform) }
-        Task {
-            if !(await state.setPlatforms(order.filter { platforms.contains($0) }, kind: kind)) {
+        let updated = order.filter { platforms.contains($0) }
+        let state = self.state, kind = self.kind
+        return Task {
+            if !(await state.setPlatforms(updated, kind: kind)) {
                 await state.reload()
             }
         }

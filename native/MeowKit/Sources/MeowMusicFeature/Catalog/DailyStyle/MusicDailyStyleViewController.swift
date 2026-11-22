@@ -76,15 +76,11 @@ public final class MusicDailyStyleViewController: PageViewController {
         contentStack.addArrangedSubview(tagWrap)
 
         observe(model, whenVisible: true) { [weak self] in self?.render() }
-        applyTheme()
         render()
     }
 
     public override func pageDidBecomeActive() { model.loadIfNeeded() }
     public override func pageDidBecomeVisible() { render() }
-    public override func pageDidFinishAppearing() {
-        if model.error != nil { render() }
-    }
     public override func pageDidBecomeInactive() { model.close() }
 
     public override func applyTheme() {
@@ -92,7 +88,8 @@ public final class MusicDailyStyleViewController: PageViewController {
         guard isViewLoaded else { return }
         spinner.color = UIColor(theme.muted)
         busyLabel.textColor = UIColor(theme.muted)
-        render()
+        categoryWrap.applyTheme(theme)
+        tagWrap.applyTheme(theme)
     }
 
     private func render() {
@@ -177,10 +174,12 @@ private final class MusicWrappingChipsView: UIView {
     }
 
     private var buttons: [UIButton] = []
+    private var selectedStates: [Bool] = []
     private var cachedHeight: CGFloat = 0
     private var lastWidth: CGFloat = 0
 
     func configure(items: [Item], theme: PageTheme) {
+        selectedStates = items.map(\.selected)
         while buttons.count > items.count {
             buttons.removeLast().removeFromSuperview()
         }
@@ -215,6 +214,14 @@ private final class MusicWrappingChipsView: UIView {
         }
         setNeedsLayout()
         layoutIfNeeded()
+    }
+
+    func applyTheme(_ theme: PageTheme) {
+        for (button, selected) in zip(buttons, selectedStates) {
+            button.configuration?.baseForegroundColor = UIColor(theme.ink)
+            button.backgroundColor = UIColor(selected ? theme.buttonSelected : theme.chip)
+            button.layer.borderColor = UIColor(selected ? theme.buttonSelected : theme.border).cgColor
+        }
     }
 
     override var intrinsicContentSize: CGSize {

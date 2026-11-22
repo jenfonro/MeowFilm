@@ -77,6 +77,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     public let search = UISearchBar()
     private lazy var searchContainer = ManagementSearchContainer(search: search)
     public let tools = UIStackView()
+    private var toolButtons: [UIButton] = []
     public let footerMore = UIButton(type: .system)
     public let deleteButton = UIButton(type: .system)
     public var onSearch: ((String) -> Void)?
@@ -292,6 +293,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         search.isHidden = !showsSearch
         searchContainer.isHidden = !showsSearch
         tools.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        toolButtons = buttons
         buttons.forEach { tools.addArrangedSubview($0) }
         accessories.forEach { tools.addArrangedSubview($0) }
         let hasTools = !buttons.isEmpty || !accessories.isEmpty
@@ -346,7 +348,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
             button.setTitleColor(UIColor(button === deleteButton ? settings.danger : settings.ink), for: .normal)
             button.setTitleColor(UIColor(settings.muted), for: .disabled)
         }
-        for button in tools.arrangedSubviews.compactMap({ $0 as? UIButton }) {
+        for button in toolButtons {
             button.backgroundColor = UIColor(settings.surface)
         }
         updateCount()

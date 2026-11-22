@@ -6,9 +6,9 @@ import MeowUI
 extension MusicBrowseViewController {
     func showActionErrorIfNeeded() {
         guard let page, let error = page.actionError, let id = page.actionErrorID else { return }
-        showError(error.message(operation: page.actionOperation, diagnosticID: page.actionDiagnosticID)) { [weak page] in
+        enqueueError(error.message(operation: page.actionOperation, diagnosticID: page.actionDiagnosticID), acknowledged: { [weak page] in
             page?.dismissActionError(id: id)
-        }
+        })
     }
 
     func showReadErrorIfNeeded() {
@@ -17,14 +17,14 @@ extension MusicBrowseViewController {
         guard let error else { shownReadError = nil; return }
         let message = error.message(operation: page?.errorContext ?? "音乐内容读取",
             diagnosticID: page?.errorDiagnosticID ?? section.flatMap { page?.sectionDiagnosticIDs[$0.id] })
-        guard canPresentPageAlert, shownReadError != message, let page else { return }
+        guard shownReadError != message, let page else { return }
         let request = page.actionPageID
         shownReadError = message
-        showRetryableError(message) { [weak self] in
+        enqueueError(message, retry: { [weak self] in
             guard let self, page.actionPageID == request else { return }
             self.shownReadError = nil
             self.runPageTask { await page.retry() }
-        }
+        })
     }
 
     func configureActions() {

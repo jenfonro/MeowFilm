@@ -128,14 +128,12 @@ public final class MusicFMSettingsViewController: PageViewController {
         observe(model, whenVisible: true) { [weak self] in self?.render() }
         observe(owner.searchAccessChanges) { [weak self] in self?.syncAccess() }
         observe(owner.playbackChanges, whenVisible: true) { [weak self] in self?.render() }
-        applyTheme()
         render()
     }
 
     public override func pageDidBecomeActive() { syncAccess() }
     public override func pageDidBecomeVisible() { render() }
     public override func pageDidFinishAppearing() {
-        render()
         drainClose()
     }
     public override func pageDidBecomeInactive() { model.close() }
@@ -152,7 +150,7 @@ public final class MusicFMSettingsViewController: PageViewController {
         )
         guard isViewLoaded else { return }
         sceneHeader.textColor = UIColor(theme.muted)
-        render()
+        for button in choiceButtons.values { button.applyTheme(theme) }
     }
 
     private func syncAccess() {
@@ -186,7 +184,7 @@ public final class MusicFMSettingsViewController: PageViewController {
         }
         if model.hasAccess, let error = model.error {
             let access = owner.searchAccessGeneration
-            showError(error, acknowledged: { [weak self] in
+            enqueueError(error, acknowledged: { [weak self] in
                 guard let self, self.owner.searchAccessGeneration == access else { return }
                 self.model.dismissError(error)
             })
@@ -229,6 +227,7 @@ private final class MusicFMChoiceButton: UIButton {
         withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .regular)
     ))
     private lazy var feedback = PressFeedback(view: self)
+    private var isChoiceSelected = false
 
     override var isHighlighted: Bool {
         didSet { feedback.setPressed(isHighlighted) }
@@ -295,21 +294,26 @@ private final class MusicFMChoiceButton: UIButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func update(selected: Bool, pending: Bool, enabled: Bool, theme: PageTheme) {
+        isChoiceSelected = selected
         isEnabled = enabled
-        backgroundColor = selected
-            ? UIColor(theme.accent).withAlphaComponent(0.16)
-            : UIColor(theme.buttonSurface)
-        layer.borderColor = UIColor(selected ? theme.accent : theme.border).cgColor
-        layer.borderWidth = selected ? 1.5 : 1
-        iconView.tintColor = UIColor(theme.ink)
-        label.textColor = UIColor(theme.ink)
-        checkmark.tintColor = UIColor(theme.accent)
+        applyTheme(theme)
         checkmark.isHidden = !selected
-        spinner.color = UIColor(theme.muted)
         if pending { spinner.startAnimating() } else { spinner.stopAnimating() }
         accessibilityValue = pending ? "正在切换" : ""
         accessibilityTraits = selected ? [.button, .selected] : .button
         if !enabled { accessibilityTraits.insert(.notEnabled) }
+    }
+
+    func applyTheme(_ theme: PageTheme) {
+        backgroundColor = isChoiceSelected
+            ? UIColor(theme.accent).withAlphaComponent(0.16)
+            : UIColor(theme.buttonSurface)
+        layer.borderColor = UIColor(isChoiceSelected ? theme.accent : theme.border).cgColor
+        layer.borderWidth = isChoiceSelected ? 1.5 : 1
+        iconView.tintColor = UIColor(theme.ink)
+        label.textColor = UIColor(theme.ink)
+        checkmark.tintColor = UIColor(theme.accent)
+        spinner.color = UIColor(theme.muted)
     }
 }
 #endif

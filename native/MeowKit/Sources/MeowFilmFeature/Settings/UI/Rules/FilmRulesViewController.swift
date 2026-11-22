@@ -257,8 +257,8 @@ final class FilmRulePageViewController: FilmSettingsListController {
         guard canPresentPageAlert, owner.draft != nil, !owner.busy, !writing else { return }
         cancelTest()
         let dialog = ManagementDialog(title: "测试", action: "测试", themeProvider: themeProvider)
-        dialog.body.addArrangedSubview(testFields.inputSection)
-        if group == .search { dialog.body.addArrangedSubview(testFields.querySection) }
+        dialog.addBodyView(testFields.inputSection)
+        if group == .search { dialog.addBodyView(testFields.querySection) }
         var submitted: (generation: UUID, request: FilmRuleRequest, rules: [FilmMatchRule])?
         dialog.submit = { [weak self] in
             guard let self, isPageActive, owner.draft != nil, !owner.busy, !writing else { return false }

@@ -49,7 +49,6 @@ final class PanLoginViewController: FloatingCardDialogController {
                 self.model.selectMethod(method)
             }, for: .valueChanged)
             addBodyView(methodControl)
-            registerThemeable(methodControl)
         }
 
         qrContainer.axis = .vertical
@@ -147,7 +146,7 @@ final class PanLoginViewController: FloatingCardDialogController {
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if isBeingDismissed {
+        if isBeingDismissed || presentingViewController == nil {
             observation?.cancel(); observation = nil
             model.close()
             qrImage = nil

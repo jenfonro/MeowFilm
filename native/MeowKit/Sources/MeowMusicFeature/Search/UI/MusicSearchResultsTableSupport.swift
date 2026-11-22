@@ -214,20 +214,15 @@ extension MusicSearchResultsViewController {
 
     func showActionError() {
         let message = actions.actionError ?? actions.error?.localizedDescription
-        guard let message, !message.isEmpty else {
-            shownActionError = nil
-            return
-        }
-        guard shownActionError != message else { return }
-        shownActionError = message
-        enqueueError(message)
+        guard let message, !message.isEmpty else { return }
+        enqueueError(message, acknowledged: { [weak actions] in actions?.clearErrors() })
     }
 
     func showSearchFailure(section requested: Int? = nil, force: Bool = false) {
         if results.songFailures.isEmpty { shownFailures[0] = nil }
         if results.playlistFailures.isEmpty { shownFailures[1] = nil }
         let sections = requested.map { [$0] } ?? (selected == .songs ? [0] : selected == .playlists ? [1] : [0, 1])
-        guard canPresentPageAlert, !selected.isAdditional else { return }
+        guard !selected.isAdditional else { return }
         for section in sections {
             let failures = section == 0 ? results.songFailures : results.playlistFailures
             guard !failures.isEmpty else { continue }
@@ -236,11 +231,11 @@ extension MusicSearchResultsViewController {
             guard force || shownFailures[section] != message else { continue }
             let request = results.requestID
             shownFailures[section] = message
-            showRetryableError(message) { [weak self] in
+            enqueueError(message, retry: { [weak self] in
                 guard let self, self.results.requestID == request else { return }
                 self.shownFailures[section] = nil
                 self.results.retry(section == 0 ? .songs : .playlists)
-            }
+            })
             return
         }
     }

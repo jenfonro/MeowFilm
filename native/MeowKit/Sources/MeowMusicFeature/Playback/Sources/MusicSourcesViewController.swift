@@ -14,6 +14,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     private var fence: MusicReferencePlayerFence
     private let table = UITableView(frame: .zero, style: .plain)
     private let more = UIButton(type: .system)
+    private let emptyLabel = UILabel()
     private var session: (any MusicSourceInspectionSession)?
     private var snapshot: MusicResolvedSourcesSnapshot?
     private var request = UUID()
@@ -82,9 +83,6 @@ final class MusicSourcesViewController: MusicPageViewController,
         else { reconcileInspection() }
     }
     override func pageDidBecomeVisible() { renderState() }
-    override func pageDidFinishAppearing() {
-        if readError != nil { renderState() }
-    }
 
     private func startInspection() {
         guard admitted, session == nil, !inspecting else { return }
@@ -176,11 +174,12 @@ final class MusicSourcesViewController: MusicPageViewController,
     override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded, dataSource != nil else { return }
+        more.tintColor = UIColor(theme.ink)
+        emptyLabel.textColor = UIColor(theme.muted)
         for path in table.indexPathsForVisibleRows ?? [] {
             if let id = dataSource.itemIdentifier(for: path), let source = rows[id],
                let cell = table.cellForRow(at: path) { configure(cell, source: source) }
         }
-        renderState()
     }
 
     private func configure(_ cell: UITableViewCell, source: MusicResolvedSource) {
@@ -301,18 +300,18 @@ final class MusicSourcesViewController: MusicPageViewController,
         more.tintColor = UIColor(theme.ink)
         let status = inspecting && snapshot == nil || snapshot?.isLoading == true ? "正在获取音源" :
             snapshot?.sources.isEmpty == true ? "暂无可用音源" : nil
-        let label = UILabel()
-        label.text = status
-        label.textColor = UIColor(theme.muted)
-        label.textAlignment = .center
-        table.backgroundView = status == nil ? nil : label
-        guard canPresentPageAlert, admitted, let readError, shownReadError != readError else { return }
+        emptyLabel.text = status
+        emptyLabel.textColor = UIColor(theme.muted)
+        emptyLabel.textAlignment = .center
+        table.backgroundView = status == nil ? nil : emptyLabel
+        guard admitted, let readError, shownReadError != readError else { return }
         let own = request
         shownReadError = readError
-        showRetryableError(readError) { [weak self] in
+        enqueueError(readError, retry: { [weak self] in
             guard let self, self.request == own, self.admitted else { return }
+            self.shownReadError = nil
             self.refresh()
-        }
+        })
     }
 
     private func loadMore(refresh: Bool) {

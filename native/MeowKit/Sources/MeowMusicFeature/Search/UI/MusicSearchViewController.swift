@@ -87,10 +87,10 @@ public final class MusicSearchViewController: SearchPageViewController,
             table.topAnchor.constraint(equalTo: contentTopAnchor),
             table.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-        observe(history) { [weak self] in self?.render() }
+        observe(history, whenVisible: true) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         if let discoveryPage {
-            observe(discoveryPage) { [weak self] in
+            observe(discoveryPage, whenVisible: true) { [weak self] in
                 self?.render()
                 self?.showDiscoveryError()
             }
@@ -122,7 +122,6 @@ public final class MusicSearchViewController: SearchPageViewController,
         if isMusicTarget {
             discoveryPage?.appear()
             measureMemberDemand()
-            showDiscoveryError()
         } else {
             discoveryPage?.disappear()
         }
@@ -210,7 +209,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     }
 
     private func showDiscoveryError() {
-        guard isMusicTarget, canPresentPageAlert, let discoveryPage else { return }
+        guard isMusicTarget, let discoveryPage else { return }
         let failures = discoveryPage.failures.filter { shownFailures[$0.target] != $0.error }
         guard !failures.isEmpty else { return }
         let access = model.accountAccessGeneration, targets = Set(failures.map(\.target))
@@ -219,11 +218,11 @@ public final class MusicSearchViewController: SearchPageViewController,
             return failure.error.message(operation: operation, platform: MusicPublicBrowsePlatform.netease.title)
         }.joined(separator: "；")
         for failure in failures { shownFailures[failure.target] = failure.error }
-        showRetryableError(message) { [weak self] in
+        enqueueError(message, retry: { [weak self] in
             guard let self, self.isPageActive, self.isMusicTarget, self.model.accountAccessGeneration == access else { return }
             for target in targets { self.shownFailures.removeValue(forKey: target) }
             self.discoveryPage?.retry(targets)
-        }
+        })
     }
 
     private func render() {

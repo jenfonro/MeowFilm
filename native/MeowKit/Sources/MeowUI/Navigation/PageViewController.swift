@@ -82,11 +82,23 @@ open class PageViewController: UIViewController {
     private var headerHeight: NSLayoutConstraint?
     private weak var defaultBackButton: PageHeaderButton?
     private var hasOwnHeader = false
+    private enum FeedbackKey: Equatable {
+        case error(String)
+        case notice(title: String, message: String?)
+    }
     private enum QueuedFeedback {
         case error(message: String, retry: (@MainActor () -> Void)?, acknowledged: (@MainActor () -> Void)?)
         case notice(title: String, message: String?, acknowledged: (@MainActor () -> Void)?)
+
+        var key: FeedbackKey {
+            switch self {
+            case .error(let message, _, _): return .error(message)
+            case .notice(let title, let message, _): return .notice(title: title, message: message)
+            }
+        }
     }
     private var queuedFeedback: [QueuedFeedback] = []
+    private var activeFeedbackKey: FeedbackKey?
 
     public init(themeProvider: any PageThemeProviding) {
         self.themeProvider = themeProvider
@@ -443,54 +455,56 @@ open class PageViewController: UIViewController {
         presentError(message, retry: nil, acknowledged: acknowledged)
     }
 
-    @discardableResult
-    public func showRetryableError(_ message: String?, retry: @escaping () -> Void) -> Bool {
-        presentError(message, retry: retry, acknowledged: nil)
-    }
-
     /// Enqueue an error or notice so pages do not maintain separate `pendingFailure` / `pendingNotice` queues.
     public func enqueueError(_ message: String?, retry: (@MainActor () -> Void)? = nil,
                              acknowledged: (@MainActor () -> Void)? = nil) {
         guard let message, !message.isEmpty else { return }
-        if queuedFeedback.contains(where: {
-            if case .error(let existing, _, _) = $0 { return existing == message }
-            return false
-        }) { return }
+        reconcileActiveFeedback()
+        let key = FeedbackKey.error(message)
+        if activeFeedbackKey == key || queuedFeedback.contains(where: { $0.key == key }) { return }
         queuedFeedback.append(.error(message: message, retry: retry, acknowledged: acknowledged))
         drainQueuedFeedback()
     }
 
     public func enqueueNotice(title: String, message: String? = nil,
                               acknowledged: (@MainActor () -> Void)? = nil) {
-        if queuedFeedback.contains(where: {
-            if case .notice(let existingTitle, let existingMessage, _) = $0 {
-                return existingTitle == title && existingMessage == message
-            }
-            return false
-        }) { return }
+        reconcileActiveFeedback()
+        let key = FeedbackKey.notice(title: title, message: message)
+        if activeFeedbackKey == key || queuedFeedback.contains(where: { $0.key == key }) { return }
         queuedFeedback.append(.notice(title: title, message: message, acknowledged: acknowledged))
         drainQueuedFeedback()
     }
 
     public func clearQueuedFeedback() {
         queuedFeedback.removeAll()
+        activeFeedbackKey = nil
+    }
+
+    private func reconcileActiveFeedback() {
+        if activeFeedbackKey != nil, presentedViewController == nil, presentedPageModal == nil {
+            activeFeedbackKey = nil
+        }
     }
 
     public func drainQueuedFeedback() {
-        guard !queuedFeedback.isEmpty, canPresentPageAlert else { return }
+        reconcileActiveFeedback()
+        guard activeFeedbackKey == nil, !queuedFeedback.isEmpty, canPresentPageAlert else { return }
         let next = queuedFeedback.removeFirst()
+        let key = next.key
+        activeFeedbackKey = key
         switch next {
         case .error(let message, let retry, let acknowledged):
             let wrappedRetry: (@MainActor () -> Void)? = retry.map { action in
                 { [weak self] in
+                    if self?.activeFeedbackKey == key { self?.activeFeedbackKey = nil }
                     action()
-                    DispatchQueue.main.async { self?.drainQueuedFeedback() }
                 }
             }
             if !presentError(message, retry: wrappedRetry, acknowledged: { [weak self] in
+                if self?.activeFeedbackKey == key { self?.activeFeedbackKey = nil }
                 acknowledged?()
-                DispatchQueue.main.async { self?.drainQueuedFeedback() }
             }) {
+                if activeFeedbackKey == key { activeFeedbackKey = nil }
                 queuedFeedback.insert(next, at: 0)
             }
         case .notice(let title, let message, let acknowledged):
@@ -499,11 +513,12 @@ open class PageViewController: UIViewController {
                 title: title,
                 message: message,
                 actions: [PageAlertAction(title: "确定", style: .default) { [weak self] in
+                    if self?.activeFeedbackKey == key { self?.activeFeedbackKey = nil }
                     acknowledged?()
-                    DispatchQueue.main.async { self?.drainQueuedFeedback() }
                 }]
             )
             if presented == nil {
+                if activeFeedbackKey == key { activeFeedbackKey = nil }
                 queuedFeedback.insert(next, at: 0)
             }
         }
@@ -628,6 +643,7 @@ open class PageViewController: UIViewController {
         guard !invalidated else { return }
         invalidated = true
         queuedFeedback.removeAll()
+        activeFeedbackKey = nil
         observationsDirtyOrder.removeAll()
         observationsDirtySet.removeAll()
         visibleObservationHandlers.removeAll()

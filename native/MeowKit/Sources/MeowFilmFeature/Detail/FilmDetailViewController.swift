@@ -66,7 +66,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     var displayedCanRetryMedia: Bool?
     var displayedEpisodeMenuState: EpisodeMenuState?
     var renderedEmptySourceMenus = false
-    private var needsPlaybackRender = false
     private var playbackActivationRequested = false
     private let presentationOwner = UUID()
     private var summaryExpanded = false
@@ -116,7 +115,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
                             themeProvider: any PageThemeProviding, model: FilmPlaybackModel? = nil) {
         self.init(detail: searchContext.detail, library: library, images: images, themeProvider: themeProvider, model: model)
         self.searchContext = searchContext
-        observe(searchContext.session.$snapshot.eraseToAnyPublisher()) { [weak self] _ in
+        observe(searchContext.session.$snapshot.eraseToAnyPublisher(), whenVisible: true) { [weak self] _ in
             self?.receiveSearchUpdate()
         }
     }
@@ -188,14 +187,9 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         configureSections()
         observe(library, whenVisible: true) { [weak self] in self?.renderFavorite() }
         if let model {
-            // Observe ONLY low-frequency presentation store; defer updates while hidden behind fullscreen player.
-            observe(model.presentationStore) { [weak self] in
-                guard let self else { return }
-                if self.isPageVisible {
-                    self.renderPlayback()
-                } else {
-                    self.needsPlaybackRender = true
-                }
+            // Observe ONLY low-frequency presentation store; framework coalesces while hidden behind fullscreen player.
+            observe(model.presentationStore, whenVisible: true) { [weak self] in
+                self?.renderPlayback()
             }
             renderPlayback()
         }
@@ -206,10 +200,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     public override func pageDidBecomeVisible() {
         model?.setPresentationVisible(true, owner: presentationOwner)
         activatePlaybackIfVisible()
-        if needsPlaybackRender {
-            needsPlaybackRender = false
-            renderPlayback()
-        }
         resumeVisibleArtworks()
         presentLibraryError()
         presentPlaybackError()
@@ -252,8 +242,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     public override func pageDidFinishAppearing() {
         super.pageDidFinishAppearing()
         activatePlaybackIfVisible()
-        presentLibraryError()
-        presentPlaybackError()
     }
 
     private func configureTitle() {

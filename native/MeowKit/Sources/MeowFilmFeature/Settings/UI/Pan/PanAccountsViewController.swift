@@ -59,7 +59,6 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
         if loginCard == nil { model.close() }
     }
     public override func pageDidBecomeInactive() { closeLogin(); model.close() }
-    public override func pageDidFinishAppearing() { showNotice() }
     public override func applyTheme() {
         super.applyTheme()
         reconfigureVisibleCells()

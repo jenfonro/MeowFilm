@@ -20,6 +20,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     }
     private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
     private var items: [Data: MusicCollection] = [:]
+    private let emptyLabel = UILabel()
     private var access: UUID?
     private var request = UUID()
     var loading = false
@@ -71,9 +72,10 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             collection.topAnchor.constraint(equalTo: heartbeat.bottomAnchor, constant: 8),
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-        observe(model.libraryChanges) { [weak self] in self?.render() }
+        emptyLabel.textAlignment = .center
+        observe(model.libraryChanges, whenVisible: true) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
-        observe(model.playbackChanges) { [weak self] in self?.renderHeartbeat() }
+        observe(model.playbackChanges, whenVisible: true) { [weak self] in self?.renderHeartbeat() }
         observeDistinct(appearance.$preferences.map(\.playlistView).eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) {
             [weak self] _ in
             self?.updatePlaylistLayout()
@@ -102,12 +104,11 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             cell.cancelPendingArtworkLoad()
         }
     }
-    public override func pageDidFinishAppearing() {
-        if loadError != nil { renderState() }
-    }
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded {
+            emptyLabel.textColor = UIColor(theme.muted)
+            collection.refreshControl?.tintColor = UIColor(theme.accent)
             renderHeartbeat()
             updateVisibleCells()
             for case let header as MusicLibrarySectionHeader in collection.visibleSupplementaryViews(ofKind: UICollectionView.elementKindSectionHeader) {
@@ -129,7 +130,8 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
                 guard let self, self.isPageActive, self.items[id] == item else { return }
                 self.presentPageConfirmation(title: "取消收藏歌单", confirmTitle: "取消收藏", destructive: true, onConfirm: { [weak self] in
                     guard let self, self.items[id] == item else { return }
-                    self.runPageTask { await self.model.removeNetworkPlaylist(item) }
+                    let model = self.model
+                    self.runPageTask { await model.removeNetworkPlaylist(item) }
                 })
             }])
         }
@@ -284,17 +286,18 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         let text = items.isEmpty ? loading || model.isLoading ? "加载中" :
             model.hasLoadedLibrary ? "暂无歌单" : nil : nil
         if let text {
-            let label = UILabel()
-            label.text = text; label.textAlignment = .center; label.textColor = UIColor(theme.muted)
-            collection.backgroundView = label
+            emptyLabel.text = text
+            emptyLabel.textColor = UIColor(theme.muted)
+            collection.backgroundView = emptyLabel
         } else { collection.backgroundView = nil }
-        guard canPresentPageAlert, let loadError, shownLoadError != loadError else { return }
+        guard let loadError, shownLoadError != loadError else { return }
         let own = request
         shownLoadError = loadError
-        showRetryableError(loadError) { [weak self] in
+        enqueueError(loadError, retry: { [weak self] in
             guard let self, self.request == own else { return }
+            self.shownLoadError = nil
             self.loadLibrary()
-        }
+        })
     }
 }
 

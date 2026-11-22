@@ -9,6 +9,7 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
     private lazy var fieldsTop = fields.topAnchor.constraint(equalTo: contentLayoutGuide.topAnchor, constant: 12)
     private struct WeakThemeable { weak var value: (any PageThemeable)? }
     private var themeables: [WeakThemeable] = []
+    private var checkRows: [(row: UIStackView, spacer: UIView)] = []
 
     public var boxedInputs = false {
         didSet {
@@ -57,6 +58,7 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
     public func clear() {
         fields.arrangedSubviews.forEach { $0.removeFromSuperview() }
         themeables.removeAll()
+        checkRows.removeAll()
     }
 
     public func registerThemeable(_ item: any PageThemeable) {
@@ -133,11 +135,22 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
         container.addArrangedSubview(section)
     }
 
+    public func addCheckRow(_ buttons: [UIButton], spacing: CGFloat = 14) {
+        let spacer = UIView()
+        let row = UIStackView(arrangedSubviews: buttons + [spacer])
+        row.spacing = spacing
+        for button in buttons {
+            if let themeable = button as? any PageThemeable { registerThemeable(themeable) }
+        }
+        checkRows.append((row: row, spacer: spacer))
+        addSection(row)
+    }
+
     private func updateCheckRows() {
-        for case let row as UIStackView in fields.arrangedSubviews where row.arrangedSubviews.contains(where: { $0 is ManagementCheckButton }) {
-            let vertical = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-            row.axis = vertical ? .vertical : .horizontal
-            row.arrangedSubviews.filter { !($0 is ManagementCheckButton) }.forEach { $0.isHidden = vertical }
+        let vertical = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
+        for entry in checkRows {
+            entry.row.axis = vertical ? .vertical : .horizontal
+            entry.spacer.isHidden = vertical
         }
     }
 
@@ -173,17 +186,18 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
 }
 
 @MainActor
-private final class ManagementCheckButton: UIButton {
+private final class ManagementCheckButton: UIButton, PageThemeable {
     private let shape: String, size: CGFloat, fontSize: CGFloat
+    private var currentTheme: PageTheme?
     init(round: Bool) {
         shape = round ? "circle" : "square"; size = round ? 20 : 18; fontSize = round ? 14 : 13
         super.init(frame: .zero)
         titleLabel?.numberOfLines = 0; titleLabel?.lineBreakMode = .byWordWrapping; titleLabel?.adjustsFontForContentSizeCategory = true
-        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self]) { (button: ManagementCheckButton, _: UITraitCollection) in button.applyTheme() }
-        applyTheme()
+        registerForTraitChanges([UITraitUserInterfaceStyle.self, UITraitPreferredContentSizeCategory.self]) { (button: ManagementCheckButton, _: UITraitCollection) in button.applyStyle() }
+        applyStyle()
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
-    override func didMoveToWindow() { super.didMoveToWindow(); applyTheme() }
+    override func didMoveToWindow() { super.didMoveToWindow(); if window != nil { applyStyle() } }
     override var intrinsicContentSize: CGSize {
         let size = super.intrinsicContentSize
         guard let titleLabel, titleLabel.preferredMaxLayoutWidth > 0 else { return size }
@@ -197,8 +211,12 @@ private final class ManagementCheckButton: UIButton {
         }
         super.layoutSubviews()
     }
-    private func applyTheme() {
-        let settings = SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)
+    func applyTheme(_ theme: PageTheme) {
+        currentTheme = theme
+        applyStyle()
+    }
+    private func applyStyle() {
+        let settings = currentTheme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)
         titleLabel?.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: fontSize), compatibleWith: traitCollection)
         let config = UIImage.SymbolConfiguration(pointSize: size, weight: .regular)
         setImage(UIImage(systemName: shape, withConfiguration: config)?.withTintColor(UIColor(settings.muted), renderingMode: .alwaysOriginal), for: .normal)

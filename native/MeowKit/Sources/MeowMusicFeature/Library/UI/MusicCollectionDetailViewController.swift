@@ -41,7 +41,6 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         remotePage?.request.dailyBranch == .style ? "风格推荐" : "每日推荐"
     }
     var shownReadError: String?
-    var shownActionError: String?
     var automaticPaginationHeld = false
     var cachedLocalTracks: [MusicRemoteTrack]?
     var cachedLocalQuery = ""
@@ -240,24 +239,24 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                 .removeDuplicates { lhs, rhs in
                     lhs.0 == rhs.0 && lhs.1.utf8.elementsEqual(rhs.1.utf8)
                 }
-                .map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.render() }
-            observe(page) { [weak self] in self?.renderState() }
+                .map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
+            observe(page, whenVisible: true) { [weak self] in self?.renderState() }
         case .remote(_, let page):
-            observe(page.$sections.map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.render() }
-            observe(page) { [weak self] in self?.renderState() }
+            observe(page.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
+            observe(page, whenVisible: true) { [weak self] in self?.renderState() }
             observe(model.accessChanges) { [weak self] in self?.activateRemotePage() }
             if let favorites {
-                observe(favorites) { [weak self] in
+                observe(favorites, whenVisible: true) { [weak self] in
                     self?.updateVisibleCells(force: true)
                     self?.showFavoriteError()
                 }
             }
         }
-        observe(model.playbackChanges) { [weak self] in
+        observe(model.playbackChanges, whenVisible: true) { [weak self] in
             self?.updateVisibleCells()
             self?.renderHeader()
         }
-        observe(model.libraryChanges) { [weak self] in
+        observe(model.libraryChanges, whenVisible: true) { [weak self] in
             self?.rowActionsRevision = UUID()
             self?.renderNavigationActions()
             self?.updateVisibleCells(force: true)
@@ -306,15 +305,8 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     public override func pageDidFinishAppearing() {
-        switch content {
-        case .local(let page):
-            if page.isMissing || page.error != nil || page.actionError != nil {
-                renderState()
-            }
-        case .remote:
-            showRemoteReadErrorIfNeeded()
-            showRemoteActionError()
-            showFavoriteError()
+        if case .local(let page) = content, page.isMissing {
+            renderState()
         }
     }
 
@@ -448,26 +440,21 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             configureFooter()
         }
         if let actionError = page.actionError, !actionError.isEmpty {
-            if shownActionError != actionError {
-                shownActionError = actionError
-                enqueueError(actionError)
-            }
-        } else {
-            shownActionError = nil
+            enqueueError(actionError, acknowledged: { [weak page] in page?.clearActionError() })
         }
         guard let error = page.error else {
             shownReadError = nil
             return
         }
         let message = error.localizedDescription
-        guard canPresentPageAlert, shownReadError != message else { return }
+        guard shownReadError != message else { return }
         let presentation = page.presentationID
         shownReadError = message
-        showRetryableError(message) { [weak self, weak page] in
+        enqueueError(message, retry: { [weak self, weak page] in
             guard let self, let page, page.presentationID == presentation else { return }
             self.shownReadError = nil
             page.reload(preservingContent: true)
-        }
+        })
     }
 
     func renderRemoteState(_ page: MusicPublicBrowseViewModel) {

@@ -453,7 +453,7 @@ final class NovelPurchaseConfirmationViewController: FloatingCardDialogControlle
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        if isBeingDismissed, confirm != nil {
+        if (isBeingDismissed || presentingViewController == nil), confirm != nil {
             let cancelled = onCancel
             confirm = nil
             onCancel = nil

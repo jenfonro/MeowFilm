@@ -720,7 +720,7 @@ extension MusicCollectionViewController: DebugPageInspectable, DebugPageActionab
 
 // MARK: - MusicPlayerViewController
 
-extension MusicPlayerViewController: DebugPageInspectable {
+extension MusicPlayerViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(
             target: "music.player",
@@ -740,8 +740,28 @@ extension MusicPlayerViewController: DebugPageInspectable {
             kind: "player",
             loading: content.model.isResolving,
             error: content.model.error,
-            player: playerState
+            player: playerState,
+            settings: .object([
+                "lyricExpanded": .bool(isLyricExpanded)
+            ])
         )
+    }
+
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        switch request.action {
+        case "lyric.toggle":
+            let next = request.params["expanded"]?.boolValue ?? !isLyricExpanded
+            setLyricExpanded(next)
+            return .object(["lyricExpanded": .bool(isLyricExpanded)])
+        case "tab.select":
+            guard let idx = request.params["index"]?.intValue, idx == 0 || idx == 1 else {
+                throw DebugAPIError.invalidArgument("MusicPlayerViewController tab.select index must be 0 (record) or 1 (lyrics)")
+            }
+            setLyricExpanded(idx == 1)
+            return .object(["lyricExpanded": .bool(isLyricExpanded)])
+        default:
+            throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicPlayerViewController")
+        }
     }
 }
 
@@ -1331,11 +1351,55 @@ extension MusicSearchSettingsViewController: DebugPageInspectable, DebugPageActi
         DebugPageStatus(target: "settings.music", moduleId: "music", route: "settings/music/search", title: "搜索设置", settingsDomain: "music", settingsSection: "search")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.music", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("music"), "section": .string("search")]))
+        DebugContentSnapshot(
+            target: "settings.music",
+            kind: "settings",
+            rows: debugContentRows(maxItems: maxItems),
+            settings: .object([
+                "domain": .string("music"),
+                "section": .string("search"),
+                "searchPlaylists": .bool(state.value.searchPlaylists),
+                "songPlatforms": .array(state.value.songs.platforms.map { .string($0.rawValue) }),
+                "playlistPlatforms": .array(state.value.playlists.platforms.map { .string($0.rawValue) }),
+                "platformDialogOrder": platformWindow.map { .array($0.order.map { .string($0.rawValue) }) } ?? .null
+            ])
+        )
     }
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
-        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
-        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicSearchSettingsViewController")
+        switch request.action {
+        case "list.item.invoke":
+            return try debugInvokeRow(params: request.params)
+        case "platform.toggle":
+            guard let window = platformWindow else {
+                throw DebugAPIError.invalidState("MusicSearchPlatformsViewController is not open")
+            }
+            guard let raw = request.params["platform"]?.stringValue,
+                  let platform = MusicPublicBrowsePlatform(rawValue: raw),
+                  let enabled = request.params["enabled"]?.boolValue else {
+                throw DebugAPIError.invalidArgument("Provide 'platform' and boolean 'enabled'")
+            }
+            await window.setEnabled(platform, enabled: enabled)?.value
+            return .object([
+                "kind": .string(window.kind.rawValue),
+                "platforms": .array(state.settings(window.kind).platforms.map { .string($0.rawValue) })
+            ])
+        case "platform.move":
+            guard let window = platformWindow else {
+                throw DebugAPIError.invalidState("MusicSearchPlatformsViewController is not open")
+            }
+            guard let from = request.params["from"]?.intValue,
+                  let to = request.params["to"]?.intValue else {
+                throw DebugAPIError.invalidArgument("Provide integer 'from' and 'to'")
+            }
+            await window.movePlatform(from: from, to: to)?.value
+            return .object([
+                "kind": .string(window.kind.rawValue),
+                "order": .array(window.order.map { .string($0.rawValue) }),
+                "platforms": .array(state.settings(window.kind).platforms.map { .string($0.rawValue) })
+            ])
+        default:
+            throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicSearchSettingsViewController")
+        }
     }
 }
 

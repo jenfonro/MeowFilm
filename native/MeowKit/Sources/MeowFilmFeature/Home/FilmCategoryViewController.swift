@@ -95,7 +95,6 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         resetPressFeedback()
         cancelVisibleArtworks()
     }
-    public override func pageDidFinishAppearing() { presentError() }
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -199,9 +198,11 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
 
     private func presentError() {
         guard let error = model.error, shownError != error else { return }
-        if showRetryableError(error.localizedDescription, retry: { [weak self] in
+        shownError = error
+        enqueueError(error.localizedDescription, retry: { [weak self] in
+            self?.shownError = nil
             self?.model.loadMore()
-        }) { shownError = error }
+        })
     }
 
     private func makeLayout() -> UICollectionViewLayout {

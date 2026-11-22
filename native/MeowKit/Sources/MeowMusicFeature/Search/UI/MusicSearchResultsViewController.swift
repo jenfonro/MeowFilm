@@ -41,7 +41,6 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     var renderedPlaylists: [MusicPublicBrowseCollection] = []
     private var renderedRequest: UUID?
     var shownFailures: [Int: String] = [:]
-    var shownActionError: String?
     var submittedKeyword: String
     var kinds: [Kind] {
         if !additionalCategories.isEmpty { return Kind.music + additionalCategories.map { .additional($0.target.id) } }
@@ -127,25 +126,26 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             }
             pages[kind] = page
         }
-        observe(results) { [weak self] in self?.render() }
-        observe(actions) { [weak self] in
+        observe(results, whenVisible: true) { [weak self] in self?.render() }
+        observe(actions, whenVisible: true) { [weak self] in
             self?.updateVisibleSongs()
             self?.showActionError()
         }
         observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.libraryChanges) { [weak self] in
             self?.actions.refreshFavorites()
-            self?.updateVisibleSongs()
+            if self?.isPageVisible == true { self?.updateVisibleSongs() }
         }
-        observe(model.playbackChanges) { [weak self] in self?.updateVisibleSongs() }
-        observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher()) {
+        observe(model.playbackChanges, whenVisible: true) { [weak self] in self?.updateVisibleSongs() }
+        observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher(), whenVisible: true) {
             [weak self] _ in self?.render()
         }
         select(selected, animated: false)
     }
 
     public override func pageDidBecomeActive() {
-        Task { await preferences.reload() }
+        let preferences = self.preferences
+        runPageTask { await preferences.reload() }
         _ = results.setAccess(available: model.isAvailable && !model.isClosed,
                               generation: model.searchAccessGeneration)
         actions.setActive(true)
@@ -165,9 +165,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     }
     public override func pageDidBecomeVisible() {
         updateLoadingSkeletons()
-        showActionError(); showSearchFailure()
-    }
-    public override func pageDidFinishAppearing() {
+        updateVisibleSongs()
         showActionError(); showSearchFailure()
     }
 

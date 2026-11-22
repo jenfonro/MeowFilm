@@ -105,7 +105,6 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
         render(reloadBooks: true)
         reconfigureVisibleBookCells()
     }
-    public override func pageDidFinishAppearing() { presentErrors() }
     public override func pageDidBecomeHidden() { discovery.deactivate(); collapseTags(); cancelCovers() }
     public override func pageDidBecomeInactive() {
         discovery.deactivate(); collapseTags(); cancelCovers()
@@ -114,7 +113,17 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded, tableTop != nil {
-            render(reloadBooks: false)
+            channels.configure(filters: discovery.channels.map { FilterTag(id: $0.id, title: $0.title) },
+                               selectedID: discovery.selectedChannelID ?? "", theme: theme) { [weak self] id in
+                self?.discovery.selectChannel(id: id)
+            }
+            kinds.configure(filters: (discovery.selectedChannel?.items ?? []).map { FilterTag(id: $0.id, title: $0.title) },
+                            selectedID: discovery.selectedKindID ?? "", theme: theme) { [weak self] id in
+                self?.discovery.selectKind(id: id)
+            }
+            empty.textColor = UIColor(theme.muted)
+            more.tintColor = UIColor(theme.ink)
+            activity.color = UIColor(theme.muted)
             reconfigureVisibleBookCells()
         }
     }
@@ -256,6 +265,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     private let table = UITableView(frame: .zero, style: .plain)
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
     private let more = UIButton(type: .system), cancelButton = UIButton(type: .system), sources = UIButton(type: .system)
+    private let emptyLabel = UILabel()
     private var theme: PageTheme
     private var subscription: AnyCancellable?
     private var active = false
@@ -284,13 +294,15 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         cancelButton.setTitle("取消", for: .normal); sources.setTitle("书源", for: .normal); sources.showsMenuAsPrimaryAction = true
         more.addAction(UIAction { [weak self] _ in self?.active = true; self?.session.loadMore() }, for: .touchUpInside)
         cancelButton.addAction(UIAction { [weak self] _ in self?.cancel() }, for: .touchUpInside)
+        emptyLabel.textAlignment = .center
         let footer = UIStackView(arrangedSubviews: [sources, cancelButton, more]); footer.distribution = .fillEqually
         let stack = UIStackView(arrangedSubviews: [table, footer]); stack.axis = .vertical
         view.addSubview(stack); stack.pinEdges(to: view)
         footer.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        subscription = session.objectWillChange.sink { [weak self] in
-            Task { @MainActor [weak self] in self?.render() }
+        subscription = session.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in
+            self?.render()
         }
+        applyTheme(theme)
         render()
     }
     public func submit(_ query: String) {
@@ -307,11 +319,13 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     public func cancel() { active = false; session.cancel(); if isViewLoaded { for cell in table.visibleCells { (cell as? NovelBookCell)?.cancelPendingLoad() } } }
     public func close() {
         cancel()
-        Task { await session.close() }
+        Task { [session] in await session.close() }
     }
     public func applyTheme(_ theme: PageTheme) {
         self.theme = theme
         guard isViewLoaded else { return }
+        emptyLabel.textColor = UIColor(theme.muted)
+        for button in [sources, cancelButton, more] { button.tintColor = UIColor(theme.ink) }
         reconfigureVisibleRows()
     }
     private func render() {
@@ -324,9 +338,8 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
             case .exhausted: status = "已加载全部"; case .cancelled: status = "已取消"; case .failed(let error): status = error }
             return UIAction(title: item.source.name, subtitle: status) { [weak self] _ in self?.active = true; self?.session.loadMore() }
         })
-        let label = UILabel(); label.textAlignment = .center; label.textColor = UIColor(theme.muted)
-        label.text = session.loading ? "搜索中" : session.states.isEmpty ? "没有可搜索书源" : "未找到书籍"
-        table.backgroundView = rows.isEmpty ? label : nil
+        emptyLabel.text = session.loading ? "搜索中" : session.states.isEmpty ? "没有可搜索书源" : "未找到书籍"
+        table.backgroundView = rows.isEmpty ? emptyLabel : nil
         if let error = session.error, presentError(error) { session.error = nil }
     }
     private func presentError(_ error: String) -> Bool {

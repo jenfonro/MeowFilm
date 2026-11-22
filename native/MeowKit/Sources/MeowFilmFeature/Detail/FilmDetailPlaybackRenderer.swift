@@ -432,10 +432,13 @@ extension FilmDetailViewController {
     }
 
     func presentLibraryError() {
-        guard let error = library.loadError, error != displayedLibraryError else { return }
-        if showError(error.localizedDescription, acknowledged: { [weak self] in
-            self?.presentPlaybackError()
-        }) { displayedLibraryError = error }
+        guard let error = library.loadError else {
+            displayedLibraryError = nil
+            return
+        }
+        guard error != displayedLibraryError else { return }
+        displayedLibraryError = error
+        enqueueError(error.localizedDescription)
     }
 
     func presentPlaybackError() {
@@ -451,21 +454,35 @@ extension FilmDetailViewController {
         }
         guard let model,
               let error = model.actionError ?? model.observationError ?? reported ?? browsing ?? metadata ?? session ?? entryError,
-              error != displayedPlaybackError, canPresentPageAlert else { return }
-        let presented: Bool
+              error != displayedPlaybackError else { return }
+        displayedPlaybackError = error
         if model.actionError == nil, model.observationError != nil {
-            presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.reconnect() })
+            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
+                self?.displayedPlaybackError = nil
+                model?.reconnect()
+            })
         } else if model.presentation == nil {
-            presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.open() })
+            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
+                self?.displayedPlaybackError = nil
+                model?.open()
+            })
         } else if model.restoringRead {
-            presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
+            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
+                self?.displayedPlaybackError = nil
+                model?.refreshBrowsing()
+            })
         } else if model.actionError == nil, model.observationError == nil, reported == nil,
                   browsing != nil || metadata != nil || model.presentation?.entryResolution == "error" {
-            presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
+            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
+                self?.displayedPlaybackError = nil
+                model?.refreshBrowsing()
+            })
         } else {
-            presented = showError(error.localizedDescription, acknowledged: { [weak model] in model?.acknowledgeError() })
+            enqueueError(error.localizedDescription, acknowledged: { [weak self, weak model] in
+                self?.displayedPlaybackError = nil
+                model?.acknowledgeError()
+            })
         }
-        if presented { displayedPlaybackError = error }
     }
 }
 #endif

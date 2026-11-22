@@ -208,7 +208,6 @@ public final class MusicQueueViewController: MusicPageViewController,
         histories.removeAll()
         model.cancelQueueRecommendationPreview()
     }
-    public override func pageDidFinishAppearing() { showFavoriteError() }
     public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         reorder?.cancel(); sheet.cancelInteraction()
         super.viewWillTransition(to: size, with: coordinator)
@@ -574,8 +573,9 @@ public final class MusicQueueViewController: MusicPageViewController,
         guard let index = MusicPlaybackMode.allCases.firstIndex(of: model.state.mode) else { return }
         let mode = MusicPlaybackMode.allCases[(index + 1) % MusicPlaybackMode.allCases.count]
         let revision = model.state.settingsRevision
-        let operation: @MainActor () async -> Void = {
-            if self.model.state.settingsRevision == revision { await self.model.setMode(mode) }
+        let operation: @MainActor () async -> Void = { [weak self] in
+            guard let self, self.model.state.settingsRevision == revision else { return }
+            await self.model.setMode(mode)
         }
         if let snapshot = model.similarMode, snapshot.active { runSimilar(snapshot, operation: operation) }
         else if let snapshot = model.queueRecommendations { runQueueRecommendation(snapshot, operation: operation) }
@@ -583,7 +583,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func showFavoriteError() {
-        _ = showError(favorites.error?.localizedDescription) { [weak self] in self?.favorites.clearError() }
+        enqueueError(favorites.error?.localizedDescription, acknowledged: { [weak self] in self?.favorites.clearError() })
     }
 
 

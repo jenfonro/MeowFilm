@@ -252,7 +252,10 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil { stopObserving() }
-        else if !closing { startObserving() }
+        else if !closing {
+            startObserving()
+            applyTheme()
+        }
     }
 
     private func startObserving() {
@@ -298,11 +301,11 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             }
             row.label.text = source.name
             row.view.accessibilityLabel = source.name
+            applyTheme(to: row, theme: panel.theme)
             if videos.arrangedSubviews.count <= index || videos.arrangedSubviews[index] !== row.view {
                 videos.insertArrangedSubview(row.view, at: index)
             }
         }
-        applyTheme()
     }
 
     private func renderBooks() {
@@ -316,6 +319,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             buttons.removeAll { $0 === row }
             bookRows[key] = nil
         }
+        let currentTheme = panel.theme
         for (index, source) in sources.enumerated() {
             let row: UIButton
             if let existing = bookRows[source.id] { row = existing }
@@ -339,25 +343,29 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             if !row.isEnabled { row.accessibilityTraits.insert(.notEnabled) }
             if row.isSelected { row.accessibilityTraits.insert(.selected) }
             row.accessibilityValue = row.isSelected ? "已选择" : nil
+            applyTheme(to: row, theme: currentTheme)
             if books.arrangedSubviews.count <= index || books.arrangedSubviews[index] !== row {
                 books.insertArrangedSubview(row, at: index)
             }
         }
-        applyTheme()
+    }
+
+    private func applyTheme(to button: UIButton, theme: PageTheme) {
+        button.configuration?.baseForegroundColor = UIColor(button.isSelected ? theme.accent : theme.ink)
+        button.tintColor = UIColor(button.isSelected ? theme.accent : theme.ink)
+        button.configuration?.background.backgroundColor = button.isSelected ? UIColor(theme.buttonSelected) : .clear
+    }
+
+    private func applyTheme(to row: DisplayRow, theme: PageTheme) {
+        row.icon.tintColor = UIColor(theme.ink)
+        row.label.textColor = UIColor(theme.ink)
     }
 
     private func applyTheme() {
         let theme = panel.theme
-        for button in buttons {
-            button.configuration?.baseForegroundColor = UIColor(button.isSelected ? theme.accent : theme.ink)
-            button.tintColor = UIColor(button.isSelected ? theme.accent : theme.ink)
-            button.configuration?.background.backgroundColor = button.isSelected ? UIColor(theme.buttonSelected) : .clear
-        }
+        for button in buttons { applyTheme(to: button, theme: theme) }
         settings.configuration?.background.backgroundColor = UIColor(theme.surface)
-        for row in videoRows.values {
-            row.icon.tintColor = UIColor(theme.ink)
-            row.label.textColor = UIColor(theme.ink)
-        }
+        for row in videoRows.values { applyTheme(to: row, theme: theme) }
     }
 
     func show() {

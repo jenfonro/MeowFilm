@@ -49,7 +49,6 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     var sliderIdentity: FilmPlayerControlIdentity?
     var brightnessScreen: UIScreen?
     var originalBrightness: CGFloat?
-    private var inactiveObservation: AnyCancellable?
     var cancellingVideoGestures = false
     let feedback = UISelectionFeedbackGenerator()
     private var returnOrientation: UIInterfaceOrientation?
@@ -70,6 +69,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         presenter.present(self, animated: animated, completion: completion)
     }
 
+    public override var usesPageHeader: Bool { false }
     public override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .landscape }
     public override var preferredInterfaceOrientationForPresentation: UIInterfaceOrientation { .landscapeRight }
     public override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
@@ -89,11 +89,6 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         render()
     }
 
-    public override func pageDidFinishAppearing() {
-        super.pageDidFinishAppearing()
-        render()
-    }
-
     public override func pageDidBecomeHidden() {
         model.setPresentationVisible(false, owner: presentationOwner)
         cancelVideoGestures()
@@ -108,7 +103,6 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         super.viewDidLoad()
         view.accessibilityIdentifier = "film.player"
         view.backgroundColor = .black
-        pageHeader.isHidden = true
         video.backgroundColor = .black
         video.accessibilityIdentifier = "film.player.video"
         view.addSubview(video); video.pinEdges(to: view)
@@ -131,13 +125,8 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         configureBottom()
         configureSettings()
         configureVideoGestures()
-        inactiveObservation = NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)
-            .sink { [weak self] _ in
-                self?.cancelVideoGestures()
-                self?.restoreBrightness()
-            }
-        observe(model.presentationStore) { [weak self] in self?.render() }
-        observe(model.mediaStore.didChange.eraseToAnyPublisher(), immediateOnMain: true) { [weak self] _ in
+        observe(model.presentationStore, whenVisible: true) { [weak self] in self?.render() }
+        observe(model.mediaStore.didChange.eraseToAnyPublisher(), immediateOnMain: true, whenVisible: true) { [weak self] _ in
             self?.render()
         }
         render()
@@ -424,16 +413,24 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             shownError = nil
         }
         if let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session,
-           error != shownError, canPresentPageAlert {
-            let presented: Bool
+           error != shownError {
+            shownError = error
             if model.actionError == nil, model.observationError != nil {
-                presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.reconnect() })
+                enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
+                    self?.shownError = nil
+                    model?.reconnect()
+                })
             } else if model.actionError == nil, model.observationError == nil, reported == nil, metadata != nil {
-                presented = showRetryableError(error.localizedDescription, retry: { [weak model] in model?.refreshBrowsing() })
+                enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
+                    self?.shownError = nil
+                    model?.refreshBrowsing()
+                })
             } else {
-                presented = showError(error.localizedDescription, acknowledged: { [weak model] in model?.acknowledgeError() })
+                enqueueError(error.localizedDescription, acknowledged: { [weak self, weak model] in
+                    self?.shownError = nil
+                    model?.acknowledgeError()
+                })
             }
-            if presented { shownError = error }
         }
         if keepsControlsVisible && !controlsHiddenByTap { controlsRequested = true }
         updateControls()
