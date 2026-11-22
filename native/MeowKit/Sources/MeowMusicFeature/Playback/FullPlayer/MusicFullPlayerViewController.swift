@@ -4,7 +4,7 @@ import MeowUI
 
 /// A distinct player page. Its content owner is shared with the dock, not its views.
 @MainActor
-public final class MusicPlayerViewController: MusicPageViewController, UIPopoverPresentationControllerDelegate {
+public final class MusicPlayerViewController: MusicPageViewController {
     public var onDismiss: (() -> Void)?
     public var onPresent: ((MusicPlaybackDestination) -> Void)?
     let content: MusicPlayerContentModel
@@ -154,8 +154,6 @@ public final class MusicPlayerViewController: MusicPageViewController, UIPopover
         }
         presentPageActionSheet(title: "播放倍速", sourceView: playerView.moreAnchor, actions: actions)
     }
-
-    public func adaptivePresentationStyle(for controller: UIPresentationController) -> UIModalPresentationStyle { .none }
 
     private func loadSources() {
         guard let current = content.model.current, isPageVisible, presentedViewController == nil else { return }

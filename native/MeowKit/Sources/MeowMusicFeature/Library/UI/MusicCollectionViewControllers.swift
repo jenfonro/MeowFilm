@@ -184,20 +184,20 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
 
         switch content {
         case .local(let page, let draft):
-            observe(draft) { [weak self] in
+            observe(draft, whenVisible: true) { [weak self] in
                 self?.renderTracks()
                 self?.updateSelection()
                 self?.renderActions()
             }
-            observe(page) { [weak self] in self?.renderActions() }
+            observe(page, whenVisible: true) { [weak self] in self?.renderActions() }
         case .remote(let page):
-            observe(page) { [weak self] in
+            observe(page, whenVisible: true) { [weak self] in
                 self?.renderTracks()
                 self?.renderActions()
             }
             observe(owner.accessChanges) { [weak self] in self?.renderActions() }
         }
-        observe(owner.libraryChanges) { [weak self] in self?.renderActions() }
+        observe(owner.libraryChanges, whenVisible: true) { [weak self] in self?.renderActions() }
         renderActions()
     }
 

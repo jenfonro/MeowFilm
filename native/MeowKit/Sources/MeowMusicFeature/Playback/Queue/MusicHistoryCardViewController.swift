@@ -66,7 +66,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         remove.addAction(UIAction { [weak self] _ in self?.confirmRemoval() }, for: .touchUpInside)
         for item in [table, source, heading, count, resume, remove] { view.addSubview(item) }
         view.layer.addSublayer(fade)
-        observe(model.queueChanges) { [weak self] in self?.updateVisiblePlayback() }
+        observe(model.queueChanges, whenVisible: true) { [weak self] in self?.updateVisiblePlayback() }
         observe(model.historyChanges) { [weak self] in self?.reconcileSummary() }
         observe(model.accessChanges) { [weak self] in self?.reconcileSummary() }
         renderRows(); renderState()

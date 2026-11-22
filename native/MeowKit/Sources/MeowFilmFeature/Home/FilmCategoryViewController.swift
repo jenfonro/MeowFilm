@@ -121,11 +121,20 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         if renderedItems != model.items || dataSource.snapshot().sectionIdentifiers.isEmpty {
             let reset = !renderedItems.isEmpty && model.items.isEmpty
             renderedItems = model.items
-            items = Dictionary(uniqueKeysWithValues: model.items.map { ($0.identity, $0) })
+            var seen: Set<FilmItemIdentity> = []
+            var uniqueIDs: [FilmItemIdentity] = []
+            uniqueIDs.reserveCapacity(model.items.count)
+            var nextItems: [FilmItemIdentity: FilmItem] = [:]
+            for item in model.items where seen.insert(item.identity).inserted {
+                uniqueIDs.append(item.identity)
+                nextItems[item.identity] = item
+            }
+            items = nextItems
             var snapshot = NSDiffableDataSourceSnapshot<Int, FilmItemIdentity>()
             snapshot.appendSections([0])
-            snapshot.appendItems(model.items.map(\.identity))
-            snapshot.reconfigureItems(snapshot.itemIdentifiers.filter { dataSource.snapshot().indexOfItem($0) != nil })
+            snapshot.appendItems(uniqueIDs)
+            let existingIDs = Set(dataSource.snapshot().itemIdentifiers)
+            snapshot.reconfigureItems(uniqueIDs.filter { existingIDs.contains($0) })
             dataSource.apply(snapshot, animatingDifferences: false)
             if reset { collection.setContentOffset(.zero, animated: false) }
         }
@@ -294,6 +303,12 @@ private final class FilmCategoryFooterView: UICollectionReusableView {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        onLoadMore = nil
+        activity.stopAnimating()
+    }
 
     func configure(isLoading: Bool, hasItems: Bool, hasMore: Bool, hasError: Bool,
                    theme: PageTheme, onLoadMore: @escaping () -> Void) {

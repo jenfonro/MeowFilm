@@ -151,18 +151,22 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
             sections = model.sections
             items.removeAll(keepingCapacity: true)
             var snapshot = NSDiffableDataSourceSnapshot<String, Row>()
-            for section in sections {
+            var seenSections: Set<String> = []
+            for section in sections where seenSections.insert(section.id).inserted {
                 snapshot.appendSections([section.id])
-                let rows = section.items.map { item -> Row in
+                var seenRows: Set<Row> = []
+                var rows: [Row] = []
+                rows.reserveCapacity(section.items.count)
+                for item in section.items {
                     let row = Row(section: section.id, item: item.identity)
+                    guard seenRows.insert(row).inserted else { continue }
                     items[row] = item
-                    return row
+                    rows.append(row)
                 }
                 snapshot.appendItems(rows.isEmpty ? [Row(section: section.id, item: nil)] : rows, toSection: section.id)
             }
-            snapshot.reconfigureItems(snapshot.itemIdentifiers.filter {
-                dataSource.snapshot().indexOfItem($0) != nil
-            })
+            let existingIDs = Set(dataSource.snapshot().itemIdentifiers)
+            snapshot.reconfigureItems(snapshot.itemIdentifiers.filter { existingIDs.contains($0) })
             dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in self?.updateVisibleHeaders() }
             collection.collectionViewLayout.invalidateLayout()
             if switchedSource { collection.setContentOffset(.zero, animated: false) }

@@ -160,11 +160,25 @@ public final class SettingsTableCell: UITableViewCell {
         }
 
         // Preserve live SettingsSwitch instance across diffable reconfigureItems so native
-        // toggle animations are not torn down mid-flight.
-        if let toggle, leadingView == nil, trailingView == nil, menu == nil, value == nil,
+        // toggle animations are not torn down mid-flight (including rows with a leading icon).
+        if let toggle, trailingView == nil, menu == nil, value == nil,
            let switchView = trailingSwitch, let titleLabel = customTitleLabel,
-           customLeadingSlot == nil, customTrailingSlot == nil,
+           let row = customStack, customTrailingSlot == nil,
            (detail?.isEmpty == false) == (customDetailLabel != nil) {
+            if let leadingView {
+                if let themeable = leadingView as? any PageThemeable { themeable.applyTheme(theme) }
+                if customLeadingSlot !== leadingView {
+                    customLeadingSlot?.removeFromSuperview()
+                    leadingView.removeFromSuperview()
+                    leadingView.setContentHuggingPriority(.required, for: .horizontal)
+                    leadingView.setContentCompressionResistancePriority(.required, for: .horizontal)
+                    row.insertArrangedSubview(leadingView, at: 0)
+                    customLeadingSlot = leadingView
+                }
+            } else if let existing = customLeadingSlot {
+                existing.removeFromSuperview()
+                customLeadingSlot = nil
+            }
             titleLabel.text = title
             titleLabel.textColor = titleColor
             if let detailLabel = customDetailLabel {

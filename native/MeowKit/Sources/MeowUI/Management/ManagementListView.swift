@@ -312,19 +312,25 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     }
 
     public func setRows(_ rows: [Row], total: Int, validIDs: Set<String>, emptyMessage: String) {
-        let oldIDs = self.rows.map(\.id)
-        self.rows = rows
-        self.rowsByID = Dictionary(rows.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        let oldIDSet = Set(self.rows.map(\.id))
+        var seen: Set<String> = []
+        var uniqueRows: [Row] = []
+        uniqueRows.reserveCapacity(rows.count)
+        for row in rows where seen.insert(row.id).inserted {
+            uniqueRows.append(row)
+        }
+        self.rows = uniqueRows
+        self.rowsByID = Dictionary(uniqueRows.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
         self.total = total
         selected.formIntersection(validIDs)
         empty.text = emptyMessage
-        table.backgroundView = rows.isEmpty ? emptyContainer : nil
+        table.backgroundView = uniqueRows.isEmpty ? emptyContainer : nil
 
-        let newIDs = rows.map(\.id)
+        let newIDs = uniqueRows.map(\.id)
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(newIDs, toSection: 0)
-        let surviving = newIDs.filter { Set(oldIDs).contains($0) }
+        let surviving = newIDs.filter { oldIDSet.contains($0) }
         if !surviving.isEmpty {
             snapshot.reconfigureItems(surviving)
         }
@@ -502,6 +508,8 @@ private final class ManagementRowCell: UITableViewCell {
         super.prepareForReuse()
         row = nil
         selection = nil
+        more.menu = nil
+        accessibilityIdentifier = nil
     }
 
     func configure(_ row: ManagementListView.Row, selected: Bool, theme: PageTheme, selection: @escaping () -> Void) {

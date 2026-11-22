@@ -176,6 +176,13 @@ final class FilmSectionHeader: UICollectionReusableView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        onMore = nil
+        titleButton.accessibilityIdentifier = nil
+        titleButton.accessibilityLabel = nil
+    }
+
     func configure(title: String, theme: PageTheme, sectionID: String, onMore: (() -> Void)?) {
         titleLabel.text = title
         titleLabel.textColor = UIColor(theme.ink)

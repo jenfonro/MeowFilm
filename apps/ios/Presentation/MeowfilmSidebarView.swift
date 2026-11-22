@@ -251,10 +251,24 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { stopObserving() }
-        else if !closing {
+        if window == nil {
+            stopObserving()
+            stopAnimator()
+        } else if !closing {
             startObserving()
             applyTheme()
+        }
+    }
+
+    private func stopAnimator() {
+        guard let value = animator else { return }
+        animator = nil
+        value.stopAnimation(true)
+    }
+
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            animator?.stopAnimation(true)
         }
     }
 
@@ -373,7 +387,8 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         panel.transform = CGAffineTransform(translationX: -panel.bounds.width, y: 0)
         shade.alpha = 0
         let value = UIViewPropertyAnimator(duration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.28,
-                                           curve: .easeOut) {
+                                           curve: .easeOut) { [weak self] in
+            guard let self else { return }
             self.panel.transform = .identity
             self.shade.alpha = 1
             self.panel.setNeedsLayout()
@@ -404,7 +419,8 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
 
     private func closingAnimator() -> UIViewPropertyAnimator {
         UIViewPropertyAnimator(duration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.25,
-                               curve: .easeInOut) {
+                               curve: .easeInOut) { [weak self] in
+            guard let self else { return }
             self.panel.transform = CGAffineTransform(translationX: -self.panel.bounds.width, y: 0)
             self.shade.alpha = 0
             self.panel.setNeedsLayout()
