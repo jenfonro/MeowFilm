@@ -5,7 +5,7 @@
 ## 1. 模块与工程边界
 
 - **共享基础设施**：`native/MeowKit/Sources/MeowDebug`（零第三方依赖，仅依赖系统框架 `Foundation`、`CryptoKit`、`Network`、`Darwin`；UIKit 辅助代码以 `#if os(iOS)` 隔离以保持 `.macOS("15.0")` 兼容），登记于 `scripts/check-source-scope.py` 的 `SHARED_TARGETS`；不反向依赖任何业务 target，不向音频/音乐依赖闭包引入视频内核依赖。
-- **App 宿主装配**：`apps/ios/Debug/`（`MeowfilmDebugHost.swift`、`MeowfilmDebugNavigator.swift`、`MeowfilmDebugDiagnosticsBridge.swift`），通过 `scripts/generate-ios-project.py` 的 `APPLICATION_DIRECTORIES` 纳入 `Meowfilm.xcodeproj`。
+- **App 宿主装配**：`apps/ios/Debug/` 按职责分层为 `Host/`（`MeowfilmDebugHost.swift`、`MeowfilmDebugDiagnosticsBridge.swift`）、`Navigation/`（`MeowfilmDebugNavigator.swift`）、`Inspection/`（`MeowfilmDebugInspection.swift`）与 `Actions/`（`MeowfilmDebugActions.swift`），通过 `scripts/generate-ios-project.py` 的 `APPLICATION_DIRECTORIES` 纳入 `Meowfilm.xcodeproj`。
 - **生产协议零放宽**：
   - `RuntimeHTTPClient` 生产 `request(...)` / `value(...)` 路径不变；Debug 专用透传位于 `RuntimeDebugBridge.swift`。
   - `SQLiteDatabase` 正常写入与事务契约不变；`storage/query` 位于 `SQLiteDebugQuery.swift`，结合领先动词检查、只读 `PRAGMA` 限制、单语句校验与 `sqlite3_stmt_readonly(stmt) != 0` 强制只读。
@@ -67,18 +67,19 @@ iOS 端解析规则：
 | `music.history` | 打开 `MusicQueueViewController` 并切至 `songs` | iOS 历史单曲统一承载于队列浮层 |
 | `music.archives` | 打开 `MusicQueueViewController` 并切至历史歌单卡片（空历史时落回 `songs`） | 对应已播队列记录 |
 | `music.personal` / `music.favorites` | 映射至 `MusicLibraryViewController` 或收藏歌单 `MusicCollectionViewController` | 归并展示于曲库 |
-| `settings.film` 全 9 子页 + `cache` | 逐一推入对应子控制器并上报精确 `settingsSection` | 覆盖 `rules`、`search-rules`、`cats`、`videos`、`metadata`、`pan`、`pan-routing`、`preferences`、`player`、`cache` |
+| `settings.film` 各子页 + `cache` | 逐一推入对应子控制器并上报精确 `settingsSection` | 覆盖 `search-rules`、`rules`、`cats`、`videos`、`metadata`、`pan`、`pan-routing`、`preferences`、`preferences-detail`、`site-clean`、`auto-prepare`、`player`、`cache` |
 
 ### 弹窗与 Sheet 操控（无私有 API）
 
-- `UIAlertController` 通过 `MeowDebug` 内的弱引用公共表 `DebugAlertActionRegistry` 登记业务回调（不触碰任何 `UIAlertAction` 私有 KVC 键），`dialog.action` 直接触发真实按钮动作或安全关闭。
-- `ManagementDialog` 通过公开调试入口调用 `commit()` / `close()`。
+- 全仓 `UIAlertController` 收口于 `PageAlertPresenter`，构造与呈现时自动向 `MeowDebug` 的弱引用公共表 `DebugAlertActionRegistry` 登记全部业务按钮回调（不触碰任何 `UIAlertAction` 私有 KVC 键），`dialog.action` 直接触发真实按钮动作或安全关闭。
+- 全部居中卡片弹窗继承 `FloatingCardDialogController` 并实现 `DebugDialogControllable`（覆盖 `ManagementDialog`、音乐账号登录／详情、平台排序与网盘登录等），`dialog.action` 通过公开调试入口读写字段、提交或关闭。
+- `apps/ios/Debug/` 按职责拆分为 `Host/`、`Navigation/`、`Inspection/`、`Actions/` 四个子目录，分别承载生命周期与诊断桥接、路由导航、内容与视图树检查、以及语义动作执行。
 
 ## 5. 底层诊断与 Node 透传降级
 
-- **`diag/summary`**：通过 Mach `task_info(TASK_VM_INFO)` 报告真实 `physFootprintBytes`（iOS jetsam 计费内存）、`residentBytes`、`virtualBytes`、`compressedBytes`、`task_threads` 线程数、`/dev/fd` 打开句柄数，以及 `PlaybackController`、`ArtworkImages`、`NativeMusicAudioFileCache`、`RuntimeSession` 活跃租约计数。
+- **`diag/summary`**：通过 Mach `task_info(TASK_VM_INFO)` 报告真实 `physFootprintBytes`（iOS jetsam 计费内存）、`residentBytes`、`virtualBytes`、`compressedBytes`、`task_threads` 线程数、`/dev/fd` 打开句柄数，以及 `native.leases` 下的 `playback`（`PlaybackController`）、三域图片缓存（`filmImagesCache` / `musicImagesCache` / `novelImagesCache`）、`uiMetrics`（`DebugUIMetrics`：歌词动画重建次数、详情页渲染统计等）、`activeFilmModelsCount`、`musicAudioFileCache`（`NativeMusicAudioFileCache`）与 `runtimeSession`（`RuntimeSession`）活跃租约计数。
 - **`diag/threads`**：枚举全部 Mach 线程状态与 CPU 时间，并采集主线程与当前线程符号化调用栈。
-- **`diag/gc`**：清理 `URLCache` 与 `ArtworkImages` 内存缓存、执行 `autoreleasepool` 排空，并转发 Node `/v1/debug/gc`，返回前后内存对比。
+- **`diag/gc`**：清理 `URLCache` 与三域图片内存缓存、执行 `autoreleasepool` 排空，并转发 Node `/v1/debug/gc`，返回前后内存对比。
 - **`diag/dump`**：在 `dumps/<timestamp>-ios-diag.json` 原子输出包含 summary、线程堆栈、Mach `vm_region_recurse_64` 内存区域分布、异常缓冲、UI 状态与播放态的完整诊断报告，并可通过 `GET /debug/v1/files/<relpath>` 下载。
 - **`diag/exceptions`**：维护容量 500 的线程安全异常环形缓冲，串联 `NSSetUncaughtExceptionHandler` 与关键 Swift 错误。
 - **Node 透传与降级**：`RuntimeEmbeddedLauncher` 在 Debug 启动时向 socketpair 握手首行附加 `debug` 配置块；`RuntimeHTTPClient` 透传 `X-Meow-Debug-Op` / `X-Meow-Debug-Trace`，与 Node 内置 `/v1/debug/*` 端点及 `scripts/debug.mjs` 统一 CLI 全链路联通。当内嵌 Node 尚未启动或已断开时，`diag/summary` / `diag/gc` 标记 `node.available = false`，`diag/node/heapsnapshot` / `diag/node/cpu-profile` 返回 `503 RUNTIME_UNAVAILABLE`，不影响原生诊断与离线会话拉取。

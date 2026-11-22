@@ -7,6 +7,7 @@ import MeowMusicFeature
 final class MeowfilmDockView: UIView {
     let surfaceHost = UIView()
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
+    var onDockHeightChanged: (() -> Void)?
     private let surface: MusicPlayerSurface
     private let navigation = UIStackView()
     private let navigationHost = UIView()
@@ -72,11 +73,14 @@ final class MeowfilmDockView: UIView {
         surfaceHost.addSubview(surface)
         surface.frame = surfaceHost.bounds
         surface.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        surface.onPrepareSizeChange = { [weak self] in
+            self?.onDockHeightChanged?()
+        }
         surface.onSizeChanged = { [weak self] in
             guard let self else { return }
             self.surfaceHeight.constant = self.playerSurfaceVisible ? self.surface.dockHeight : 0
-            self.superview?.setNeedsLayout()
-            self.superview?.layoutIfNeeded()
+            self.invalidateIntrinsicContentSize()
+            self.onDockHeightChanged?()
         }
         renderNavigation()
     }

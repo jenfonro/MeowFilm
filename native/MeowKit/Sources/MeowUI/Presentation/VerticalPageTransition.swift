@@ -27,8 +27,12 @@ public final class VerticalPageTransition: NSObject, UIViewControllerTransitioni
         self.controller = controller
         edgeGesture.edges = .left
         edgeGesture.delegate = self
+        edgeGesture.removeTarget(self, action: #selector(edgePanned))
         edgeGesture.addTarget(self, action: #selector(edgePanned))
-        controller.view.addGestureRecognizer(edgeGesture)
+        if edgeGesture.view !== controller.view {
+            controller.view.addGestureRecognizer(edgeGesture)
+        }
+        guard foregroundObserver == nil else { return }
         foregroundObserver = NotificationCenter.default.addObserver(
             forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.cancelInteractiveDismissal() } }

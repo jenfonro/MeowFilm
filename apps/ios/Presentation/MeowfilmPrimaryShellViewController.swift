@@ -101,18 +101,16 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
         })
         switch page {
         case .recommend, .film, .novel:
-            let search = makeSearchField()
-            if page == .novel { search.configuration?.title = "搜索小说" }
-            if page == .film { search.configuration?.title = "搜索影视" }
+            let placeholder: String
+            switch page {
+            case .novel: placeholder = "搜索小说"
+            case .film: placeholder = "搜索影视"
+            default: placeholder = "搜索歌曲、歌手、歌单"
+            }
+            let search = PageHeaderSearchButton(placeholder: placeholder) { [weak self] in self?.openSearch() }
             header.setTitleView(search)
             if page == .recommend {
                 header.setTrailing([Self.iconButton(.recognize, label: "更多功能", identifier: "app.feature")])
-            }
-            primary.themeHeader = { theme in
-                search.tintColor = UIColor(theme.muted)
-                search.configuration?.baseForegroundColor = UIColor(theme.muted)
-                search.backgroundColor = UIColor(theme.control)
-                search.layer.borderColor = UIColor(theme.border).cgColor
             }
         case .channels:
             let switcher = (content as? MusicChannelsViewController)?.channelSwitcherView ?? UIView()
@@ -149,8 +147,8 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
                     layout?.accessibilityValue = value == .grid ? "当前为网格" : "当前为列表"
                 }
                 update(library.appearance.preferences.playlistView)
-                primary.observe(library.appearance.$preferences.map(\.playlistView).removeDuplicates().eraseToAnyPublisher(),
-                                update: update)
+                primary.observeDistinct(library.appearance.$preferences.map(\.playlistView).eraseToAnyPublisher(),
+                                        whenVisible: true, update: update)
             }
             header.setTrailing([layout, Self.iconButton(.plus, label: "新建歌单", identifier: "app.primary.add") {
                 [weak self] in self?.library?.requestCreatePlaylist()
@@ -162,27 +160,6 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
 
     private func index(of page: MeowfilmPrimaryPage) -> Int {
         MeowfilmPrimaryPage.allCases.firstIndex(of: page)!
-    }
-
-    private func makeSearchField() -> PageHeaderTextButton {
-        let search = PageHeaderTextButton(title: "") { [weak self] in self?.openSearch() }
-        var configuration = UIButton.Configuration.plain()
-        configuration.title = "搜索歌曲、歌手、歌单"
-        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
-            var result = attributes
-            result.font = .systemFont(ofSize: 15)
-            return result
-        }
-        configuration.image = PageIcon.image(.search, size: 18)
-        configuration.imagePadding = 8
-        configuration.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14)
-        search.configuration = configuration
-        search.contentHorizontalAlignment = .leading
-        search.layer.cornerRadius = PageLayoutMetrics.searchControl / 2
-        search.layer.borderWidth = 0.5
-        search.accessibilityIdentifier = "search.open"
-        search.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return search
     }
 
     private static func iconButton(_ kind: PageIcon.Kind, label: String, identifier: String,
@@ -263,5 +240,53 @@ private final class MeowfilmPrimaryPageViewController: PageViewController {
     override func applyTheme() {
         super.applyTheme()
         if isViewLoaded { themeHeader?(theme) }
+    }
+}
+
+/// Capsule search trigger using `UIButton.Configuration` exclusively so `PageThemeable`
+/// updates never mix legacy `setTitle`/`setTitleColor` APIs with configuration titles.
+@MainActor
+private final class PageHeaderSearchButton: UIButton, PageThemeable {
+    override var isHighlighted: Bool {
+        get { false }
+        set {}
+    }
+
+    init(placeholder: String, action: @escaping @MainActor () -> Void) {
+        super.init(frame: .zero)
+        var configuration = UIButton.Configuration.plain()
+        configuration.title = placeholder
+        configuration.titleLineBreakMode = .byTruncatingTail
+        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+            var result = attributes
+            result.font = .systemFont(ofSize: 15, weight: .regular)
+            return result
+        }
+        configuration.image = PageIcon.image(.search, size: 18)
+        configuration.imagePadding = 8
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 14, bottom: 0, trailing: 14)
+        self.configuration = configuration
+        contentHorizontalAlignment = .leading
+        tintAdjustmentMode = .normal
+        layer.cornerRadius = PageLayoutMetrics.searchControl / 2
+        layer.borderWidth = 0.5
+        accessibilityIdentifier = "search.open"
+        accessibilityLabel = placeholder
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        addAction(UIAction { _ in action() }, for: .touchUpInside)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func applyTheme(_ theme: PageTheme) {
+        let muted = UIColor(theme.muted)
+        tintColor = muted
+        if var updated = configuration {
+            updated.baseForegroundColor = muted
+            configuration = updated
+        }
+        backgroundColor = UIColor(theme.control)
+        layer.borderColor = UIColor(theme.border).cgColor
     }
 }

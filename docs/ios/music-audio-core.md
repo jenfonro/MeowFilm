@@ -27,7 +27,7 @@
 - Headerless HTTP 保留 200、未知长度和非 Range 播放支持；只有实际响应提供 Range 能力才允许 seek。HTTP 读取有界回压，重定向、headers、凭据和资源表示一致性由原生政策核对。
 - 显式 progressive 或携带请求头的非 HLS 输入使用已有受控分窗 loader。HLS 使用已有改写路由；主清单有界读取，嵌套请求只允许同一 listener／route 根下的规范地址，禁止外部、文件、跨根和重定向旁路。
 - 准备只打开输入、解码信息及第一块 PCM；静音候选、暂停准备和缓存探测都不创建 AVAudioEngine 输出。音频准入成功并且当前播放意图仍有效，才创建并启动输出图。
-- 定位能力由当前 decoder 的 seekable 与实际 duration 共同确认。准备前可排队；准备后确认不支持定位时，以 `seekFailed` 单次失败并释放当前媒体，不向 decoder 派发 seek。当前生产只在准备完成时取得时长，仍未知的可定位媒体按既有预算超时，不合成时间范围或声称具备后续时长订阅；late-duration 状态机测试只验证策略。
+- 定位能力由当前 decoder 的 seekable 与实际 duration 共同确认。准备前可排队；准备后确认不支持定位时，以 `seekFailed` 单次失败并释放当前媒体，不向 decoder 派发 seek。当前生产只在准备完成时取得时长，仍未知的可定位媒体按既有预算超时，不合成时间范围或声称具备后续时长订阅。
 - `PlaybackPreparedReplacement` 保留独立无输出 decoder。定位以真实时间戳裁剪后的首帧为准；交接时长、15 秒预算和 0.25 秒差值政策见[音源管理](music-sources.md)，不是另建策略。
 - 输入与 decoder 的失败统一由当前 `PlaybackAudioMedia` 记录；准备／同步／最终提交检查同一错误事实，提交后由该媒体回调当前 controller。
 
@@ -47,4 +47,4 @@ Stop 先同步撤销输入及输出；close 等待 decoder worker、已登记读
 
 缓存检查保持已有源结构、源位深、编码包和预期时长政策，用同一 FFmpeg decoder 解码至实际 EOF；源帧数在重采样前实际计数，不从 48 kHz 输出反向舍入。不创建输出，不将 float PCM 冒充原文件音质。
 
-脚本检查核对精确来源、目标 ABI、隐藏导出、平台、framework 哈希和许可资源；Swift 回归分别覆盖真实合成音频解码、静音准备、取消／seek／EOF、HTTP 表示一致性、业务交接及系统会话。Mac 主机、模拟器、设备 SDK 编译与真实设备输出结果分别记录；替身、编译和模拟器不证明真机听感或真实蓝牙／AirPlay。
+脚本检查核对精确来源、目标 ABI、隐藏导出、平台、framework 哈希和许可资源；解码、静音准备、取消／seek／EOF、HTTP 表示一致性、业务交接及系统会话统一在正常构建产物的 `--debug` 模式中实跑验证。Mac 主机、模拟器、设备 SDK 编译与真实设备输出结果分别记录；编译和模拟器不证明真机听感或真实蓝牙／AirPlay。

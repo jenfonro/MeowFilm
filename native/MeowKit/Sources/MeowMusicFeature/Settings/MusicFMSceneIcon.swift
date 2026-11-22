@@ -429,7 +429,7 @@ enum MusicFMSceneIcon {
             local.translateBy(x: 17, y: 20)
             local.rotate(by: -12 * .pi / 180)
             local.translateBy(x: -17, y: -20)
-            drawText("RICH", font: UIFont.systemFont(ofSize: 8, weight: .bold), centerX: 17, baseline: 23, in: local)
+            drawText("RICH", font: UIFont.systemFont(ofSize: 8, weight: .regular), centerX: 17, baseline: 23, in: local)
         }
     }
     private static func K_POP(in context: CGContext) {
@@ -437,7 +437,7 @@ enum MusicFMSceneIcon {
             context.saveGState()
             defer { context.restoreGState() }
             let local = context
-            drawText("한", font: UIFont.systemFont(ofSize: 28, weight: .bold), centerX: 16, baseline: 26, in: local)
+            drawText("한", font: UIFont.systemFont(ofSize: 28, weight: .regular), centerX: 16, baseline: 26, in: local)
         }
     }
     private static func ORIGINAL_MUSICIAL(in context: CGContext) {
@@ -690,7 +690,7 @@ enum MusicFMSceneIcon {
             context.saveGState()
             defer { context.restoreGState() }
             let local = context
-            drawText("中", font: UIFont.systemFont(ofSize: 23, weight: .bold), centerX: 16, baseline: 24, in: local)
+            drawText("中", font: UIFont.systemFont(ofSize: 23, weight: .regular), centerX: 16, baseline: 24, in: local)
         }
     }
     private static func ENGLISH(in context: CGContext) {
@@ -706,7 +706,7 @@ enum MusicFMSceneIcon {
             context.saveGState()
             defer { context.restoreGState() }
             let local = context
-            drawText("勁", font: UIFont.systemFont(ofSize: 28, weight: .bold), centerX: 16, baseline: 26, in: local)
+            drawText("勁", font: UIFont.systemFont(ofSize: 28, weight: .regular), centerX: 16, baseline: 26, in: local)
         }
     }
     private static func MANYAO(in context: CGContext) {
@@ -714,7 +714,7 @@ enum MusicFMSceneIcon {
             context.saveGState()
             defer { context.restoreGState() }
             let local = context
-            drawText("DJ", font: UIFont.systemFont(ofSize: 27, weight: .heavy), centerX: 16, baseline: 26, in: local)
+            drawText("DJ", font: UIFont.systemFont(ofSize: 27, weight: .regular), centerX: 16, baseline: 26, in: local)
         }
     }
     private static func JINGDIAN(in context: CGContext) {
@@ -1086,7 +1086,7 @@ enum MusicFMSceneIcon {
             context.saveGState()
             defer { context.restoreGState() }
             let local = context
-            drawText("ATIN", font: UIFont(descriptor: UIFont.systemFont(ofSize: 8, weight: .heavy).fontDescriptor.withSymbolicTraits(.traitItalic)!, size: 8), centerX: 16, baseline: 30, in: local)
+            drawText("ATIN", font: UIFont.systemFont(ofSize: 8, weight: .regular), centerX: 16, baseline: 30, in: local)
         }
     }
     private static func PUNK(in context: CGContext) {

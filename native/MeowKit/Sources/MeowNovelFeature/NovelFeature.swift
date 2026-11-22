@@ -8,6 +8,9 @@ public final class NovelFeature: ObservableObject {
     public let rules: NovelRuleProcessor
     public let sourcesClient: NovelSourceClient
     public let web: NovelWebBroker
+    #if os(iOS)
+    public lazy var images = NovelImageStore(sourcesClient: sourcesClient)
+    #endif
     @Published public private(set) var local = NovelLibrarySnapshot()
     @Published public private(set) var sources: [NovelSource] = []
     @Published public var error: String?
@@ -40,6 +43,9 @@ public final class NovelFeature: ObservableObject {
         try Task.checkCancellation(); guard !closed else { throw NovelError.closed }
         guard sourceRefresh == token else { return }
         sources = value.sorted { $0.order == $1.order ? $0.id < $1.id : $0.order < $1.order }
+        #if os(iOS)
+        images.invalidate(activeSources: sources)
+        #endif
         for session in sessions.values { session.sourcesChanged() }
     }
     public func source(for book: NovelBook) throws -> NovelSource {
@@ -96,10 +102,16 @@ public final class NovelFeature: ObservableObject {
         if let closing { await closing.value; return }
         closed = true; startup?.cancel()
         let readers = Array(sessions.values), startup = startup, web = web, client = sourcesClient, rules = rules, library = library
+        #if os(iOS)
+        let imageStore = images
+        #endif
         let task = Task {
             await web.close()
             for session in readers { await session.close() }
             await startup?.value
+            #if os(iOS)
+            await imageStore.close()
+            #endif
             await rules.close()
             do { try await client.runtime.close() }
             catch { self.error = error.localizedDescription }

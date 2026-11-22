@@ -16,8 +16,8 @@ final class MeowfilmRootContainerViewController: PageViewController {
     private var sidebar: MeowfilmSidebarView?
     var isSidebarVisible: Bool { sidebar != nil }
     private let keyboardArea = UILayoutGuide()
-    private var readingVisible = false
-    private var settingsVisible = false
+    private var dockHidden = false
+    private var miniPlayerHidden = false
     private var rootVisible = true
     private var selectedPage = MeowfilmPrimaryPage.recommend
     private let bottomBackdrop = UIView()
@@ -75,6 +75,13 @@ final class MeowfilmRootContainerViewController: PageViewController {
         surface.observeOutsideInteractions(in: view.window ?? view)
         let dock = MeowfilmDockView(surface: surface)
         dock.onSelectPage = { [weak self] page in self?.onSelectPage?(page) }
+        dock.onDockHeightChanged = { [weak self] in
+            guard let self, self.isViewLoaded else { return }
+            self.view.setNeedsLayout()
+            if self.view.window != nil {
+                self.view.layoutIfNeeded()
+            }
+        }
         dock.accessibilityIdentifier = "app.dock"
         view.addSubview(dock)
         dock.translatesAutoresizingMaskIntoConstraints = false
@@ -84,8 +91,9 @@ final class MeowfilmRootContainerViewController: PageViewController {
             dock.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         self.dock = dock
+        dock.isHidden = dockHidden
         dock.setNavigationVisible(rootVisible)
-        dock.setPlayerSurfaceVisible(!settingsVisible)
+        dock.setPlayerSurfaceVisible(!miniPlayerHidden)
         updateBottomBackdrop()
         view.setNeedsLayout()
     }
@@ -109,7 +117,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
         guard let dock else { return }
         // The dock stays at the bottom edge; the keyboard only insets content.
         let bottom = view.safeAreaInsets.bottom
-        let docked = readingVisible || dock.isHidden || !dock.occupiesBottom
+        let docked = dockHidden || dock.isHidden || !dock.occupiesBottom
             ? 0 : max(0, view.bounds.maxY - dock.frame.minY - bottom)
         let keyboard = max(0, keyboardArea.layoutFrame.height - bottom)
         let occupied = max(docked, keyboard)
@@ -133,16 +141,16 @@ final class MeowfilmRootContainerViewController: PageViewController {
         }
     }
 
-    func setSettingsVisible(_ visible: Bool) {
-        settingsVisible = visible
-        dock?.setPlayerSurfaceVisible(!visible)
+    func setMiniPlayerHidden(_ hidden: Bool) {
+        miniPlayerHidden = hidden
+        dock?.setPlayerSurfaceVisible(!hidden)
         updateBottomBackdrop()
         view.setNeedsLayout()
     }
 
-    func setReadingVisible(_ visible: Bool) {
-        readingVisible = visible
-        dock?.isHidden = visible
+    func setDockHidden(_ hidden: Bool) {
+        dockHidden = hidden
+        dock?.isHidden = hidden
         updateBottomBackdrop()
         view.setNeedsLayout()
     }
@@ -165,7 +173,7 @@ final class MeowfilmRootContainerViewController: PageViewController {
 
     private func updateBottomBackdrop() {
         backdropHeight?.constant = fixedBackdropHeight
-        bottomBackdrop.isHidden = dock == nil || readingVisible || settingsVisible
+        bottomBackdrop.isHidden = dock == nil || dockHidden || (!rootVisible && miniPlayerHidden)
         opaqueBackdrop.alpha = rootVisible && selectedPage == .recommend ? 0 : 1
     }
 

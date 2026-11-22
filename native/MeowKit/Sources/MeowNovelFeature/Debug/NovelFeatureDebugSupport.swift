@@ -309,7 +309,7 @@ extension NovelSearchResultsContent: DebugPageInspectable, DebugPageActionable {
 
 // MARK: - Novel Settings Controllers
 
-extension NovelSettingsViewController: DebugPageInspectable {
+extension NovelSettingsViewController: DebugPageInspectable, DebugPageActionable {
     public func debugOpenSection(_ section: String) throws {
         let page: UIViewController
         switch section {
@@ -349,6 +349,7 @@ extension NovelSettingsViewController: DebugPageInspectable {
         return DebugContentSnapshot(
             target: "settings.novel",
             kind: "settings",
+            rows: debugContentRows(maxItems: maxItems),
             settings: .object([
                 "domain": .string("novel"),
                 "section": .string("root"),
@@ -358,6 +359,10 @@ extension NovelSettingsViewController: DebugPageInspectable {
                 "booksCount": .int(feature.local.entries.count)
             ])
         )
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on NovelSettingsViewController")
     }
 }
 
@@ -379,12 +384,16 @@ extension NovelRulesViewController: DebugPageInspectable {
     }
 }
 
-extension NovelAppearanceViewController: DebugPageInspectable {
+extension NovelAppearanceViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.novel", moduleId: "novel", route: "settings/novel/appearance", title: "阅读排版", settingsDomain: "novel", settingsSection: "appearance")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.novel", kind: "settings", settings: .object(["domain": .string("novel"), "section": .string("appearance")]))
+        DebugContentSnapshot(target: "settings.novel", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("novel"), "section": .string("appearance")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on NovelAppearanceViewController")
     }
 }
 #endif
