@@ -440,6 +440,7 @@ final class MeowfilmAssembly: ObservableObject {
         filmPlayback = nil
         let novel = novel
         let filmImages = initializedFilmImages
+        let musicImages = self.musicImages
         stopping = Task { [weak self] in
             // Stop the producer before waiting for its borrowers. Only this App
             // owner confirms embedded Node exit; borrowers drain local work.
@@ -470,7 +471,7 @@ final class MeowfilmAssembly: ObservableObject {
             await pendingScripts?.value
             await service?.close()
             await filmImages?.close()
-            await self?.musicImages.close()
+            await musicImages.close()
             do { try await resources?.musicScripts.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
             if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete,

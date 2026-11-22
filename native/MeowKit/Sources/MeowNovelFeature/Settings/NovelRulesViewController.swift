@@ -72,20 +72,20 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
     }
     private func networkImport() {
         var preview: (rules: [NovelRule], failures: [String]) = ([], [])
-        addressDialog(label: "替换规则地址", placeholder: "网络替换规则地址", load: { [self] text in
+        addressDialog(label: "替换规则地址", placeholder: "网络替换规则地址", load: { text in
             guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.user == nil, url.password == nil else { throw NovelError.invalidRule(["网络地址无效"]) }
             let config = URLSessionConfiguration.ephemeral; config.httpCookieStorage = nil
             let session = URLSession(configuration: config); defer { session.finishTasksAndInvalidate() }
             let (data, response) = try await session.data(from: url)
             guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), let text = String(data: data, encoding: .utf8) else { throw NovelError.invalidResponse }
-            preview = try self.parse(text)
+            preview = try Self.parse(text)
         }, completed: { [weak self] in self?.showPreview(preview.rules, failures: preview.failures) })
     }
     private func preview(_ text: String) throws {
-        let preview = try parse(text)
+        let preview = try Self.parse(text)
         try Task.checkCancellation(); showPreview(preview.rules, failures: preview.failures)
     }
-    private func parse(_ text: String) throws -> (rules: [NovelRule], failures: [String]) {
+    private static func parse(_ text: String) throws -> (rules: [NovelRule], failures: [String]) {
         var rules: [NovelRule] = [], failures: [String] = []
         for (index, entry) in try NovelRuleImport.entries(text).enumerated() {
             try Task.checkCancellation()
@@ -109,7 +109,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
     }
     private func manageGroups() {
         let ids = manager.selected
-        groupsPage(groups: { [self] in groups }, create: { [feature] name in
+        groupsPage(groups: { [feature] in Array(Set(feature.local.rules.flatMap { NovelGroups.split($0.group) })).sorted() }, create: { [feature] name in
             var next = feature.local.rules; for index in next.indices where ids.contains(next[index].id) { next[index].group = NovelGroups.replacing(next[index].group, old: "", new: name) }
             try await feature.saveRules(next)
         }, change: { [feature] old, name in

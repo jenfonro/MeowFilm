@@ -97,7 +97,7 @@ public final class NovelImageStore {
                     return
                 }
                 let flight: Flight
-                if let existing = flights[key] {
+                if let existing = flights[key], !existing.abandoned {
                     flight = existing
                 } else {
                     let created = Flight(key: key, source: source, book: book)
@@ -195,12 +195,22 @@ public final class NovelImageStore {
             } catch {
                 outcome = .failure(error)
             }
-            self?.finish(flight, outcome: outcome)
+            if let self {
+                self.finish(flight, outcome: outcome)
+            } else {
+                flight.task = nil
+                let consumers = flight.consumers
+                flight.consumers.removeAll()
+                for continuation in consumers.values {
+                    continuation.resume(throwing: CancellationError())
+                }
+            }
         }
     }
 
     private func finish(_ flight: Flight, outcome: Result<UIImage, Error>) {
         producers.removeValue(forKey: flight.id)
+        flight.task = nil
         if case .success(let image) = outcome, !closed, !flight.abandoned {
             let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
             cache.setObject(image, forKey: flight.key.cacheKey, cost: max(1, cost))

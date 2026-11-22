@@ -100,8 +100,10 @@ class FilmSettingsListController: SettingsListViewController {
 }
 
 @MainActor
-func filmTextField(_ placeholder: String, id: String, value: String = "") -> UITextField {
+func filmTextField(_ placeholder: String, id: String, value: String = "",
+                   appearance: SettingsInputAppearance = .plain) -> SettingsTextField {
     let field = SettingsTextField()
+    field.inputAppearance = appearance
     field.placeholder = placeholder; field.text = value
     field.font = .preferredFont(forTextStyle: .body)
     field.adjustsFontForContentSizeCategory = true

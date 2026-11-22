@@ -68,18 +68,18 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
         actions += [action("导出") { [weak self] in self?.export([source]) }, action("删除", destructive: true) { [weak self] in self?.remove([source]) }]
         return UIMenu(children: actions)
     }
-    private func mutate(_ operation: @escaping @MainActor () async throws -> Void) async throws {
+    private static func mutate(_ feature: NovelFeature, _ operation: @escaping @MainActor () async throws -> Void) async throws {
         do { try await operation() }
         catch { try? await feature.refreshSources(); throw error }
         try await feature.refreshSources()
     }
-    private func update(_ source: NovelSource, _ patch: RuntimeObject) { perform { [weak self, feature] in try await self?.mutate { try await feature.sourcesClient.update(source, patch: patch) } } }
+    private func update(_ source: NovelSource, _ patch: RuntimeObject) { perform { [feature] in try await Self.mutate(feature) { try await feature.sourcesClient.update(source, patch: patch) } } }
     private func move(_ source: NovelSource, top: Bool) {
         let ordered = feature.sources.sorted { $0.order < $1.order }.filter { $0.id != source.id }
         let next = top ? [source] + ordered : ordered + [source]
         guard let edge = top ? feature.sources.map(\.order).min() : feature.sources.map(\.order).max() else { return }
-        perform { [weak self, feature] in
-            try await self?.mutate {
+        perform { [feature] in
+            try await Self.mutate(feature) {
                 // JSON safe integers are the runtime's ordering contract.
                 if edge > -9007199254740991 && edge < 9007199254740991 {
                     try await feature.sourcesClient.update(source, patch: ["order": .number(Double(edge + (top ? -1 : 1)))])
@@ -91,7 +91,7 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
     }
     private func batchEnabled(_ enabled: Bool) {
         let selected = feature.sources.filter { self.manager.selected.contains($0.id) }
-        perform { [weak self, feature] in try await self?.mutate { for item in selected { try await feature.sourcesClient.update(item, patch: ["enabled": .bool(enabled)]) } } }
+        perform { [feature] in try await Self.mutate(feature) { for item in selected { try await feature.sourcesClient.update(item, patch: ["enabled": .bool(enabled)]) } } }
     }
     private func remove(_ sources: [NovelSource]) {
         confirmDelete(sources.count) { [feature, weak self] in
@@ -141,10 +141,12 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
     }
     private func manageGroups() {
         let selected = manager.selected
-        groupsPage(groups: { [self] in groups }, create: { [self, feature] name in
-            try await mutate { for source in feature.sources.filter({ selected.contains($0.id) }) { try await feature.sourcesClient.update(source, patch: ["group": .string(NovelGroups.replacing(source.group, old: "", new: name))]) } }
-        }, change: { [self, feature] old, next in
-            try await mutate { for source in feature.sources.filter({ NovelGroups.split($0.group).contains(old) }) { try await feature.sourcesClient.update(source, patch: ["group": .string(NovelGroups.replacing(source.group, old: old, new: next))]) } }
+        groupsPage(groups: { [feature] in
+            Array(Set(feature.sources.flatMap { NovelGroups.split($0.group) })).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        }, create: { [feature] name in
+            try await Self.mutate(feature) { for source in feature.sources.filter({ selected.contains($0.id) }) { try await feature.sourcesClient.update(source, patch: ["group": .string(NovelGroups.replacing(source.group, old: "", new: name))]) } }
+        }, change: { [feature] old, next in
+            try await Self.mutate(feature) { for source in feature.sources.filter({ NovelGroups.split($0.group).contains(old) }) { try await feature.sourcesClient.update(source, patch: ["group": .string(NovelGroups.replacing(source.group, old: old, new: next))]) } }
         })
     }
 }

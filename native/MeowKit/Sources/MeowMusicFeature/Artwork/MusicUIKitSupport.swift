@@ -1,6 +1,5 @@
 #if os(iOS)
 import UIKit
-import Combine
 import MeowDebug
 import MeowUI
 import ImageIO
@@ -171,14 +170,18 @@ final class MusicArtworkView: ArtworkView {
     }
     private func loadSelected(_ url: URL?, songID: String) { super.load(url, displayIdentity: songID) }
 
+    private var hasPendingRetryableFailure: Bool {
+        hasRetryableFailure || (requestedURL == nil && !attempted.isEmpty && inputURL != nil && representedSongID != nil)
+    }
+
     override func retryFailedLoad() {
+        guard hasPendingRetryableFailure else { return }
         sharedImages?.unregisterFailed(self)
         if requestedURL == nil, !attempted.isEmpty, let inputURL, let songID = representedSongID {
             attempted.removeAll(); requestedURL = inputURL; selectionOriginURL = inputURL
             loadSelected(inputURL, songID: songID)
         } else {
             super.retryFailedLoad()
-            if let songID = representedSongID { loadSelected(requestedURL, songID: songID) }
         }
     }
 
@@ -190,7 +193,7 @@ final class MusicArtworkView: ArtworkView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if isEligibleForVisibleRetry {
+        if hasPendingRetryableFailure, isEligibleForVisibleRetry {
             retryFailedLoad()
         }
     }

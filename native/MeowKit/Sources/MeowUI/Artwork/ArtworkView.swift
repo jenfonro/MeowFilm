@@ -96,6 +96,8 @@ open class ArtworkView: UIImageView {
         load(representedURL, displayIdentity: displayIdentity)
     }
 
+    public var hasRetryableFailure: Bool { failure == .retryable }
+
     /// Cancels only an in-flight admission without releasing or clearing already-admitted images.
     public func cancelPendingLoad() {
         guard let pending = task else { return }

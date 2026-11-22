@@ -219,6 +219,14 @@ private final class MusicSearchPlatformCell: UITableViewCell {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        onChange = nil
+        logo.image = nil
+        switchInput.control.accessibilityLabel = nil
+        switchInput.control.accessibilityIdentifier = nil
+    }
+
     func configure(platform: MusicPublicBrowsePlatform, enabled: Bool, theme: PageTheme,
                    first: Bool, last: Bool, identifier: String,
                    onChange: @escaping @MainActor (Bool) -> Void) {

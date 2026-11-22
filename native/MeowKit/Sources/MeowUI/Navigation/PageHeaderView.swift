@@ -64,6 +64,11 @@ public final class PageHeaderTextButton: UIButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public func applyTheme(_ theme: PageTheme) {
+        if var updated = configuration {
+            updated.baseForegroundColor = UIColor(theme.ink)
+            configuration = updated
+            return
+        }
         setTitleColor(UIColor(theme.ink), for: .normal)
         setTitleColor(UIColor(theme.muted), for: .disabled)
         setTitleColor(UIColor(theme.ink), for: .highlighted)

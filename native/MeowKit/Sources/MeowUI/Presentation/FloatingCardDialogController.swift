@@ -41,7 +41,6 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     private var leadingHeaderView: UIView?
     private var trailingHeaderView: UIView?
     private var scrollHeightConstraint: NSLayoutConstraint?
-    private var bodyContentConstraint: NSLayoutConstraint?
 
     public var theme: PageTheme {
         PageTheme(colors: themeProvider.pagePalette,

@@ -72,7 +72,7 @@ public final class ManagementDialog: FloatingCardDialogController {
 
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        if isBeingDismissed { task?.cancel() }
+        if isBeingDismissed || presentingViewController == nil { task?.cancel() }
     }
 
     public override func applyTypography() {
@@ -139,8 +139,9 @@ public final class ManagementDialog: FloatingCardDialogController {
                     guard !self.cancelling else { return }
                     self.dismiss(animated: true) { self.accepted?() }
                 }
+            } catch is CancellationError {
             } catch {
-                if !self.cancelling { self.showError(error.localizedDescription) }
+                if !self.cancelling, !Task.isCancelled { self.showError(error.localizedDescription) }
             }
         }
     }

@@ -11,11 +11,9 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
     let area: Area
     private var loading: Task<Void, Never>?
     private var saving: Task<Void, Never>?
-    private let keywords: SettingsTextField = {
-        let field = filmTextField("关键字匹配规则", id: "film.preferences.keywords") as! SettingsTextField
-        field.inputAppearance = .underline
-        return field
-    }()
+    private let keywords: SettingsTextField = filmTextField(
+        "关键字匹配规则", id: "film.preferences.keywords", appearance: .underline
+    )
     private lazy var keywordSection: SettingsInputSection = {
         let section = SettingsInputSection(title: "关键字匹配规则", input: keywords)
         section.titleLabel.setContentHuggingPriority(.defaultHigh, for: .vertical)
@@ -67,7 +65,8 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         loading = Task { [weak self] in
             guard let self else { return }
             do { try await owner.loadPreferences(); update() }
-            catch { failure(error, retry: { [weak self] in self?.load() }) }
+            catch is CancellationError { }
+            catch { if !Task.isCancelled { failure(error, retry: { [weak self] in self?.load() }) } }
         }
     }
 
