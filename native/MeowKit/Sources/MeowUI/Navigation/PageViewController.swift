@@ -3,10 +3,34 @@ import UIKit
 import Combine
 import MeowDebug
 
+/// Declarative chrome requirements owned by each page instead of type checks in the coordinator.
+public struct PageChromePolicy: Equatable, Sendable {
+    public var hidesDock: Bool
+    public var hidesMiniPlayer: Bool
+    public var isSettingsBranchRoot: Bool
+    public var isImmersiveReading: Bool
+
+    public static let standard = PageChromePolicy()
+
+    public init(
+        hidesDock: Bool = false,
+        hidesMiniPlayer: Bool = false,
+        isSettingsBranchRoot: Bool = false,
+        isImmersiveReading: Bool = false
+    ) {
+        self.hidesDock = hidesDock
+        self.hidesMiniPlayer = hidesMiniPlayer
+        self.isSettingsBranchRoot = isSettingsBranchRoot
+        self.isImmersiveReading = isImmersiveReading
+    }
+}
+
 /// Page resources live until removal; appearance and foreground only control
 /// visibility. Returning to a retained page does not reactivate its content.
 @MainActor
 open class PageViewController: UIViewController {
+    /// Declarative chrome policy read by the app shell/coordinator.
+    open var pageChromePolicy: PageChromePolicy { .standard }
     public let themeProvider: any PageThemeProviding
     /// Visible titles belong to the page header. Leave UIKit's `title` unset
     /// so its native navigation item remains empty, including lazy creation.
@@ -44,6 +68,12 @@ open class PageViewController: UIViewController {
     private weak var completedAppearanceTransition: (any UIViewControllerTransitionCoordinator)?
     private weak var presentedPageModal: UIViewController?
     private weak var departingContainer: UIViewController?
+    private var observationsDirtyOrder: [Int] = []
+    private var observationsDirtySet: Set<Int> = []
+    private var visibleObservationHandlers: [Int: @MainActor () -> Void] = [:]
+    private var nextObservationID = 0
+    private var appliedTheme: PageTheme?
+    private var themeNeedsUpdate = false
     private var observers: [NSObjectProtocol] = []
     private var themeObservation: AnyCancellable?
     private var observationFactories: [() -> AnyCancellable] = []
@@ -52,6 +82,11 @@ open class PageViewController: UIViewController {
     private var headerHeight: NSLayoutConstraint?
     private weak var defaultBackButton: PageHeaderButton?
     private var hasOwnHeader = false
+    private enum QueuedFeedback {
+        case error(message: String, retry: (@MainActor () -> Void)?, acknowledged: (@MainActor () -> Void)?)
+        case notice(title: String, message: String?, acknowledged: (@MainActor () -> Void)?)
+    }
+    private var queuedFeedback: [QueuedFeedback] = []
 
     public init(themeProvider: any PageThemeProviding) {
         self.themeProvider = themeProvider
@@ -76,9 +111,9 @@ open class PageViewController: UIViewController {
         foreground = UIApplication.shared.applicationState == .active
         themeObservation = themeProvider.pageThemeChanges
             .receive(on: RunLoop.main)
-            .sink { [weak self] in self?.applyTheme() }
+            .sink { [weak self] in self?.applyThemeIfNeeded() }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
-            (page: PageViewController, _: UITraitCollection) in page.applyTheme()
+            (page: PageViewController, _: UITraitCollection) in page.applyThemeIfNeeded()
         }
         for name in [UIApplication.didBecomeActiveNotification,
                      UIApplication.willResignActiveNotification] {
@@ -91,7 +126,7 @@ open class PageViewController: UIViewController {
                 }
             })
         }
-        applyTheme()
+        applyThemeIfNeeded(force: true)
     }
 
     open override func viewWillAppear(_ animated: Bool) {
@@ -107,8 +142,10 @@ open class PageViewController: UIViewController {
             isPageActive = true
             subscriptions = observationFactories.map { $0() }
             observationFactories.removeAll()
-            applyTheme()
+            applyThemeIfNeeded(force: true)
             pageDidBecomeActive()
+        } else if themeNeedsUpdate || appliedTheme != theme {
+            applyThemeIfNeeded(force: true)
         }
         if let transition = transitionCoordinator {
             observeTransitionCompletion(transition)
@@ -271,30 +308,110 @@ open class PageViewController: UIViewController {
         return false
     }
 
+    public func setNeedsThemeUpdate() {
+        guard isViewLoaded, !invalidated else { return }
+        if isPageVisible {
+            applyThemeIfNeeded(force: true)
+        } else {
+            themeNeedsUpdate = true
+        }
+    }
+
+    private func applyThemeIfNeeded(force: Bool = false) {
+        guard isViewLoaded, !invalidated else { return }
+        let current = theme
+        guard force || isPageVisible || appliedTheme == nil else {
+            if appliedTheme != current { themeNeedsUpdate = true }
+            return
+        }
+        if !force, appliedTheme == current, !themeNeedsUpdate { return }
+        themeNeedsUpdate = false
+        appliedTheme = current
+        applyTheme()
+    }
+
     public func observe<Object: ObservableObject>(
-        _ object: Object, update: @escaping @MainActor () -> Void
+        _ object: Object,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor () -> Void
     ) where Object.ObjectWillChangePublisher == ObservableObjectPublisher {
-        observe(object.objectWillChange.eraseToAnyPublisher(), update: update)
+        observe(object.objectWillChange.eraseToAnyPublisher(), whenVisible: whenVisible, update: update)
     }
 
     public func observe(
-        _ changes: AnyPublisher<Void, Never>, update: @escaping @MainActor () -> Void
+        _ changes: AnyPublisher<Void, Never>,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor () -> Void
     ) {
-        observe(changes) { _ in update() }
+        observe(changes, immediateOnMain: false, whenVisible: whenVisible) { _ in update() }
     }
 
     public func observe<Value>(
-        _ changes: AnyPublisher<Value, Never>, update: @escaping @MainActor (Value) -> Void
+        _ changes: AnyPublisher<Value, Never>,
+        immediateOnMain: Bool = false,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor (Value) -> Void
     ) {
         guard !invalidated else { return }
+        let id = nextObservationID
+        nextObservationID += 1
+        let deliver: @MainActor (Value) -> Void = { [weak self] value in
+            guard let self, self.isPageActive else { return }
+            if whenVisible, !self.isPageVisible {
+                self.visibleObservationHandlers[id] = { update(value) }
+                if self.observationsDirtySet.insert(id).inserted {
+                    self.observationsDirtyOrder.append(id)
+                }
+                return
+            }
+            update(value)
+        }
         let factory = { [weak self] in
-            changes.receive(on: RunLoop.main).sink { value in
+            if immediateOnMain {
+                return changes.sink { value in
+                    if Thread.isMainThread {
+                        MainActor.assumeIsolated {
+                            guard self?.isPageActive == true else { return }
+                            deliver(value)
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            guard self?.isPageActive == true else { return }
+                            deliver(value)
+                        }
+                    }
+                }
+            }
+            return changes.receive(on: RunLoop.main).sink { value in
                 guard self?.isPageActive == true else { return }
-                update(value)
+                deliver(value)
             }
         }
         if isPageActive { subscriptions.append(factory()) }
         else { observationFactories.append(factory) }
+    }
+
+    public func observeDistinct<Value: Equatable>(
+        _ changes: AnyPublisher<Value, Never>,
+        immediateOnMain: Bool = true,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor (Value) -> Void
+    ) {
+        observe(changes.removeDuplicates().eraseToAnyPublisher(),
+                immediateOnMain: immediateOnMain, whenVisible: whenVisible, update: update)
+    }
+
+    private func flushPendingVisibleObservations() {
+        guard !observationsDirtyOrder.isEmpty else { return }
+        let ids = observationsDirtyOrder
+        observationsDirtyOrder.removeAll(keepingCapacity: true)
+        observationsDirtySet.removeAll(keepingCapacity: true)
+        for id in ids {
+            guard isPageActive, isPageVisible else { return }
+            if let handler = visibleObservationHandlers.removeValue(forKey: id) {
+                handler()
+            }
+        }
     }
 
     public func runPageTask(_ operation: @escaping @MainActor () async -> Void) {
@@ -331,6 +448,84 @@ open class PageViewController: UIViewController {
         presentError(message, retry: retry, acknowledged: nil)
     }
 
+    /// Enqueue an error or notice so pages do not maintain separate `pendingFailure` / `pendingNotice` queues.
+    public func enqueueError(_ message: String?, retry: (@MainActor () -> Void)? = nil,
+                             acknowledged: (@MainActor () -> Void)? = nil) {
+        guard let message, !message.isEmpty else { return }
+        if queuedFeedback.contains(where: {
+            if case .error(let existing, _, _) = $0 { return existing == message }
+            return false
+        }) { return }
+        queuedFeedback.append(.error(message: message, retry: retry, acknowledged: acknowledged))
+        drainQueuedFeedback()
+    }
+
+    public func enqueueNotice(title: String, message: String? = nil,
+                              acknowledged: (@MainActor () -> Void)? = nil) {
+        if queuedFeedback.contains(where: {
+            if case .notice(let existingTitle, let existingMessage, _) = $0 {
+                return existingTitle == title && existingMessage == message
+            }
+            return false
+        }) { return }
+        queuedFeedback.append(.notice(title: title, message: message, acknowledged: acknowledged))
+        drainQueuedFeedback()
+    }
+
+    public func clearQueuedFeedback() {
+        queuedFeedback.removeAll()
+    }
+
+    public func drainQueuedFeedback() {
+        guard !queuedFeedback.isEmpty, canPresentPageAlert else { return }
+        let next = queuedFeedback.removeFirst()
+        switch next {
+        case .error(let message, let retry, let acknowledged):
+            let wrappedRetry: (@MainActor () -> Void)? = retry.map { action in
+                { [weak self] in
+                    action()
+                    DispatchQueue.main.async { self?.drainQueuedFeedback() }
+                }
+            }
+            if !presentError(message, retry: wrappedRetry, acknowledged: { [weak self] in
+                acknowledged?()
+                DispatchQueue.main.async { self?.drainQueuedFeedback() }
+            }) {
+                queuedFeedback.insert(next, at: 0)
+            }
+        case .notice(let title, let message, let acknowledged):
+            let presented = PageAlertPresenter.present(
+                on: self,
+                title: title,
+                message: message,
+                actions: [PageAlertAction(title: "确定", style: .default) { [weak self] in
+                    acknowledged?()
+                    DispatchQueue.main.async { self?.drainQueuedFeedback() }
+                }]
+            )
+            if presented == nil {
+                queuedFeedback.insert(next, at: 0)
+            }
+        }
+    }
+
+    /// Present a page inside the unified navigation sheet container.
+    @discardableResult
+    public func presentPageSheet(
+        _ root: PageViewController,
+        detents: [UISheetPresentationController.Detent] = [.medium(), .large()],
+        prefersGrabberVisible: Bool = true,
+        animated: Bool = true
+    ) -> PageNavigationController {
+        let navigation = PageNavigationController(themeProvider: themeProvider)
+        navigation.setViewControllers([root], animated: false)
+        navigation.modalPresentationStyle = .pageSheet
+        navigation.sheetPresentationController?.detents = detents
+        navigation.sheetPresentationController?.prefersGrabberVisible = prefersGrabberVisible
+        present(navigation, animated: animated)
+        return navigation
+    }
+
     /// Dismiss a modal presented by this page. Follow-up work uses its actual
     /// receipt, including a coordinator UIKit may retain during completion.
     public func dismissPageModal(_ modal: UIViewController, completion: (() -> Void)? = nil) {
@@ -360,32 +555,15 @@ open class PageViewController: UIViewController {
 
     private func presentError(_ message: String?, retry: (() -> Void)?, acknowledged: (() -> Void)?) -> Bool {
         guard let message, !message.isEmpty, canPresentPageAlert else { return false }
-        let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
-        let confirmHandler: @MainActor () -> Void = { [weak self, weak alert] in
-            guard let self, let alert else { return }
-            dismissPageModal(alert, completion: acknowledged)
-        }
-        alert.addAction(UIAlertAction(title: "确定", style: .cancel) { _ in confirmHandler() })
-        var registered: [DebugAlertActionRegistry.RegisteredAction] = [
-            .init(index: 0, label: "确定", kind: "cancel", handler: confirmHandler)
+        var actions: [PageAlertAction] = [
+            PageAlertAction(title: retry == nil ? "确定" : "取消", style: .cancel, handler: acknowledged)
         ]
         if let retry {
-            let retryHandler: @MainActor () -> Void = { [weak self, weak alert] in
-                guard let self, let alert else { return }
-                dismissPageModal(alert, completion: retry)
-            }
-            alert.addAction(UIAlertAction(title: "重试", style: .default) { _ in retryHandler() })
-            registered.append(.init(index: 1, label: "重试", kind: "default", handler: retryHandler))
+            actions.append(PageAlertAction(title: "重试", style: .default, handler: retry))
         }
-        DebugAlertActionRegistry.shared.register(alert: alert, actions: registered)
-        DebugRuntime.log(.uiNav, sub: "alert", event: "present", level: .warn, data: .object([
-            "title": .string("错误"),
-            "message": .string(message),
-            "hasRetry": .bool(retry != nil),
-            "page": .string(String(describing: type(of: self)))
-        ]))
-        present(alert, animated: true)
-        return true
+        return PageAlertPresenter.present(
+            on: self, title: "错误", message: message, preferredStyle: .alert, actions: actions
+        ) != nil
     }
 
     private func updateVisibility() {
@@ -393,6 +571,10 @@ open class PageViewController: UIViewController {
         guard isPageVisible != visible else { return }
         isPageVisible = visible
         if visible {
+            if themeNeedsUpdate || appliedTheme != theme {
+                applyThemeIfNeeded(force: true)
+            }
+            flushPendingVisibleObservations()
             pageDidBecomeVisible()
             finishAppearance()
         }
@@ -404,7 +586,10 @@ open class PageViewController: UIViewController {
         guard !invalidated else { return }
         if let transition { completedAppearanceTransition = transition }
         completion?()
-        if canPresentPageAlert { pageDidFinishAppearing() }
+        if canPresentPageAlert {
+            drainQueuedFeedback()
+            pageDidFinishAppearing()
+        }
     }
 
     private func observeTransitionCompletion(_ transition: any UIViewControllerTransitionCoordinator) {
@@ -442,6 +627,11 @@ open class PageViewController: UIViewController {
     private func invalidatePage() {
         guard !invalidated else { return }
         invalidated = true
+        queuedFeedback.removeAll()
+        observationsDirtyOrder.removeAll()
+        observationsDirtySet.removeAll()
+        visibleObservationHandlers.removeAll()
+        themeNeedsUpdate = false
         completedAppearanceTransition = nil
         presentedPageModal = nil
         let wasActive = isPageActive

@@ -224,17 +224,11 @@ public final class PageHeaderView: UIView {
 
     public func applyTheme(_ theme: PageTheme) {
         titleLabel.textColor = UIColor(theme.ink)
-        for button in [leading, titleContent].compactMap({ $0 }) {
-            (button as? UIButton)?.tintColor = UIColor(theme.ink)
-            for child in button.subviews.compactMap({ $0 as? UIButton }) {
-                child.tintColor = UIColor(theme.ink)
-            }
-        }
-        for button in trailing {
-            (button as? UIButton)?.tintColor = UIColor(theme.ink)
-            (button as? PageHeaderTextButton)?.applyTheme(theme)
-            for child in button.subviews.compactMap({ $0 as? UIButton }) {
-                child.tintColor = UIColor(theme.ink)
+        for item in [leading, titleContent].compactMap({ $0 }) + trailing {
+            if let themeable = item as? any PageThemeable {
+                themeable.applyTheme(theme)
+            } else if let button = item as? UIButton {
+                button.tintColor = UIColor(theme.ink)
             }
         }
         background.applyTheme()

@@ -341,9 +341,12 @@ extension MusicViewModel {
         fmRevocationTask = Task { [weak self] in
             for await _ in events {
                 guard let self, !Task.isCancelled, self.fmSource?.id == source.id else { return }
+                let duringLogin = self.isAccountLoginInProgress
                 self.cancelFMNavigation(); self.stopFM()
                 self.invalidateSelection(stopMedia: true)
-                if self.isAvailable, !self.isClosed { self.error = MusicServiceError.staleAccess.localizedDescription }
+                if self.isAvailable, !self.isClosed, !duringLogin {
+                    self.error = MusicServiceError.staleAccess.localizedDescription
+                }
             }
         }
     }

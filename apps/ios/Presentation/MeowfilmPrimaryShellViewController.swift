@@ -149,8 +149,8 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
                     layout?.accessibilityValue = value == .grid ? "当前为网格" : "当前为列表"
                 }
                 update(library.appearance.preferences.playlistView)
-                primary.observe(library.appearance.$preferences.map(\.playlistView).removeDuplicates().eraseToAnyPublisher(),
-                                update: update)
+                primary.observeDistinct(library.appearance.$preferences.map(\.playlistView).eraseToAnyPublisher(),
+                                        whenVisible: true, update: update)
             }
             header.setTrailing([layout, Self.iconButton(.plus, label: "新建歌单", identifier: "app.primary.add") {
                 [weak self] in self?.library?.requestCreatePlaylist()

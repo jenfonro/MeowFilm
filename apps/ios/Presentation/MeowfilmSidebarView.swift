@@ -27,8 +27,14 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     private let videos = UIStackView()
     private let books = UIStackView()
     private let settings = UIButton(type: .system)
+    private struct DisplayRow {
+        let view: UIStackView
+        let icon: UIImageView
+        let label: UILabel
+    }
+
     private var buttons: [UIButton] = []
-    private var videoRows: [FilmSourceKey: UIStackView] = [:]
+    private var videoRows: [FilmSourceKey: DisplayRow] = [:]
     private var bookRows: [String: UIButton] = [:]
     private var observations: Set<AnyCancellable> = []
     private var observing = false
@@ -212,13 +218,14 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         return icon
     }
 
-    private func displayRow(title: String, symbol: String, identifier: String) -> UIStackView {
+    private func displayRow(title: String, symbol: String, identifier: String) -> DisplayRow {
+        let icon = rowIcon(symbol)
         let label = UILabel()
         label.text = title
         label.font = .preferredFont(forTextStyle: .body)
         label.adjustsFontForContentSizeCategory = true
         label.numberOfLines = 0
-        let row = UIStackView(arrangedSubviews: [rowIcon(symbol), label])
+        let row = UIStackView(arrangedSubviews: [icon, label])
         row.alignment = .center
         row.spacing = 12
         row.isLayoutMarginsRelativeArrangement = true
@@ -230,7 +237,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         row.accessibilityTraits = .staticText
         row.accessibilityIdentifier = identifier
         row.accessibilityLabel = title
-        return row
+        return DisplayRow(view: row, icon: icon, label: label)
     }
 
     private func navigationButton(title: String, symbol: String, page: MeowfilmPrimaryPage, selected: Bool) -> UIButton {
@@ -277,11 +284,11 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         videos.isHidden = sources.isEmpty
         let keys = Set(sources.map(\.key))
         for (key, row) in videoRows where !keys.contains(key) {
-            row.removeFromSuperview()
+            row.view.removeFromSuperview()
             videoRows[key] = nil
         }
         for (index, source) in sources.enumerated() {
-            let row: UIStackView
+            let row: DisplayRow
             if let existing = videoRows[source.key] { row = existing }
             else {
                 let key = source.key
@@ -289,10 +296,10 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
                     identifier: "app.sidebar.video.\(Data(key.installationId.utf8).base64EncodedString()).\(Data(key.siteKey.utf8).base64EncodedString())")
                 videoRows[key] = row
             }
-            (row.arrangedSubviews.last as? UILabel)?.text = source.name
-            row.accessibilityLabel = source.name
-            if videos.arrangedSubviews.count <= index || videos.arrangedSubviews[index] !== row {
-                videos.insertArrangedSubview(row, at: index)
+            row.label.text = source.name
+            row.view.accessibilityLabel = source.name
+            if videos.arrangedSubviews.count <= index || videos.arrangedSubviews[index] !== row.view {
+                videos.insertArrangedSubview(row.view, at: index)
             }
         }
         applyTheme()
@@ -347,11 +354,9 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             button.configuration?.background.backgroundColor = button.isSelected ? UIColor(theme.buttonSelected) : .clear
         }
         settings.configuration?.background.backgroundColor = UIColor(theme.surface)
-        for stack in [upper, videos, books] {
-            for row in stack.arrangedSubviews.compactMap({ $0 as? UIStackView }) {
-                (row.arrangedSubviews.first as? UIImageView)?.tintColor = UIColor(theme.ink)
-                (row.arrangedSubviews.last as? UILabel)?.textColor = UIColor(theme.ink)
-            }
+        for row in videoRows.values {
+            row.icon.tintColor = UIColor(theme.ink)
+            row.label.textColor = UIColor(theme.ink)
         }
     }
 

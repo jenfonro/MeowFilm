@@ -54,7 +54,7 @@ extension MusicViewModel {
     public func setPresentationCache(_ cache: (any MusicPresentationCaching)?) {
         playbackMetadata.setDisplayCache(cache)
         #if os(iOS)
-        if let cache { MusicArtworkImages.shared.configure(cache: cache, selector: service as? any MusicArtworkSelecting) }
+        if let cache { artworkImages.configure(cache: cache, selector: service as? any MusicArtworkSelecting) }
         #endif
     }
     public func artworkFailed(_ url: URL?) { playbackMetadata.artworkFailed(url) }

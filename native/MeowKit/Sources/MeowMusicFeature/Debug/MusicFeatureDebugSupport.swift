@@ -463,6 +463,10 @@ extension MusicChannelsViewController: DebugPageInspectable, DebugPageActionable
     }
 
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "channel.picker" {
+            showPicker()
+            return .object(["pickerPresented": .bool(true)])
+        }
         if request.action == "tab.select", (request.params["group"]?.stringValue ?? "channel") == "channel" {
             try debugSelectChannel(key: request.params["id"]?.stringValue, index: request.params["index"]?.intValue)
             return .object(["selectedChannel": .optional(selection.channel?.identity)])
@@ -607,25 +611,83 @@ extension MusicCollectionViewController: DebugPageInspectable, DebugPageActionab
                 meta: ["duration": .number(track.duration)]
             )
         }
-        let detailObj: DebugJSONValue = .object([
+        let isDaily = remotePage?.request.dailyPlatform != nil
+        let isNeteaseDaily = remotePage?.request.dailyPlatform == .netease
+        let dailyBranch: String? = isNeteaseDaily
+            ? (remotePage?.request.dailyBranch == .style ? "style" : "default")
+            : nil
+        let dailyTabs: [DebugTabItem] = isNeteaseDaily ? [
+            DebugTabItem(group: "daily-branch", index: 0, id: "default", title: "默认推荐", selected: dailyBranch == "default"),
+            DebugTabItem(group: "daily-branch", index: 1, id: "style", title: "风格推荐", selected: dailyBranch == "style")
+        ] : []
+        let canEditStyle = remotePage.map { canActRemotely($0) && $0.remoteSource?.dailyStyle != nil } ?? false
+        let dailyStyleTags = remotePage?.dailyStyle?.tags.map(\.name) ?? []
+        var detail: [String: DebugJSONValue] = [
             "title": .string(pageTitle ?? ""),
             "trackCount": .int(orderedRows.count),
             "isLocal": .bool(localPage != nil),
-            "isDaily": .bool(remotePage?.request.dailyPlatform != nil)
-        ])
+            "isDaily": .bool(isDaily)
+        ]
+        if let dailyBranch {
+            detail["dailyBranch"] = .string(dailyBranch)
+            detail["canEditStyle"] = .bool(canEditStyle)
+            detail["dailyStyleTags"] = .array(dailyStyleTags.map(DebugJSONValue.string))
+        }
         return DebugContentSnapshot(
             target: debugPageStatus.target,
             kind: "list",
             loading: debugPageStatus.isBusy,
             error: debugPageStatus.errorText,
+            tabs: dailyTabs,
             rows: projectedRows,
             hasMore: remotePage?.nextCursor != nil,
-            detail: detailObj
+            detail: .object(detail)
         )
     }
 
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
         switch request.action {
+        case "tab.select":
+            guard let page = remotePage, page.request.dailyPlatform == .netease else {
+                throw DebugAPIError.invalidState("Daily branch selection is only available on Netease daily recommendations")
+            }
+            guard !page.isActing else {
+                throw DebugAPIError.invalidState("Daily recommendation page is busy")
+            }
+            let branch: MusicHomeAction.DailyBranch
+            if let idx = request.params["index"]?.intValue {
+                switch idx {
+                case 0: branch = .default
+                case 1: branch = .style
+                default: throw DebugAPIError.invalidArgument("Daily branch index \(idx) out of range (0..<2)")
+                }
+            } else if let id = request.params["id"]?.stringValue {
+                switch id.lowercased() {
+                case "default", "默认推荐": branch = .default
+                case "style", "风格推荐": branch = .style
+                default: throw DebugAPIError.notFound("Unknown daily branch: \(id)")
+                }
+            } else {
+                throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for tab.select")
+            }
+            dailyBranches.selectedSegmentIndex = branch == .style ? 1 : 0
+            if page.request.dailyBranch != branch {
+                prepareDailyBranchSwitch()
+                await page.selectDailyBranch(branch)
+            }
+            return .object([
+                "dailyBranch": .string(branch == .style ? "style" : "default"),
+                "canEditStyle": .bool(canActRemotely(page) && page.remoteSource?.dailyStyle != nil)
+            ])
+        case "daily.style", "style.open":
+            guard let page = remotePage, page.request.dailyPlatform == .netease else {
+                throw DebugAPIError.invalidState("Daily style editor is only available on Netease daily recommendations")
+            }
+            guard canPresentPageAlert, canActRemotely(page), page.remoteSource?.dailyStyle != nil else {
+                throw DebugAPIError.invalidState("Daily style editor is not currently available")
+            }
+            openDailyStyle()
+            return .object(["opened": .bool(true)])
         case "list.item.invoke":
             let targetIndex: Int
             if let idx = request.params["index"]?.intValue {
@@ -828,11 +890,11 @@ extension MusicSearchViewController: DebugPageInspectable, DebugPageActionable {
 
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(
-            target: searchTargetID == "music" ? "music.discovery" : "search",
+            target: isMusicTarget ? "music.discovery" : "search",
             moduleId: searchTargetID.isEmpty ? "music" : searchTargetID,
             route: "search/discovery",
             title: "搜索",
-            isBusy: discoveryPage?.loadingComponents.isEmpty == false
+            isBusy: isMusicTarget && discoveryPage?.loadingComponents.isEmpty == false
         )
     }
 
@@ -840,27 +902,29 @@ extension MusicSearchViewController: DebugPageInspectable, DebugPageActionable {
         let targetTabs = searchTargets.enumerated().map { idx, opt in
             DebugTabItem(group: "search-target", index: idx, id: opt.id, title: opt.title, selected: opt.id == searchTargetID)
         }
+        let historyTerms = history.entries.map(\.text)
+        let suggestions = isMusicTarget ? (discoveryPage?.suggestions ?? []) : []
         var sections: [DebugContentSection] = []
-        if !renderedHistory.isEmpty {
+        if !historyTerms.isEmpty {
             sections.append(DebugContentSection(
                 index: sections.count,
                 id: "history",
                 title: "搜索历史",
                 kind: "mixed",
                 layout: "list",
-                items: renderedHistory.prefix(maxItems).enumerated().map { idx, term in
+                items: historyTerms.prefix(maxItems).enumerated().map { idx, term in
                     DebugContentItem(index: idx, id: term, kind: "action", title: term, actions: ["open"])
                 }
             ))
         }
-        if !renderedSuggestions.isEmpty {
+        if isMusicTarget, !suggestions.isEmpty {
             sections.append(DebugContentSection(
                 index: sections.count,
                 id: "suggestions",
                 title: "热搜推荐",
                 kind: "mixed",
                 layout: "list",
-                items: renderedSuggestions.prefix(maxItems).enumerated().map { idx, term in
+                items: suggestions.prefix(maxItems).enumerated().map { idx, term in
                     DebugContentItem(index: idx, id: term, kind: "action", title: term, actions: ["open"])
                 }
             ))
@@ -868,7 +932,7 @@ extension MusicSearchViewController: DebugPageInspectable, DebugPageActionable {
         return DebugContentSnapshot(
             target: debugPageStatus.target,
             kind: "search",
-            loading: discoveryPage?.loadingComponents.isEmpty == false,
+            loading: isMusicTarget && discoveryPage?.loadingComponents.isEmpty == false,
             tabs: targetTabs,
             sections: sections,
             extra: ["query": .string(query), "searchTarget": .string(searchTargetID)]
@@ -894,10 +958,13 @@ extension MusicSearchViewController: DebugPageInspectable, DebugPageActionable {
             }
             throw DebugAPIError.invalidArgument("Invalid search target selection")
         case "section.item.invoke":
+            let historyTerms = history.entries.map(\.text)
+            let suggestions = isMusicTarget ? (discoveryPage?.suggestions ?? []) : []
             let sId = request.params["sectionId"]?.stringValue
             let sIdx = request.params["sectionIndex"]?.intValue ?? 0
             let iIdx = request.params["itemIndex"]?.intValue ?? 0
-            let list = (sId == "suggestions" || (sId == nil && renderedHistory.isEmpty) || sIdx == 1) ? renderedSuggestions : renderedHistory
+            let useSuggestions = isMusicTarget && (sId == "suggestions" || (sId == nil && historyTerms.isEmpty) || sIdx == 1)
+            let list = useSuggestions ? suggestions : historyTerms
             guard list.indices.contains(iIdx) else { throw DebugAPIError.invalidArgument("Item index out of range") }
             submit(list[iIdx], animated: false)
             return .object(["submitted": .string(list[iIdx])])
@@ -1084,6 +1151,7 @@ extension MusicSettingsViewController: DebugPageInspectable, DebugPageActionable
             target: "settings.music",
             kind: "settings",
             loading: sourceSettings.isSaving,
+            rows: debugContentRows(maxItems: maxItems),
             settings: .object([
                 "domain": .string("music"),
                 "section": .string("root"),
@@ -1095,6 +1163,8 @@ extension MusicSettingsViewController: DebugPageInspectable, DebugPageActionable
 
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
         switch request.action {
+        case "list.item.invoke":
+            return try debugInvokeRow(params: request.params)
         case "setting.set":
             guard let key = request.params["key"]?.stringValue, let val = request.params["value"] else {
                 throw DebugAPIError.invalidArgument("Missing 'key' or 'value'")
@@ -1154,6 +1224,7 @@ extension MusicAppearanceSettingsViewController: DebugPageInspectable, DebugPage
         DebugContentSnapshot(
             target: "settings.general",
             kind: "settings",
+            rows: debugContentRows(maxItems: maxItems),
             settings: .object([
                 "domain": .string("general"),
                 "section": .string("appearance"),
@@ -1167,6 +1238,7 @@ extension MusicAppearanceSettingsViewController: DebugPageInspectable, DebugPage
     }
 
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
         throw DebugAPIError.invalidArgument("Use general setting.set via host for appearance updates")
     }
 
@@ -1175,7 +1247,7 @@ extension MusicAppearanceSettingsViewController: DebugPageInspectable, DebugPage
     }
 }
 
-extension MusicAccountsViewController: DebugPageInspectable {
+extension MusicAccountsViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.music", moduleId: "music", route: "settings/music/accounts", title: "平台账号", isBusy: state.busy, isError: state.error != nil, errorText: state.error, settingsDomain: "music", settingsSection: "accounts")
     }
@@ -1196,6 +1268,7 @@ extension MusicAccountsViewController: DebugPageInspectable {
             kind: "settings",
             loading: state.busy,
             error: state.error,
+            rows: debugContentRows(maxItems: maxItems),
             settings: .object([
                 "domain": .string("music"),
                 "section": .string("accounts"),
@@ -1204,6 +1277,10 @@ extension MusicAccountsViewController: DebugPageInspectable {
                 "accounts": .array(accounts)
             ])
         )
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicAccountsViewController")
     }
 }
 
@@ -1236,48 +1313,246 @@ extension MusicSourceManagementViewController: DebugPageInspectable {
     }
 }
 
-extension MusicSourceExclusionsViewController: DebugPageInspectable {
+extension MusicSourceExclusionsViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.music", moduleId: "music", route: "settings/music/exclusions", title: "错源管理", settingsDomain: "music", settingsSection: "exclusions")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.music", kind: "settings", settings: .object(["domain": .string("music"), "section": .string("exclusions")]))
+        DebugContentSnapshot(target: "settings.music", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("music"), "section": .string("exclusions")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicSourceExclusionsViewController")
     }
 }
 
-extension MusicSearchSettingsViewController: DebugPageInspectable {
+extension MusicSearchSettingsViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.music", moduleId: "music", route: "settings/music/search", title: "搜索设置", settingsDomain: "music", settingsSection: "search")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.music", kind: "settings", settings: .object(["domain": .string("music"), "section": .string("search")]))
+        DebugContentSnapshot(target: "settings.music", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("music"), "section": .string("search")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicSearchSettingsViewController")
     }
 }
 
-extension MusicPlaybackSettingsViewController: DebugPageInspectable {
+extension MusicPlaybackSettingsViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.music", moduleId: "music", route: "settings/music/playback", title: "播放设置", settingsDomain: "music", settingsSection: "playback")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.music", kind: "settings", settings: .object(["domain": .string("music"), "section": .string("playback")]))
+        DebugContentSnapshot(target: "settings.music", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("music"), "section": .string("playback")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicPlaybackSettingsViewController")
     }
 }
 
-extension MusicQualitySettingsViewController: DebugPageInspectable {
+extension MusicQualitySettingsViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.music", moduleId: "music", route: "settings/music/quality", title: "音质设置", settingsDomain: "music", settingsSection: "quality")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.music", kind: "settings", settings: .object(["domain": .string("music"), "section": .string("quality")]))
+        DebugContentSnapshot(target: "settings.music", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("music"), "section": .string("quality")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicQualitySettingsViewController")
     }
 }
 
-extension MusicMetadataSettingsViewController: DebugPageInspectable {
+extension MusicMetadataSettingsViewController: DebugPageInspectable, DebugPageActionable {
     public var debugPageStatus: DebugPageStatus {
         DebugPageStatus(target: "settings.music", moduleId: "music", route: "settings/music/metadata", title: "歌词／封面设置", settingsDomain: "music", settingsSection: "metadata")
     }
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
-        DebugContentSnapshot(target: "settings.music", kind: "settings", settings: .object(["domain": .string("music"), "section": .string("metadata")]))
+        DebugContentSnapshot(target: "settings.music", kind: "settings", rows: debugContentRows(maxItems: maxItems), settings: .object(["domain": .string("music"), "section": .string("metadata")]))
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
+        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicMetadataSettingsViewController")
+    }
+}
+
+extension MusicFMSettingsViewController: DebugPageInspectable, DebugPageActionable {
+    public var debugPageStatus: DebugPageStatus {
+        DebugPageStatus(
+            target: "music.fm",
+            moduleId: "music",
+            route: "music/fm/settings",
+            title: "私人漫游",
+            isBusy: model.pendingChoice != nil,
+            isError: model.error != nil,
+            errorText: model.error
+        )
+    }
+    public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
+        let rows = (MusicFMModeChoice.main + MusicFMModeChoice.scenes).prefix(maxItems).enumerated().map { idx, choice in
+            DebugContentRow(
+                index: idx,
+                id: choice.id,
+                title: choice.title,
+                selected: choice.matches(model.selection),
+                actions: ["select"]
+            )
+        }
+        return DebugContentSnapshot(
+            target: "music.fm",
+            kind: "list",
+            loading: model.pendingChoice != nil,
+            error: model.error,
+            rows: rows
+        )
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        guard request.action == "list.item.invoke" || request.action == "section.item.invoke" else {
+            throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicFMSettingsViewController")
+        }
+        let choices = MusicFMModeChoice.main + MusicFMModeChoice.scenes
+        let choice: MusicFMModeChoice
+        if let idx = (request.params["index"] ?? request.params["itemIndex"])?.intValue {
+            guard choices.indices.contains(idx) else {
+                throw DebugAPIError.invalidArgument("FM choice index \(idx) out of range (0..<\(choices.count))")
+            }
+            choice = choices[idx]
+        } else if let id = (request.params["id"] ?? request.params["itemId"])?.stringValue {
+            guard let found = choices.first(where: { $0.id == id || $0.submode == id || $0.title == id }) else {
+                throw DebugAPIError.notFound("FM choice not found: \(id)")
+            }
+            choice = found
+        } else {
+            throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for \(request.action)")
+        }
+        model.select(choice)
+        return .object(["choiceId": .string(choice.id), "title": .string(choice.title)])
+    }
+}
+
+extension MusicChannelsPickerViewController: DebugPageInspectable {
+    public var debugPageStatus: DebugPageStatus {
+        DebugPageStatus(
+            target: "music.channels",
+            moduleId: "music",
+            route: "music/channels/picker",
+            title: "全部频道"
+        )
+    }
+    public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
+        let rows = channels.prefix(maxItems).enumerated().map { idx, ch in
+            DebugContentRow(
+                index: idx,
+                id: ch.identity,
+                title: ch.title,
+                selected: ch.identity == selectedID
+            )
+        }
+        return DebugContentSnapshot(target: "music.channels", kind: "list", rows: rows)
+    }
+}
+
+extension MusicDailyStyleViewController: DebugPageInspectable, DebugPageActionable {
+    public var debugPageStatus: DebugPageStatus {
+        DebugPageStatus(
+            target: "music.daily",
+            moduleId: "music",
+            route: "music/daily/style",
+            title: "风格推荐",
+            isBusy: model.working,
+            isError: model.error != nil,
+            errorText: model.error
+        )
+    }
+    public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
+        let tabs = model.categories.enumerated().map { idx, cat in
+            DebugTabItem(group: "category", index: idx, id: cat.id, title: cat.name, selected: cat.id == model.category)
+        }
+        let rows = (model.selectedCategory?.tags ?? []).prefix(maxItems).enumerated().map { idx, tag in
+            DebugContentRow(
+                index: idx,
+                id: tag.id,
+                title: tag.name,
+                selected: model.selected.contains(tag.id),
+                actions: ["toggle"]
+            )
+        }
+        return DebugContentSnapshot(
+            target: "music.daily",
+            kind: "list",
+            loading: model.working,
+            error: model.error,
+            tabs: tabs,
+            rows: rows,
+            extra: [
+                "canSave": .bool(model.canSave),
+                "canRetry": .bool(model.canRetry),
+                "selectedCount": .int(model.selected.count)
+            ]
+        )
+    }
+    public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
+        switch request.action {
+        case "tab.select":
+            let categories = model.categories
+            let target: MusicDailyStyleCategory
+            if let idx = request.params["index"]?.intValue {
+                guard categories.indices.contains(idx) else {
+                    throw DebugAPIError.invalidArgument("Category index \(idx) out of range (0..<\(categories.count))")
+                }
+                target = categories[idx]
+            } else if let id = request.params["id"]?.stringValue {
+                guard let found = categories.first(where: { $0.id == id || $0.name == id }) else {
+                    throw DebugAPIError.notFound("Daily style category not found: \(id)")
+                }
+                target = found
+            } else {
+                throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for tab.select")
+            }
+            model.selectCategory(target.id)
+            return .object(["categoryId": .string(target.id), "name": .string(target.name)])
+        case "list.item.invoke", "section.item.invoke":
+            let tags = model.selectedCategory?.tags ?? []
+            let tag = try { () throws -> MusicDailyStyleTag in
+                if let idx = (request.params["index"] ?? request.params["itemIndex"])?.intValue {
+                    guard tags.indices.contains(idx) else {
+                        throw DebugAPIError.invalidArgument("Tag index \(idx) out of range (0..<\(tags.count))")
+                    }
+                    return tags[idx]
+                } else if let id = (request.params["id"] ?? request.params["itemId"])?.stringValue {
+                    guard let found = tags.first(where: { $0.id == id || $0.name == id }) else {
+                        throw DebugAPIError.notFound("Daily style tag not found: \(id)")
+                    }
+                    return found
+                } else {
+                    throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for \(request.action)")
+                }
+            }()
+            model.selectTag(tag.id)
+            return .object([
+                "tagId": .string(tag.id),
+                "name": .string(tag.name),
+                "selected": .bool(model.selected.contains(tag.id))
+            ])
+        case "form.submit", "daily.save":
+            guard model.canSave else {
+                throw DebugAPIError.invalidState("Daily style selection cannot be saved right now")
+            }
+            model.save()
+            await model.finishPending()
+            return .object(["saved": .bool(model.saved), "error": .optional(model.error)])
+        case "retry":
+            guard model.canRetry else {
+                throw DebugAPIError.invalidState("Daily style editor cannot retry right now")
+            }
+            model.retry()
+            await model.finishPending()
+            return .object(["retried": .bool(true), "categoriesCount": .int(model.categories.count)])
+        default:
+            throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicDailyStyleViewController")
+        }
     }
 }
 #endif

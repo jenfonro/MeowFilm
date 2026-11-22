@@ -28,6 +28,7 @@
 
 - [架构与模块职责](ios/architecture.md)
 - [音乐能力与统一音源管理](ios/music.md)
+- [音源管理与选源](ios/music-sources.md)
 - [独立音乐核心](ios/music-audio-core.md)
 - [系统媒体、锁屏歌词与耳机控制](ios/system-media.md)
 - [网易云漫游、心动与队列推荐](ios/music-recommendations.md)

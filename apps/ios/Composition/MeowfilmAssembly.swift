@@ -32,13 +32,21 @@ final class MeowfilmAssembly: ObservableObject {
         return try await resources.scriptSession.connection()
     }]
     private let filmHTTP = FilmHTTP()
-    lazy var filmImages = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { [weak self, filmHTTP] in
-        if $0.scheme == nil {
-            guard let metadata = await self?.resources?.filmMetadata else { throw FilmSearchError.unavailable }
-            return try await metadata.readImage($0)
+    private var initializedFilmImages: ArtworkImages?
+    var filmImages: ArtworkImages {
+        if let existing = initializedFilmImages { return existing }
+        let created = ArtworkImages(maximumBytes: 4 * 1_024 * 1_024) { [weak self, filmHTTP] in
+            if $0.scheme == nil {
+                guard let metadata = await self?.resources?.filmMetadata else { throw FilmSearchError.unavailable }
+                return try await metadata.readImage($0)
+            }
+            return try await filmHTTP.readArtwork($0)
         }
-        return try await filmHTTP.readArtwork($0)
+        initializedFilmImages = created
+        return created
     }
+    var initializedFilmImagesForDiagnostics: ArtworkImages? { initializedFilmImages }
+    let musicImages = MusicArtworkImages()
     @Published private(set) var music: MusicViewModel?
     @Published private(set) var filmSettings: FilmSettingsModel?
     private(set) var filmSearch: FilmSearchService?
@@ -72,6 +80,9 @@ final class MeowfilmAssembly: ObservableObject {
         return ([filmPlayback].compactMap { $0 } + (filmMedia?.models ?? [])).filter {
             identities.insert(ObjectIdentifier($0)).inserted
         }
+    }
+    var activeFilmModels: [FilmPlaybackModel] {
+        filmModels.filter { !$0.canLeave || $0.hasSystemOwner }
     }
     private var filmBackground: Task<Void, Never>?
     var restoreFilmPlaybackUI: (@MainActor (UUID) async -> Bool)? {
@@ -226,7 +237,7 @@ final class MeowfilmAssembly: ObservableObject {
             try await accounts.prepareLocalAccounts()
         }, makeModel: {
             let model = MusicViewModel(service: service, playback: playback, accounts: resources.musicAccounts,
-                                       scriptSources: resources.musicScripts)
+                                       scriptSources: resources.musicScripts, artworkImages: self.musicImages)
             model.setPresentationCache(resources.musicPresentationCache)
             await model.searchPreferences.bind(database: resources.database)
             await model.searchHistory.bind(database: resources.database)
@@ -388,6 +399,7 @@ final class MeowfilmAssembly: ObservableObject {
             guard current.canLeave || current.hasSystemOwner else {
                 throw current.actionError ?? FilmPlaybackError(code: "MEDIA_UNAVAILABLE")
             }
+            if filmPlayback === current { filmPlayback = nil }
         }
         try Task.checkCancellation()
         guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
@@ -401,6 +413,7 @@ final class MeowfilmAssembly: ObservableObject {
             guard model.canLeave || allowSystemOwner && model.hasSystemOwner else {
                 throw model.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")
             }
+            if filmPlayback === model { filmPlayback = nil }
         }
     }
 
@@ -424,7 +437,9 @@ final class MeowfilmAssembly: ObservableObject {
         let resources = resources, pendingScripts = scriptStartup, lease = lease
         let pendingStartup = startup
         let filmSearch = filmSearch, films = filmModels, filmMedia = filmMedia, filmBackground = filmBackground
+        filmPlayback = nil
         let novel = novel
+        let filmImages = initializedFilmImages
         stopping = Task { [weak self] in
             // Stop the producer before waiting for its borrowers. Only this App
             // owner confirms embedded Node exit; borrowers drain local work.
@@ -454,7 +469,8 @@ final class MeowfilmAssembly: ObservableObject {
             }
             await pendingScripts?.value
             await service?.close()
-            if resources != nil { await MusicArtworkImages.shared.close() }
+            await filmImages?.close()
+            await self?.musicImages.close()
             do { try await resources?.musicScripts.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
             if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete,
@@ -522,7 +538,8 @@ final class MeowfilmAssembly: ObservableObject {
         let closeMusic = closeMusic, service = service, resources = resources, lease = lease
         let pendingScripts = scriptStartup, stopping = stopping, filmSearch = filmSearch
         let film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
-        let closeNovel = closeNovel
+        let closeNovel = closeNovel, musicAccessGeneration = musicAccessGeneration
+        let musicImages = musicImages, filmImages = initializedFilmImages
         Task { @MainActor in
             if let stopping { await stopping.value; return }
             async let executor: Void? = resources?.scriptSession.close()
@@ -549,7 +566,8 @@ final class MeowfilmAssembly: ObservableObject {
             }
             await pendingScripts?.value
             await service?.close()
-            if resources != nil { await MusicArtworkImages.shared.close() }
+            await filmImages?.close()
+            await musicImages.close()
             try? await resources?.musicScripts.close()
             if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete {
                 NSLog("Music account shutdown incomplete")
