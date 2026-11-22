@@ -17,15 +17,6 @@ CREATE TABLE music_library_accounts (
     PRIMARY KEY (scope, platform)
 ) STRICT;
 
-CREATE TABLE music_library_status_issues (
-    scope TEXT NOT NULL REFERENCES music_library_state(scope) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    platform TEXT,
-    collection_id TEXT,
-    code TEXT NOT NULL,
-    PRIMARY KEY (scope, position)
-) STRICT;
-
 CREATE TABLE music_collections (
     scope TEXT NOT NULL REFERENCES music_library_state(scope) ON DELETE CASCADE,
     collection_id TEXT NOT NULL,

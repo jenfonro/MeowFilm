@@ -47,8 +47,8 @@ function maintain() {
   try {
     lease = enter(true, 0);
     verifyFiles();
-    query('PRAGMA wal_checkpoint(PASSIVE)');
-    if (Number(db.prepare('PRAGMA freelist_count').get().freelist_count) >= 256)
+    const ckpt = query('PRAGMA wal_checkpoint(PASSIVE)');
+    if (ckpt[0]?.busy === 0 && Number(db.prepare('PRAGMA freelist_count').get().freelist_count) >= 256)
       db.exec('PRAGMA incremental_vacuum(128)');
   } catch (error) {
     const err = code(error);
@@ -158,7 +158,7 @@ if (isReader) {
     parentPort.close();
   }
 } else {
-  let initializing, validating;
+  let initializing, validating, createdFresh = false, committedSchema = false;
   try {
     initializing = acquire(dirname(path) + '/initialize.lock', true, 5000);
     validating = enter(false, 5000);
@@ -169,7 +169,10 @@ if (isReader) {
     }
     if (existing?.size === 0) fail('STORAGE_CORRUPT');
     if (!existing && !initialize) fail('STORAGE_SCHEMA');
-    if (!existing) closeSync(openSync(path, 'wx', 0o600));
+    if (!existing) {
+      closeSync(openSync(path, 'wx', 0o600));
+      createdFresh = true;
+    }
     db = new DatabaseSync(path, { enableForeignKeyConstraints: true, allowExtension: false });
     if (process.platform !== 'win32') chmodSync(path, 0o600);
     const engine = db.prepare('SELECT sqlite_version() AS version').get().version.split('.').map(Number);
@@ -202,6 +205,7 @@ if (isReader) {
         db.prepare('INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)').run(identity.hash);
         db.exec(`PRAGMA application_id=${identity.applicationId}; PRAGMA user_version=${identity.version};`);
         db.exec('COMMIT');
+        committedSchema = true;
       } catch (error) { if (db.isTransaction) db.exec('ROLLBACK'); throw error; }
     }
     const stored = db.prepare('SELECT schema_hash FROM storage_identity WHERE singleton=1').get();
@@ -218,6 +222,11 @@ if (isReader) {
   } catch (error) {
     statementCache.clear();
     try { db?.close(); } catch {}
+    if (createdFresh && !committedSchema) {
+      for (const suffix of ['', '-wal', '-shm', '-journal']) {
+        try { unlinkSync(path + suffix); } catch {}
+      }
+    }
     parentPort.postMessage({ id: 0, code: code(error) });
     parentPort.close();
   } finally { validating?.release(); initializing?.release(); }
@@ -245,6 +254,8 @@ parentPort.on('message', async ({ id, input }) => {
       lease = enter(true);
       verifyFiles();
     }
+    const isWrite = input.kind === 'execute' || input.kind === 'transaction';
+    const beforeChanges = isWrite ? prepare('SELECT total_changes() AS n').get().n : 0n;
     let result;
     if (input.kind === 'query') result = query(input.sql, input.params, input.maxRows);
     else if (input.kind === 'execute') result = transaction([input])[0];
@@ -273,8 +284,9 @@ parentPort.on('message', async ({ id, input }) => {
       }
     }
     else fail('INVALID_REQUEST');
+    const changed = isWrite && prepare('SELECT total_changes() AS n').get().n !== beforeChanges;
     parentPort.postMessage({ id, value: result });
-    if (input.kind === 'execute' || input.kind === 'transaction') ++commits;
+    if (changed) ++commits;
   } catch (error) {
     parentPort.postMessage({ id, code: code(error) });
   } finally {

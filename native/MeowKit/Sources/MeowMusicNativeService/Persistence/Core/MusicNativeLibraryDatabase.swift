@@ -162,17 +162,21 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
     }
     func sourceOwners(keys: Set<String>) throws -> [String: String] {
         try read { db in
-            var result: [String: String] = [:]
             let values = Array(keys)
-            for start in stride(from: 0, to: values.count, by: 500) {
-                let batch = Array(values[start..<min(start + 500, values.count)])
-                let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
-                try db.scan("SELECT source_key,song_id FROM music_song_sources WHERE source_key IN (\(placeholders))",
-                            batch.map(SQLiteValue.text)) { row in
-                    result[try row.text(0)] = try row.text(1)
+            guard !values.isEmpty else { return [:] }
+            let queryBatches: (SQLiteConnection) throws -> [String: String] = { conn in
+                var result: [String: String] = [:]
+                for start in stride(from: 0, to: values.count, by: 500) {
+                    let batch = Array(values[start..<min(start + 500, values.count)])
+                    let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+                    try conn.scan("SELECT source_key,song_id FROM music_song_sources WHERE source_key IN (\(placeholders))",
+                                  batch.map(SQLiteValue.text)) { row in
+                        result[try row.text(0)] = try row.text(1)
+                    }
                 }
+                return result
             }
-            return result
+            return values.count > 500 ? try SQLiteDatabase.readSnapshot(db, queryBatches) : try queryBatches(db)
         }
     }
     func candidateIDs(lookupKey: String) throws -> [String] {
@@ -180,17 +184,21 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
     }
     func candidateIDs(lookupKeys: Set<String>) throws -> [String: [String]] {
         try read { db in
-            var result: [String: [String]] = [:]
             let values = Array(lookupKeys)
-            for start in stride(from: 0, to: values.count, by: 500) {
-                let batch = Array(values[start..<min(start + 500, values.count)])
-                let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
-                try db.scan("SELECT lookup_key,song_id FROM music_songs WHERE lookup_key IN (\(placeholders)) ORDER BY lookup_key,song_id",
-                            batch.map(SQLiteValue.text)) { row in
-                    result[try row.text(0), default: []].append(try row.text(1))
+            guard !values.isEmpty else { return [:] }
+            let queryBatches: (SQLiteConnection) throws -> [String: [String]] = { conn in
+                var result: [String: [String]] = [:]
+                for start in stride(from: 0, to: values.count, by: 500) {
+                    let batch = Array(values[start..<min(start + 500, values.count)])
+                    let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+                    try conn.scan("SELECT lookup_key,song_id FROM music_songs WHERE lookup_key IN (\(placeholders)) ORDER BY lookup_key,song_id",
+                                  batch.map(SQLiteValue.text)) { row in
+                        result[try row.text(0), default: []].append(try row.text(1))
+                    }
                 }
+                return result
             }
-            return result
+            return values.count > 500 ? try SQLiteDatabase.readSnapshot(db, queryBatches) : try queryBatches(db)
         }
     }
     func querySongIDs(query: String) throws -> [String] {

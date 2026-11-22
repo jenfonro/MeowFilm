@@ -195,7 +195,7 @@ function relations(value, previous, stored) {
     ['film_group_members',['group_id','position','member_identity'],['group_id','position'],retained('film_group_members',value.groups,previous.groups,
       row => row.members.map((key,index) => [row.id,index,key]))],
     ...(value.preferences ? [
-      ['film_preferences',['singleton','ios_auto_prepare','metadata_view_provider','row_revision'],['singleton'],[[1,Number(value.preferences.iosAutoPrepare),value.preferences.metadataViewProvider,1]]],
+      ['film_preferences',['singleton','ios_auto_prepare','metadata_view_provider','row_revision'],['singleton'],[[1,Number(value.preferences.iosAutoPrepare),value.preferences.metadataViewProvider,(stored.find(item => item[0] === 'film_preferences')?.[3]?.[0]?.[3] ?? 0) + 1]]],
       ['film_preference_items',['list_kind','position','item_value'],['list_kind','position'],preferenceLists.flatMap(key => value.preferences[key].map((item,index) => [key,index,item]))],
     ] : []),
   ].map(relation => {
@@ -299,7 +299,7 @@ export function createPlaybackLibrary({dataRoot,nativePreferences} = {}) {
         const changes = proposed.flatMap(([table,columns,keys,rows],index) => reconcile(table,columns,keys,stored[index][3],rows));
         if (!changes.length) return snapshot();
         const gate = revision ? {sql:"UPDATE owner_revisions SET revision=revision+1,receipt=? WHERE owner='film.library' AND revision=?",params:[randomUUID(),revision],expectChanges:1}
-          : {sql:'INSERT INTO owner_revisions VALUES(?,?,?)',params:['film.library',1,randomUUID()],expectChanges:1};
+          : {sql:'INSERT INTO owner_revisions(owner,revision,receipt) VALUES(?,?,?)',params:['film.library',1,randomUUID()],expectChanges:1};
         try { await database.transaction([gate,...changes]); }
         catch (error) {
           let current;
@@ -321,7 +321,7 @@ export function createPlaybackLibrary({dataRoot,nativePreferences} = {}) {
         sql:`INSERT INTO film_history(${historyColumns.join(',')}) VALUES(${values.map(() => '?').join(',')})`,params:values,expectChanges:1};
       const members = value.playbackTarget.members ?? [];
       await database.transaction([statement,{sql:'DELETE FROM film_history_target_members WHERE target_id=?',params:[value.targetId]},
-        ...members.map((row,index) => ({sql:'INSERT INTO film_history_target_members VALUES(?,?,?,?,?)',
+        ...members.map((row,index) => ({sql:'INSERT INTO film_history_target_members(target_id,position,source_key,detail_id_kind,detail_id_text) VALUES(?,?,?,?,?)',
           params:[value.targetId,index,row.sourceKey,detailKind(row.detailId),detailText(row.detailId)]}))]);
     });},
     removeHistory(targetId) {return serialize(() => database.execute('DELETE FROM film_history' +

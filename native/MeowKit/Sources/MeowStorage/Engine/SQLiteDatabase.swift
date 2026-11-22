@@ -687,20 +687,34 @@ public final class SQLiteDatabase: @unchecked Sendable {
             guard existing != nil || sidecar == nil else { throw SQLiteStorageError.corrupt }
         }
         guard existing?.st_size != 0 else { throw SQLiteStorageError.corrupt }
+        var createdFresh = false
+        var committedSchema = false
+        func cleanupFailedCreation() {
+            guard createdFresh && !committedSchema else { return }
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                _ = unlink(url.path + suffix)
+            }
+        }
         if existing == nil {
             let created = url.path.withCString { openFile($0, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) }
             guard created >= 0 else { throw errno == ENOSPC ? SQLiteStorageError.full : SQLiteStorageError.io }
-            guard closeFile(created) == 0 else { throw SQLiteStorageError.io }
+            createdFresh = true
+            guard closeFile(created) == 0 else {
+                cleanupFailedCreation()
+                throw SQLiteStorageError.io
+            }
         }
         var writeHandle: OpaquePointer?
         let openStatus = sqlite3_open_v2(url.path, &writeHandle,
             SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
         guard openStatus == SQLITE_OK, let writeHandle else {
             if let writeHandle { sqlite3_close_v2(writeHandle) }
+            cleanupFailedCreation()
             throw SQLiteConnection.failure(openStatus)
         }
         guard chmod(url.path, 0o600) == 0 else {
             sqlite3_close_v2(writeHandle)
+            cleanupFailedCreation()
             throw SQLiteStorageError.io
         }
         let writeDB = SQLiteConnection(writeHandle, isReadOnly: false)
@@ -748,6 +762,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
                     _ = try db.query("PRAGMA application_id=\(Self.applicationID)")
                     _ = try db.query("PRAGMA user_version=\(Self.schemaVersion)")
                 }
+                committedSchema = true
             }
             try SQLiteSchema.verifyStructure(of: writeDB, against: definition)
 
@@ -787,6 +802,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             readDB?.releaseStatements()
             if let readHandle { sqlite3_close_v2(readHandle) }
             sqlite3_close_v2(writeHandle)
+            cleanupFailedCreation()
             throw error
         }
     }
@@ -939,10 +955,12 @@ public final class SQLiteDatabase: @unchecked Sendable {
     /// re-entrantly inside a write transaction; otherwise they use the read lane.
     public func readSync<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
         if DispatchQueue.getSpecific(key: writeQueueKey) != nil {
+            if let failure = currentMaintenanceFailure() { throw failure }
             guard let connection = writeConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }
         if DispatchQueue.getSpecific(key: readQueueKey) != nil {
+            if let failure = currentMaintenanceFailure() { throw failure }
             guard let connection = readConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }
@@ -958,6 +976,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             throw SQLiteStorageError.readOnly
         }
         if DispatchQueue.getSpecific(key: writeQueueKey) != nil {
+            if let failure = currentMaintenanceFailure() { throw failure }
             guard let connection = writeConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }

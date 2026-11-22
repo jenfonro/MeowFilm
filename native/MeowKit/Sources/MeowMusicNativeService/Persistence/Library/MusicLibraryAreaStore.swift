@@ -26,7 +26,7 @@ enum MusicLibraryAreaStore {
         ) { (try $0.text(0), .string(try $0.text(1))) }
 
         let statusIssues: [MJ] = try db.query(
-            "SELECT platform,collection_id,code FROM music_library_status_issues WHERE scope=? ORDER BY position",
+            "SELECT platform,collection_id,code FROM ios_music_library_status_issues WHERE scope=? ORDER BY position",
             [.text(scope)]
         ) { c in
             var fields: [(String, MJ)] = []
@@ -242,11 +242,11 @@ enum MusicLibraryAreaStore {
 
         // Incremental diff for status issues
         if previous == nil || !MusicPersistenceHelpers.semanticEquals(status["issues"], prevLib?["status"]["issues"] ?? .null) {
-            try db.execute("DELETE FROM music_library_status_issues WHERE scope=?", [.text(scope)])
+            try db.execute("DELETE FROM ios_music_library_status_issues WHERE scope=?", [.text(scope)])
             for (index, issue) in status["issues"].array.enumerated() {
                 let colID = issue["collectionID"].isString ? issue["collectionID"] : issue["collectionId"]
                 try db.execute(
-                    "INSERT INTO music_library_status_issues(scope,position,platform,collection_id,code) VALUES(?,?,?,?,?)",
+                    "INSERT INTO ios_music_library_status_issues(scope,position,platform,collection_id,code) VALUES(?,?,?,?,?)",
                     [
                         .text(scope), .integer(index),
                         MusicPersistenceHelpers.optionalNonEmpty(issue["platform"]),

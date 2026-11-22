@@ -146,7 +146,7 @@ export class SourceStorage {
   }
   async load() {
     await this.db.ready;
-    await this.db.execute('INSERT INTO owner_revisions VALUES(?,1,?) ON CONFLICT DO NOTHING',
+    await this.db.execute('INSERT INTO owner_revisions(owner,revision,receipt) VALUES(?,1,?) ON CONFLICT DO NOTHING',
       [this.owner, 'initial']);
     const tables = Object.keys(relations).filter(table => !this.native || table.startsWith('source_private_'));
     const snapshot = await this.db.snapshot([

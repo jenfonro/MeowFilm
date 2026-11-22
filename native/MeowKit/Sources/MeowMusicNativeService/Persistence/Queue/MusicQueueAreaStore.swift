@@ -168,7 +168,7 @@ enum MusicQueueAreaStore {
 
     private static func readSimilar(_ db: SQLiteConnection, scope: String) throws -> MJ? {
         guard let row = try db.queryOne(
-            "SELECT \(similarSelectColumns) FROM music_queue_similar_state WHERE scope=?",
+            "SELECT \(similarSelectColumns) FROM ios_music_queue_similar_state WHERE scope=?",
             [.text(scope)],
             map: { c in
                 (
@@ -194,7 +194,7 @@ enum MusicQueueAreaStore {
 
         var lists: [String: [String]] = [:]
         try db.scan(
-            "SELECT list_kind,item_value FROM music_queue_similar_list_items WHERE scope=? ORDER BY list_kind,position",
+            "SELECT list_kind,item_value FROM ios_music_queue_similar_list_items WHERE scope=? ORDER BY list_kind,position",
             [.text(scope)]
         ) { c in
             lists[try c.text(0), default: []].append(try c.text(1))
@@ -203,7 +203,7 @@ enum MusicQueueAreaStore {
         let returnQueue: MJ
         if row.hasReturnQueue {
             let returnEntries: [MJ] = try db.query(
-                "SELECT \(entrySelectColumns) FROM music_queue_similar_return_entries WHERE scope=? ORDER BY position",
+                "SELECT \(entrySelectColumns) FROM ios_music_queue_similar_return_entries WHERE scope=? ORDER BY position",
                 [.text(scope)]
             ) { entry in
                 var fields: [(String, MJ)] = [
@@ -228,14 +228,14 @@ enum MusicQueueAreaStore {
 
         var batchEntries: [String: [String]] = [:]
         try db.scan(
-            "SELECT batch_id,entry_id FROM music_queue_similar_batch_entries WHERE scope=? ORDER BY batch_id,position",
+            "SELECT batch_id,entry_id FROM ios_music_queue_similar_batch_entries WHERE scope=? ORDER BY batch_id,position",
             [.text(scope)]
         ) { c in
             batchEntries[try c.text(0), default: []].append(try c.text(1))
         }
 
         let batches: [MJ] = try db.query(
-            "SELECT batch_id,based_on_song_id,based_on_title,provider FROM music_queue_similar_batches " +
+            "SELECT batch_id,based_on_song_id,based_on_title,provider FROM ios_music_queue_similar_batches " +
             "WHERE scope=? ORDER BY position",
             [.text(scope)]
         ) { batch in
@@ -282,7 +282,7 @@ enum MusicQueueAreaStore {
 
     private static func writeSimilar(_ db: SQLiteConnection, scope: String, similar: MJ) throws {
         guard similar.isObject else {
-            try db.execute("DELETE FROM music_queue_similar_state WHERE scope=?", [.text(scope)])
+            try db.execute("DELETE FROM ios_music_queue_similar_state WHERE scope=?", [.text(scope)])
             return
         }
         let pCtx = similar["providerContext"]
@@ -315,19 +315,19 @@ enum MusicQueueAreaStore {
             hasReturn ? MusicPersistenceHelpers.optionalNonEmpty(returnQueue["currentId"]) : .null
         ] + returnSourceRec.sqliteValues
 
-        try db.upsert("music_queue_similar_state", columns: cols, values: vals, key: ["scope"])
+        try db.upsert("ios_music_queue_similar_state", columns: cols, values: vals, key: ["scope"])
 
-        try db.execute("DELETE FROM music_queue_similar_return_entries WHERE scope=?", [.text(scope)])
+        try db.execute("DELETE FROM ios_music_queue_similar_return_entries WHERE scope=?", [.text(scope)])
         if hasReturn {
             for (index, entry) in returnQueue["entries"].array.enumerated() {
                 let rowVals: [SQLiteValue] = [
                     .text(scope), .text(entry["id"].string), .integer(index), .text(entry["songId"].string)
                 ] + MusicPlayContextRecord.from(entry["context"]).sqliteValues
-                try db.upsert("music_queue_similar_return_entries", columns: entryColumns, values: rowVals, key: ["scope", "entry_id"])
+                try db.upsert("ios_music_queue_similar_return_entries", columns: entryColumns, values: rowVals, key: ["scope", "entry_id"])
             }
         }
 
-        try db.execute("DELETE FROM music_queue_similar_list_items WHERE scope=?", [.text(scope)])
+        try db.execute("DELETE FROM ios_music_queue_similar_list_items WHERE scope=?", [.text(scope)])
         let listGroups: [(String, [String])] = [
             ("return_priority", hasReturn ? returnQueue["priority"].strings : []),
             ("return_history", hasReturn ? returnQueue["history"].strings : []),
@@ -337,17 +337,17 @@ enum MusicQueueAreaStore {
         for (kind, items) in listGroups {
             for (index, item) in items.enumerated() {
                 try db.execute(
-                    "INSERT INTO music_queue_similar_list_items(scope,list_kind,position,item_value) VALUES(?,?,?,?)",
+                    "INSERT INTO ios_music_queue_similar_list_items(scope,list_kind,position,item_value) VALUES(?,?,?,?)",
                     [.text(scope), .text(kind), .integer(index), .text(item)]
                 )
             }
         }
 
-        try db.execute("DELETE FROM music_queue_similar_batches WHERE scope=?", [.text(scope)])
+        try db.execute("DELETE FROM ios_music_queue_similar_batches WHERE scope=?", [.text(scope)])
         for (index, batch) in similar["batches"].array.enumerated() {
             let batchID = batch["id"].string
             try db.execute(
-                "INSERT INTO music_queue_similar_batches(scope,batch_id,position,based_on_song_id,based_on_title,provider) " +
+                "INSERT INTO ios_music_queue_similar_batches(scope,batch_id,position,based_on_song_id,based_on_title,provider) " +
                 "VALUES(?,?,?,?,?,?)",
                 [
                     .text(scope), .text(batchID), .integer(index),
@@ -358,7 +358,7 @@ enum MusicQueueAreaStore {
             )
             for (eIndex, entryID) in batch["entryIds"].strings.enumerated() {
                 try db.execute(
-                    "INSERT INTO music_queue_similar_batch_entries(scope,batch_id,position,entry_id) VALUES(?,?,?,?)",
+                    "INSERT INTO ios_music_queue_similar_batch_entries(scope,batch_id,position,entry_id) VALUES(?,?,?,?)",
                     [.text(scope), .text(batchID), .integer(eIndex), .text(entryID)]
                 )
             }
