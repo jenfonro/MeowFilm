@@ -68,10 +68,11 @@ extension MusicNativeLibraryEngine {
 
 /// The music owner borrows the App database's off-main lane. It never opens a
 /// second SQLite file or closes the shared connection. Songs, relationships and
-/// control columns settle in the same transaction as the exact commit receipt.
+/// control columns settle in the same transaction as the canonical `owner_revisions` receipt.
 public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchecked Sendable {
     private let database: SQLiteDatabase
     private let scope: String
+    private let ownerKey: String
     private let stateLock = NSLock()
     private var closed = false
     private var active = false
@@ -79,7 +80,9 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
     private var cachedAreas: [String: MJ] = [:]
 
     public init(database: SQLiteDatabase, scope: String = "device") {
-        self.database = database; self.scope = scope
+        self.database = database
+        self.scope = scope
+        self.ownerKey = "music.library:\(scope)"
     }
 
     private static func readArea(_ area: String, from db: SQLiteConnection, scope: String) throws -> MJ? {
@@ -111,12 +114,10 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
         }
     }
     private func revision(_ db: SQLiteConnection) throws -> MusicNativeLibraryRevision {
-        guard let row = try db.query("SELECT revision,receipt FROM music_owner_state WHERE scope=?", [.text(scope)]).first else {
-            return .init(revision: 0, receipt: "")
-        }
-        let revision = try row.integer("revision"), receipt = try row.text("receipt")
-        try musicRequire(revision == 0 ? receipt.isEmpty : UUID(uuidString: receipt) != nil, .corruptDocument)
-        return .init(revision: revision, receipt: receipt)
+        let rev = try db.ownerRevision(ownerKey)
+        guard let revisionInt = Int(exactly: rev.revision) else { throw MusicServiceError.corruptDocument }
+        try musicRequire(revisionInt == 0 ? rev.receipt.isEmpty : UUID(uuidString: rev.receipt) != nil, .corruptDocument)
+        return .init(revision: revisionInt, receipt: rev.receipt)
     }
     func readRevision() throws -> MusicNativeLibraryRevision { try read(revision) }
     func readSnapshot() throws -> MusicNativeLibrarySnapshot {
@@ -154,10 +155,10 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
         try read { db in try SQLiteDatabase.readSnapshot(db) { try readSong($0, id: id) } }
     }
     func containsSong(id: String) throws -> Bool {
-        try read { try !$0.query("SELECT song_id FROM music_songs WHERE song_id=?", [.text(id)]).isEmpty }
+        try read { try $0.queryOne("SELECT 1 FROM music_songs WHERE song_id=?", [.text(id)]) { _ in true } != nil }
     }
     func sourceOwner(key: String) throws -> String? {
-        try read { try $0.query("SELECT song_id FROM music_song_sources WHERE source_key=?", [.text(key)]).first?.text("song_id") }
+        try read { try $0.queryOne("SELECT song_id FROM music_song_sources WHERE source_key=?", [.text(key)]) { try $0.text(0) } }
     }
     func sourceOwners(keys: Set<String>) throws -> [String: String] {
         try read { db in
@@ -166,17 +167,16 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             for start in stride(from: 0, to: values.count, by: 500) {
                 let batch = Array(values[start..<min(start + 500, values.count)])
                 let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
-                for row in try db.query("SELECT source_key,song_id FROM music_song_sources WHERE source_key IN (\(placeholders))",
-                    batch.map(SQLiteValue.text)) {
-                    result[try row.text("source_key")] = try row.text("song_id")
+                try db.scan("SELECT source_key,song_id FROM music_song_sources WHERE source_key IN (\(placeholders))",
+                            batch.map(SQLiteValue.text)) { row in
+                    result[try row.text(0)] = try row.text(1)
                 }
             }
             return result
         }
     }
     func candidateIDs(lookupKey: String) throws -> [String] {
-        try read { try $0.query("SELECT song_id FROM music_songs WHERE lookup_key=? ORDER BY song_id", [.text(lookupKey)])
-            .map { try $0.text("song_id") } }
+        try read { try $0.query("SELECT song_id FROM music_songs WHERE lookup_key=? ORDER BY song_id", [.text(lookupKey)]) { try $0.text(0) } }
     }
     func candidateIDs(lookupKeys: Set<String>) throws -> [String: [String]] {
         try read { db in
@@ -185,20 +185,19 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             for start in stride(from: 0, to: values.count, by: 500) {
                 let batch = Array(values[start..<min(start + 500, values.count)])
                 let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
-                try db.rows("SELECT lookup_key,song_id FROM music_songs WHERE lookup_key IN (\(placeholders)) ORDER BY lookup_key,song_id",
-                    batch.map(SQLiteValue.text)) { row in
-                    result[try row.text("lookup_key"), default: []].append(try row.text("song_id"))
+                try db.scan("SELECT lookup_key,song_id FROM music_songs WHERE lookup_key IN (\(placeholders)) ORDER BY lookup_key,song_id",
+                            batch.map(SQLiteValue.text)) { row in
+                    result[try row.text(0), default: []].append(try row.text(1))
                 }
             }
             return result
         }
     }
     func querySongIDs(query: String) throws -> [String] {
-        try read { try $0.query("SELECT song_id FROM music_songs WHERE search_query=? ORDER BY song_id", [.text(query)])
-            .map { try $0.text("song_id") } }
+        try read { try $0.query("SELECT song_id FROM music_songs WHERE search_query=? ORDER BY song_id", [.text(query)]) { try $0.text(0) } }
     }
     func allSongIDs() throws -> [String] {
-        try read { try $0.query("SELECT song_id FROM music_songs ORDER BY song_id").map { try $0.text("song_id") } }
+        try read { try $0.query("SELECT song_id FROM music_songs ORDER BY song_id") { try $0.text(0) } }
     }
     func withTransaction<T>(commit: (_ action: () throws -> Void) throws -> Void,
                             _ body: (any MusicNativeLibraryWriting) throws -> T) throws -> T {
@@ -220,10 +219,14 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
                     let result = try body(writer)
                     if writer.changed {
                         try musicRequire(before.revision < 9_007_199_254_740_991, .limit)
-                        let next = MusicNativeLibraryRevision(revision: before.revision + 1, receipt: UUID().uuidString)
-                        try db.upsert("music_owner_state", columns: ["scope", "revision", "receipt"],
-                            values: [.text(scope), .integer(next.revision), .text(next.receipt)], key: ["scope"])
-                        after = next
+                        let nextReceipt = UUID().uuidString
+                        let committed = try db.commitOwnerRevision(
+                            ownerKey,
+                            expectedRevision: Int64(before.revision),
+                            expectedReceipt: before.receipt,
+                            operationID: nextReceipt
+                        )
+                        after = MusicNativeLibraryRevision(revision: Int(committed.revision), receipt: committed.receipt)
                     }
                     return result
                 }
@@ -285,15 +288,15 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
         func readSnapshot() throws -> MusicNativeLibrarySnapshot { try database.readSnapshot() }
         func song(id: String) throws -> MJ? { try database.readSong(connection, id: id) }
         func containsSong(id: String) throws -> Bool {
-            try !connection.query("SELECT song_id FROM music_songs WHERE song_id=?", [.text(id)]).isEmpty
+            try connection.queryOne("SELECT 1 FROM music_songs WHERE song_id=?", [.text(id)]) { _ in true } != nil
         }
         func sourceOwner(key: String) throws -> String? {
             if let owner = resolvedSourceOwners[key] { return owner }
             if missingSourceOwners.contains(key) { return nil }
-            let owner = try connection.query(
+            let owner = try connection.queryOne(
                 "SELECT song_id FROM music_song_sources WHERE source_key=?",
                 [.text(key)]
-            ).first?.text("song_id")
+            ) { try $0.text(0) }
             if let owner { resolvedSourceOwners[key] = owner }
             else { missingSourceOwners.insert(key) }
             return owner
@@ -304,9 +307,9 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             for start in stride(from: 0, to: values.count, by: 500) {
                 let batch = Array(values[start..<min(start + 500, values.count)])
                 let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
-                for row in try connection.query("SELECT source_key,song_id FROM music_song_sources WHERE source_key IN (\(placeholders))",
-                    batch.map(SQLiteValue.text)) {
-                    resolvedSourceOwners[try row.text("source_key")] = try row.text("song_id")
+                try connection.scan("SELECT source_key,song_id FROM music_song_sources WHERE source_key IN (\(placeholders))",
+                                    batch.map(SQLiteValue.text)) { row in
+                    resolvedSourceOwners[try row.text(0)] = try row.text(1)
                 }
             }
             missingSourceOwners.formUnion(unresolved.subtracting(resolvedSourceOwners.keys))
@@ -317,7 +320,7 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             let rows = try connection.query(
                 "SELECT song_id FROM music_songs WHERE lookup_key=? ORDER BY song_id",
                 [.text(lookupKey)]
-            ).map { try $0.text("song_id") }
+            ) { try $0.text(0) }
             resolvedCandidateKeys.insert(lookupKey); candidateRows[lookupKey] = rows
             return rows
         }
@@ -327,9 +330,9 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             for start in stride(from: 0, to: values.count, by: 500) {
                 let batch = Array(values[start..<min(start + 500, values.count)])
                 let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
-                try connection.rows("SELECT lookup_key,song_id FROM music_songs WHERE lookup_key IN (\(placeholders)) ORDER BY lookup_key,song_id",
-                    batch.map(SQLiteValue.text)) { row in
-                    candidateRows[try row.text("lookup_key"), default: []].append(try row.text("song_id"))
+                try connection.scan("SELECT lookup_key,song_id FROM music_songs WHERE lookup_key IN (\(placeholders)) ORDER BY lookup_key,song_id",
+                                    batch.map(SQLiteValue.text)) { row in
+                    candidateRows[try row.text(0), default: []].append(try row.text(1))
                 }
             }
             resolvedCandidateKeys.formUnion(unresolved)
@@ -339,10 +342,10 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             try connection.query(
                 "SELECT song_id FROM music_songs WHERE search_query=? ORDER BY song_id",
                 [.text(query)]
-            ).map { try $0.text("song_id") }
+            ) { try $0.text(0) }
         }
         func allSongIDs() throws -> [String] {
-            try connection.query("SELECT song_id FROM music_songs ORDER BY song_id").map { try $0.text("song_id") }
+            try connection.query("SELECT song_id FROM music_songs ORDER BY song_id") { try $0.text(0) }
         }
         func saveArea(_ area: String, value: MJ) throws {
             try check()
@@ -361,7 +364,7 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
                     previous = try MusicNativeLibraryDatabase.readArea(area, from: connection, scope: database.scope)
                 }
             }
-            if let previous, value.stable == previous.stable { return }
+            if let previous, MusicPersistenceHelpers.semanticEquals(value, previous) { return }
             try MusicNativeLibraryDatabase.writeArea(area, to: connection, scope: database.scope, value: value)
             areaValues[area] = value
             changed = true
@@ -371,7 +374,7 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             let id = song["songId"].string
             try MusicLibraryValidation.validateSong(song, id: id)
             let old = try MusicSongStore.read(connection, id: id)
-            if let old, song.stable == old.stable { return }
+            if let old, MusicPersistenceHelpers.semanticEquals(song, old) { return }
             let sourceKeys = Set(song["sources"].array.map { $0["sourceKey"].string })
             try musicRequire(old?["sources"].array.allSatisfy { sourceKeys.contains($0["sourceKey"].string) } ?? true, .nativeIDConflict)
             if let old, old["baselineDuration"] != .null {
@@ -382,9 +385,10 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             }
             let evidence = MusicModel.descriptor(song)
             let query = MusicRecordingIdentity.normalize(song["title"].string + " " + song["artist"].string)
-            try MusicSongStore.write(
+            try MusicSongStore.writeIncremental(
                 connection,
                 song: song,
+                previous: old,
                 id: id,
                 lookupKey: evidence.lookupKey,
                 searchQuery: query,

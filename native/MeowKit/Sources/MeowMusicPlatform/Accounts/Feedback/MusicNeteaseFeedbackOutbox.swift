@@ -40,28 +40,28 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             occurredAt = report.occurredAt; reason = report.reason?.rawValue
             self.startConfirmed = startConfirmed
         }
-        init(row: SQLiteRow) throws {
-            guard let phase = Phase(rawValue: try row.text("phase")),
-                  let state = State(rawValue: try row.text("state")) else {
+        init(cursor: SQLiteCursor) throws {
+            guard let phase = Phase(rawValue: try cursor.text(4)),
+                  let state = State(rawValue: try cursor.text(15)) else {
                 throw SQLiteStorageError.invalidValue
             }
-            self.id = try row.uuid("id")
-            self.instance = try row.uuid("instance")
-            self.scope = try row.text("scope")
-            self.generation = try row.integer("generation")
+            self.id = try cursor.uuid(0)
+            self.instance = try cursor.uuid(1)
+            self.scope = try cursor.text(2)
+            self.generation = try cursor.integer(3)
             self.phase = phase
-            self.nativeID = try row.text("nativeID")
-            self.source = try row.text("source")
-            self.sourceID = try row.text("sourceID")
-            self.algorithm = try row.text("algorithm")
-            self.heartbeat = try row.bool("heartbeat")
-            self.listened = try row.double("listened")
-            self.media = try row.double("media")
-            self.rate = try row.double("rate")
-            self.occurredAt = try row.double("occurredAt")
-            self.reason = try row.optionalText("reason")
+            self.nativeID = try cursor.text(5)
+            self.source = try cursor.text(6)
+            self.sourceID = try cursor.text(7)
+            self.algorithm = try cursor.text(8)
+            self.heartbeat = try cursor.bool(9)
+            self.listened = try cursor.double(10)
+            self.media = try cursor.double(11)
+            self.rate = try cursor.double(12)
+            self.occurredAt = try cursor.double(13)
+            self.reason = try cursor.optionalText(14)
             self.state = state
-            self.startConfirmed = try row.bool("startConfirmed")
+            self.startConfirmed = try cursor.bool(16)
         }
         var sqliteValues: [SQLiteValue] {
             [
@@ -106,8 +106,8 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     }
     private let lock = NSLock()
     private let database: SQLiteDatabase?
-    private static let columns = ["id", "instance", "scope", "generation", "phase", "nativeID", "source", "sourceID",
-        "algorithm", "heartbeat", "listened", "media", "rate", "occurredAt", "reason", "state", "startConfirmed"]
+    private static let columns = ["event_id", "instance", "scope", "generation", "phase", "native_id", "source", "source_id",
+        "algorithm", "heartbeat", "listened", "media", "rate", "occurred_at", "reason", "state", "start_confirmed"]
     private var loaded = false, writable = true, frozen = false, armed = false, configured = false
     private var dispatchStopped = false
     private var entries: [Entry] = []
@@ -127,7 +127,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             guard let database else { throw MusicServiceError.storageFailed }
             let rows = draft.map(\.sqliteValues)
             try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
-                try db.reconcile("ios_music_feedback_outbox", columns: Self.columns, key: ["id"], rows: rows)
+                try db.reconcile("ios_music_feedback_outbox", columns: Self.columns, key: ["event_id"], rows: rows)
             }
             entries = draft
         } catch {
@@ -142,9 +142,11 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         do {
             if let database {
                 let saved = try database.readSync { db in
-                    try db.query("SELECT * FROM ios_music_feedback_outbox ORDER BY occurredAt,id").map {
-                        try Entry(row: $0)
-                    }
+                    try db.query(
+                        "SELECT event_id, instance, scope, generation, phase, native_id, source, source_id, " +
+                        "algorithm, heartbeat, listened, media, rate, occurred_at, reason, state, start_confirmed " +
+                        "FROM ios_music_feedback_outbox ORDER BY occurred_at, event_id"
+                    ) { try Entry(cursor: $0) }
                 }
                 guard Set(saved.map(\.id)).count == saved.count, saved.allSatisfy({
                           !$0.scope.isEmpty && $0.generation >= 0 &&

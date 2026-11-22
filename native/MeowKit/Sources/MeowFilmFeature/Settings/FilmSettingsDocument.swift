@@ -57,16 +57,19 @@ public final class FilmSettingsDocument: @unchecked Sendable {
         return result.0
     }
     private func advance(_ db: SQLiteConnection) throws {
-        guard try db.execute("UPDATE ios_settings_blocks SET revision=revision+1 WHERE block=? AND revision<9007199254740991",
-                             [.text(block.rawValue)]) == 1 else { throw FilmSettingsStorageError.conflict }
+        let current = try db.ownerRevision(block.rawValue)
+        guard current.revision < 9_007_199_254_740_991 else { throw FilmSettingsStorageError.conflict }
+        _ = try db.commitOwnerRevision(
+            block.rawValue,
+            expectedRevision: current.revision,
+            expectedReceipt: current.receipt,
+            operationID: UUID().uuidString.lowercased()
+        )
     }
     private func snapshot(_ db: SQLiteConnection) throws -> RuntimeSettingsSnapshot {
-        guard let row = try db.query("SELECT revision FROM ios_settings_blocks WHERE block=?", [.text(block.rawValue)]).first else {
-            throw FilmSettingsStorageError.storageFailure
-        }
-        let revision = try row.integer("revision")
+        let revision = try db.ownerRevision(block.rawValue).revision
         guard (0...9_007_199_254_740_991).contains(revision) else { throw FilmSettingsStorageError.invalidDocument }
-        return .init(document: revision == 0 ? nil : try project(db), revision: Int64(revision))
+        return .init(document: revision == 0 ? nil : try project(db), revision: revision)
     }
     private static func scalar(_ value: RuntimeValue?) throws -> SQLiteValue {
         switch value {
@@ -91,36 +94,45 @@ public final class FilmSettingsDocument: @unchecked Sendable {
         case .blob: throw FilmSettingsStorageError.invalidDocument
         }
     }
-    private static func fields(_ row: SQLiteRow, _ names: [String], booleans: Set<String> = []) throws -> RuntimeObject {
-        RuntimeObject(uniqueKeysWithValues: try names.map { ($0, try value(row, $0, boolean: booleans.contains($0))) })
+    private static func fields(_ row: SQLiteRow, _ mappings: [(wire: String, column: String)], booleans: Set<String> = []) throws -> RuntimeObject {
+        RuntimeObject(uniqueKeysWithValues: try mappings.map { ($0.wire, try value(row, $0.column, boolean: booleans.contains($0.wire))) })
     }
-    private static func saveFlat(_ db: SQLiteConnection, table: String, columns: [String],
+    private static func saveFlat(_ db: SQLiteConnection, table: String, mappings: [(wire: String, column: String)],
                                  fields: RuntimeObject) throws {
-        guard Set(fields.keys) == Set(columns) else { throw FilmSettingsStorageError.invalidDocument }
-        for column in columns {
-            if ["includeAdult", "iosAutoPrepare"].contains(column) {
-                guard case .bool? = fields[column] else { throw FilmSettingsStorageError.invalidDocument }
-            } else if fields[column]?.filmText == nil { throw FilmSettingsStorageError.invalidDocument }
+        let wireNames = Set(mappings.map(\.wire))
+        guard Set(fields.keys) == wireNames else { throw FilmSettingsStorageError.invalidDocument }
+        for mapping in mappings {
+            if ["includeAdult", "iosAutoPrepare"].contains(mapping.wire) {
+                guard case .bool? = fields[mapping.wire] else { throw FilmSettingsStorageError.invalidDocument }
+            } else if fields[mapping.wire]?.filmText == nil { throw FilmSettingsStorageError.invalidDocument }
         }
-        try db.upsert(table, columns: ["singleton"] + columns,
-                      values: [.integer(1)] + columns.map { try scalar(fields[$0]) }, key: ["singleton"])
+        let revision = try db.queryOne("SELECT row_revision FROM \(table) WHERE singleton=1") { try $0.int64(0) } ?? 0
+        guard revision < 9_007_199_254_740_991 else { throw FilmSettingsStorageError.conflict }
+        try db.upsert(
+            table,
+            columns: ["singleton"] + mappings.map(\.column) + ["row_revision"],
+            values: [.integer(1)] + (try mappings.map { try scalar(fields[$0.wire]) }) + [.integer(revision + 1)],
+            key: ["singleton"]
+        )
     }
     private func project(_ db: SQLiteConnection) throws -> RuntimeValue {
         switch block {
         case .tmdb, .douban:
-            let columns = block == .tmdb ? Self.tmdb : Self.douban
-            let table = block == .tmdb ? "ios_tmdb_settings" : "ios_douban_settings"
+            let mappings = block == .tmdb ? Self.tmdb : Self.douban
+            let table = block == .tmdb ? "tmdb_settings" : "douban_settings"
             guard let row = try db.query("SELECT * FROM \(table) WHERE singleton=1").first else {
                 throw FilmSettingsStorageError.invalidDocument
             }
-            return .object(["version": .number(1), "settings": .object(try Self.fields(row, columns, booleans: ["includeAdult"]))])
+            return .object(["version": .number(1), "settings": .object(try Self.fields(row, mappings, booleans: ["includeAdult"]))])
         case .panAccounts:
             var accounts = RuntimeObject()
-            for row in try db.query("SELECT * FROM ios_pan_accounts") {
+            for row in try db.query("SELECT * FROM pan_accounts") {
                 let revision = try row.integer("account_revision")
                 if revision == 0 { continue }
                 var credentials = RuntimeObject()
-                for field in Self.panFields where row[field] != .null { credentials[field] = try Self.value(row, field) }
+                for field in Self.panFields where row[field.column] != .null {
+                    credentials[field.wire] = try Self.value(row, field.column)
+                }
                 accounts[try row.text("provider")] = .object([
                     "revision": .number(Double(revision)),
                     "rowRevision": .number(Double(try row.integer("row_revision"))),
@@ -129,45 +141,60 @@ public final class FilmSettingsDocument: @unchecked Sendable {
             }
             return .object(["version": .number(1), "accounts": .object(accounts)])
         case .catSources:
-            let port = try db.query("SELECT port FROM ios_cat_settings WHERE singleton=1").first?.integer("port") ?? 0
-            let providers = RuntimeObject(uniqueKeysWithValues: try db.query("SELECT * FROM ios_cat_providers ORDER BY provider").map {
-                (try $0.text("provider"), RuntimeValue.bool(try $0.bool("enabled")))
+            let port = try db.queryOne("SELECT port FROM cat_settings WHERE singleton=1") { try $0.integer(0) } ?? 0
+            let providers = RuntimeObject(uniqueKeysWithValues: try db.query("SELECT provider, enabled FROM cat_providers ORDER BY position, provider") {
+                (try $0.text(0), RuntimeValue.bool(try $0.bool(1)))
             })
-            let aliases = try db.query("SELECT * FROM ios_cat_mapping_aliases ORDER BY mapping_ordinal,ordinal")
-            let mappings = try db.query("SELECT * FROM ios_cat_mappings ORDER BY ordinal").map { row in
-                let ordinal = try row.integer("ordinal")
-                return RuntimeValue.object(["provider": .string(try row.text("provider")),
-                    "aliases": .array(try aliases.filter { try $0.integer("mapping_ordinal") == ordinal }.map { .string(try $0.text("alias")) })])
+            var aliasesByMapping: [Int: [RuntimeValue]] = [:]
+            try db.scan("SELECT mapping_position, alias FROM cat_mapping_aliases ORDER BY mapping_position, position") { cursor in
+                aliasesByMapping[try cursor.integer(0), default: []].append(.string(try cursor.text(1)))
             }
-            let scripts = try db.query("SELECT * FROM ios_cat_inputs ORDER BY ordinal,installationId").map {
+            let mappings = try db.query("SELECT position, provider FROM cat_mappings ORDER BY position") { cursor in
+                let position = try cursor.integer(0)
+                return RuntimeValue.object([
+                    "provider": .string(try cursor.text(1)),
+                    "aliases": .array(aliasesByMapping[position] ?? []),
+                ])
+            }
+            let scripts = try db.query("SELECT * FROM cat_scripts ORDER BY position, installation_id").map {
                 RuntimeValue.object(try Self.fields($0, Self.catFields, booleans: ["enabled"]))
             }
             return .object(["version": .number(1), "port": .number(Double(port)),
                             "providers": .object(providers), "mappings": .array(mappings), "scripts": .array(scripts)])
         case .rules:
-            guard try db.query("SELECT rule_group FROM ios_film_rules WHERE rule_group NOT IN " +
-                "('episodeCleanRegexRules','episodeRules','movieRules','aggregateRegexRules') LIMIT 1").isEmpty else {
-                throw FilmSettingsStorageError.invalidDocument
-            }
             var rules = RuntimeObject(uniqueKeysWithValues: Self.ruleGroups.map { ($0, .array([])) })
             for group in Self.ruleGroups {
-                let rows = try db.query("SELECT * FROM ios_film_rules WHERE rule_group=? ORDER BY ordinal", [.text(group)])
-                rules[group] = .array(try rows.map { row in
-                    if group == "episodeCleanRegexRules" || group == "aggregateRegexRules" { return .string(try row.text("pattern")) }
-                    return .object(["pattern": .string(try row.text("pattern")),
-                                    "replace": .string(try row.text("replacement")), "flags": .string(try row.text("flags"))])
-                })
+                let entries: [RuntimeValue] = try db.query(
+                    "SELECT pattern, replacement, flags FROM film_rules WHERE group_name=? ORDER BY position",
+                    [.text(group)]
+                ) { cursor in
+                    if group == "episodeCleanRegexRules" || group == "aggregateRegexRules" {
+                        return .string(try cursor.text(0))
+                    }
+                    return .object([
+                        "pattern": .string(try cursor.text(0)),
+                        "replace": .string(try cursor.optionalText(1) ?? ""),
+                        "flags": .string(try cursor.optionalText(2) ?? ""),
+                    ])
+                }
+                rules[group] = .array(entries)
             }
             return .object(["version": .number(1), "rules": .object(rules)])
         case .preferences:
-            guard let row = try db.query("SELECT iosAutoPrepare,metadataViewProvider FROM ios_film_preferences WHERE singleton=1").first else {
+            guard let row = try db.queryOne("SELECT ios_auto_prepare, metadata_view_provider FROM film_preferences WHERE singleton=1", map: {
+                (try $0.bool(0), try $0.text(1))
+            }) else {
                 throw FilmSettingsStorageError.invalidDocument
             }
-            var fields: RuntimeObject = ["iosAutoPrepare": .bool(try row.bool("iosAutoPrepare")),
-                "metadataViewProvider": .string(try row.text("metadataViewProvider"))]
+            var fields: RuntimeObject = [
+                "iosAutoPrepare": .bool(row.0),
+                "metadataViewProvider": .string(row.1),
+            ]
             for list in Self.preferenceLists {
-                fields[list] = .array(try db.query("SELECT value FROM ios_film_preference_items WHERE list=? ORDER BY ordinal",
-                                                  [.text(list)]).map { .string(try $0.text("value")) })
+                fields[list] = .array(try db.query(
+                    "SELECT item_value FROM film_preference_items WHERE list_kind=? ORDER BY position",
+                    [.text(list)]
+                ) { .string(try $0.text(0)) })
             }
             guard (try? FilmPlaybackPreferences(.object(fields))) != nil else { throw FilmSettingsStorageError.invalidDocument }
             return .object(["version": .number(1), "preferences": .object(fields)])
@@ -187,11 +214,11 @@ public final class FilmSettingsDocument: @unchecked Sendable {
         switch block {
         case .tmdb, .douban:
             guard let fields = root["settings"]?.filmObject else { throw FilmSettingsStorageError.invalidDocument }
-            try Self.saveFlat(db, table: block == .tmdb ? "ios_tmdb_settings" : "ios_douban_settings",
-                              columns: block == .tmdb ? Self.tmdb : Self.douban, fields: fields)
+            try Self.saveFlat(db, table: block == .tmdb ? "tmdb_settings" : "douban_settings",
+                              mappings: block == .tmdb ? Self.tmdb : Self.douban, fields: fields)
         case .panAccounts:
             guard let accounts = root["accounts"]?.filmObject else { throw FilmSettingsStorageError.invalidDocument }
-            let existing = try db.query("SELECT * FROM ios_pan_accounts")
+            let existing = try db.query("SELECT * FROM pan_accounts")
             guard try existing.allSatisfy({ row in
                 try row.integer("account_revision") == 0 || accounts[row.text("provider")] != nil
             }) else { throw FilmSettingsStorageError.invalidDocument }
@@ -201,7 +228,7 @@ public final class FilmSettingsDocument: @unchecked Sendable {
                       Set(fields.keys).isSubset(of: ["revision", "rowRevision", "credentials"]),
                       fields["rowRevision"] == nil || fields["rowRevision"]?.filmInteger != nil,
                       let allowed = Self.panAllowed[provider], Set(credentials.keys).isSubset(of: allowed),
-                      let previous = try db.query("SELECT * FROM ios_pan_accounts WHERE provider=?", [.text(provider)]).first else {
+                      let previous = try db.query("SELECT * FROM pan_accounts WHERE provider=?", [.text(provider)]).first else {
                     throw FilmSettingsStorageError.invalidDocument
                 }
                 for (name, value) in credentials {
@@ -209,44 +236,47 @@ public final class FilmSettingsDocument: @unchecked Sendable {
                         guard value.filmInteger != nil else { throw FilmSettingsStorageError.invalidDocument }
                     } else if value.filmText == nil { throw FilmSettingsStorageError.invalidDocument }
                 }
-                let values = try Self.panFields.map { try Self.scalar(credentials[$0]) }
+                let values = try Self.panFields.map { try Self.scalar(credentials[$0.wire]) }
                 let unchanged = try previous.integer("account_revision") == revision &&
-                    zip(Self.panFields, values).allSatisfy { pair in previous[pair.0] == pair.1 }
+                    zip(Self.panFields, values).allSatisfy { pair in previous[pair.0.column] == pair.1 }
                 if unchanged { continue }
                 guard revision == (try previous.integer("account_revision")) + 1 else { throw FilmSettingsStorageError.conflict }
-                try db.execute("UPDATE ios_pan_accounts SET account_revision=?,row_revision=row_revision+1," +
-                               Self.panFields.map { "\($0)=?" }.joined(separator: ",") + " WHERE provider=?",
+                try db.execute("UPDATE pan_accounts SET account_revision=?,row_revision=row_revision+1," +
+                               Self.panFields.map { "\($0.column)=?" }.joined(separator: ",") + " WHERE provider=?",
                                [.integer(revision)] + values + [.text(provider)])
             }
         case .catSources:
             guard let scripts = root["scripts"]?.filmArray, let providers = root["providers"]?.filmObject,
                   let mappings = root["mappings"]?.filmArray else { throw FilmSettingsStorageError.invalidDocument }
-            try db.upsert("ios_cat_settings", columns: ["singleton", "port"],
+            try db.upsert("cat_settings", columns: ["singleton", "port"],
                           values: [.integer(1), try Self.scalar(root["port"])], key: ["singleton"])
-            try db.reconcile("ios_cat_providers", columns: ["provider", "enabled"], key: ["provider"],
-                rows: providers.map { key, value in
+            let sortedProviders = providers.keys.sorted()
+            try db.reconcile("cat_providers", columns: ["provider", "position", "enabled"], key: ["provider"],
+                rows: try sortedProviders.enumerated().map { index, key in
+                    let value = providers[key]!
                     guard !key.isEmpty, case .bool = value else { throw FilmSettingsStorageError.invalidDocument }
-                    return [.text(key), try Self.scalar(value)]
+                    return [.text(key), .integer(index), try Self.scalar(value)]
                 })
             var mappingRows: [[SQLiteValue]] = [], aliasRows: [[SQLiteValue]] = []
-            for (ordinal, mapping) in mappings.enumerated() {
+            for (position, mapping) in mappings.enumerated() {
                 guard let fields = mapping.filmObject, Set(fields.keys) == ["provider", "aliases"],
                       let provider = fields["provider"]?.filmText, !provider.isEmpty,
                       let aliases = fields["aliases"]?.filmArray else { throw FilmSettingsStorageError.invalidDocument }
-                mappingRows.append([.integer(ordinal), .text(provider)])
+                mappingRows.append([.integer(position), .text(provider)])
                 aliasRows += try aliases.enumerated().map {
                     guard let alias = $0.element.filmText else { throw FilmSettingsStorageError.invalidDocument }
-                    return [.integer(ordinal), .integer($0.offset), .text(alias)]
+                    return [.integer(position), .integer($0.offset), .text(alias)]
                 }
             }
-            try db.reconcile("ios_cat_mappings", columns: ["ordinal", "provider"], key: ["ordinal"], rows: mappingRows)
-            try db.reconcile("ios_cat_mapping_aliases", columns: ["mapping_ordinal", "ordinal", "alias"],
-                             key: ["mapping_ordinal", "ordinal"], rows: aliasRows)
+            try db.reconcile("cat_mappings", columns: ["position", "provider"], key: ["position"], rows: mappingRows)
+            try db.reconcile("cat_mapping_aliases", columns: ["mapping_position", "position", "alias"],
+                             key: ["mapping_position", "position"], rows: aliasRows)
+            let catWireKeys = Set(Self.catFields.map(\.wire))
             let rows = try scripts.enumerated().map { index, script -> [SQLiteValue] in
-                guard let fields = script.filmObject, Set(fields.keys) == Set(Self.catFields) else { throw FilmSettingsStorageError.invalidDocument }
-                return [.integer(index)] + (try Self.catFields.map { try Self.scalar(fields[$0]) })
+                guard let fields = script.filmObject, Set(fields.keys) == catWireKeys else { throw FilmSettingsStorageError.invalidDocument }
+                return [.integer(index)] + (try Self.catFields.map { try Self.scalar(fields[$0.wire]) })
             }
-            try db.reconcile("ios_cat_inputs", columns: ["ordinal"] + Self.catFields, key: ["installationId"], rows: rows)
+            try db.reconcile("cat_scripts", columns: ["position"] + Self.catFields.map(\.column), key: ["installation_id"], rows: rows)
         case .rules:
             guard let rules = root["rules"]?.filmObject, Set(rules.keys) == Set(Self.ruleGroups) else {
                 throw FilmSettingsStorageError.invalidDocument
@@ -254,9 +284,14 @@ public final class FilmSettingsDocument: @unchecked Sendable {
             var rows: [[SQLiteValue]] = []
             for group in Self.ruleGroups {
                 guard let entries = rules[group]?.filmArray else { throw FilmSettingsStorageError.invalidDocument }
+                try db.execute(
+                    "INSERT INTO film_rule_groups(group_name, row_revision, overridden) VALUES(?, 1, 1) " +
+                    "ON CONFLICT(group_name) DO UPDATE SET overridden=1, row_revision=film_rule_groups.row_revision+1",
+                    [.text(group)]
+                )
                 for (index, entry) in entries.enumerated() {
                     if ["episodeCleanRegexRules", "aggregateRegexRules"].contains(group), let pattern = entry.filmText {
-                        rows.append([.text(group), .integer(index), .text(pattern), .text(""), .text("")])
+                        rows.append([.text(group), .integer(index), .text(pattern), .null, .null])
                     } else if ["episodeRules", "movieRules"].contains(group), let fields = entry.filmObject,
                               Set(fields.keys) == ["pattern", "replace", "flags"] {
                         rows.append([.text(group), .integer(index), try Self.scalar(fields["pattern"]),
@@ -264,14 +299,18 @@ public final class FilmSettingsDocument: @unchecked Sendable {
                     } else { throw FilmSettingsStorageError.invalidDocument }
                 }
             }
-            try db.reconcile("ios_film_rules", columns: ["rule_group", "ordinal", "pattern", "replacement", "flags"],
-                             key: ["rule_group", "ordinal"], rows: rows)
+            try db.reconcile("film_rules", columns: ["group_name", "position", "pattern", "replacement", "flags"],
+                             key: ["group_name", "position"], rows: rows)
         case .preferences:
             guard let fields = root["preferences"]?.filmObject,
                   Set(fields.keys) == Set(Self.preferenceLists + ["iosAutoPrepare", "metadataViewProvider"]),
                   (try? FilmPlaybackPreferences(.object(fields))) != nil else { throw FilmSettingsStorageError.invalidDocument }
-            try Self.saveFlat(db, table: "ios_film_preferences", columns: ["iosAutoPrepare", "metadataViewProvider"],
-                              fields: ["iosAutoPrepare": fields["iosAutoPrepare"]!, "metadataViewProvider": fields["metadataViewProvider"]!])
+            try Self.saveFlat(
+                db,
+                table: "film_preferences",
+                mappings: Self.preferenceFlatFields,
+                fields: ["iosAutoPrepare": fields["iosAutoPrepare"]!, "metadataViewProvider": fields["metadataViewProvider"]!]
+            )
             var rows: [[SQLiteValue]] = []
             for list in Self.preferenceLists {
                 guard let items = fields[list]?.filmArray else { throw FilmSettingsStorageError.invalidDocument }
@@ -280,8 +319,8 @@ public final class FilmSettingsDocument: @unchecked Sendable {
                     return [.text(list), .integer($0.offset), .text(text)]
                 }
             }
-            try db.reconcile("ios_film_preference_items", columns: ["list", "ordinal", "value"],
-                             key: ["list", "ordinal"], rows: rows, replaceChanged: true)
+            try db.reconcile("film_preference_items", columns: ["list_kind", "position", "item_value"],
+                             key: ["list_kind", "position"], rows: rows, replaceChanged: true)
         }
     }
     /// Native manual edits validate and change only their own provider. A damaged
@@ -291,12 +330,12 @@ public final class FilmSettingsDocument: @unchecked Sendable {
         let result = try await database.transaction { db in
             let current = try self.snapshot(db)
             guard let revision = try PanSettingsStore.snapshot(current.document ?? PanSettingsStore.empty, provider).revision,
-                  let row = try db.query("SELECT row_revision FROM ios_pan_accounts WHERE provider=?", [.text(provider.rawValue)]).first,
+                  let rowRev = try db.queryOne("SELECT row_revision FROM pan_accounts WHERE provider=?", [.text(provider.rawValue)], map: { try $0.int64(0) }),
                   revision < 9_007_199_254_740_991,
-                  try row.integer("row_revision") < 9_007_199_254_740_991 else { throw FilmSettingsStorageError.storageFailure }
-            guard try db.execute("UPDATE ios_pan_accounts SET account_revision=account_revision+1,row_revision=row_revision+1," +
-                Self.panFields.map { "\($0)=?" }.joined(separator: ",") + " WHERE provider=?",
-                (try Self.panFields.map { try Self.scalar(fields[$0]) }) + [.text(provider.rawValue)]) == 1 else {
+                  rowRev < 9_007_199_254_740_991 else { throw FilmSettingsStorageError.storageFailure }
+            guard try db.execute("UPDATE pan_accounts SET account_revision=account_revision+1,row_revision=row_revision+1," +
+                Self.panFields.map { "\($0.column)=?" }.joined(separator: ",") + " WHERE provider=?",
+                (try Self.panFields.map { try Self.scalar(fields[$0.wire]) }) + [.text(provider.rawValue)]) == 1 else {
                 throw FilmSettingsStorageError.conflict
             }
             try self.advance(db)
@@ -320,10 +359,10 @@ public final class FilmSettingsDocument: @unchecked Sendable {
               mode == "refresh" || accountRevision < 9_007_199_254_740_991,
               mode != "refresh" || accountRevision > 0 else { throw FilmSettingsStorageError.invalidDocument }
         return try database.transactionSync { db in
-            let values = try Self.panFields.map { try Self.scalar(credentials[$0]) }
+            let values = try Self.panFields.map { try Self.scalar(credentials[$0.wire]) }
             let next = accountRevision + (mode == "replace" ? 1 : 0)
-            guard try db.execute("UPDATE ios_pan_accounts SET account_revision=?,row_revision=row_revision+1," +
-                                 Self.panFields.map { "\($0)=?" }.joined(separator: ",") +
+            guard try db.execute("UPDATE pan_accounts SET account_revision=?,row_revision=row_revision+1," +
+                                 Self.panFields.map { "\($0.column)=?" }.joined(separator: ",") +
                                  " WHERE provider=? AND row_revision=? AND account_revision=?",
                                  [.integer(next)] + values + [.text(provider), .integer(rowRevision), .integer(accountRevision)]) == 1 else {
                 throw FilmSettingsStorageError.conflict
@@ -332,10 +371,26 @@ public final class FilmSettingsDocument: @unchecked Sendable {
             return try snapshot(db)
         }
     }
-    private static let tmdb = ["apiBase", "imageBase", "apiKey", "accessToken", "language", "region", "includeAdult"]
-    private static let douban = ["apiBase", "searchBase", "imageBase", "apiProxy", "imageProxy", "cookie"]
-    private static let catFields = ["installationId", "name", "sourceType", "sourceUrl", "localPath", "localHash", "enabled", "inputRevision"]
-    private static let panFields = ["cookie", "username", "password", "authorization", "refreshedAt"]
+    private static let tmdb: [(wire: String, column: String)] = [
+        ("apiBase", "api_base"), ("imageBase", "image_base"), ("apiKey", "api_key"),
+        ("accessToken", "access_token"), ("language", "language"), ("region", "region"), ("includeAdult", "include_adult"),
+    ]
+    private static let douban: [(wire: String, column: String)] = [
+        ("apiBase", "api_base"), ("searchBase", "search_base"), ("imageBase", "image_base"),
+        ("apiProxy", "api_proxy"), ("imageProxy", "image_proxy"), ("cookie", "cookie"),
+    ]
+    private static let preferenceFlatFields: [(wire: String, column: String)] = [
+        ("iosAutoPrepare", "ios_auto_prepare"), ("metadataViewProvider", "metadata_view_provider"),
+    ]
+    private static let catFields: [(wire: String, column: String)] = [
+        ("installationId", "installation_id"), ("name", "name"), ("sourceType", "source_type"),
+        ("sourceUrl", "source_url"), ("localPath", "local_path"), ("localHash", "local_hash"),
+        ("enabled", "enabled"), ("inputRevision", "input_revision"),
+    ]
+    private static let panFields: [(wire: String, column: String)] = [
+        ("cookie", "cookie"), ("username", "username"), ("password", "password"),
+        ("authorization", "authorization"), ("refreshedAt", "refreshed_at_ms"),
+    ]
     private static let panAllowed: [String: Set<String>] = [
         "baidu": ["cookie"], "quark": ["cookie"], "uc": ["cookie"],
         "tianyi": ["cookie", "username", "password"], "yidong": ["authorization", "refreshedAt"],

@@ -25,25 +25,60 @@ CREATE TABLE source_installation_actions (
 
 CREATE TABLE source_definitions (
     installation_id TEXT PRIMARY KEY NOT NULL REFERENCES source_installations(installation_id) ON DELETE CASCADE,
-    bookSourceName TEXT, bookSourceUrl TEXT, bookSourceGroup TEXT,
-    bookSourceComment TEXT, bookUrlPattern TEXT, searchUrl TEXT, exploreUrl TEXT,
-    loginUrl TEXT, loginCheckJs TEXT, jsLib TEXT, coverDecodeJs TEXT,
-    concurrentRate TEXT, header TEXT, html TEXT,
-    bookSourceType INTEGER, weight REAL, respondTime REAL, lastUpdateTime REAL,
-    enabledCookieJar INTEGER CHECK (enabledCookieJar IN (0, 1))
+    book_source_name TEXT,
+    book_source_url TEXT,
+    book_source_group TEXT,
+    book_source_comment TEXT,
+    book_url_pattern TEXT,
+    search_url TEXT,
+    explore_url TEXT,
+    login_url TEXT,
+    login_check_js TEXT,
+    js_lib TEXT,
+    cover_decode_js TEXT,
+    concurrent_rate TEXT,
+    header TEXT,
+    html TEXT,
+    book_source_type INTEGER,
+    weight REAL,
+    respond_time REAL,
+    last_update_time REAL,
+    enabled_cookie_jar INTEGER CHECK (enabled_cookie_jar IN (0, 1))
 ) STRICT;
 
 CREATE TABLE source_definition_rules (
     installation_id TEXT NOT NULL REFERENCES source_installations(installation_id) ON DELETE CASCADE,
     rule_group TEXT NOT NULL CHECK (rule_group IN ('ruleSearch', 'ruleExplore', 'ruleBookInfo', 'ruleToc', 'ruleContent')),
     encoded INTEGER NOT NULL CHECK (encoded IN (0, 1)),
-    bookList TEXT, name TEXT, author TEXT, kind TEXT, wordCount TEXT, lastChapter TEXT,
-    intro TEXT, coverUrl TEXT, bookUrl TEXT, tocUrl TEXT, init TEXT,
-    chapterList TEXT, chapterName TEXT, chapterUrl TEXT, nextTocUrl TEXT,
-    isReverse TEXT, reverseToc TEXT, updateTime TEXT, preUpdateJs TEXT,
-    content TEXT, nextContentUrl TEXT, title TEXT, replaceRegex TEXT,
-    sourceRegex TEXT, webJs TEXT, payAction TEXT, imageStyle TEXT,
-    imageDecode TEXT, imageDecrypt TEXT,
+    book_list TEXT,
+    name TEXT,
+    author TEXT,
+    kind TEXT,
+    word_count TEXT,
+    last_chapter TEXT,
+    intro TEXT,
+    cover_url TEXT,
+    book_url TEXT,
+    toc_url TEXT,
+    init TEXT,
+    chapter_list TEXT,
+    chapter_name TEXT,
+    chapter_url TEXT,
+    next_toc_url TEXT,
+    is_reverse TEXT,
+    reverse_toc TEXT,
+    update_time TEXT,
+    pre_update_js TEXT,
+    content TEXT,
+    next_content_url TEXT,
+    title TEXT,
+    replace_regex TEXT,
+    source_regex TEXT,
+    web_js TEXT,
+    pay_action TEXT,
+    image_style TEXT,
+    image_decode TEXT,
+    image_decrypt TEXT,
     PRIMARY KEY (installation_id, rule_group)
 ) STRICT;
 
@@ -101,30 +136,41 @@ CREATE TABLE source_private_kv_entries (
 
 CREATE INDEX idx_source_private_kv_installation ON source_private_kv_entries(installation_id);
 
--- Reader synchronous source.get/put scope (separate from asynchronous cache KV).
+-- Reader synchronous source.get/put scope (UTF-16LE BLOBs preserve unpaired JS surrogates).
 CREATE TABLE source_reader_state (
     installation_id TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    login_header TEXT,
-    login_info TEXT,
-    variable TEXT
+    variable BLOB CHECK (length(variable) % 2 = 0)
 ) STRICT;
 
 CREATE TABLE source_reader_value_nodes (
     installation_id TEXT NOT NULL REFERENCES source_reader_state(installation_id) ON DELETE CASCADE,
-    scope_name TEXT NOT NULL CHECK (scope_name IN ('values', 'books')),
-    entry_key TEXT NOT NULL,
+    entry_key BLOB NOT NULL CHECK (length(entry_key) % 2 = 0),
     node_id INTEGER NOT NULL CHECK (node_id >= 0),
     parent_id INTEGER,
-    prop_key TEXT,
-    item_index INTEGER,
+    prop_key BLOB CHECK (length(prop_key) % 2 = 0),
+    item_index INTEGER CHECK (item_index >= 0),
     kind TEXT NOT NULL CHECK (kind IN ('null', 'boolean', 'integer', 'real', 'number_text', 'text', 'array', 'object')),
     bool_value INTEGER CHECK (bool_value IN (0, 1)),
     int_value INTEGER,
     real_value REAL,
-    text_value TEXT,
-    PRIMARY KEY (installation_id, scope_name, entry_key, node_id)
+    text_value ANY,
+    CHECK ((kind = 'boolean') = (bool_value IS NOT NULL)
+        AND (kind = 'integer') = (int_value IS NOT NULL)
+        AND (kind = 'real') = (real_value IS NOT NULL)),
+    CHECK (CASE kind
+        WHEN 'text' THEN typeof(text_value) = 'blob' AND length(text_value) % 2 = 0
+        WHEN 'number_text' THEN typeof(text_value) = 'text'
+        ELSE text_value IS NULL END),
+    CHECK (CASE WHEN node_id = 0 THEN parent_id IS NULL AND prop_key IS NULL AND item_index IS NULL
+        ELSE parent_id IS NOT NULL AND parent_id >= 0 AND parent_id < node_id AND (prop_key IS NULL) <> (item_index IS NULL) END),
+    PRIMARY KEY (installation_id, entry_key, node_id),
+    FOREIGN KEY (installation_id, entry_key, parent_id)
+        REFERENCES source_reader_value_nodes(installation_id, entry_key, node_id)
 ) STRICT;
+
+CREATE INDEX idx_source_reader_value_nodes_parent
+    ON source_reader_value_nodes(installation_id, entry_key, parent_id);
 
 CREATE TABLE source_private_kv_nodes (
     installation_id TEXT NOT NULL,

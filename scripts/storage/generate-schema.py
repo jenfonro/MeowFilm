@@ -8,19 +8,42 @@ ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_ROOT = ROOT / "packages/storage/schema"
 GENERATED_ROOT = ROOT / "packages/storage/generated"
 
+SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+FORBIDDEN_COLUMNS = frozenset(("shape_mask", "null_mask", "presence_low", "presence_high"))
+
 TARGETS = {
     "standalone": {
         "layers": ("core", "runtime"),
         "outputs": (GENERATED_ROOT / "schema-standalone.sql",),
-        "forbidden_prefixes": ("windows_", "ios_", "music_songs", "music_owner_state", "music_library_", "music_collections", "music_queue_", "music_history_"),
+        "forbidden_prefixes": (
+            "windows_",
+            "ios_",
+            "music_songs",
+            "music_owner_state",
+            "music_library_",
+            "music_collections",
+            "music_queue_",
+            "music_history_",
+            "music_catalog_source",
+            "music_appearance",
+            "music_playback_",
+            "music_source_exclusions",
+            "music_lyrics",
+            "music_lyric_",
+            "cat_scripts",
+            "film_favorites",
+            "film_favorite_",
+            "film_source_deletions",
+            "novel_rules",
+        ),
     },
     "windows": {
-        "layers": ("core", "runtime", "music", "windows"),
+        "layers": ("core", "runtime", "shared", "music", "windows"),
         "outputs": (GENERATED_ROOT / "schema-windows.sql",),
         "forbidden_prefixes": ("ios_",),
     },
     "ios": {
-        "layers": ("core", "runtime", "music", "ios"),
+        "layers": ("core", "runtime", "shared", "music", "ios"),
         "outputs": (
             GENERATED_ROOT / "schema-ios.sql",
             ROOT / "native/MeowKit/Sources/MeowStorage/Resources/storage-schema.sql",
@@ -45,6 +68,35 @@ def collect_sql(layers: tuple[str, ...]) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+def index_column_lists(conn: sqlite3.Connection, table_name: str) -> list[list[str]]:
+    covered: list[list[str]] = []
+    # Explicit primary key (including WITHOUT ROWID or composite / single INTEGER PK).
+    pk_cols = [
+        (row[5], row[1])
+        for row in conn.execute(f'PRAGMA table_info("{table_name}")').fetchall()
+        if row[5] > 0
+    ]
+    if pk_cols:
+        pk_cols.sort(key=lambda item: item[0])
+        covered.append([col for _, col in pk_cols])
+    for idx in conn.execute(f'PRAGMA index_list("{table_name}")').fetchall():
+        idx_name = idx[1]
+        is_partial = idx[4]
+        if is_partial:
+            continue
+        idx_cols = [
+            row[2]
+            for row in sorted(
+                conn.execute(f'PRAGMA index_info("{idx_name}")').fetchall(),
+                key=lambda r: r[0],
+            )
+            if row[2] is not None
+        ]
+        if idx_cols:
+            covered.append(idx_cols)
+    return covered
+
+
 def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]) -> dict[str, int]:
     conn = sqlite3.connect(":memory:")
     try:
@@ -66,19 +118,42 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
                 raise SystemExit(f"[{target_name}] missing required core table: {required}")
 
         for name, ddl in tables:
+            if not SNAKE_CASE_RE.match(name):
+                raise SystemExit(f"[{target_name}] non-snake_case table name: {name}")
             for prefix in forbidden_prefixes:
                 if name.startswith(prefix):
                     raise SystemExit(f"[{target_name}] forbidden cross-platform table: {name}")
             if not re.search(r"\bSTRICT\b", ddl or "", re.I):
                 raise SystemExit(f"[{target_name}] table is not STRICT: {name}")
+
             cols = [row[1] for row in conn.execute(f'PRAGMA table_info("{name}")').fetchall()]
             for col in cols:
-                if col in ("shape_mask", "null_mask"):
-                    raise SystemExit(f"[{target_name}] forbidden pseudo-relational column {name}.{col}")
+                if not SNAKE_CASE_RE.match(col):
+                    raise SystemExit(f"[{target_name}] non-snake_case column name: {name}.{col}")
+                if col in FORBIDDEN_COLUMNS:
+                    raise SystemExit(f"[{target_name}] forbidden pseudo-relational/bitmask column: {name}.{col}")
+
+            # Group composite FKs by FK id and verify each FK target exists AND has a covering index prefix.
+            fk_groups: dict[int, tuple[str, list[tuple[int, str]]]] = {}
             for fk in conn.execute(f'PRAGMA foreign_key_list("{name}")').fetchall():
-                ref_table = fk[2]
+                fk_id, seq, ref_table, from_col = fk[0], fk[1], fk[2], fk[3]
                 if ref_table not in table_names:
                     raise SystemExit(f"[{target_name}] broken foreign key {name} -> {ref_table}")
+                if fk_id not in fk_groups:
+                    fk_groups[fk_id] = (ref_table, [])
+                fk_groups[fk_id][1].append((seq, from_col))
+
+            if fk_groups:
+                indexed_lists = index_column_lists(conn, name)
+                for fk_id, (ref_table, items) in fk_groups.items():
+                    fk_cols = [col for _, col in sorted(items, key=lambda item: item[0])]
+                    fk_len = len(fk_cols)
+                    # Any non-partial index whose leading N columns are a permutation of the FK columns covers lookups/deletes.
+                    fk_set = set(fk_cols)
+                    if not any(len(idx) >= fk_len and set(idx[:fk_len]) == fk_set for idx in indexed_lists):
+                        raise SystemExit(
+                            f"[{target_name}] unindexed foreign key {name}({', '.join(fk_cols)}) -> {ref_table}"
+                        )
 
         indexes = conn.execute(
             "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"

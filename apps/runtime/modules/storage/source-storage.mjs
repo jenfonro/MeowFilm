@@ -5,16 +5,30 @@ import { parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-
 import { isDeepStrictEqual } from 'node:util';
 import { readReaderValues, applyReaderValues } from './source-reader-values.mjs';
 
-const texts = ['bookSourceName', 'bookSourceUrl', 'bookSourceGroup', 'bookSourceComment',
-  'bookUrlPattern', 'searchUrl', 'exploreUrl', 'loginUrl', 'loginCheckJs', 'jsLib',
-  'coverDecodeJs', 'concurrentRate', 'header', 'html'];
-const numbers = ['bookSourceType', 'weight', 'respondTime', 'lastUpdateTime'];
+const textFields = [
+  ['bookSourceName', 'book_source_name'], ['bookSourceUrl', 'book_source_url'],
+  ['bookSourceGroup', 'book_source_group'], ['bookSourceComment', 'book_source_comment'],
+  ['bookUrlPattern', 'book_url_pattern'], ['searchUrl', 'search_url'], ['exploreUrl', 'explore_url'],
+  ['loginUrl', 'login_url'], ['loginCheckJs', 'login_check_js'], ['jsLib', 'js_lib'],
+  ['coverDecodeJs', 'cover_decode_js'], ['concurrentRate', 'concurrent_rate'],
+  ['header', 'header'], ['html', 'html'],
+];
+const numberFields = [
+  ['bookSourceType', 'book_source_type'], ['weight', 'weight'],
+  ['respondTime', 'respond_time'], ['lastUpdateTime', 'last_update_time'],
+];
 const rules = ['ruleSearch', 'ruleExplore', 'ruleBookInfo', 'ruleToc', 'ruleContent'];
-const ruleFields = ['bookList', 'name', 'author', 'kind', 'wordCount', 'lastChapter',
-  'intro', 'coverUrl', 'bookUrl', 'tocUrl', 'init', 'chapterList', 'chapterName',
-  'chapterUrl', 'nextTocUrl', 'isReverse', 'reverseToc', 'updateTime', 'preUpdateJs',
-  'content', 'nextContentUrl', 'title', 'replaceRegex', 'sourceRegex', 'webJs',
-  'payAction', 'imageStyle', 'imageDecode', 'imageDecrypt'];
+const ruleFieldMap = [
+  ['bookList', 'book_list'], ['name', 'name'], ['author', 'author'], ['kind', 'kind'],
+  ['wordCount', 'word_count'], ['lastChapter', 'last_chapter'], ['intro', 'intro'],
+  ['coverUrl', 'cover_url'], ['bookUrl', 'book_url'], ['tocUrl', 'toc_url'], ['init', 'init'],
+  ['chapterList', 'chapter_list'], ['chapterName', 'chapter_name'], ['chapterUrl', 'chapter_url'],
+  ['nextTocUrl', 'next_toc_url'], ['isReverse', 'is_reverse'], ['reverseToc', 'reverse_toc'],
+  ['updateTime', 'update_time'], ['preUpdateJs', 'pre_update_js'], ['content', 'content'],
+  ['nextContentUrl', 'next_content_url'], ['title', 'title'], ['replaceRegex', 'replace_regex'],
+  ['sourceRegex', 'source_regex'], ['webJs', 'web_js'], ['payAction', 'pay_action'],
+  ['imageStyle', 'image_style'], ['imageDecode', 'image_decode'], ['imageDecrypt', 'image_decrypt'],
+];
 const nodeColumns = ['node_id', 'parent_id', 'prop_key', 'item_index', 'kind',
   'bool_value', 'int_value', 'real_value', 'text_value'];
 const relations = {
@@ -22,9 +36,9 @@ const relations = {
     'name', 'source_url', 'source_group', 'sort_order', 'enabled', 'enabled_explore',
     'protocol', 'definition_kind', 'raw_html']],
   source_installation_actions: [['installation_id', 'position'], ['installation_id', 'position', 'action']],
-  source_definitions: [['installation_id'], ['installation_id', ...texts, ...numbers, 'enabledCookieJar']],
+  source_definitions: [['installation_id'], ['installation_id', ...textFields.map(f => f[1]), ...numberFields.map(f => f[1]), 'enabled_cookie_jar']],
   source_definition_rules: [['installation_id', 'rule_group'],
-    ['installation_id', 'rule_group', 'encoded', ...ruleFields]],
+    ['installation_id', 'rule_group', 'encoded', ...ruleFieldMap.map(f => f[1])]],
   source_definition_nodes: [['installation_id', 'field', 'node_id'],
     ['installation_id', 'field', ...nodeColumns]],
   source_private_profiles: [['installation_id', 'profile_suffix'], ['installation_id', 'profile_suffix']],
@@ -47,12 +61,12 @@ function definitionRows(id, text, output) {
   if (!object(definition)) return ['html', String(definition)];
   const remaining = { ...definition };
   const values = [id];
-  for (const field of texts) {
+  for (const [field] of textFields) {
     const value = remaining[field];
     values.push(typeof value === 'string' ? value : null);
     if (typeof value === 'string') delete remaining[field];
   }
-  for (const field of numbers) {
+  for (const [field] of numberFields) {
     const raw = remaining[field], value = isRawJSON(raw) ? Number(raw.rawJSON) : raw;
     const accepted = !isRawJSON(raw) && typeof value === 'number' && Number.isFinite(value) &&
       (field !== 'bookSourceType' || Number.isSafeInteger(value));
@@ -69,7 +83,7 @@ function definitionRows(id, text, output) {
     }
     if (!object(rule)) continue;
     const extras = { ...rule }, fields = [id, group, Number(encoded)];
-    for (const field of ruleFields) {
+    for (const [field] of ruleFieldMap) {
       fields.push(typeof extras[field] === 'string' ? extras[field] : null);
       if (typeof extras[field] === 'string') delete extras[field];
     }
@@ -195,13 +209,13 @@ export class SourceStorage {
     if (!definition) throw Object.assign(new Error('STORAGE_CORRUPT'), { code: 'STORAGE_CORRUPT' });
     const requested = field => !selected || selected.includes(field);
     const value = {};
-    for (const field of [...texts, ...numbers])
-      if (requested(field) && definition[field] !== null) value[field] = definition[field];
-    if (requested('enabledCookieJar') && definition.enabledCookieJar !== null)
-      value.enabledCookieJar = Boolean(definition.enabledCookieJar);
+    for (const [field, column] of [...textFields, ...numberFields])
+      if (requested(field) && definition[column] !== null) value[field] = definition[column];
+    if (requested('enabledCookieJar') && definition.enabled_cookie_jar !== null)
+      value.enabledCookieJar = Boolean(definition.enabled_cookie_jar);
     const groups = objects('source_definition_rules').filter(group => requested(group.rule_group));
     for (const group of groups) value[group.rule_group] = Object.fromEntries(
-      ruleFields.filter(field => group[field] !== null).map(field => [field, group[field]]));
+      ruleFieldMap.filter(([, column]) => group[column] !== null).map(([field, column]) => [field, group[column]]));
     const extensions = new Map();
     for (const node of objects('source_definition_nodes')) {
       if (!requested(node.field)) continue;

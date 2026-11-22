@@ -20,12 +20,11 @@ import MeowStorage
     public init() {}
     public func bind(database: SQLiteDatabase) async throws {
         guard self.database == nil, !closed else { return }
-        let rows = try await database.read { try $0.query("SELECT * FROM ios_playback_volume") }
+        let saved = try await database.read { try PlaybackVolumeRepository.loadAll($0) }
         guard !closed else { return }
         self.database = database
-        for row in rows {
-            let owner = try row.text("owner")
-            if values[owner] == nil { values[owner] = try row.double("volume") }
+        for (owner, volume) in saved where values[owner] == nil {
+            values[owner] = volume
         }
         persist()
     }
@@ -45,10 +44,7 @@ import MeowStorage
                 let batch = pending; pending.removeAll()
                 do {
                     try await database.transaction { db in
-                        for (owner, volume) in batch {
-                            try db.upsert("ios_playback_volume", columns: ["owner", "volume"],
-                                values: [.text(owner), .real(volume)], key: ["owner"])
-                        }
+                        try PlaybackVolumeRepository.saveBatch(batch, db)
                     }
                     persistenceError = nil
                 } catch { persistenceError = "音量保存失败" }

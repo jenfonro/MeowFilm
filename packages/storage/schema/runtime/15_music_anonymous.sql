@@ -10,6 +10,8 @@ CREATE TABLE music_anonymous_wy_cookies (
     singleton INTEGER NOT NULL DEFAULT 1 CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE
 ) STRICT;
 
+CREATE INDEX idx_music_anonymous_wy_cookies_singleton ON music_anonymous_wy_cookies(singleton);
+
 CREATE TABLE music_anonymous_kg (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES music_anonymous_state(singleton) ON DELETE CASCADE,
     seed TEXT NOT NULL,

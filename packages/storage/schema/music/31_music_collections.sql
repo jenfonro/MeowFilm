@@ -88,6 +88,8 @@ CREATE TABLE music_collection_binding_map (
         REFERENCES music_collection_bindings(scope, collection_id, binding_index) ON DELETE CASCADE
 ) STRICT;
 
+CREATE INDEX idx_music_collection_binding_map_song ON music_collection_binding_map(song_id);
+
 CREATE TABLE music_collection_intents (
     scope TEXT NOT NULL,
     collection_id TEXT NOT NULL,

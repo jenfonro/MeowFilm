@@ -103,6 +103,116 @@ public struct SQLiteRow: Equatable, Sendable {
     }
 }
 
+/// Zero-allocation positional row cursor backed directly by the active `sqlite3_stmt`.
+/// Valid only within the `scan`/`query(map:)` closure invocation.
+public struct SQLiteCursor {
+    private let statement: OpaquePointer
+    public let columnCount: Int32
+
+    init(_ statement: OpaquePointer, columnCount: Int32) {
+        self.statement = statement
+        self.columnCount = columnCount
+    }
+
+    public func isNull(_ index: Int32) -> Bool {
+        sqlite3_column_type(statement, index) == SQLITE_NULL
+    }
+
+    public func text(_ index: Int32) throws -> String {
+        guard sqlite3_column_type(statement, index) == SQLITE_TEXT else { throw SQLiteStorageError.invalidValue }
+        let byteCount = Int(sqlite3_column_bytes(statement, index))
+        if byteCount == 0 { return "" }
+        guard let pointer = sqlite3_column_text(statement, index) else { throw SQLiteStorageError.corrupt }
+        return String(decoding: UnsafeBufferPointer(start: pointer, count: byteCount), as: UTF8.self)
+    }
+
+    public func optionalText(_ index: Int32) throws -> String? {
+        isNull(index) ? nil : try text(index)
+    }
+
+    public func int64(_ index: Int32) throws -> Int64 {
+        guard sqlite3_column_type(statement, index) == SQLITE_INTEGER else { throw SQLiteStorageError.invalidValue }
+        return sqlite3_column_int64(statement, index)
+    }
+
+    public func optionalInt64(_ index: Int32) throws -> Int64? {
+        isNull(index) ? nil : try int64(index)
+    }
+
+    public func integer(_ index: Int32) throws -> Int {
+        let value = try int64(index)
+        guard let result = Int(exactly: value) else { throw SQLiteStorageError.invalidValue }
+        return result
+    }
+
+    public func optionalInteger(_ index: Int32) throws -> Int? {
+        isNull(index) ? nil : try integer(index)
+    }
+
+    public func double(_ index: Int32) throws -> Double {
+        switch sqlite3_column_type(statement, index) {
+        case SQLITE_FLOAT: return sqlite3_column_double(statement, index)
+        case SQLITE_INTEGER: return Double(sqlite3_column_int64(statement, index))
+        default: throw SQLiteStorageError.invalidValue
+        }
+    }
+
+    public func optionalDouble(_ index: Int32) throws -> Double? {
+        isNull(index) ? nil : try double(index)
+    }
+
+    public func bool(_ index: Int32) throws -> Bool {
+        let value = try int64(index)
+        guard value == 0 || value == 1 else { throw SQLiteStorageError.invalidValue }
+        return value == 1
+    }
+
+    public func optionalBool(_ index: Int32) throws -> Bool? {
+        isNull(index) ? nil : try bool(index)
+    }
+
+    public func blob(_ index: Int32) throws -> Data {
+        guard sqlite3_column_type(statement, index) == SQLITE_BLOB else { throw SQLiteStorageError.invalidValue }
+        let byteCount = Int(sqlite3_column_bytes(statement, index))
+        if byteCount == 0 { return Data() }
+        guard let pointer = sqlite3_column_blob(statement, index) else { throw SQLiteStorageError.corrupt }
+        return Data(bytes: pointer, count: byteCount)
+    }
+
+    public func optionalBlob(_ index: Int32) throws -> Data? {
+        isNull(index) ? nil : try blob(index)
+    }
+
+    public func date(_ index: Int32) throws -> Date {
+        Date(timeIntervalSince1970: try double(index))
+    }
+
+    public func optionalDate(_ index: Int32) throws -> Date? {
+        try optionalDouble(index).map { Date(timeIntervalSince1970: $0) }
+    }
+
+    public func uuid(_ index: Int32) throws -> UUID {
+        guard let value = UUID(uuidString: try text(index)) else { throw SQLiteStorageError.invalidValue }
+        return value
+    }
+
+    public func optionalUUID(_ index: Int32) throws -> UUID? {
+        guard let raw = try optionalText(index) else { return nil }
+        guard let value = UUID(uuidString: raw) else { throw SQLiteStorageError.invalidValue }
+        return value
+    }
+
+    public func value(_ index: Int32) throws -> SQLiteValue {
+        switch sqlite3_column_type(statement, index) {
+        case SQLITE_INTEGER: return .integer(sqlite3_column_int64(statement, index))
+        case SQLITE_FLOAT: return .real(sqlite3_column_double(statement, index))
+        case SQLITE_TEXT: return .text(try text(index))
+        case SQLITE_BLOB: return .blob(try blob(index))
+        default: return .null
+        }
+    }
+}
+
 /// A connection is borrowed only during an executor closure. Domain repositories
 /// own SQL and typed projections; this layer never selects a business namespace.
 public final class SQLiteConnection {
@@ -218,10 +328,27 @@ public final class SQLiteConnection {
         return statement
     }
 
-    private func recycle(_ statement: OpaquePointer, sql: String, succeeded: Bool) {
-        guard succeeded, Self.isCacheable(sql),
-              sqlite3_reset(statement) == SQLITE_OK,
-              sqlite3_clear_bindings(statement) == SQLITE_OK else {
+    private static func shouldRetainStatement(after error: Error?) -> Bool {
+        guard let error else { return true }
+        if let storageError = error as? SQLiteStorageError {
+            switch storageError {
+            case .constraint, .conflict, .busy, .invalidValue, .queueFull: return true
+            default: return false
+            }
+        }
+        // Caller row-mapping exceptions leave the compiled statement valid.
+        return true
+    }
+
+    private func recycle(_ statement: OpaquePointer, sql: String, retain: Bool) {
+        guard retain, Self.isCacheable(sql) else {
+            sqlite3_finalize(statement); return
+        }
+        // Note: sqlite3_reset returns the last step error code if the previous step failed
+        // (e.g. SQLITE_CONSTRAINT), while still successfully resetting the statement for reuse.
+        let resetRC = sqlite3_reset(statement) & 0xff
+        let resetOk = resetRC == SQLITE_OK || resetRC == SQLITE_CONSTRAINT || resetRC == SQLITE_BUSY || resetRC == SQLITE_LOCKED
+        guard resetOk, sqlite3_clear_bindings(statement) == SQLITE_OK else {
             sqlite3_finalize(statement); return
         }
         if let previous = statementMap.removeValue(forKey: sql) {
@@ -256,12 +383,56 @@ public final class SQLiteConnection {
     @discardableResult
     public func execute(_ sql: String, _ bindings: [SQLiteValue] = []) throws -> Int {
         let statement = try prepare(sql, bindings)
-        var succeeded = false
-        defer { recycle(statement, sql: sql, succeeded: succeeded) }
+        var stepError: Error?
+        defer { recycle(statement, sql: sql, retain: Self.shouldRetainStatement(after: stepError)) }
         let result = sqlite3_step(statement)
-        guard result == SQLITE_DONE else { throw Self.failure(result) }
-        succeeded = true
+        guard result == SQLITE_DONE else {
+            let err = Self.failure(result)
+            stepError = err
+            throw err
+        }
         return Int(sqlite3_changes(handle))
+    }
+
+    public func scan(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max,
+                     consume: (SQLiteCursor) throws -> Void) throws {
+        guard maximumRows > 0 else { throw SQLiteStorageError.invalidValue }
+        let statement = try prepare(sql, bindings)
+        var caughtError: Error?
+        defer { recycle(statement, sql: sql, retain: Self.shouldRetainStatement(after: caughtError)) }
+        let count = sqlite3_column_count(statement)
+        let cursor = SQLiteCursor(statement, columnCount: count)
+        var emitted = 0
+        do {
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_DONE { return }
+                guard result == SQLITE_ROW else { throw Self.failure(result) }
+                guard emitted < maximumRows else { throw SQLiteStorageError.queueFull }
+                emitted += 1
+                try consume(cursor)
+            }
+        } catch {
+            caughtError = error
+            throw error
+        }
+    }
+
+    public func query<T>(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max,
+                         map: (SQLiteCursor) throws -> T) throws -> [T] {
+        var output: [T] = []
+        try scan(sql, bindings, maximumRows: maximumRows) { output.append(try map($0)) }
+        return output
+    }
+
+    public func queryOne<T>(_ sql: String, _ bindings: [SQLiteValue] = [],
+                            map: (SQLiteCursor) throws -> T) throws -> T? {
+        var output: T?
+        try scan(sql, bindings, maximumRows: 2) { cursor in
+            if output != nil { throw SQLiteStorageError.corrupt }
+            output = try map(cursor)
+        }
+        return output
     }
 
     public func query(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max) throws -> [SQLiteRow] {
@@ -275,42 +446,91 @@ public final class SQLiteConnection {
                      consume: (SQLiteRow) throws -> Void) throws {
         guard maximumRows > 0 else { throw SQLiteStorageError.invalidValue }
         let statement = try prepare(sql, bindings)
-        var succeeded = false
-        defer { recycle(statement, sql: sql, succeeded: succeeded) }
+        var caughtError: Error?
+        defer { recycle(statement, sql: sql, retain: Self.shouldRetainStatement(after: caughtError)) }
         let count = Int(sqlite3_column_count(statement))
         let names = (0..<count).map { String(cString: sqlite3_column_name(statement, Int32($0))) }
         var emitted = 0
-        while true {
-            let result = sqlite3_step(statement)
-            if result == SQLITE_DONE { succeeded = true; return }
-            guard result == SQLITE_ROW else { throw Self.failure(result) }
-            guard emitted < maximumRows else { throw SQLiteStorageError.queueFull }
-            emitted += 1
-            var values: [String: SQLiteValue] = [:]
-            values.reserveCapacity(count)
-            for index in 0..<count {
-                let column = Int32(index), name = names[index]
-                switch sqlite3_column_type(statement, column) {
-                case SQLITE_INTEGER: values[name] = .integer(sqlite3_column_int64(statement, column))
-                case SQLITE_FLOAT: values[name] = .real(sqlite3_column_double(statement, column))
-                case SQLITE_TEXT:
-                    let byteCount = Int(sqlite3_column_bytes(statement, column))
-                    if byteCount == 0 { values[name] = .text("") }
-                    else if let pointer = sqlite3_column_text(statement, column) {
-                        let text = String(decoding: UnsafeBufferPointer(start: pointer, count: byteCount), as: UTF8.self)
-                        values[name] = .text(text)
-                    } else { throw SQLiteStorageError.corrupt }
-                case SQLITE_BLOB:
-                    let byteCount = Int(sqlite3_column_bytes(statement, column))
-                    if byteCount == 0 { values[name] = .blob(Data()) }
-                    else if let pointer = sqlite3_column_blob(statement, column) {
-                        values[name] = .blob(Data(bytes: pointer, count: byteCount))
-                    } else { throw SQLiteStorageError.corrupt }
-                default: values[name] = .null
+        do {
+            while true {
+                let result = sqlite3_step(statement)
+                if result == SQLITE_DONE { return }
+                guard result == SQLITE_ROW else { throw Self.failure(result) }
+                guard emitted < maximumRows else { throw SQLiteStorageError.queueFull }
+                emitted += 1
+                var values: [String: SQLiteValue] = [:]
+                values.reserveCapacity(count)
+                for index in 0..<count {
+                    let column = Int32(index), name = names[index]
+                    switch sqlite3_column_type(statement, column) {
+                    case SQLITE_INTEGER: values[name] = .integer(sqlite3_column_int64(statement, column))
+                    case SQLITE_FLOAT: values[name] = .real(sqlite3_column_double(statement, column))
+                    case SQLITE_TEXT:
+                        let byteCount = Int(sqlite3_column_bytes(statement, column))
+                        if byteCount == 0 { values[name] = .text("") }
+                        else if let pointer = sqlite3_column_text(statement, column) {
+                            let text = String(decoding: UnsafeBufferPointer(start: pointer, count: byteCount), as: UTF8.self)
+                            values[name] = .text(text)
+                        } else { throw SQLiteStorageError.corrupt }
+                    case SQLITE_BLOB:
+                        let byteCount = Int(sqlite3_column_bytes(statement, column))
+                        if byteCount == 0 { values[name] = .blob(Data()) }
+                        else if let pointer = sqlite3_column_blob(statement, column) {
+                            values[name] = .blob(Data(bytes: pointer, count: byteCount))
+                        } else { throw SQLiteStorageError.corrupt }
+                    default: values[name] = .null
+                    }
                 }
+                try consume(SQLiteRow(values: values))
             }
-            try consume(SQLiteRow(values: values))
+        } catch {
+            caughtError = error
+            throw error
         }
+    }
+
+    public func ownerRevision(_ owner: String) throws -> (revision: Int64, receipt: String) {
+        guard let row = try queryOne(
+            "SELECT revision, receipt FROM owner_revisions WHERE owner = ?",
+            [.text(owner)],
+            map: { (try $0.int64(0), try $0.text(1)) }
+        ) else {
+            return (0, "")
+        }
+        return row
+    }
+
+    @discardableResult
+    public func commitOwnerRevision(
+        _ owner: String,
+        expectedRevision: Int64,
+        expectedReceipt: String,
+        operationID: String
+    ) throws -> (revision: Int64, receipt: String) {
+        guard expectedRevision >= 0, expectedRevision < 9_007_199_254_740_991, !operationID.isEmpty else {
+            throw SQLiteStorageError.invalidValue
+        }
+        let current = try ownerRevision(owner)
+        guard current.revision == expectedRevision, current.receipt == expectedReceipt else {
+            throw SQLiteStorageError.conflict
+        }
+        let nextRevision = expectedRevision + 1
+        try execute("""
+            INSERT INTO owner_revisions(owner, revision, receipt) VALUES(?, ?, ?)
+            ON CONFLICT(owner) DO UPDATE SET revision = excluded.revision, receipt = excluded.receipt
+            """, [.text(owner), .integer(nextRevision), .text(operationID)])
+        try execute("INSERT INTO operation_receipts(owner, operation_id, revision) VALUES(?, ?, ?)",
+                    [.text(owner), .text(operationID), .integer(nextRevision)])
+        try execute("DELETE FROM operation_receipts WHERE owner = ? AND revision < ? - 256",
+                    [.text(owner), .integer(nextRevision)])
+        return (nextRevision, operationID)
+    }
+
+    @discardableResult
+    public func bumpOwnerRevision(_ owner: String, operationID: String = UUID().uuidString.lowercased()) throws -> Int64 {
+        let current = try ownerRevision(owner)
+        let next = try commitOwnerRevision(owner, expectedRevision: current.revision, expectedReceipt: current.receipt, operationID: operationID)
+        return next.revision
     }
 
     /// Table/column identifiers are repository constants, never external input.
@@ -874,13 +1094,18 @@ public final class SQLiteDatabase: @unchecked Sendable {
             try checkFiles()
             try Self.maintain(db)
         } catch SQLiteStorageError.busy { }
-        catch { recordMaintenanceFailure(error) }
+        catch let storageError as SQLiteStorageError where storageError == .invalidPath || storageError == .corrupt {
+            recordMaintenanceFailure(storageError)
+        } catch {
+            if DebugRuntime.isEnabled {
+                DebugRuntime.logError(.storage, sub: "sqlite", event: "maintenance.warn", error: error)
+            }
+        }
     }
     private static func maintain(_ db: SQLiteConnection) throws {
-        guard !db.isInTransaction else { throw SQLiteStorageError.busy }
-        guard try db.query("PRAGMA wal_checkpoint(PASSIVE)").first?.integer("busy") == 0 else {
-            throw SQLiteStorageError.busy
-        }
+        guard !db.isInTransaction else { return }
+        let busy = try db.query("PRAGMA wal_checkpoint(PASSIVE)").first?.integer("busy") ?? 0
+        guard busy == 0 else { return }
         if try db.query("PRAGMA freelist_count").first!.integer("freelist_count") >= 256 {
             _ = try db.query("PRAGMA incremental_vacuum(128)")
         }

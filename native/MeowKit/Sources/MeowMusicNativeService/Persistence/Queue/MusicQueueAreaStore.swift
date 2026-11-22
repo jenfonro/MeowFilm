@@ -2,58 +2,70 @@ import Foundation
 import MeowStorage
 
 enum MusicQueueAreaStore {
-    private static let entryInsertSQL: String = {
-        let cols = ["scope", "entry_id", "position", "song_id"] + MusicPersistenceHelpers.contextColumns
-        let placeholders = Array(repeating: "?", count: cols.count).joined(separator: ",")
-        return "INSERT INTO music_queue_entries(\(cols.joined(separator: ","))) VALUES(\(placeholders))"
-    }()
+    private static let entryColumns = ["scope", "entry_id", "position", "song_id"] + MusicPersistenceHelpers.contextColumns
+    private static let entrySelectColumns = "entry_id,song_id," + MusicPersistenceHelpers.contextColumns.joined(separator: ",")
+    private static let stateSelectColumns =
+        "current_id,serial,revision,run_id," + MusicPersistenceHelpers.sourceColumns(prefix: "source_").joined(separator: ",")
+    private static let similarSelectColumns =
+        "seed_song_id,seed_title,seed_entry_id,from_home,provider,continue_enabled,offset_val,exhausted," +
+        "similar_scope,status,provider_pid,provider_sid,provider_count,has_return_queue,return_current_id," +
+        MusicPersistenceHelpers.sourceColumns(prefix: "return_source_").joined(separator: ",")
 
-    private static let returnEntryInsertSQL: String = {
-        let cols = ["scope", "entry_id", "position", "song_id"] + MusicPersistenceHelpers.contextColumns
-        let placeholders = Array(repeating: "?", count: cols.count).joined(separator: ",")
-        return "INSERT INTO music_queue_similar_return_entries(\(cols.joined(separator: ","))) VALUES(\(placeholders))"
-    }()
+    private struct QueueEntryRow: Equatable {
+        let id: String
+        let songID: String
+        let context: MusicPlayContextRecord
+    }
 
     static func read(_ db: SQLiteConnection, scope: String) throws -> MJ? {
-        guard let state = try db.query(
-            "SELECT * FROM music_queue_state WHERE scope=?",
-            [.text(scope)]
-        ).first else { return nil }
+        guard let state = try db.queryOne(
+            "SELECT \(stateSelectColumns) FROM music_queue_state WHERE scope=?",
+            [.text(scope)],
+            map: { c in
+                (
+                    currentID: try c.optionalText(0),
+                    serial: try c.integer(1),
+                    revision: try c.integer(2),
+                    runID: try c.optionalText(3),
+                    source: try MusicSourceRecord.read(from: c, offset: 4)
+                )
+            }
+        ) else { return nil }
 
         let entries: [MJ] = try db.query(
-            "SELECT * FROM music_queue_entries WHERE scope=? ORDER BY position",
+            "SELECT \(entrySelectColumns) FROM music_queue_entries WHERE scope=? ORDER BY position",
             [.text(scope)]
-        ).map { row in
+        ) { c in
             var fields: [(String, MJ)] = [
-                ("id", .string(try row.text("entry_id"))),
-                ("songId", .string(try row.text("song_id")))
+                ("id", .string(try c.text(0))),
+                ("songId", .string(try c.text(1)))
             ]
-            if let context = try MusicPersistenceHelpers.readContext(row) {
+            if let context = try MusicPlayContextRecord.read(from: c, offset: 2).toMJ() {
                 fields.append(("context", context))
             }
             return .obj(fields)
         }
 
         var lists: [String: [String]] = [:]
-        for item in try db.query(
+        try db.scan(
             "SELECT list_kind,item_value FROM music_queue_list_items WHERE scope=? ORDER BY list_kind,position",
             [.text(scope)]
-        ) {
-            lists[try item.text("list_kind"), default: []].append(try item.text("item_value"))
+        ) { c in
+            lists[try c.text(0), default: []].append(try c.text(1))
         }
 
         var fields: [(String, MJ)] = [
             ("schema", .n(1)),
             ("entries", .array(entries)),
-            ("currentId", (try state.optionalText("current_id")).map(MJ.string) ?? .null),
+            ("currentId", state.currentID.map(MJ.string) ?? .null),
             ("priority", .strings(lists["priority"] ?? [])),
             ("history", .strings(lists["history"] ?? [])),
-            ("source", try MusicPersistenceHelpers.readSource(state, prefix: "source_")),
-            ("serial", .n(try state.integer("serial"))),
-            ("revision", .n(try state.integer("revision"))),
+            ("source", state.source?.toMJ() ?? .null),
+            ("serial", .n(state.serial)),
+            ("revision", .n(state.revision)),
             ("failed", .strings(lists["failed"] ?? []))
         ]
-        if let runID = try state.optionalText("run_id") {
+        if let runID = state.runID {
             fields.append(("runId", .string(runID)))
         }
         if let similar = try readSimilar(db, scope: scope) {
@@ -65,144 +77,207 @@ enum MusicQueueAreaStore {
     static func write(_ db: SQLiteConnection, scope: String, value: MJ) throws {
         let stateCols = ["scope", "current_id", "serial", "revision", "run_id"] +
             MusicPersistenceHelpers.sourceColumns(prefix: "source_")
+        let sourceRec = MusicSourceRecord.from(value["source"]) ?? .empty
         let stateVals: [SQLiteValue] = [
             .text(scope),
             MusicPersistenceHelpers.optionalNonEmpty(value["currentId"]),
             .integer(value["serial"].int),
             .integer(value["revision"].int),
             MusicPersistenceHelpers.optionalNonEmpty(value["runId"])
-        ] + MusicPersistenceHelpers.bindSource(value["source"])
+        ] + sourceRec.sqliteValues
 
         try db.upsert("music_queue_state", columns: stateCols, values: stateVals, key: ["scope"])
 
-        try db.execute("DELETE FROM music_queue_entries WHERE scope=?", [.text(scope)])
-        for (index, entry) in value["entries"].array.enumerated() {
-            let vals: [SQLiteValue] = [
-                .text(scope), .text(entry["id"].string), .integer(index), .text(entry["songId"].string)
-            ] + MusicPersistenceHelpers.bindContext(entry["context"])
-            try db.execute(entryInsertSQL, vals)
+        // Row-level incremental diff for queue entries (track switch = 0 entry writes!)
+        var prevEntries: [String: (pos: Int, row: QueueEntryRow)] = [:]
+        try db.scan(
+            "SELECT position,\(entrySelectColumns) FROM music_queue_entries WHERE scope=?",
+            [.text(scope)]
+        ) { c in
+            let pos = try c.integer(0)
+            let id = try c.text(1)
+            prevEntries[id] = (pos, QueueEntryRow(
+                id: id,
+                songID: try c.text(2),
+                context: try MusicPlayContextRecord.read(from: c, offset: 3)
+            ))
         }
 
-        try db.execute("DELETE FROM music_queue_list_items WHERE scope=?", [.text(scope)])
+        let nextEntries: [QueueEntryRow] = value["entries"].array.map { entry in
+            QueueEntryRow(
+                id: entry["id"].string,
+                songID: entry["songId"].string,
+                context: MusicPlayContextRecord.from(entry["context"])
+            )
+        }
+        let nextEntryIDs = Set(nextEntries.map(\.id))
+        for oldID in prevEntries.keys where !nextEntryIDs.contains(oldID) {
+            try db.execute("DELETE FROM music_queue_entries WHERE scope=? AND entry_id=?", [.text(scope), .text(oldID)])
+        }
+
+        for (index, entry) in nextEntries.enumerated() {
+            if let old = prevEntries[entry.id] {
+                if old.pos == index && old.row == entry { continue }
+                if old.row == entry {
+                    try db.execute(
+                        "UPDATE music_queue_entries SET position=? WHERE scope=? AND entry_id=?",
+                        [.integer(index), .text(scope), .text(entry.id)]
+                    )
+                    continue
+                }
+            }
+            let vals: [SQLiteValue] = [.text(scope), .text(entry.id), .integer(index), .text(entry.songID)] + entry.context.sqliteValues
+            try db.upsert("music_queue_entries", columns: entryColumns, values: vals, key: ["scope", "entry_id"])
+        }
+
+        // Prefix-diff for priority / history / failed lists
         for kind in ["priority", "history", "failed"] {
-            for (index, item) in value[kind].strings.enumerated() {
+            let nextItems = value[kind].strings
+            let prevItems = try db.query(
+                "SELECT item_value FROM music_queue_list_items WHERE scope=? AND list_kind=? ORDER BY position",
+                [.text(scope), .text(kind)]
+            ) { try $0.text(0) }
+            if prevItems == nextItems { continue }
+            let prefix = MusicPersistenceHelpers.commonPrefixLength(prevItems, nextItems)
+            if prefix < prevItems.count {
+                try db.execute(
+                    "DELETE FROM music_queue_list_items WHERE scope=? AND list_kind=? AND position>=?",
+                    [.text(scope), .text(kind), .integer(prefix)]
+                )
+            }
+            for index in prefix..<nextItems.count {
                 try db.execute(
                     "INSERT INTO music_queue_list_items(scope,list_kind,position,item_value) VALUES(?,?,?,?)",
-                    [.text(scope), .text(kind), .integer(index), .text(item)]
+                    [.text(scope), .text(kind), .integer(index), .text(nextItems[index])]
                 )
             }
         }
 
-        try writeSimilar(db, scope: scope, similar: value["similar"])
+        let prevSimilar = try readSimilar(db, scope: scope)
+        let nextSimilar: MJ? = value["similar"].isObject ? value["similar"] : nil
+        let similarSame: Bool
+        switch (prevSimilar, nextSimilar) {
+        case (nil, nil): similarSame = true
+        case (let a?, let b?): similarSame = MusicPersistenceHelpers.semanticEquals(a, b)
+        default: similarSame = false
+        }
+        if !similarSame {
+            try writeSimilar(db, scope: scope, similar: value["similar"])
+        }
     }
 
     private static func readSimilar(_ db: SQLiteConnection, scope: String) throws -> MJ? {
-        guard let row = try db.query(
-            "SELECT * FROM music_queue_similar_state WHERE scope=?",
-            [.text(scope)]
-        ).first else { return nil }
+        guard let row = try db.queryOne(
+            "SELECT \(similarSelectColumns) FROM music_queue_similar_state WHERE scope=?",
+            [.text(scope)],
+            map: { c in
+                (
+                    seedSongID: try c.optionalText(0),
+                    seedTitle: try c.optionalText(1) ?? "",
+                    seedEntryID: try c.optionalText(2),
+                    fromHome: try c.optionalBool(3) ?? false,
+                    provider: try c.optionalText(4) ?? "",
+                    continueEnabled: try c.optionalBool(5) ?? false,
+                    offsetVal: try c.optionalInteger(6) ?? 0,
+                    exhausted: try c.optionalBool(7) ?? false,
+                    similarScope: try c.optionalText(8) ?? "",
+                    status: try c.optionalText(9) ?? "ready",
+                    providerPID: try c.optionalText(10),
+                    providerSID: try c.optionalText(11),
+                    providerCount: try c.optionalInteger(12),
+                    hasReturnQueue: try c.bool(13),
+                    returnCurrentID: try c.optionalText(14),
+                    returnSource: try MusicSourceRecord.read(from: c, offset: 15)
+                )
+            }
+        ) else { return nil }
 
         var lists: [String: [String]] = [:]
-        for item in try db.query(
+        try db.scan(
             "SELECT list_kind,item_value FROM music_queue_similar_list_items WHERE scope=? ORDER BY list_kind,position",
             [.text(scope)]
-        ) {
-            lists[try item.text("list_kind"), default: []].append(try item.text("item_value"))
+        ) { c in
+            lists[try c.text(0), default: []].append(try c.text(1))
         }
 
         let returnQueue: MJ
-        if try row.bool("has_return_queue") {
+        if row.hasReturnQueue {
             let returnEntries: [MJ] = try db.query(
-                "SELECT * FROM music_queue_similar_return_entries WHERE scope=? ORDER BY position",
+                "SELECT \(entrySelectColumns) FROM music_queue_similar_return_entries WHERE scope=? ORDER BY position",
                 [.text(scope)]
-            ).map { entry in
+            ) { entry in
                 var fields: [(String, MJ)] = [
-                    ("id", .string(try entry.text("entry_id"))),
-                    ("songId", .string(try entry.text("song_id")))
+                    ("id", .string(try entry.text(0))),
+                    ("songId", .string(try entry.text(1)))
                 ]
-                if let context = try MusicPersistenceHelpers.readContext(entry) {
+                if let context = try MusicPlayContextRecord.read(from: entry, offset: 2).toMJ() {
                     fields.append(("context", context))
                 }
                 return .obj(fields)
             }
             returnQueue = .obj([
                 ("entries", .array(returnEntries)),
-                ("currentId", (try row.optionalText("return_current_id")).map(MJ.string) ?? .null),
+                ("currentId", row.returnCurrentID.map(MJ.string) ?? .null),
                 ("priority", .strings(lists["return_priority"] ?? [])),
                 ("history", .strings(lists["return_history"] ?? [])),
-                ("source", try MusicPersistenceHelpers.readSource(row, prefix: "return_source_"))
+                ("source", row.returnSource?.toMJ() ?? .null)
             ])
         } else {
             returnQueue = .null
         }
 
         var batchEntries: [String: [String]] = [:]
-        for item in try db.query(
+        try db.scan(
             "SELECT batch_id,entry_id FROM music_queue_similar_batch_entries WHERE scope=? ORDER BY batch_id,position",
             [.text(scope)]
-        ) {
-            batchEntries[try item.text("batch_id"), default: []].append(try item.text("entry_id"))
+        ) { c in
+            batchEntries[try c.text(0), default: []].append(try c.text(1))
         }
 
         let batches: [MJ] = try db.query(
             "SELECT batch_id,based_on_song_id,based_on_title,provider FROM music_queue_similar_batches " +
             "WHERE scope=? ORDER BY position",
             [.text(scope)]
-        ).map { batch in
-            let batchID = try batch.text("batch_id")
+        ) { batch in
+            let batchID = try batch.text(0)
             return .obj([
                 ("id", .string(batchID)),
-                ("basedOnSongId", (try batch.optionalText("based_on_song_id")).map(MJ.string) ?? .null),
-                ("basedOnTitle", .string(try batch.optionalText("based_on_title") ?? "")),
-                ("provider", .string(try batch.optionalText("provider") ?? "")),
+                ("basedOnSongId", (try batch.optionalText(1)).map(MJ.string) ?? .null),
+                ("basedOnTitle", .string(try batch.optionalText(2) ?? "")),
+                ("provider", .string(try batch.optionalText(3) ?? "")),
                 ("entryIds", .strings(batchEntries[batchID] ?? []))
             ])
         }
 
-        let pid = try MusicPersistenceHelpers.readIdentifier(row, kindColumn: "provider_pid_kind", valueColumn: "provider_pid_value")
-        let sid = try MusicPersistenceHelpers.readIdentifier(row, kindColumn: "provider_sid_kind", valueColumn: "provider_sid_value")
-        let count = try row.optionalInteger("provider_count")
         let providerContext: MJ
-        if pid != nil || sid != nil || count != nil {
+        if row.providerPID != nil || row.providerSID != nil || row.providerCount != nil {
             var ctx: [(String, MJ)] = []
-            if let pid { ctx.append(("pid", pid)) }
-            if let sid { ctx.append(("sid", sid)) }
-            if let count { ctx.append(("count", .n(count))) }
+            if let pid = row.providerPID { ctx.append(("pid", .string(pid))) }
+            if let sid = row.providerSID { ctx.append(("sid", .string(sid))) }
+            if let count = row.providerCount { ctx.append(("count", .n(count))) }
             providerContext = .obj(ctx)
         } else {
             providerContext = .null
         }
 
-        let seedSongId: MJ = (try row.optionalText("seed_song_id")).map(MJ.string) ?? .null
-        let seedTitle = try row.optionalText("seed_title") ?? ""
-        let seedEntryId: MJ = (try row.optionalText("seed_entry_id")).map(MJ.string) ?? .null
-        let fromHome = try row.optionalBool("from_home") ?? false
-        let provider = try row.optionalText("provider") ?? ""
-        let continueEnabled = try row.optionalBool("continue_enabled") ?? false
-        let offsetVal = try row.optionalInteger("offset_val") ?? 0
-        let exhausted = try row.optionalBool("exhausted") ?? false
-        let similarScope = try row.optionalText("similar_scope") ?? ""
-        let status = try row.optionalText("status") ?? "ready"
-
-        var fields: [(String, MJ)] = []
-        fields.reserveCapacity(16)
-        fields.append(("schema", .n(1)))
-        fields.append(("seedSongId", seedSongId))
-        fields.append(("seedTitle", .string(seedTitle)))
-        fields.append(("seedEntryId", seedEntryId))
-        fields.append(("returnQueue", returnQueue))
-        fields.append(("sourceIds", .strings(lists["source_ids"] ?? [])))
-        fields.append(("fromHome", .bool(fromHome)))
-        fields.append(("provider", .string(provider)))
-        fields.append(("providerContext", providerContext))
-        fields.append(("continue", .bool(continueEnabled)))
-        fields.append(("offset", .n(offsetVal)))
-        fields.append(("exhausted", .bool(exhausted)))
-        fields.append(("batches", .array(batches)))
-        fields.append(("attempted", .strings(lists["attempted"] ?? [])))
-        fields.append(("scope", .string(similarScope)))
-        fields.append(("status", .string(status)))
-        return .obj(fields)
+        return .obj([
+            ("schema", .n(1)),
+            ("seedSongId", row.seedSongID.map(MJ.string) ?? .null),
+            ("seedTitle", .string(row.seedTitle)),
+            ("seedEntryId", row.seedEntryID.map(MJ.string) ?? .null),
+            ("returnQueue", returnQueue),
+            ("sourceIds", .strings(lists["source_ids"] ?? [])),
+            ("fromHome", .bool(row.fromHome)),
+            ("provider", .string(row.provider)),
+            ("providerContext", providerContext),
+            ("continue", .bool(row.continueEnabled)),
+            ("offset", .n(row.offsetVal)),
+            ("exhausted", .bool(row.exhausted)),
+            ("batches", .array(batches)),
+            ("attempted", .strings(lists["attempted"] ?? [])),
+            ("scope", .string(row.similarScope)),
+            ("status", .string(row.status))
+        ])
     }
 
     private static func writeSimilar(_ db: SQLiteConnection, scope: String, similar: MJ) throws {
@@ -211,8 +286,8 @@ enum MusicQueueAreaStore {
             return
         }
         let pCtx = similar["providerContext"]
-        let (pidKind, pidVal) = pCtx.isObject ? MusicPersistenceHelpers.bindIdentifier(pCtx["pid"]) : (.null, .null)
-        let (sidKind, sidVal) = pCtx.isObject ? MusicPersistenceHelpers.bindIdentifier(pCtx["sid"]) : (.null, .null)
+        let pidVal: SQLiteValue = (pCtx.isObject && !pCtx["pid"].id.isEmpty) ? .text(pCtx["pid"].id) : .null
+        let sidVal: SQLiteValue = (pCtx.isObject && !pCtx["sid"].id.isEmpty) ? .text(pCtx["sid"].id) : .null
         let pCount = pCtx.isObject ? MusicPersistenceHelpers.optionalInt(pCtx["count"]) : .null
         let returnQueue = similar["returnQueue"]
         let hasReturn = returnQueue.isObject
@@ -220,9 +295,9 @@ enum MusicQueueAreaStore {
         let cols = [
             "scope", "seed_song_id", "seed_title", "seed_entry_id", "from_home", "provider",
             "continue_enabled", "offset_val", "exhausted", "similar_scope", "status",
-            "provider_pid_kind", "provider_pid_value", "provider_sid_kind", "provider_sid_value",
-            "provider_count", "has_return_queue", "return_current_id"
+            "provider_pid", "provider_sid", "provider_count", "has_return_queue", "return_current_id"
         ] + MusicPersistenceHelpers.sourceColumns(prefix: "return_source_")
+        let returnSourceRec = hasReturn ? (MusicSourceRecord.from(returnQueue["source"]) ?? .empty) : .empty
         let vals: [SQLiteValue] = [
             .text(scope),
             MusicPersistenceHelpers.optionalNonEmpty(similar["seedSongId"]),
@@ -235,10 +310,10 @@ enum MusicQueueAreaStore {
             .bool(similar["exhausted"].bool),
             MusicPersistenceHelpers.optionalString(similar["scope"]),
             MusicPersistenceHelpers.optionalString(similar["status"]),
-            pidKind, pidVal, sidKind, sidVal, pCount,
+            pidVal, sidVal, pCount,
             .bool(hasReturn),
             hasReturn ? MusicPersistenceHelpers.optionalNonEmpty(returnQueue["currentId"]) : .null
-        ] + (hasReturn ? MusicPersistenceHelpers.bindSource(returnQueue["source"]) : Array(repeating: .null, count: 12))
+        ] + returnSourceRec.sqliteValues
 
         try db.upsert("music_queue_similar_state", columns: cols, values: vals, key: ["scope"])
 
@@ -247,8 +322,8 @@ enum MusicQueueAreaStore {
             for (index, entry) in returnQueue["entries"].array.enumerated() {
                 let rowVals: [SQLiteValue] = [
                     .text(scope), .text(entry["id"].string), .integer(index), .text(entry["songId"].string)
-                ] + MusicPersistenceHelpers.bindContext(entry["context"])
-                try db.execute(returnEntryInsertSQL, rowVals)
+                ] + MusicPlayContextRecord.from(entry["context"]).sqliteValues
+                try db.upsert("music_queue_similar_return_entries", columns: entryColumns, values: rowVals, key: ["scope", "entry_id"])
             }
         }
 
@@ -268,7 +343,6 @@ enum MusicQueueAreaStore {
             }
         }
 
-        // Cascades to music_queue_similar_batch_entries.
         try db.execute("DELETE FROM music_queue_similar_batches WHERE scope=?", [.text(scope)])
         for (index, batch) in similar["batches"].array.enumerated() {
             let batchID = batch["id"].string

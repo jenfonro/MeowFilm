@@ -3,14 +3,15 @@ import MeowStorage
 
 enum MusicCatalogSourceAreaStore {
     static func read(_ db: SQLiteConnection, scope: String) throws -> MJ? {
-        guard let row = try db.query(
-            "SELECT revision,platform FROM ios_music_catalog_source WHERE scope=?",
-            [.text(scope)]
-        ).first else { return nil }
+        guard let row = try db.queryOne(
+            "SELECT revision,platform FROM music_catalog_source WHERE scope=?",
+            [.text(scope)],
+            map: { (revision: try $0.integer(0), platform: try $0.text(1)) }
+        ) else { return nil }
         return .obj([
             ("schema", .n(1)),
-            ("revision", .n(try row.integer("revision"))),
-            ("platform", .string(try row.text("platform")))
+            ("revision", .n(row.revision)),
+            ("platform", .string(row.platform))
         ])
     }
 
@@ -18,7 +19,7 @@ enum MusicCatalogSourceAreaStore {
         let revision = value["revision"].int
         let platform = value["platform"].string.isEmpty ? "wy" : value["platform"].string
         try db.upsert(
-            "ios_music_catalog_source",
+            "music_catalog_source",
             columns: ["scope", "revision", "platform"],
             values: [.text(scope), .integer(revision), .text(platform)],
             key: ["scope"]

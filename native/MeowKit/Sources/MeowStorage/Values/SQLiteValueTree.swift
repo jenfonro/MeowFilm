@@ -32,7 +32,7 @@ public enum SQLiteValueTree {
                 guard value.isFinite else { throw SQLiteStorageError.invalidValue }
                 if value == 0 && value.sign == .minus { kind = "number_text"; text = .text("-0") }
                 else if let value = Int64(exactly: value) { kind = "integer"; integer = .integer(value) }
-                else { kind = "real"; real = .real(value) }
+                else { kind = "real"; real = .real(value); text = .text(String(value)) }
             case .exactNumber(let value):
                 guard number.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value))?.range.length == value.utf16.count else {
                     throw SQLiteStorageError.invalidValue

@@ -1,14 +1,14 @@
--- Native iOS music preferences, accounts, network references, sync state, playback prefs, source discovery, and home snapshot.
+-- iOS-specific music preferences, accounts, network references, sync fences, discovery cache, home snapshot, and media caches.
 CREATE TABLE ios_search_history (
-    text TEXT PRIMARY KEY,
+    text TEXT PRIMARY KEY NOT NULL,
     used_at REAL NOT NULL
 ) STRICT;
 
-CREATE INDEX ios_search_history_recent ON ios_search_history(used_at DESC, text);
+CREATE INDEX idx_ios_search_history_recent ON ios_search_history(used_at DESC, text);
 
 CREATE TABLE ios_music_search_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    searchPlaylists INTEGER NOT NULL CHECK (searchPlaylists IN (0, 1)),
+    search_playlists INTEGER NOT NULL CHECK (search_playlists IN (0, 1)),
     song_pages INTEGER NOT NULL CHECK (song_pages >= 1),
     song_concurrency INTEGER NOT NULL CHECK (song_concurrency >= 1),
     song_cache_minutes INTEGER NOT NULL CHECK (song_cache_minutes BETWEEN 1 AND 1440),
@@ -20,31 +20,19 @@ CREATE TABLE ios_music_search_preferences (
 
 CREATE TABLE ios_music_search_platforms (
     kind TEXT NOT NULL CHECK (kind IN ('song', 'playlist')),
-    ordinal INTEGER NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
     platform TEXT NOT NULL,
-    PRIMARY KEY (kind, ordinal),
+    PRIMARY KEY (kind, position),
     UNIQUE (kind, platform)
 ) STRICT;
 
-CREATE TABLE ios_music_appearance (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    playlistView TEXT NOT NULL,
-    playerTheme TEXT NOT NULL,
-    colorMode TEXT NOT NULL,
-    colorPalette TEXT NOT NULL,
-    lockLyric INTEGER NOT NULL CHECK (lockLyric IN (0, 1)),
-    lyricTranslation INTEGER NOT NULL CHECK (lyricTranslation IN (0, 1)),
-    lyricBackground INTEGER NOT NULL CHECK (lyricBackground IN (0, 1)),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
-) STRICT;
-
 CREATE TABLE ios_music_song_palettes (
-    song_key TEXT PRIMARY KEY,
+    song_key TEXT PRIMARY KEY NOT NULL,
     palette TEXT NOT NULL,
     used_at REAL NOT NULL
 ) STRICT;
 
-CREATE INDEX ios_music_song_palettes_recent ON ios_music_song_palettes(used_at DESC, song_key);
+CREATE INDEX idx_ios_music_song_palettes_recent ON ios_music_song_palettes(used_at DESC, song_key);
 
 CREATE TABLE ios_music_palette_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -57,7 +45,7 @@ CREATE TABLE ios_music_channel_selection (
 ) STRICT;
 
 CREATE TABLE ios_playback_volume (
-    owner TEXT PRIMARY KEY,
+    owner TEXT PRIMARY KEY NOT NULL,
     volume REAL NOT NULL CHECK (volume BETWEEN 0 AND 1)
 ) STRICT;
 
@@ -71,12 +59,6 @@ CREATE TABLE ios_music_accounts (
     credential_revision TEXT NOT NULL,
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     PRIMARY KEY (installation_id, site_key, account_id)
-) STRICT;
-
-CREATE TABLE ios_music_catalog_source (
-    scope TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    platform TEXT NOT NULL DEFAULT 'wy'
 ) STRICT;
 
 CREATE TABLE ios_music_network_references (
@@ -101,7 +83,6 @@ CREATE TABLE ios_music_network_references (
 
 CREATE INDEX idx_ios_music_network_references_order ON ios_music_network_references(scope, position);
 
--- iOS music library sync state, automatic sync selections/bindings, and mutation fences.
 CREATE TABLE ios_music_sync_state (
     scope TEXT PRIMARY KEY NOT NULL REFERENCES music_library_state(scope) ON DELETE CASCADE,
     phase TEXT NOT NULL DEFAULT 'idle',
@@ -195,46 +176,6 @@ CREATE TABLE ios_music_sync_fence_members (
     FOREIGN KEY (scope, fence_index) REFERENCES ios_music_sync_fences(scope, fence_index) ON DELETE CASCADE
 ) STRICT;
 
--- iOS music playback preferences, quality/official/metadata lists, and source exclusions.
-CREATE TABLE ios_music_playback_settings (
-    scope TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    mode INTEGER NOT NULL DEFAULT 1,
-    lyrics_enabled INTEGER NOT NULL DEFAULT 1 CHECK (lyrics_enabled IN (0, 1)),
-    show_translation INTEGER NOT NULL DEFAULT 1 CHECK (show_translation IN (0, 1)),
-    quality_request TEXT,
-    position_occurrence_id TEXT,
-    position_seconds REAL NOT NULL DEFAULT 0
-) STRICT;
-
-CREATE TABLE ios_music_playback_lists (
-    scope TEXT NOT NULL REFERENCES ios_music_playback_settings(scope) ON DELETE CASCADE,
-    list_kind TEXT NOT NULL CHECK (list_kind IN (
-        'qualityOrder', 'qualityEnabled', 'spatialOrder', 'spatialEnabled',
-        'officialSources', 'metadataPlatforms', 'metadataEnabled'
-    )),
-    position INTEGER NOT NULL CHECK (position >= 0),
-    item_value TEXT NOT NULL,
-    PRIMARY KEY (scope, list_kind, position)
-) STRICT;
-
-CREATE TABLE ios_music_source_exclusions (
-    scope TEXT NOT NULL REFERENCES ios_music_playback_settings(scope) ON DELETE CASCADE,
-    exclusion_kind TEXT NOT NULL CHECK (exclusion_kind IN ('source', 'recording')),
-    exclusion_id TEXT NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    song_id TEXT NOT NULL REFERENCES music_songs(song_id),
-    title TEXT NOT NULL DEFAULT '',
-    artist TEXT NOT NULL DEFAULT '',
-    provider TEXT NOT NULL DEFAULT '',
-    platform TEXT NOT NULL DEFAULT '',
-    source_key TEXT,
-    PRIMARY KEY (scope, exclusion_kind, exclusion_id)
-) STRICT;
-
-CREATE INDEX idx_ios_music_source_exclusions_order ON ios_music_source_exclusions(scope, exclusion_kind, position);
-
--- iOS music source discovery cache (replaces music_source_discovery_* generated trees).
 CREATE TABLE ios_music_source_discovery (
     song_id TEXT PRIMARY KEY NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
@@ -278,7 +219,6 @@ CREATE TABLE ios_music_source_discovery_observations (
         REFERENCES ios_music_source_discovery_platforms(song_id, platform) ON DELETE CASCADE
 ) STRICT;
 
--- iOS music home display snapshot (normalized flat tables, no shape_mask/null_mask).
 CREATE TABLE ios_music_home_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     source TEXT NOT NULL
@@ -397,3 +337,102 @@ CREATE TABLE ios_music_home_item_previews (
     last_rank INTEGER,
     PRIMARY KEY (item_uid, preview_kind, position)
 ) STRICT;
+
+CREATE TABLE ios_music_audio_urls (
+    scope TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    quality TEXT NOT NULL,
+    url TEXT NOT NULL,
+    full INTEGER CHECK (full IS NULL OR full IN (0, 1)),
+    actual_quality TEXT,
+    bitrate REAL,
+    sample_rate REAL,
+    duration REAL,
+    expires_at REAL,
+    license_expires_at REAL,
+    saved_at REAL NOT NULL,
+    PRIMARY KEY (scope, platform, native_id, quality)
+) STRICT;
+
+CREATE INDEX idx_ios_music_audio_urls_age ON ios_music_audio_urls(saved_at);
+
+CREATE TABLE ios_music_chorus (
+    scope TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    recording_duration REAL NOT NULL CHECK (recording_duration > 0),
+    start_sec REAL NOT NULL CHECK (start_sec >= 0),
+    end_sec REAL NOT NULL CHECK (end_sec >= start_sec),
+    expires_at REAL NOT NULL,
+    PRIMARY KEY (scope, platform, native_id, recording_duration)
+) STRICT;
+
+CREATE TABLE ios_music_feedback_outbox (
+    event_id TEXT PRIMARY KEY NOT NULL,
+    instance TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    phase TEXT NOT NULL CHECK (phase IN ('start', 'end')),
+    native_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    algorithm TEXT NOT NULL,
+    heartbeat INTEGER NOT NULL CHECK (heartbeat IN (0, 1)),
+    listened REAL NOT NULL CHECK (listened >= 0),
+    media REAL NOT NULL CHECK (media >= 0),
+    rate REAL NOT NULL CHECK (rate > 0),
+    occurred_at REAL NOT NULL CHECK (occurred_at >= 0),
+    reason TEXT,
+    state TEXT NOT NULL CHECK (state IN ('pending', 'inflight')),
+    start_confirmed INTEGER NOT NULL CHECK (start_confirmed IN (0, 1))
+) STRICT;
+
+CREATE INDEX idx_ios_music_feedback_dispatch ON ios_music_feedback_outbox(scope, state, occurred_at);
+
+CREATE TABLE ios_music_images (
+    resource TEXT NOT NULL,
+    filename TEXT PRIMARY KEY NOT NULL,
+    updated_at REAL NOT NULL,
+    bytes INTEGER NOT NULL CHECK (bytes > 0),
+    ready INTEGER NOT NULL CHECK (ready IN (0, 1))
+) STRICT;
+
+CREATE UNIQUE INDEX idx_ios_music_images_ready ON ios_music_images(resource) WHERE ready = 1;
+CREATE INDEX idx_ios_music_images_age ON ios_music_images(updated_at);
+
+CREATE TABLE ios_music_audio_files (
+    cache_key TEXT PRIMARY KEY NOT NULL CHECK (length(cache_key) = 64),
+    file TEXT NOT NULL UNIQUE,
+    quality TEXT NOT NULL,
+    last_played_at REAL NOT NULL,
+    license_expires_at REAL,
+    expires_at REAL NOT NULL,
+    scope TEXT NOT NULL,
+    song_id TEXT NOT NULL,
+    source_key TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    requested_quality TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation > 0),
+    stamp_device INTEGER NOT NULL,
+    stamp_inode TEXT NOT NULL,
+    stamp_size INTEGER NOT NULL CHECK (stamp_size > 0),
+    stamp_seconds INTEGER NOT NULL,
+    stamp_nanos INTEGER NOT NULL,
+    container TEXT NOT NULL,
+    codec TEXT NOT NULL,
+    duration REAL NOT NULL CHECK (duration > 0),
+    decoded_frames INTEGER NOT NULL CHECK (decoded_frames > 0),
+    sample_rate REAL NOT NULL CHECK (sample_rate > 0),
+    channels INTEGER NOT NULL CHECK (channels > 0),
+    bitrate REAL NOT NULL CHECK (bitrate > 0),
+    bit_depth INTEGER,
+    lossless INTEGER NOT NULL CHECK (lossless IN (0, 1)),
+    complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
+    protected INTEGER NOT NULL CHECK (protected IN (0, 1))
+) STRICT;
+
+CREATE INDEX idx_ios_music_audio_files_song ON ios_music_audio_files(scope, song_id, last_played_at);
+CREATE INDEX idx_ios_music_audio_files_age ON ios_music_audio_files(expires_at);

@@ -195,7 +195,7 @@ function relations(value, previous, stored) {
     ['film_group_members',['group_id','position','member_identity'],['group_id','position'],retained('film_group_members',value.groups,previous.groups,
       row => row.members.map((key,index) => [row.id,index,key]))],
     ...(value.preferences ? [
-      ['film_preferences_state',['singleton','ios_auto_prepare','metadata_view_provider','row_revision'],['singleton'],[[1,Number(value.preferences.iosAutoPrepare),value.preferences.metadataViewProvider,1]]],
+      ['film_preferences',['singleton','ios_auto_prepare','metadata_view_provider','row_revision'],['singleton'],[[1,Number(value.preferences.iosAutoPrepare),value.preferences.metadataViewProvider,1]]],
       ['film_preference_items',['list_kind','position','item_value'],['list_kind','position'],preferenceLists.flatMap(key => value.preferences[key].map((item,index) => [key,index,item]))],
     ] : []),
   ].map(relation => {
@@ -218,7 +218,7 @@ export function createPlaybackLibrary({dataRoot,nativePreferences} = {}) {
       {sql:'SELECT * FROM film_preview_targets ORDER BY position_order',rows:true},
       {sql:'SELECT * FROM film_groups ORDER BY position_order',rows:true},
       ...['film_group_keys','film_group_members'].map(table => ({sql:`SELECT * FROM ${table} ORDER BY group_id,position`,rows:true})),
-      {sql:'SELECT * FROM film_preferences_state WHERE singleton=1',rows:true},
+      {sql:'SELECT * FROM film_preferences WHERE singleton=1',rows:true},
       {sql:'SELECT * FROM film_preference_items ORDER BY list_kind,position',rows:true},
     ]);
     revision = state[0]?.revision ?? 0;
@@ -259,7 +259,7 @@ export function createPlaybackLibrary({dataRoot,nativePreferences} = {}) {
       ['film_group_keys',['group_id','position','aggregation_key'],['group_id','position'],keys.map(row => [row.group_id,row.position,row.aggregation_key])],
       ['film_group_members',['group_id','position','member_identity'],['group_id','position'],members.map(row => [row.group_id,row.position,row.member_identity])],
       ...(!nativePreferences ? [
-        ['film_preferences_state',['singleton','ios_auto_prepare','metadata_view_provider','row_revision'],['singleton'],prefs.map(row => [row.singleton,row.ios_auto_prepare,row.metadata_view_provider,row.row_revision])],
+        ['film_preferences',['singleton','ios_auto_prepare','metadata_view_provider','row_revision'],['singleton'],prefs.map(row => [row.singleton,row.ios_auto_prepare,row.metadata_view_provider,row.row_revision])],
         ['film_preference_items',['list_kind','position','item_value'],['list_kind','position'],items.map(row => [row.list_kind,row.position,row.item_value])],
       ] : []),
     ];

@@ -28,7 +28,7 @@ struct MusicAccountChorusCache {
         entries = Array(entries.suffix(100))
         if let database {
             try? database.transactionSync { db in
-                try db.upsert("ios_music_chorus", columns: ["scope", "platform", "native_id", "recording_duration", "start", "end", "expires_at"],
+                try db.upsert("ios_music_chorus", columns: ["scope", "platform", "native_id", "recording_duration", "start_sec", "end_sec", "expires_at"],
                     values: [.text(key.scope), .text(key.platform), .text(key.nativeID), .real(key.duration),
                              .real(point.start), .real(point.end), .optional(now.addingTimeInterval(30 * 86_400))],
                     key: ["scope", "platform", "native_id", "recording_duration"])
@@ -42,11 +42,11 @@ struct MusicAccountChorusCache {
         if !loaded {
             loaded = true
             if let database, let values = try? database.readSync({ db in
-                try db.query("SELECT * FROM ios_music_chorus ORDER BY expires_at LIMIT 100").map { row in
-                    Entry(key: .init(scope: try row.text("scope"), platform: try row.text("platform"),
-                                    nativeID: try row.text("native_id"), duration: try row.double("recording_duration")),
-                          point: .init(start: try row.double("start"), end: try row.double("end")),
-                          expires: Date(timeIntervalSince1970: try row.double("expires_at")))
+                try db.query("SELECT scope, platform, native_id, recording_duration, start_sec, end_sec, expires_at FROM ios_music_chorus ORDER BY expires_at LIMIT 100") { cursor in
+                    Entry(key: .init(scope: try cursor.text(0), platform: try cursor.text(1),
+                                    nativeID: try cursor.text(2), duration: try cursor.double(3)),
+                          point: .init(start: try cursor.double(4), end: try cursor.double(5)),
+                          expires: Date(timeIntervalSince1970: try cursor.double(6)))
                 }
             }) {
                 entries = values

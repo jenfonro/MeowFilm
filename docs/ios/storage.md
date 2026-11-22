@@ -4,11 +4,12 @@ iOS App 的所有内部业务数据和结构化缓存使用唯一 SQLite 数据�
 
 ## 数据模型与 owner
 
-iOS 专属关系模式按职责分层位于 `packages/storage/schema/{core,runtime,music,ios}/`，由 `python3 -I -B scripts/storage/generate-schema.py` 合并生成 `packages/storage/generated/schema-ios.sql` 并镜像到 `native/MeowKit/Sources/MeowStorage/Resources/storage-schema.sql`（161 张 `STRICT` 表、43 个索引，不包含 `windows_*` 表，无 `shape_mask` / `null_mask`）。所有内部业务持久化均由各仓库手写强类型 SQL ↔ Swift 模型直接映射，禁止 `JSONEncoder`/`JSONDecoder` 数据库往返或伪关系 JSON-AST 抽象；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
+iOS 专属关系模式按职责分层位于 `packages/storage/schema/{core,runtime,shared,music,ios}/`，由 `python3 -I -B scripts/storage/generate-schema.py` 合并生成 `packages/storage/generated/schema-ios.sql` 并镜像到 `native/MeowKit/Sources/MeowStorage/Resources/storage-schema.sql`（143 张 `STRICT` 表、62 个索引，不包含 `windows_*` 表，无 `shape_mask` / `null_mask`，所有外键子表均配有覆盖索引）。所有内部业务持久化均由各仓库手写强类型 SQL ↔ Swift 模型直接映射，禁止 `JSONEncoder`/`JSONDecoder` 数据库往返或伪关系 JSON-AST 抽象；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
 
 目录职责划分：
-- `native/MeowKit/Sources/MeowStorage/`：`Engine/`（`SQLiteDatabase.swift`）、`Schema/`（`SQLiteSchema.swift`）、`Files/`（原始资源与文件保护）、`Values/`（`SQLiteValueTree.swift`）、`Debug/`（`SQLiteDebugQuery.swift`）。
-- `native/MeowKit/Sources/MeowMusicNativeService/Persistence/`：`Core/`（库事务协调、模型清洗、通用 SQL helper、目录源与播放设置）、`Songs/`（曲目与来源事实）、`Library/`（收藏、歌单、网络歌单引用与同步状态）、`Queue/`（播放队列与相似推荐会话）、`History/`（历史歌单与按日播放记录）、`Discovery/`（多平台来源发现缓存）、`Home/`（首页展示快照）。
+- `native/MeowKit/Sources/MeowStorage/`：`Engine/`（`SQLiteDatabase.swift`，含零分配 `SQLiteCursor` 与统一 `owner_revisions` CAS 辅助）、`Schema/`（`SQLiteSchema.swift`）、`Files/`（原始资源与文件保护）、`Values/`（`SQLiteValueTree.swift`）、`Debug/`（`SQLiteDebugQuery.swift`）。
+- `native/MeowKit/Sources/MeowMusicNativeService/Persistence/`：`Core/`（库事务协调、模型清洗、通用 SQL helper、目录源与播放设置）、`Songs/`（曲目与 15 列强类型来源事实 + 无损数值 ID 扩展）、`Library/`（收藏、歌单、网络歌单引用与同步状态）、`Queue/`（播放队列与相似推荐会话）、`History/`（历史歌单与按日播放记录）、`Discovery/`（多平台来源发现缓存）、`Home/`（首页展示快照）。
+- 各业务模块数据仓库独立收敛至 `*Repository.swift`（`FilmFavoriteRepository`、`FilmSourceRepository`、`FilmPlayerPreferencesRepository`、`MusicAppearanceRepository`、`MusicChannelSelectionRepository`、`MusicSearchPreferencesRepository`、`NovelLibraryRepository`、`PlaybackVolumeRepository`、`SearchHistoryRepository`），ViewModel / Store 不内联原始 SQL。
 
 | 数据 | 唯一 owner 与存储 |
 | --- | --- |
@@ -29,7 +30,7 @@ iOS 专属关系模式按职责分层位于 `packages/storage/schema/{core,runti
 
 `SQLiteDatabase` 与 `packages/script-host/native/sqlite-storage.cc` 统一执行相同的 PRAGMA 基准：`busy_timeout=5000`、`trusted_schema=OFF`、`foreign_keys=ON`、`journal_mode=WAL`、`synchronous=FULL`、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`temp_store=MEMORY`、`cache_size=-16384`，并在 `open` 阶段逐项校验生效。
 
-- **WAL 读写分离**：`SQLiteDatabase` 维护一条串行写连接（`writeQueue`）和一条独立只读连接（`readQueue`，`SQLITE_OPEN_READONLY` + `PRAGMA query_only=ON`）。常规只读查询与 `readSnapshot` 运行在只读连接上，不与写事务互斥；写事务内重入只读调用自动复用当前写连接以保持读己所写。
+- **WAL 读写分离**：`SQLiteDatabase` 与 `packages/script-host/native/sqlite-storage.cc` 均采用真正双连接 WAL 读写分离：串行写线程持有读写连接处理写事务与维护；独立只读线程持有只读连接（`SQLITE_OPEN_READONLY` + `PRAGMA query_only=ON`）处理并发 `query`/`snapshot`，不与写事务互斥；写事务内重入只读调用自动复用当前写连接以保持读己所写。
 - **Prepared Statement LRU 缓存**：`SQLiteDatabase` 的读写连接及 `sqlite-storage.cc` 均维护有界 Prepared Statement LRU 缓存（上限 256 条、SQL ≤ 4096 字节、跳过 `PRAGMA`），复用句柄并在连接关闭前统一 `sqlite3_finalize`。
 - **零每请求文件 syscall 与锁争用**：仅在打开库、显式 `checkpoint`、在线 `backup` 以及达到提交阈值（64 次提交）触发周期维护时执行文件/inode 校验并获取 `maintenance.lock`；常规 `query`/`execute`/`transaction`/`snapshot` 零额外文件 stat 与锁文件争用。
 - **写入准入与生命周期**：写入有 pending count/bytes 准入，短事务只读取和更改对应实体及关系；无变化更新不增加 WAL。关闭先拒绝新任务、排空已受理事务、释放全部缓存语句并关闭连接，不在关闭时执行 checkpoint／vacuum。在线备份由 SQLite backup API 生成一致快照。

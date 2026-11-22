@@ -19,7 +19,7 @@ const columns = {
 export function createMetadataSettings(dataRoot, id, nativeSettings) {
   if (!Object.hasOwn(defaults, id)) throw metadataFailure('INVALID_REQUEST');
   const database = nativeSettings ? null : openDatabase(dataRoot), keys = Object.keys(defaults[id]);
-  const table = `metadata_standalone_${id}`;
+  const table = `${id}_settings`;
   let snapshot, rowRevision = 0, dirty = true, tail = Promise.resolve();
   const revision = value => createHash('sha256').update(stringifyJSONValue([id,
     keys.map(key => [key, value[key]])])).digest('hex');

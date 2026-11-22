@@ -3,84 +3,16 @@ import MeowMusicFeature
 import MeowStorage
 
 enum MusicSongStore {
-    private static let sourceIDFields: [(json: String, prefix: String)] = [
-        ("songmid", "songmid"),
-        ("mid", "mid"),
-        ("id", "id"),
-        ("songId", "song_id"),
-        ("qqSongId", "qq_song_id"),
-        ("songType", "song_type"),
-        ("type", "type"),
-        ("copyrightId", "copyright_id"),
-        ("strMediaMid", "str_media_mid"),
-        ("albumId", "album_id"),
-        ("album_id", "album_id_snake"),
-        ("albumMid", "album_mid"),
-        ("albumAudioId", "album_audio_id"),
-        ("mixsongid", "mixsongid"),
-        ("fileid", "fileid"),
-        ("fileId", "file_id_camel"),
-        ("contentId", "content_id"),
-        ("size", "size")
+    private static let pureScalarInfoKeys: Set<String> = [
+        "source", "hash", "name", "singer", "albumName", "duration", "img", "qualityKnown", "artistNames"
     ]
+    private static let indexedIDKeys: Set<String> = ["songmid", "mid", "id"]
 
-    private static let sourceKnownInfoKeys: Set<String> = Set(
-        sourceIDFields.map(\.json) + [
-            "source", "hash", "md5", "androidMd5", "name", "singer",
-            "albumName", "duration", "img", "qualityKnown",
-            "artistNames", "types", "_types", "audioFormats", "newRateFormats"
-        ]
-    )
-
-    private static let formatIDFields: [(json: String, prefix: String)] = [
-        ("formatType", "format_type"),
-        ("resourceType", "resource_type"),
-        ("size", "size"),
-        ("androidSize", "android_size"),
-        ("iosSize", "ios_size"),
-        ("asize", "asize"),
-        ("isize", "isize"),
-        ("format", "format"),
-        ("androidFormat", "android_format"),
-        ("iosFormat", "ios_format"),
-        ("aformat", "aformat"),
-        ("iformat", "iformat"),
-        ("bitrate", "bitrate"),
-        ("sampleRate", "sample_rate"),
-        ("bitDepth", "bit_depth"),
-        ("fileType", "file_type"),
-        ("androidFileType", "android_file_type"),
-        ("iosFileType", "ios_file_type"),
-        ("iosAccuracyLevel", "ios_accuracy_level"),
-        ("androidAccuracyLevel", "android_accuracy_level"),
-        ("fileId", "file_id"),
-        ("contentId", "content_id")
+    private static let sourceColumns: [String] = [
+        "song_id", "source_key", "position", "platform", "info_source",
+        "songmid", "mid", "native_id", "hash",
+        "name", "singer", "album_name", "duration", "img", "quality_known"
     ]
-
-    private static let sourceInsertSQL: String = {
-        var cols = ["song_id", "source_key", "position", "platform", "info_source"]
-        for field in sourceIDFields {
-            cols.append("\(field.prefix)_kind")
-            cols.append("\(field.prefix)_value")
-        }
-        cols.append(contentsOf: [
-            "hash", "md5", "android_md5", "name", "singer", "album_name",
-            "duration", "img", "quality_known"
-        ])
-        let placeholders = Array(repeating: "?", count: cols.count).joined(separator: ",")
-        return "INSERT INTO music_song_sources(\(cols.joined(separator: ","))) VALUES(\(placeholders))"
-    }()
-
-    private static let formatInsertSQL: String = {
-        var cols = ["song_id", "source_key", "list_kind", "position"]
-        for field in formatIDFields {
-            cols.append("\(field.prefix)_kind")
-            cols.append("\(field.prefix)_value")
-        }
-        cols.append(contentsOf: ["hash", "md5", "android_md5"])
-        let placeholders = Array(repeating: "?", count: cols.count).joined(separator: ",")
-        return "INSERT INTO music_song_source_formats(\(cols.joined(separator: ","))) VALUES(\(placeholders))"
-    }()
 
     private static let extraInsertSQL: String = {
         let cols = ["song_id", "source_key"] + SQLiteValueTree.columns
@@ -88,82 +20,71 @@ enum MusicSongStore {
         return "INSERT INTO music_song_source_extras(\(cols.joined(separator: ","))) VALUES(\(placeholders))"
     }()
 
+    private static func readIDAsText(_ value: MJ) -> (text: String?, needsTypedExtra: Bool) {
+        switch value {
+        case .null: return (nil, false)
+        case .string(let text): return (text, false)
+        case .number(let number):
+            guard number.isFinite else { return (nil, true) }
+            if number.rounded(.towardZero) == number,
+               abs(number) <= Double(MusicPersistenceHelpers.maxSafeInteger),
+               let integer = Int64(exactly: number) {
+                return (String(integer), true)
+            }
+            return (MJ.number(number).json, true)
+        case .upstreamNumber(let token):
+            return (token, true)
+        default:
+            return (nil, true)
+        }
+    }
+
+    private static func mergeFields(_ base: [(String, MJ)], overrides: [(String, MJ)]) -> [(String, MJ)] {
+        var result = base
+        for (key, val) in overrides {
+            if let idx = result.firstIndex(where: { $0.0.utf8.elementsEqual(key.utf8) }) {
+                result[idx].1 = val
+            } else {
+                result.append((key, val))
+            }
+        }
+        return result
+    }
+
     static func read(_ db: SQLiteConnection, id: String) throws -> MJ? {
-        guard let row = try db.query(
+        guard let row = try db.queryOne(
             "SELECT song_id,title,artist,album,duration,baseline_duration,cover_url," +
             "local_file_id,artwork_source_key,artwork_source_image,fingerprint " +
             "FROM music_songs WHERE song_id=?",
-            [.text(id)]
-        ).first else { return nil }
+            [.text(id)],
+            map: { c in
+                (
+                    songID: try c.text(0),
+                    title: try c.text(1),
+                    artist: try c.text(2),
+                    album: try c.text(3),
+                    duration: try c.optionalDouble(4),
+                    baselineDuration: try c.optionalDouble(5),
+                    coverURL: try c.text(6),
+                    localFileID: try c.optionalText(7),
+                    artworkSourceKey: try c.optionalText(8),
+                    artworkSourceImage: try c.optionalText(9),
+                    fingerprint: try c.optionalText(10)
+                )
+            }
+        ) else { return nil }
 
         let songArtists = try db.query(
             "SELECT name FROM music_song_artists WHERE song_id=? ORDER BY position",
             [.text(id)]
-        ).map { try $0.text("name") }
-
-        let sourceRows = try db.query(
-            "SELECT * FROM music_song_sources WHERE song_id=? ORDER BY position",
-            [.text(id)]
-        )
+        ) { try $0.text(0) }
 
         var artistsBySource: [String: [String]] = [:]
-        for item in try db.query(
+        try db.scan(
             "SELECT source_key,name FROM music_song_source_artists WHERE song_id=? ORDER BY source_key,position",
             [.text(id)]
-        ) {
-            artistsBySource[try item.text("source_key"), default: []].append(try item.text("name"))
-        }
-
-        var typesBySource: [String: [MJ]] = [:]
-        var underscoreTypesBySource: [String: [(String, MJ)]] = [:]
-        for item in try db.query(
-            "SELECT source_key,list_kind,entry_key,type_kind,type_value,hash,size_kind,size_value " +
-            "FROM music_song_source_types WHERE song_id=? ORDER BY source_key,list_kind,position",
-            [.text(id)]
-        ) {
-            let key = try item.text("source_key")
-            let kind = try item.text("list_kind")
-            var entryFields: [(String, MJ)] = []
-            if kind == "types",
-               let typeVal = try MusicPersistenceHelpers.readIdentifier(item, kindColumn: "type_kind", valueColumn: "type_value") {
-                entryFields.append(("type", typeVal))
-            }
-            if let hash = try item.optionalText("hash") {
-                entryFields.append(("hash", .string(hash)))
-            }
-            if let sizeVal = try MusicPersistenceHelpers.readIdentifier(item, kindColumn: "size_kind", valueColumn: "size_value") {
-                entryFields.append(("size", sizeVal))
-            }
-            if kind == "types" {
-                typesBySource[key, default: []].append(.obj(entryFields))
-            } else {
-                underscoreTypesBySource[key, default: []].append((try item.text("entry_key"), .obj(entryFields)))
-            }
-        }
-
-        var formatsBySource: [String: [String: [MJ]]] = [:]
-        for item in try db.query(
-            "SELECT * FROM music_song_source_formats WHERE song_id=? ORDER BY source_key,list_kind,position",
-            [.text(id)]
-        ) {
-            let key = try item.text("source_key")
-            let kind = try item.text("list_kind")
-            var formatFields: [(String, MJ)] = []
-            for field in formatIDFields {
-                if let val = try MusicPersistenceHelpers.readIdentifier(
-                    item,
-                    kindColumn: "\(field.prefix)_kind",
-                    valueColumn: "\(field.prefix)_value"
-                ) {
-                    formatFields.append((field.json, val))
-                }
-            }
-            if let hash = try item.optionalText("hash") { formatFields.append(("hash", .string(hash))) }
-            if let md5 = try item.optionalText("md5") { formatFields.append(("md5", .string(md5))) }
-            if let androidMd5 = try item.optionalText("android_md5") {
-                formatFields.append(("androidMd5", .string(androidMd5)))
-            }
-            formatsBySource[key, default: [:]][kind, default: []].append(.obj(formatFields))
+        ) { c in
+            artistsBySource[try c.text(0), default: []].append(try c.text(1))
         }
 
         var extraRowsBySource: [String: [SQLiteRow]] = [:]
@@ -176,46 +97,28 @@ enum MusicSongStore {
         }
 
         var sources: [MJ] = []
-        sources.reserveCapacity(sourceRows.count)
-        for src in sourceRows {
-            let sourceKey = try src.text("source_key")
-            let platform = try src.text("platform")
-            let infoSource = try src.text("info_source")
+        try db.scan(
+            "SELECT source_key,platform,info_source,songmid,mid,native_id,hash," +
+            "name,singer,album_name,duration,img,quality_known " +
+            "FROM music_song_sources WHERE song_id=? ORDER BY position",
+            [.text(id)]
+        ) { src in
+            let sourceKey = try src.text(0)
+            let platform = try src.text(1)
+            let infoSource = try src.text(2)
             var infoFields: [(String, MJ)] = [("source", .string(infoSource))]
-            for field in sourceIDFields {
-                if let val = try MusicPersistenceHelpers.readIdentifier(
-                    src,
-                    kindColumn: "\(field.prefix)_kind",
-                    valueColumn: "\(field.prefix)_value"
-                ) {
-                    infoFields.append((field.json, val))
-                }
-            }
-            if let hash = try src.optionalText("hash") { infoFields.append(("hash", .string(hash))) }
-            if let md5 = try src.optionalText("md5") { infoFields.append(("md5", .string(md5))) }
-            if let androidMd5 = try src.optionalText("android_md5") { infoFields.append(("androidMd5", .string(androidMd5))) }
-            if let name = try src.optionalText("name") { infoFields.append(("name", .string(name))) }
-            if let singer = try src.optionalText("singer") { infoFields.append(("singer", .string(singer))) }
-            if let albumName = try src.optionalText("album_name") { infoFields.append(("albumName", .string(albumName))) }
-            if let duration = try src.optionalDouble("duration") { infoFields.append(("duration", .number(duration))) }
-            if let img = try src.optionalText("img") { infoFields.append(("img", .string(img))) }
-            if let qualityKnown = try src.optionalBool("quality_known") {
-                infoFields.append(("qualityKnown", .bool(qualityKnown)))
-            }
+            if let songmid = try src.optionalText(3) { infoFields.append(("songmid", .string(songmid))) }
+            if let mid = try src.optionalText(4) { infoFields.append(("mid", .string(mid))) }
+            if let nativeID = try src.optionalText(5) { infoFields.append(("id", .string(nativeID))) }
+            if let hash = try src.optionalText(6) { infoFields.append(("hash", .string(hash))) }
+            if let name = try src.optionalText(7) { infoFields.append(("name", .string(name))) }
+            if let singer = try src.optionalText(8) { infoFields.append(("singer", .string(singer))) }
+            if let albumName = try src.optionalText(9) { infoFields.append(("albumName", .string(albumName))) }
+            if let duration = try src.optionalDouble(10) { infoFields.append(("duration", .number(duration))) }
+            if let img = try src.optionalText(11) { infoFields.append(("img", .string(img))) }
+            if let qualityKnown = try src.optionalBool(12) { infoFields.append(("qualityKnown", .bool(qualityKnown))) }
             if let artists = artistsBySource[sourceKey], !artists.isEmpty {
                 infoFields.append(("artistNames", .strings(artists)))
-            }
-            if let types = typesBySource[sourceKey], !types.isEmpty {
-                infoFields.append(("types", .array(types)))
-            }
-            if let underscoreTypes = underscoreTypesBySource[sourceKey], !underscoreTypes.isEmpty {
-                infoFields.append(("_types", .obj(underscoreTypes)))
-            }
-            if let audioFormats = formatsBySource[sourceKey]?["audioFormats"], !audioFormats.isEmpty {
-                infoFields.append(("audioFormats", .array(audioFormats)))
-            }
-            if let newRateFormats = formatsBySource[sourceKey]?["newRateFormats"], !newRateFormats.isEmpty {
-                infoFields.append(("newRateFormats", .array(newRateFormats)))
             }
 
             var extraSourceFields: [(String, MJ)] = []
@@ -223,7 +126,7 @@ enum MusicSongStore {
                 let tree = try SQLiteValueTree.value(extraRows)
                 let decoded = try MusicPersistenceHelpers.mj(from: tree)
                 if decoded["musicInfo"].isObject {
-                    infoFields.append(contentsOf: decoded["musicInfo"].fields)
+                    infoFields = mergeFields(infoFields, overrides: decoded["musicInfo"].fields)
                 }
                 if decoded["source"].isObject {
                     extraSourceFields = decoded["source"].fields
@@ -240,39 +143,25 @@ enum MusicSongStore {
         }
 
         var songFields: [(String, MJ)] = [
-            ("songId", .string(try row.text("song_id"))),
-            ("title", .string(try row.text("title"))),
-            ("artist", .string(try row.text("artist"))),
-            ("album", .string(try row.text("album")))
+            ("songId", .string(row.songID)),
+            ("title", .string(row.title)),
+            ("artist", .string(row.artist)),
+            ("album", .string(row.album))
         ]
-        if let duration = try row.optionalDouble("duration") {
-            songFields.append(("duration", .number(duration)))
-        }
-        if let baselineDuration = try row.optionalDouble("baseline_duration") {
-            songFields.append(("baselineDuration", .number(baselineDuration)))
-        }
-        songFields.append(("cover_url", .string(try row.text("cover_url"))))
-        if !songArtists.isEmpty {
-            songFields.append(("artistNames", .strings(songArtists)))
-        }
-        if let localFileID = try row.optionalText("local_file_id") {
-            songFields.append(("localFileId", .string(localFileID)))
-        }
-        if let artworkSourceKey = try row.optionalText("artwork_source_key") {
-            songFields.append(("artworkSourceKey", .string(artworkSourceKey)))
-        }
-        if let artworkSourceImage = try row.optionalText("artwork_source_image") {
-            songFields.append(("artworkSourceImage", .string(artworkSourceImage)))
-        }
-        if let fingerprint = try row.optionalText("fingerprint") {
-            songFields.append(("fingerprint", .string(fingerprint)))
-        }
+        if let duration = row.duration { songFields.append(("duration", .number(duration))) }
+        if let baselineDuration = row.baselineDuration { songFields.append(("baselineDuration", .number(baselineDuration))) }
+        songFields.append(("cover_url", .string(row.coverURL)))
+        if !songArtists.isEmpty { songFields.append(("artistNames", .strings(songArtists))) }
+        if let localFileID = row.localFileID { songFields.append(("localFileId", .string(localFileID))) }
+        if let artworkSourceKey = row.artworkSourceKey { songFields.append(("artworkSourceKey", .string(artworkSourceKey))) }
+        if let artworkSourceImage = row.artworkSourceImage { songFields.append(("artworkSourceImage", .string(artworkSourceImage))) }
+        if let fingerprint = row.fingerprint { songFields.append(("fingerprint", .string(fingerprint))) }
         songFields.append(("sources", .array(sources)))
         return .obj(songFields)
     }
 
-    static func write(_ db: SQLiteConnection, song: MJ, id: String,
-                      lookupKey: String?, searchQuery: String, baselineDuration: Double?) throws {
+    static func writeIncremental(_ db: SQLiteConnection, song: MJ, previous: MJ?, id: String,
+                                 lookupKey: String?, searchQuery: String, baselineDuration: Double?) throws {
         let resolvedBaseline: SQLiteValue
         if let baselineDuration, baselineDuration.isFinite, baselineDuration > 0 {
             resolvedBaseline = .real(baselineDuration)
@@ -305,117 +194,106 @@ enum MusicSongStore {
             key: ["song_id"]
         )
 
-        try db.execute("DELETE FROM music_song_artists WHERE song_id=?", [.text(id)])
-        for (index, name) in song["artistNames"].strings.enumerated() {
-            try db.execute(
-                "INSERT INTO music_song_artists(song_id,position,name) VALUES(?,?,?)",
-                [.text(id), .integer(index), .text(name)]
-            )
+        let nextArtists = song["artistNames"].strings
+        let prevArtists = previous?["artistNames"].strings ?? []
+        if previous == nil || prevArtists != nextArtists {
+            let prefix = previous == nil ? 0 : MusicPersistenceHelpers.commonPrefixLength(prevArtists, nextArtists)
+            if previous != nil && prefix < prevArtists.count {
+                try db.execute("DELETE FROM music_song_artists WHERE song_id=? AND position>=?", [.text(id), .integer(prefix)])
+            }
+            for index in prefix..<nextArtists.count {
+                try db.execute(
+                    "INSERT INTO music_song_artists(song_id,position,name) VALUES(?,?,?)",
+                    [.text(id), .integer(index), .text(nextArtists[index])]
+                )
+            }
         }
 
-        // Cascades to music_song_source_artists, _types, _formats, _extras.
-        try db.execute("DELETE FROM music_song_sources WHERE song_id=?", [.text(id)])
-        for (sourceIndex, source) in song["sources"].array.enumerated() {
+        var prevSourcesByKey: [String: (pos: Int, value: MJ)] = [:]
+        if let prevSources = previous?["sources"].array {
+            for (idx, src) in prevSources.enumerated() {
+                prevSourcesByKey[src["sourceKey"].string] = (idx, src)
+            }
+        }
+
+        let nextSources = song["sources"].array
+        let nextKeys = Set(nextSources.map { $0["sourceKey"].string })
+        for oldKey in prevSourcesByKey.keys where !nextKeys.contains(oldKey) {
+            try db.execute("DELETE FROM music_song_sources WHERE song_id=? AND source_key=?", [.text(id), .text(oldKey)])
+        }
+
+        for (sourceIndex, source) in nextSources.enumerated() {
             let sourceKey = source["sourceKey"].string
+            if let old = prevSourcesByKey[sourceKey],
+               old.pos == sourceIndex,
+               MusicPersistenceHelpers.semanticEquals(source, old.value) {
+                continue
+            }
+
             let info = source["musicInfo"]
             let platform = source["source"].string.isEmpty ? info["source"].string : source["source"].string
             let infoSource = info["source"].string.isEmpty ? platform : info["source"].string
 
-            var values: [SQLiteValue] = [
+            let songmid = readIDAsText(info["songmid"])
+            let mid = readIDAsText(info["mid"])
+            let nativeID = readIDAsText(info["id"])
+
+            let values: [SQLiteValue] = [
                 .text(id),
                 .text(sourceKey),
                 .integer(sourceIndex),
                 .text(platform),
-                .text(infoSource)
-            ]
-            for field in sourceIDFields {
-                let (kind, val) = MusicPersistenceHelpers.bindIdentifier(info[field.json])
-                values.append(kind)
-                values.append(val)
-            }
-            values.append(contentsOf: [
+                .text(infoSource),
+                .optional(songmid.text),
+                .optional(mid.text),
+                .optional(nativeID.text),
                 MusicPersistenceHelpers.optionalString(info["hash"]),
-                MusicPersistenceHelpers.optionalString(info["md5"]),
-                MusicPersistenceHelpers.optionalString(info["androidMd5"]),
                 MusicPersistenceHelpers.optionalString(info["name"]),
                 MusicPersistenceHelpers.optionalString(info["singer"]),
                 MusicPersistenceHelpers.optionalString(info["albumName"]),
                 MusicPersistenceHelpers.positiveDouble(info["duration"]),
                 MusicPersistenceHelpers.optionalString(info["img"]),
                 MusicPersistenceHelpers.optionalBool(info["qualityKnown"])
-            ])
-            try db.execute(sourceInsertSQL, values)
+            ]
+            try db.upsert("music_song_sources", columns: sourceColumns, values: values, key: ["song_id", "source_key"])
 
-            for (artistIndex, artistName) in info["artistNames"].strings.enumerated() {
-                try db.execute(
-                    "INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES(?,?,?,?)",
-                    [.text(id), .text(sourceKey), .integer(artistIndex), .text(artistName)]
-                )
-            }
-
-            for (typeIndex, row) in info["types"].array.enumerated() {
-                let (typeKind, typeVal) = row.isString
-                    ? MusicPersistenceHelpers.bindIdentifier(row)
-                    : MusicPersistenceHelpers.bindIdentifier(row["type"])
-                let (sizeKind, sizeVal) = row.isObject
-                    ? MusicPersistenceHelpers.bindIdentifier(row["size"])
-                    : (.null, .null)
-                try db.execute(
-                    "INSERT INTO music_song_source_types(" +
-                    "song_id,source_key,list_kind,entry_key,position,type_kind,type_value,hash,size_kind,size_value" +
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        .text(id), .text(sourceKey), .text("types"), .text(String(typeIndex)),
-                        .integer(typeIndex), typeKind, typeVal,
-                        row.isObject ? MusicPersistenceHelpers.optionalString(row["hash"]) : .null,
-                        sizeKind, sizeVal
-                    ]
-                )
-            }
-
-            for (typeIndex, pair) in info["_types"].fields.enumerated() {
-                let (entryKey, entryVal) = pair
-                let (sizeKind, sizeVal) = entryVal.isObject
-                    ? MusicPersistenceHelpers.bindIdentifier(entryVal["size"])
-                    : (.null, .null)
-                try db.execute(
-                    "INSERT INTO music_song_source_types(" +
-                    "song_id,source_key,list_kind,entry_key,position,type_kind,type_value,hash,size_kind,size_value" +
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        .text(id), .text(sourceKey), .text("_types"), .text(entryKey),
-                        .integer(typeIndex), .null, .null,
-                        entryVal.isObject ? MusicPersistenceHelpers.optionalString(entryVal["hash"]) : .null,
-                        sizeKind, sizeVal
-                    ]
-                )
-            }
-
-            for listKind in ["audioFormats", "newRateFormats"] {
-                for (fmtIndex, fmt) in info[listKind].array.enumerated() {
-                    var fmtValues: [SQLiteValue] = [
-                        .text(id), .text(sourceKey), .text(listKind), .integer(fmtIndex)
-                    ]
-                    for field in formatIDFields {
-                        let (kind, val) = MusicPersistenceHelpers.bindIdentifier(fmt[field.json])
-                        fmtValues.append(kind)
-                        fmtValues.append(val)
-                    }
-                    fmtValues.append(contentsOf: [
-                        MusicPersistenceHelpers.optionalString(fmt["hash"]),
-                        MusicPersistenceHelpers.optionalString(fmt["md5"]),
-                        MusicPersistenceHelpers.optionalString(fmt["androidMd5"])
-                    ])
-                    try db.execute(formatInsertSQL, fmtValues)
+            let nextSrcArtists = info["artistNames"].strings
+            let prevSrcArtists = prevSourcesByKey[sourceKey]?.value["musicInfo"]["artistNames"].strings ?? []
+            let existed = prevSourcesByKey[sourceKey] != nil
+            if !existed || prevSrcArtists != nextSrcArtists {
+                let prefix = existed ? MusicPersistenceHelpers.commonPrefixLength(prevSrcArtists, nextSrcArtists) : 0
+                if existed && prefix < prevSrcArtists.count {
+                    try db.execute(
+                        "DELETE FROM music_song_source_artists WHERE song_id=? AND source_key=? AND position>=?",
+                        [.text(id), .text(sourceKey), .integer(prefix)]
+                    )
+                }
+                for artistIndex in prefix..<nextSrcArtists.count {
+                    try db.execute(
+                        "INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES(?,?,?,?)",
+                        [.text(id), .text(sourceKey), .integer(artistIndex), .text(nextSrcArtists[artistIndex])]
+                    )
                 }
             }
 
-            let unknownInfo = info.fields.filter { !sourceKnownInfoKeys.contains($0.0) }
-            let unknownSource = source.fields.filter { !["sourceKey", "source", "musicInfo"].contains($0.0) }
-            if !unknownInfo.isEmpty || !unknownSource.isEmpty {
+            let extraInfo = info.fields.filter { field in
+                if pureScalarInfoKeys.contains(field.0) { return false }
+                if indexedIDKeys.contains(field.0) {
+                    switch field.0 {
+                    case "songmid": return songmid.needsTypedExtra
+                    case "mid": return mid.needsTypedExtra
+                    case "id": return nativeID.needsTypedExtra
+                    default: return false
+                    }
+                }
+                return true
+            }
+            let extraSource = source.fields.filter { !["sourceKey", "source", "musicInfo"].contains($0.0) }
+            try db.execute("DELETE FROM music_song_source_extras WHERE song_id=? AND source_key=?", [.text(id), .text(sourceKey)])
+            if !extraInfo.isEmpty || !extraSource.isEmpty {
                 var extraPayload: [(String, MJ)] = []
-                if !unknownInfo.isEmpty { extraPayload.append(("musicInfo", .obj(unknownInfo))) }
-                if !unknownSource.isEmpty { extraPayload.append(("source", .obj(unknownSource))) }
+                if !extraInfo.isEmpty { extraPayload.append(("musicInfo", .obj(extraInfo))) }
+                if !extraSource.isEmpty { extraPayload.append(("source", .obj(extraSource))) }
                 let tree = try MusicPersistenceHelpers.tree(from: .obj(extraPayload))
                 for nodeRow in try SQLiteValueTree.rows(tree) {
                     try db.execute(extraInsertSQL, [.text(id), .text(sourceKey)] + nodeRow)

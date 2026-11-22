@@ -1,10 +1,10 @@
--- Windows native novel shelf, reading progress, reader appearance, replacement rules, and source configuration.
+-- Windows-specific novel shelf, reading progress, reader appearance, and source configuration (revisions use owner_revisions).
 CREATE TABLE windows_novel_entries (
     book_id TEXT PRIMARY KEY NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
     identity_key TEXT NOT NULL,
     on_shelf INTEGER NOT NULL CHECK (on_shelf IN (0, 1)),
-    added_at TEXT NOT NULL,
+    added_at TEXT,
     pinned_at TEXT,
     read_at TEXT,
     chapter_count INTEGER NOT NULL DEFAULT 0 CHECK (chapter_count >= 0),
@@ -61,30 +61,6 @@ CREATE TABLE windows_novel_appearance (
     foreground TEXT NOT NULL,
     background_image TEXT NOT NULL DEFAULT '',
     auto_speed REAL NOT NULL
-) STRICT;
-
-CREATE TABLE windows_novel_rules (
-    rule_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    name TEXT NOT NULL,
-    rule_group TEXT NOT NULL DEFAULT '',
-    pattern TEXT NOT NULL,
-    replacement TEXT NOT NULL DEFAULT '',
-    is_regex INTEGER NOT NULL CHECK (is_regex IN (0, 1)),
-    is_enabled INTEGER NOT NULL CHECK (is_enabled IN (0, 1)),
-    scope_title INTEGER NOT NULL CHECK (scope_title IN (0, 1)),
-    scope_content INTEGER NOT NULL CHECK (scope_content IN (0, 1)),
-    scope TEXT NOT NULL DEFAULT '',
-    exclude_scope TEXT NOT NULL DEFAULT '',
-    sort_order INTEGER NOT NULL DEFAULT 0,
-    timeout_ms INTEGER NOT NULL DEFAULT 3000
-) STRICT;
-
-CREATE INDEX idx_windows_novel_rules_order ON windows_novel_rules(position);
-
-CREATE TABLE windows_novel_source_state (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991)
 ) STRICT;
 
 CREATE TABLE windows_novel_sources (

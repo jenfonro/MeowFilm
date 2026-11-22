@@ -3,8 +3,8 @@ import { reconcile } from '@meowfilm/storage/statements';
 
 const columns = ['group_name', 'position', 'pattern', 'replacement', 'flags'];
 const snapshot = [
-  { sql: 'SELECT group_name,row_revision,overridden FROM film_standalone_rule_groups', rows: true, maxRows: 4 },
-  { sql: `SELECT ${columns.join(',')} FROM film_standalone_rule_entries ORDER BY group_name,position`, rows: true },
+  { sql: 'SELECT group_name,row_revision,overridden FROM film_rule_groups', rows: true, maxRows: 4 },
+  { sql: `SELECT ${columns.join(',')} FROM film_rules ORDER BY group_name,position`, rows: true },
 ];
 const failure = code => Object.assign(new Error(code), { code });
 
@@ -46,9 +46,9 @@ export function openRuleStorage(root) {
         const saved = values !== null;
         const rows = (values ?? []).map((row, i) => typeof row === 'string' ? [key, i, row, null, null] :
           [key, i, row.pattern, row.replace ?? null, row.flags ?? null]);
-        const entries = reconcile('film_standalone_rule_entries', columns, ['group_name', 'position'], previous.rows.get(key) ?? [], rows);
+        const entries = reconcile('film_rules', columns, ['group_name', 'position'], previous.rows.get(key) ?? [], rows);
         const changed = entries.length > 0 || saved !== previous.rows.has(key);
-        changes.push({ sql: 'UPDATE film_standalone_rule_groups SET overridden=?,row_revision=row_revision+? WHERE group_name=? AND row_revision=?',
+        changes.push({ sql: 'UPDATE film_rule_groups SET overridden=?,row_revision=row_revision+? WHERE group_name=? AND row_revision=?',
           params: [Number(saved), Number(changed), key, previous.versions.get(key)], expectChanges: 1 }, ...entries);
       }
       try { return decode((await db.transaction([...changes, ...snapshot], { signal })).slice(-2), defaults); }

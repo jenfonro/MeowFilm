@@ -118,26 +118,11 @@ public struct MusicSearchPreferences: Codable, Equatable, Sendable {
         guard self.database == nil, !closed else { return }
         self.database = database; await reload()
     }
-    nonisolated private static func load(_ db: SQLiteConnection) throws -> (MusicSearchPreferences, Int) {
-        guard let row = try db.query("SELECT * FROM ios_music_search_preferences WHERE singleton=1").first else { return (.init(), 0) }
-        let platforms = try db.query("SELECT * FROM ios_music_search_platforms ORDER BY kind,ordinal")
-        func values(_ kind: String) throws -> [MusicPublicBrowsePlatform] {
-            try platforms.filter { try $0.text("kind") == kind }.map {
-                guard let platform = MusicPublicBrowsePlatform(rawValue: try $0.text("platform")) else { throw SQLiteStorageError.corrupt }
-                return platform
-            }
-        }
-        return (try MusicSearchPreferences(songPlatforms: values("song"), searchPlaylists: row.bool("searchPlaylists"),
-            playlistPlatforms: values("playlist"), songPages: row.integer("song_pages"),
-            songConcurrency: row.integer("song_concurrency"), songCacheMinutes: row.integer("song_cache_minutes"),
-            playlistPages: row.integer("playlist_pages"), playlistConcurrency: row.integer("playlist_concurrency"),
-            playlistCacheMinutes: row.integer("playlist_cache_minutes")).validated(), try row.integer("row_revision"))
-    }
     public func reload() async {
         guard !closed, let database else { return }
         let ticket = UUID(); epoch = ticket
         do {
-            let result = try await database.snapshot(Self.load)
+            let result = try await database.snapshot { try MusicSearchPreferencesRepository.load($0) }
             guard !closed, epoch == ticket else { return }
             preferences = result.0; revision = result.1; persistenceError = nil
         } catch { if !closed, epoch == ticket { persistenceError = "搜索偏好读取失败" } }
@@ -152,21 +137,7 @@ public struct MusicSearchPreferences: Codable, Equatable, Sendable {
         do {
             if let database {
                 try await database.transaction { db in
-                    let current = try db.query("SELECT row_revision FROM ios_music_search_preferences WHERE singleton=1")
-                        .first?.integer("row_revision") ?? 0
-                    guard current == expected else { throw SQLiteStorageError.conflict }
-                    try db.upsert("ios_music_search_preferences",
-                        columns: ["singleton", "searchPlaylists", "song_pages", "song_concurrency", "song_cache_minutes",
-                                  "playlist_pages", "playlist_concurrency", "playlist_cache_minutes", "row_revision"],
-                        values: [.integer(1), .bool(value.searchPlaylists), .integer(value.songs.pages),
-                            .integer(value.songs.concurrency), .integer(value.songs.cacheMinutes),
-                            .integer(value.playlists.pages), .integer(value.playlists.concurrency),
-                            .integer(value.playlists.cacheMinutes), .integer(expected + 1)], key: ["singleton"])
-                    let rows = [("song", value.songPlatforms), ("playlist", value.playlistPlatforms)].flatMap { kind, platforms in
-                        platforms.enumerated().map { [SQLiteValue.text(kind), .integer($0.offset), .text($0.element.rawValue)] }
-                    }
-                    try db.reconcile("ios_music_search_platforms", columns: ["kind", "ordinal", "platform"],
-                        key: ["kind", "ordinal"], rows: rows, replaceChanged: true)
+                    try MusicSearchPreferencesRepository.save(value, expectedRevision: expected, db)
                 }
             }
             if !closed, epoch == ticket { preferences = value; revision = expected + 1; persistenceError = nil }

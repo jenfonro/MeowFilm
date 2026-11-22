@@ -52,10 +52,10 @@ enum FilmFavoriteRepository {
     static func load(_ db: SQLiteConnection) throws -> Set<FilmItemIdentity> {
         var result = Set<FilmItemIdentity>()
         let members = try Dictionary(grouping: db.query(
-            "SELECT * FROM ios_film_favorite_members ORDER BY businessID,ordinal"),
-            by: { try $0.text("businessID") })
-        for row in try db.query("SELECT * FROM ios_film_favorites ORDER BY added_at,businessID") {
-            let id = try row.text("businessID")
+            "SELECT * FROM film_favorite_members ORDER BY favorite_id, position"),
+            by: { try $0.text("favorite_id") })
+        for row in try db.query("SELECT * FROM film_favorites ORDER BY added_at, favorite_id") {
+            let id = try row.text("favorite_id")
             var target: RuntimeObject = ["id": .string(id)]
             var source = RuntimeObject()
             for (field, column) in targetFields where row[column] != .null { target[field] = try wire(row[column]) }
@@ -75,34 +75,46 @@ enum FilmFavoriteRepository {
                 guard let parsed = FilmItemKind(rawValue: text) else { throw FilmLibraryError.corruptedData }
                 kind = parsed
             } else { kind = nil }
-            let item = FilmItemIdentity(sourceID: try row.text("sourceID"), itemID: try row.text("itemID"),
+            let item = FilmItemIdentity(sourceID: try row.text("source_id"), itemID: try row.text("item_id"),
                 kind: kind, businessID: id, playbackTarget: try FilmPlaybackTarget(.object(target)))
             guard result.insert(item).inserted else { throw FilmLibraryError.corruptedData }
         }
         return result
     }
+    static func toggle(_ item: FilmItemIdentity, businessID: String, _ db: SQLiteConnection) throws -> Bool {
+        if try db.queryOne("SELECT 1 FROM film_favorites WHERE favorite_id=?", [.text(businessID)], map: { _ in true }) == true {
+            try db.execute("DELETE FROM film_favorites WHERE favorite_id=?", [.text(businessID)])
+            return false
+        }
+        try insert(item, db)
+        return true
+    }
     static func insert(_ item: FilmItemIdentity, _ db: SQLiteConnection) throws {
         guard let id = item.businessID, let target = item.playbackTarget, id.utf8.elementsEqual(target.id.utf8) else {
             throw FilmLibraryError.missingTarget
         }
+        let nextPosition = try db.queryOne("SELECT COALESCE(MAX(position) + 1, 0) FROM film_favorites") { try $0.integer(0) } ?? 0
         let source = target.value["source"]?.filmObject ?? RuntimeObject()
-        var columns = ["businessID", "sourceID", "itemID", "kind"]
+        var columns = ["favorite_id", "position", "source_id", "item_id", "kind", "target_id"]
         columns += targetFields.map(\.1)
         columns += ["metadata_id_kind", "metadata_id_text"]
         columns += sourceFields.map(\.1)
         columns += sourceIdentifiers.flatMap { [$0.1 + "_kind", $0.1 + "_text"] }
-        columns += ["row_revision", "added_at"]
-        var values: [SQLiteValue] = [.text(id), .text(item.sourceID), .text(item.itemID), .optional(item.kind?.rawValue)]
+        columns += ["added_at", "row_revision"]
+        var values: [SQLiteValue] = [.text(id), .integer(nextPosition), .text(item.sourceID), .text(item.itemID), .optional(item.kind?.rawValue), .text(id)]
         values += try targetFields.map { try scalar(target.value[$0.0]) }
         values += try identifier(target.value["metadataId"])
         values += try sourceFields.map { try scalar(source[$0.0]) }
         values += try sourceIdentifiers.flatMap { try identifier(source[$0.0]) }
-        values += [.integer(1), .optional(Date())]
-        try db.upsert("ios_film_favorites", columns: columns, values: values, key: ["businessID"])
-        for (ordinal, member) in (target.value["members"]?.filmArray ?? []).enumerated() {
+        values += [.optional(Date()), .integer(1)]
+        try db.upsert("film_favorites", columns: columns, values: values, key: ["favorite_id"])
+        try db.execute("DELETE FROM film_favorite_members WHERE favorite_id=?", [.text(id)])
+        for (position, member) in (target.value["members"]?.filmArray ?? []).enumerated() {
             guard let fields = member.filmObject, let key = fields["sourceKey"]?.filmText else { throw FilmLibraryError.corruptedData }
-            try db.execute("INSERT INTO ios_film_favorite_members VALUES(?,?,?,?,?)",
-                [.text(id), .integer(ordinal), .text(key)] + (try identifier(fields["detailId"])))
+            try db.execute(
+                "INSERT INTO film_favorite_members(favorite_id, position, source_key, detail_kind, detail_text) VALUES(?,?,?,?,?)",
+                [.text(id), .integer(position), .text(key)] + (try identifier(fields["detailId"]))
+            )
         }
     }
 }

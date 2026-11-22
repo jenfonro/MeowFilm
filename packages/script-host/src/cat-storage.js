@@ -7,10 +7,10 @@ import { fault } from './errors.js';
 const nodes = ['node_id', 'parent_id', 'prop_key', 'item_index', 'kind',
   'bool_value', 'int_value', 'real_value', 'text_value'];
 const relations = {
-  cat_gateway_settings: [['singleton'], ['singleton', 'port']],
-  cat_provider_entries: [['provider_id'], ['provider_id', 'position', 'enabled']],
-  cat_mappings: [['position'], ['position', 'provider_id']],
-  cat_mapping_aliases: [['position', 'ordinal'], ['position', 'ordinal', 'alias']],
+  cat_settings: [['singleton'], ['singleton', 'port']],
+  cat_providers: [['provider'], ['provider', 'position', 'enabled']],
+  cat_mappings: [['position'], ['position', 'provider']],
+  cat_mapping_aliases: [['mapping_position', 'position'], ['mapping_position', 'position', 'alias']],
   cat_installations: [['mode', 'installation_id'], ['mode', 'installation_id', 'position',
     'name', 'source_type', 'source_url', 'local_path', 'local_hash', 'enabled', 'input_revision',
     'source_hash', 'version', 'loaded_identity', 'imported_at_ms', 'updated_at_ms', 'update_state', 'update_error']],
@@ -49,13 +49,13 @@ export function catConfigNodes(script) {
 function project(value, mode) {
   const rows = Object.fromEntries(Object.keys(relations).map(table => [table, []]));
   if (mode === 'standalone') {
-    rows.cat_gateway_settings.push([1, value.port]);
+    rows.cat_settings.push([1, value.port]);
     for (const [index, [provider, enabled]] of Object.entries(value.providers).entries())
-      rows.cat_provider_entries.push([provider, index, Number(enabled)]);
+      rows.cat_providers.push([provider, index, Number(enabled)]);
     for (const [index, mapping] of value.mappings.entries()) {
       rows.cat_mappings.push([index, mapping.provider]);
-      for (const [ordinal, alias] of mapping.aliases.entries())
-        rows.cat_mapping_aliases.push([index, ordinal, alias]);
+      for (const [position, alias] of mapping.aliases.entries())
+        rows.cat_mapping_aliases.push([index, position, alias]);
     }
   }
   for (const [position, script] of value.scripts.entries()) {
@@ -107,13 +107,13 @@ export class CatStorage {
     for (const table of tables) this.rows[table] = records[table].map(row => relations[table][1].map(field => row[field]));
     const value = empty();
     if (this.mode === 'standalone') {
-      value.port = records.cat_gateway_settings[0]?.port ?? 0;
-      value.providers = Object.fromEntries(records.cat_provider_entries.sort((a, b) => a.position - b.position)
-        .map(row => [row.provider_id, Boolean(row.enabled)]));
+      value.port = records.cat_settings[0]?.port ?? 0;
+      value.providers = Object.fromEntries(records.cat_providers.sort((a, b) => a.position - b.position)
+        .map(row => [row.provider, Boolean(row.enabled)]));
       value.mappings = records.cat_mappings.sort((a, b) => a.position - b.position).map(row => ({
-        provider: row.provider_id,
-        aliases: records.cat_mapping_aliases.filter(alias => alias.position === row.position)
-          .sort((a, b) => a.ordinal - b.ordinal).map(alias => alias.alias),
+        provider: row.provider,
+        aliases: records.cat_mapping_aliases.filter(alias => alias.mapping_position === row.position)
+          .sort((a, b) => a.position - b.position).map(alias => alias.alias),
       }));
     }
     for (const row of records.cat_installations.sort((a, b) => a.position - b.position)) {

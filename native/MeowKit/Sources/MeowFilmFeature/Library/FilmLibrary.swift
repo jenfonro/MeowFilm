@@ -49,12 +49,7 @@ public final class FilmLibrary: ObservableObject {
         let added: Bool
         if let database {
             added = try await database.transaction { db in
-                if try !db.query("SELECT businessID FROM ios_film_favorites WHERE businessID=?", [.text(businessID)]).isEmpty {
-                    try db.execute("DELETE FROM ios_film_favorites WHERE businessID=?", [.text(businessID)])
-                    return false
-                }
-                try FilmFavoriteRepository.insert(identity, db)
-                return true
+                try FilmFavoriteRepository.toggle(identity, businessID: businessID, db)
             }
         } else { added = !favorites.contains(identity) }
         if changes[identity] == ticket, !closed {

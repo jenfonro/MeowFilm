@@ -1,25 +1,25 @@
--- CatNode standalone gateway configuration and shared script installation state.
-CREATE TABLE cat_gateway_settings (
+-- Shared Cat gateway configuration (used by standalone runtime or native App owner) and CatNode script state.
+CREATE TABLE cat_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     port INTEGER NOT NULL CHECK (port BETWEEN 0 AND 65535)
 ) STRICT;
 
-CREATE TABLE cat_provider_entries (
-    provider_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL CHECK (position >= 0),
+CREATE TABLE cat_providers (
+    provider TEXT PRIMARY KEY NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
 ) STRICT;
 
 CREATE TABLE cat_mappings (
     position INTEGER PRIMARY KEY CHECK (position >= 0),
-    provider_id TEXT NOT NULL
+    provider TEXT NOT NULL
 ) STRICT;
 
 CREATE TABLE cat_mapping_aliases (
-    position INTEGER NOT NULL REFERENCES cat_mappings(position) ON DELETE CASCADE,
-    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    mapping_position INTEGER NOT NULL REFERENCES cat_mappings(position) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
     alias TEXT NOT NULL,
-    PRIMARY KEY (position, ordinal)
+    PRIMARY KEY (mapping_position, position)
 ) STRICT;
 
 CREATE TABLE cat_installations (
