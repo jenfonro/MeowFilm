@@ -27,7 +27,7 @@ public final class FilmLibrary: ObservableObject {
     public func bind(database: SQLiteDatabase) async throws {
         guard self.database == nil, !closed else { return }
         do {
-            let saved = try await database.snapshot(FilmFavoriteRepository.load)
+            let saved = try await database.snapshot { try FilmFavoriteRepository.load($0) }
             guard !closed else { return }
             self.database = database; favorites = saved; loadError = nil
         } catch {
