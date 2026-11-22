@@ -41,6 +41,10 @@ import Combine
         binding = MusicCollectionPageBinding(owner: model)
         refreshFavorites()
     }
+    public func clearErrors() {
+        actionError = nil
+        error = nil
+    }
     public func suspend() {
         active = false; access = nil; binding?.active = false; binding = nil
         readID = UUID(); actionID = UUID()

@@ -430,8 +430,11 @@ extension MusicViewModel {
                 // lifecycle. Never stop a newer admitted attempt.
                 guard !Task.isCancelled, let self, self.nativeAttempt == native else { return }
                 let changingQueue = self.isChangingQueue
+                let duringLogin = self.isAccountLoginInProgress
                 self.retireRevokedAudio()
-                if !changingQueue, self.isAvailable { self.error = MusicServiceError.staleAccess.localizedDescription }
+                if !changingQueue, self.isAvailable, !duringLogin {
+                    self.error = MusicServiceError.staleAccess.localizedDescription
+                }
                 if let service = self.service {
                     await self.releaseUnacceptedAttempt(value.attemptId, service: service)
                 }

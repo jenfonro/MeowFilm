@@ -45,7 +45,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 - `apps/ios/` — 唯一 iOS App 工程
   - `Application` — 应用与 scene 生命周期、窗口、产品身份
   - `Composition` — 资源、服务、播放、账号和同步装配
-  - `Debug` — iOS 端 `--debug` 调试控制面、诊断与日志宿主
+  - `Debug` — iOS 端 `--debug` 调试控制面、诊断与日志宿主（按 `Host/`、`Navigation/`、`Inspection/`、`Actions/` 分层）
   - `Navigation` — 根容器、页面导航与呈现路由
   - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
   - `runtime` — iOS 受信启动／生命周期交接与公共 HTTP 运行器薄 entry
@@ -140,6 +140,14 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 
 - Windows 全应用的栏目、卡片和列表显示投影只由内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动与布局事件不得扫描整页控件树来决定业务显示、重建投影或触发刷新。视口只准入尚未看过的资源；已准入请求、图像与取色在当前挂载页面／章节的 owner 内复用，滚出再滚回不得释放重载。原生容器滚动回收只归还视图借用，不退休数据项资源；数据项删除、页面真正卸载、资源身份或 owner 变化才退休；隐藏停止新准入并按 owner 契约取消未完成工作、关闭等待实际排空。这些约束在真实运行与 `--debug` 模式中核对，不设回退开关，不以源码关键字禁令替代行为门禁。尺寸、裁剪、命中区域和绘制等几何更新不得触发业务读取。
 - 数据回执按稳定身份增量更新实际变化的元素，保留未变化的集合、控件和资源；加载状态、选择及无关属性通知不得清空重填列表或重建整页。验收检查集合通知、元素身份、读取次数和退休边界，性能数值仅作辅助证据，不能代替处理机制正确性。
+
+- **iOS 界面架构硬性契约**（完整规范见 [`docs/ios/architecture.md`](docs/ios/architecture.md)）：
+  - **100% 纯 UIKit，零 SwiftUI**：iOS App 与 `MeowKit` UI 模块全面采用原生 UIKit（全仓零 `import SwiftUI`、`UIHostingController`、`UIViewRepresentable`）；禁止跨框架嵌套桥接或整树重建 `rootView`。
+  - **统一设置底座与三层弹层**：App 总设置与音乐／影视／小说设置共用 `MeowUI/Settings/` 统一底座（`SettingsListViewController`、`SettingsFormViewController`、可复用 `SettingsTableCell` 与 `SettingsSwitch`）；业务弹窗统一收敛为三层浮层契约——`PageAlertPresenter`（全部 `UIAlertController` 唯一入口并 100% 自动注册 `DebugAlertActionRegistry`）、`FloatingCardDialogController`（唯一纯 UIKit 居中卡片弹窗基类，实现 `DebugDialogControllable`）与 `FixedSheetTransition`／`VerticalPageTransition`；错误与操作反馈统一走 `PageViewController` 反馈队列与协调器单一出口。
+  - **主题传播与布局边界**：禁止递归遍历 `subviews` 猜测叶子视图／分割线刷主题；使用显式 `PageThemeable` 协议与具名组件（`SettingsDividerView`、`SettingsSectionHeaderView`、`SettingsSegmentedControl`）分发主题；子视图禁止调用 `superview?.layoutIfNeeded()` 或 `window?.layoutIfNeeded()`；页面外观能力通过 `PageChromePolicy` 声明，协调器不按具体业务控制器类型做 `is` 透视。
+  - **图片／取色缓存、虚拟化列表与视口退休**：音乐、影视、小说三域均由装配根显式持有独立图片／取色存储（`MusicArtworkImages`、`ArtworkImages`、`NovelImageStore`，无全局 `.shared` 单例），后台解码／取色、同页滚出再滚回命中缓存零重载、隐藏取消新准入、页面卸载／关闭排空租约；禁止关闭 `UITableViewCell` 复用、禁止业务列表整表 `table.reloadData()`、禁止用非虚拟化 `UIStackView` 承载长选集／列表（统一 Diffable 数据源与 `UICollectionView` 虚拟化）。
+  - **高频热路径与细粒度状态观察**：高频进度／播放状态与低频浏览／详情状态物理隔离（如 `FilmMediaStateStore` 与 `FilmPresentationStateStore`），页面通过 `PageViewController` 切片／属性观察按需响应，禁止整对象 `objectWillChange` 唤醒不可见页面或重跑 `applyTheme()`；逐字歌词由连续单调时钟驱动，仅在状态／倍速／seek／行变更／尺寸变化或漂移超阈值时重建动画，禁止在主线程执行封面高斯模糊或像素取色。
+  - **目录分层规范**：`MeowUI`、`MeowFilmFeature`、`MeowMusicFeature`、`MeowNovelFeature` 与 `apps/ios/Debug` 均按明确职责建子目录归位，禁止将大量跨子域文件平铺堆塞进单一目录。
 
 - Windows 与 iOS 的普通文字统一使用系统常规字体（Normal／Regular），包括标题、按钮、菜单、标签、选中态和歌词；层级只通过字号区分，不使用 Medium、SemiBold、Bold、斜体或状态切换粗细来强调。阅读器 UI 同样遵守；仅阅读器内可自定义的正文排版保留用户字体／加粗设置。纯图标／符号图形不属于普通文字，不通过该例外给文本加粗。
 

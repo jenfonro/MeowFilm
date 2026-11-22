@@ -100,6 +100,7 @@ final class MeowfilmSceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene,
               let app = UIApplication.shared.delegate as? MeowfilmAppDelegate else { return }
         let window = UIWindow(windowScene: windowScene)
+        window.overrideUserInterfaceStyle = .light
         self.window = window
         launchObservation = app.launch.$phase.receive(on: RunLoop.main).sink { [weak self, weak app] phase in
             guard let self, let app else { return }

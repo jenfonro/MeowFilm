@@ -78,6 +78,9 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
 /// Product lifetime, not page lifetime. Products bind PlaybackEvent and system
 /// navigation once and retain this model while another domain is visible.
 @MainActor public final class MusicViewModel {
+    #if os(iOS)
+    public let artworkImages: MusicArtworkImages
+    #endif
     public let searchPreferences = MusicSearchPreferencesStore()
     public let searchHistory = SearchHistoryStore()
     public let channelSelection = MusicChannelSelection()
@@ -112,6 +115,16 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     let accountEvents = PassthroughSubject<MusicAccountPlatform, Never>()
     var accountObservation: Task<Void, Never>?
+    private var activeAccountLoginTransitions: Set<UUID> = []
+    var isAccountLoginInProgress: Bool { !activeAccountLoginTransitions.isEmpty }
+    func beginAccountLoginTransition() -> UUID {
+        let token = UUID()
+        activeAccountLoginTransitions.insert(token)
+        return token
+    }
+    func endAccountLoginTransition(_ token: UUID) {
+        activeAccountLoginTransitions.remove(token)
+    }
     public var accountChanges: AnyPublisher<MusicAccountPlatform, Never> {
         accountEvents.eraseToAnyPublisher()
     }
@@ -312,6 +325,32 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         }
     }
 
+    #if os(iOS)
+    public init(service: any MusicServing, playback: PlaybackController,
+                accounts: (any MusicAccountsServing)? = nil,
+                scriptSources: (any MusicScriptSourceManaging)? = nil,
+                artworkImages: MusicArtworkImages? = nil) {
+        self.artworkImages = artworkImages ?? MusicArtworkImages()
+        self.service = service; self.player = SharedMusicPlaybackDriver(playback); self.accounts = accounts
+        self.scriptSources = scriptSources
+        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
+        configureMetadata()
+        observeAccountSessions()
+        observeSongRepository()
+    }
+    public init(service: any MusicServing, player: any MusicPlaybackDriving,
+                accounts: (any MusicAccountsServing)? = nil,
+                scriptSources: (any MusicScriptSourceManaging)? = nil,
+                artworkImages: MusicArtworkImages? = nil) {
+        self.artworkImages = artworkImages ?? MusicArtworkImages()
+        self.service = service; self.player = player; self.accounts = accounts
+        self.scriptSources = scriptSources
+        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
+        configureMetadata()
+        observeAccountSessions()
+        observeSongRepository()
+    }
+    #else
     public init(service: any MusicServing, playback: PlaybackController,
                 accounts: (any MusicAccountsServing)? = nil,
                 scriptSources: (any MusicScriptSourceManaging)? = nil) {
@@ -332,6 +371,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         observeAccountSessions()
         observeSongRepository()
     }
+    #endif
     public func attachPlayback(_ playback: PlaybackController) {
         if player == nil { player = SharedMusicPlaybackDriver(playback) }
     }

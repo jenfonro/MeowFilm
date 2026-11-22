@@ -27,8 +27,14 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     private let videos = UIStackView()
     private let books = UIStackView()
     private let settings = UIButton(type: .system)
+    private struct DisplayRow {
+        let view: UIStackView
+        let icon: UIImageView
+        let label: UILabel
+    }
+
     private var buttons: [UIButton] = []
-    private var videoRows: [FilmSourceKey: UIStackView] = [:]
+    private var videoRows: [FilmSourceKey: DisplayRow] = [:]
     private var bookRows: [String: UIButton] = [:]
     private var observations: Set<AnyCancellable> = []
     private var observing = false
@@ -212,13 +218,14 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         return icon
     }
 
-    private func displayRow(title: String, symbol: String, identifier: String) -> UIStackView {
+    private func displayRow(title: String, symbol: String, identifier: String) -> DisplayRow {
+        let icon = rowIcon(symbol)
         let label = UILabel()
         label.text = title
         label.font = .preferredFont(forTextStyle: .body)
         label.adjustsFontForContentSizeCategory = true
         label.numberOfLines = 0
-        let row = UIStackView(arrangedSubviews: [rowIcon(symbol), label])
+        let row = UIStackView(arrangedSubviews: [icon, label])
         row.alignment = .center
         row.spacing = 12
         row.isLayoutMarginsRelativeArrangement = true
@@ -230,7 +237,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         row.accessibilityTraits = .staticText
         row.accessibilityIdentifier = identifier
         row.accessibilityLabel = title
-        return row
+        return DisplayRow(view: row, icon: icon, label: label)
     }
 
     private func navigationButton(title: String, symbol: String, page: MeowfilmPrimaryPage, selected: Bool) -> UIButton {
@@ -244,8 +251,25 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window == nil { stopObserving() }
-        else if !closing { startObserving() }
+        if window == nil {
+            stopObserving()
+            stopAnimator()
+        } else if !closing {
+            startObserving()
+            applyTheme()
+        }
+    }
+
+    private func stopAnimator() {
+        guard let value = animator else { return }
+        animator = nil
+        value.stopAnimation(true)
+    }
+
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            animator?.stopAnimation(true)
+        }
     }
 
     private func startObserving() {
@@ -277,11 +301,11 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         videos.isHidden = sources.isEmpty
         let keys = Set(sources.map(\.key))
         for (key, row) in videoRows where !keys.contains(key) {
-            row.removeFromSuperview()
+            row.view.removeFromSuperview()
             videoRows[key] = nil
         }
         for (index, source) in sources.enumerated() {
-            let row: UIStackView
+            let row: DisplayRow
             if let existing = videoRows[source.key] { row = existing }
             else {
                 let key = source.key
@@ -289,13 +313,13 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
                     identifier: "app.sidebar.video.\(Data(key.installationId.utf8).base64EncodedString()).\(Data(key.siteKey.utf8).base64EncodedString())")
                 videoRows[key] = row
             }
-            (row.arrangedSubviews.last as? UILabel)?.text = source.name
-            row.accessibilityLabel = source.name
-            if videos.arrangedSubviews.count <= index || videos.arrangedSubviews[index] !== row {
-                videos.insertArrangedSubview(row, at: index)
+            row.label.text = source.name
+            row.view.accessibilityLabel = source.name
+            applyTheme(to: row, theme: panel.theme)
+            if videos.arrangedSubviews.count <= index || videos.arrangedSubviews[index] !== row.view {
+                videos.insertArrangedSubview(row.view, at: index)
             }
         }
-        applyTheme()
     }
 
     private func renderBooks() {
@@ -309,6 +333,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             buttons.removeAll { $0 === row }
             bookRows[key] = nil
         }
+        let currentTheme = panel.theme
         for (index, source) in sources.enumerated() {
             let row: UIButton
             if let existing = bookRows[source.id] { row = existing }
@@ -332,27 +357,29 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             if !row.isEnabled { row.accessibilityTraits.insert(.notEnabled) }
             if row.isSelected { row.accessibilityTraits.insert(.selected) }
             row.accessibilityValue = row.isSelected ? "已选择" : nil
+            applyTheme(to: row, theme: currentTheme)
             if books.arrangedSubviews.count <= index || books.arrangedSubviews[index] !== row {
                 books.insertArrangedSubview(row, at: index)
             }
         }
-        applyTheme()
+    }
+
+    private func applyTheme(to button: UIButton, theme: PageTheme) {
+        button.configuration?.baseForegroundColor = UIColor(button.isSelected ? theme.accent : theme.ink)
+        button.tintColor = UIColor(button.isSelected ? theme.accent : theme.ink)
+        button.configuration?.background.backgroundColor = button.isSelected ? UIColor(theme.buttonSelected) : .clear
+    }
+
+    private func applyTheme(to row: DisplayRow, theme: PageTheme) {
+        row.icon.tintColor = UIColor(theme.ink)
+        row.label.textColor = UIColor(theme.ink)
     }
 
     private func applyTheme() {
         let theme = panel.theme
-        for button in buttons {
-            button.configuration?.baseForegroundColor = UIColor(button.isSelected ? theme.accent : theme.ink)
-            button.tintColor = UIColor(button.isSelected ? theme.accent : theme.ink)
-            button.configuration?.background.backgroundColor = button.isSelected ? UIColor(theme.buttonSelected) : .clear
-        }
+        for button in buttons { applyTheme(to: button, theme: theme) }
         settings.configuration?.background.backgroundColor = UIColor(theme.surface)
-        for stack in [upper, videos, books] {
-            for row in stack.arrangedSubviews.compactMap({ $0 as? UIStackView }) {
-                (row.arrangedSubviews.first as? UIImageView)?.tintColor = UIColor(theme.ink)
-                (row.arrangedSubviews.last as? UILabel)?.textColor = UIColor(theme.ink)
-            }
-        }
+        for row in videoRows.values { applyTheme(to: row, theme: theme) }
     }
 
     func show() {
@@ -360,7 +387,8 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         panel.transform = CGAffineTransform(translationX: -panel.bounds.width, y: 0)
         shade.alpha = 0
         let value = UIViewPropertyAnimator(duration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.28,
-                                           curve: .easeOut) {
+                                           curve: .easeOut) { [weak self] in
+            guard let self else { return }
             self.panel.transform = .identity
             self.shade.alpha = 1
             self.panel.setNeedsLayout()
@@ -391,7 +419,8 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
 
     private func closingAnimator() -> UIViewPropertyAnimator {
         UIViewPropertyAnimator(duration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.25,
-                               curve: .easeInOut) {
+                               curve: .easeInOut) { [weak self] in
+            guard let self else { return }
             self.panel.transform = CGAffineTransform(translationX: -self.panel.bounds.width, y: 0)
             self.shade.alpha = 0
             self.panel.setNeedsLayout()

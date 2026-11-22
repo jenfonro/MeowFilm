@@ -215,6 +215,10 @@ enum MusicCollectionOwnerChange {
         self.currentQueueCollectionID = currentQueueCollectionID
     }
 
+    public func clearActionError() {
+        actionError = nil
+    }
+
     @discardableResult public func appear() -> Task<Void, Never>? {
         guard !visible else { return nil }
         visible = true; model.observeCollectionPage(self, id: observerID)
