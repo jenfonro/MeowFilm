@@ -2,11 +2,6 @@ import Foundation
 import MeowRuntime
 
 public struct FilmDoubanSettings: Equatable, Sendable {
-    static let defaultValue: RuntimeValue = .object([
-        "apiBase": .string("https://m.douban.com"), "searchBase": .string("https://search.douban.com"),
-        "imageBase": .string("https://img3.doubanio.com"), "apiProxy": .string(""),
-        "imageProxy": .string(""), "cookie": .string(""),
-    ])
     public let apiBase: String
     public let searchBase: String
     public let imageBase: String
@@ -14,30 +9,54 @@ public struct FilmDoubanSettings: Equatable, Sendable {
     public let imageProxy: String
     public let cookie: String
 
-    init(_ value: RuntimeValue) throws {
-        guard let apiBase = value.catField("apiBase")?.catText,
-              let searchBase = value.catField("searchBase")?.catText,
-              let imageBase = value.catField("imageBase")?.catText,
-              let apiProxy = value.catField("apiProxy")?.catText,
-              let imageProxy = value.catField("imageProxy")?.catText,
-              let cookie = value.catField("cookie")?.catText else { throw FilmSearchError.invalidResponse }
-        self.apiBase = apiBase; self.searchBase = searchBase; self.imageBase = imageBase
-        self.apiProxy = apiProxy; self.imageProxy = imageProxy; self.cookie = cookie
+    init(_ record: FilmDoubanSettingsRecord) {
+        apiBase = record.apiBase
+        searchBase = record.searchBase
+        imageBase = record.imageBase
+        apiProxy = record.apiProxy
+        imageProxy = record.imageProxy
+        cookie = record.cookie
     }
 }
 
-/// The native document is the only editable settings owner.
+/// The native repository is the only editable settings owner.
 public struct FilmDoubanSettingsService: Sendable {
-    private let settingsDocument: FilmSettingsDocument
-    public init(settingsDocument: FilmSettingsDocument) { self.settingsDocument = settingsDocument }
+    private let settingsRepository: FilmSettingsRepository
+    public init(settingsRepository: FilmSettingsRepository) {
+        self.settingsRepository = settingsRepository
+    }
+
     public func settings() async throws -> FilmDoubanSettings {
         try Task.checkCancellation()
-        let value = try await FilmDoubanSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmDoubanSettings.defaultValue))
+        let record = try await settingsRepository.readDouban().value ?? .defaults
         try Task.checkCancellation()
-        return value
+        return FilmDoubanSettings(record)
     }
+
     public func updateSettings(_ patch: RuntimeObject) async throws -> FilmDoubanSettings {
         try Task.checkCancellation()
-        return try await FilmDoubanSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmDoubanSettings.defaultValue, patch: patch))
+        let saved = try await settingsRepository.updateDouban { current in
+            var record = current ?? .defaults
+            if let v = patch["apiBase"] {
+                record.apiBase = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: false)
+            }
+            if let v = patch["searchBase"] {
+                record.searchBase = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: false)
+            }
+            if let v = patch["imageBase"] {
+                record.imageBase = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: false)
+            }
+            if let v = patch["apiProxy"] {
+                record.apiProxy = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: true)
+            }
+            if let v = patch["imageProxy"] {
+                record.imageProxy = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: true)
+            }
+            if let v = patch["cookie"] {
+                record.cookie = FilmMetadataSettingsNormalizer.trim(try FilmMetadataSettingsNormalizer.text(v))
+            }
+            return record
+        }
+        return FilmDoubanSettings(saved.value)
     }
 }

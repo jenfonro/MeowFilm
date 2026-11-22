@@ -141,6 +141,7 @@ import Combine
         $effectivePalette.removeDuplicates().dropFirst().map { _ in () }.eraseToAnyPublisher()
     }
     private var database: SQLiteDatabase?
+    private var cacheDatabase: SQLiteDatabase?
     private var epoch = UUID()
     private var closed = false
     private var pendingColors: [Data: (key: String, palette: PageColorway)] = [:]
@@ -153,14 +154,19 @@ import Combine
     private var artworkID: String?
     private var previewPalette: PagePalette?
 
-    public init(database: SQLiteDatabase? = nil) { self.database = database }
-    public func bind(database: SQLiteDatabase) async throws {
+    public init(database: SQLiteDatabase? = nil, cacheDatabase: SQLiteDatabase? = nil) {
+        self.database = database
+        self.cacheDatabase = cacheDatabase
+    }
+    public func bind(database: SQLiteDatabase, cacheDatabase: SQLiteDatabase) async throws {
         guard self.database == nil || self.database === database, !closed else { return }
-        let result = try await database.snapshot { try MusicAppearanceRepository.loadAll($0) }
+        let loadedPreferences = try await database.snapshot { try MusicAppearanceRepository.loadPreferences($0) }
+        let loadedColors = try await cacheDatabase.snapshot { try MusicAppearanceRepository.loadColors($0) }
         guard !closed else { return }
         self.database = database
-        cache = result.1; savedLast = cache.last
-        publishPreferences(result.0)
+        self.cacheDatabase = cacheDatabase
+        cache = loadedColors; savedLast = cache.last
+        publishPreferences(loadedPreferences)
     }
 
     /// Call on foreground if another native preferences owner was used.
@@ -368,14 +374,14 @@ import Combine
         // Retain only the latest bounded palette cache, not every sampled cover.
         let retained = Set(cache.colors.map { Data($0[0].utf8) })
         pendingColors = pendingColors.filter { retained.contains($0.key) }
-        guard colorWriter == nil, let database, pendingLast != nil || !pendingColors.isEmpty else { return }
+        guard colorWriter == nil, let cacheDatabase, pendingLast != nil || !pendingColors.isEmpty else { return }
         colorWriter = Task {
             while pendingLast != nil || !pendingColors.isEmpty {
                 let last = pendingLast
                 let colors = cache.colors.compactMap { pendingColors[Data($0[0].utf8)] }
                 pendingLast = nil; pendingColors.removeAll()
                 do {
-                    try await database.transaction { db in
+                    try await cacheDatabase.transaction { db in
                         try MusicAppearanceRepository.saveColors(colors, last: last, db)
                     }
                     if let last { savedLast = last }
@@ -387,6 +393,7 @@ import Combine
     public func close() async {
         closed = true; epoch = UUID()
         await colorWriter?.value
+        _ = try? await cacheDatabase?.flush()
         _ = try? await database?.flush()
     }
 }

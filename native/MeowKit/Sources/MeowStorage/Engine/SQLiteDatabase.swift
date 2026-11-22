@@ -18,12 +18,13 @@ public enum SQLiteValue: Equatable, Hashable, Sendable {
 
     public static func integer(_ value: Int) -> Self { .integer(Int64(value)) }
     public static func bool(_ value: Bool) -> Self { .integer(value ? 1 : 0) }
+    public static func epochMillis(_ value: Date) -> Self { .integer(Int64((value.timeIntervalSince1970 * 1000.0).rounded())) }
     public static func optional(_ value: String?) -> Self { value.map(Self.text) ?? .null }
     public static func optional(_ value: Double?) -> Self { value.map(Self.real) ?? .null }
     public static func optional(_ value: Int?) -> Self { value.map(Self.integer) ?? .null }
     public static func optional(_ value: Int64?) -> Self { value.map(Self.integer) ?? .null }
     public static func optional(_ value: Bool?) -> Self { value.map(Self.bool) ?? .null }
-    public static func optional(_ value: Date?) -> Self { value.map { .real($0.timeIntervalSince1970) } ?? .null }
+    public static func optionalEpochMillis(_ value: Date?) -> Self { value.map(Self.epochMillis) ?? .null }
     public static func optional(_ value: Data?) -> Self { value.map(Self.blob) ?? .null }
     public var byteCount: Int {
         switch self {
@@ -34,77 +35,8 @@ public enum SQLiteValue: Equatable, Hashable, Sendable {
     }
 }
 
-public struct SQLiteRow: Equatable, Sendable {
-    public let values: [String: SQLiteValue]
-    public init(values: [String: SQLiteValue]) { self.values = values }
-    public subscript(_ column: String) -> SQLiteValue { values[column] ?? .null }
-    public func text(_ column: String) throws -> String {
-        guard case .text(let value) = self[column] else { throw SQLiteStorageError.invalidValue }
-        return value
-    }
-    public func optionalText(_ column: String) throws -> String? {
-        self[column] == .null ? nil : try text(column)
-    }
-    public func int64(_ column: String) throws -> Int64 {
-        guard case .integer(let value) = self[column] else { throw SQLiteStorageError.invalidValue }
-        return value
-    }
-    public func optionalInt64(_ column: String) throws -> Int64? {
-        self[column] == .null ? nil : try int64(column)
-    }
-    public func integer(_ column: String) throws -> Int {
-        guard case .integer(let value) = self[column], let result = Int(exactly: value) else {
-            throw SQLiteStorageError.invalidValue
-        }
-        return result
-    }
-    public func optionalInteger(_ column: String) throws -> Int? {
-        self[column] == .null ? nil : try integer(column)
-    }
-    public func double(_ column: String) throws -> Double {
-        switch self[column] {
-        case .real(let value): return value
-        case .integer(let value): return Double(value)
-        default: throw SQLiteStorageError.invalidValue
-        }
-    }
-    public func optionalDouble(_ column: String) throws -> Double? {
-        self[column] == .null ? nil : try double(column)
-    }
-    public func bool(_ column: String) throws -> Bool {
-        let value = try integer(column)
-        guard value == 0 || value == 1 else { throw SQLiteStorageError.invalidValue }
-        return value == 1
-    }
-    public func optionalBool(_ column: String) throws -> Bool? {
-        self[column] == .null ? nil : try bool(column)
-    }
-    public func blob(_ column: String) throws -> Data {
-        guard case .blob(let data) = self[column] else { throw SQLiteStorageError.invalidValue }
-        return data
-    }
-    public func optionalBlob(_ column: String) throws -> Data? {
-        self[column] == .null ? nil : try blob(column)
-    }
-    public func date(_ column: String) throws -> Date {
-        Date(timeIntervalSince1970: try double(column))
-    }
-    public func optionalDate(_ column: String) throws -> Date? {
-        try optionalDouble(column).map { Date(timeIntervalSince1970: $0) }
-    }
-    public func uuid(_ column: String) throws -> UUID {
-        guard let value = UUID(uuidString: try text(column)) else { throw SQLiteStorageError.invalidValue }
-        return value
-    }
-    public func optionalUUID(_ column: String) throws -> UUID? {
-        guard let raw = try optionalText(column) else { return nil }
-        guard let value = UUID(uuidString: raw) else { throw SQLiteStorageError.invalidValue }
-        return value
-    }
-}
-
 /// Zero-allocation positional row cursor backed directly by the active `sqlite3_stmt`.
-/// Valid only within the `scan`/`query(map:)` closure invocation.
+/// Valid only within the `scan`/`query`/`queryOne` closure invocation.
 public struct SQLiteCursor {
     private let statement: OpaquePointer
     public let columnCount: Int32
@@ -183,12 +115,12 @@ public struct SQLiteCursor {
         isNull(index) ? nil : try blob(index)
     }
 
-    public func date(_ index: Int32) throws -> Date {
-        Date(timeIntervalSince1970: try double(index))
+    public func dateFromMillis(_ index: Int32) throws -> Date {
+        Date(timeIntervalSince1970: Double(try int64(index)) / 1000.0)
     }
 
-    public func optionalDate(_ index: Int32) throws -> Date? {
-        try optionalDouble(index).map { Date(timeIntervalSince1970: $0) }
+    public func optionalDateFromMillis(_ index: Int32) throws -> Date? {
+        try optionalInt64(index).map { Date(timeIntervalSince1970: Double($0) / 1000.0) }
     }
 
     public func uuid(_ index: Int32) throws -> UUID {
@@ -336,7 +268,6 @@ public final class SQLiteConnection {
             default: return false
             }
         }
-        // Caller row-mapping exceptions leave the compiled statement valid.
         return true
     }
 
@@ -344,8 +275,6 @@ public final class SQLiteConnection {
         guard retain, Self.isCacheable(sql) else {
             sqlite3_finalize(statement); return
         }
-        // Note: sqlite3_reset returns the last step error code if the previous step failed
-        // (e.g. SQLITE_CONSTRAINT), while still successfully resetting the statement for reuse.
         let resetRC = sqlite3_reset(statement) & 0xff
         let resetOk = resetRC == SQLITE_OK || resetRC == SQLITE_CONSTRAINT || resetRC == SQLITE_BUSY || resetRC == SQLITE_LOCKED
         guard resetOk, sqlite3_clear_bindings(statement) == SQLITE_OK else {
@@ -435,108 +364,42 @@ public final class SQLiteConnection {
         return output
     }
 
-    public func query(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max) throws -> [SQLiteRow] {
-        guard maximumRows > 0 else { throw SQLiteStorageError.invalidValue }
-        var output: [SQLiteRow] = []
-        try rows(sql, bindings, maximumRows: maximumRows) { output.append($0) }
-        return output
-    }
-
-    public func rows(_ sql: String, _ bindings: [SQLiteValue] = [], maximumRows: Int = .max,
-                     consume: (SQLiteRow) throws -> Void) throws {
-        guard maximumRows > 0 else { throw SQLiteStorageError.invalidValue }
-        let statement = try prepare(sql, bindings)
-        var caughtError: Error?
-        defer { recycle(statement, sql: sql, retain: Self.shouldRetainStatement(after: caughtError)) }
-        let count = Int(sqlite3_column_count(statement))
-        let names = (0..<count).map { String(cString: sqlite3_column_name(statement, Int32($0))) }
-        var emitted = 0
-        do {
-            while true {
-                let result = sqlite3_step(statement)
-                if result == SQLITE_DONE { return }
-                guard result == SQLITE_ROW else { throw Self.failure(result) }
-                guard emitted < maximumRows else { throw SQLiteStorageError.queueFull }
-                emitted += 1
-                var values: [String: SQLiteValue] = [:]
-                values.reserveCapacity(count)
-                for index in 0..<count {
-                    let column = Int32(index), name = names[index]
-                    switch sqlite3_column_type(statement, column) {
-                    case SQLITE_INTEGER: values[name] = .integer(sqlite3_column_int64(statement, column))
-                    case SQLITE_FLOAT: values[name] = .real(sqlite3_column_double(statement, column))
-                    case SQLITE_TEXT:
-                        let byteCount = Int(sqlite3_column_bytes(statement, column))
-                        if byteCount == 0 { values[name] = .text("") }
-                        else if let pointer = sqlite3_column_text(statement, column) {
-                            let text = String(decoding: UnsafeBufferPointer(start: pointer, count: byteCount), as: UTF8.self)
-                            values[name] = .text(text)
-                        } else { throw SQLiteStorageError.corrupt }
-                    case SQLITE_BLOB:
-                        let byteCount = Int(sqlite3_column_bytes(statement, column))
-                        if byteCount == 0 { values[name] = .blob(Data()) }
-                        else if let pointer = sqlite3_column_blob(statement, column) {
-                            values[name] = .blob(Data(bytes: pointer, count: byteCount))
-                        } else { throw SQLiteStorageError.corrupt }
-                    default: values[name] = .null
-                    }
-                }
-                try consume(SQLiteRow(values: values))
-            }
-        } catch {
-            caughtError = error
-            throw error
-        }
-    }
-
-    public func ownerRevision(_ owner: String) throws -> (revision: Int64, receipt: String) {
-        guard let row = try queryOne(
-            "SELECT revision, receipt FROM owner_revisions WHERE owner = ?",
+    public func ownerRevision(_ owner: String) throws -> Int64 {
+        try queryOne(
+            "SELECT revision FROM owner_revisions WHERE owner = ?",
             [.text(owner)],
-            map: { (try $0.int64(0), try $0.text(1)) }
-        ) else {
-            return (0, "")
-        }
-        return row
+            map: { try $0.int64(0) }
+        ) ?? 0
     }
 
     @discardableResult
-    public func commitOwnerRevision(
-        _ owner: String,
-        expectedRevision: Int64,
-        expectedReceipt: String,
-        operationID: String
-    ) throws -> (revision: Int64, receipt: String) {
-        guard expectedRevision >= 0, expectedRevision < 9_007_199_254_740_991, !operationID.isEmpty else {
+    public func commitOwnerRevision(_ owner: String, expectedRevision: Int64) throws -> Int64 {
+        guard expectedRevision >= 0, expectedRevision < 9_007_199_254_740_991 else {
             throw SQLiteStorageError.invalidValue
         }
         let current = try ownerRevision(owner)
-        guard current.revision == expectedRevision, current.receipt == expectedReceipt else {
+        guard current == expectedRevision else {
             throw SQLiteStorageError.conflict
         }
         let nextRevision = expectedRevision + 1
         try execute("""
-            INSERT INTO owner_revisions(owner, revision, receipt) VALUES(?, ?, ?)
-            ON CONFLICT(owner) DO UPDATE SET revision = excluded.revision, receipt = excluded.receipt
-            """, [.text(owner), .integer(nextRevision), .text(operationID)])
-        try execute("INSERT INTO operation_receipts(owner, operation_id, revision) VALUES(?, ?, ?)",
-                    [.text(owner), .text(operationID), .integer(nextRevision)])
-        try execute("DELETE FROM operation_receipts WHERE owner = ? AND revision < ? - 256",
-                    [.text(owner), .integer(nextRevision)])
-        return (nextRevision, operationID)
+            INSERT INTO owner_revisions(owner, revision) VALUES(?, ?)
+            ON CONFLICT(owner) DO UPDATE SET revision = excluded.revision
+            """, [.text(owner), .integer(nextRevision)])
+        return nextRevision
     }
 
     @discardableResult
-    public func bumpOwnerRevision(_ owner: String, operationID: String = UUID().uuidString.lowercased()) throws -> Int64 {
+    public func bumpOwnerRevision(_ owner: String) throws -> Int64 {
         let current = try ownerRevision(owner)
-        let next = try commitOwnerRevision(owner, expectedRevision: current.revision, expectedReceipt: current.receipt, operationID: operationID)
-        return next.revision
+        return try commitOwnerRevision(owner, expectedRevision: current)
     }
 
     /// Table/column identifiers are repository constants, never external input.
     private static func identifier(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
+
     public static func upsertSQL(_ table: String, columns: [String], key: [String]) -> String {
         let changed = columns.filter { !key.contains($0) }
         let conflict = changed.isEmpty ? "DO NOTHING" : "DO UPDATE SET " +
@@ -546,52 +409,12 @@ public final class SQLiteConnection {
             Array(repeating: "?", count: columns.count).joined(separator: ",") +
             ") ON CONFLICT(\(key.map(identifier).joined(separator: ","))) \(conflict)"
     }
+
     @discardableResult
     public func upsert(_ table: String, columns: [String], values: [SQLiteValue], key: [String]) throws -> Int {
         guard columns.count == values.count, !columns.isEmpty, !key.isEmpty,
               key.allSatisfy(columns.contains) else { throw SQLiteStorageError.invalidValue }
         return try execute(Self.upsertSQL(table, columns: columns, key: key), values)
-    }
-
-    /// Diff a domain's typed relation in a transaction. Only changed rows are
-    /// written; changing a singleton does not delete/reinsert its children.
-    @discardableResult
-    public func reconcile(_ table: String, columns: [String], key: [String],
-                          rows proposed: [[SQLiteValue]], where predicate: String = "1",
-                          bindings: [SQLiteValue] = [], replaceChanged: Bool = false) throws -> Bool {
-        let identifier = Self.identifier
-        let existing = try query("SELECT \(columns.map(identifier).joined(separator: ",")) FROM \(identifier(table)) WHERE \(predicate)", bindings)
-        let keyOffsets = try key.map { name -> Int in
-            guard let index = columns.firstIndex(of: name) else { throw SQLiteStorageError.invalidValue }
-            return index
-        }
-        var changed = false
-        guard proposed.allSatisfy({ $0.count == columns.count }) else { throw SQLiteStorageError.invalidValue }
-        var remaining: [[SQLiteValue]: [SQLiteValue]] = [:]
-        var replacements: [[SQLiteValue]] = []
-        for row in proposed {
-            guard remaining.updateValue(row, forKey: keyOffsets.map { row[$0] }) == nil else {
-                throw SQLiteStorageError.constraint
-            }
-        }
-        for previous in existing {
-            let values = columns.map { previous[$0] }
-            if let row = remaining.removeValue(forKey: keyOffsets.map { values[$0] }) {
-                if row != values {
-                    if replaceChanged {
-                        try execute("DELETE FROM \(identifier(table)) WHERE " +
-                            key.map { "\(identifier($0)) IS ?" }.joined(separator: " AND "), keyOffsets.map { values[$0] })
-                        replacements.append(row); changed = true
-                    } else { changed = try upsert(table, columns: columns, values: row, key: key) > 0 || changed }
-                }
-            } else {
-                changed = try execute("DELETE FROM \(identifier(table)) WHERE " +
-                    key.map { "\(identifier($0)) IS ?" }.joined(separator: " AND "), keyOffsets.map { values[$0] }) > 0 || changed
-            }
-        }
-        for row in replacements { try upsert(table, columns: columns, values: row, key: key) }
-        for row in remaining.values { changed = try upsert(table, columns: columns, values: row, key: key) > 0 || changed }
-        return changed
     }
 
     public var isInTransaction: Bool { sqlite3_get_autocommit(handle) == 0 }
@@ -608,16 +431,18 @@ public final class SQLiteConnection {
     }
 }
 
-/// The App owns one database coordinator and lends dedicated WAL read/write lanes
-/// to native repositories. Writes serialize on the write lane; reads run
-/// concurrently on an independent read-only connection (`query_only=ON`).
+/// The App owns one permanent data database (`meowfilm-data.sqlite3`) and one
+/// rebuildable cache database (`meowfilm-cache.sqlite3`), lending dedicated WAL
+/// read/write lanes to native repositories.
 public final class SQLiteDatabase: @unchecked Sendable {
-    public static let applicationID = SQLiteSchema.applicationID
+    public static let dataApplicationID = SQLiteSchema.dataApplicationID
+    public static let cacheApplicationID = SQLiteSchema.cacheApplicationID
     public static let schemaVersion = SQLiteSchema.version
+    public let role: SQLiteDatabaseRole
     public let dataRoot: URL
     public let url: URL
-    private let writeQueue = DispatchQueue(label: "meowfilm.storage.sqlite.write", qos: .utility)
-    private let readQueue = DispatchQueue(label: "meowfilm.storage.sqlite.read", qos: .utility)
+    private let writeQueue: DispatchQueue
+    private let readQueue: DispatchQueue
     private let writeQueueKey = DispatchSpecificKey<UInt8>()
     private let readQueueKey = DispatchSpecificKey<UInt8>()
     private let admission = NSLock()
@@ -631,9 +456,21 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private var databaseInode: ino_t = 0
     private var commits = 0
 
-    public convenience init(dataRoot: URL) throws {
-        try self.init(url: dataRoot.appendingPathComponent("storage-v1", isDirectory: true)
-            .appendingPathComponent("meowfilm.sqlite3"), dataRoot: dataRoot)
+    public static func openData(dataRoot: URL) throws -> SQLiteDatabase {
+        try SQLiteDatabase(dataRoot: dataRoot, role: .data)
+    }
+
+    public static func openCache(dataRoot: URL) throws -> SQLiteDatabase {
+        try SQLiteDatabase(dataRoot: dataRoot, role: .cache)
+    }
+
+    public convenience init(dataRoot: URL, role: SQLiteDatabaseRole = .data) throws {
+        try self.init(
+            url: dataRoot.appendingPathComponent("storage-v1", isDirectory: true)
+                .appendingPathComponent(role.fileName),
+            role: role,
+            dataRoot: dataRoot
+        )
     }
 
     /// Resolve only an existing, trusted system base before appending owned
@@ -645,10 +482,13 @@ public final class SQLiteDatabase: @unchecked Sendable {
         return URL(fileURLWithPath: String(cString: path), isDirectory: true)
     }
 
-    public init(url: URL, dataRoot: URL? = nil) throws {
+    public init(url: URL, role: SQLiteDatabaseRole = .data, dataRoot: URL? = nil) throws {
         guard url.isFileURL, !url.path.utf8.contains(0), url.path != "/" else { throw SQLiteStorageError.invalidPath }
+        self.role = role
         self.url = url
         self.dataRoot = dataRoot ?? url.deletingLastPathComponent()
+        self.writeQueue = DispatchQueue(label: "meowfilm.storage.sqlite.\(role.rawValue).write", qos: .utility)
+        self.readQueue = DispatchQueue(label: "meowfilm.storage.sqlite.\(role.rawValue).read", qos: .utility)
         writeQueue.setSpecific(key: writeQueueKey, value: 1)
         readQueue.setSpecific(key: readQueueKey, value: 1)
         guard !Thread.isMainThread else { throw SQLiteStorageError.mainThreadAccess }
@@ -662,20 +502,20 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 _ = closeFile(maintenanceDescriptor); maintenanceDescriptor = -1
             }
         }
-        let definition = try SQLiteSchema.load()
+        let definition = try SQLiteSchema.load(role: role)
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         guard try Self.canonicalSystemBaseURL(directory).path == directory.path else {
             throw SQLiteStorageError.invalidPath
         }
-        let lockURL = directory.appendingPathComponent("initialize.lock")
+        let lockURL = directory.appendingPathComponent(role.initializeLockName)
         let lock = lockURL.path.withCString { openFile($0, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600) }
         guard lock >= 0 else { throw SQLiteStorageError.io }
         defer { _ = flock(lock, LOCK_UN); _ = closeFile(lock) }
         try Self.regular(lock)
         try Self.lock(lock, exclusive: true)
-        let maintenanceURL = directory.appendingPathComponent("maintenance.lock")
+        let maintenanceURL = directory.appendingPathComponent(role.maintenanceLockName)
         maintenanceDescriptor = maintenanceURL.path.withCString { openFile($0, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600) }
         guard maintenanceDescriptor >= 0 else { throw SQLiteStorageError.io }
         try Self.regular(maintenanceDescriptor)
@@ -729,38 +569,38 @@ public final class SQLiteDatabase: @unchecked Sendable {
             guard meow_sqlite3_disable_close_checkpoint(writeHandle) == SQLITE_OK else {
                 throw SQLiteStorageError.io
             }
-            _ = try writeDB.query("PRAGMA foreign_keys=ON")
-            _ = try writeDB.query("PRAGMA trusted_schema=OFF")
-            let identity = try writeDB.query("PRAGMA application_id").first!.integer("application_id")
-            let version = try writeDB.query("PRAGMA user_version").first!.integer("user_version")
-            let empty = try writeDB.query("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").isEmpty
+            try Self.runPragma(writeDB, "PRAGMA foreign_keys=ON")
+            try Self.runPragma(writeDB, "PRAGMA trusted_schema=OFF")
+            let identity = try Self.pragmaInt(writeDB, "PRAGMA application_id")
+            let version = try Self.pragmaInt(writeDB, "PRAGMA user_version")
+            let empty = try writeDB.queryOne("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1", map: { try $0.text(0) }) == nil
             if empty {
                 guard existing == nil, identity == 0, version == 0 else {
                     throw SQLiteStorageError.invalidSchema
                 }
-                _ = try writeDB.query("PRAGMA auto_vacuum=INCREMENTAL")
-            } else if identity != Self.applicationID || version != Self.schemaVersion {
+                try Self.runPragma(writeDB, "PRAGMA auto_vacuum=INCREMENTAL")
+            } else if identity != role.applicationID || version != Self.schemaVersion {
                 throw SQLiteStorageError.invalidSchema
             }
-            _ = try writeDB.query("PRAGMA busy_timeout=5000")
-            _ = try writeDB.query("PRAGMA trusted_schema=OFF")
-            _ = try writeDB.query("PRAGMA foreign_keys=ON")
-            guard try writeDB.query("PRAGMA journal_mode=WAL").first?.text("journal_mode") == "wal" else {
+            try Self.runPragma(writeDB, "PRAGMA busy_timeout=5000")
+            try Self.runPragma(writeDB, "PRAGMA trusted_schema=OFF")
+            try Self.runPragma(writeDB, "PRAGMA foreign_keys=ON")
+            guard try Self.pragmaText(writeDB, "PRAGMA journal_mode=WAL") == "wal" else {
                 throw SQLiteStorageError.io
             }
-            _ = try writeDB.query("PRAGMA synchronous=FULL")
-            _ = try writeDB.query("PRAGMA wal_autocheckpoint=0")
-            _ = try writeDB.query("PRAGMA temp_store=MEMORY")
-            _ = try writeDB.query("PRAGMA cache_size=-16384")
-            try Self.verifyBaselinePragmas(on: writeDB, expectQueryOnly: false)
+            try Self.runPragma(writeDB, "PRAGMA synchronous=\(role.synchronousSQL)")
+            try Self.runPragma(writeDB, "PRAGMA wal_autocheckpoint=0")
+            try Self.runPragma(writeDB, "PRAGMA temp_store=MEMORY")
+            try Self.runPragma(writeDB, "PRAGMA cache_size=-16384")
+            try Self.verifyBaselinePragmas(on: writeDB, role: role, expectQueryOnly: false)
             if empty {
                 try Self.transaction(writeDB) { db in
                     guard sqlite3_exec(writeHandle, definition.sql, nil, nil, nil) == SQLITE_OK else {
                         throw SQLiteConnection.failure(sqlite3_extended_errcode(writeHandle))
                     }
                     try db.execute("INSERT INTO storage_identity(singleton,schema_hash) VALUES(1,?)", [.text(definition.hash)])
-                    _ = try db.query("PRAGMA application_id=\(Self.applicationID)")
-                    _ = try db.query("PRAGMA user_version=\(Self.schemaVersion)")
+                    try Self.runPragma(db, "PRAGMA application_id=\(role.applicationID)")
+                    try Self.runPragma(db, "PRAGMA user_version=\(Self.schemaVersion)")
                 }
                 committedSchema = true
             }
@@ -778,15 +618,15 @@ public final class SQLiteDatabase: @unchecked Sendable {
             guard meow_sqlite3_disable_close_checkpoint(openedReadHandle) == SQLITE_OK else {
                 throw SQLiteStorageError.io
             }
-            _ = try openedReadDB.query("PRAGMA busy_timeout=5000")
-            _ = try openedReadDB.query("PRAGMA trusted_schema=OFF")
-            _ = try openedReadDB.query("PRAGMA foreign_keys=ON")
-            _ = try openedReadDB.query("PRAGMA synchronous=FULL")
-            _ = try openedReadDB.query("PRAGMA wal_autocheckpoint=0")
-            _ = try openedReadDB.query("PRAGMA temp_store=MEMORY")
-            _ = try openedReadDB.query("PRAGMA cache_size=-16384")
-            _ = try openedReadDB.query("PRAGMA query_only=ON")
-            try Self.verifyBaselinePragmas(on: openedReadDB, expectQueryOnly: true)
+            try Self.runPragma(openedReadDB, "PRAGMA busy_timeout=5000")
+            try Self.runPragma(openedReadDB, "PRAGMA trusted_schema=OFF")
+            try Self.runPragma(openedReadDB, "PRAGMA foreign_keys=ON")
+            try Self.runPragma(openedReadDB, "PRAGMA synchronous=\(role.synchronousSQL)")
+            try Self.runPragma(openedReadDB, "PRAGMA wal_autocheckpoint=0")
+            try Self.runPragma(openedReadDB, "PRAGMA temp_store=MEMORY")
+            try Self.runPragma(openedReadDB, "PRAGMA cache_size=-16384")
+            try Self.runPragma(openedReadDB, "PRAGMA query_only=ON")
+            try Self.verifyBaselinePragmas(on: openedReadDB, role: role, expectQueryOnly: true)
 
             writeDB.releaseStatements()
             openedReadDB.releaseStatements()
@@ -807,20 +647,38 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    private static func verifyBaselinePragmas(on db: SQLiteConnection, expectQueryOnly: Bool) throws {
-        guard try db.query("PRAGMA journal_mode").first?.text("journal_mode") == "wal",
-              try db.query("PRAGMA synchronous").first?.integer("synchronous") == 2,
-              try db.query("PRAGMA foreign_keys").first?.integer("foreign_keys") == 1,
-              try db.query("PRAGMA trusted_schema").first?.integer("trusted_schema") == 0,
-              try db.query("PRAGMA wal_autocheckpoint").first?.integer("wal_autocheckpoint") == 0,
-              try db.query("PRAGMA auto_vacuum").first?.integer("auto_vacuum") == 2,
-              try db.query("PRAGMA busy_timeout").first?.integer("timeout") == 5_000,
-              try db.query("PRAGMA temp_store").first?.integer("temp_store") == 2,
-              try db.query("PRAGMA cache_size").first?.integer("cache_size") == -16_384 else {
+    private static func runPragma(_ db: SQLiteConnection, _ sql: String) throws {
+        try db.scan(sql) { _ in }
+    }
+
+    private static func pragmaInt(_ db: SQLiteConnection, _ sql: String) throws -> Int {
+        guard let value = try db.queryOne(sql, map: { try $0.integer(0) }) else {
+            throw SQLiteStorageError.invalidSchema
+        }
+        return value
+    }
+
+    private static func pragmaText(_ db: SQLiteConnection, _ sql: String) throws -> String {
+        guard let value = try db.queryOne(sql, map: { try $0.text(0) }) else {
+            throw SQLiteStorageError.invalidSchema
+        }
+        return value
+    }
+
+    private static func verifyBaselinePragmas(on db: SQLiteConnection, role: SQLiteDatabaseRole, expectQueryOnly: Bool) throws {
+        guard try pragmaText(db, "PRAGMA journal_mode") == "wal",
+              try pragmaInt(db, "PRAGMA synchronous") == role.expectedSynchronous,
+              try pragmaInt(db, "PRAGMA foreign_keys") == 1,
+              try pragmaInt(db, "PRAGMA trusted_schema") == 0,
+              try pragmaInt(db, "PRAGMA wal_autocheckpoint") == 0,
+              try pragmaInt(db, "PRAGMA auto_vacuum") == 2,
+              try pragmaInt(db, "PRAGMA busy_timeout") == 5_000,
+              try pragmaInt(db, "PRAGMA temp_store") == 2,
+              try pragmaInt(db, "PRAGMA cache_size") == -16_384 else {
             throw SQLiteStorageError.invalidSchema
         }
         if expectQueryOnly {
-            guard try db.query("PRAGMA query_only").first?.integer("query_only") == 1 else {
+            guard try pragmaInt(db, "PRAGMA query_only") == 1 else {
                 throw SQLiteStorageError.invalidSchema
             }
         }
@@ -831,6 +689,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
         guard fstat(descriptor, &state) == 0, state.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
               state.st_nlink == 1, state.st_uid == geteuid() else { throw SQLiteStorageError.invalidPath }
     }
+
     @discardableResult
     private static func regular(_ file: URL, required: Bool) throws -> stat? {
         var state = stat()
@@ -842,6 +701,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
               state.st_nlink == 1, state.st_uid == geteuid() else { throw SQLiteStorageError.invalidPath }
         return state
     }
+
     private static func lock(_ descriptor: Int32, exclusive: Bool, wait: Bool = true) throws {
         let deadline = Date().addingTimeInterval(wait ? 5 : 0)
         while flock(descriptor, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 {
@@ -850,6 +710,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             Thread.sleep(forTimeInterval: 0.02)
         }
     }
+
     private func checkFiles() throws {
         guard try Self.canonicalSystemBaseURL(url.deletingLastPathComponent()).path == url.deletingLastPathComponent().path else {
             throw SQLiteStorageError.invalidPath
@@ -860,7 +721,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             throw SQLiteStorageError.invalidPath
         }
         for suffix in ["-wal", "-shm", "-journal", ""] {
-            let file = suffix.isEmpty ? url.deletingLastPathComponent().appendingPathComponent("maintenance.lock") :
+            let file = suffix.isEmpty ? url.deletingLastPathComponent().appendingPathComponent(role.maintenanceLockName) :
                 URL(fileURLWithPath: url.path + suffix)
             try Self.regular(file, required: suffix.isEmpty)
             if suffix.isEmpty {
@@ -881,12 +742,15 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
         pending += 1; pendingBytes += bytes
     }
+
     private func release(_ bytes: Int) {
         admission.lock(); pending -= 1; pendingBytes -= bytes; admission.unlock()
     }
+
     private func currentMaintenanceFailure() -> Error? {
         admission.withLock { maintenanceFailure }
     }
+
     private func recordMaintenanceFailure(_ error: Error) {
         admission.withLock { if maintenanceFailure == nil { maintenanceFailure = error } }
     }
@@ -902,7 +766,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             if debugEnabled {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
                 DebugRuntime.logError(.storage, sub: "sqlite", event: "operation.error", error: error,
-                                      durationMs: ms, data: .object(["lane": .string("read")]))
+                                      durationMs: ms, data: .object(["db": .string(role.rawValue), "lane": .string("read")]))
             }
             throw error
         }
@@ -932,6 +796,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 if debugEnabled {
                     let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
                     DebugRuntime.log(.storage, sub: "sqlite", event: "write.commit", level: .debug, durationMs: ms, data: .object([
+                        "db": .string(role.rawValue),
                         "deltaChanges": .integer(afterChanges - changes),
                         "exclusive": .bool(exclusive)
                     ]))
@@ -943,6 +808,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
                 DebugRuntime.logError(.storage, sub: "sqlite", event: "operation.error", error: error,
                                       durationMs: ms, data: .object([
+                    "db": .string(role.rawValue),
                     "lane": .string("write"),
                     "exclusive": .bool(exclusive)
                 ]))
@@ -951,8 +817,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    /// Non-main synchronous reads reuse the active write lane when called
-    /// re-entrantly inside a write transaction; otherwise they use the read lane.
     public func readSync<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
         if DispatchQueue.getSpecific(key: writeQueueKey) != nil {
             if let failure = currentMaintenanceFailure() { throw failure }
@@ -969,8 +833,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
         return try readQueue.sync { try borrowRead(action) }
     }
 
-    /// Non-main synchronous owners can retain their generation/fence through a
-    /// short transaction. Nested calls already inside the write lane reuse it.
     public func writeSync<T>(ownedBytes: Int = 0, _ action: (SQLiteConnection) throws -> T) throws -> T {
         if DispatchQueue.getSpecific(key: readQueueKey) != nil {
             throw SQLiteStorageError.readOnly
@@ -988,9 +850,11 @@ public final class SQLiteDatabase: @unchecked Sendable {
     public func read<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try await performRead(action)
     }
+
     public func snapshot<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try await read { db in try Self.readSnapshot(db, action) }
     }
+
     public static func readSnapshot<T>(_ db: SQLiteConnection, _ action: (SQLiteConnection) throws -> T) throws -> T {
         guard !db.isInTransaction else { return try action(db) }
         try db.execute("BEGIN DEFERRED")
@@ -1003,6 +867,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             throw error
         }
     }
+
     public func write<T: Sendable>(ownedBytes: Int = 0,
                                   _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try await performWrite(ownedBytes: ownedBytes, exclusive: false, action)
@@ -1023,8 +888,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
                                            _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try Task.checkCancellation()
         try admit(ownedBytes)
-        // Once admitted a write settles and returns its actual result even if
-        // the awaiting task is cancelled; no continuation drops an accepted commit.
         return try await withCheckedThrowingContinuation { continuation in
             writeQueue.async {
                 defer { self.release(ownedBytes) }
@@ -1033,13 +896,18 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
+    @discardableResult
     public func transactionSync<T>(ownedBytes: Int = 0, _ action: (SQLiteConnection) throws -> T) throws -> T {
         try writeSync(ownedBytes: ownedBytes) { db in try Self.transaction(db, action) }
     }
+
+    @discardableResult
     public func transaction<T: Sendable>(ownedBytes: Int = 0,
                                         _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try await write(ownedBytes: ownedBytes) { db in try Self.transaction(db, action) }
     }
+
+    @discardableResult
     public static func transaction<T>(_ db: SQLiteConnection,
                                       commit: (_ action: () throws -> Void) throws -> Void = { try $0() },
                                       _ action: (SQLiteConnection) throws -> T) throws -> T {
@@ -1057,11 +925,15 @@ public final class SQLiteDatabase: @unchecked Sendable {
         try await write { _ in () }
         try await read { _ in () }
     }
+
     public func checkpoint() async throws {
         try await performWrite(ownedBytes: 0, exclusive: true) { db in try Self.maintain(db) }
     }
-    /// A new, consistent current-format snapshot. Never overwrites a recovery point.
+
+    /// A new, consistent current-format snapshot of the permanent data database.
+    /// Disposable cache databases reject backup requests.
     public func backup(to destination: URL) async throws {
+        guard role == .data else { throw SQLiteStorageError.invalidValue }
         guard destination.isFileURL, !destination.path.utf8.contains(0),
               ![".", ".."].contains(destination.lastPathComponent),
               try Self.canonicalSystemBaseURL(destination.deletingLastPathComponent()).path ==
@@ -1091,8 +963,10 @@ public final class SQLiteDatabase: @unchecked Sendable {
             guard copied == SQLITE_DONE, finished == SQLITE_OK else {
                 throw SQLiteConnection.failure(copied == SQLITE_DONE ? finished : copied)
             }
-            guard try snapshot.query("PRAGMA quick_check").first?.text("quick_check") == "ok",
-                  try snapshot.query("PRAGMA foreign_key_check").isEmpty else { throw SQLiteStorageError.corrupt }
+            guard try snapshot.queryOne("PRAGMA quick_check", map: { try $0.text(0) }) == "ok",
+                  try snapshot.queryOne("PRAGMA foreign_key_check", map: { _ in 1 }) == nil else {
+                throw SQLiteStorageError.corrupt
+            }
             guard fsync(file) == 0 else { throw SQLiteStorageError.io }
             let directory = destination.deletingLastPathComponent().path.withCString {
                 openFile($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
@@ -1103,6 +977,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             completed = true
         }
     }
+
     private func scheduleMaintenance() {
         guard commits >= 64, !admission.withLock({ closing }), let db = writeConnection,
               currentMaintenanceFailure() == nil else { return }
@@ -1121,14 +996,16 @@ public final class SQLiteDatabase: @unchecked Sendable {
             }
         }
     }
+
     private static func maintain(_ db: SQLiteConnection) throws {
         guard !db.isInTransaction else { return }
-        let busy = try db.query("PRAGMA wal_checkpoint(PASSIVE)").first?.integer("busy") ?? 0
+        let busy = try db.queryOne("PRAGMA wal_checkpoint(PASSIVE)", map: { try $0.integer(0) }) ?? 0
         guard busy == 0 else { return }
-        if try db.query("PRAGMA freelist_count").first!.integer("freelist_count") >= 256 {
-            _ = try db.query("PRAGMA incremental_vacuum(128)")
+        if (try db.queryOne("PRAGMA freelist_count", map: { try $0.integer(0) }) ?? 0) >= 256 {
+            try runPragma(db, "PRAGMA incremental_vacuum(128)")
         }
     }
+
     public func close() async throws {
         admission.withLock { closing = true }
         let readError: Error? = await withCheckedContinuation { continuation in
@@ -1146,8 +1023,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
             writeQueue.async {
                 var failure: Error?
                 if let db = self.writeConnection {
-                    // Accepted transactions have already committed to the WAL.
-                    // Release does not contend with the other owner's maintenance.
                     db.releaseStatements()
                     if sqlite3_close_v2(db.handle) != SQLITE_OK { failure = SQLiteStorageError.io }
                     self.writeConnection = nil
@@ -1161,6 +1036,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
         if let failure = writeError ?? readError { throw failure }
     }
+
     deinit {
         if let readConnection { readConnection.releaseStatements(); sqlite3_close_v2(readConnection.handle) }
         if let writeConnection { writeConnection.releaseStatements(); sqlite3_close_v2(writeConnection.handle) }
@@ -1175,6 +1051,7 @@ private func openFile(_ path: UnsafePointer<CChar>, _ flags: Int32, _ mode: mode
     return Glibc.open(path, flags, mode)
     #endif
 }
+
 private func closeFile(_ fd: Int32) -> Int32 {
     #if canImport(Darwin)
     return Darwin.close(fd)

@@ -3,15 +3,18 @@ import MeowSQLite
 import MeowDebug
 
 public struct SQLiteDebugQueryResult: Sendable {
+    public let db: String
     public let columns: [String]
-    public let rows: [[DebugJSONValue]]
+    public let rows: [[String: DebugJSONValue]]
     public let truncated: Bool
     public let durationMs: Double
 
     public func toJSON() -> DebugJSONValue {
         .object([
+            "db": .string(db),
             "columns": .array(columns.map(DebugJSONValue.string)),
-            "rows": .array(rows.map(DebugJSONValue.array)),
+            "rows": .array(rows.map(DebugJSONValue.object)),
+            "rowCount": .int(rows.count),
             "truncated": .bool(truncated),
             "durationMs": .number((durationMs * 1000).rounded() / 1000)
         ])
@@ -20,6 +23,7 @@ public struct SQLiteDebugQueryResult: Sendable {
 
 extension SQLiteConnection {
     func executeDebugReadOnlyQuery(
+        dbName: String,
         sql: String,
         bindings: [SQLiteValue],
         maxRows: Int
@@ -92,9 +96,9 @@ extension SQLiteConnection {
             return "col_\(i)"
         }
 
-        var rows: [[DebugJSONValue]] = []
+        var rows: [[String: DebugJSONValue]] = []
         var truncated = false
-        let limit = min(max(maxRows, 1), 2000)
+        let limit = min(max(maxRows, 1), 5000)
 
         while true {
             let stepRC = sqlite3_step(statement)
@@ -107,46 +111,47 @@ extension SQLiteConnection {
                 truncated = true
                 break
             }
-            var row: [DebugJSONValue] = []
+            var row: [String: DebugJSONValue] = [:]
             row.reserveCapacity(colCount)
             for i in 0..<colCount {
                 let c = Int32(i)
+                let colName = columns[i]
                 switch sqlite3_column_type(statement, c) {
                 case SQLITE_NULL:
-                    row.append(.null)
+                    row[colName] = .null
                 case SQLITE_INTEGER:
-                    row.append(.integer(sqlite3_column_int64(statement, c)))
+                    row[colName] = .integer(sqlite3_column_int64(statement, c))
                 case SQLITE_FLOAT:
-                    row.append(.optional(sqlite3_column_double(statement, c)))
+                    row[colName] = .optional(sqlite3_column_double(statement, c))
                 case SQLITE_TEXT:
                     let count = Int(sqlite3_column_bytes(statement, c))
                     if count == 0 {
-                        row.append(.string(""))
+                        row[colName] = .string("")
                     } else if let ptr = sqlite3_column_text(statement, c) {
                         let data = Data(bytes: ptr, count: count)
-                        row.append(.string(String(decoding: data, as: UTF8.self)))
+                        row[colName] = .string(String(decoding: data, as: UTF8.self))
                     } else {
-                        row.append(.null)
+                        row[colName] = .null
                     }
                 case SQLITE_BLOB:
                     let count = Int(sqlite3_column_bytes(statement, c))
                     if count == 0 {
-                        row.append(.string("base64:"))
+                        row[colName] = .string("")
                     } else if let ptr = sqlite3_column_blob(statement, c) {
                         let data = Data(bytes: ptr, count: count)
-                        row.append(.string("base64:" + data.base64EncodedString()))
+                        row[colName] = .string(data.base64EncodedString())
                     } else {
-                        row.append(.null)
+                        row[colName] = .null
                     }
                 default:
-                    row.append(.null)
+                    row[colName] = .null
                 }
             }
             rows.append(row)
         }
 
         let durationMs = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
-        return SQLiteDebugQueryResult(columns: columns, rows: rows, truncated: truncated, durationMs: durationMs)
+        return SQLiteDebugQueryResult(db: dbName, columns: columns, rows: rows, truncated: truncated, durationMs: durationMs)
     }
 
     private static func isReadOnlyLeadingVerb(_ sql: String) -> Bool {
@@ -178,12 +183,10 @@ extension SQLiteConnection {
     }
 
     private static func isReadOnlyPragma(_ remainder: Substring) -> Bool {
-        // Disallow assignment syntax (`PRAGMA key = val`).
         guard !remainder.contains("=") else { return false }
         let trimmed = remainder.drop(while: { $0.isWhitespace })
         guard !trimmed.isEmpty else { return false }
 
-        // Extract optional schema prefix (`main.pragma_name`) and pragma identifier.
         var identCursor = trimmed
         let firstIdent = identCursor.prefix(while: { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_") })
         guard !firstIdent.isEmpty else { return false }
@@ -200,14 +203,11 @@ extension SQLiteConnection {
             pragmaName = firstIdent.lowercased()
         }
 
-        // Reject mutating/side-effect PRAGMAs even in argumentless form.
         let forbiddenMutatingPragmas: Set<String> = [
             "optimize", "shrink_memory", "wal_checkpoint", "incremental_vacuum", "analysis_limit"
         ]
         if forbiddenMutatingPragmas.contains(pragmaName) { return false }
 
-        // Parenthesized PRAGMAs (`PRAGMA foo(bar)`) can mutate connection settings (e.g. `foreign_keys(0)`),
-        // so allow parentheses only for strictly read-only metadata/check PRAGMAs.
         if identCursor.first == "(" || remainder.contains("(") {
             let allowedFunctionPragmas: Set<String> = [
                 "table_info", "table_xinfo", "index_list", "index_info", "index_xinfo",
@@ -223,7 +223,7 @@ extension SQLiteDatabase {
     public func debugReadOnlyQuery(
         sql: String,
         params: [DebugJSONValue] = [],
-        maxRows: Int = 500
+        maxRows: Int = 200
     ) async throws -> SQLiteDebugQueryResult {
         let bindings: [SQLiteValue] = try params.map { value in
             switch value {
@@ -236,9 +236,10 @@ extension SQLiteDatabase {
                 throw DebugAPIError.invalidArgument("SQL parameters must be scalar JSON values")
             }
         }
+        let dbName = role.rawValue
         do {
             let result = try await read { db in
-                try db.executeDebugReadOnlyQuery(sql: sql, bindings: bindings, maxRows: maxRows)
+                try db.executeDebugReadOnlyQuery(dbName: dbName, sql: sql, bindings: bindings, maxRows: maxRows)
             }
             DebugRuntime.log(
                 .storage,
@@ -246,6 +247,7 @@ extension SQLiteDatabase {
                 event: "query.ok",
                 durationMs: result.durationMs,
                 data: .object([
+                    "db": .string(dbName),
                     "sql": .string(sql),
                     "rowCount": .int(result.rows.count),
                     "truncated": .bool(result.truncated)
@@ -258,12 +260,13 @@ extension SQLiteDatabase {
                 sub: "debug.sql",
                 event: "query.rejected",
                 level: .warn,
-                data: .object(["sql": .string(sql)]),
+                data: .object(["db": .string(dbName), "sql": .string(sql)]),
                 error: DebugErrorPayload(code: apiError.code.rawValue, type: "DebugAPIError", message: apiError.message)
             )
             throw apiError
         } catch {
-            DebugRuntime.logError(.storage, sub: "debug.sql", event: "query.error", error: error, data: .object(["sql": .string(sql)]))
+            DebugRuntime.logError(.storage, sub: "debug.sql", event: "query.error", error: error,
+                                  data: .object(["db": .string(dbName), "sql": .string(sql)]))
             throw error
         }
     }

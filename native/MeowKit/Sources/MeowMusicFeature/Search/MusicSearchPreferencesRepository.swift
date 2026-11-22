@@ -4,34 +4,42 @@ import MeowStorage
 
 #if os(iOS) || os(macOS)
 enum MusicSearchPreferencesRepository {
+    private static let scopeKey = "device"
+
     static func load(_ db: SQLiteConnection) throws -> (MusicSearchPreferences, Int) {
         guard let row = try db.queryOne(
-            "SELECT search_playlists, song_pages, song_concurrency, song_cache_minutes, " +
-            "playlist_pages, playlist_concurrency, playlist_cache_minutes, row_revision " +
-            "FROM ios_music_search_preferences WHERE singleton=1"
-        , map: { cursor in
-            (
-                try cursor.bool(0),
-                try cursor.integer(1),
-                try cursor.integer(2),
-                try cursor.integer(3),
-                try cursor.integer(4),
-                try cursor.integer(5),
-                try cursor.integer(6),
-                try cursor.integer(7)
-            )
-        }) else {
+            "SELECT search_playlists, songs_pages, songs_concurrency, songs_cache_minutes, " +
+            "playlists_pages, playlists_concurrency, playlists_cache_minutes, revision " +
+            "FROM music_search_policy WHERE scope=?",
+            [.text(scopeKey)],
+            map: { cursor in
+                (
+                    try cursor.bool(0),
+                    try cursor.integer(1),
+                    try cursor.integer(2),
+                    try cursor.integer(3),
+                    try cursor.integer(4),
+                    try cursor.integer(5),
+                    try cursor.integer(6),
+                    try cursor.integer(7)
+                )
+            }
+        ) else {
             return (.init(), 0)
         }
         var songPlatforms: [MusicPublicBrowsePlatform] = []
         var playlistPlatforms: [MusicPublicBrowsePlatform] = []
-        try db.scan("SELECT kind, platform FROM ios_music_search_platforms ORDER BY kind, position") { cursor in
-            let kind = try cursor.text(0)
+        try db.scan(
+            "SELECT target_kind, platform FROM music_search_policy_platforms " +
+            "WHERE scope=? AND list_kind='enabled' ORDER BY target_kind, position",
+            [.text(scopeKey)]
+        ) { cursor in
+            let target = try cursor.text(0)
             guard let platform = MusicPublicBrowsePlatform(rawValue: try cursor.text(1)) else {
                 throw SQLiteStorageError.corrupt
             }
-            if kind == "song" { songPlatforms.append(platform) }
-            else if kind == "playlist" { playlistPlatforms.append(platform) }
+            if target == "songs" { songPlatforms.append(platform) }
+            else if target == "playlists" { playlistPlatforms.append(platform) }
         }
         let prefs = try MusicSearchPreferences(
             songPlatforms: songPlatforms,
@@ -49,33 +57,41 @@ enum MusicSearchPreferencesRepository {
 
     static func save(_ value: MusicSearchPreferences, expectedRevision expected: Int, _ db: SQLiteConnection) throws {
         let current = try db.queryOne(
-            "SELECT row_revision FROM ios_music_search_preferences WHERE singleton=1"
+            "SELECT revision FROM music_search_policy WHERE scope=?",
+            [.text(scopeKey)]
         ) { try $0.integer(0) } ?? 0
         guard current == expected else { throw SQLiteStorageError.conflict }
         try db.upsert(
-            "ios_music_search_preferences",
+            "music_search_policy",
             columns: [
-                "singleton", "search_playlists", "song_pages", "song_concurrency", "song_cache_minutes",
-                "playlist_pages", "playlist_concurrency", "playlist_cache_minutes", "row_revision",
+                "scope", "revision", "search_playlists",
+                "songs_pages", "songs_concurrency", "songs_cache_minutes",
+                "playlists_pages", "playlists_concurrency", "playlists_cache_minutes",
             ],
             values: [
-                .integer(1), .bool(value.searchPlaylists), .integer(value.songs.pages),
-                .integer(value.songs.concurrency), .integer(value.songs.cacheMinutes),
-                .integer(value.playlists.pages), .integer(value.playlists.concurrency),
-                .integer(value.playlists.cacheMinutes), .integer(expected + 1),
+                .text(scopeKey), .integer(expected + 1), .bool(value.searchPlaylists),
+                .integer(value.songs.pages), .integer(value.songs.concurrency), .integer(value.songs.cacheMinutes),
+                .integer(value.playlists.pages), .integer(value.playlists.concurrency), .integer(value.playlists.cacheMinutes),
             ],
-            key: ["singleton"]
+            key: ["scope"]
         )
-        let rows = [("song", value.songPlatforms), ("playlist", value.playlistPlatforms)].flatMap { kind, platforms in
-            platforms.enumerated().map { [SQLiteValue.text(kind), .integer($0.offset), .text($0.element.rawValue)] }
+        try db.execute("DELETE FROM music_search_policy_platforms WHERE scope=?", [.text(scopeKey)])
+        let allPlatforms = MusicPublicBrowsePlatform.allCases
+        for (target, enabledList) in [("songs", value.songPlatforms), ("playlists", value.playlistPlatforms)] {
+            let order = enabledList + allPlatforms.filter { !enabledList.contains($0) }
+            for (pos, platform) in order.enumerated() {
+                try db.execute(
+                    "INSERT INTO music_search_policy_platforms(scope,target_kind,list_kind,position,platform) VALUES(?,?,?,?,?)",
+                    [.text(scopeKey), .text(target), .text("order"), .integer(pos), .text(platform.rawValue)]
+                )
+            }
+            for (pos, platform) in enabledList.enumerated() {
+                try db.execute(
+                    "INSERT INTO music_search_policy_platforms(scope,target_kind,list_kind,position,platform) VALUES(?,?,?,?,?)",
+                    [.text(scopeKey), .text(target), .text("enabled"), .integer(pos), .text(platform.rawValue)]
+                )
+            }
         }
-        try db.reconcile(
-            "ios_music_search_platforms",
-            columns: ["kind", "position", "platform"],
-            key: ["kind", "position"],
-            rows: rows,
-            replaceChanged: true
-        )
     }
 }
 #endif

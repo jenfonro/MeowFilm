@@ -58,13 +58,14 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             self.listened = try cursor.double(10)
             self.media = try cursor.double(11)
             self.rate = try cursor.double(12)
-            self.occurredAt = try cursor.double(13)
+            self.occurredAt = Double(try cursor.int64(13)) / 1000.0
             self.reason = try cursor.optionalText(14)
             self.state = state
             self.startConfirmed = try cursor.bool(16)
         }
         var sqliteValues: [SQLiteValue] {
-            [
+            let occurredAtMs = Int64((occurredAt * 1000.0).rounded())
+            return [
                 .text(id.uuidString),
                 .text(instance.uuidString),
                 .text(scope),
@@ -78,7 +79,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                 .real(listened),
                 .real(media),
                 .real(rate),
-                .real(occurredAt),
+                .integer(max(0, occurredAtMs)),
                 .optional(reason),
                 .text(state.rawValue),
                 .bool(startConfirmed)
@@ -106,8 +107,11 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     }
     private let lock = NSLock()
     private let database: SQLiteDatabase?
-    private static let columns = ["event_id", "instance", "scope", "generation", "phase", "native_id", "source", "source_id",
-        "algorithm", "heartbeat", "listened", "media", "rate", "occurred_at", "reason", "state", "start_confirmed"]
+    private static let insertSQL =
+        "INSERT INTO ios_music_feedback_outbox(" +
+        "event_id,instance,scope,generation,phase,native_id,source,source_id," +
+        "algorithm,heartbeat,listened,media,rate,occurred_at_ms,reason,state,start_confirmed" +
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     private var loaded = false, writable = true, frozen = false, armed = false, configured = false
     private var dispatchStopped = false
     private var entries: [Entry] = []
@@ -127,7 +131,10 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             guard let database else { throw MusicServiceError.storageFailed }
             let rows = draft.map(\.sqliteValues)
             try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
-                try db.reconcile("ios_music_feedback_outbox", columns: Self.columns, key: ["event_id"], rows: rows)
+                try db.execute("DELETE FROM ios_music_feedback_outbox")
+                for row in rows {
+                    try db.execute(Self.insertSQL, row)
+                }
             }
             entries = draft
         } catch {
@@ -144,8 +151,8 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                 let saved = try database.readSync { db in
                     try db.query(
                         "SELECT event_id, instance, scope, generation, phase, native_id, source, source_id, " +
-                        "algorithm, heartbeat, listened, media, rate, occurred_at, reason, state, start_confirmed " +
-                        "FROM ios_music_feedback_outbox ORDER BY occurred_at, event_id"
+                        "algorithm, heartbeat, listened, media, rate, occurred_at_ms, reason, state, start_confirmed " +
+                        "FROM ios_music_feedback_outbox ORDER BY occurred_at_ms, event_id"
                     ) { try Entry(cursor: $0) }
                 }
                 guard Set(saved.map(\.id)).count == saved.count, saved.allSatisfy({

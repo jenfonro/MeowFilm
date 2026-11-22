@@ -2,11 +2,6 @@ import Foundation
 import MeowRuntime
 
 public struct FilmTMDBSettings: Equatable, Sendable {
-    static let defaultValue: RuntimeValue = .object([
-        "apiBase": .string("https://api.themoviedb.org/3"), "imageBase": .string("https://image.tmdb.org"),
-        "apiKey": .string(""), "accessToken": .string(""), "language": .string("zh-CN"),
-        "region": .string("CN"), "includeAdult": .bool(false),
-    ])
     public let apiBase: String
     public let imageBase: String
     public let apiKey: String
@@ -15,28 +10,30 @@ public struct FilmTMDBSettings: Equatable, Sendable {
     public let region: String
     public let includeAdult: Bool
     public var apiToken: String { accessToken.isEmpty ? apiKey : accessToken }
-    init(_ value: RuntimeValue) throws {
-        guard let apiBase = value.catField("apiBase")?.catText,
-              let imageBase = value.catField("imageBase")?.catText,
-              let key = value.catField("apiKey")?.catText,
-              let token = value.catField("accessToken")?.catText,
-              let language = value.catField("language")?.catText,
-              let region = value.catField("region")?.catText,
-              case .bool(let includeAdult)? = value.catField("includeAdult") else { throw FilmSearchError.invalidResponse }
-        self.apiBase = apiBase; self.imageBase = imageBase
-        apiKey = key; accessToken = token; self.language = language; self.region = region; self.includeAdult = includeAdult
+
+    init(_ record: FilmTMDBSettingsRecord) {
+        apiBase = record.apiBase
+        imageBase = record.imageBase
+        apiKey = record.apiKey
+        accessToken = record.accessToken
+        language = record.language
+        region = record.region
+        includeAdult = record.includeAdult
     }
 }
 
 /// Native settings are independent of the borrowed runtime. Metadata and image
 /// requests still use the runtime's upstream owner.
 public struct FilmTMDBService: FilmSearchMetadataReading {
-    private let settingsDocument: FilmSettingsDocument
+    private let settingsRepository: FilmSettingsRepository
     private let connection: @Sendable () async throws -> RuntimeHTTPClient
-    public init(settingsDocument: FilmSettingsDocument,
+
+    public init(settingsRepository: FilmSettingsRepository,
                 connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
-        self.settingsDocument = settingsDocument; self.connection = connection
+        self.settingsRepository = settingsRepository
+        self.connection = connection
     }
+
     public func search(query: String) async throws -> RuntimeValue {
         try await searchRead(query: query).value
     }
@@ -71,13 +68,43 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
     }
     public func settings() async throws -> FilmTMDBSettings {
         try Task.checkCancellation()
-        let value = try await FilmTMDBSettings(FilmMetadataSettingsDocument.read(settingsDocument, defaults: FilmTMDBSettings.defaultValue))
+        let record = try await settingsRepository.readTMDB().value ?? .defaults
         try Task.checkCancellation()
-        return value
+        return FilmTMDBSettings(record)
     }
     public func updateSettings(_ patch: RuntimeObject) async throws -> FilmTMDBSettings {
         try Task.checkCancellation()
-        return try await FilmTMDBSettings(FilmMetadataSettingsDocument.update(settingsDocument, defaults: FilmTMDBSettings.defaultValue, patch: patch))
+        let saved = try await settingsRepository.updateTMDB { current in
+            var record = current ?? .defaults
+            if let v = patch["apiBase"] {
+                let text = try FilmMetadataSettingsNormalizer.text(v)
+                record.apiBase = try FilmMetadataSettingsNormalizer.endpoint(
+                    text.isEmpty ? FilmTMDBSettingsRecord.defaults.apiBase : text, proxy: false)
+            }
+            if let v = patch["imageBase"] {
+                let text = try FilmMetadataSettingsNormalizer.text(v)
+                record.imageBase = try FilmMetadataSettingsNormalizer.endpoint(
+                    text.isEmpty ? FilmTMDBSettingsRecord.defaults.imageBase : text, proxy: false)
+            }
+            if let v = patch["apiKey"] {
+                record.apiKey = FilmMetadataSettingsNormalizer.trim(try FilmMetadataSettingsNormalizer.text(v))
+            }
+            if let v = patch["accessToken"] {
+                record.accessToken = FilmMetadataSettingsNormalizer.trim(try FilmMetadataSettingsNormalizer.text(v))
+            }
+            if let v = patch["language"] {
+                record.language = FilmMetadataSettingsNormalizer.trim(try FilmMetadataSettingsNormalizer.text(v))
+            }
+            if let v = patch["region"] {
+                record.region = FilmMetadataSettingsNormalizer.trim(try FilmMetadataSettingsNormalizer.text(v))
+            }
+            if let v = patch["includeAdult"] {
+                guard case .bool(let flag) = v else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
+                record.includeAdult = flag
+            }
+            return record
+        }
+        return FilmTMDBSettings(saved.value)
     }
     public func imageURL(path: String) -> URL? { RuntimeHTTPClient.metadataImageURL(path) }
     public func readImage(_ reference: URL) async throws -> Data {
@@ -86,65 +113,24 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
     }
 }
 
-/// Settings encoding and validation only; no upstream request or runtime lookup.
-enum FilmMetadataSettingsDocument {
+/// Settings validation and endpoint normalization only; no upstream request or runtime lookup.
+enum FilmMetadataSettingsNormalizer {
     private static let inputWhitespace = CharacterSet(charactersIn:
         "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
 
-    static func read(_ document: FilmSettingsDocument, defaults: RuntimeValue) async throws -> RuntimeValue {
-        try await settings(document.read(), defaults: defaults)
-    }
-
-    static func update(_ document: FilmSettingsDocument, defaults: RuntimeValue, patch: RuntimeObject) async throws -> RuntimeValue {
-        let saved = try await document.update { current in
-            var values = try settings(current, defaults: defaults).filmRequiredObject()
-            let selected = patch.filter { defaults.filmObject![$0.key] != nil }
-            for (key, value) in selected {
-                values[key] = value
-            }
-            let normalized = try normalize(values, defaults: defaults.filmObject!, keys: selected.map(\.key))
-            return .object(["version": .number(1), "settings": .object(normalized)])
+    static func text(_ value: RuntimeValue) throws -> String {
+        guard let text = value.filmText,
+              !text.unicodeScalars.contains(where: { $0.value <= 0x1f || $0.value == 0x7f }) else {
+            throw RuntimeHTTPError.remote("INVALID_REQUEST")
         }
-        return saved.filmObject!["settings"]!
+        return text
     }
 
-    private static func settings(_ document: RuntimeValue?, defaults: RuntimeValue) throws -> RuntimeValue {
-        guard let document else { return defaults }
-        guard let fields = document.filmObject, Set(fields.keys) == ["version", "settings"], fields["version"] == .number(1),
-              let settings = fields["settings"]?.filmObject,
-              Set(settings.keys) == Set(defaults.filmObject!.keys),
-              defaults.filmObject!.allSatisfy({ key, expected in
-                  if case .bool = expected { if case .bool? = settings[key] { return true }; return false }
-                  return settings[key]?.filmText != nil
-              }) else { throw FilmSettingsStorageError.invalidDocument }
-        return .object(settings)
+    static func trim(_ value: String) -> String {
+        value.trimmingCharacters(in: inputWhitespace)
     }
 
-    private static func normalize(_ values: RuntimeObject, defaults: RuntimeObject, keys: [String]) throws -> RuntimeObject {
-        var result = values
-        for key in keys {
-            guard let expected = defaults[key] else { continue }
-            guard let value = values[key] else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
-            if key == "includeAdult" {
-                guard case .bool = value else { throw RuntimeHTTPError.remote("INVALID_REQUEST") }
-                result[key] = value
-            } else {
-                guard let text = value.filmText,
-                      !text.unicodeScalars.contains(where: { $0.value <= 0x1f || $0.value == 0x7f }) else {
-                    throw RuntimeHTTPError.remote("INVALID_REQUEST")
-                }
-                if key.hasSuffix("Base") || key.hasSuffix("Proxy") {
-                    let input = text.isEmpty && defaults["includeAdult"] != nil ? expected.filmText! : text
-                    result[key] = .string(try endpoint(input, proxy: key.hasSuffix("Proxy")))
-                } else {
-                    result[key] = .string(text.trimmingCharacters(in: inputWhitespace))
-                }
-            }
-        }
-        return result
-    }
-
-    private static func endpoint(_ text: String, proxy: Bool) throws -> String {
+    static func endpoint(_ text: String, proxy: Bool) throws -> String {
         if proxy && text.isEmpty { return "" }
         let invalid = RuntimeHTTPError.remote("INVALID_REQUEST")
         guard text.lowercased().hasPrefix("http://") || text.lowercased().hasPrefix("https://"),

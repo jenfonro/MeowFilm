@@ -2,14 +2,18 @@ import Foundation
 import MeowMusicFeature
 import MeowStorage
 
-/// Disposable exact-recording metadata. No URL, source credentials, account
-/// UID or trial offsets. A cache hit still requires a live local-scope fence.
+/// Disposable exact-recording metadata in the evictable cache database. No URL,
+/// source credentials, account UID or trial offsets. A cache hit still requires a live local-scope fence.
 struct MusicAccountChorusCache {
     struct Key: Codable, Equatable {
         let scope: String
         let platform: String
         let nativeID: String
         let duration: Double
+
+        var cacheKey: String {
+            "\(scope)\u{001F}\(platform)\u{001F}\(nativeID)\u{001F}\(duration)"
+        }
     }
     struct Entry: Codable { let key: Key; let point: MusicChorusPoint; let expires: Date }
     private let database: SQLiteDatabase?
@@ -23,18 +27,30 @@ struct MusicAccountChorusCache {
     }
     mutating func put(_ point: MusicChorusPoint, key: Key, at now: Date) {
         load(at: now)
+        let expires = now.addingTimeInterval(30 * 86_400)
         entries.removeAll { $0.key == key }
-        entries.append(.init(key: key, point: point, expires: now.addingTimeInterval(30 * 86_400)))
+        entries.append(.init(key: key, point: point, expires: expires))
         entries = Array(entries.suffix(100))
         if let database {
             try? database.transactionSync { db in
-                try db.upsert("ios_music_chorus", columns: ["scope", "platform", "native_id", "recording_duration", "start_sec", "end_sec", "expires_at"],
-                    values: [.text(key.scope), .text(key.platform), .text(key.nativeID), .real(key.duration),
-                             .real(point.start), .real(point.end), .optional(now.addingTimeInterval(30 * 86_400))],
-                    key: ["scope", "platform", "native_id", "recording_duration"])
-                try db.execute("DELETE FROM ios_music_chorus WHERE expires_at<=?", [.optional(now)])
-                try db.execute("DELETE FROM ios_music_chorus WHERE (scope,platform,native_id,recording_duration) IN " +
-                    "(SELECT scope,platform,native_id,recording_duration FROM ios_music_chorus ORDER BY expires_at DESC LIMIT -1 OFFSET 100)")
+                try db.upsert(
+                    "cached_music_chorus",
+                    columns: [
+                        "cache_key", "scope", "platform", "native_id", "recording_duration",
+                        "start_sec", "end_sec", "updated_at_ms", "expires_at_ms"
+                    ],
+                    values: [
+                        .text(key.cacheKey), .text(key.scope), .text(key.platform), .text(key.nativeID),
+                        .real(key.duration), .real(point.start), .real(point.end),
+                        .epochMillis(now), .epochMillis(expires)
+                    ],
+                    key: ["cache_key"]
+                )
+                try db.execute("DELETE FROM cached_music_chorus WHERE expires_at_ms<=?", [.epochMillis(now)])
+                try db.execute(
+                    "DELETE FROM cached_music_chorus WHERE cache_key IN " +
+                    "(SELECT cache_key FROM cached_music_chorus ORDER BY expires_at_ms DESC LIMIT -1 OFFSET 100)"
+                )
             }
         }
     }
@@ -42,11 +58,20 @@ struct MusicAccountChorusCache {
         if !loaded {
             loaded = true
             if let database, let values = try? database.readSync({ db in
-                try db.query("SELECT scope, platform, native_id, recording_duration, start_sec, end_sec, expires_at FROM ios_music_chorus ORDER BY expires_at LIMIT 100") { cursor in
-                    Entry(key: .init(scope: try cursor.text(0), platform: try cursor.text(1),
-                                    nativeID: try cursor.text(2), duration: try cursor.double(3)),
-                          point: .init(start: try cursor.double(4), end: try cursor.double(5)),
-                          expires: Date(timeIntervalSince1970: try cursor.double(6)))
+                try db.query(
+                    "SELECT scope, platform, native_id, recording_duration, start_sec, end_sec, expires_at_ms " +
+                    "FROM cached_music_chorus ORDER BY expires_at_ms LIMIT 100"
+                ) { cursor in
+                    Entry(
+                        key: .init(
+                            scope: try cursor.text(0),
+                            platform: try cursor.text(1),
+                            nativeID: try cursor.text(2),
+                            duration: try cursor.double(3)
+                        ),
+                        point: .init(start: try cursor.double(4), end: try cursor.double(5)),
+                        expires: try cursor.dateFromMillis(6)
+                    )
                 }
             }) {
                 entries = values

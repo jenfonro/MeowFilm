@@ -4,51 +4,55 @@ import MeowStorage
 
 enum MusicSourceDiscoveryStore {
     static func allSongIDs(_ db: SQLiteConnection) throws -> [String] {
-        try db.query("SELECT song_id FROM ios_music_source_discovery").map { try $0.text("song_id") }
+        try db.query("SELECT song_id FROM ios_music_source_discovery") { try $0.text(0) }
     }
 
     static func read(_ db: SQLiteConnection, songID: String) throws -> [String: MusicSourceDiscoveryEntry]? {
-        guard try !db.query(
-            "SELECT song_id FROM ios_music_source_discovery WHERE song_id=?",
-            [.text(songID)]
-        ).isEmpty else { return nil }
+        guard try db.queryOne(
+            "SELECT 1 FROM ios_music_source_discovery WHERE song_id=?",
+            [.text(songID)],
+            map: { _ in true }
+        ) != nil else { return nil }
 
-        let platformRows = try db.query(
-            "SELECT platform,checked_at FROM ios_music_source_discovery_platforms WHERE song_id=?",
+        let platformRows: [(platform: String, checkedAtMs: Int64)] = try db.query(
+            "SELECT platform,checked_at_ms FROM ios_music_source_discovery_platforms WHERE song_id=?",
             [.text(songID)]
-        )
+        ) { c in
+            (platform: try c.text(0), checkedAtMs: try c.int64(1))
+        }
 
         var keysByPlatform: [String: [String]] = [:]
-        for row in try db.query(
+        try db.scan(
             "SELECT platform,source_key FROM ios_music_source_discovery_keys WHERE song_id=? ORDER BY platform,position",
             [.text(songID)]
-        ) {
-            keysByPlatform[try row.text("platform"), default: []].append(try row.text("source_key"))
+        ) { c in
+            keysByPlatform[try c.text(0), default: []].append(try c.text(1))
         }
 
         var obsByPlatform: [String: [MusicSearchObservation]] = [:]
-        for row in try db.query(
-            "SELECT platform,request_id,started_at,sort_order,checked_at,obs_platform,query_text," +
+        try db.scan(
+            "SELECT platform,request_id,started_at_ms,sort_order,checked_at_ms,obs_platform,query_text," +
             "context,page,limit_count,obs_scope,outcome,failure_code " +
             "FROM ios_music_source_discovery_observations WHERE song_id=? ORDER BY platform,position",
             [.text(songID)]
-        ) {
-            let platform = try row.text("platform")
-            guard let scope = MusicSearchObservation.Scope(rawValue: try row.text("obs_scope")),
-                  let outcome = MusicSearchObservation.Outcome(rawValue: try row.text("outcome")) else {
+        ) { c in
+            let platform = try c.text(0)
+            guard let requestID = UUID(uuidString: try c.text(1)),
+                  let scope = MusicSearchObservation.Scope(rawValue: try c.text(10)),
+                  let outcome = MusicSearchObservation.Outcome(rawValue: try c.text(11)) else {
                 throw MusicServiceError.corruptDocument
             }
-            let failure = (try row.optionalText("failure_code")).flatMap(MusicServiceError.init(rawValue:))
+            let failure = (try c.optionalText(12)).flatMap(MusicServiceError.init(rawValue:))
             let obs = MusicSearchObservation(
-                requestID: try row.uuid("request_id"),
-                startedAt: try row.double("started_at"),
-                order: UInt64(bitPattern: try row.int64("sort_order")),
-                checkedAt: try row.double("checked_at"),
-                platform: try row.text("obs_platform"),
-                query: try row.text("query_text"),
-                context: try row.text("context"),
-                page: try row.integer("page"),
-                limit: try row.integer("limit_count"),
+                requestID: requestID,
+                startedAt: Double(try c.int64(2)),
+                order: UInt64(bitPattern: try c.int64(3)),
+                checkedAt: Double(try c.int64(4)),
+                platform: try c.text(5),
+                query: try c.text(6),
+                context: try c.text(7),
+                page: try c.integer(8),
+                limit: try c.integer(9),
                 scope: scope,
                 outcome: outcome,
                 failure: failure
@@ -59,11 +63,10 @@ enum MusicSourceDiscoveryStore {
         var result: [String: MusicSourceDiscoveryEntry] = [:]
         result.reserveCapacity(platformRows.count)
         for row in platformRows {
-            let platform = try row.text("platform")
-            result[platform] = MusicSourceDiscoveryEntry(
-                checkedAt: try row.double("checked_at"),
-                sourceKeys: keysByPlatform[platform] ?? [],
-                observations: obsByPlatform[platform] ?? []
+            result[row.platform] = MusicSourceDiscoveryEntry(
+                checkedAt: Double(row.checkedAtMs),
+                sourceKeys: keysByPlatform[row.platform] ?? [],
+                observations: obsByPlatform[row.platform] ?? []
             )
         }
         return result
@@ -73,17 +76,12 @@ enum MusicSourceDiscoveryStore {
                         retained: Set<String>,
                         records: [(songID: String, storedBytes: Int, platforms: [String: MusicSourceDiscoveryEntry])],
                         maximumBytes: Int) throws {
-        for row in try db.query("SELECT song_id FROM ios_music_source_discovery") {
-            let id = try row.text("song_id")
-            if !retained.contains(id) {
-                try db.execute("DELETE FROM ios_music_source_discovery WHERE song_id=?", [.text(id)])
-            }
+        let existingIDs = try db.query("SELECT song_id FROM ios_music_source_discovery") { try $0.text(0) }
+        for id in existingIDs where !retained.contains(id) {
+            try db.execute("DELETE FROM ios_music_source_discovery WHERE song_id=?", [.text(id)])
         }
 
         for record in records {
-            guard try !db.query("SELECT song_id FROM music_songs WHERE song_id=?", [.text(record.songID)]).isEmpty else {
-                continue
-            }
             try db.upsert(
                 "ios_music_source_discovery",
                 columns: ["song_id", "stored_bytes"],
@@ -93,9 +91,10 @@ enum MusicSourceDiscoveryStore {
             // Cascades to ios_music_source_discovery_keys and _observations.
             try db.execute("DELETE FROM ios_music_source_discovery_platforms WHERE song_id=?", [.text(record.songID)])
             for (platform, entry) in record.platforms.sorted(by: { $0.key < $1.key }) {
+                let checkedAtMs = Int64(entry.checkedAt.isFinite ? entry.checkedAt.rounded() : 0)
                 try db.execute(
-                    "INSERT INTO ios_music_source_discovery_platforms(song_id,platform,checked_at) VALUES(?,?,?)",
-                    [.text(record.songID), .text(platform), .real(entry.checkedAt)]
+                    "INSERT INTO ios_music_source_discovery_platforms(song_id,platform,checked_at_ms) VALUES(?,?,?)",
+                    [.text(record.songID), .text(platform), .integer(checkedAtMs)]
                 )
                 var seenKeys = Set<String>()
                 var keyPos = 0
@@ -107,9 +106,11 @@ enum MusicSourceDiscoveryStore {
                     keyPos += 1
                 }
                 for (obsIdx, obs) in entry.observations.enumerated() {
+                    let obsStartedMs = Int64(obs.startedAt.isFinite ? obs.startedAt.rounded() : 0)
+                    let obsCheckedMs = Int64(obs.checkedAt.isFinite ? obs.checkedAt.rounded() : 0)
                     try db.execute(
                         "INSERT INTO ios_music_source_discovery_observations(" +
-                        "song_id,platform,position,request_id,started_at,sort_order,checked_at," +
+                        "song_id,platform,position,request_id,started_at_ms,sort_order,checked_at_ms," +
                         "obs_platform,query_text,context,page,limit_count,obs_scope,outcome,failure_code" +
                         ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         [
@@ -117,9 +118,9 @@ enum MusicSourceDiscoveryStore {
                             .text(platform),
                             .integer(obsIdx),
                             .text(obs.requestID.uuidString),
-                            .real(obs.startedAt),
+                            .integer(obsStartedMs),
                             .integer(Int64(bitPattern: obs.order)),
-                            .real(obs.checkedAt),
+                            .integer(obsCheckedMs),
                             .text(obs.platform),
                             .text(obs.query),
                             .text(obs.context),
@@ -134,15 +135,17 @@ enum MusicSourceDiscoveryStore {
             }
         }
 
-        let rows = try db.query(
+        let rows: [(songID: String, storedBytes: Int)] = try db.query(
             "SELECT song_id,stored_bytes FROM ios_music_source_discovery ORDER BY " +
-            "(SELECT max(checked_at) FROM ios_music_source_discovery_platforms " +
+            "(SELECT max(checked_at_ms) FROM ios_music_source_discovery_platforms " +
             "WHERE ios_music_source_discovery_platforms.song_id=ios_music_source_discovery.song_id)"
-        )
-        var bytes = try rows.reduce(0) { try $0 + $1.integer("stored_bytes") }
+        ) { c in
+            (songID: try c.text(0), storedBytes: try c.integer(1))
+        }
+        var bytes = rows.reduce(0) { $0 + $1.storedBytes }
         for row in rows where bytes > maximumBytes {
-            try db.execute("DELETE FROM ios_music_source_discovery WHERE song_id=?", [row["song_id"]])
-            bytes -= try row.integer("stored_bytes")
+            try db.execute("DELETE FROM ios_music_source_discovery WHERE song_id=?", [.text(row.songID)])
+            bytes -= row.storedBytes
         }
     }
 }

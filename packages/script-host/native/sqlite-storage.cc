@@ -28,7 +28,8 @@
 namespace meow {
 namespace {
 constexpr int64_t SafeInteger = 9007199254740991LL;
-constexpr size_t MaximumBytes = 16 * 1024 * 1024;
+constexpr size_t MaximumBytes = 32 * 1024 * 1024;
+constexpr size_t MaxPending = 128;
 constexpr size_t MaxPreparedStatements = 256;
 constexpr size_t MaxCachedSQLLength = 4096;
 using Blob = std::vector<unsigned char>;
@@ -67,7 +68,7 @@ void N(napi_status value) { Check(value == napi_ok, "STORAGE_ERROR"); }
 const char* SQLiteError(int code) {
   switch (code & 255) {
     case SQLITE_BUSY: case SQLITE_LOCKED: return "STORAGE_BUSY";
-    case SQLITE_CONSTRAINT: return "STORAGE_CONFLICT";
+    case SQLITE_CONSTRAINT: return "STORAGE_CONSTRAINT";
     case SQLITE_FULL: return "STORAGE_FULL";
     case SQLITE_READONLY: return "STORAGE_READONLY";
     case SQLITE_CORRUPT: case SQLITE_NOTADB: return "STORAGE_CORRUPT";
@@ -314,7 +315,11 @@ class Storage : public std::enable_shared_from_this<Storage> {
   ConnectionSlot writeSlot;
   ConnectionSlot readSlot;
   std::string path, schema, hash;
-  int application = 0, version = 0;
+  std::string synchronousMode = "FULL";
+  std::string initializeLockName = "data-initialize.lock";
+  std::string maintenanceLockName = "data-maintenance.lock";
+  int application = 0, version = 0, synchronousLevel = 2;
+  bool allowBackup = true;
   bool initialize = false, openComplete = false, stopping = false, environmentClosing = false, joining = false;
   std::mutex mutex;
   std::condition_variable writeChanged;
@@ -357,7 +362,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
     struct stat state{}; Check(lstat(path.c_str(), &state) == 0, "STORAGE_IO");
     Check(state.st_dev == device && state.st_ino == inode, "UNSAFE_PATH");
     for (const char* suffix : {"-wal", "-shm", "-journal"}) CheckPath(path + suffix, false);
-    const std::string lockPath = path.substr(0, path.find_last_of('/')) + "/maintenance.lock";
+    const std::string lockPath = path.substr(0, path.find_last_of('/')) + "/" + maintenanceLockName;
     CheckPath(lockPath, true);
     struct stat descriptorState{}, pathState{};
     Check(fstat(maintenance.value, &descriptorState) == 0 && lstat(lockPath.c_str(), &pathState) == 0 &&
@@ -399,7 +404,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
   }
   void Open() {
     const std::string parent = path.substr(0, path.find_last_of('/'));
-    const std::string initializePath = parent + "/initialize.lock";
+    const std::string initializePath = parent + "/" + initializeLockName;
     CheckPath(initializePath, false);
     OwnedDescriptor initializeFile;
     initializeFile.value = open(initializePath.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -407,7 +412,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
     struct stat lockState{};
     Check(fstat(initializeFile.value, &lockState) == 0 && S_ISREG(lockState.st_mode) && lockState.st_nlink == 1, "UNSAFE_PATH");
     AdvisoryLock initializeLock(initializeFile.value, LOCK_EX, 5000);
-    const std::string maintenancePath = parent + "/maintenance.lock";
+    const std::string maintenancePath = parent + "/" + maintenanceLockName;
     CheckPath(maintenancePath, false);
     maintenance.value = open(maintenancePath.c_str(), O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     Check(maintenance.value >= 0, "STORAGE_IO");
@@ -458,7 +463,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
       };
       auto verifyPragmas = [&](ConnectionSlot& slot, bool expectQueryOnly) {
         Check(std::get<std::string>(readFrom(slot, "PRAGMA journal_mode").values[0][0].second) == "wal" &&
-          intFrom(slot, "PRAGMA synchronous") == 2 && intFrom(slot, "PRAGMA foreign_keys") == 1 &&
+          intFrom(slot, "PRAGMA synchronous") == synchronousLevel && intFrom(slot, "PRAGMA foreign_keys") == 1 &&
           intFrom(slot, "PRAGMA trusted_schema") == 0 && intFrom(slot, "PRAGMA wal_autocheckpoint") == 0 &&
           intFrom(slot, "PRAGMA auto_vacuum") == 2 && intFrom(slot, "PRAGMA busy_timeout") == 5000 &&
           intFrom(slot, "PRAGMA temp_store") == 2 && intFrom(slot, "PRAGMA cache_size") == -16384 &&
@@ -471,7 +476,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
         Check(existing < 0 && !app && !current, "STORAGE_SCHEMA"); writeSlot.Exec("PRAGMA auto_vacuum=INCREMENTAL");
       } else Check(app == application && current == version, "STORAGE_SCHEMA");
       writeSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
-                     "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; "
+                     "PRAGMA journal_mode=WAL; PRAGMA synchronous=" + synchronousMode + "; PRAGMA wal_autocheckpoint=0; "
                      "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
       verifyPragmas(writeSlot, false);
       if (empty) {
@@ -525,7 +530,7 @@ class Storage : public std::enable_shared_from_this<Storage> {
       Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
       Check(sqlite3_db_config(readSlot.db, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, nullptr) == SQLITE_OK, "STORAGE_CONFIGURATION");
       readSlot.Exec("PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; "
-                    "PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; "
+                    "PRAGMA synchronous=" + synchronousMode + "; PRAGMA wal_autocheckpoint=0; "
                     "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
       verifyPragmas(readSlot, true);
 
@@ -767,6 +772,7 @@ napi_value RequestValue(napi_env env, napi_callback_info info) {
       }
     } else if (request.kind == "checkpoint") request.statements.push_back({"PRAGMA wal_checkpoint(PASSIVE)", {}, -1, true});
     else if (request.kind == "backup") {
+      Check(storage.allowBackup, "INVALID_REQUEST");
       request.destination = Text(env, Property(env, args[1], "path"));
       request.bytes += request.destination.size();
     }
@@ -776,7 +782,7 @@ napi_value RequestValue(napi_env env, napi_callback_info info) {
     {
       std::lock_guard<std::mutex> lock(storage.mutex);
       Check(!storage.stopping, "STORAGE_CLOSED");
-      Check(storage.pendingCount < 64 && (storage.pendingCount == 0 ||
+      Check(storage.pendingCount < MaxPending && (storage.pendingCount == 0 ||
         (storage.pendingBytes <= MaximumBytes && request.bytes <= MaximumBytes - storage.pendingBytes)), "STORAGE_BUSY");
       if (isClose) storage.stopping = true;
       ++storage.pendingCount; storage.pendingBytes += request.bytes;
@@ -808,10 +814,39 @@ napi_value OpenValue(napi_env env, napi_callback_info info) {
     Check(actual == storage->hash, "STORAGE_SCHEMA");
     storage->application = int(std::get<int64_t>(ReadCell(env, Property(env, identity, "applicationId"))));
     storage->version = int(std::get<int64_t>(ReadCell(env, Property(env, identity, "version"))));
+    {
+      napi_value syncProp = Property(env, identity, "synchronous");
+      napi_valuetype syncType; N(napi_typeof(env, syncProp, &syncType));
+      if (syncType == napi_string) {
+        std::string sync = Text(env, syncProp);
+        Check(sync == "FULL" || sync == "NORMAL", "STORAGE_CONFIGURATION");
+        storage->synchronousMode = sync;
+        storage->synchronousLevel = (sync == "NORMAL") ? 1 : 2;
+      }
+      napi_value initLockProp = Property(env, identity, "initializeLock");
+      napi_valuetype initLockType; N(napi_typeof(env, initLockProp, &initLockType));
+      if (initLockType == napi_string) {
+        std::string name = Text(env, initLockProp);
+        Check(!name.empty() && name.find('/') == std::string::npos && name.find('\0') == std::string::npos, "STORAGE_CONFIGURATION");
+        storage->initializeLockName = name;
+      }
+      napi_value maintLockProp = Property(env, identity, "maintenanceLock");
+      napi_valuetype maintLockType; N(napi_typeof(env, maintLockProp, &maintLockType));
+      if (maintLockType == napi_string) {
+        std::string name = Text(env, maintLockProp);
+        Check(!name.empty() && name.find('/') == std::string::npos && name.find('\0') == std::string::npos, "STORAGE_CONFIGURATION");
+        storage->maintenanceLockName = name;
+      }
+      napi_value allowBackupProp = Property(env, identity, "allowBackup");
+      napi_valuetype allowBackupType; N(napi_typeof(env, allowBackupProp, &allowBackupType));
+      if (allowBackupType == napi_boolean) {
+        N(napi_get_value_bool(env, allowBackupProp, &storage->allowBackup));
+      }
+    }
     N(napi_get_value_bool(env, Property(env, args[0], "initialize"), &storage->initialize));
     auto* retained = new std::shared_ptr<Storage>(storage);
     napi_value name; N(napi_create_string_utf8(env, "meowfilm-storage", NAPI_AUTO_LENGTH, &name));
-    napi_status status = napi_create_threadsafe_function(env, args[1], nullptr, name, 66, 2, retained,
+    napi_status status = napi_create_threadsafe_function(env, args[1], nullptr, name, MaxPending + 2, 2, retained,
       [](napi_env, void* data, void*) { delete static_cast<std::shared_ptr<Storage>*>(data); },
       retained, Deliver, &storage->messages);
     if (status != napi_ok) { delete retained; N(status); }

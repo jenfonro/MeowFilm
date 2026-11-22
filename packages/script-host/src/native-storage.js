@@ -120,7 +120,7 @@ export function createNativeStorageDriver(path, identity, initialize) {
   }
   function request(input) {
     if (closed || !handle) return Promise.reject(failure('STORAGE_CLOSED'));
-    if (pending.size >= 66 || !Number.isSafeInteger(sequence + 1))
+    if (pending.size >= 130 || !Number.isSafeInteger(sequence + 1))
       return Promise.reject(failure('STORAGE_BUSY'));
     const id = ++sequence;
     return new Promise((resolve, reject) => {

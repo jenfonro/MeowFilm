@@ -71,14 +71,14 @@ final class MusicNativeLibraryAccessReader: MusicNativeLibraryReading, @unchecke
         // acquires the same lock only for an actual commit.
         return try access.perform { value }
     }
-    func readRevision() throws -> MusicNativeLibraryRevision { try read { try database.readRevision() } }
+    func readRevision() throws -> Int { try read { try database.readRevision() } }
     func readSnapshot() throws -> MusicNativeLibrarySnapshot { try read { try database.readSnapshot() } }
-    func song(id: String) throws -> MJ? { try read { try database.song(id: id) } }
+    func song(id: String) throws -> MusicSongRecord? { try read { try database.song(id: id) } }
     func containsSong(id: String) throws -> Bool { try read { try database.containsSong(id: id) } }
     func sourceOwner(key: String) throws -> String? { try read { try database.sourceOwner(key: key) } }
     func sourceOwners(keys: Set<String>) throws -> [String: String] { try read { try database.sourceOwners(keys: keys) } }
-    func candidateIDs(lookupKey: String) throws -> [String] { try read { try database.candidateIDs(lookupKey: lookupKey) } }
-    func candidateIDs(lookupKeys: Set<String>) throws -> [String: [String]] { try read { try database.candidateIDs(lookupKeys: lookupKeys) } }
+    func candidateIDs(matchKey: String) throws -> [String] { try read { try database.candidateIDs(matchKey: matchKey) } }
+    func candidateIDs(matchKeys: Set<String>) throws -> [String: [String]] { try read { try database.candidateIDs(matchKeys: matchKeys) } }
     func querySongIDs(query: String) throws -> [String] { try read { try database.querySongIDs(query: query) } }
     func allSongIDs() throws -> [String] { try read { try database.allSongIDs() } }
 }

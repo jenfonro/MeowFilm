@@ -257,7 +257,7 @@ Windows 运行器图片 GET 使用独立的可复用 handler；两个 `ReadImage
 
 ## Film 元数据缓存边界
 
-`film` 的 data owner 使用共享 SQLite 中的 `metadata_cache_entries`、组件槽、类型化实体、有序关系及受限扩展节点。按完整请求身份（含设置 revision、query、图片尺寸）异步查询；缺失或不可用缓存为 miss，正常回源，不识别、迁移或兼容历史文件。有效命中的组件完整度、TTL 和身份规则保持不变。
+`film` 的 data owner 使用共享缓存 SQLite（`storage-v1/meowfilm-cache.sqlite3`）中的 `metadata_cache_entries`、组件槽、类型化实体、有序关系及受限扩展节点。按完整请求身份（含设置 revision、query、图片尺寸）异步查询；缺失或不可用缓存为 miss，正常回源，不识别、迁移或兼容历史文件。有效命中的组件完整度、TTL 和身份规则保持不变。
 
 首次按需读取后，生产者的成功／失败结算只使用已捕获状态和当前内存；外部已取得的 seed 也只合并内存状态。成功结果和刷新失败的 stale/error 先在共享有界内存缓存结算，持久发布不参与请求结果等待。写入由 metadata owner 按 provider 排序，在单个事务中提交所选缓存项及其组件关系，失败仅输出不含请求／凭据的诊断；不是无主后台任务。失效按 provider 或缓存身份删除关系行，不遍历文件目录。缓存不授予权限，也不改变业务设置的严格事务错误语义。
 

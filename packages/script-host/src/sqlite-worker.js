@@ -10,9 +10,14 @@ const fail = code => { throw Object.assign(new Error(code), { code }); };
 const MAX_PREPARED_STATEMENTS = 256;
 const MAX_CACHED_SQL_LENGTH = 4096;
 const statementCache = new Map();
+const synchronousMode = identity?.synchronous === 'NORMAL' ? 'NORMAL' : 'FULL';
+const synchronousLevel = synchronousMode === 'NORMAL' ? 1 : 2;
+const initializeLockName = identity?.initializeLock ?? 'data-initialize.lock';
+const maintenanceLockName = identity?.maintenanceLock ?? 'data-maintenance.lock';
+const allowBackup = identity?.allowBackup ?? true;
 let db, fileIdentity, commits = 0, maintenanceFailure;
 const enter = (exclusive, timeout = 5000) =>
-  acquire(dirname(path) + '/maintenance.lock', exclusive, timeout);
+  acquire(dirname(path) + '/' + maintenanceLockName, exclusive, timeout);
 
 function verifyFiles() {
   if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
@@ -160,7 +165,7 @@ if (isReader) {
 } else {
   let initializing, validating, createdFresh = false, committedSchema = false;
   try {
-    initializing = acquire(dirname(path) + '/initialize.lock', true, 5000);
+    initializing = acquire(dirname(path) + '/' + initializeLockName, true, 5000);
     validating = enter(false, 5000);
     if (realpathSync(dirname(path)) !== dirname(path)) fail('UNSAFE_PATH');
     const existing = safeFile(path);
@@ -187,10 +192,10 @@ if (isReader) {
       db.exec('PRAGMA auto_vacuum=INCREMENTAL');
     } else if (application !== identity.applicationId || version !== identity.version) fail('STORAGE_SCHEMA');
     db.exec('PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; ' +
-      'PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; ' +
+      `PRAGMA journal_mode=WAL; PRAGMA synchronous=${synchronousMode}; PRAGMA wal_autocheckpoint=0; ` +
       'PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
     if (db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
-        db.prepare('PRAGMA synchronous').get().synchronous !== 2 ||
+        db.prepare('PRAGMA synchronous').get().synchronous !== synchronousLevel ||
         db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
         db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
         db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint !== 0 ||
@@ -250,6 +255,7 @@ parentPort.on('message', async ({ id, input }) => {
       parentPort.postMessage({ id, value: result });
       return;
     }
+    if (input.kind === 'backup' && !allowBackup) fail('INVALID_REQUEST');
     if (input.kind === 'checkpoint' || input.kind === 'backup') {
       lease = enter(true);
       verifyFiles();

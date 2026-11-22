@@ -196,15 +196,16 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 | 身份 | 所有者／用途 |
 | --- | --- |
 | `dev.meowfilm.aggregate` | 固定产品身份；安装宿主改写安装标识时，内部存储身份不变 |
-| Application Support 下 `meowfilm/storage-v1/meowfilm.sqlite3` | 原生客户端与 Node runtime 共用的唯一 SQLite 数据库 |
-| Application Support 下 `meowfilm/resources-v1` | 原始图片、歌词、音频等资源 owner 的文件目录 |
+| Application Support 下 `meowfilm/storage-v1/meowfilm-data.sqlite3` | 原生客户端与 Node runtime 共用的永久数据 SQLite 数据库（`user_version = 1`） |
+| Application Support 下 `meowfilm/storage-v1/meowfilm-cache.sqlite3` | 原生客户端与 Node runtime 共用的可重建缓存 SQLite 数据库（`user_version = 1`） |
+| Application Support 下 `meowfilm/resources-v1` | 原始图片、音频等资源 owner 的文件目录 |
 | Application Support 下 `meowfilm/script-runtime/music-platform` | Node 唯一维护的匿名协议状态 |
 
-| `music_*` / `ios_music_*` | 音乐曲库、队列、历史、账号、来源发现、首页快照与资源索引的 SQLite owner tables |
+| `music_*` / `ios_music_*` / `cached_*` | 音乐曲库、队列、历史、账号、反馈设置（`data` 库）与来源发现、首页快照、展示媒体缓存（`cache` 库）的 SQLite owner tables |
 | `music.platform.audio-locators.v1` | 账号作用域下的官方音频定位缓存 |
 | `meowfilm.music.audio-resources.v1` | 实际播放后的完整音频缓存 |
-| `music.presentation-resources.v2` | 共享图片／歌词原始字节叶子，首用文件 metadata 仅保留在内存 |
-| `music.home.display.v2`、`music.source-checks.v1` | 首页展示快照和来源发现观察 |
+| `music.presentation-resources.v1` | 共享图片／歌词展示缓存（索引与结构化歌词存于缓存库 `cached_images` / `cached_music_lyrics*`） |
+| `music.home.display.v1`、`music.source-checks.v1` | 首页展示快照和来源发现观察（缓存库） |
 | `music.ui.appearance.v1`、`music.ui.songColors.v1`、`music.ui.lastChannel` | 音乐外观偏好、歌曲取色缓存和频道恢复 |
 | `playback.volume`、播放所有者 `music`／`film` | 共享播放音量与当前播放业务所有者 |
 | `meowfilm.film.library.v1` | 影视收藏身份，保留原来源／影片字段及可选 Node `businessID/playbackTarget`，见[影视收藏](film.md#详情和收藏) |

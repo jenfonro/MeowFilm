@@ -418,13 +418,14 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         let value = try NativeMusicAudioCacheDirectory(url: rootURL, baseURL: baseURL)
         var loaded: [String: NativeMusicAudioCacheEntry] = [:]
         let saved = try database.readSync { db in
-            try db.query("SELECT * FROM ios_music_audio_files", maximumRows: 4096).map(NativeMusicAudioCacheEntry.init)
+            try db.query(NativeMusicAudioCacheEntry.selectSQL, maximumRows: 4096) { try NativeMusicAudioCacheEntry($0) }
         }
         for entry in saved {
+                    let expectedExpiry = Self.expiry(entry.lastPlayedAt, entry.licenseExpiresAt)
                     guard Self.valid(entry.identity), entry.key == Self.key(entry.identity),
                           loaded[entry.key] == nil, Self.confirmed(entry.lastPlayedAt, now: clock()),
                           Self.licenseValid(entry.licenseExpiresAt, now: clock()), entry.expiresAt > clock(),
-                          entry.expiresAt == Self.expiry(entry.lastPlayedAt, entry.licenseExpiresAt),
+                          Self.sameEpochMillis(entry.expiresAt, expectedExpiry),
                           (try? entry.inspection.quality(for: entry.quality,
                                                         expectedDuration: entry.inspection.duration)) == entry.quality,
                           (try? value.matches(entry.file, stamp: entry.stamp)) == true else { continue }
@@ -501,6 +502,9 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private static func expiry(_ date: Date, _ license: Date?) -> Date {
         min(date.addingTimeInterval(lifetime), license ?? .distantFuture)
     }
+    private static func sameEpochMillis(_ a: Date, _ b: Date) -> Bool {
+        Int64((a.timeIntervalSince1970 * 1000).rounded()) == Int64((b.timeIntervalSince1970 * 1000).rounded())
+    }
 }
 
 private struct NativeMusicAudioCacheEntry {
@@ -513,12 +517,13 @@ private struct NativeMusicAudioCacheEntry {
     var lastPlayedAt: Date
     var licenseExpiresAt: Date?
     var expiresAt: Date
-    static let columns = ["cache_key", "file", "quality", "last_played_at", "license_expires_at", "expires_at",
+    static let columns = ["cache_key", "file", "quality", "last_played_at_ms", "license_expires_at_ms", "expires_at_ms",
         "scope", "song_id", "source_key", "platform", "native_id", "requested_quality", "provider", "generation",
         "stamp_device", "stamp_inode", "stamp_size", "stamp_seconds", "stamp_nanos", "container", "codec", "duration",
         "decoded_frames", "sample_rate", "channels", "bitrate", "bit_depth", "lossless", "complete", "protected"]
+    static let selectSQL = "SELECT " + columns.joined(separator: ",") + " FROM ios_music_audio_files"
     var cells: [SQLiteValue] {
-        [.text(key), .text(file), .text(quality), .optional(lastPlayedAt), .optional(licenseExpiresAt), .optional(expiresAt),
+        [.text(key), .text(file), .text(quality), .epochMillis(lastPlayedAt), .optionalEpochMillis(licenseExpiresAt), .epochMillis(expiresAt),
          .text(identity.scope), .text(identity.songID), .text(identity.sourceKey), .text(identity.platform),
          .text(identity.nativeID), .text(identity.requestedQuality), .text(identity.provider), .integer(identity.generation),
          .integer(stamp.device), .text(String(stamp.inode)), .integer(stamp.size), .integer(stamp.seconds), .integer(stamp.nanos),
@@ -531,21 +536,21 @@ private struct NativeMusicAudioCacheEntry {
         self.key = key; self.identity = identity; self.file = file; self.stamp = stamp; self.inspection = inspection
         self.quality = quality; self.lastPlayedAt = lastPlayedAt; self.licenseExpiresAt = licenseExpiresAt; self.expiresAt = expiresAt
     }
-    init(_ row: SQLiteRow) throws {
-        key = try row.text("cache_key"); file = try row.text("file"); quality = try row.text("quality")
-        identity = .init(scope: try row.text("scope"), songID: try row.text("song_id"), sourceKey: try row.text("source_key"),
-            platform: try row.text("platform"), nativeID: try row.text("native_id"), requestedQuality: try row.text("requested_quality"),
-            provider: try row.text("provider"), generation: try row.integer("generation"))
-        guard let inode = UInt64(try row.text("stamp_inode")) else { throw SQLiteStorageError.corrupt }
-        stamp = .init(device: Int64(try row.integer("stamp_device")), inode: inode, size: Int64(try row.integer("stamp_size")),
-            seconds: Int64(try row.integer("stamp_seconds")), nanos: Int64(try row.integer("stamp_nanos")))
-        inspection = .init(container: try row.text("container"), codec: try row.text("codec"), duration: try row.double("duration"),
-            decodedFrames: Int64(try row.integer("decoded_frames")), sampleRate: try row.double("sample_rate"), channels: try row.integer("channels"),
-            bitrate: try row.double("bitrate"), bitDepth: try row.optionalInteger("bit_depth"), lossless: try row.bool("lossless"),
-            complete: try row.bool("complete"), protectedContent: try row.bool("protected"))
-        lastPlayedAt = Date(timeIntervalSince1970: try row.double("last_played_at"))
-        licenseExpiresAt = try row.optionalDouble("license_expires_at").map { Date(timeIntervalSince1970: $0) }
-        expiresAt = Date(timeIntervalSince1970: try row.double("expires_at"))
+    init(_ c: SQLiteCursor) throws {
+        key = try c.text(0); file = try c.text(1); quality = try c.text(2)
+        lastPlayedAt = try c.dateFromMillis(3)
+        licenseExpiresAt = try c.optionalDateFromMillis(4)
+        expiresAt = try c.dateFromMillis(5)
+        identity = .init(scope: try c.text(6), songID: try c.text(7), sourceKey: try c.text(8),
+            platform: try c.text(9), nativeID: try c.text(10), requestedQuality: try c.text(11),
+            provider: try c.text(12), generation: try c.integer(13))
+        guard let inode = UInt64(try c.text(15)) else { throw SQLiteStorageError.corrupt }
+        stamp = .init(device: try c.int64(14), inode: inode, size: try c.int64(16),
+            seconds: try c.int64(17), nanos: try c.int64(18))
+        inspection = .init(container: try c.text(19), codec: try c.text(20), duration: try c.double(21),
+            decodedFrames: try c.int64(22), sampleRate: try c.double(23), channels: try c.integer(24),
+            bitrate: try c.double(25), bitDepth: try c.optionalInteger(26), lossless: try c.bool(27),
+            complete: try c.bool(28), protectedContent: try c.bool(29))
     }
 }
 

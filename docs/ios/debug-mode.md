@@ -8,7 +8,7 @@
 - **App 宿主装配**：`apps/ios/Debug/` 按职责分层为 `Host/`（`MeowfilmDebugHost.swift`、`MeowfilmDebugDiagnosticsBridge.swift`）、`Navigation/`（`MeowfilmDebugNavigator.swift`）、`Inspection/`（`MeowfilmDebugInspection.swift`）与 `Actions/`（`MeowfilmDebugActions.swift`），通过 `scripts/generate-ios-project.py` 的 `APPLICATION_DIRECTORIES` 纳入 `Meowfilm.xcodeproj`。
 - **生产协议零放宽**：
   - `RuntimeHTTPClient` 生产 `request(...)` / `value(...)` 路径不变；Debug 专用透传位于 `RuntimeDebugBridge.swift`。
-  - `SQLiteDatabase` 正常写入与事务契约不变；`storage/query` 位于 `SQLiteDebugQuery.swift`，结合领先动词检查、只读 `PRAGMA` 限制、单语句校验与 `sqlite3_stmt_readonly(stmt) != 0` 强制只读。
+  - `SQLiteDatabase` 正常写入与事务契约不变；`storage/query` 位于 `SQLiteDebugQuery.swift`，支持 `db: "data" | "cache"`（默认 `"data"`）双库路由与 `maxRows`（默认 `200`，夹取 `1..5000`），返回统一信封 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（BLOB 统一 raw base64），并在独立只读连接（`SQLITE_OPEN_READONLY` + `PRAGMA query_only = ON`）上结合领先动词检查、只读 `PRAGMA` 白名单、单语句校验与 `sqlite3_stmt_readonly(stmt) != 0` 强制只读。
   - `apps/ios/Info.plist` 声明 `NSLocalNetworkUsageDescription` 以支持真机 `--debug-bind 0.0.0.0`；非 Debug 启动不触发本地网络监听与系统弹窗。
 
 ## 2. 启动参数与零副作用约束
@@ -61,7 +61,7 @@ iOS 端解析规则：
 | 目标 / 端点 | iOS 行为 | 说明 |
 | --- | --- | --- |
 | `POST /debug/v1/nav/forward` | `501 UNSUPPORTED_ON_PLATFORM` | iOS 导航栈无前进历史 |
-| `novel.shelf` | `501 UNSUPPORTED_ON_PLATFORM` | iOS 无独立小说书架页（见 [novel.md](novel.md)）；可通过 `storage/query` 查询 `ios_novel_books` 或用 `novel/command` (`toggle_shelf`) 操控 |
+| `novel.shelf` | `501 UNSUPPORTED_ON_PLATFORM` | iOS 无独立小说书架页（见 [novel.md](novel.md)）；可通过 `storage/query` 查询 `novel_books` 或用 `novel/command` (`toggle_shelf`) 操控 |
 | `settings.media-controls` | `501 UNSUPPORTED_ON_PLATFORM` | Windows 桌面专属快捷键设置页 |
 | `settings.general` (`window` / `shortcuts`) | `501 UNSUPPORTED_ON_PLATFORM` | Windows 桌面专属窗口/快捷键分组 |
 | `music.history` | 打开 `MusicQueueViewController` 并切至 `songs` | iOS 历史单曲统一承载于队列浮层 |

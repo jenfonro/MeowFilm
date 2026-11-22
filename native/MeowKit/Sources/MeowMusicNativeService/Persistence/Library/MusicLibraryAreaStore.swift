@@ -2,47 +2,48 @@ import Foundation
 import MeowStorage
 
 enum MusicLibraryAreaStore {
-    static func read(_ db: SQLiteConnection, scope: String) throws -> MJ? {
+    static func read(_ db: SQLiteConnection, scope: String) throws -> MusicLibraryAreaRecord? {
         guard let state = try db.queryOne(
-            "SELECT revision,owner_id,library_revision,next_id,status_phase,status_at,status_code " +
-            "FROM music_library_state WHERE scope=?",
+            "SELECT revision,owner_id,library_revision,next_id FROM music_library_state WHERE scope=?",
             [.text(scope)],
             map: { c in
                 (
                     revision: try c.integer(0),
                     ownerID: try c.text(1),
                     libraryRevision: try c.integer(2),
-                    nextID: try c.integer(3),
-                    statusPhase: try c.text(4),
-                    statusAt: try c.double(5),
-                    statusCode: try c.optionalText(6)
+                    nextID: try c.integer(3)
                 )
             }
         ) else { return nil }
 
-        let accountFields: [(String, MJ)] = try db.query(
+        let status = try db.queryOne(
+            "SELECT status_phase,status_at_ms,status_code FROM ios_music_library_status WHERE scope=?",
+            [.text(scope)],
+            map: { c in
+                (
+                    phase: try c.text(0),
+                    atMs: try c.int64(1),
+                    code: try c.optionalText(2)
+                )
+            }
+        )
+
+        let accounts: [MusicLibraryAccountRecord] = try db.query(
             "SELECT platform,account_id FROM music_library_accounts WHERE scope=? ORDER BY platform",
             [.text(scope)]
-        ) { (try $0.text(0), .string(try $0.text(1))) }
+        ) { c in
+            MusicLibraryAccountRecord(platform: try c.text(0), accountID: try c.text(1))
+        }
 
-        let statusIssues: [MJ] = try db.query(
+        let statusIssues: [MusicLibraryIssueRecord] = try db.query(
             "SELECT platform,collection_id,code FROM ios_music_library_status_issues WHERE scope=? ORDER BY position",
             [.text(scope)]
         ) { c in
-            var fields: [(String, MJ)] = []
-            if let platform = try c.optionalText(0) { fields.append(("platform", .string(platform))) }
-            if let collectionID = try c.optionalText(1) { fields.append(("collectionID", .string(collectionID))) }
-            fields.append(("code", .string(try c.text(2))))
-            return .obj(fields)
-        }
-
-        var statusFields: [(String, MJ)] = [
-            ("phase", .string(state.statusPhase)),
-            ("at", .number(state.statusAt)),
-            ("issues", .array(statusIssues))
-        ]
-        if let code = state.statusCode {
-            statusFields.append(("code", .string(code)))
+            MusicLibraryIssueRecord(
+                platform: try c.optionalText(0),
+                collectionID: try c.optionalText(1),
+                code: try c.text(2)
+            )
         }
 
         var songsByCollection: [String: [String]] = [:]
@@ -64,17 +65,20 @@ enum MusicLibraryAreaStore {
             baselineByBinding[key, default: []].append(try c.text(2))
         }
 
-        var mapByBinding: [BindingKey: [(String, MJ)]] = [:]
+        var mapByBinding: [BindingKey: [MusicCollectionBindingMapEntry]] = [:]
         try db.scan(
             "SELECT collection_id,binding_index,remote_entry_id,song_id FROM music_collection_binding_map " +
             "WHERE scope=? ORDER BY collection_id,binding_index,remote_entry_id",
             [.text(scope)]
         ) { c in
             let key = BindingKey(collectionID: try c.text(0), index: try c.integer(1))
-            mapByBinding[key, default: []].append((try c.text(2), .string(try c.text(3))))
+            mapByBinding[key, default: []].append(MusicCollectionBindingMapEntry(
+                remoteEntryID: try c.text(2),
+                songID: try c.text(3)
+            ))
         }
 
-        var bindingsByCollection: [String: [MJ]] = [:]
+        var bindingsByCollection: [String: [MusicCollectionBindingRecord]] = [:]
         try db.scan(
             "SELECT collection_id,binding_index,platform,account_id,remote_id,writable,name " +
             "FROM music_collection_bindings WHERE scope=? ORDER BY collection_id,binding_index",
@@ -83,16 +87,15 @@ enum MusicLibraryAreaStore {
             let collectionID = try c.text(0)
             let index = try c.integer(1)
             let key = BindingKey(collectionID: collectionID, index: index)
-            var fields: [(String, MJ)] = [
-                ("platform", .string(try c.text(2))),
-                ("accountId", .string(try c.text(3))),
-                ("id", .string(try c.text(4))),
-                ("writable", .bool(try c.bool(5))),
-                ("baseline", .strings(baselineByBinding[key] ?? [])),
-                ("map", .obj(mapByBinding[key] ?? []))
-            ]
-            if let name = try c.optionalText(6) { fields.append(("name", .string(name))) }
-            bindingsByCollection[collectionID, default: []].append(.obj(fields))
+            bindingsByCollection[collectionID, default: []].append(MusicCollectionBindingRecord(
+                platform: try c.text(2),
+                accountID: try c.text(3),
+                remoteID: try c.text(4),
+                writable: try c.bool(5),
+                name: try c.optionalText(6),
+                baseline: baselineByBinding[key] ?? [],
+                map: mapByBinding[key] ?? []
+            ))
         }
 
         struct IntentKey: Hashable { let collectionID: String; let intentKey: String }
@@ -106,7 +109,7 @@ enum MusicLibraryAreaStore {
             acksByIntent[key, default: []].append(try c.text(2))
         }
 
-        var intentsByCollection: [String: [(String, MJ)]] = [:]
+        var intentsByCollection: [String: [MusicCollectionIntentRecord]] = [:]
         try db.scan(
             "SELECT collection_id,intent_key,present,pending,origin FROM music_collection_intents " +
             "WHERE scope=? ORDER BY collection_id,intent_key",
@@ -114,337 +117,329 @@ enum MusicLibraryAreaStore {
         ) { c in
             let collectionID = try c.text(0)
             let intentKey = try c.text(1)
-            var fields: [(String, MJ)] = [
-                ("present", .bool(try c.bool(2))),
-                ("pending", .bool(try c.bool(3)))
-            ]
-            if let origin = try c.optionalText(4) { fields.append(("origin", .string(origin))) }
-            if let acks = acksByIntent[IntentKey(collectionID: collectionID, intentKey: intentKey)], !acks.isEmpty {
-                fields.append(("acknowledged", .strings(acks)))
-            }
-            intentsByCollection[collectionID, default: []].append((intentKey, .obj(fields)))
+            intentsByCollection[collectionID, default: []].append(MusicCollectionIntentRecord(
+                intentKey: intentKey,
+                present: try c.bool(2),
+                pending: try c.bool(3),
+                origin: try c.optionalText(4),
+                acknowledged: acksByIntent[IntentKey(collectionID: collectionID, intentKey: intentKey)] ?? []
+            ))
         }
 
-        let collections: [MJ] = try db.query(
+        let collections: [MusicCollectionRecord] = try db.query(
             "SELECT collection_id,name,kind,revision,manual_order,deleted,locally_created " +
             "FROM music_collections WHERE scope=? ORDER BY position",
             [.text(scope)]
         ) { c in
             let cid = try c.text(0)
-            var fields: [(String, MJ)] = [
-                ("id", .string(cid)),
-                ("name", .string(try c.text(1))),
-                ("kind", .string(try c.text(2))),
-                ("order", .strings(songsByCollection[cid] ?? [])),
-                ("revision", .n(try c.integer(3))),
-                ("manualOrder", .bool(try c.bool(4))),
-                ("bindings", .array(bindingsByCollection[cid] ?? [])),
-                ("intents", .obj(intentsByCollection[cid] ?? []))
-            ]
-            if try c.bool(5) { fields.append(("deleted", .bool(true))) }
-            if try c.bool(6) { fields.append(("locallyCreated", .bool(true))) }
-            return .obj(fields)
+            return MusicCollectionRecord(
+                id: cid,
+                name: try c.text(1),
+                kind: try c.text(2),
+                order: songsByCollection[cid] ?? [],
+                revision: try c.integer(3),
+                manualOrder: try c.bool(4),
+                deleted: try c.bool(5),
+                locallyCreated: try c.bool(6),
+                bindings: bindingsByCollection[cid] ?? [],
+                intents: intentsByCollection[cid] ?? []
+            )
         }
 
-        let networkReferences: [MJ] = try db.query(
+        let networkReferences: [MusicNetworkReferenceRecord] = try db.query(
             "SELECT ref_id,platform,remote_id,name,creator,artwork,song_count,revision,present,pending," +
             "rel_account_id,rel_baseline,rel_relation_id,rel_locator " +
             "FROM ios_music_network_references WHERE scope=? ORDER BY position",
             [.text(scope)]
         ) { c in
-            let relation: MJ
+            let relation: MusicNetworkReferenceRelationRecord?
             if let accountID = try c.optionalText(10) {
-                var relFields: [(String, MJ)] = [
-                    ("accountId", .string(accountID)),
-                    ("baseline", .bool(try c.optionalBool(11) ?? false)),
-                    ("relationID", .string(try c.optionalText(12) ?? ""))
-                ]
-                if let locator = try c.optionalText(13) { relFields.append(("locator", .string(locator))) }
-                relation = .obj(relFields)
+                relation = MusicNetworkReferenceRelationRecord(
+                    accountID: accountID,
+                    baseline: try c.optionalBool(11) ?? false,
+                    relationID: try c.optionalText(12) ?? "",
+                    locator: try c.optionalText(13)
+                )
             } else {
-                relation = .null
+                relation = nil
             }
-            return .obj([
-                ("id", .string(try c.text(0))),
-                ("platform", .string(try c.text(1))),
-                ("remoteID", .string(try c.text(2))),
-                ("name", .string(try c.text(3))),
-                ("creator", .string(try c.text(4))),
-                ("artwork", .string(try c.text(5))),
-                ("count", .n(try c.integer(6))),
-                ("revision", .n(try c.integer(7))),
-                ("present", .bool(try c.bool(8))),
-                ("pending", .bool(try c.bool(9))),
-                ("relation", relation)
-            ])
+            return MusicNetworkReferenceRecord(
+                id: try c.text(0),
+                platform: try c.text(1),
+                remoteID: try c.text(2),
+                name: try c.text(3),
+                creator: try c.text(4),
+                artwork: try c.text(5),
+                count: try c.integer(6),
+                revision: try c.integer(7),
+                present: try c.bool(8),
+                pending: try c.bool(9),
+                relation: relation
+            )
         }
 
-        let innerLibrary: MJ = .obj([
-            ("version", .n(1)),
-            ("ownerId", .string(state.ownerID)),
-            ("revision", .n(state.libraryRevision)),
-            ("nextId", .n(state.nextID)),
-            ("collections", .array(collections)),
-            ("networkReferences", .array(networkReferences)),
-            ("accounts", .obj(accountFields)),
-            ("status", .obj(statusFields))
-        ])
+        let sync = try readSync(db, scope: scope)
 
-        var areaFields: [(String, MJ)] = [
-            ("schema", .n(1)),
-            ("scope", .string(scope)),
-            ("revision", .n(state.revision)),
-            ("library", innerLibrary)
-        ]
-        if let sync = try readSync(db, scope: scope) {
-            areaFields.append(("sync", sync))
-        }
-        return .obj(areaFields)
+        return MusicLibraryAreaRecord(
+            revision: state.revision,
+            ownerID: state.ownerID,
+            libraryRevision: state.libraryRevision,
+            nextID: state.nextID,
+            accounts: accounts,
+            statusPhase: status?.phase ?? "idle",
+            statusAtMs: status?.atMs ?? 0,
+            statusCode: status?.code,
+            statusIssues: statusIssues,
+            collections: collections,
+            networkReferences: networkReferences,
+            sync: sync
+        )
     }
 
-    static func write(_ db: SQLiteConnection, scope: String, value: MJ) throws {
-        let previous = try read(db, scope: scope)
-        let lib = value["library"]
-        let prevLib = previous?["library"]
-        let status = lib["status"]
+    static func write(_ db: SQLiteConnection, scope: String, value: MusicLibraryAreaRecord, previous: MusicLibraryAreaRecord?) throws {
+        let ownerID = value.ownerID.isEmpty ? scope : value.ownerID
+        let nextID = max(1, value.nextID)
+        if previous == nil ||
+            previous?.revision != value.revision ||
+            previous?.ownerID != ownerID ||
+            previous?.libraryRevision != value.libraryRevision ||
+            previous?.nextID != nextID {
+            try db.upsert(
+                "music_library_state",
+                columns: ["scope", "revision", "owner_id", "library_revision", "next_id"],
+                values: [
+                    .text(scope),
+                    .integer(value.revision),
+                    .text(ownerID),
+                    .integer(value.libraryRevision),
+                    .integer(nextID)
+                ],
+                key: ["scope"]
+            )
+        }
 
-        try db.upsert(
-            "music_library_state",
-            columns: [
-                "scope", "revision", "owner_id", "library_revision", "next_id",
-                "status_phase", "status_at", "status_code"
-            ],
-            values: [
-                .text(scope),
-                .integer(value["revision"].int),
-                .text(lib["ownerId"].string.isEmpty ? scope : lib["ownerId"].string),
-                .integer(lib["revision"].int),
-                .integer(max(1, lib["nextId"].int)),
-                .text(status["phase"].string.isEmpty ? "idle" : status["phase"].string),
-                .real(MusicPersistenceHelpers.finiteDouble(status["at"], fallback: 0)),
-                MusicPersistenceHelpers.optionalNonEmpty(status["code"])
-            ],
-            key: ["scope"]
-        )
+        let phase = value.statusPhase.isEmpty ? "idle" : value.statusPhase
+        let statusCode = value.statusCode.flatMap { $0.isEmpty ? nil : $0 }
+        if previous == nil ||
+            previous?.statusPhase != phase ||
+            previous?.statusAtMs != value.statusAtMs ||
+            previous?.statusCode != statusCode {
+            try db.upsert(
+                "ios_music_library_status",
+                columns: ["scope", "status_phase", "status_at_ms", "status_code"],
+                values: [
+                    .text(scope),
+                    .text(phase),
+                    .integer(value.statusAtMs),
+                    .optional(statusCode)
+                ],
+                key: ["scope"]
+            )
+        }
 
-        // Incremental diff for accounts
-        if previous == nil || !MusicPersistenceHelpers.semanticEquals(lib["accounts"], prevLib?["accounts"] ?? .null) {
-            let nextAccounts = Dictionary(uniqueKeysWithValues: lib["accounts"].fields.compactMap { k, v in v.isString ? (k, v.string) : nil })
-            let prevAccounts = Dictionary(uniqueKeysWithValues: (prevLib?["accounts"].fields ?? []).compactMap { k, v in v.isString ? (k, v.string) : nil })
-            for plat in prevAccounts.keys where nextAccounts[plat] == nil {
-                try db.execute("DELETE FROM music_library_accounts WHERE scope=? AND platform=?", [.text(scope), .text(plat)])
+        if previous == nil || previous?.accounts != value.accounts {
+            let prevAccounts = Dictionary(uniqueKeysWithValues: (previous?.accounts ?? []).map { ($0.platform, $0.accountID) })
+            let nextAccounts = Dictionary(uniqueKeysWithValues: value.accounts.map { ($0.platform, $0.accountID) })
+            for platform in prevAccounts.keys where nextAccounts[platform] == nil {
+                try db.execute("DELETE FROM music_library_accounts WHERE scope=? AND platform=?", [.text(scope), .text(platform)])
             }
-            for (plat, accID) in nextAccounts where prevAccounts[plat] != accID {
-                try db.upsert("music_library_accounts", columns: ["scope", "platform", "account_id"],
-                              values: [.text(scope), .text(plat), .text(accID)], key: ["scope", "platform"])
+            for account in value.accounts where prevAccounts[account.platform] != account.accountID {
+                try db.upsert(
+                    "music_library_accounts",
+                    columns: ["scope", "platform", "account_id"],
+                    values: [.text(scope), .text(account.platform), .text(account.accountID)],
+                    key: ["scope", "platform"]
+                )
             }
         }
 
-        // Incremental diff for status issues
-        if previous == nil || !MusicPersistenceHelpers.semanticEquals(status["issues"], prevLib?["status"]["issues"] ?? .null) {
-            try db.execute("DELETE FROM ios_music_library_status_issues WHERE scope=?", [.text(scope)])
-            for (index, issue) in status["issues"].array.enumerated() {
-                let colID = issue["collectionID"].isString ? issue["collectionID"] : issue["collectionId"]
+        if previous == nil || previous?.statusIssues != value.statusIssues {
+            if previous != nil {
+                try db.execute("DELETE FROM ios_music_library_status_issues WHERE scope=?", [.text(scope)])
+            }
+            for (index, issue) in value.statusIssues.enumerated() {
                 try db.execute(
                     "INSERT INTO ios_music_library_status_issues(scope,position,platform,collection_id,code) VALUES(?,?,?,?,?)",
                     [
                         .text(scope), .integer(index),
-                        MusicPersistenceHelpers.optionalNonEmpty(issue["platform"]),
-                        MusicPersistenceHelpers.optionalNonEmpty(colID),
-                        .text(issue["code"].string)
+                        .optional(issue.platform.flatMap { $0.isEmpty ? nil : $0 }),
+                        .optional(issue.collectionID.flatMap { $0.isEmpty ? nil : $0 }),
+                        .text(issue.code)
                     ]
                 )
             }
         }
 
-        // Row-level incremental diff for collections (never DELETE FROM music_collections WHERE scope=?)
-        var prevColsByID: [String: (pos: Int, col: MJ)] = [:]
-        if let prevCols = prevLib?["collections"].array {
-            for (idx, col) in prevCols.enumerated() {
-                prevColsByID[col["id"].string] = (idx, col)
-            }
-        }
-        let nextCols = lib["collections"].array
-        let nextColIDs = Set(nextCols.map { $0["id"].string })
-        for oldCID in prevColsByID.keys where !nextColIDs.contains(oldCID) {
-            try db.execute("DELETE FROM music_collections WHERE scope=? AND collection_id=?", [.text(scope), .text(oldCID)])
-        }
-
-        for (index, col) in nextCols.enumerated() {
-            let cid = col["id"].string
-            let old = prevColsByID[cid]
-            if let old, old.pos == index, MusicPersistenceHelpers.semanticEquals(col, old.col) {
-                continue
-            }
-
-            try db.upsert(
-                "music_collections",
-                columns: [
-                    "scope", "collection_id", "position", "name", "kind",
-                    "revision", "manual_order", "deleted", "locally_created"
-                ],
-                values: [
-                    .text(scope), .text(cid), .integer(index),
-                    .text(col["name"].string), .text(col["kind"].string),
-                    .integer(col["revision"].int), .bool(col["manualOrder"].bool),
-                    .bool(col["deleted"].bool), .bool(col["locallyCreated"].bool)
-                ],
-                key: ["scope", "collection_id"]
-            )
-
-            let nextOrder = col["order"].strings
-            let prevOrder = old?.col["order"].strings ?? []
-            if old == nil || prevOrder != nextOrder {
-                let prefix = old == nil ? 0 : MusicPersistenceHelpers.commonPrefixLength(prevOrder, nextOrder)
-                if old != nil && prefix < prevOrder.count {
-                    try db.execute(
-                        "DELETE FROM music_collection_songs WHERE scope=? AND collection_id=? AND position>=?",
-                        [.text(scope), .text(cid), .integer(prefix)]
-                    )
-                }
-                for songPos in prefix..<nextOrder.count {
-                    try db.execute(
-                        "INSERT INTO music_collection_songs(scope,collection_id,position,song_id) VALUES(?,?,?,?)",
-                        [.text(scope), .text(cid), .integer(songPos), .text(nextOrder[songPos])]
-                    )
+        if previous == nil || previous?.collections != value.collections {
+            var prevColsByID: [String: (pos: Int, col: MusicCollectionRecord)] = [:]
+            if let prevCols = previous?.collections {
+                for (index, col) in prevCols.enumerated() {
+                    prevColsByID[col.id] = (index, col)
                 }
             }
+            let nextColIDs = Set(value.collections.map(\.id))
+            for oldCID in prevColsByID.keys where !nextColIDs.contains(oldCID) {
+                try db.execute("DELETE FROM music_collections WHERE scope=? AND collection_id=?", [.text(scope), .text(oldCID)])
+            }
 
-            if old == nil || !MusicPersistenceHelpers.semanticEquals(col["bindings"], old!.col["bindings"]) {
-                if old != nil {
-                    try db.execute("DELETE FROM music_collection_bindings WHERE scope=? AND collection_id=?", [.text(scope), .text(cid)])
-                }
-                for (bIndex, binding) in col["bindings"].array.enumerated() {
-                    try db.execute(
-                        "INSERT INTO music_collection_bindings(" +
-                        "scope,collection_id,binding_index,platform,account_id,remote_id,writable,name" +
-                        ") VALUES(?,?,?,?,?,?,?,?)",
-                        [
-                            .text(scope), .text(cid), .integer(bIndex),
-                            .text(binding["platform"].string), .text(binding["accountId"].string),
-                            .text(binding["id"].string), .bool(binding["writable"].bool),
-                            MusicPersistenceHelpers.optionalString(binding["name"])
-                        ]
-                    )
-                    for (pos, nativeID) in binding["baseline"].strings.enumerated() {
+            for (index, col) in value.collections.enumerated() {
+                let old = prevColsByID[col.id]
+                if let old, old.pos == index, old.col == col { continue }
+
+                try db.upsert(
+                    "music_collections",
+                    columns: [
+                        "scope", "collection_id", "position", "name", "kind",
+                        "revision", "manual_order", "deleted", "locally_created"
+                    ],
+                    values: [
+                        .text(scope), .text(col.id), .integer(index),
+                        .text(col.name), .text(col.kind),
+                        .integer(col.revision), .bool(col.manualOrder),
+                        .bool(col.deleted), .bool(col.locallyCreated)
+                    ],
+                    key: ["scope", "collection_id"]
+                )
+
+                let prevOrder = old?.col.order ?? []
+                if old == nil || prevOrder != col.order {
+                    let prefix = old == nil ? 0 : MusicPersistenceListDiff.commonPrefixLength(prevOrder, col.order)
+                    if old != nil && prefix < prevOrder.count {
                         try db.execute(
-                            "INSERT INTO music_collection_binding_baseline(" +
-                            "scope,collection_id,binding_index,position,native_id" +
-                            ") VALUES(?,?,?,?,?)",
-                            [.text(scope), .text(cid), .integer(bIndex), .integer(pos), .text(nativeID)]
+                            "DELETE FROM music_collection_songs WHERE scope=? AND collection_id=? AND position>=?",
+                            [.text(scope), .text(col.id), .integer(prefix)]
                         )
                     }
-                    for (remoteEntryID, songVal) in binding["map"].fields where songVal.isString && !songVal.string.isEmpty {
+                    for songPos in prefix..<col.order.count {
                         try db.execute(
-                            "INSERT INTO music_collection_binding_map(" +
-                            "scope,collection_id,binding_index,song_id,remote_entry_id" +
-                            ") VALUES(?,?,?,?,?)",
-                            [.text(scope), .text(cid), .integer(bIndex), .text(songVal.string), .text(remoteEntryID)]
+                            "INSERT INTO music_collection_songs(scope,collection_id,position,song_id) VALUES(?,?,?,?)",
+                            [.text(scope), .text(col.id), .integer(songPos), .text(col.order[songPos])]
                         )
                     }
                 }
-            }
 
-            if old == nil || !MusicPersistenceHelpers.semanticEquals(col["intents"], old!.col["intents"]) {
-                let prevIntents = Dictionary(uniqueKeysWithValues: (old?.col["intents"].fields ?? []).map { ($0.0, $0.1) })
-                let nextIntents = col["intents"].fields
-                let nextIntentKeys = Set(nextIntents.map(\.0))
-                for oldKey in prevIntents.keys where !nextIntentKeys.contains(oldKey) {
-                    try db.execute(
-                        "DELETE FROM music_collection_intents WHERE scope=? AND collection_id=? AND intent_key=?",
-                        [.text(scope), .text(cid), .text(oldKey)]
-                    )
-                }
-                for (intentKey, intent) in nextIntents {
-                    if let oldIntent = prevIntents[intentKey], MusicPersistenceHelpers.semanticEquals(intent, oldIntent) {
-                        continue
+                if old == nil || old!.col.bindings != col.bindings {
+                    if old != nil {
+                        try db.execute("DELETE FROM music_collection_bindings WHERE scope=? AND collection_id=?", [.text(scope), .text(col.id)])
                     }
-                    try db.upsert(
-                        "music_collection_intents",
-                        columns: ["scope", "collection_id", "intent_key", "present", "pending", "origin"],
-                        values: [
-                            .text(scope), .text(cid), .text(intentKey),
-                            .bool(intent["present"].bool), .bool(intent["pending"].bool),
-                            MusicPersistenceHelpers.optionalString(intent["origin"])
-                        ],
-                        key: ["scope", "collection_id", "intent_key"]
-                    )
-                    let nextAcks = intent["acknowledged"].strings
-                    let prevAcks = prevIntents[intentKey]?["acknowledged"].strings ?? []
-                    if prevIntents[intentKey] == nil || prevAcks != nextAcks {
+                    for (bIndex, binding) in col.bindings.enumerated() {
                         try db.execute(
-                            "DELETE FROM music_collection_intent_acks WHERE scope=? AND collection_id=? AND intent_key=?",
-                            [.text(scope), .text(cid), .text(intentKey)]
+                            "INSERT INTO music_collection_bindings(" +
+                            "scope,collection_id,binding_index,platform,account_id,remote_id,writable,name" +
+                            ") VALUES(?,?,?,?,?,?,?,?)",
+                            [
+                                .text(scope), .text(col.id), .integer(bIndex),
+                                .text(binding.platform), .text(binding.accountID),
+                                .text(binding.remoteID), .bool(binding.writable),
+                                .optional(binding.name)
+                            ]
                         )
-                        for (pos, ack) in nextAcks.enumerated() {
+                        for (pos, nativeID) in binding.baseline.enumerated() {
                             try db.execute(
-                                "INSERT INTO music_collection_intent_acks(" +
-                                "scope,collection_id,intent_key,position,ack_value" +
+                                "INSERT INTO music_collection_binding_baseline(" +
+                                "scope,collection_id,binding_index,position,native_id" +
                                 ") VALUES(?,?,?,?,?)",
-                                [.text(scope), .text(cid), .text(intentKey), .integer(pos), .text(ack)]
+                                [.text(scope), .text(col.id), .integer(bIndex), .integer(pos), .text(nativeID)]
                             )
+                        }
+                        for entry in binding.map where !entry.songID.isEmpty {
+                            try db.execute(
+                                "INSERT INTO music_collection_binding_map(" +
+                                "scope,collection_id,binding_index,song_id,remote_entry_id" +
+                                ") VALUES(?,?,?,?,?)",
+                                [.text(scope), .text(col.id), .integer(bIndex), .text(entry.songID), .text(entry.remoteEntryID)]
+                            )
+                        }
+                    }
+                }
+
+                if old == nil || old!.col.intents != col.intents {
+                    let prevIntents = Dictionary(uniqueKeysWithValues: (old?.col.intents ?? []).map { ($0.intentKey, $0) })
+                    let nextIntentKeys = Set(col.intents.map(\.intentKey))
+                    for oldKey in prevIntents.keys where !nextIntentKeys.contains(oldKey) {
+                        try db.execute(
+                            "DELETE FROM music_collection_intents WHERE scope=? AND collection_id=? AND intent_key=?",
+                            [.text(scope), .text(col.id), .text(oldKey)]
+                        )
+                    }
+                    for intent in col.intents {
+                        if let oldIntent = prevIntents[intent.intentKey], oldIntent == intent { continue }
+                        try db.upsert(
+                            "music_collection_intents",
+                            columns: ["scope", "collection_id", "intent_key", "present", "pending", "origin"],
+                            values: [
+                                .text(scope), .text(col.id), .text(intent.intentKey),
+                                .bool(intent.present), .bool(intent.pending),
+                                .optional(intent.origin)
+                            ],
+                            key: ["scope", "collection_id", "intent_key"]
+                        )
+                        if prevIntents[intent.intentKey] == nil || prevIntents[intent.intentKey]?.acknowledged != intent.acknowledged {
+                            if prevIntents[intent.intentKey] != nil {
+                                try db.execute(
+                                    "DELETE FROM music_collection_intent_acks WHERE scope=? AND collection_id=? AND intent_key=?",
+                                    [.text(scope), .text(col.id), .text(intent.intentKey)]
+                                )
+                            }
+                            for (pos, ack) in intent.acknowledged.enumerated() {
+                                try db.execute(
+                                    "INSERT INTO music_collection_intent_acks(" +
+                                    "scope,collection_id,intent_key,position,ack_value" +
+                                    ") VALUES(?,?,?,?,?)",
+                                    [.text(scope), .text(col.id), .text(intent.intentKey), .integer(pos), .text(ack)]
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Incremental diff for network references
-        var prevRefsByID: [String: (pos: Int, ref: MJ)] = [:]
-        if let prevRefs = prevLib?["networkReferences"].array {
-            for (idx, ref) in prevRefs.enumerated() { prevRefsByID[ref["id"].string] = (idx, ref) }
-        }
-        let nextRefs = lib["networkReferences"].array
-        let nextRefIDs = Set(nextRefs.map { $0["id"].string })
-        for oldID in prevRefsByID.keys where !nextRefIDs.contains(oldID) {
-            try db.execute("DELETE FROM ios_music_network_references WHERE scope=? AND ref_id=?", [.text(scope), .text(oldID)])
-        }
-        for (index, ref) in nextRefs.enumerated() {
-            let refID = ref["id"].string
-            if let old = prevRefsByID[refID], old.pos == index, MusicPersistenceHelpers.semanticEquals(ref, old.ref) {
-                continue
+        if previous == nil || previous?.networkReferences != value.networkReferences {
+            var prevRefsByID: [String: (pos: Int, ref: MusicNetworkReferenceRecord)] = [:]
+            if let prevRefs = previous?.networkReferences {
+                for (index, ref) in prevRefs.enumerated() {
+                    prevRefsByID[ref.id] = (index, ref)
+                }
             }
-            let rel = ref["relation"]
-            let hasRelation = rel.isObject && rel["accountId"].isString
-            try db.upsert(
-                "ios_music_network_references",
-                columns: [
-                    "scope", "ref_id", "position", "platform", "remote_id", "name", "creator", "artwork",
-                    "song_count", "revision", "present", "pending",
-                    "rel_account_id", "rel_baseline", "rel_relation_id", "rel_locator"
-                ],
-                values: [
-                    .text(scope), .text(refID), .integer(index),
-                    .text(ref["platform"].string), .text(ref["remoteID"].string),
-                    .text(ref["name"].string), .text(ref["creator"].string),
-                    .text(ref["artwork"].string), .integer(ref["count"].int),
-                    .integer(ref["revision"].int), .bool(ref["present"].bool),
-                    .bool(ref["pending"].bool),
-                    hasRelation ? .text(rel["accountId"].string) : .null,
-                    hasRelation ? .bool(rel["baseline"].bool) : .null,
-                    hasRelation ? MusicPersistenceHelpers.optionalString(rel["relationID"]) : .null,
-                    hasRelation ? MusicPersistenceHelpers.optionalString(rel["locator"]) : .null
-                ],
-                key: ["scope", "ref_id"]
-            )
+            let nextRefIDs = Set(value.networkReferences.map(\.id))
+            for oldID in prevRefsByID.keys where !nextRefIDs.contains(oldID) {
+                try db.execute("DELETE FROM ios_music_network_references WHERE scope=? AND ref_id=?", [.text(scope), .text(oldID)])
+            }
+            for (index, ref) in value.networkReferences.enumerated() {
+                if let old = prevRefsByID[ref.id], old.pos == index, old.ref == ref { continue }
+                try db.upsert(
+                    "ios_music_network_references",
+                    columns: [
+                        "scope", "ref_id", "position", "platform", "remote_id", "name", "creator", "artwork",
+                        "song_count", "revision", "present", "pending",
+                        "rel_account_id", "rel_baseline", "rel_relation_id", "rel_locator"
+                    ],
+                    values: [
+                        .text(scope), .text(ref.id), .integer(index),
+                        .text(ref.platform), .text(ref.remoteID),
+                        .text(ref.name), .text(ref.creator),
+                        .text(ref.artwork), .integer(ref.count),
+                        .integer(ref.revision), .bool(ref.present),
+                        .bool(ref.pending),
+                        .optional(ref.relation?.accountID),
+                        .optional(ref.relation?.baseline),
+                        .optional(ref.relation?.relationID),
+                        .optional(ref.relation?.locator)
+                    ],
+                    key: ["scope", "ref_id"]
+                )
+            }
         }
 
-        let nextSync: MJ? = value.contains("sync") ? value["sync"] : nil
-        let prevSync: MJ? = (previous?.contains("sync") == true) ? previous?["sync"] : nil
-        let syncUnchanged: Bool
-        switch (nextSync, prevSync) {
-        case (nil, nil): syncUnchanged = true
-        case (let a?, let b?): syncUnchanged = MusicPersistenceHelpers.semanticEquals(a, b)
-        default: syncUnchanged = false
-        }
-        if !syncUnchanged {
-            try writeSync(db, scope: scope, sync: nextSync)
+        if previous == nil || previous?.sync != value.sync {
+            try writeSync(db, scope: scope, sync: value.sync, hadPrevious: previous?.sync != nil)
         }
     }
 
     // MARK: - iOS Music Sync State
 
-    private static func readSync(_ db: SQLiteConnection, scope: String) throws -> MJ? {
+    private static func readSync(_ db: SQLiteConnection, scope: String) throws -> MusicSyncStateRecord? {
         guard let row = try db.queryOne(
             "SELECT phase,auto_revision,auto_intent_revision,auto_settled_intent_revision,auto_order_only " +
             "FROM ios_music_sync_state WHERE scope=?",
@@ -460,45 +455,51 @@ enum MusicLibraryAreaStore {
             }
         ) else { return nil }
 
-        var manualSelections: [MJ] = []
-        var autoSelections: [MJ] = []
+        var manualSelections: [MusicSyncSelectionRecord] = []
+        var automaticSelections: [MusicSyncSelectionRecord] = []
         try db.scan(
             "SELECT section,platform,favorites,playlists FROM ios_music_sync_selections WHERE scope=? ORDER BY section,position",
             [.text(scope)]
-        ) { sel in
-            let entry: MJ = .obj([
-                ("platform", .string(try sel.text(1))),
-                ("favorites", .bool(try sel.bool(2))),
-                ("playlists", .bool(try sel.bool(3)))
-            ])
-            if try sel.text(0) == "manual" { manualSelections.append(entry) }
-            else { autoSelections.append(entry) }
+        ) { c in
+            let entry = MusicSyncSelectionRecord(
+                platform: try c.text(1),
+                favorites: try c.bool(2),
+                playlists: try c.bool(3)
+            )
+            if try c.text(0) == "manual" {
+                manualSelections.append(entry)
+            } else {
+                automaticSelections.append(entry)
+            }
         }
 
-        let scopes: [(String, MJ)] = try db.query(
+        let scopes: [MusicSyncScopeRecord] = try db.query(
             "SELECT platform,account_scope FROM ios_music_sync_scopes WHERE scope=? ORDER BY platform",
             [.text(scope)]
-        ) { (try $0.text(0), .string(try $0.text(1))) }
-
-        let issues: [MJ] = try db.query(
-            "SELECT platform,collection_id,code FROM ios_music_sync_issues WHERE scope=? ORDER BY position",
-            [.text(scope)]
-        ) { item in
-            var fields: [(String, MJ)] = []
-            if let platform = try item.optionalText(0) { fields.append(("platform", .string(platform))) }
-            if let collectionID = try item.optionalText(1) { fields.append(("collectionID", .string(collectionID))) }
-            fields.append(("code", .string(try item.text(2))))
-            return .obj(fields)
+        ) { c in
+            MusicSyncScopeRecord(platform: try c.text(0), accountScope: try c.text(1))
         }
 
-        let autoBindings: [(String, MJ)] = try db.query(
+        let issues: [MusicLibraryIssueRecord] = try db.query(
+            "SELECT platform,collection_id,code FROM ios_music_sync_issues WHERE scope=? ORDER BY position",
+            [.text(scope)]
+        ) { c in
+            MusicLibraryIssueRecord(
+                platform: try c.optionalText(0),
+                collectionID: try c.optionalText(1),
+                code: try c.text(2)
+            )
+        }
+
+        let autoBindings: [MusicSyncAutoBindingRecord] = try db.query(
             "SELECT platform,account_id,binding_scope FROM ios_music_sync_auto_bindings WHERE scope=? ORDER BY platform",
             [.text(scope)]
-        ) {
-            (try $0.text(0), .obj([
-                ("accountID", .string(try $0.text(1))),
-                ("scope", .string(try $0.text(2)))
-            ]))
+        ) { c in
+            MusicSyncAutoBindingRecord(
+                platform: try c.text(0),
+                accountID: try c.text(1),
+                bindingScope: try c.text(2)
+            )
         }
 
         let relationshipPlatforms: [String] = try db.query(
@@ -507,20 +508,20 @@ enum MusicLibraryAreaStore {
         ) { try $0.text(0) }
 
         struct FenceMemberKey: Hashable { let fenceIndex: Int; let memberSet: String }
-        var fenceMembers: [FenceMemberKey: [MJ]] = [:]
+        var fenceMembers: [FenceMemberKey: [MusicSyncFenceMemberRecord]] = [:]
         try db.scan(
             "SELECT fence_index,member_set,native_id,occurrence_id FROM ios_music_sync_fence_members " +
             "WHERE scope=? ORDER BY fence_index,member_set,position",
             [.text(scope)]
-        ) { member in
-            let key = FenceMemberKey(fenceIndex: try member.integer(0), memberSet: try member.text(1))
-            fenceMembers[key, default: []].append(.obj([
-                ("nativeID", .string(try member.text(2))),
-                ("occurrenceID", .string(try member.optionalText(3) ?? ""))
-            ]))
+        ) { c in
+            let key = FenceMemberKey(fenceIndex: try c.integer(0), memberSet: try c.text(1))
+            fenceMembers[key, default: []].append(MusicSyncFenceMemberRecord(
+                nativeID: try c.text(2),
+                occurrenceID: try c.optionalText(3)
+            ))
         }
 
-        let fences: [MJ] = try db.query(
+        let fences: [MusicSyncFenceRecord] = try db.query(
             "SELECT fence_index,platform,account_id,fence_scope,local_id,local_revision," +
             "acknowledged_id,acknowledged_name,mut_id,mut_action,mut_collection_id,mut_name," +
             "mut_directory_revision,before_id,before_name,before_kind,before_writable," +
@@ -531,79 +532,81 @@ enum MusicLibraryAreaStore {
             [.text(scope)]
         ) { f in
             let idx = try f.integer(0)
-            var mutationFields: [(String, MJ)] = [
-                ("id", .string(try f.optionalText(8) ?? "")),
-                ("action", .string(try f.optionalText(9) ?? "")),
-                ("directoryRevision", .string(try f.optionalText(12) ?? "")),
-                ("members", .array(fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "mutation")] ?? []))
-            ]
-            if let cid = try f.optionalText(10) { mutationFields.append(("collectionID", .string(cid))) }
-            if let name = try f.optionalText(11) { mutationFields.append(("name", .string(name))) }
+            let before: MusicSyncFenceBeforeRecord?
             if let beforeID = try f.optionalText(13) {
-                mutationFields.append(("before", .obj([
-                    ("id", .string(beforeID)),
-                    ("name", .string(try f.optionalText(14) ?? "")),
-                    ("kind", .string(try f.optionalText(15) ?? "")),
-                    ("writable", .bool(try f.optionalBool(16) ?? false)),
-                    ("canRename", .bool(try f.optionalBool(17) ?? false)),
-                    ("canDelete", .bool(try f.optionalBool(18) ?? false)),
-                    ("canOrder", .bool(try f.optionalBool(19) ?? false)),
-                    ("members", .array(fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "before")] ?? [])),
-                    ("revision", .string(try f.optionalText(20) ?? ""))
-                ])))
+                before = MusicSyncFenceBeforeRecord(
+                    id: beforeID,
+                    name: try f.optionalText(14) ?? "",
+                    kind: try f.optionalText(15) ?? "",
+                    writable: try f.optionalBool(16) ?? false,
+                    canRename: try f.optionalBool(17) ?? false,
+                    canDelete: try f.optionalBool(18) ?? false,
+                    canOrder: try f.optionalBool(19) ?? false,
+                    revision: try f.optionalText(20) ?? "",
+                    members: fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "before")] ?? []
+                )
+            } else {
+                before = nil
             }
+            let beforeSub: MusicSyncFenceBeforeSubscriptionRecord?
             if let subRemoteID = try f.optionalText(21) {
-                var subFields: [(String, MJ)] = [
-                    ("remoteID", .string(subRemoteID)),
-                    ("relationID", .string(try f.optionalText(22) ?? "")),
-                    ("name", .string(try f.optionalText(23) ?? "")),
-                    ("creator", .string(try f.optionalText(24) ?? "")),
-                    ("artwork", .string(try f.optionalText(25) ?? ""))
-                ]
-                if let count = try f.optionalInteger(26) { subFields.append(("count", .n(count))) }
-                mutationFields.append(("beforeSubscription", .obj(subFields)))
+                beforeSub = MusicSyncFenceBeforeSubscriptionRecord(
+                    remoteID: subRemoteID,
+                    relationID: try f.optionalText(22) ?? "",
+                    name: try f.optionalText(23) ?? "",
+                    creator: try f.optionalText(24) ?? "",
+                    artwork: try f.optionalText(25) ?? "",
+                    count: try f.optionalInteger(26)
+                )
+            } else {
+                beforeSub = nil
             }
-
-            var fenceFields: [(String, MJ)] = [
-                ("platform", .string(try f.text(1))),
-                ("accountID", .string(try f.text(2))),
-                ("scope", .string(try f.text(3))),
-                ("localID", .string(try f.optionalText(4) ?? "")),
-                ("localRevision", .n(try f.optionalInteger(5) ?? 0)),
-                ("mutation", .obj(mutationFields))
-            ]
-            if let ackID = try f.optionalText(6) { fenceFields.append(("acknowledgedID", .string(ackID))) }
-            if let ackName = try f.optionalText(7) { fenceFields.append(("acknowledgedName", .string(ackName))) }
-            return .obj(fenceFields)
+            return MusicSyncFenceRecord(
+                platform: try f.text(1),
+                accountID: try f.text(2),
+                fenceScope: try f.text(3),
+                localID: try f.optionalText(4) ?? "",
+                localRevision: try f.optionalInteger(5) ?? 0,
+                acknowledgedID: try f.optionalText(6),
+                acknowledgedName: try f.optionalText(7),
+                mutationID: try f.optionalText(8),
+                mutationAction: try f.optionalText(9),
+                mutationCollectionID: try f.optionalText(10),
+                mutationName: try f.optionalText(11),
+                mutationDirectoryRevision: try f.optionalText(12),
+                mutationMembers: fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "mutation")] ?? [],
+                before: before,
+                beforeSubscription: beforeSub
+            )
         }
 
-        var autoFields: [(String, MJ)] = [
-            ("revision", .n(row.autoRev)),
-            ("selections", .array(autoSelections)),
-            ("bindings", .obj(autoBindings)),
-            ("intentRevision", .n(row.autoIntentRev)),
-            ("settledIntentRevision", .n(row.autoSettledRev)),
-            ("relationshipPlatforms", .strings(relationshipPlatforms))
-        ]
-        if let orderOnly = row.autoOrderOnly { autoFields.append(("orderOnly", .string(orderOnly))) }
-
-        return .obj([
-            ("schema", .n(1)),
-            ("selections", .array(manualSelections)),
-            ("scopes", .obj(scopes)),
-            ("fences", .array(fences)),
-            ("phase", .string(row.phase)),
-            ("issues", .array(issues)),
-            ("automatic", .obj(autoFields))
-        ])
+        return MusicSyncStateRecord(
+            phase: row.phase,
+            autoRevision: row.autoRev,
+            autoIntentRevision: row.autoIntentRev,
+            autoSettledIntentRevision: row.autoSettledRev,
+            autoOrderOnly: row.autoOrderOnly,
+            manualSelections: manualSelections,
+            automaticSelections: automaticSelections,
+            scopes: scopes,
+            issues: issues,
+            autoBindings: autoBindings,
+            relationshipPlatforms: relationshipPlatforms,
+            fences: fences
+        )
     }
 
-    private static func writeSync(_ db: SQLiteConnection, scope: String, sync: MJ?) throws {
-        guard let sync, sync.isObject else {
-            try db.execute("DELETE FROM ios_music_sync_state WHERE scope=?", [.text(scope)])
+    private static func writeSync(_ db: SQLiteConnection,
+                                  scope: String,
+                                  sync: MusicSyncStateRecord?,
+                                  hadPrevious: Bool) throws {
+        guard let sync else {
+            if hadPrevious {
+                try db.execute("DELETE FROM ios_music_sync_state WHERE scope=?", [.text(scope)])
+            }
             return
         }
-        let auto = sync["automatic"]
+
         try db.upsert(
             "ios_music_sync_state",
             columns: [
@@ -612,73 +615,69 @@ enum MusicLibraryAreaStore {
             ],
             values: [
                 .text(scope),
-                .text(sync["phase"].string.isEmpty ? "idle" : sync["phase"].string),
-                .integer(auto["revision"].int),
-                .integer(auto["intentRevision"].int),
-                .integer(auto["settledIntentRevision"].int),
-                MusicPersistenceHelpers.optionalNonEmpty(auto["orderOnly"])
+                .text(sync.phase.isEmpty ? "idle" : sync.phase),
+                .integer(sync.autoRevision),
+                .integer(sync.autoIntentRevision),
+                .integer(sync.autoSettledIntentRevision),
+                .optional(sync.autoOrderOnly.flatMap { $0.isEmpty ? nil : $0 })
             ],
             key: ["scope"]
         )
 
-        try db.execute("DELETE FROM ios_music_sync_selections WHERE scope=?", [.text(scope)])
-        for (section, items) in [("manual", sync["selections"].array), ("automatic", auto["selections"].array)] {
+        if hadPrevious {
+            try db.execute("DELETE FROM ios_music_sync_selections WHERE scope=?", [.text(scope)])
+            try db.execute("DELETE FROM ios_music_sync_scopes WHERE scope=?", [.text(scope)])
+            try db.execute("DELETE FROM ios_music_sync_issues WHERE scope=?", [.text(scope)])
+            try db.execute("DELETE FROM ios_music_sync_auto_bindings WHERE scope=?", [.text(scope)])
+            try db.execute("DELETE FROM ios_music_sync_relationship_platforms WHERE scope=?", [.text(scope)])
+            try db.execute("DELETE FROM ios_music_sync_fences WHERE scope=?", [.text(scope)])
+        }
+
+        for (section, items) in [("manual", sync.manualSelections), ("automatic", sync.automaticSelections)] {
             for (index, sel) in items.enumerated() {
                 try db.execute(
                     "INSERT INTO ios_music_sync_selections(scope,section,position,platform,favorites,playlists) VALUES(?,?,?,?,?,?)",
-                    [
-                        .text(scope), .text(section), .integer(index),
-                        .text(sel["platform"].string), .bool(sel["favorites"].bool), .bool(sel["playlists"].bool)
-                    ]
+                    [.text(scope), .text(section), .integer(index), .text(sel.platform), .bool(sel.favorites), .bool(sel.playlists)]
                 )
             }
         }
 
-        try db.execute("DELETE FROM ios_music_sync_scopes WHERE scope=?", [.text(scope)])
-        for (platform, accountScope) in sync["scopes"].fields where accountScope.isString {
+        for item in sync.scopes {
             try db.execute(
                 "INSERT INTO ios_music_sync_scopes(scope,platform,account_scope) VALUES(?,?,?)",
-                [.text(scope), .text(platform), .text(accountScope.string)]
+                [.text(scope), .text(item.platform), .text(item.accountScope)]
             )
         }
 
-        try db.execute("DELETE FROM ios_music_sync_issues WHERE scope=?", [.text(scope)])
-        for (index, issue) in sync["issues"].array.enumerated() {
-            let colID = issue["collectionID"].isString ? issue["collectionID"] : issue["collectionId"]
+        for (index, issue) in sync.issues.enumerated() {
             try db.execute(
                 "INSERT INTO ios_music_sync_issues(scope,position,platform,collection_id,code) VALUES(?,?,?,?,?)",
                 [
                     .text(scope), .integer(index),
-                    MusicPersistenceHelpers.optionalNonEmpty(issue["platform"]),
-                    MusicPersistenceHelpers.optionalNonEmpty(colID),
-                    .text(issue["code"].string)
+                    .optional(issue.platform.flatMap { $0.isEmpty ? nil : $0 }),
+                    .optional(issue.collectionID.flatMap { $0.isEmpty ? nil : $0 }),
+                    .text(issue.code)
                 ]
             )
         }
 
-        try db.execute("DELETE FROM ios_music_sync_auto_bindings WHERE scope=?", [.text(scope)])
-        for (platform, binding) in auto["bindings"].fields where binding.isObject {
+        for binding in sync.autoBindings {
             try db.execute(
                 "INSERT INTO ios_music_sync_auto_bindings(scope,platform,account_id,binding_scope) VALUES(?,?,?,?)",
-                [.text(scope), .text(platform), .text(binding["accountID"].string), .text(binding["scope"].string)]
+                [.text(scope), .text(binding.platform), .text(binding.accountID), .text(binding.bindingScope)]
             )
         }
 
-        try db.execute("DELETE FROM ios_music_sync_relationship_platforms WHERE scope=?", [.text(scope)])
-        for (index, platform) in auto["relationshipPlatforms"].strings.enumerated() {
+        for (index, platform) in sync.relationshipPlatforms.enumerated() {
             try db.execute(
                 "INSERT INTO ios_music_sync_relationship_platforms(scope,position,platform) VALUES(?,?,?)",
                 [.text(scope), .integer(index), .text(platform)]
             )
         }
 
-        try db.execute("DELETE FROM ios_music_sync_fences WHERE scope=?", [.text(scope)])
-        for (index, fence) in sync["fences"].array.enumerated() {
-            let mut = fence["mutation"]
-            let before = mut["before"]
-            let hasBefore = before.isObject
-            let sub = mut["beforeSubscription"]
-            let hasSub = sub.isObject
+        for (index, fence) in sync.fences.enumerated() {
+            let before = fence.before
+            let sub = fence.beforeSubscription
             try db.execute(
                 "INSERT INTO ios_music_sync_fences(" +
                 "scope,fence_index,platform,account_id,fence_scope,local_id,local_revision," +
@@ -690,50 +689,50 @@ enum MusicLibraryAreaStore {
                 ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     .text(scope), .integer(index),
-                    .text(fence["platform"].string), .text(fence["accountID"].string),
-                    .text(fence["scope"].string), .text(fence["localID"].string),
-                    .integer(fence["localRevision"].int),
-                    MusicPersistenceHelpers.optionalString(fence["acknowledgedID"]),
-                    MusicPersistenceHelpers.optionalString(fence["acknowledgedName"]),
-                    MusicPersistenceHelpers.optionalString(mut["id"]),
-                    MusicPersistenceHelpers.optionalString(mut["action"]),
-                    MusicPersistenceHelpers.optionalString(mut["collectionID"]),
-                    MusicPersistenceHelpers.optionalString(mut["name"]),
-                    MusicPersistenceHelpers.optionalString(mut["directoryRevision"]),
-                    hasBefore ? MusicPersistenceHelpers.optionalString(before["id"]) : .null,
-                    hasBefore ? MusicPersistenceHelpers.optionalString(before["name"]) : .null,
-                    hasBefore ? MusicPersistenceHelpers.optionalString(before["kind"]) : .null,
-                    hasBefore ? .bool(before["writable"].bool) : .null,
-                    hasBefore ? .bool(before["canRename"].bool) : .null,
-                    hasBefore ? .bool(before["canDelete"].bool) : .null,
-                    hasBefore ? .bool(before["canOrder"].bool) : .null,
-                    hasBefore ? MusicPersistenceHelpers.optionalString(before["revision"]) : .null,
-                    hasSub ? MusicPersistenceHelpers.optionalString(sub["remoteID"]) : .null,
-                    hasSub ? MusicPersistenceHelpers.optionalString(sub["relationID"]) : .null,
-                    hasSub ? MusicPersistenceHelpers.optionalString(sub["name"]) : .null,
-                    hasSub ? MusicPersistenceHelpers.optionalString(sub["creator"]) : .null,
-                    hasSub ? MusicPersistenceHelpers.optionalString(sub["artwork"]) : .null,
-                    hasSub ? MusicPersistenceHelpers.optionalInt(sub["count"]) : .null
+                    .text(fence.platform), .text(fence.accountID),
+                    .text(fence.fenceScope), .text(fence.localID),
+                    .integer(fence.localRevision),
+                    .optional(fence.acknowledgedID),
+                    .optional(fence.acknowledgedName),
+                    .optional(fence.mutationID),
+                    .optional(fence.mutationAction),
+                    .optional(fence.mutationCollectionID),
+                    .optional(fence.mutationName),
+                    .optional(fence.mutationDirectoryRevision),
+                    .optional(before?.id),
+                    .optional(before?.name),
+                    .optional(before?.kind),
+                    .optional(before?.writable),
+                    .optional(before?.canRename),
+                    .optional(before?.canDelete),
+                    .optional(before?.canOrder),
+                    .optional(before?.revision),
+                    .optional(sub?.remoteID),
+                    .optional(sub?.relationID),
+                    .optional(sub?.name),
+                    .optional(sub?.creator),
+                    .optional(sub?.artwork),
+                    .optional(sub?.count)
                 ]
             )
-            for (mPos, member) in mut["members"].array.enumerated() {
+            for (mPos, member) in fence.mutationMembers.enumerated() {
                 try db.execute(
                     "INSERT INTO ios_music_sync_fence_members(scope,fence_index,member_set,position,native_id,occurrence_id) " +
                     "VALUES(?,?,?,?,?,?)",
                     [
                         .text(scope), .integer(index), .text("mutation"), .integer(mPos),
-                        .text(member["nativeID"].string), MusicPersistenceHelpers.optionalString(member["occurrenceID"])
+                        .text(member.nativeID), .optional(member.occurrenceID)
                     ]
                 )
             }
-            if hasBefore {
-                for (mPos, member) in before["members"].array.enumerated() {
+            if let before {
+                for (mPos, member) in before.members.enumerated() {
                     try db.execute(
                         "INSERT INTO ios_music_sync_fence_members(scope,fence_index,member_set,position,native_id,occurrence_id) " +
                         "VALUES(?,?,?,?,?,?)",
                         [
                             .text(scope), .integer(index), .text("before"), .integer(mPos),
-                            .text(member["nativeID"].string), MusicPersistenceHelpers.optionalString(member["occurrenceID"])
+                            .text(member.nativeID), .optional(member.occurrenceID)
                         ]
                     )
                 }

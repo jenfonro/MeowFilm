@@ -101,8 +101,11 @@ struct MusicNativeAccountURLCache {
     }
 
     private let database: SQLiteDatabase?
-    private static let columns = ["scope", "platform", "native_id", "quality", "url", "full", "actual_quality", "bitrate",
-                                  "sample_rate", "duration", "expires_at", "license_expires_at", "saved_at"]
+    private static let insertSQL =
+        "INSERT INTO ios_music_audio_urls(" +
+        "scope,platform,native_id,quality,url,full,actual_quality,bitrate," +
+        "sample_rate,duration,expires_at_ms,license_expires_at_ms,saved_at_ms" +
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"
     private var loaded = false
     private var entries: [Entry] = []
     // A delayed pre-failure resolver must not reinsert a URL rejected by the
@@ -160,8 +163,8 @@ struct MusicNativeAccountURLCache {
                 var list: [Entry] = []
                 try db.scan(
                     "SELECT scope, platform, native_id, quality, url, full, actual_quality, bitrate, " +
-                    "sample_rate, duration, expires_at, license_expires_at, saved_at " +
-                    "FROM ios_music_audio_urls ORDER BY saved_at LIMIT 200"
+                    "sample_rate, duration, expires_at_ms, license_expires_at_ms, saved_at_ms " +
+                    "FROM ios_music_audio_urls ORDER BY saved_at_ms LIMIT 200"
                 ) { cursor in
                     let key = Key(
                         scope: try cursor.text(0),
@@ -177,10 +180,10 @@ struct MusicNativeAccountURLCache {
                         bitrate: try cursor.optionalDouble(7),
                         sampleRate: try cursor.optionalDouble(8),
                         duration: try cursor.optionalDouble(9),
-                        expiresAtMs: try cursor.optionalDouble(10),
-                        licenseExpiresAtMs: try cursor.optionalDouble(11)
+                        expiresAtMs: try cursor.optionalInt64(10).map(Double.init),
+                        licenseExpiresAtMs: try cursor.optionalInt64(11).map(Double.init)
                     )
-                    let entry = Entry(key: key, record: record, savedAt: Date(timeIntervalSince1970: try cursor.double(12)))
+                    let entry = Entry(key: key, record: record, savedAt: try cursor.dateFromMillis(12))
                     if entry.usable(at: now) { list.append(entry) }
                 }
                 return list
@@ -275,9 +278,9 @@ struct MusicNativeAccountURLCache {
                 r.bitrate.map(SQLiteValue.real) ?? .null,
                 r.sampleRate.map(SQLiteValue.real) ?? .null,
                 r.duration.map(SQLiteValue.real) ?? .null,
-                r.expiresAtMs.map(SQLiteValue.real) ?? .null,
-                r.licenseExpiresAtMs.map(SQLiteValue.real) ?? .null,
-                .optional(entry.savedAt),
+                r.expiresAtMs.map { .integer(Int64($0.rounded())) } ?? .null,
+                r.licenseExpiresAtMs.map { .integer(Int64($0.rounded())) } ?? .null,
+                .epochMillis(entry.savedAt),
             ]
         }
         do {
@@ -288,8 +291,10 @@ struct MusicNativeAccountURLCache {
             // The byte budget also applies when persistence is absent/failed.
             guard let database else { return }
             try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
-                try db.reconcile("ios_music_audio_urls", columns: Self.columns,
-                    key: ["scope", "platform", "native_id", "quality"], rows: rows)
+                try db.execute("DELETE FROM ios_music_audio_urls")
+                for row in rows {
+                    try db.execute(Self.insertSQL, row)
+                }
             }
         } catch {
             // A disk failure cannot turn usable media into failure.

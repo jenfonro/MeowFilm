@@ -169,7 +169,7 @@ final class MeowfilmAssembly: ObservableObject {
         }
         self.resources = resources
         do {
-            try await appearance.bind(database: resources.database)
+            try await appearance.bind(database: resources.database, cacheDatabase: resources.cacheDatabase)
             try await volumePreferences.bind(database: resources.database)
             await playerPreferences.bind(database: resources.database)
             try await filmLibrary.bind(database: resources.database)
@@ -201,11 +201,11 @@ final class MeowfilmAssembly: ObservableObject {
         }
         let playbackSettings = FilmPlaybackSettingsModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
-        }, settingsDocument: resources.filmSettings[.preferences])
+        }, settingsRepository: resources.filmSettings.repository)
         playbackSettings.playbackSnapshot = { [weak self] in
             self?.filmMediaPlayback?.snapshot ?? self?.filmPlayback?.snapshot
         }
-        let pan = PanAccountsModel(service: PanAccountService(document: resources.filmSettings[.panAccounts],
+        let pan = PanAccountsModel(service: PanAccountService(settingsRepository: resources.filmSettings.repository,
             connection: { try await resources.scriptSession.connection() }))
         let filmSettings = FilmSettingsModel(rules: resources.filmRules, sources: resources.filmSourceSettings,
                                              tmdb: tmdb, douban: douban, pan: pan, playback: playbackSettings,
@@ -487,6 +487,8 @@ final class MeowfilmAssembly: ObservableObject {
             await self?.playerPreferences.close()
             await self?.volumePreferences.close()
             await self?.filmLibrary.close()
+            do { try await resources?.cacheDatabase.close() }
+            catch { if self?.shutdownError == nil { self?.shutdownError = "缓存数据库关闭失败" } }
             do { try await resources?.database.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = "数据库关闭失败" } }
             lease?.cancel()
@@ -529,6 +531,7 @@ final class MeowfilmAssembly: ObservableObject {
         await resources.musicAudioCache?.close()
         await resources.musicPresentationCache.close()
         do { try resources.musicLibrary.close() } catch { NSLog("Music repository shutdown failed") }
+        do { try await resources.cacheDatabase.close() } catch { NSLog("Cache database shutdown failed") }
         do { try await resources.database.close() } catch { NSLog("Database shutdown failed") }
     }
 
@@ -578,6 +581,7 @@ final class MeowfilmAssembly: ObservableObject {
             await executor
             await resources?.musicAudioCache?.close()
             await resources?.musicPresentationCache.close()
+            do { try await resources?.cacheDatabase.close() } catch { NSLog("Cache database shutdown failed") }
             do { try await resources?.database.close() } catch { NSLog("Database shutdown failed") }
             lease?.cancel()
         }

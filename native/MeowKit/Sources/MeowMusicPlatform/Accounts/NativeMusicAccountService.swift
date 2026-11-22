@@ -326,13 +326,15 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     public init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
                 platformClient: MusicPlatformClient,
                 database: SQLiteDatabase? = nil,
+                cacheDatabase: SQLiteDatabase? = nil,
                 cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() }) {
         self.accounts = accounts; self.scopes = scopes; self.now = clock
         self.platformClient = platformClient
         self.cacheLifecycle = cacheLifecycle
-        self.urlCache = MusicNativeAccountURLCache(database: database)
-        self.chorusCache = MusicAccountChorusCache(database: database)
+        let cache = cacheDatabase ?? database
+        self.urlCache = MusicNativeAccountURLCache(database: cache)
+        self.chorusCache = MusicAccountChorusCache(database: cache)
         self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(database: database)
         self.providers = Dictionary(uniqueKeysWithValues: MusicAccountPlatform.allCases.map {
             ($0, MusicNodeAccountProvider(platform: $0, client: platformClient, clock: clock) as any MusicAccountProvider)
@@ -357,14 +359,16 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
          providers: [MusicAccountPlatform: any MusicAccountProvider],
          database: SQLiteDatabase? = nil,
+         cacheDatabase: SQLiteDatabase? = nil,
          cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
          clock: @escaping @Sendable () -> Date = { Date() }) {
         self.accounts = accounts; self.scopes = scopes; self.providers = providers
         self.platformClient = nil
         self.now = clock
         self.cacheLifecycle = cacheLifecycle
-        self.urlCache = MusicNativeAccountURLCache(database: database)
-        self.chorusCache = MusicAccountChorusCache(database: database)
+        let cache = cacheDatabase ?? database
+        self.urlCache = MusicNativeAccountURLCache(database: cache)
+        self.chorusCache = MusicAccountChorusCache(database: cache)
         self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(database: database)
     }
     private func configured(_ platform: MusicAccountPlatform) throws -> AccountIdentity {

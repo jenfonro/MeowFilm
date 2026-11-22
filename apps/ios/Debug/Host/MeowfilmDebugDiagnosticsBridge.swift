@@ -61,6 +61,15 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
               !sql.isEmpty else {
             throw DebugAPIError.invalidArgument("storage/query requires non-empty string 'sql'")
         }
+        let dbName: String
+        if let rawDB = body["db"] {
+            guard let parsed = rawDB.stringValue, parsed == "data" || parsed == "cache" else {
+                throw DebugAPIError.invalidArgument("storage/query 'db' must be 'data' or 'cache'")
+            }
+            dbName = parsed
+        } else {
+            dbName = "data"
+        }
         let params: [DebugJSONValue]
         if let rawParams = body["params"] {
             guard let arr = rawParams.arrayValue else {
@@ -75,12 +84,13 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
             guard let parsed = rawMax.intValue, parsed >= 1 else {
                 throw DebugAPIError.invalidArgument("storage/query 'maxRows' must be an integer >= 1")
             }
-            maxRows = parsed
+            maxRows = min(parsed, 5000)
         } else {
-            maxRows = 500
+            maxRows = 200
         }
         let resources = try await requireResources()
-        let result = try await resources.database.debugReadOnlyQuery(
+        let targetDB = dbName == "cache" ? resources.cacheDatabase : resources.database
+        let result = try await targetDB.debugReadOnlyQuery(
             sql: sql,
             params: params,
             maxRows: maxRows

@@ -14,7 +14,7 @@ protocol MusicHomeDisplaySnapshotStoring: MusicHomeSnapshotStoring {
 }
 
 public final class MusicNativeHomeSnapshotDocument: MusicHomeDisplaySnapshotStoring, @unchecked Sendable {
-    public static let namespace = "music.home.display.v2"
+    public static let namespace = "music.home.display.v1"
     private let database: SQLiteDatabase
     public init(database: SQLiteDatabase) { self.database = database }
     func readDisplay() throws -> (source: MusicPublicBrowsePlatform, page: MusicNativePublicBrowseDiscovery)? {

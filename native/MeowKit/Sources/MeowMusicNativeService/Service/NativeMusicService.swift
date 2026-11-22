@@ -14,18 +14,18 @@ struct MusicDocument: Sendable {
     let songRows: any MusicNativeLibraryReading
     init(snapshot: MusicNativeLibrarySnapshot, runID: String, songs: any MusicNativeLibraryReading) throws {
         revision = snapshot.revision; songRows = songs
-        library = snapshot.areas["library"] ?? MusicModel.library
-        queue = snapshot.areas["queue"] ?? MusicModel.queue
-        playback = snapshot.areas["playback"] ?? MusicModel.playback
-        history = snapshot.areas["history"] ?? MusicModel.history
-        catalogSource = snapshot.areas["catalogSource"] ?? MusicModel.catalogSource
+        library = snapshot.areas.library.map { MusicPersistenceAdapter.libraryToMJ($0) } ?? MusicModel.library
+        queue = snapshot.areas.queue.map { MusicPersistenceAdapter.queueToMJ($0) } ?? MusicModel.queue
+        playback = snapshot.areas.playback.map { MusicPersistenceAdapter.playbackToMJ($0) } ?? MusicModel.playback
+        history = snapshot.areas.history.map { MusicPersistenceAdapter.historyToMJ($0) } ?? MusicModel.history
+        catalogSource = snapshot.areas.catalogSource.map { MusicPersistenceAdapter.catalogSourceToMJ($0) } ?? MusicModel.catalogSource
         if queue["runId"].string != runID { queue["history"] = .array([]); queue["failed"] = .array([]) }
         queue["runId"] = .string(runID)
         if playback["position"]["occurrenceId"] != queue["currentId"] { resetPosition() }
     }
     mutating func resetPosition() { playback["position"] = .obj([("occurrenceId", queue["currentId"]), ("seconds", .n(0))]) }
     func song(_ id: String) throws -> MJ {
-        guard let song = try songRows.song(id: id) else { throw MusicServiceError.notFound }
+        guard let song = try songRows.songMJ(id: id) else { throw MusicServiceError.notFound }
         return song
     }
     func projectSongs(_ ids: [String]) throws -> MJ {
@@ -157,12 +157,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     let random: @Sendable () -> Double
     let runID = UUID().uuidString.lowercased()
     private var sessionPosition = MusicModel.playback["position"]
-    private var parsedDocument: (identity: MusicNativeLibraryRevision, state: MusicDocument)?
-    private struct PendingTransaction {
-        let before: MusicNativeLibraryRevision, after: MusicNativeLibraryRevision
-        let draft: MusicDocument, areas: Set<String>, changed: Set<String>, songs: Set<String>
-    }
-    private var pendingTransaction: PendingTransaction?
+    private var parsedDocument: (revision: Int, state: MusicDocument)?
     var available = false, generation: UInt64 = 0, closed = false, epoch = UUID()
     var lyricEpoch = UUID()
     struct Attempt: Sendable {
@@ -392,21 +387,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     func read() throws -> MusicDocument {
         try check()
         do {
-            let identity = try repositoryReader.readRevision()
-            if let pending = pendingTransaction {
-                if identity == pending.after {
-                    pendingTransaction = nil
-                    publishTransaction(pending.draft, identity: identity, areas: pending.areas, changed: pending.changed, songs: pending.songs)
-                } else if identity == pending.before {
-                    pendingTransaction = nil; parsedDocument = nil
-                } else { throw MusicServiceError.storageConflict }
-            }
+            let currentRevision = try repositoryReader.readRevision()
             var state: MusicDocument
-            if let cached = parsedDocument, cached.identity == identity { state = cached.state }
+            if let cached = parsedDocument, cached.revision == currentRevision { state = cached.state }
             else {
                 let snapshot = try repositoryReader.readSnapshot()
                 state = try MusicDocument(snapshot: snapshot, runID: runID, songs: repositoryReader)
-                parsedDocument = (snapshot.identity, state)
+                parsedDocument = (snapshot.revision, state)
             }
             if sessionPosition["occurrenceId"] == state.queue["currentId"] { state.playback["position"] = sessionPosition }
             else { state.resetPosition() }
@@ -418,24 +405,19 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                         _ change: (inout MusicDocument) throws -> T) throws -> T {
         try check()
         let original = try read()
-        guard let originalIdentity = parsedDocument?.identity else { throw MusicServiceError.storageConflict }
+        guard let originalRevision = parsedDocument?.revision else { throw MusicServiceError.storageConflict }
         var draft = original
         for area in areas { try draft.requireRevision(area) }
         var changedSongs = Set<String>()
         var changed = Set<String>()
-        var candidateReady = false
-        var commitIdentity: MusicNativeLibraryRevision?
-        let value: T
-        do {
-            value = try withUnsafeCurrentTask { task in
+        let value: T = try withUnsafeCurrentTask { task in
             try database.withTransaction(commit: { action in
                 try access.perform {
                     if task?.isCancelled == true { throw MusicServiceError.cancelled }
-                    commitIdentity = try database.readRevision()
                     try action()
                 }
             }) { writer in
-                try musicRequire(try writer.readRevision() == originalIdentity, .storageConflict)
+                try musicRequire(try writer.readRevision() == originalRevision, .storageConflict)
                 activeSongWriter = writer
                 defer { activeSongWriter = nil }
                 let result = try change(&draft)
@@ -458,36 +440,21 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                 }
                 if changed.contains("queue") { try draft.requireQueue(knownSongIDs: retained) }
                 if task?.isCancelled == true { throw MusicServiceError.cancelled }
-                for area in changed { try writer.saveArea(area, value: draft.area(area)) }
+                for area in changed { try writer.saveAreaMJ(area, value: draft.area(area)) }
                 changedSongs = writer.changedSongIDs
-                candidateReady = true
                 return result
             }
-            }
-        } catch MusicNativeLibraryCommitError.receiptLost {
-            // The store verifies this transaction's durable receipt before
-            // reporting a lost callback. Settle its facts without replaying it.
-            if candidateReady {
-                draft.revision = original.revision + 1
-                publishTransaction(draft, identity: commitIdentity, areas: areas, changed: changed, songs: changedSongs)
-            }
-            throw MusicServiceError.commitUnconfirmed
-        } catch MusicNativeLibraryCommitError.outcomeUnknown(let before, let after) {
-            try musicRequire(candidateReady && before == originalIdentity &&
-                after.revision == original.revision + 1, .storageConflict)
-            draft.revision = after.revision
-            pendingTransaction = .init(before: before, after: after, draft: draft, areas: areas, changed: changed, songs: changedSongs)
-            throw MusicServiceError.commitUnconfirmed
         }
         if changed.isEmpty && changedSongs.isEmpty { return value }
-        draft.revision = original.revision + 1
-        publishTransaction(draft, identity: commitIdentity, areas: areas, changed: changed, songs: changedSongs)
+        let nextRevision = originalRevision + 1
+        draft.revision = nextRevision
+        publishTransaction(draft, revision: nextRevision, areas: areas, changed: changed, songs: changedSongs)
         if reportingCancellationAfterCommit && Task.isCancelled { throw MusicServiceError.commitUnconfirmed }
         return value
     }
-    private func publishTransaction(_ draft: MusicDocument, identity: MusicNativeLibraryRevision?, areas: Set<String>, changed: Set<String>, songs: Set<String>) {
+    private func publishTransaction(_ draft: MusicDocument, revision: Int, areas: Set<String>, changed: Set<String>, songs: Set<String>) {
         if changed.isEmpty && songs.isEmpty { return }
-        parsedDocument = identity.map { ($0, draft) }
+        parsedDocument = (revision, draft)
         sessionPosition = draft.playback["position"]
         if areas.contains("queue") {
             let entries = Set(draft.queue["entries"].array.map { $0["id"].string })

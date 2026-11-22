@@ -28,21 +28,21 @@ public actor FilmSourceService {
     public private(set) var snapshot = FilmSourceSnapshot(cats: [], videos: [], runtimeError: nil)
 
     public init(transport: CatScriptTransport, database: SQLiteDatabase,
-                settingsDocument: FilmSettingsDocument, runtimeSourceRoot: URL,
+                settingsRepository: FilmSettingsRepository, runtimeSourceRoot: URL,
                 observeConnection: @escaping @Sendable () async -> RuntimeHTTPClient? = { nil }) {
         self.transport = transport; self.repository = FilmSourceRepository(database: database)
-        self.settings = CatSourceSettings(document: settingsDocument)
+        self.settings = CatSourceSettings(repository: settingsRepository)
         self.localInput = CatLocalSourceInput(runtimeRoot: runtimeSourceRoot)
         self.readSourceFile = { url in try await Self.readSource(url) }
         self.observeConnection = observeConnection
     }
 
     init(transport: CatScriptTransport, database: SQLiteDatabase,
-         settingsDocument: FilmSettingsDocument, runtimeSourceRoot: URL,
+         settingsRepository: FilmSettingsRepository, runtimeSourceRoot: URL,
          observeConnection: @escaping @Sendable () async -> RuntimeHTTPClient? = { nil },
          readSourceFile: @escaping @Sendable (URL) async throws -> String) {
         self.transport = transport; self.repository = FilmSourceRepository(database: database); self.readSourceFile = readSourceFile
-        self.settings = CatSourceSettings(document: settingsDocument)
+        self.settings = CatSourceSettings(repository: settingsRepository)
         self.localInput = CatLocalSourceInput(runtimeRoot: runtimeSourceRoot)
         self.observeConnection = observeConnection
     }
