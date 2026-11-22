@@ -11,6 +11,7 @@ namespace MeowFilm.Capabilities;
 public partial class MusicQueueView : UserControl
 {
     private readonly MusicCapability module;
+    public MusicQueueState State => module.QueueState;
     private readonly UserScrollIntent scrollIntent;
     private bool loadingMore;
     private ScrollViewer? queueScroll;
@@ -36,7 +37,7 @@ public partial class MusicQueueView : UserControl
             var candidate = (MusicRecommendationCandidate)item;
             return [new("cover", candidate.Cover, candidate.Song.Id)];
         });
-        DataContext = module;
+        DataContext = module.QueueState;
         Loaded += (_, _) =>
         {
             if (Descendant<ScrollViewer>(QueueList) is not { } scroll) return;

@@ -367,12 +367,12 @@ public sealed partial class MusicCapability
         });
     }
 
-    public Task ClearSearchHistoryAsync()
+    public async Task ClearSearchHistoryAsync()
     {
-        if (!CanEdit || !HasSearchHistory || !dialogs.Confirm("清空搜索历史？", "搜索历史"))
-            return Task.CompletedTask;
+        if (!CanEdit || !HasSearchHistory || !await ConfirmAsync("清空搜索历史？", "搜索历史", lifetime.Token))
+            return;
         long revision = searchHistoryRevision;
-        return RunAsync(async () => PublishSearchHistory((await Call("music.search.history.clear",
+        await RunAsync(async () => PublishSearchHistory((await Call("music.search.history.clear",
             new { ifRevision = revision, confirm = true }, lifetime.Token)).GetProperty("history")));
     }
 

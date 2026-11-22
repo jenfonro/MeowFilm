@@ -1,6 +1,6 @@
 using System.ComponentModel;
-using System.Runtime.InteropServices;
 using Microsoft.UI.Xaml;
+using MeowFilm.Desktop;
 using MeowFilm.Media;
 
 namespace MeowFilm.Capabilities;
@@ -98,7 +98,7 @@ internal sealed class NativeMusicPlayback(NativeAudioPlayback native) : IMusicPl
 
 public interface IMusicDialogs
 {
-    bool Confirm(string message, string title);
+    Task<bool> ConfirmAsync(FrameworkElement owner, string message, string title, CancellationToken cancellationToken = default);
     Task<string[]?> SelectAudioFilesAsync(FrameworkElement owner);
     Task<string[]?> SelectScriptFilesAsync(FrameworkElement owner) => Task.FromResult<string[]?>(null);
     Task<string?> SelectScriptFileAsync(FrameworkElement owner) => Task.FromResult<string?>(null);
@@ -107,9 +107,18 @@ public interface IMusicDialogs
 
 internal sealed class MusicDialogs : IMusicDialogs
 {
-    public bool Confirm(string message, string title) => MessageBox(0, message, title, 0x31) == 1;
-    [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]
-    private static extern int MessageBox(nint window, string text, string caption, uint flags);
+    public async Task<bool> ConfirmAsync(FrameworkElement owner, string message, string title, CancellationToken cancellationToken = default)
+    {
+        var request = new DesktopDialogRequest
+        {
+            Title = title,
+            Message = message,
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = DesktopDialogDefaultButton.Close
+        };
+        return await DesktopModalHost.ShowDialogAsync(owner, request, cancellationToken, stack: true) == DesktopDialogResult.Primary;
+    }
     public Task<string[]?> SelectAudioFilesAsync(FrameworkElement owner) =>
         CapabilityFilePicker.OpenMultipleAsync(owner, "添加音乐", ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma");
     public Task<string[]?> SelectScriptFilesAsync(FrameworkElement owner) =>

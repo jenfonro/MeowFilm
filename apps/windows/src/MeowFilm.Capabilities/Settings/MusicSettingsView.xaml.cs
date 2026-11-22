@@ -28,7 +28,9 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     {
         this.module = module;
         InitializeComponent();
-        DataContext = module;
+        ModalStash.Children.Clear();
+        DataContext = module.SettingsState;
+        AccountsPanel.DataContext = module.AccountsState;
         anchors = SettingsNavigation.Children.OfType<RadioButton>().ToArray();
         sections = [AccountsSection, SearchSection, QualitySection, MetadataSection];
         Loaded += View_Loaded;
@@ -62,7 +64,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         RetireExclusionPopup();
         AccountTransferButton.Flyout.Hide();
         AccountsPanel.CloseTransientPopups();
-        SearchAdvancedPopup.Hide();
+        DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
         await module.DeactivateSettingsAsync();
     }
     private Task UpdateActivation()
@@ -77,7 +79,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         if (!DesktopVisual.IsVisible(this))
         {
             AccountTransferButton.Flyout.Hide(); AccountsPanel.CloseTransientPopups();
-            SearchAdvancedPopup.Hide(); RetireExclusionPopup();
+            DesktopModalHost.CloseFor(this, SearchAdvancedSurface); RetireExclusionPopup();
         }
         await UpdateActivation();
     }
@@ -108,7 +110,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         SettingsScroller.Visibility = sources ? Visibility.Collapsed : Visibility.Visible;
         SourcesPage.Visibility = sources ? Visibility.Visible : Visibility.Collapsed;
         anchor.Focus(FocusState.Programmatic); anchor.StartBringIntoView();
-        if (sources) { RetireExclusionPopup(); SearchAdvancedPopup.Hide(); return; }
+        if (sources) { RetireExclusionPopup(); DesktopModalHost.CloseFor(this, SearchAdvancedSurface); return; }
         SettingsScroller.UpdateLayout(); UpdateLayoutMetrics();
         if (FindName(key) is Border section) SettingsScroller.ChangeView(null, section.TransformToVisual(SectionsStack).TransformPoint(new Point()).Y, null, true);
     }
@@ -188,23 +190,23 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         {
             if (exclusionShowing) return;
             exclusionShowing = true;
-            try { await DialogPlacement.ShowAsync(this, ExclusionPopup); }
+            try { await DesktopModalHost.ShowSurfaceAsync(this, ExclusionPopupSurface, onOpened: () => ExclusionSong.Focus(FocusState.Programmatic)); }
             finally { exclusionShowing = false; }
         }
     }
     private void RetireExclusionPopup()
     {
         exclusionRequest++;
-        ExclusionPopup.Hide();
+        DesktopModalHost.CloseFor(this, ExclusionPopupSurface);
     }
-    private void ExclusionCancel_Click(object sender, RoutedEventArgs e) => ExclusionPopup.Hide();
+    private void ExclusionCancel_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, ExclusionPopupSurface);
     private async void ExclusionConfirm_Click(object sender, RoutedEventArgs e)
     {
         var song = ExclusionSong.SelectedItem as MusicExclusionOption;
         var provider = ExclusionProvider.SelectedItem as MusicExclusionOption;
         var platform = ExclusionPlatform.SelectedItem as MusicExclusionOption;
         if (song is null || provider is null || platform is null) return;
-        ExclusionPopup.Hide();
+        DesktopModalHost.CloseFor(this, ExclusionPopupSurface);
         await module.AddSourceExclusionAsync(song, provider, platform);
     }
     private async void ExclusionRestore_Click(object sender, RoutedEventArgs e)
@@ -216,13 +218,23 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private async void SearchAdvanced_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: string kind } button) return;
-        SearchAdvancedPopup.Hide();
+        DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
         searchAdvancedKind = kind;
         ShowSearchAdvanced();
         if (advancedShowing) return;
         advancedShowing = true;
-        try { await DialogPlacement.ShowAsync(this, SearchAdvancedPopup); }
-        finally { advancedShowing = false; }
+        try
+        {
+            await DesktopModalHost.ShowSurfaceAsync(
+                this,
+                SearchAdvancedSurface,
+                onOpened: () => { SearchPagesBox.Focus(FocusState.Programmatic); SearchPagesBox.SelectAll(); });
+        }
+        finally
+        {
+            advancedShowing = false;
+            await CommitSearchAdvancedAsync();
+        }
     }
     private void ShowSearchAdvanced(bool keepEditing = false)
     {
@@ -232,12 +244,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
             // Do not overwrite the field the user has moved on to edit.
             if (!keepEditing || !DesktopVisual.ContainsFocus(box)) box.Text = value.ToString(CultureInfo.InvariantCulture);
     }
-    private void SearchAdvancedPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e) { SearchPagesBox.Focus(FocusState.Programmatic); SearchPagesBox.SelectAll(); }
-    private async void SearchAdvancedPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
-    {
-        advancedShowing = false;
-        await CommitSearchAdvancedAsync();
-    }
+    private void SearchAdvancedClose_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
     private async void SearchAdvancedBox_LostFocus(object sender, RoutedEventArgs e) => await CommitSearchAdvancedAsync();
     private async void SearchAdvancedPopup_KeyDown(object sender, KeyRoutedEventArgs e)
     {
@@ -245,7 +252,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         {
             // Discard unsaved edits.
             ShowSearchAdvanced();
-            SearchAdvancedPopup.Hide(); e.Handled = true;
+            DesktopModalHost.CloseFor(this, SearchAdvancedSurface); e.Handled = true;
         }
         else if (e.Key == VirtualKey.Enter) { e.Handled = true; await CommitSearchAdvancedAsync(); ShowSearchAdvanced(); }
     }

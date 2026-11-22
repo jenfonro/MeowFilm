@@ -21,12 +21,13 @@ public sealed class FilmSettingsRuleRow(string title, int number, string pattern
     bool hasReplacement = false)
     : INotifyPropertyChanged
 {
-    private string pattern = pattern, replace = replace, preview = "";
+    private string pattern = pattern, replace = replace, flags = flags, preview = "";
+    private int number = number;
     public string Pattern { get => pattern; set { pattern = value; Changed(); } }
     public string Replace { get => replace; set { replace = value; Changed(); } }
-    public string Flags { get; } = flags;
+    public string Flags => flags;
     public bool HasReplacement { get; } = hasReplacement;
-    public int Number { get; } = number;
+    public int Number => number;
     public string Preview { get => preview; set { preview = value; Changed(); } }
     public string PatternLabel => $"{title}第 {Number} 条正则";
     public string ReplaceLabel => $"{title}第 {Number} 条替换";
@@ -34,6 +35,22 @@ public sealed class FilmSettingsRuleRow(string title, int number, string pattern
     public string DeleteLabel => $"删除{title}第 {Number} 条";
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
+
+    internal void Update(int nextNumber, string nextPattern, string nextReplace, string nextFlags)
+    {
+        if (number != nextNumber)
+        {
+            number = nextNumber;
+            Changed(nameof(Number));
+            Changed(nameof(PatternLabel));
+            Changed(nameof(ReplaceLabel));
+            Changed(nameof(SaveLabel));
+            Changed(nameof(DeleteLabel));
+        }
+        if (pattern != nextPattern) { pattern = nextPattern; Changed(nameof(Pattern)); }
+        if (replace != nextReplace) { replace = nextReplace; Changed(nameof(Replace)); }
+        if (flags != nextFlags) { flags = nextFlags; Changed(nameof(Flags)); }
+    }
 }
 
 public partial class FilmSettingsRuleEditor : UserControl

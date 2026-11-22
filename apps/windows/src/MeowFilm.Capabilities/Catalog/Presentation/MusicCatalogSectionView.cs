@@ -37,25 +37,33 @@ public sealed class MusicCatalogSectionView : UserControl
         title.Children.Add(titleText); title.Children.Add(progress); title.Children.Add(actionButton); heading.Children.Add(title);
         Grid.SetColumn(more, 1); Grid.SetColumn(refresh, 1); heading.Children.Add(more); heading.Children.Add(refresh);
         var canvas = new Canvas { Width = 20, Height = 20 };
-        var path = (Path)XamlReader.Load("<Path xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Data='M16.5,6 A7.5,7.5 0 1 0 17.2,12 M16.5,1.5 L16.5,6 12,6' StrokeThickness='1.2' StrokeStartLineCap='Round' StrokeEndLineCap='Round' StrokeLineJoin='Round'/>");
-        path.Stroke = refresh.Foreground; canvas.Children.Add(path); refresh.Content = canvas;
+        var path = new Path
+        {
+            Data = MusicVisuals.Geometry("M16.5,6 A7.5,7.5 0 1 0 17.2,12 M16.5,1.5 L16.5,6 12,6"),
+            StrokeThickness = 1.2,
+            StrokeStartLineCap = PenLineCap.Round,
+            StrokeEndLineCap = PenLineCap.Round,
+            StrokeLineJoin = PenLineJoin.Round,
+            Stroke = refresh.Foreground
+        };
+        canvas.Children.Add(path); refresh.Content = canvas;
         AutomationProperties.SetName(refresh, "刷新推荐");
         refresh.Click += async (_, _) => { if (owner is not null) await owner.RefreshCatalogAsync(); };
         more.Click += async (_, _) => { if (owner is not null) await owner.OpenSearchTabAsync(observed?.Title == "歌单" ? "playlists" : "songs"); };
         actionButton.Click += async (_, _) => { if (owner is not null && observed?.Action is { CanOpen: true } action) await owner.OpenCatalogCardAsync(action); };
         stack.Children.Add(heading); stack.Children.Add(tabs); stack.Children.Add(body); Content = stack;
-        tabs.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:local='using:MeowFilm.Capabilities'><local:MusicWrapPanel/></ItemsPanelTemplate>");
+        tabs.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:desktop='using:MeowFilm.Desktop'><desktop:WrapPanel/></ItemsPanelTemplate>");
         DataContextChanged += (_, _) => ObserveDisplay();
         Loaded += (_, _) =>
         {
             for (DependencyObject? node = VisualTreeHelper.GetParent(this); node is not null; node = VisualTreeHelper.GetParent(node))
                 if (node is MusicCatalogView view) { owner = view.Owner; break; }
-            if (owner is not null) owner.PropertyChanged += Changed;
+            if (owner is not null) owner.CatalogState.PropertyChanged += Changed;
             ObserveDisplay();
         };
         Unloaded += (_, _) =>
         {
-            if (owner is not null) owner.PropertyChanged -= Changed; owner = null;
+            if (owner is not null) owner.CatalogState.PropertyChanged -= Changed; owner = null;
             if (display is not null) display.PropertyChanged -= DisplayChanged; display = null;
             if (observed is not null) observed.PropertyChanged -= SectionChanged; observed = null;
         };

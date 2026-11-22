@@ -1,9 +1,6 @@
 <UserControl xmlns:desktop="using:MeowFilm.Desktop" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmSettingsRuleEditor" x:Name="Root">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/FilmSettingsTheme.xaml" />
-   </ResourceDictionary.MergedDictionaries>
    <local:FilmVisibilityConverter x:Key="Film.Visible" />
    <local:FilmEmptyConverter x:Key="Film.Empty" />
   </ResourceDictionary>
@@ -19,12 +16,12 @@
     <TextBox x:Name="NewPattern" Header="新正则" AutomationProperties.Name="新增正则" />
     <TextBox x:Name="NewReplace" Header="替换" AutomationProperties.Name="新增替换" Visibility="{Binding HasReplacement,ElementName=Root,Converter={StaticResource Film.Visible}}" />
    </StackPanel>
-   <Button x:Name="AddButton" Grid.Column="1" Content="添加" Click="Add_Click" VerticalAlignment="Top" Margin="0,28,0,0" />
+   <Button x:Name="AddButton" Grid.Column="1" Content="添加" Style="{StaticResource Settings.PrimaryButton}" Click="Add_Click" VerticalAlignment="Bottom" Margin="0,0,0,2" />
   </Grid>
   <ItemsControl x:Name="RuleList" ItemsSource="{Binding Rows,ElementName=Root}">
    <ItemsControl.ItemTemplate>
     <DataTemplate>
-     <Border BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" CornerRadius="8" Padding="12" Margin="0,0,0,8">
+     <Border Style="{StaticResource Settings.RuleSurface}" Margin="0,0,0,8">
       <Grid ColumnSpacing="8">
        <Grid.ColumnDefinitions>
         <ColumnDefinition Width="24" />
@@ -37,9 +34,9 @@
         <TextBox Text="{Binding Replace,Mode=TwoWay,UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="{Binding ReplaceLabel}" Visibility="{Binding HasReplacement,Converter={StaticResource Film.Visible}}" />
         <TextBlock Text="{Binding Preview}" TextWrapping="Wrap" Visibility="{Binding Preview,Converter={StaticResource Film.Visible}}" />
        </StackPanel>
-       <StackPanel Grid.Column="2" Spacing="8">
-        <Button Content="保存" Click="Save_Click" AutomationProperties.Name="{Binding SaveLabel}" />
-        <Button Content="删除" Click="Delete_Click" AutomationProperties.Name="{Binding DeleteLabel}" />
+       <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top" Margin="0,4,0,0" Spacing="8">
+        <Button Content="保存" Style="{StaticResource Settings.Button}" Click="Save_Click" AutomationProperties.Name="{Binding SaveLabel}" />
+        <Button Content="删除" Style="{StaticResource Settings.DangerButton}" Click="Delete_Click" AutomationProperties.Name="{Binding DeleteLabel}" />
        </StackPanel>
       </Grid>
      </Border>

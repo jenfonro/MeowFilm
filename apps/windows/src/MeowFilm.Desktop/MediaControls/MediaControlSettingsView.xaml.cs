@@ -96,8 +96,8 @@ public partial class MediaControlSettingsView : UserControl
         refreshing = true;
         try
         {
-            GlobalSwitch.IsOn = settings.Preferences.GlobalEnabled;
-            SystemMediaSwitch.IsOn = settings.Preferences.SystemMediaEnabled;
+            GlobalSwitch.IsChecked = settings.Preferences.GlobalEnabled;
+            SystemMediaSwitch.IsChecked = settings.Preferences.SystemMediaEnabled;
         }
         finally { refreshing = false; }
     }
@@ -200,7 +200,7 @@ public partial class MediaControlSettingsView : UserControl
     private async void GlobalSwitch_Toggled(object sender, RoutedEventArgs e)
     {
         if (refreshing || !subscribed) return;
-        bool enabled = GlobalSwitch.IsOn;
+        bool enabled = GlobalSwitch.IsChecked == true;
         EndRecording();
         await settings.SaveAsync(settings.Preferences with { GlobalEnabled = enabled });
         Refresh();
@@ -208,7 +208,7 @@ public partial class MediaControlSettingsView : UserControl
     private async void SystemMediaSwitch_Toggled(object sender, RoutedEventArgs e)
     {
         if (refreshing || !subscribed) return;
-        bool enabled = SystemMediaSwitch.IsOn;
+        bool enabled = SystemMediaSwitch.IsChecked == true;
         EndRecording();
         await settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = enabled });
         Refresh();

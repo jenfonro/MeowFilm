@@ -90,9 +90,8 @@ public partial class EntryCard : UserControl
         { sampledSource = Cover.Source; sampledPreview = preview; entryPalette = MusicEntryPalette.Sample(sampledSource, preview); }
         highContrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
         if (!changed) return;
-        var colors = new Windows.UI.ViewManagement.UISettings();
-        Foreground = highContrast ? new SolidColorBrush(colors.UIElementColor(Windows.UI.ViewManagement.UIElementType.WindowText)) : MusicVisuals.Brush("#FFFFFF");
-        Surface.Background = highContrast ? new SolidColorBrush(colors.UIElementColor(Windows.UI.ViewManagement.UIElementType.Window)) : entryPalette;
+        Foreground = highContrast ? MeowFilm.Desktop.SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.WindowText) : MusicVisuals.Brush("#FFFFFF");
+        Surface.Background = highContrast ? MeowFilm.Desktop.SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.Window) : entryPalette;
         var bottom = (Surface.Background as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.Gray;
         BottomShade.Background = new LinearGradientBrush
         {

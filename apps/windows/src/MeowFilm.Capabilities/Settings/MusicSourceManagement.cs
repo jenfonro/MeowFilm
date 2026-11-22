@@ -197,15 +197,18 @@ public sealed partial class MusicCapability
         }
         return ScriptActionAsync(row, enabled ? "enable" : "disable");
     }
-    public Task RemoveSourceAsync(MusicSourceRow? row) =>
-        row is { IsScript: true } && Sources.Contains(row) && CanEditScripts &&
-        dialogs.Confirm($"删除音源“{row.Name}”？", "删除音源") ? ScriptActionAsync(row, "remove") : Task.CompletedTask;
-    public Task RemoveSelectedSourcesAsync()
+    public async Task RemoveSourceAsync(MusicSourceRow? row)
+    {
+        if (row is not { IsScript: true } || !Sources.Contains(row) || !CanEditScripts) return;
+        if (!await ConfirmAsync($"删除音源“{row.Name}”？", "删除音源", lifetime.Token)) return;
+        await ScriptActionAsync(row, "remove");
+    }
+    public async Task RemoveSelectedSourcesAsync()
     {
         var rows = Sources.Where(row => row.Selected && row.IsScript).ToArray();
-        if (!CanEditScripts || rows.Length == 0 || !dialogs.Confirm($"删除所选的 {rows.Length} 个音源？", "删除音源"))
-            return Task.CompletedTask;
-        return RunSourceManagementAsync(async generation =>
+        if (!CanEditScripts || rows.Length == 0 || !await ConfirmAsync($"删除所选的 {rows.Length} 个音源？", "删除音源", lifetime.Token))
+            return;
+        await RunSourceManagementAsync(async generation =>
         {
             try
             {
@@ -218,9 +221,12 @@ public sealed partial class MusicCapability
             finally { NotifyMusicSourcesChanged(); await ReloadSources(lifetime.Token, generation); }
         });
     }
-    public Task RollbackSourceAsync(MusicSourceRow? row) =>
-        row is { IsScript: true, RollbackAvailable: true } && Sources.Contains(row) && CanEditScripts &&
-        dialogs.Confirm($"回退音源“{row.Name}”？", "回退音源") ? ScriptActionAsync(row, "rollback") : Task.CompletedTask;
+    public async Task RollbackSourceAsync(MusicSourceRow? row)
+    {
+        if (row is not { IsScript: true, RollbackAvailable: true } || !Sources.Contains(row) || !CanEditScripts) return;
+        if (!await ConfirmAsync($"回退音源“{row.Name}”？", "回退音源", lifetime.Token)) return;
+        await ScriptActionAsync(row, "rollback");
+    }
     private Task ScriptActionAsync(MusicSourceRow row, string action)
     {
         if (!CanEditScripts) return Task.CompletedTask;

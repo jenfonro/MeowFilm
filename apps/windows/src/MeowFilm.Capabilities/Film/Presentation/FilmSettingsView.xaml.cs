@@ -25,6 +25,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private long activation;
     private Func<Task>? popupAction;
     private Control? popupAnchor;
+    private bool popupOpen;
 
     public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
         : this(rules, sources, sources.Storage, null, () => null, metadata) { }
@@ -38,6 +39,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         this.metadata = metadata;
         panAccounts = new(sources.Runtime, store);
         InitializeComponent();
+        ModalStash.Children.Clear();
         PanPage.DataContext = panAccounts;
         if (business is not null)
         {
@@ -259,10 +261,10 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         ContentFrame.Margin = e.NewSize.Width < 700 || e.NewSize.Height < 450
             ? new(16, 0, 16, 8) : new(32, 0, 32, 12);
         if (compactSources != (e.NewSize.Width < 850)) UpdateSourceColumns(e.NewSize.Width < 850);
-        if (ActionPopup.IsOpen) UpdatePopupSize();
+        if (popupOpen) UpdatePopupSize();
     }
 
-    private void OpenPopup(FrameworkElement anchor, string title, string message, string accept,
+    private async void OpenPopup(FrameworkElement anchor, string title, string message, string accept,
         Func<Task> execute, bool edit = false, FilmCatSource? cat = null, string? importType = null)
     {
         if (!Active) return;
@@ -288,20 +290,30 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         AutomationProperties.SetName(PopupCancel, title + "：取消");
         AutomationProperties.SetName(PopupSurface, title);
         UpdatePopupSize();
-        ActionPopup.XamlRoot = XamlRoot;
-        ActionPopup.IsOpen = true;
+        popupOpen = true;
+        try
+        {
+            await DesktopModalHost.ShowSurfaceAsync(this, PopupSurface, onOpened: () =>
+            {
+                if (PopupFields.Visibility == Visibility.Visible) { CatNameBox.Focus(FocusState.Programmatic); CatNameBox.SelectAll(); }
+                else if (PopupCancel.Visibility == Visibility.Visible) PopupCancel.Focus(FocusState.Programmatic);
+                else PopupAccept.Focus(FocusState.Programmatic);
+            });
+        }
+        finally
+        {
+            popupOpen = false;
+            popupAction = null;
+            var restore = popupAnchor;
+            popupAnchor = null;
+            if (Active && restore is { Visibility: Visibility.Visible, IsEnabled: true }) restore.Focus(FocusState.Programmatic);
+        }
     }
 
     private void UpdatePopupSize()
     {
         PopupSurface.Width = Math.Min(400, Math.Max(240, ActualWidth - 32));
         PopupScroller.MaxHeight = Math.Max(100, ActualHeight - 64);
-        if (XamlRoot is { } root)
-        {
-            ActionPopup.HorizontalOffset = Math.Max(0, (root.Size.Width - PopupSurface.Width) / 2);
-            PopupSurface.Measure(new Size(PopupSurface.Width, PopupScroller.MaxHeight));
-            ActionPopup.VerticalOffset = Math.Max(0, (root.Size.Height - PopupSurface.DesiredSize.Height) / 2);
-        }
     }
 
     private string? catFilePath, originalCatType;
@@ -316,14 +328,9 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     }
     private async void CatFile_Click(object sender, RoutedEventArgs e)
     {
-        if (!Active || !ActionPopup.IsOpen) return;
-        ActionPopup.IsLightDismissEnabled = false;
-        try
-        {
-            string? path = (await PickLocalScriptsAsync("选择猫源文件")).FirstOrDefault();
-            if (path is not null && Active && ActionPopup.IsOpen) SelectCatFile(path);
-        }
-        finally { ActionPopup.IsLightDismissEnabled = true; }
+        if (!Active || !popupOpen) return;
+        string? path = (await PickLocalScriptsAsync("选择猫源文件")).FirstOrDefault();
+        if (path is not null && Active && popupOpen) SelectCatFile(path);
     }
     internal void SelectCatFile(string path)
     {
@@ -336,23 +343,9 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     {
         if (!initialized) return;
         if (!restoreFocus) popupAnchor = null;
-        ActionPopup.IsOpen = false;
+        popupOpen = false;
         popupAction = null;
-    }
-
-    private void ActionPopup_Opened(object? sender, object e)
-    {
-        if (PopupFields.Visibility == Visibility.Visible) { CatNameBox.Focus(FocusState.Programmatic); CatNameBox.SelectAll(); }
-        else if (PopupCancel.Visibility == Visibility.Visible) PopupCancel.Focus(FocusState.Programmatic);
-        else PopupAccept.Focus(FocusState.Programmatic);
-    }
-
-    private void ActionPopup_Closed(object? sender, object e)
-    {
-        popupAction = null;
-        var anchor = popupAnchor;
-        popupAnchor = null;
-        if (Active && anchor is { Visibility: Visibility.Visible, IsEnabled: true }) anchor.Focus(FocusState.Programmatic);
+        DesktopModalHost.CloseFor(this, PopupSurface);
     }
 
     private void ActionPopup_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -369,7 +362,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private async void PopupAccept_Click(object sender, RoutedEventArgs e)
     {
         var execute = popupAction;
-        if (!ActionPopup.IsOpen || execute is null || !Active) return;
+        if (!popupOpen || execute is null || !Active) return;
         if (PopupFields.Visibility == Visibility.Visible)
         {
             if (string.IsNullOrWhiteSpace(CatNameBox.Text))

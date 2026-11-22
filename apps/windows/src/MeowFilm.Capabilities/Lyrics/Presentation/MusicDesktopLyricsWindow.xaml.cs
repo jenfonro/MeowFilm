@@ -23,8 +23,6 @@ sealed partial class MusicDesktopLyricsWindow : Window
     private readonly MusicDesktopLyricsNative.SubclassProc hook;
     private readonly nint handle;
     private readonly MusicDesktopLyricsInputRegion inputRegion;
-    private readonly AccessibilitySettings accessibility = new();
-    private readonly UISettings uiSettings = new();
     private MusicDesktopLyricsUnlockWindow? unlockWindow;
     private MusicDesktopLyricColorWindow? colorWindow;
     private MenuFlyout? settingsMenu;
@@ -38,7 +36,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
     internal MusicDesktopLyricsUnlockWindow? UnlockWindow => unlockWindow;
     internal MusicDesktopLyricsWindow(MusicCapability module, Window anchor, MusicDesktopLyricsGeometry? geometry = null)
     {
-        this.module = module; InitializeComponent(); LyricsFrame.DataContext = LineSurface.DataContext = module;
+        this.module = module; InitializeComponent(); LyricsFrame.DataContext = LineSurface.DataContext = module.LyricsState;
         LyricPresenter.SizeChanged += (_, args) => LineSurface.Height = args.NewSize.Height;
         handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
         inputRegion = new(handle, LyricsFrame, () => HoverSurface.Visibility == Visibility.Visible || sizing);
@@ -52,7 +50,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
         MusicDesktopLyricsNative.SetResizableStyle(handle);
         pointerObserver = DispatcherQueue.CreateTimer(); pointerObserver.Interval = TimeSpan.FromMilliseconds(100);
         pointerObserver.Tick += (_, _) => ObservePointer();
-        module.PropertyChanged += ModuleChanged;
+        module.LyricsState.PropertyChanged += ModuleChanged;
         AppWindow.Closing += Closing;
         AppWindow.Changed += (_, args) =>
         {
@@ -63,12 +61,12 @@ sealed partial class MusicDesktopLyricsWindow : Window
             else if (locked) { unlockWindow?.Show(); QueueUnlockPlacement(); }
             else if (LyricsFrame.IsLoaded) StartPointerObserver();
         };
-        uiSettings.ColorValuesChanged += HighContrastChanged;
+        SystemAppearance.Changed += HighContrastChanged;
         Closed += (_, _) =>
         {
             closed = true; pointerObserver.Stop(); ClosePopups(); unlockWindow?.Close(); unlockWindow = null;
             inputRegion.Dispose();
-            module.PropertyChanged -= ModuleChanged; uiSettings.ColorValuesChanged -= HighContrastChanged;
+            module.LyricsState.PropertyChanged -= ModuleChanged; SystemAppearance.Changed -= HighContrastChanged;
             MusicDesktopLyricsNative.RemoveWindowSubclass(handle, hook, 1); LyricsFrame.DataContext = LineSurface.DataContext = null;
         };
         double dpi = Dpi;
@@ -84,7 +82,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
             line.RegisterPropertyChangedCallback(MusicDesktopLyricLineView.RowProperty, (_, _) => UpdateContentBounds());
             line.RegisterPropertyChangedCallback(MusicDesktopLyricLineView.ShowTranslationProperty, (_, _) => UpdateContentBounds());
         }
-        LyricsFrame.Loaded += (_, _) => { UpdatePresentation(); UpdatePlayback(); ApplyHighContrast(accessibility.HighContrast); StartPointerObserver(); };
+        LyricsFrame.Loaded += (_, _) => { UpdatePresentation(); UpdatePlayback(); ApplyHighContrast(SystemAppearance.IsHighContrast); StartPointerObserver(); };
     }
     internal Task SynchronizeInputRegionAsync() => inputRegion.SynchronizeAsync();
     private double Dpi => MusicDesktopLyricsNative.GetDpiForWindow(handle) / 96d;
@@ -197,22 +195,22 @@ sealed partial class MusicDesktopLyricsWindow : Window
         }
         catch (Win32Exception) { _ = module.Notify("无法定位桌面歌词窗口。"); }
     }
-    private void HighContrastChanged(UISettings sender, object args) => DispatcherQueue.TryEnqueue(() => ApplyHighContrast(accessibility.HighContrast));
+    private void HighContrastChanged(object? sender, EventArgs args) => DispatcherQueue.TryEnqueue(() => ApplyHighContrast(SystemAppearance.IsHighContrast));
     internal void ApplyHighContrast(bool enabled)
     {
         highContrast = enabled;
         DesktopTheme.SetIsHighContrast(LyricsFrame, enabled);
         unlockWindow?.ApplyHighContrast(enabled);
-        if (colorWindow is not null) DesktopTheme.SetIsHighContrast(colorWindow, enabled);
-        HoverSurface.Background = enabled ? new SolidColorBrush(uiSettings.UIElementColor(UIElementType.Window)) : MusicVisuals.Brush("#B3212121");
+        colorWindow?.ApplyHighContrast(enabled);
+        HoverSurface.Background = enabled ? SystemAppearance.GetElementBrush(UIElementType.Window) : MusicVisuals.Brush("#B3212121");
         UpdateNormalColor(); UpdateHighlightColor();
         foreach (var button in Toolbar.Children.OfType<Button>())
-            button.Foreground = enabled ? new SolidColorBrush(uiSettings.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush("#F5F5F5");
+            button.Foreground = enabled ? SystemAppearance.GetElementBrush(UIElementType.WindowText) : MusicVisuals.Brush("#F5F5F5");
     }
     private void UpdateNormalColor() => TopLine.Normal = BottomLine.Normal = StatusText.Foreground = new SolidColorBrush(highContrast
-        ? uiSettings.UIElementColor(UIElementType.WindowText) : MusicVisuals.Brush(module.DesktopLyricNormalColor).Color);
+        ? SystemAppearance.GetElementColor(UIElementType.WindowText) : MusicVisuals.Brush(module.DesktopLyricNormalColor).Color);
     private void UpdateHighlightColor() => TopLine.Highlight = BottomLine.Highlight = new SolidColorBrush(highContrast
-        ? uiSettings.UIElementColor(UIElementType.Highlight) : MusicVisuals.Brush(module.DesktopLyricHighlightColor).Color);
+        ? SystemAppearance.GetElementColor(UIElementType.Highlight) : MusicVisuals.Brush(module.DesktopLyricHighlightColor).Color);
     private void StartPointerObserver() { if (closed || locked || !AppWindow.IsVisible) return; ObservePointer(); pointerObserver.Start(); }
     private void ObservePointer() { if (MusicDesktopLyricsNative.GetCursorPos(out var point)) RefreshHover(new(point.X, point.Y)); }
     internal void RefreshHover(Point point)
@@ -265,9 +263,9 @@ sealed partial class MusicDesktopLyricsWindow : Window
         menu.Items.Add(new MenuFlyoutSeparator()); var custom = new MenuFlyoutItem { Text = "自定义…" };
         custom.Click += async (_, _) =>
         {
-            var editor = new MusicDesktopLyricColorWindow(module, role) { XamlRoot = LyricsFrame.XamlRoot }; colorWindow = editor;
-            DesktopTheme.SetIsHighContrast(editor, highContrast);
-            try { await editor.ShowAsync(); } finally { if (ReferenceEquals(colorWindow, editor)) colorWindow = null; ObservePointer(); }
+            var editor = new MusicDesktopLyricColorWindow(module, role); colorWindow = editor;
+            editor.ApplyHighContrast(highContrast);
+            try { await editor.ShowModalAsync(); } finally { if (ReferenceEquals(colorWindow, editor)) colorWindow = null; ObservePointer(); }
         };
         menu.Items.Add(custom); return menu;
     }
@@ -323,7 +321,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
         var start = new Point(AppWindow.Position.X + origin.X * dpi, AppWindow.Position.Y + origin.Y * dpi);
         MusicDesktopLyricsNative.Place(unlockWindow.Handle, start, new(start.X + 32 * dpi, start.Y + 32 * dpi));
     }
-    private void ClosePopups() { settingsMenu?.Hide(); settingsMenu = null; colorWindow?.Hide(); colorWindow = null; }
+    private void ClosePopups() { settingsMenu?.Hide(); settingsMenu = null; colorWindow?.Close(); colorWindow = null; }
     private async void Close_Click(object sender, RoutedEventArgs e) => await CloseAsync();
     internal Task CloseAsync() { Close(); return closeWork; }
     private void Closing(AppWindow sender, AppWindowClosingEventArgs e)

@@ -14,15 +14,6 @@ namespace MeowFilm.Capabilities;
 internal static class NovelUi
 {
     private static readonly DependencyProperty DialogLayerProperty = DependencyProperty.RegisterAttached("DialogLayer", typeof(Grid), typeof(NovelUi), new PropertyMetadata(null));
-    private const string ThemeUri = "ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml";
-
-    internal static void Theme(FrameworkElement element)
-    {
-        if (!element.Resources.MergedDictionaries.Any(dictionary =>
-                dictionary.Source?.OriginalString == ThemeUri))
-            element.Resources.MergedDictionaries.Add(new ResourceDictionary
-            { Source = new Uri(ThemeUri) });
-    }
 
     internal static TextBlock Text(string text, double size = 14, bool muted = false)
     {
@@ -92,7 +83,7 @@ internal static class NovelUi
         for (DependencyObject? node = owner; parent is null && node is not null; node = VisualTreeHelper.GetParent(node))
             parent = node.GetValue(DialogLayerProperty) as Grid;
         var host = parent is null
-            ? PlayerDialogHost.Find(owner) ?? throw new InvalidOperationException("The novel dialog requires the application overlay.")
+            ? DesktopModalHost.Find(owner) ?? throw new InvalidOperationException("The novel dialog requires the application overlay.")
             : null;
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pending = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -111,7 +102,6 @@ internal static class NovelUi
             Width = dialogWidth
         };
         if (!applicationOverlay) surface.CornerRadius = new(20);
-        Theme(surface);
         if (applicationOverlay) surface.UseResource(FrameworkElement.StyleProperty, "MeowFilm.FloatingSurface");
         else surface.UseResource(Border.BackgroundProperty, "MeowFilm.Brush.Surface");
         if (editing is not null)

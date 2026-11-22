@@ -30,7 +30,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private CancellationTokenSource? read;
     private Task? reading;
     private Task<bool>? mutation;
-    private ContentDialog? editor;
+    private CancellationTokenSource? editorLifetime;
     private string section = "preferences";
     private long generation;
     private bool readBusy, libraryBusy, mutating, stopping;
@@ -78,7 +78,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         generation++;
         read?.Cancel();
-        editor?.Hide(); editor = null;
+        editorLifetime?.Cancel(); editorLifetime = null;
         readBusy = libraryBusy = false; ReadFailed = LibraryFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
     }
     internal async Task PrepareShutdownAsync()
@@ -287,9 +287,15 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private async Task<bool> ConfirmAsync(string title, string content)
     {
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = title, Content = content,
-            PrimaryButtonText = "确定", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close };
-        return await dialog.ShowAsync() == ContentDialogResult.Primary;
+        var request = new MeowFilm.Desktop.DesktopDialogRequest
+        {
+            Title = title,
+            Message = content,
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = MeowFilm.Desktop.DesktopDialogDefaultButton.Close
+        };
+        return await MeowFilm.Desktop.DesktopModalHost.ShowDialogAsync(this, request) == MeowFilm.Desktop.DesktopDialogResult.Primary;
     }
     private void AddManual_Click(object sender, RoutedEventArgs e) => OpenEditor(null);
     private void Edit_Click(object sender, RoutedEventArgs e)
@@ -297,10 +303,10 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
 
     private async void OpenEditor(JsonElement? stored)
     {
-        if (!CanEditLibrary || section != "preferences" || editor is not null) return;
+        if (!CanEditLibrary || section != "preferences" || editorLifetime is not null) return;
         long ticket = generation;
         var value = stored ?? default;
-        var content = new StackPanel { Margin = new(20) };
+        var content = new StackPanel { Margin = new(0, 4, 0, 4) };
         TextBox Field(string label, string text)
         {
             content.Children.Add(new TextBlock { Text = label, Margin = new(0, 10, 0, 5) });
@@ -338,52 +344,69 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         var enabled = new CheckBox { Content = "启用", IsChecked = stored is null || FilmJson.Bool(value, "enabled"), Margin = new(0, 16, 0, 0) };
         var autoDisable = new CheckBox { Content = "连续失败自动停用", IsChecked = FilmJson.Bool(value, "autoDisable"), Margin = new(0, 10, 0, 0) };
         content.Children.Add(enabled); content.Children.Add(autoDisable);
-        var save = new Button { Content = "保存", Style = (Style)MeowFilm.Desktop.DesktopVisual.Resource(this, "Settings.PrimaryButton"), HorizontalAlignment = HorizontalAlignment.Right, Margin = new(0, 20, 0, 0) };
-        content.Children.Add(save);
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = stored is null ? "添加人工匹配" : "编辑人工匹配",
-            Content = new ScrollViewer { Content = content, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, MaxHeight = 560 },
-            CloseButtonText = "取消" };
-        editor = dialog;
-        dialog.Closed += (_, _) => { urlBox.Text = ""; password.Text = ""; if (ReferenceEquals(editor, dialog)) editor = null; };
-        save.Click += async (_, _) =>
+        var cts = new CancellationTokenSource();
+        editorLifetime = cts;
+        bool savedOk = false;
+        var request = new MeowFilm.Desktop.DesktopDialogRequest
         {
-            if (ticket != generation || !ReferenceEquals(editor, dialog) || !Idle) return;
-            if (!int.TryParse(seasonBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int season) && seasonBox.Text.Length > 0 ||
-                seasonBox.Text.Length > 0 && season < 0)
-            { Notify("季线索无效"); return; }
-            string kind = (string)kinds.SelectedValue;
-            var fields = new JsonObject
+            Title = stored is null ? "添加人工匹配" : "编辑人工匹配",
+            Content = content,
+            PrimaryButtonText = "保存",
+            CloseButtonText = "取消",
+            DefaultButton = MeowFilm.Desktop.DesktopDialogDefaultButton.Primary,
+            MinWidth = 380,
+            MaxWidth = 520,
+            OnPrimaryAsync = async () =>
             {
-                ["id"] = id.Length > 0 ? id : Guid.NewGuid().ToString(), ["targetId"] = targetBox.Text.Trim(),
-                ["title"] = titleBox.Text.Trim(), ["kind"] = kind, ["enabled"] = enabled.IsChecked == true,
-                ["autoDisable"] = autoDisable.IsChecked == true
-            };
-            if (nameBox.Text.Length > 0) fields["name"] = nameBox.Text;
-            if (FilmJson.Integer(value, "failureCount") is { } failures) fields["failureCount"] = failures;
-            if (seasonBox.Text.Length > 0) fields["seasonHint"] = season;
-            if (kind == "site")
-            {
-                fields["sourceKey"] = sourceBox.Text;
-                if (Equals(detailType.SelectedValue, "number"))
+                if (ticket != generation || !ReferenceEquals(editorLifetime, cts) || !Idle) return false;
+                if (!int.TryParse(seasonBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int season) && seasonBox.Text.Length > 0 ||
+                    seasonBox.Text.Length > 0 && season < 0)
+                { Notify("季线索无效"); return false; }
+                string kind = (string)kinds.SelectedValue;
+                var fields = new JsonObject
                 {
-                    if (!long.TryParse(detailBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long detailId) ||
-                        detailId is < -9007199254740991 or > 9007199254740991)
-                    { Notify("数字详情标识无效"); return; }
-                    fields["detailId"] = detailId;
+                    ["id"] = id.Length > 0 ? id : Guid.NewGuid().ToString(), ["targetId"] = targetBox.Text.Trim(),
+                    ["title"] = titleBox.Text.Trim(), ["kind"] = kind, ["enabled"] = enabled.IsChecked == true,
+                    ["autoDisable"] = autoDisable.IsChecked == true
+                };
+                if (nameBox.Text.Length > 0) fields["name"] = nameBox.Text;
+                if (FilmJson.Integer(value, "failureCount") is { } failures) fields["failureCount"] = failures;
+                if (seasonBox.Text.Length > 0) fields["seasonHint"] = season;
+                if (kind == "site")
+                {
+                    fields["sourceKey"] = sourceBox.Text;
+                    if (Equals(detailType.SelectedValue, "number"))
+                    {
+                        if (!long.TryParse(detailBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long detailId) ||
+                            detailId is < -9007199254740991 or > 9007199254740991)
+                        { Notify("数字详情标识无效"); return false; }
+                        fields["detailId"] = detailId;
+                    }
+                    else fields["detailId"] = detailBox.Text;
                 }
-                else fields["detailId"] = detailBox.Text;
+                else
+                {
+                    fields["provider"] = providerBox.SelectedValue as string;
+                    fields["share"] = new JsonObject { ["url"] = urlBox.Text.Trim(), ["password"] = password.Text };
+                }
+                var payload = JsonSerializer.SerializeToElement(fields);
+                bool saved = await MutateAsync(() => service.SaveManualAsync(payload), null, "人工匹配已保存");
+                if (ticket != generation || !ReferenceEquals(editorLifetime, cts)) return true;
+                if (saved) { savedOk = true; return true; }
+                return false;
             }
-            else
-            {
-                fields["provider"] = providerBox.SelectedValue as string;
-                fields["share"] = new JsonObject { ["url"] = urlBox.Text.Trim(), ["password"] = password.Text };
-            }
-            var payload = JsonSerializer.SerializeToElement(fields);
-            save.IsEnabled = false;
-            bool saved = await MutateAsync(() => service.SaveManualAsync(payload), null, "人工匹配已保存");
-            if (ticket != generation || !ReferenceEquals(editor, dialog)) return;
-            if (saved) { dialog.Hide(); await LoadAsync(); } else save.IsEnabled = true;
         };
-        await dialog.ShowAsync();
+        try
+        {
+            await MeowFilm.Desktop.DesktopModalHost.ShowDialogAsync(this, request, cts.Token);
+        }
+        finally
+        {
+            urlBox.Text = "";
+            password.Text = "";
+            if (ReferenceEquals(editorLifetime, cts)) editorLifetime = null;
+            cts.Dispose();
+        }
+        if (savedOk && ticket == generation) await LoadAsync();
     }
 }

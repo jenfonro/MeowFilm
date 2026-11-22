@@ -129,11 +129,15 @@ public sealed class MusicCatalogCardView : UserControl
             copy.Children.Add(title); copy.Children.Add(subtitle); Grid.SetColumn(copy, 1); body.Children.Add(copy);
             open.Padding = new Thickness(8); open.Content = body; overlay.Children.Add(open);
             var actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0), Background = hover.Background };
-            var favorite = Action("收藏", (owner, card) => owner.FavoriteCatalogCardAsync(card), nameof(MusicCatalogCard.CanFavorite));
-            favorite.Content = new FontIcon { Glyph = "\uEB51", FontSize = 16 };
-            var more = new Button { Content = new FontIcon { Glyph = "\uE712", FontSize = 16 }, Background = MusicVisuals.Brush("#00000000"), BorderThickness = new Thickness(0) };
+            var favorite = new MeowFilm.Desktop.FavoriteButton { IconSize = 16 };
+            AutomationProperties.SetName(favorite, "收藏");
+            MusicVisuals.Bind(favorite, Control.IsEnabledProperty, nameof(MusicCatalogCard.CanFavorite));
+            favorite.Click += async (_, _) => { if (Owner is { } owner && DataContext is MusicCatalogCard card) await owner.FavoriteCatalogCardAsync(card); };
+            var more = new Button { Content = new FontIcon { Glyph = "\uE712", FontSize = 16 }, CornerRadius = new CornerRadius(16) };
+            if (Application.Current?.Resources.TryGetValue("MeowFilm.GhostButton", out var ghostObj) == true && ghostObj is Style ghostStyle)
+                more.Style = ghostStyle;
             AutomationProperties.SetName(more, "歌曲操作"); more.Click += (_, _) => { if (DataContext is MusicCatalogCard card) ShowMenu(more, card); };
-            foreach (var action in new[] { favorite, more }) { action.Width = action.Height = 36; action.Margin = new Thickness(0); action.Padding = new Thickness(0); actions.Children.Add(action); }
+            foreach (Button action in new Button[] { favorite, more }) { action.Width = action.Height = action.MinWidth = action.MinHeight = 36; action.Margin = new Thickness(0); action.Padding = new Thickness(0); actions.Children.Add(action); }
             overlay.Children.Add(actions);
             CardMotion.SetEnabled(row, true);
             void Motion()

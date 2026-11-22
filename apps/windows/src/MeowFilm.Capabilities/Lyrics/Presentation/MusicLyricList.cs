@@ -41,7 +41,7 @@ public sealed class MusicLyricList : ListView
     private long boundaryEpoch;
     private bool recalibrate;
     private bool viewportDirty = true;
-    private readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
+    private Size lastArrangeSize;
     private DesktopWindow? window;
 
     public MusicLyricList()
@@ -51,16 +51,15 @@ public sealed class MusicLyricList : ListView
         {
             if (MusicVisuals.Descendant<ScrollViewer>(this) is { } scroll)
             { scroll.ViewChanged -= OnViewChanged; scroll.ViewChanged += OnViewChanged; }
-            uiSettings.ColorValuesChanged += AccessibilityChanged;
-            uiSettings.AnimationsEnabledChanged += AnimationsChanged;
+            SystemAppearance.Changed -= OnSystemAppearanceChanged;
+            SystemAppearance.Changed += OnSystemAppearanceChanged;
             window = DesktopWindow.GetWindow(this);
             if (window is not null) window.VisibilityChanged += WindowVisibilityChanged;
             InvalidateViewport(); Rebase();
         };
         Unloaded += (_, _) =>
         {
-            uiSettings.ColorValuesChanged -= AccessibilityChanged;
-            uiSettings.AnimationsEnabledChanged -= AnimationsChanged;
+            SystemAppearance.Changed -= OnSystemAppearanceChanged;
             if (window is not null) window.VisibilityChanged -= WindowVisibilityChanged;
             window = null;
             Suspend();
@@ -80,7 +79,26 @@ public sealed class MusicLyricList : ListView
     private static void OnPlaybackChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {
         var list = (MusicLyricList)owner;
+        if (args.Property == PositionProperty)
+        {
+            list.SyncPositionSample();
+            return;
+        }
         list.Rebase(retireClocks: args.Property == PresentationKeyProperty);
+    }
+
+    private void SyncPositionSample()
+    {
+        double? nextRate = CanAdvance ? PlaybackRate : null;
+        if (sampleRate is { } currentRate && nextRate is { } activeRate &&
+            Math.Abs(currentRate - activeRate) < 1e-6 && double.IsFinite(Position))
+        {
+            // Keep running compositor InsetClip animations intact across regular audio clock ticks.
+            // Only recalibrate when drift exceeds 80 ms (seek, stall, or audio clock discontinuity).
+            double drift = Math.Abs(Position - CurrentPosition);
+            if (drift < 0.08) return;
+        }
+        Rebase(retireClocks: false);
     }
 
     private bool CanAdvance => IsLoaded && IsVisible && IsPlaying && !string.IsNullOrEmpty(PresentationKey) &&
@@ -119,13 +137,17 @@ public sealed class MusicLyricList : ListView
         RefreshWords();
     }
 
-    private void AccessibilityChanged(Windows.UI.ViewManagement.UISettings sender, object args) => DispatcherQueue.TryEnqueue(() => Rebase());
-    private void AnimationsChanged(Windows.UI.ViewManagement.UISettings sender, object args) => DispatcherQueue.TryEnqueue(() => Rebase());
+    private void OnSystemAppearanceChanged(object? sender, EventArgs args) => DispatcherQueue.TryEnqueue(() => Rebase());
 
     protected override Size ArrangeOverride(Size arrangeBounds)
     {
         var result = base.ArrangeOverride(arrangeBounds);
-        InvalidateViewport();
+        if (Math.Abs(arrangeBounds.Width - lastArrangeSize.Width) > 0.5 ||
+            Math.Abs(arrangeBounds.Height - lastArrangeSize.Height) > 0.5)
+        {
+            lastArrangeSize = arrangeBounds;
+            InvalidateViewport();
+        }
         return result;
     }
 
@@ -134,7 +156,7 @@ public sealed class MusicLyricList : ListView
         if (!IsLoaded || !IsVisible || refresh) return;
         refresh = true;
         var epoch = refreshEpoch;
-        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Normal, () =>
         {
             if (epoch != refreshEpoch) return;
             refresh = false; PresentWords();

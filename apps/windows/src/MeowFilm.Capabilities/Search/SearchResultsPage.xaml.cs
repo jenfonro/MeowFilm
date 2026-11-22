@@ -134,7 +134,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
     private FrameworkElement? novelLayout;
-    private MusicWrapPanel? novelBooks, novelStatus;
+    private MeowFilm.Desktop.WrapPanel? novelBooks, novelStatus;
     private TextBlock? novelState;
     private Button? novelMore, novelCancel;
     private bool novelBooksDirty = true, novelStatesDirty = true;
@@ -152,7 +152,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         if (page.SelectedTab != "novel" || page.Novel is not { } module) return;
         if (novelLayout is null)
         {
-            var layout = new StackPanel(); novelStatus = new MusicWrapPanel(); novelBooks = new MusicWrapPanel(); novelState = NovelUi.Text("", muted: true);
+            var layout = new StackPanel(); novelStatus = new MeowFilm.Desktop.WrapPanel(); novelBooks = new MeowFilm.Desktop.WrapPanel(); novelState = NovelUi.Text("", muted: true);
             novelMore = NovelUi.Button("加载更多", () => _ = page.LoadMoreNovelAsync());
             novelCancel = NovelUi.Button("取消", module.Search.Cancel);
             layout.Children.Add(novelStatus); layout.Children.Add(novelBooks); layout.Children.Add(novelState);
@@ -246,8 +246,8 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         {
             bool contrast = DesktopTheme.GetIsHighContrast(button);
             button.Foreground = contrast
-                ? new SolidColorBrush(new Windows.UI.ViewManagement.UISettings().UIElementColor(button.IsEnabled
-                    ? Windows.UI.ViewManagement.UIElementType.WindowText : Windows.UI.ViewManagement.UIElementType.GrayText))
+                ? SystemAppearance.GetElementBrush(button.IsEnabled
+                    ? Windows.UI.ViewManagement.UIElementType.WindowText : Windows.UI.ViewManagement.UIElementType.GrayText)
                 : (Brush)DesktopVisual.Resource(button, !button.IsEnabled ? "MeowFilm.Brush.Disabled"
                     : tab.Selected ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Muted");
             indicator.Background = contrast ? button.Foreground : (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.Accent");

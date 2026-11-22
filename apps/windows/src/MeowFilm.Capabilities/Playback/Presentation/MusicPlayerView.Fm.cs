@@ -11,15 +11,14 @@ public partial class MusicPlayerView
     private void RefreshFmPalette()
     {
         bool contrast = DesktopTheme.GetIsHighContrast(FmPanel);
-        var settings = new UISettings();
-        if (contrast) FmPanel.Background = new SolidColorBrush(settings.UIElementColor(UIElementType.Window));
-        else MusicVisuals.Bind(FmPanel, Border.BackgroundProperty, nameof(MusicCapability.PlayerBackground), module);
-        FmPanel.BorderBrush = contrast ? new SolidColorBrush(settings.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush("#60FFFFFF");
-        var caption = contrast ? new SolidColorBrush(settings.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush("#C5C3C8");
+        if (contrast) FmPanel.Background = SystemAppearance.GetElementBrush(UIElementType.Window);
+        else MusicVisuals.Bind(FmPanel, Border.BackgroundProperty, nameof(MusicPlaybackState.PlayerBackground), module.PlaybackState);
+        FmPanel.BorderBrush = contrast ? SystemAppearance.GetElementBrush(UIElementType.WindowText) : MusicVisuals.Brush("#60FFFFFF");
+        var caption = contrast ? SystemAppearance.GetElementBrush(UIElementType.WindowText) : MusicVisuals.Brush("#C5C3C8");
         ((TextBlock)FmPanel.FindName("FmTitle")).Foreground = caption;
         ((TextBlock)FmPanel.FindName("FmSceneCaption")).Foreground = caption;
         ((Border)FmPanel.FindName("FmSceneSurface")).Background = contrast
-            ? new SolidColorBrush(settings.UIElementColor(UIElementType.Window)) : MusicVisuals.Brush("#12FFFFFF");
+            ? SystemAppearance.GetElementBrush(UIElementType.Window) : MusicVisuals.Brush("#12FFFFFF");
     }
     private static void ObserveFmButton(Button button, bool selected, bool scene, bool close = false)
     {
@@ -30,11 +29,10 @@ public partial class MusicPlayerView
             string? state = commonStates?.CurrentState?.Name;
             if (DesktopTheme.GetIsHighContrast(button))
             {
-                var settings = new UISettings();
                 bool highlight = button.IsEnabled && (selected || close && (focused || state is "PointerOver" or "Pressed"));
-                button.Foreground = new SolidColorBrush(settings.UIElementColor(!button.IsEnabled ? UIElementType.GrayText : highlight ? UIElementType.HighlightText : UIElementType.WindowText));
-                button.Background = new SolidColorBrush(settings.UIElementColor(highlight ? UIElementType.Highlight : UIElementType.Window));
-                button.BorderBrush = new SolidColorBrush(settings.UIElementColor(!button.IsEnabled ? UIElementType.GrayText : focused ? UIElementType.Highlight : UIElementType.WindowText));
+                button.Foreground = SystemAppearance.GetElementBrush(!button.IsEnabled ? UIElementType.GrayText : highlight ? UIElementType.HighlightText : UIElementType.WindowText);
+                button.Background = SystemAppearance.GetElementBrush(highlight ? UIElementType.Highlight : UIElementType.Window);
+                button.BorderBrush = SystemAppearance.GetElementBrush(!button.IsEnabled ? UIElementType.GrayText : focused ? UIElementType.Highlight : UIElementType.WindowText);
             }
             else
             {

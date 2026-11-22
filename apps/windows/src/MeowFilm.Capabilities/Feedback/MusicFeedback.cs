@@ -88,12 +88,12 @@ public sealed partial class MusicCapability
         Changed(nameof(CanEditFeedback)); PublishFeedbackStatus();
     }
 
-    public Task SetFeedbackEnabledAsync(MusicFeedbackPlatformRow row, bool enabled)
+    public async Task SetFeedbackEnabledAsync(MusicFeedbackPlatformRow row, bool enabled)
     {
         if (!CanEditFeedback || !FeedbackPlatforms.Contains(row) || row.Enabled == enabled)
-            return Task.CompletedTask;
-        if (enabled && !dialogs.Confirm($"向{row.Label}上报播放记录？", "播放记录上报"))
-            return Task.CompletedTask;
+            return;
+        if (enabled && !await ConfirmAsync($"向{row.Label}上报播放记录？", "播放记录上报", lifetime.Token))
+            return;
         var targets = FeedbackPlatforms.Where(value => value.Enabled || ReferenceEquals(value, row) && enabled)
             .Where(value => !ReferenceEquals(value, row) || enabled)
             .Select(value => value.Platform).ToArray();
@@ -101,7 +101,7 @@ public sealed partial class MusicCapability
         feedbackSettingsBusy = true;
         Changed(nameof(CanEditFeedback));
         RefreshPlatformSetting(row.Platform);
-        return feedbackSettingsWork = RunAsync(async () =>
+        var work = RunAsync(async () =>
         {
             long receipt = ++settingSubmission;
             try
@@ -145,6 +145,8 @@ public sealed partial class MusicCapability
                 }
             }
         }, publishStatus: false);
+        feedbackSettingsWork = work;
+        await work;
     }
 
     private void SelectFeedback(SongRow row, bool automatic, MusicRecommendationFeedback? recommendation = null)

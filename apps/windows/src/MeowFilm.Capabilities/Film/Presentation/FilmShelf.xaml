@@ -2,15 +2,15 @@
  <UserControl.Resources>
   <ResourceDictionary>
    <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml" />
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/FilmShelfStyles.xaml" />
+<ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/FilmShelfStyles.xaml" />
    </ResourceDictionary.MergedDictionaries>
    <local:FilmVisibilityConverter x:Key="Film.Visible" />
    <local:FilmEmptyConverter x:Key="Film.Empty" />
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid>
-  <local:FilmLoadingCards Margin="24,0" Visibility="{Binding ShowSkeleton,Converter={StaticResource Film.Visible}}" />
+  <ProgressRing Width="28" Height="28" MinHeight="120" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
+                IsActive="{Binding ShowSkeleton}" Visibility="{Binding ShowSkeleton,Converter={StaticResource Film.Visible}}" />
   <local:Shelf x:Name="Cards" Margin="24,0" MinimumCardWidth="144" ItemsSource="{Binding Items}" HorizontalOffset="{Binding HorizontalOffset,Mode=TwoWay}" NavigationButtonStyle="{StaticResource Film.ShelfArrow}" Visibility="{Binding HasItems,Converter={StaticResource Film.Visible}}">
    <local:Shelf.CardTemplate>
     <DataTemplate>

@@ -73,7 +73,7 @@ internal static class MediaShortcutInput
         VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).Any(popup => popup.IsOpen && popup.Child is not ToolTip);
 
     private static bool Protected(DependencyObject node) =>
-        node is PlayerDialogHost or TextBox or RichEditBox or PasswordBox or AutoSuggestBox or
+        node is DesktopModalHost or TextBox or RichEditBox or PasswordBox or AutoSuggestBox or
             ComboBox { IsEditable: true } or MenuFlyoutPresenter or MenuFlyoutItemBase or MenuBar or
             MenuBarItem or FlyoutPresenter or Popup or ContentDialog or WebView2;
 }

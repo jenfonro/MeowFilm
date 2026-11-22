@@ -173,21 +173,21 @@ public sealed partial class MusicCapability
         !PlatformSettings.Contains(row) ? Task.CompletedTask :
         SetFeedbackEnabledAsync(row.Feedback, enabled);
 
-    public Task SetPlatformSyncAsync(MusicPlatformSettingsRow row, string kind, bool enabled)
+    public async Task SetPlatformSyncAsync(MusicPlatformSettingsRow row, string kind, bool enabled)
     {
         if (!PlatformSettings.Contains(row) || kind is not ("favorites" or "playlists"))
-            return Task.CompletedTask;
-        bool confirmed = !enabled || dialogs.Confirm(
+            return;
+        bool confirmed = !enabled || await ConfirmAsync(
             $"开启{row.Name}{(kind == "favorites" ? "收藏歌曲" : "歌单")}同步？",
-            "平台同步");
-        return LibrarySync.SetAsync(row.Sync, kind, enabled, confirmed);
+            "平台同步", lifetime.Token);
+        await LibrarySync.SetAsync(row.Sync, kind, enabled, confirmed);
     }
 
-    public Task ConfirmPlatformSyncAsync()
+    public async Task ConfirmPlatformSyncAsync()
     {
         if (!LibrarySync.HasConfirmation ||
-            !dialogs.Confirm(LibrarySync.Confirmation, "平台同步")) return Task.CompletedTask;
-        return LibrarySync.ConfirmAsync(true);
+            !await ConfirmAsync(LibrarySync.Confirmation, "平台同步", lifetime.Token)) return;
+        await LibrarySync.ConfirmAsync(true);
     }
 
     private async Task DeactivateAccountDetailsAsync()

@@ -59,8 +59,6 @@ internal sealed class NovelDiscoveryChannelBar : Grid
             Content = expandedChoices, MaxHeight = 180, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
-        scroll.Resources.MergedDictionaries.Add(new()
-            { Source = new Uri("ms-appx:///MeowFilm.Desktop/SettingsScrollChrome.xaml") });
         scroll.UseResource(StyleProperty, "MeowFilm.SettingsScrollViewer");
         expansion.Child = scroll; overlay.Children.Add(expansion); Canvas.SetTop(expansion, 48);
         Grid.SetColumnSpan(overlay, 2); Children.Add(overlay);

@@ -4,12 +4,6 @@
  xmlns:local="using:MeowFilm.Desktop"
  UseLayoutRounding="True"
  Loaded="View_Loaded">
- <UserControl.Resources>
-  <ResourceDictionary><ResourceDictionary.MergedDictionaries>
-   <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme.xaml"/>
-   <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/SettingsScrollChrome.xaml"/>
-  </ResourceDictionary.MergedDictionaries></ResourceDictionary>
- </UserControl.Resources>
  <UserControl.Style><Style TargetType="UserControl">
   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
 

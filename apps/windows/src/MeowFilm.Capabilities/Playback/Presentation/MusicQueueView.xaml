@@ -3,38 +3,40 @@
  xmlns:local="using:MeowFilm.Capabilities" xmlns:art="using:MeowFilm.Desktop.Artwork" xmlns:desktop="using:MeowFilm.Desktop">
  <UserControl.Resources><local:MusicVisibilityConverter x:Key="Visible"/><local:MusicMotionHitTestConverter x:Key="HitTest"/></UserControl.Resources>
  <Grid Margin="20,18,8,14" RowSpacing="14"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-  <desktop:NoticeOutlet Message="{Binding QueueSurfaceStatus}"/>
+ <desktop:NoticeOutlet Message="{x:Bind State.QueueSurfaceStatus,Mode=OneWay}"/>
   <Grid Margin="0,0,12,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-   <StackPanel Orientation="Horizontal" VerticalAlignment="Center"><TextBlock Text="播放列表" FontSize="22"/><TextBlock Text="{Binding QueueSurfaceCountText}" FontSize="12" Margin="5,2,0,0" VerticalAlignment="Center"/></StackPanel>
-   <StackPanel Grid.Column="1" Orientation="Horizontal"><Button Content="收藏全部" Click="FavoriteAll_Click" IsEnabled="{Binding CanClearQueueSurface}" Margin="4,0"/><Button Content="清空" Click="Clear_Click" IsEnabled="{Binding CanClearQueueSurface}"/></StackPanel>
+  <StackPanel Orientation="Horizontal" VerticalAlignment="Center"><TextBlock Text="播放列表" FontSize="22"/><TextBlock Text="{x:Bind State.QueueSurfaceCountText,Mode=OneWay}" FontSize="12" Margin="5,2,0,0" VerticalAlignment="Center"/></StackPanel>
+  <StackPanel Grid.Column="1" Orientation="Horizontal"><Button Content="收藏全部" Click="FavoriteAll_Click" IsEnabled="{x:Bind State.CanClearQueueSurface,Mode=OneWay}" Margin="4,0"/><Button Content="清空" Click="Clear_Click" IsEnabled="{x:Bind State.CanClearQueueSurface,Mode=OneWay}"/></StackPanel>
   </Grid>
-  <ListView x:Name="QueueList" Grid.Row="1" ItemsSource="{Binding QueueSurfaceRows}" SelectionMode="None" Background="Transparent" BorderThickness="0" Padding="0"
+ <ListView x:Name="QueueList" Grid.Row="1" ItemsSource="{x:Bind State.QueueSurfaceRows}" SelectionMode="None" Background="Transparent" BorderThickness="0" Padding="0"
    ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
    PointerWheelChanged="QueueList_PointerWheelChanged" KeyDown="QueueList_KeyDown" AutomationProperties.Name="播放列表">
-   <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,8,2"/></Style></ListView.ItemContainerStyle>
+   <ListView.ItemContainerTransitions><TransitionCollection/></ListView.ItemContainerTransitions>
+   <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,8,2"/></Style></ListView.ItemContainerStyle>
    <ListView.ItemTemplate><DataTemplate>
     <local:MusicQueueRowView x:Name="QueueRow" Height="58" local:CardMotion.Enabled="True"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="30"/></Grid.ColumnDefinitions>
-     <Button Tag="{Binding}" Click="Play_Click" Padding="0" Background="Transparent" BorderThickness="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.Name="{Binding Title}">
+     <Button Style="{StaticResource MeowFilm.GhostButton}" Tag="{Binding}" Click="Play_Click" Padding="6,0" Margin="0" Background="Transparent" BorderThickness="0" CornerRadius="6" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" AutomationProperties.Name="{Binding Title}">
       <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="42"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
        <Grid Width="42" Height="42" CornerRadius="4" local:CardClip.Radius="4"><art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id}"/><Border x:Name="QueuePlayMark" Background="#60000000" Opacity="0"><Path Data="M0,0 L0,18 L14,9 Z" Fill="White" Width="14" Height="18" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border></Grid>
        <StackPanel Grid.Column="1" VerticalAlignment="Center"><TextBlock x:Name="QueueTitle" Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/><TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,3,0,0"/></StackPanel>
        <TextBlock Text="{Binding Duration}" Grid.Column="2" FontSize="12" VerticalAlignment="Center" HorizontalAlignment="Right"/>
       </Grid>
      </Button>
-     <Button Grid.Column="1" Tag="{Binding}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=QueueRow}" IsHitTestVisible="{Binding Path=(local:CardMotion.Progress),ElementName=QueueRow,Converter={StaticResource HitTest}}" Click="Remove_Click" Padding="0" Width="28" Height="28" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" AutomationProperties.Name="从播放列表移除"><FontIcon Glyph="&#xE711;" FontSize="12"/></Button>
+     <Button Grid.Column="1" Style="{StaticResource MeowFilm.GhostButton}" Tag="{Binding}" Opacity="{Binding Path=(local:CardMotion.Progress),ElementName=QueueRow}" IsHitTestVisible="{Binding Path=(local:CardMotion.Progress),ElementName=QueueRow,Converter={StaticResource HitTest}}" Click="Remove_Click" Padding="0" Margin="0" Width="28" Height="28" MinWidth="28" MinHeight="28" CornerRadius="14" VerticalAlignment="Center" Background="Transparent" BorderThickness="0" AutomationProperties.Name="从播放列表移除"><FontIcon Glyph="&#xE711;" FontSize="12"/></Button>
     </local:MusicQueueRowView>
    </DataTemplate></ListView.ItemTemplate>
   </ListView>
-  <Grid Grid.Row="2" Margin="0,2,12,0" RowSpacing="8" Visibility="{Binding HasRecommendationPanel,Converter={StaticResource Visible}}"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+ <Grid Grid.Row="2" Margin="0,2,12,0" RowSpacing="8" Visibility="{x:Bind State.HasRecommendationPanel,Mode=OneWay,Converter={StaticResource Visible}}"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-    <TextBlock Text="{Binding RecommendationTitle}" FontSize="18" VerticalAlignment="Center"/>
-    <Button x:Name="RetryRecommendationButton" Grid.Column="1" Content="重试推荐" Click="RetryRecommendation_Click" Visibility="{Binding CanRetryRecommendation,Converter={StaticResource Visible}}" IsEnabled="{Binding CanRetryRecommendation}" Margin="8,0,0,0"/>
-    <Button Grid.Column="2" Content="核对保存结果" Click="ReconcileRecommendation_Click" Visibility="{Binding CanReconcileRecommendation,Converter={StaticResource Visible}}"/>
+   <TextBlock Text="{x:Bind State.RecommendationTitle,Mode=OneWay}" FontSize="18" VerticalAlignment="Center"/>
+   <Button x:Name="RetryRecommendationButton" Grid.Column="1" Content="重试推荐" Click="RetryRecommendation_Click" Visibility="{x:Bind State.CanRetryRecommendation,Mode=OneWay,Converter={StaticResource Visible}}" IsEnabled="{x:Bind State.CanRetryRecommendation,Mode=OneWay}" Margin="8,0,0,0"/>
+   <Button Grid.Column="2" Content="核对保存结果" Click="ReconcileRecommendation_Click" Visibility="{x:Bind State.CanReconcileRecommendation,Mode=OneWay,Converter={StaticResource Visible}}"/>
    </Grid>
-   <ListView x:Name="RecommendationList" Grid.Row="1" ItemsSource="{Binding RecommendationCandidates}" MaxHeight="232" SelectionMode="None" IsEnabled="{Binding CanChooseRecommendation}" AutomationProperties.Name="为你推荐候选">
-    <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/></Style></ListView.ItemContainerStyle>
+  <ListView x:Name="RecommendationList" Grid.Row="1" ItemsSource="{x:Bind State.RecommendationCandidates,Mode=OneWay}" MaxHeight="232" SelectionMode="None" IsEnabled="{x:Bind State.CanChooseRecommendation,Mode=OneWay}" AutomationProperties.Name="为你推荐候选">
+    <ListView.ItemContainerTransitions><TransitionCollection/></ListView.ItemContainerTransitions>
+    <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/></Style></ListView.ItemContainerStyle>
     <ListView.ItemTemplate><DataTemplate>
-     <Button Tag="{Binding}" Click="Recommendation_Click" HorizontalContentAlignment="Stretch" HorizontalAlignment="Stretch" Padding="0,8" Background="Transparent" BorderThickness="0" AutomationProperties.Name="{Binding Title}">
+     <Button Style="{StaticResource MeowFilm.GhostButton}" Tag="{Binding}" Click="Recommendation_Click" HorizontalContentAlignment="Stretch" HorizontalAlignment="Stretch" Padding="6,8" Margin="0" CornerRadius="6" Background="Transparent" BorderThickness="0" AutomationProperties.Name="{Binding Title}">
       <Grid ColumnSpacing="8"><Grid.ColumnDefinitions><ColumnDefinition Width="40"/><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
        <Grid Width="40" Height="40" CornerRadius="4" local:CardClip.Radius="4"><art:ArtworkImage Address="{Binding Cover}" DisplayIdentity="{Binding Song.Id}"/></Grid>
        <StackPanel Grid.Column="1" VerticalAlignment="Center"><TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" FontSize="14"/><TextBlock Text="{Binding Artist}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,3,0,0"/></StackPanel>

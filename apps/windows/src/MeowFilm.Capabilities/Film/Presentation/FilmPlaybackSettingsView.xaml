@@ -1,9 +1,6 @@
 <UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:desktop="using:MeowFilm.Desktop" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmPlaybackSettingsView" Loaded="View_Loaded" Unloaded="View_Unloaded">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/FilmSettingsTheme.xaml" />
-   </ResourceDictionary.MergedDictionaries>
    <Style x:Key="GroupSidebar" TargetType="Border">
     <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}" />
     <Setter Property="BorderThickness" Value="0,0,1,0" />

@@ -13,7 +13,7 @@ public partial class MusicCacheSettingsView : UserControl
     {
         this.module = module;
         InitializeComponent();
-        DataContext = module;
+        DataContext = module.SettingsState;
     }
     private async void ClearPlaybackCache_Click(object sender, RoutedEventArgs e)
     {

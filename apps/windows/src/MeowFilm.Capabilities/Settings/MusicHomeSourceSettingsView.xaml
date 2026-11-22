@@ -3,11 +3,6 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:desktop="using:MeowFilm.Desktop"
  UseLayoutRounding="True">
- <UserControl.Resources>
-  <ResourceDictionary><ResourceDictionary.MergedDictionaries>
-   <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Settings/SettingsTheme.xaml"/>
-  </ResourceDictionary.MergedDictionaries></ResourceDictionary>
- </UserControl.Resources>
  <Border x:Name="HomeSourceSection" Style="{StaticResource Settings.Section}">
   <StackPanel>
    <TextBlock Text="音乐数据源" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,8"/>

@@ -95,9 +95,17 @@ public partial class FilmSettingsView
 
     private static void SetRows(FilmSettingsRuleEditor editor, IEnumerable<FilmMatchRule> values)
     {
-        while (editor.Rows.Count > 0) editor.Rows.RemoveAt(editor.Rows.Count - 1);
-        foreach (var value in values)
-            editor.Rows.Add(new(editor.Title, editor.Rows.Count + 1, value.Pattern, value.Replace, value.Flags, editor.HasReplacement));
+        var list = values as IList<FilmMatchRule> ?? values.ToList();
+        for (int index = 0; index < list.Count; index++)
+        {
+            var value = list[index];
+            if (index < editor.Rows.Count)
+                editor.Rows[index].Update(index + 1, value.Pattern, value.Replace, value.Flags);
+            else
+                editor.Rows.Add(new(editor.Title, index + 1, value.Pattern, value.Replace, value.Flags, editor.HasReplacement));
+        }
+        while (editor.Rows.Count > list.Count)
+            editor.Rows.RemoveAt(editor.Rows.Count - 1);
     }
 
     private async void Rule_ActionRequested(object? sender, FilmSettingsRuleActionEventArgs e)

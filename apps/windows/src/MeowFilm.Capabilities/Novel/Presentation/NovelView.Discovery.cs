@@ -13,7 +13,6 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class NovelView
 {
-    private const string DiscoveryThemeUri = "ms-appx:///MeowFilm.Capabilities/Novel/Presentation/NovelDiscoveryTheme.xaml";
     private const string StackIcon = "M3,7 L12,3 21,7 12,11 Z M3,12 L12,16 21,12 M3,17 L12,21 21,17";
     private long shownDiscoveryFailure;
     private bool showingDiscoveryFailure, changingDiscoveryShelf;
@@ -34,34 +33,20 @@ public sealed partial class NovelView
             if (Book != next) { Book = next; Update?.Invoke(next); }
         }
     }
-    private static (string Source, long Revision, string Url, string Cover) CoverIdentity(NovelBook book) =>
+    internal static (string Source, long Revision, string Url, string Cover) CoverIdentity(NovelBook book) =>
         (book.InstallationId, book.Revision, book.BookUrl, book.CoverUrl);
-    private static void PlaceChild(Panel panel, UIElement child, int index)
+    internal static void PlaceChild(Panel panel, UIElement child, int index)
     {
         if (index < panel.Children.Count && ReferenceEquals(panel.Children[index], child)) return;
         panel.Children.Remove(child); panel.Children.Insert(index, child);
     }
     private void PresentDiscovery() => updateDiscovery?.Invoke();
-    private void AddDiscoveryTheme() => Resources.MergedDictionaries.Add(new()
-        { Source = new Uri(DiscoveryThemeUri) });
 
     private static TextBlock DiscoveryText(string value, double size = 12, bool muted = false)
     {
         var text = NovelUi.Text(value, size, muted);
         text.Margin = new(0); text.TextWrapping = TextWrapping.NoWrap; text.TextTrimming = TextTrimming.CharacterEllipsis;
-        DesktopTheme.Observe(text, () => text.Foreground = DesktopTheme.GetIsHighContrast(text)
-            ? new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText))
-            : (Brush)DesktopVisual.Resource(text, muted ? "MeowFilm.Brush.Muted" : "MeowFilm.Brush.Text"));
         return text;
-    }
-    private static void DiscoveryCanvas(Border card)
-    {
-        DesktopTheme.Observe(card, () =>
-        {
-            if (DesktopTheme.GetIsHighContrast(card))
-                card.Background = new SolidColorBrush(new global::Windows.UI.ViewManagement.UISettings().UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window));
-            else card.ClearValue(Border.BackgroundProperty);
-        });
     }
     private static Viewbox DiscoveryIcon(string data, double size = 14)
     {
@@ -180,7 +165,7 @@ public sealed partial class NovelView
             // Finish the checked/overflow gesture before publishing a replacement page.
             tab.DispatcherQueue.TryEnqueue(() =>
             {
-                if (!presentingDiscovery && module.Route == route && module.ExploreSource?.InstallationId == source?.InstallationId && DesktopVisual.Contains(body, tab) &&
+                if (!presentingDiscovery && module.Route == route && module.ExploreSource?.InstallationId == source?.InstallationId && DesktopVisual.Contains(BodyHost, tab) &&
                     tab.IsChecked == true && kind.Url != module.ExploreKind?.Url)
                     module.RunUi(ct => module.LoadDiscoveryAsync(source, kind, false, ct));
             });
@@ -211,8 +196,6 @@ public sealed partial class NovelView
         var scroll = new ScrollViewer { Content = choices, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalScrollMode = ScrollMode.Enabled, VerticalScrollMode = ScrollMode.Disabled,
             HorizontalContentAlignment = HorizontalAlignment.Left };
-        scroll.Resources.MergedDictionaries.Add(new()
-            { Source = new Uri("ms-appx:///MeowFilm.Desktop/SettingsScrollChrome.xaml") });
         scroll.UseResource(StyleProperty, "MeowFilm.SettingsScrollViewer");
         return scroll;
     }
@@ -461,7 +444,7 @@ public sealed partial class NovelView
     {
         var view = new DiscoveryBookView(book);
         var card = new Border { Height = 216, Padding = new(30, 22, 30, 22) };
-        card.UseResource(StyleProperty, "Novel.Discovery.Feature"); DiscoveryCanvas(card);
+        card.UseResource(StyleProperty, "Novel.Discovery.Feature");
         AutomationProperties.SetName(card, "选读");
         var layout = new Grid(); layout.ColumnDefinitions.Add(new()); layout.ColumnDefinitions.Add(new() { Width = new(149) });
         var cover = DiscoveryCoverSlot(book, 121, 168, out var updateCover); cover.HorizontalAlignment = HorizontalAlignment.Right;
@@ -499,7 +482,7 @@ public sealed partial class NovelView
     private FrameworkElement DiscoveryContinuation(out Action update)
     {
         var card = new Border { Height = 216, Padding = new(20) };
-        card.UseResource(StyleProperty, "Novel.Discovery.Surface"); DiscoveryCanvas(card);
+        card.UseResource(StyleProperty, "Novel.Discovery.Surface");
         AutomationProperties.SetName(card, "继续阅读");
         var panel = new DockPanel(); card.Child = panel;
         var heading = new Grid(); heading.Children.Add(DiscoveryText("继续阅读", 13));
@@ -633,7 +616,7 @@ public sealed partial class NovelView
                         throw new InvalidDataException("发现加载失败，请重试");
                     }
                     return true;
-                }, token, applicationOverlay: PlayerDialogHost.Find(this) is not null);
+                }, token, applicationOverlay: DesktopModalHost.Find(this) is not null);
         }
         finally { showingDiscoveryFailure = false; PresentDiscoveryFailure(); }
     }

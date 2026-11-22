@@ -33,9 +33,8 @@ public sealed class MusicPlayerMenuChoice : ToggleMenuFlyoutItem
         bool active = IsChecked || FocusState != FocusState.Unfocused || commonStates?.CurrentState?.Name is "PointerOver" or "Pressed";
         if (DesktopTheme.GetIsHighContrast(this))
         {
-            var settings = new UISettings();
-            Foreground = new SolidColorBrush(settings.UIElementColor(!IsEnabled ? UIElementType.GrayText : active ? UIElementType.HighlightText : UIElementType.WindowText));
-            Background = new SolidColorBrush(settings.UIElementColor(IsEnabled && active ? UIElementType.Highlight : UIElementType.Window));
+            Foreground = SystemAppearance.GetElementBrush(!IsEnabled ? UIElementType.GrayText : active ? UIElementType.HighlightText : UIElementType.WindowText);
+            Background = SystemAppearance.GetElementBrush(IsEnabled && active ? UIElementType.Highlight : UIElementType.Window);
         }
         else
         {

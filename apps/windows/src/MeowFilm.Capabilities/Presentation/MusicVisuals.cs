@@ -4,14 +4,14 @@ using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+using MeowFilm.Desktop;
 using Windows.UI;
-using Windows.UI.ViewManagement;
 
 namespace MeowFilm.Capabilities;
 
 internal static class MusicVisuals
 {
-    internal static bool Animate => new UISettings().AnimationsEnabled && !new AccessibilitySettings().HighContrast;
+    internal static bool Animate => SystemAppearance.AnimationsEnabled && !SystemAppearance.IsHighContrast;
     internal static bool CanAnimate(DependencyObject view)
     {
         if (!Animate) return false;
@@ -20,8 +20,7 @@ internal static class MusicVisuals
         return true;
     }
     internal static SolidColorBrush Brush(byte r, byte g, byte b, byte a = 255) => new(Color.FromArgb(a, r, g, b));
-    internal static SolidColorBrush Brush(string value) => (SolidColorBrush)XamlReader.Load(
-        $"<SolidColorBrush xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' Color='{value}'/>");
+    internal static SolidColorBrush Brush(string value) => new(SystemAppearance.ParseColor(value));
     internal static Geometry Geometry(string value) => (Geometry)XamlBindingHelper.ConvertValue(typeof(Geometry), value);
     internal static void Bind(FrameworkElement target, DependencyProperty property, string path, object? source = null,
         BindingMode mode = BindingMode.OneWay) => target.SetBinding(property,

@@ -1,0 +1,28 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <ControlTemplate x:Key="MeowFilm.ManagementDeleteButtonTemplate" TargetType="Button">
+  <Grid>
+   <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+    <VisualState x:Name="Normal"/>
+    <VisualState x:Name="PointerOver">
+     <VisualState.Setters>
+      <Setter Target="StateLayer.Background" Value="#14B62535"/>
+     </VisualState.Setters>
+    </VisualState>
+    <VisualState x:Name="Pressed">
+     <VisualState.Setters>
+      <Setter Target="StateLayer.Background" Value="#24B62535"/>
+     </VisualState.Setters>
+    </VisualState>
+    <VisualState x:Name="Disabled"><Storyboard><ObjectAnimationUsingKeyFrames Storyboard.TargetName="Content" Storyboard.TargetProperty="Foreground"><DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></ObjectAnimationUsingKeyFrames><ObjectAnimationUsingKeyFrames Storyboard.TargetName="Surface" Storyboard.TargetProperty="BorderBrush"><DiscreteObjectKeyFrame KeyTime="0" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></ObjectAnimationUsingKeyFrames></Storyboard></VisualState>
+   </VisualStateGroup></VisualStateManager.VisualStateGroups>
+   <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"/>
+   <Border x:Name="StateLayer" Background="Transparent" CornerRadius="{TemplateBinding CornerRadius}" IsHitTestVisible="False"/>
+   <ContentPresenter x:Name="Content" Margin="{TemplateBinding Padding}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+     HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+     HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+     Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
+     FontWeight="Normal"/>
+  </Grid>
+ </ControlTemplate>
+</ResourceDictionary>

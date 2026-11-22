@@ -1,9 +1,6 @@
 <UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:desktop="using:MeowFilm.Desktop" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmSettingsView" x:Name="Root" UseLayoutRounding="True" Loaded="View_Loaded" Unloaded="View_Unloaded" SizeChanged="View_SizeChanged" Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/FilmSettingsTheme.xaml" />
-   </ResourceDictionary.MergedDictionaries>
    <local:FilmVisibilityConverter x:Key="Film.Visible" />
    <local:FilmEmptyConverter x:Key="Film.Empty" />
   </ResourceDictionary>
@@ -282,8 +279,8 @@
    </ContentControl>
   </Grid>
   <desktop:NoticeOutlet x:Name="Notices" />
-  <Popup x:Name="ActionPopup" IsLightDismissEnabled="True" Opened="ActionPopup_Opened" Closed="ActionPopup_Closed">
-   <Border x:Name="PopupSurface" Width="360" Padding="20" Style="{StaticResource Settings.PopupSurface}">
+  <Grid x:Name="ModalStash" Visibility="Collapsed">
+   <Border x:Name="PopupSurface" Width="380" Padding="20" CornerRadius="10" Style="{StaticResource Settings.PopupSurface}" TabFocusNavigation="Cycle">
     <ScrollViewer x:Name="PopupScroller" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
      <StackPanel KeyDown="ActionPopup_KeyDown">
       <TextBlock x:Name="PopupTitle" Style="{StaticResource Settings.PopupTitle}" TextWrapping="Wrap" />
@@ -314,6 +311,6 @@
      </StackPanel>
     </ScrollViewer>
    </Border>
-  </Popup>
+  </Grid>
  </Grid>
 </UserControl>

@@ -28,6 +28,7 @@ public partial class PanAccountsView : UserControl
     public PanAccountsView()
     {
         InitializeComponent();
+        ModalStash.Children.Clear();
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) => Detach();
         SizeChanged += (_, _) => SizePopup();
@@ -62,7 +63,8 @@ public partial class PanAccountsView : UserControl
         StopPolling();
         ClearInputs();
         formRow = null; loginAnchor = null; logout = null;
-        LoginPopup.Hide(); LogoutPopup.Hide();
+        DesktopModalHost.CloseFor(this, LoginSurface);
+        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
         logoutAnchor = null;
         if (old is not null) _ = old.DeactivateAsync();
     }
@@ -76,7 +78,8 @@ public partial class PanAccountsView : UserControl
         {
             StopPolling();
             ClearInputs(); loginAnchor = null; logout = null;
-            LoginPopup.Hide(); LogoutPopup.Hide();
+            DesktopModalHost.CloseFor(this, LoginSurface);
+            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
             logoutAnchor = null;
             if (observed is { } old) await old.DeactivateAsync();
         }
@@ -87,7 +90,7 @@ public partial class PanAccountsView : UserControl
         if (!ReferenceEquals(sender, observed)) return;
         if (logout is { } confirmation &&
             (!confirmation.Row.CanLogout || confirmation.Row.Revision != confirmation.Revision))
-            LogoutPopup.Hide();
+            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
         SyncLogin();
     }
     private void SyncLogin()
@@ -96,7 +99,7 @@ public partial class PanAccountsView : UserControl
         {
             StopPolling();
             ClearInputs(); formRow = null;
-            LoginPopup.Hide();
+            DesktopModalHost.CloseFor(this, LoginSurface);
             return;
         }
         if (!ReferenceEquals(formRow, owner.LoginRow) || formQr != owner.QrMode)
@@ -126,6 +129,8 @@ public partial class PanAccountsView : UserControl
         }
         QrPanel.Visibility = formQr ? Visibility.Visible : Visibility.Collapsed;
         ManualPanel.Visibility = formQr ? Visibility.Collapsed : Visibility.Visible;
+        QrModeButton.Tag = QrPanel.Visibility;
+        ManualModeButton.Tag = ManualPanel.Visibility;
         SizePopup();
         ShowLogin();
         if (formQr)
@@ -141,15 +146,42 @@ public partial class PanAccountsView : UserControl
     {
         if (loginShowing) return;
         loginShowing = true;
-        try { await DialogPlacement.ShowAsync(this, LoginPopup); }
-        finally { loginShowing = false; }
+        try
+        {
+            await DesktopModalHost.ShowSurfaceAsync(this, LoginSurface, onOpened: () =>
+            {
+                if (formQr) QrModeButton.Focus(FocusState.Programmatic);
+                else CredentialInputs.Children.OfType<Control>().FirstOrDefault()?.Focus(FocusState.Programmatic);
+            });
+        }
+        finally
+        {
+            loginShowing = false;
+            StopPolling(); ClearInputs(); formRow = null;
+            var anchor = loginAnchor; loginAnchor = null;
+            if (observed is { } owner) await owner.CloseLoginAsync();
+            if (Active && anchor is { IsEnabled: true } && DesktopVisual.IsVisible(anchor)) anchor.Focus(FocusState.Programmatic);
+        }
     }
     private async void ShowLogout()
     {
         if (logoutShowing) return;
         logoutShowing = true;
-        try { await DialogPlacement.ShowAsync(this, LogoutPopup); }
-        finally { logoutShowing = false; }
+        try
+        {
+            await DesktopModalHost.ShowSurfaceAsync(
+                this,
+                LogoutPopupSurface,
+                onOpened: () => CancelLogout.Focus(FocusState.Programmatic));
+        }
+        finally
+        {
+            logoutShowing = false;
+            logout = null;
+            var target = logoutAnchor;
+            logoutAnchor = null;
+            if (Active && target is { IsEnabled: true } && DesktopVisual.IsVisible(target)) target.Focus(FocusState.Programmatic);
+        }
     }
     private void SizePopup()
     {
@@ -198,20 +230,7 @@ public partial class PanAccountsView : UserControl
     {
         if (Active && Owner is { } owner) await owner.RetryQrAsync();
     }
-    private void CloseLogin_Click(object sender, RoutedEventArgs e) => LoginPopup.Hide();
-    private void LoginPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e)
-    {
-        if (formQr) QrModeButton.Focus(FocusState.Programmatic);
-        else CredentialInputs.Children.OfType<Control>().FirstOrDefault()?.Focus(FocusState.Programmatic);
-    }
-    private async void LoginPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
-    {
-        loginShowing = false;
-        StopPolling(); ClearInputs(); formRow = null;
-        var anchor = loginAnchor; loginAnchor = null;
-        if (observed is { } owner) await owner.CloseLoginAsync();
-        if (Active && anchor is { IsEnabled: true } && DesktopVisual.IsVisible(anchor)) anchor.Focus(FocusState.Programmatic);
-    }
+    private void CloseLogin_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, LoginSurface);
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
         if (!Active || Owner is not { CanSave: true } owner) return;
@@ -231,20 +250,11 @@ public partial class PanAccountsView : UserControl
         logoutAnchor = button;
         ShowLogout();
     }
-    private void LogoutPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e) => CancelLogout.Focus(FocusState.Programmatic);
-    private void LogoutPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
-    {
-        logoutShowing = false;
-        logout = null;
-        var target = logoutAnchor;
-        logoutAnchor = null;
-        if (Active && target is { IsEnabled: true } && DesktopVisual.IsVisible(target)) target.Focus(FocusState.Programmatic);
-    }
-    private void CancelLogout_Click(object sender, RoutedEventArgs e) => LogoutPopup.Hide();
+    private void CancelLogout_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, LogoutPopupSurface);
     private async void ConfirmLogout_Click(object sender, RoutedEventArgs e)
     {
         var confirmation = logout;
-        LogoutPopup.Hide();
+        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
         if (Active && Owner is { } owner && confirmation is { } captured &&
             captured.Row.Revision == captured.Revision) await owner.LogoutAsync(captured.Row);
     }

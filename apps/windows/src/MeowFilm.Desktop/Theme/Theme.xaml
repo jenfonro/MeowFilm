@@ -1,0 +1,290 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Desktop">
+ <ResourceDictionary.MergedDictionaries>
+  <ResourceDictionary Source="Typography.xaml"/>
+  <ResourceDictionary Source="OverlayScrollChrome.xaml"/>
+  <ResourceDictionary Source="SettingsScrollChrome.xaml"/>
+  <ResourceDictionary Source="ButtonTemplate.xaml"/>
+  <ResourceDictionary Source="GhostButtonTemplate.xaml"/>
+  <ResourceDictionary Source="ContentTemplates.xaml"/>
+  <ResourceDictionary Source="PrimaryButtonTemplate.xaml"/>
+  <ResourceDictionary Source="ManagementButtonTemplate.xaml"/>
+  <ResourceDictionary Source="ManagementDeleteButtonTemplate.xaml"/>
+  <local:AppearanceResources/>
+ </ResourceDictionary.MergedDictionaries>
+ <ResourceDictionary.ThemeDictionaries>
+  <ResourceDictionary x:Key="Default">
+   <SolidColorBrush x:Key="MeowFilm.Brush.SubtleHover" Color="#10000000"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SubtlePressed" Color="#1C000000"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.PrimaryHoverOverlay" Color="#24FFFFFF"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.PrimaryPressedOverlay" Color="#1F000000"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffBackground" Color="Transparent"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffBorder" Color="#CBD5E1"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffKnob" Color="#94A3B8"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOnBackground" Color="#22C55E"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOnKnob" Color="#FFFFFF"/>
+  </ResourceDictionary>
+  <ResourceDictionary x:Key="Dark">
+   <SolidColorBrush x:Key="MeowFilm.Brush.SubtleHover" Color="#1AFFFFFF"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SubtlePressed" Color="#29FFFFFF"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.PrimaryHoverOverlay" Color="#24FFFFFF"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.PrimaryPressedOverlay" Color="#26000000"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffBackground" Color="Transparent"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffBorder" Color="#66FFFFFF"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffKnob" Color="#D4D4D8"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOnBackground" Color="#22C55E"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOnKnob" Color="#FFFFFF"/>
+  </ResourceDictionary>
+  <ResourceDictionary x:Key="HighContrast">
+   <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.DialogScrim" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SidebarBorder" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Surface" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Border" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Hover" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Pressed" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Disabled" Color="{ThemeResource SystemColorGrayTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Accent" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.AccentHover" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.AccentText" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.OnAccent" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.AccentSoft" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Focus" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.Error" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.ErrorSurface" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.ManagementNeutral" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.ManagementBlue" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.ManagementBlueText" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.ManagementSuccess" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.AppBackground" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.FloatingSurface" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.ItemHover" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.ItemSelected" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.InputSurface" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SubtleHover" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SubtlePressed" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.PrimaryHoverOverlay" Color="Transparent"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.PrimaryPressedOverlay" Color="Transparent"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffBackground" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffBorder" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOffKnob" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOnBackground" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="MeowFilm.Brush.SwitchOnKnob" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+  </ResourceDictionary>
+ </ResourceDictionary.ThemeDictionaries>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Window" Color="#F7F8FA"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.DialogScrim" Color="#509CA3AF"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.SidebarBorder" Color="#B8B9CDD7"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Surface" Color="#FFFFFF"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Text" Color="#374151"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Muted" Color="#6B7280"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Border" Color="#D1D5DB"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Hover" Color="#B3FFFFFF"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Pressed" Color="#E5E7EB"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Disabled" Color="#727783"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Accent" Color="#22C55E"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.AccentHover" Color="#16A34A"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.AccentText" Color="#15803D"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.OnAccent" Color="#FFFFFF"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.AccentSoft" Color="#3322C55E"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Focus" Color="#16A34A"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.Error" Color="#B62535"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.ErrorSurface" Color="#FFF0F0"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.ManagementNeutral" Color="#F9FAFB"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.ManagementBlue" Color="#EFF6FF"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.ManagementBlueText" Color="#1D4ED8"/>
+ <SolidColorBrush x:Key="MeowFilm.Brush.ManagementSuccess" Color="#F0FDF4"/>
+ <FontWeight x:Key="ControlContentThemeFontWeight">Normal</FontWeight>
+ <FontWeight x:Key="TextControlThemeFontWeight">Normal</FontWeight>
+ <FontWeight x:Key="ComboBoxItemSelectedFontWeight">Normal</FontWeight>
+ <FontFamily x:Key="MeowFilm.Font.Icons">Segoe Fluent Icons</FontFamily>
+ <local:BooleanToVisibilityConverter x:Key="MeowFilm.BoolToVisibility"/>
+ <local:StringToVisibilityConverter x:Key="MeowFilm.StringToVisibility"/>
+ <Style x:Key="MeowFilm.DialogHost" TargetType="Grid"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.DialogScrim}"/></Style>
+ <Style x:Key="MeowFilm.DialogFooter" TargetType="Border"><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/></Style>
+ <Style x:Key="MeowFilm.FloatingSurface" TargetType="Border"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.FloatingSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="10"/></Style>
+ <Style x:Key="MeowFilm.MenuItem" TargetType="MenuFlyoutItem"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="8,7"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ContextMenu" TargetType="MenuFlyoutPresenter"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="UseLayoutRounding" Value="True"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.SettingsPage" TargetType="Grid"><Setter Property="Margin" Value="32,0,32,12"/></Style>
+ <Style x:Key="MeowFilm.SettingsNavigationBar" TargetType="Border"><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="0,0,0,1"/></Style>
+ <Style x:Key="MeowFilm.ManagementTitleRow" TargetType="StackPanel"><Setter Property="Orientation" Value="Horizontal"/><Setter Property="Margin" Value="0,8,0,8"/></Style>
+ <Style x:Key="MeowFilm.ManagementRowButton" TargetType="Button">
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
+  <Setter Property="Height" Value="30"/><Setter Property="MinHeight" Value="30"/>
+  <Setter Property="Padding" Value="12,0"/><Setter Property="CornerRadius" Value="15"/>
+  <Setter Property="Margin" Value="4,0,0,0"/><Setter Property="VerticalAlignment" Value="Center"/>
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.ManagementBlueText}"/>
+  <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.ManagementBlue}"/>
+  <Setter Property="BorderBrush" Value="Transparent"/><Setter Property="BorderThickness" Value="1"/>
+  <Setter Property="UseSystemFocusVisuals" Value="True"/><Setter Property="FontWeight" Value="Normal"/>
+  <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+  <Setter Property="Template" Value="{StaticResource MeowFilm.ManagementButtonTemplate}"/>
+ </Style>
+ <Style x:Key="MeowFilm.ManagementRowButton.Primary" TargetType="Button" BasedOn="{StaticResource MeowFilm.ManagementRowButton}"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.AccentText}"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.ManagementSuccess}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ManagementRowButton.Danger" TargetType="Button" BasedOn="{StaticResource MeowFilm.ManagementRowButton}"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Error}"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.ErrorSurface}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ManagementStatus" TargetType="local:ManagementStatus" BasedOn="{StaticResource MeowFilm.ManagementRowButton}"><Setter Property="Margin" Value="6,0"/><Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.ManagementNeutral}"/></Style>
+ <Style x:Key="MeowFilm.SettingsArea" TargetType="RadioButton">
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/>
+  <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
+  <Setter Property="FontWeight" Value="Normal"/>
+  <Setter Property="MinWidth" Value="0"/>
+  <Setter Property="Margin" Value="0,0,32,0"/>
+  <Setter Property="Height" Value="36"/>
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/>
+  <Setter Property="UseSystemFocusVisuals" Value="True"/>
+  <Setter Property="FocusVisualMargin" Value="-4,0"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
+   <Grid Background="Transparent">
+    <VisualStateManager.VisualStateGroups>
+     <VisualStateGroup x:Name="CommonStates">
+      <VisualState x:Name="Normal"/>
+      <VisualState x:Name="PointerOver"><VisualState.Setters>
+       <Setter Target="Label.Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
+      </VisualState.Setters></VisualState>
+      <VisualState x:Name="Pressed"><VisualState.Setters>
+       <Setter Target="Label.Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
+      </VisualState.Setters></VisualState>
+      <VisualState x:Name="Disabled"><VisualState.Setters>
+       <Setter Target="Label.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/>
+       <Setter Target="Underline.Opacity" Value="0"/>
+      </VisualState.Setters></VisualState>
+     </VisualStateGroup>
+     <VisualStateGroup x:Name="CheckStates">
+      <VisualState x:Name="Unchecked"/>
+      <VisualState x:Name="Checked"><VisualState.Setters>
+       <Setter Target="Underline.Visibility" Value="Visible"/>
+       <Setter Target="Label.Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
+      </VisualState.Setters></VisualState>
+      <VisualState x:Name="Indeterminate"/>
+     </VisualStateGroup>
+    </VisualStateManager.VisualStateGroups>
+    <ContentPresenter x:Name="Label" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
+                      Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
+                      FontSize="{TemplateBinding FontSize}" FontWeight="Normal" Margin="0,0,0,4" VerticalAlignment="Center"/>
+    <Border x:Name="Underline" Height="2" VerticalAlignment="Bottom" Visibility="Collapsed"
+            Background="{ThemeResource MeowFilm.Brush.Accent}"/>
+   </Grid>
+  </ControlTemplate></Setter.Value></Setter>
+ </Style>
+ <Style TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}"/>
+ <Style x:Key="MeowFilm.Button" TargetType="Button">
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/>
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
+  <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/>
+  <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/>
+  <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="10"/>
+  <Setter Property="Padding" Value="14,8"/><Setter Property="MinHeight" Value="36"/>
+  <Setter Property="HorizontalContentAlignment" Value="Center"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+  <Setter Property="UseSystemFocusVisuals" Value="True"/><Setter Property="FontWeight" Value="Normal"/>
+  <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+  <Setter Property="Template" Value="{StaticResource MeowFilm.ButtonTemplate}"/>
+ </Style>
+ <Style x:Key="MeowFilm.GhostButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+  <Setter Property="Background" Value="Transparent"/>
+  <Setter Property="BorderBrush" Value="Transparent"/>
+  <Setter Property="BorderThickness" Value="0"/>
+  <Setter Property="Template" Value="{StaticResource MeowFilm.GhostButtonTemplate}"/>
+ </Style>
+ <Style x:Key="MeowFilm.QuietButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}"><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.PrimaryButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+  <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Accent}"/>
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.OnAccent}"/>
+  <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Accent}"/>
+  <Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+  <Setter Property="Template" Value="{StaticResource MeowFilm.PrimaryButtonTemplate}"/>
+ </Style>
+ <Style x:Key="MeowFilm.ManagementDeleteSelected" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}"><Setter Property="Height" Value="32"/><Setter Property="MinHeight" Value="32"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="Padding" Value="12,5"/><Setter Property="Margin" Value="4,0,0,0"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Error}"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Error}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/><Setter Property="Template" Value="{StaticResource MeowFilm.ManagementDeleteButtonTemplate}"/></Style>
+ <Style x:Key="MeowFilm.HeaderAction" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}"><Setter Property="Padding" Value="12,6"/><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.IconButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}"><Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/><Setter Property="Padding" Value="0"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionTitle}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="{StaticResource MeowFilm.Font.Icons}"/></Style>
+ <Style x:Key="MeowFilm.CaptionButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.IconButton}"><Setter Property="Width" Value="42"/><Setter Property="Height" Value="36"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="{StaticResource MeowFilm.Font.Icons}"/></Style>
+ <Style x:Key="MeowFilm.CloseButton" TargetType="Button" BasedOn="{StaticResource MeowFilm.CaptionButton}"><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="{StaticResource MeowFilm.Font.Icons}"/></Style>
+ <Style x:Key="MeowFilm.TextBox" TargetType="TextBox"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="12,8"/><Setter Property="MinHeight" Value="38"/><Setter Property="VerticalContentAlignment" Value="Center"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/><Setter Property="CornerRadius" Value="10"/></Style>
+ <Style x:Key="MeowFilm.ManagementTextBox" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}"><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.Text" TargetType="TextBlock"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.MutedText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ErrorText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Error}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.AccentText" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.AccentText}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.Heading" TargetType="TextBlock"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Heading}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="Margin" Value="0,0,0,20"/><Setter Property="TextWrapping" Value="Wrap"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.SectionHeading" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Heading}"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionHeading}"/><Setter Property="Margin" Value="0,0,0,12"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.Title" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Heading}"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Title}"/><Setter Property="Margin" Value="0"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.NavigationGroup" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Heading}"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="Margin" Value="12,20,12,8"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.Surface" TargetType="Border"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="14"/><Setter Property="Padding" Value="20"/></Style>
+ <Style x:Key="MeowFilm.ManagementList" TargetType="ListView"><Setter Property="ItemTemplate"><Setter.Value><DataTemplate><local:ManagementRowView/></DataTemplate></Setter.Value></Setter></Style>
+ <Style x:Key="MeowFilm.ManagementListItem" TargetType="ListViewItem"><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="Margin" Value="0,0,0,4"/><Setter Property="BorderThickness" Value="1"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.NavigationList" TargetType="ListView"><Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Padding" Value="4"/><Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/></Style>
+ <Style x:Key="MeowFilm.NavigationItem" TargetType="ListViewItem"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="Transparent"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="12,6"/><Setter Property="Margin" Value="0,2"/><Setter Property="MinHeight" Value="36"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Center"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.SettingsComboItem" TargetType="ComboBoxItem"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="Padding" Value="10,7"/><Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="Margin" Value="0,1"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ComboBox" TargetType="ComboBox"><Setter Property="local:DropdownPlacement.Enabled" Value="True"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="MinHeight" Value="38"/><Setter Property="Padding" Value="12,8"/><Setter Property="ItemContainerStyle" Value="{StaticResource MeowFilm.SettingsComboItem}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/><Setter Property="CornerRadius" Value="8"/></Style>
+ <Style x:Key="MeowFilm.SettingsComboBox" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}"><Setter Property="MinHeight" Value="34"/><Setter Property="Height" Value="34"/><Setter Property="Padding" Value="12,5"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.SettingsSectionTitle" TargetType="TextBlock"><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.SectionTitle}"/><Setter Property="LineHeight" Value="24"/><Setter Property="TextWrapping" Value="NoWrap"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.SettingsSection" TargetType="Border"><Setter Property="Padding" Value="0,8"/><Setter Property="BorderThickness" Value="0,0,0,1"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/></Style>
+ <Style x:Key="MeowFilm.ManagementInput" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ImportStatusBadge" TargetType="Border"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.AccentSoft}"/></Style>
+ <Style x:Key="MeowFilm.ManagementSearch" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}"><Setter Property="Height" Value="38"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ManagementCheck" TargetType="CheckBox"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="MinHeight" Value="32"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ManagementTab" TargetType="TabViewItem"><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="MinWidth" Value="64"/><Setter Property="Height" Value="46"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/></Style>
+ <Style x:Key="MeowFilm.ManagementTabs" TargetType="TabView"/>
+ <Style x:Key="MeowFilm.Switch" TargetType="CheckBox">
+  <Setter Property="MinWidth" Value="36"/><Setter Property="MinHeight" Value="20"/>
+  <Setter Property="Width" Value="36"/><Setter Property="Height" Value="20"/>
+  <Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0"/>
+  <Setter Property="VerticalAlignment" Value="Center"/><Setter Property="HorizontalAlignment" Value="Center"/>
+  <Setter Property="UseSystemFocusVisuals" Value="True"/>
+  <Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+  <Setter Property="Template">
+   <Setter.Value>
+    <ControlTemplate TargetType="CheckBox">
+     <Grid Background="Transparent">
+      <VisualStateManager.VisualStateGroups>
+       <VisualStateGroup x:Name="CommonStates">
+        <VisualState x:Name="Normal"/>
+        <VisualState x:Name="PointerOver">
+         <VisualState.Setters>
+          <Setter Target="Track.Opacity" Value="0.88"/>
+         </VisualState.Setters>
+        </VisualState>
+        <VisualState x:Name="Pressed">
+         <VisualState.Setters>
+          <Setter Target="Track.Opacity" Value="0.76"/>
+         </VisualState.Setters>
+        </VisualState>
+        <VisualState x:Name="Disabled">
+         <VisualState.Setters>
+          <Setter Target="Track.Opacity" Value="0.45"/>
+         </VisualState.Setters>
+        </VisualState>
+       </VisualStateGroup>
+       <VisualStateGroup x:Name="CheckStates">
+        <VisualState x:Name="Unchecked"/>
+        <VisualState x:Name="Checked">
+         <VisualState.Setters>
+          <Setter Target="Track.Background" Value="{ThemeResource MeowFilm.Brush.SwitchOnBackground}"/>
+          <Setter Target="Track.BorderBrush" Value="Transparent"/>
+          <Setter Target="Knob.HorizontalAlignment" Value="Right"/>
+          <Setter Target="Knob.Fill" Value="{ThemeResource MeowFilm.Brush.SwitchOnKnob}"/>
+         </VisualState.Setters>
+        </VisualState>
+        <VisualState x:Name="Indeterminate"/>
+       </VisualStateGroup>
+      </VisualStateManager.VisualStateGroups>
+      <Border x:Name="Track" Width="36" Height="20" CornerRadius="10"
+              Background="{ThemeResource MeowFilm.Brush.SwitchOffBackground}"
+              BorderBrush="{ThemeResource MeowFilm.Brush.SwitchOffBorder}" BorderThickness="1">
+       <Ellipse x:Name="Knob" Width="14" Height="14" Margin="2,0" HorizontalAlignment="Left"
+                VerticalAlignment="Center" Fill="{ThemeResource MeowFilm.Brush.SwitchOffKnob}"/>
+      </Border>
+     </Grid>
+    </ControlTemplate>
+   </Setter.Value>
+  </Setter>
+ </Style>
+ <Style x:Key="MeowFilm.ManagementSwitch" TargetType="CheckBox" BasedOn="{StaticResource MeowFilm.Switch}"/>
+ <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}"/>
+ <Style TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"/>
+ <Style TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}"/>
+ <Style TargetType="CheckBox" BasedOn="{StaticResource MeowFilm.ManagementCheck}"/>
+ <Style TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}"/>
+ <Style TargetType="MenuFlyoutItem" BasedOn="{StaticResource MeowFilm.MenuItem}"/>
+ <Style TargetType="MenuFlyoutPresenter" BasedOn="{StaticResource MeowFilm.ContextMenu}"/>
+</ResourceDictionary>

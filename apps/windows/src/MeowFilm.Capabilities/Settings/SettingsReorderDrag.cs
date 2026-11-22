@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Foundation;
-using Windows.UI.ViewManagement;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -18,7 +17,6 @@ internal sealed class SettingsReorderDrag
     private readonly Canvas overlay;
     private readonly DispatcherTimer scrolling = new() { Interval = TimeSpan.FromMilliseconds(32) };
     private readonly SettingsReorderShift shifts = new();
-    private readonly UISettings settings = new();
     private ScrollViewer? scroller;
     private Thumb? grip;
     private ListView? list;
@@ -82,7 +80,7 @@ internal sealed class SettingsReorderDrag
         for (int index = 0; index < rows.Length; index++)
             if (owner.ContainerFromIndex(index) is ListViewItem row)
                 shifts.Apply(row, index, sourceIndex, destination < 0 ? sourceIndex : destination, rowBounds[sourceIndex].Height,
-                    settings.AnimationsEnabled && !highContrast);
+                    SystemAppearance.AnimationsEnabled && !highContrast);
         if (preview is not null)
         {
             Canvas.SetLeft(preview, 0);

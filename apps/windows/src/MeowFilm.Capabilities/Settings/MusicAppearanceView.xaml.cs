@@ -16,7 +16,7 @@ public partial class MusicAppearanceView : UserControl
         InitializeComponent();
         PaletteSelection.Presets = MusicAppearancePalette.Options
             .Select(option => new ColorPreset(option.Key, option.Name, option.Color)).ToArray();
-        DataContext = module;
+        DataContext = module.SettingsState;
         _ = DesktopVisual.ObserveVisibility(this, async _ => await UpdateActivation());
     }
     private async Task UpdateActivation()

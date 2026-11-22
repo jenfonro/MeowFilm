@@ -390,7 +390,7 @@ public sealed partial class MusicCapability : IDesktopGlobalSurfaceSource
         if (!CanClearQueueSurface) return Task.CompletedTask;
         return RunAsync(async () =>
         {
-            if (!dialogs.Confirm("清空播放列表？", "播放列表")) return;
+            if (!await ConfirmAsync("清空播放列表？", "播放列表", lifetime.Token)) return;
             await QueueCall("music.queue.clear");
             await StopOwnedPlayback();
             await ReadQueue(lifetime.Token);

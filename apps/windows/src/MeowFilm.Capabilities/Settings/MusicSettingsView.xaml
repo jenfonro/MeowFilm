@@ -8,8 +8,7 @@
  SizeChanged="View_SizeChanged">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Settings/SettingsTheme.xaml"/></ResourceDictionary.MergedDictionaries>
-   <Style x:Key="Settings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}"/>
+<Style x:Key="Settings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}"/>
    <DataTemplate x:Key="Quality.Name"><TextBlock Text="{Binding Converter={StaticResource Settings.QualityName}}" Style="{StaticResource Settings.Text}"/></DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
@@ -136,8 +135,8 @@
    </StackPanel>
   </ScrollViewer>
   <local:MusicSourcesSettingsView x:Name="SourcesPage" Grid.Row="1" Visibility="Collapsed"/>
-  <ContentDialog x:Name="ExclusionPopup">
-   <Border Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16" Width="360" TabFocusNavigation="Cycle">
+  <Grid x:Name="ModalStash" Visibility="Collapsed">
+   <Border x:Name="ExclusionPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20" Width="360" TabFocusNavigation="Cycle">
     <StackPanel>
      <TextBlock Text="添加错源" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,12"/>
      <TextBlock Text="歌曲" Style="{StaticResource Settings.Subtitle}" Margin="0,0,0,6"/>
@@ -154,11 +153,10 @@
      </StackPanel>
     </StackPanel>
    </Border>
-  </ContentDialog>
-  <ContentDialog x:Name="SearchAdvancedPopup" CloseButtonText="关闭"
-         Opened="SearchAdvancedPopup_Opened" Closed="SearchAdvancedPopup_Closed">
-   <Grid Width="264" TabFocusNavigation="Cycle" KeyDown="SearchAdvancedPopup_KeyDown">
-    <Border x:Name="SearchAdvancedSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16">
+   <Border x:Name="SearchAdvancedSurface" Width="288" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20"
+           TabFocusNavigation="Cycle" KeyDown="SearchAdvancedPopup_KeyDown" AutomationProperties.Name="高级搜索设置">
+    <StackPanel>
+     <TextBlock Text="高级设置" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,14"/>
      <Grid>
       <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="76"/></Grid.ColumnDefinitions>
       <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -172,8 +170,11 @@
       <TextBox x:Name="SearchCacheBox" Grid.Row="2" Grid.Column="1" Style="{StaticResource Settings.TextBox}" Height="32" Padding="8,4" Margin="0,10,0,0" HorizontalContentAlignment="Right"
                MaxLength="4" LostFocus="SearchAdvancedBox_LostFocus" AutomationProperties.Name="缓存时长（分钟）"/>
      </Grid>
-    </Border>
-   </Grid>
-  </ContentDialog>
+     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+      <Button Content="关闭" Style="{StaticResource Settings.QuietButton}" Click="SearchAdvancedClose_Click" MinWidth="64"/>
+     </StackPanel>
+    </StackPanel>
+   </Border>
+  </Grid>
  </Grid>
 </UserControl>

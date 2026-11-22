@@ -28,7 +28,7 @@ public sealed partial class MusicCapability
         accountQrSaving = true; AccountBindings();
         try
         {
-            if (!dialogs.Confirm("保存此登录二维码？", "保存二维码") || !Current()) return;
+            if (!await ConfirmAsync("保存此登录二维码？", "保存二维码", lifetime.Token) || !Current()) return;
             string? path;
             if (dialogs is IMusicAccountQrSaveDialog picker) path = picker.SelectQrPngPath();
             else

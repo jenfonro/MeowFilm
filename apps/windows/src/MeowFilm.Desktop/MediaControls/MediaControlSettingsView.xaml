@@ -6,10 +6,7 @@
  Loaded="View_Loaded" Unloaded="View_Unloaded" LostFocus="View_LostFocus">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme.xaml"/>
-   </ResourceDictionary.MergedDictionaries>
-   <Style x:Key="Shortcut.Editor" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+<Style x:Key="Shortcut.Editor" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
     <Setter Property="Height" Value="34"/><Setter Property="MinHeight" Value="34"/>
     <Setter Property="Padding" Value="8,4"/><Setter Property="HorizontalContentAlignment" Value="Left"/>
     <Setter Property="HorizontalAlignment" Value="Stretch"/>
@@ -30,13 +27,13 @@
     <TextBlock Text="快捷键" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>
     <Grid MinHeight="36">
      <TextBlock Text="全局快捷键" VerticalAlignment="Center"/>
-     <ToggleSwitch x:Name="GlobalSwitch" HorizontalAlignment="Right" MinWidth="0" OffContent="" OnContent=""
-                   IsEnabled="{Binding CanEdit}" AutomationProperties.Name="全局快捷键" Toggled="GlobalSwitch_Toggled"/>
+    <CheckBox x:Name="GlobalSwitch" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.Switch}"
+              IsEnabled="{Binding CanEdit}" AutomationProperties.Name="全局快捷键" Click="GlobalSwitch_Toggled"/>
     </Grid>
     <Grid MinHeight="36">
      <TextBlock Text="使用系统媒体快捷键" VerticalAlignment="Center"/>
-     <ToggleSwitch x:Name="SystemMediaSwitch" HorizontalAlignment="Right" MinWidth="0" OffContent="" OnContent=""
-                   IsEnabled="{Binding CanEdit}" AutomationProperties.Name="使用系统媒体快捷键" Toggled="SystemMediaSwitch_Toggled"/>
+    <CheckBox x:Name="SystemMediaSwitch" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.Switch}"
+              IsEnabled="{Binding CanEdit}" AutomationProperties.Name="使用系统媒体快捷键" Click="SystemMediaSwitch_Toggled"/>
     </Grid>
    </StackPanel>
   </Border>

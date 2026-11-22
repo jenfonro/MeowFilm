@@ -1,8 +1,8 @@
 <Window x:Class="MeowFilm.Capabilities.MusicDesktopLyricsWindow" Title="meowfilm 桌面歌词"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Capabilities">
  <Border x:Name="LyricsFrame" Background="Transparent" PointerPressed="Lyrics_PointerPressed" PointerEntered="Lyrics_PointerEntered" AutomationProperties.Name="桌面歌词">
-  <Border.Resources><Style TargetType="Button"><Setter Property="Width" Value="32"/><Setter Property="Height" Value="32"/><Setter Property="Margin" Value="2"/><Setter Property="Padding" Value="0"/><Setter Property="IsTabStop" Value="False"/><Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="#F5F5F5"/><Setter Property="FontFamily" Value="Segoe Fluent Icons"/><Setter Property="FontSize" Value="15"/><Setter Property="CornerRadius" Value="5"/><Setter Property="BorderThickness" Value="0"/></Style></Border.Resources>
-  <Grid>
+  <Border.Resources><Style TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}"><Setter Property="Width" Value="32"/><Setter Property="Height" Value="32"/><Setter Property="MinWidth" Value="32"/><Setter Property="MinHeight" Value="32"/><Setter Property="Margin" Value="2"/><Setter Property="Padding" Value="0"/><Setter Property="IsTabStop" Value="False"/><Setter Property="Foreground" Value="#F5F5F5"/><Setter Property="FontFamily" Value="Segoe Fluent Icons"/><Setter Property="FontSize" Value="15"/><Setter Property="CornerRadius" Value="5"/></Style></Border.Resources>
+  <Grid RequestedTheme="Dark">
    <Border x:Name="HoverSurface" Visibility="Collapsed" CornerRadius="8" Background="#B3212121"/>
    <Grid><Grid.RowDefinitions><RowDefinition Height="44"/><RowDefinition Height="*"/></Grid.RowDefinitions>
     <StackPanel x:Name="Toolbar" Visibility="Collapsed" Orientation="Horizontal" HorizontalAlignment="Center" Margin="8,4">

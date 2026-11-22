@@ -5,7 +5,7 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicDiscoveryView : UserControl
 {
-    private MusicCapability? Model => DataContext as MusicCapability;
+    private MusicCapability? Model => (DataContext as MusicCatalogState)?.Owner;
     public MusicDiscoveryView() => InitializeComponent();
     private async void Rotate_Click(object sender, RoutedEventArgs e)
     { if (Model is { } m) await m.RotateDiscoveryAsync(); }

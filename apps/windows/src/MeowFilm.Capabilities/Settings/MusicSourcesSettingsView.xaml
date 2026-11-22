@@ -9,10 +9,7 @@
  x:Name="SourcesRoot" Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Settings/SettingsTheme.xaml"/>
-   </ResourceDictionary.MergedDictionaries>
-   <Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
+<Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
    <Style x:Key="Source.Muted" TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"/>
    <Style x:Key="Source.Status" TargetType="desktop:ManagementStatus" BasedOn="{StaticResource MeowFilm.ManagementStatus}">
     <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
@@ -47,7 +44,7 @@
                 Visibility="{Binding HasVersion,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
      <ItemsControl ItemsSource="{Binding Platforms}" ItemTemplate="{StaticResource Source.Platform}" Margin="0,4,0,0" Loaded="CompactPlatforms_Loaded" IsTabStop="False" AutomationProperties.Name="平台">
 
-      <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:MusicWrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><desktop:WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
      </ItemsControl>
     </StackPanel>
    </DataTemplate>
@@ -56,7 +53,7 @@
    <DataTemplate x:Key="Source.Platforms">
     <ItemsControl ItemsSource="{Binding Platforms}" ItemTemplate="{StaticResource Source.Platform}" VerticalAlignment="Center" IsTabStop="False" Margin="6,0" AutomationProperties.Name="平台">
      <ItemsControl.Style><Style TargetType="ItemsControl"></Style></ItemsControl.Style>
-     <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:MusicWrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><desktop:WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
     </ItemsControl>
    </DataTemplate>
    <DataTemplate x:Key="Source.Actions">
@@ -80,9 +77,8 @@
    <Button Content="删除所选" Style="{StaticResource MeowFilm.ManagementDeleteSelected}" Click="RemoveSelected_Click" IsEnabled="{Binding CanRemoveSelectedSources}"/>
   </StackPanel>
   <desktop:ManagementList x:Name="SourceList" Grid.Row="1" ShowToolbar="False" ShowBulkActions="False" AutomationProperties.Name="音源列表"/>
-  <ContentDialog x:Name="NetworkPopup"
-         Closed="NetworkPopup_Closed">
-   <Border Style="{StaticResource Settings.PopupSurface}" Padding="20" Width="400" TabFocusNavigation="Cycle">
+  <Grid x:Name="ModalStash" Visibility="Collapsed">
+   <Border x:Name="NetworkPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20" Width="400" TabFocusNavigation="Cycle">
     <StackPanel>
      <TextBlock Text="添加网络源" Style="{StaticResource Settings.PopupTitle}"/>
      <TextBlock Text="网络地址" Margin="0,16,0,8"/>
@@ -94,9 +90,7 @@
      </StackPanel>
     </StackPanel>
    </Border>
-  </ContentDialog>
-  <ContentDialog x:Name="EditPopup">
-   <Border Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16" Width="380" TabFocusNavigation="Cycle">
+   <Border x:Name="EditPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20" Width="380" TabFocusNavigation="Cycle">
     <StackPanel>
      <TextBlock Text="编辑音源" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,12"/>
      <TextBlock Text="名称" Style="{StaticResource Source.Muted}" Margin="0,0,0,6"/>
@@ -114,7 +108,7 @@
      </Grid>
     </StackPanel>
    </Border>
-  </ContentDialog>
+  </Grid>
   <desktop:NoticeOutlet Message="{Binding Status}"/>
  </Grid>
 </UserControl>

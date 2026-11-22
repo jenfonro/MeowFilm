@@ -121,19 +121,18 @@ public sealed partial class MusicCapability
     };
     private async Task<MusicAccountTransferPolicy> ChooseTransferPolicy(IReadOnlyList<MusicAccountTransferConflict> conflicts, CancellationToken token)
     {
-        var dialog = new ContentDialog
+        var request = new DesktopDialogRequest
         {
             Title = "导入账号",
-            Content = new TextBlock { Text = "已有账号：" + string.Join("、", conflicts.Select(item => TransferPlatform(item.Platform))), TextWrapping = TextWrapping.Wrap },
+            Message = "已有账号：" + string.Join("、", conflicts.Select(item => TransferPlatform(item.Platform))),
             PrimaryButtonText = "覆盖", SecondaryButtonText = "跳过", CloseButtonText = "取消",
-            DefaultButton = ContentDialogButton.Close
+            DefaultButton = DesktopDialogDefaultButton.Close
         };
-        using var cancellation = token.Register(() => SettingsView.DispatcherQueue.TryEnqueue(dialog.Hide));
         token.ThrowIfCancellationRequested();
-        var choice = await DialogPlacement.ShowAsync(SettingsView, dialog);
+        var choice = await DesktopModalHost.ShowDialogAsync(SettingsView, request, token);
         token.ThrowIfCancellationRequested();
-        return choice switch { ContentDialogResult.Primary => MusicAccountTransferPolicy.Overwrite,
-            ContentDialogResult.Secondary => MusicAccountTransferPolicy.Skip, _ => MusicAccountTransferPolicy.Cancel };
+        return choice switch { DesktopDialogResult.Primary => MusicAccountTransferPolicy.Overwrite,
+            DesktopDialogResult.Secondary => MusicAccountTransferPolicy.Skip, _ => MusicAccountTransferPolicy.Cancel };
     }
 }
 

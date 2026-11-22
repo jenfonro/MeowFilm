@@ -25,13 +25,14 @@ public partial class MusicSourcesSettingsView : UserControl
     private MusicCapability? networkTransferOwner;
     private long networkSession;
     private long networkTransferSession;
-    private MusicCapability? Module => DataContext as MusicCapability;
+    private MusicCapability? Module => (DataContext as MusicSettingsState)?.Owner;
     private bool Active => initialized && IsLoaded && DesktopVisual.IsVisible(this) && IsEnabled && Module is not null;
     private bool Ready => Active && Module is { CanEdit: true };
 
     public MusicSourcesSettingsView()
     {
         InitializeComponent();
+        ModalStash.Children.Clear();
         initialized = true;
         BindRows();
         _ = DesktopVisual.ObserveVisibility(this, _ => UpdateActivation());
@@ -165,8 +166,20 @@ public partial class MusicSourcesSettingsView : UserControl
         if (!Ready || networkShowing) return;
         networkSession++;
         networkShowing = true;
-        try { networkPresentation = DialogPlacement.ShowAsync(this, NetworkPopup); await networkPresentation; }
-        finally { networkShowing = false; }
+        try
+        {
+            networkPresentation = DesktopModalHost.ShowSurfaceAsync(
+                this,
+                NetworkPopupSurface,
+                onOpened: () => { NetworkAddress.Focus(FocusState.Programmatic); NetworkAddress.SelectAll(); });
+            await networkPresentation;
+        }
+        finally
+        {
+            networkShowing = false;
+            networkSession++;
+            networkTransferOwner?.CancelSourceTransfer();
+        }
     }
     private async void Download_Click(object sender, RoutedEventArgs e)
     {
@@ -182,7 +195,7 @@ public partial class MusicSourcesSettingsView : UserControl
                 (session != networkSession || !networkShowing || !Active || !ReferenceEquals(Module, owner)))
                 owner.CancelSourceTransfer();
         };
-        owner.PropertyChanged += cancelRetired;
+        owner.SettingsState.PropertyChanged += cancelRetired;
         try
         {
             await owner.ImportSourceFromUrlAsync(NetworkAddress.Text);
@@ -192,23 +205,18 @@ public partial class MusicSourcesSettingsView : UserControl
         }
         finally
         {
-            owner.PropertyChanged -= cancelRetired;
+            owner.SettingsState.PropertyChanged -= cancelRetired;
             if (networkTransferSession == session && ReferenceEquals(networkTransferOwner, owner)) networkTransferOwner = null;
         }
     }
     private void NetworkCancel_Click(object sender, RoutedEventArgs e) => CloseNetwork();
-    private void NetworkPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
-    {
-        networkSession++;
-        networkTransferOwner?.CancelSourceTransfer();
-    }
     private void CloseNetwork()
     {
         if (!initialized) return;
         networkSession++;
         networkTransferOwner?.CancelSourceTransfer();
         networkShowing = false;
-        NetworkPopup.Hide();
+        DesktopModalHost.CloseFor(this, NetworkPopupSurface);
     }
 
     /// <summary>Edits management facts only: the display name and a network source's address.</summary>
@@ -242,13 +250,19 @@ public partial class MusicSourcesSettingsView : UserControl
     }
     private async Task ShowEdit()
     {
-        try { await DialogPlacement.ShowAsync(this, EditPopup); }
+        try
+        {
+            await DesktopModalHost.ShowSurfaceAsync(
+                this,
+                EditPopupSurface,
+                onOpened: () => { EditName.Focus(FocusState.Programmatic); EditName.SelectAll(); });
+        }
         finally { editShowing = false; editing = null; }
     }
     private void SourceEnabled_Loaded(object sender, RoutedEventArgs args)
     {
         if (sender is CheckBox { DataContext: MusicSourceRow row } box)
-            box.SetBinding(IsEnabledProperty, new Binding { Source = Module,
+            box.SetBinding(IsEnabledProperty, new Binding { Source = Module?.SettingsState,
                 Path = new PropertyPath(row.IsBuiltIn ? nameof(MusicCapability.CanEditOfficialSources) : nameof(MusicCapability.CanEditScripts)), Mode = BindingMode.OneWay });
     }
     private void CompactPlatforms_Loaded(object sender, RoutedEventArgs args) =>
@@ -274,6 +288,6 @@ public partial class MusicSourcesSettingsView : UserControl
     private void CloseEdit()
     {
         editing = null;
-        if (initialized) { editShowing = false; EditPopup.Hide(); }
+        if (initialized) { editShowing = false; DesktopModalHost.CloseFor(this, EditPopupSurface); }
     }
 }

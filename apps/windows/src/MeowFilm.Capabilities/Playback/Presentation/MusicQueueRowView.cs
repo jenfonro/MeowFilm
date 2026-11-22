@@ -10,13 +10,26 @@ namespace MeowFilm.Capabilities;
 
 public sealed class MusicQueueRowView : Grid
 {
+    private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
     private MusicQueueSurfaceRow? observed;
+    private IDisposable? themeObserver;
     public MusicQueueRowView()
     {
-        Loaded += (_, _) => Observe();
-        Unloaded += (_, _) => { if (observed is not null) observed.PropertyChanged -= RowChanged; observed = null; };
+        Background = TransparentBrush;
+        CornerRadius = new CornerRadius(6);
+        Loaded += (_, _) =>
+        {
+            themeObserver ??= DesktopTheme.Observe(this, Refresh);
+            Observe();
+        };
+        Unloaded += (_, _) =>
+        {
+            if (observed is not null) observed.PropertyChanged -= RowChanged;
+            observed = null;
+            themeObserver?.Dispose();
+            themeObserver = null;
+        };
         DataContextChanged += (_, _) => Observe();
-        DesktopTheme.Observe(this, Refresh);
         RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => Refresh());
     }
     private void Observe()
@@ -35,13 +48,12 @@ public sealed class MusicQueueRowView : Grid
         bool highlighted = CardMotion.GetProgress(this) > .001;
         bool current = DataContext is MusicQueueSurfaceRow { IsCurrent: true };
         bool contrast = DesktopTheme.GetIsHighContrast(this);
-        var settings = new UISettings();
-        Brush SystemBrush(UIElementType type) => new SolidColorBrush(settings.UIElementColor(type));
+        static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
         Brush Resource(string name) => (Brush)Application.Current.Resources[name];
         var foreground = contrast ? SystemBrush(highlighted ? UIElementType.HighlightText : UIElementType.WindowText) :
             Resource("MeowFilm.Brush.Text");
         Background = contrast ? SystemBrush(highlighted ? UIElementType.Highlight : UIElementType.Window) :
-            highlighted ? Resource("MeowFilm.Brush.ItemHover") : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            highlighted ? Resource("MeowFilm.Brush.ItemHover") : TransparentBrush;
         foreach (var node in Descendants(this))
         {
             if (node is TextBlock text)

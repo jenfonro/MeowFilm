@@ -37,12 +37,13 @@ public partial class MusicAccountsView : UserControl
     private bool SurfaceVisible => IsLoaded && DesktopVisual.IsVisible(this) && window?.WindowState != DesktopWindowState.Minimized;
     private bool Visible => SurfaceVisible && loginShowing;
     private bool QrVisible => Visible && QrPanel.Visibility == Visibility.Visible;
-    private MusicCapability? Owner => DataContext as MusicCapability;
+    private MusicCapability? Owner => (DataContext as MusicAccountsState)?.Owner;
 
     public MusicAccountsView()
     {
         AccountTableRows = new(tableRows);
         InitializeComponent();
+        ModalStash.Children.Clear();
         Loaded += (_, _) => Attach();
         Unloaded += (_, _) => Detach();
         DataContextChanged += (_, _) =>
@@ -58,15 +59,40 @@ public partial class MusicAccountsView : UserControl
     {
         if (loginShowing) return;
         loginShowing = true;
-        try { await DialogPlacement.ShowAsync(this, LoginPopup); }
-        finally { loginShowing = false; }
+        try
+        {
+            await DesktopModalHost.ShowSurfaceAsync(this, LoginSurface, onOpened: () =>
+            {
+                if (loginShowing) loginOwner ??= Owner;
+            });
+        }
+        finally
+        {
+            loginShowing = false;
+            RetireLoginPopup();
+        }
     }
     private async void ShowLogout()
     {
         if (logoutShowing) return;
         logoutShowing = true;
-        try { await DialogPlacement.ShowAsync(this, LogoutPopup, () => logoutConfirmation is not null); }
-        finally { logoutShowing = false; }
+        try
+        {
+            await DesktopModalHost.ShowSurfaceAsync(
+                this,
+                LogoutPopupSurface,
+                onOpened: () => CancelLogoutButton.Focus(FocusState.Programmatic),
+                canRestoreFocus: () => logoutConfirmation is not null);
+        }
+        finally
+        {
+            logoutShowing = false;
+            var target = logoutAnchor;
+            logoutConfirmation = null;
+            logoutAnchor = null;
+            if (SurfaceVisible && target is { IsEnabled: true } && DesktopVisual.IsVisible(target))
+                target.Focus(FocusState.Programmatic);
+        }
     }
 
     private void ObserveTableRows()
@@ -145,7 +171,7 @@ public partial class MusicAccountsView : UserControl
     {
         var owner = loginOwner;
         loginOwner = null;
-        LoginPopup.Hide();
+        DesktopModalHost.CloseFor(this, LoginSurface);
         StopPolling();
         StopSmsCountdown();
         ClearSmsInputs();
@@ -156,14 +182,14 @@ public partial class MusicAccountsView : UserControl
     {
         logoutConfirmation = null;
         logoutAnchor = null;
-        LogoutPopup.Hide();
+        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
     }
 
     private void Attach()
     {
         if (observed is not null) return;
         observed = Owner;
-        if (observed is not null) observed.PropertyChanged += OwnerChanged;
+        if (observed is not null) observed.AccountsState.PropertyChanged += OwnerChanged;
         ObserveTableRows();
         window = DesktopWindow.GetWindow(this);
         if (window is not null)
@@ -181,7 +207,7 @@ public partial class MusicAccountsView : UserControl
         var old = observed;
         var retiringLogin = loginOwner;
         observed = null;
-        if (old is not null) old.PropertyChanged -= OwnerChanged;
+        if (old is not null) old.AccountsState.PropertyChanged -= OwnerChanged;
         if (tableSource is not null)
             tableSource.CollectionChanged -= PlatformSettingsChanged;
         tableSource = null;
@@ -210,7 +236,7 @@ public partial class MusicAccountsView : UserControl
 
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!ReferenceEquals(sender, observed)) return;
+        if (!ReferenceEquals(sender, observed?.AccountsState)) return;
         if (logoutConfirmation is { } confirmation &&
             (!ReferenceEquals(observed, confirmation.Owner) || !confirmation.Owner.CanLogoutAccount(confirmation.Account)))
             RetireLogoutPopup();
@@ -256,28 +282,18 @@ public partial class MusicAccountsView : UserControl
         ShowLogout();
     }
 
-    private void LogoutPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e) => CancelLogoutButton.Focus(FocusState.Programmatic);
-    private void LogoutPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
-    {
-        logoutShowing = false;
-        var target = logoutAnchor;
-        logoutConfirmation = null;
-        logoutAnchor = null;
-        if (SurfaceVisible && target is { IsEnabled: true } && DesktopVisual.IsVisible(target)) target.Focus(FocusState.Programmatic);
-    }
-
-    private void CancelLogout_Click(object sender, RoutedEventArgs e) => LogoutPopup.Hide();
+    private void CancelLogout_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, LogoutPopupSurface);
     private void LogoutPopup_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key != VirtualKey.Escape) return;
         e.Handled = true;
-        LogoutPopup.Hide();
+        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
     }
 
     private async void ConfirmLogout_Click(object sender, RoutedEventArgs e)
     {
         var confirmation = logoutConfirmation;
-        LogoutPopup.Hide();
+        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
         if (SurfaceVisible && confirmation is { } captured && ReferenceEquals(Owner, captured.Owner))
             await captured.Owner.LogoutAccountAsync(captured.Account, confirmed: true);
     }
@@ -318,6 +334,8 @@ public partial class MusicAccountsView : UserControl
         if (Owner?.ShowAccountSms != true) return;
         QrPanel.Visibility = Visibility.Collapsed;
         SmsPanel.Visibility = Visibility.Visible;
+        QrModeButton.Tag = Visibility.Collapsed;
+        SmsModeButton.Tag = Visibility.Visible;
         StopPolling();
         RefreshSmsCountdown();
         SmsPhoneInput.Focus(FocusState.Programmatic);
@@ -327,6 +345,8 @@ public partial class MusicAccountsView : UserControl
     {
         QrPanel.Visibility = Visibility.Visible;
         SmsPanel.Visibility = Visibility.Collapsed;
+        QrModeButton.Tag = Visibility.Visible;
+        SmsModeButton.Tag = Visibility.Collapsed;
         StopSmsCountdown();
         RefreshPolling();
     }
@@ -339,17 +359,6 @@ public partial class MusicAccountsView : UserControl
     private async void SaveQr_Click(object sender, RoutedEventArgs e)
     {
         if (Owner is { } owner) await owner.SaveAccountQrAsync();
-    }
-
-    private void LoginPopup_Opened(ContentDialog sender, ContentDialogOpenedEventArgs e)
-    {
-        if (loginShowing) loginOwner ??= Owner;
-    }
-
-    private void LoginPopup_Closed(ContentDialog sender, ContentDialogClosedEventArgs e)
-    {
-        loginShowing = false;
-        RetireLoginPopup();
     }
 
     private void VisibilityChanged()

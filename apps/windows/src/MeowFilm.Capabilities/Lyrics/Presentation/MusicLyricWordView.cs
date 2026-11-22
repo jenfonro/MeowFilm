@@ -122,16 +122,19 @@ public sealed class MusicLyricWordView : UserControl
     private void RefreshNormalColor()
     {
         bool contrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
-        normal.Foreground = contrast ? new SolidColorBrush(new Windows.UI.ViewManagement.UISettings()
-            .GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground)) : Foreground;
+        normal.Foreground = contrast
+            ? new SolidColorBrush(MeowFilm.Desktop.SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
+            : Foreground;
         if (contrast) RefreshOutline();
     }
     private void RefreshHighlightColor()
     {
         bool contrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
-        highlighted.Foreground = contrast ? new SolidColorBrush(new Windows.UI.ViewManagement.UISettings()
-            .GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent)) : Highlight ?? MusicVisuals.Brush("#DC143C");
+        highlighted.Foreground = contrast
+            ? new SolidColorBrush(MeowFilm.Desktop.SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent))
+            : Highlight ?? DefaultHighlight;
     }
+    private static readonly SolidColorBrush DefaultHighlight = MusicVisuals.Brush("#DC143C");
     private void RefreshOutline() => outline.Update(normal, textSurface,
         MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this) ? normal.Foreground : Stroke, StrokeThickness);
     private void RefreshPosition()
@@ -146,6 +149,7 @@ public sealed class MusicLyricWordView : UserControl
             ? (timed.Time + timed.Duration - position) / rate.Value : 0;
         bool animate = remaining > 0 && ActualWidth > 0 && Visibility == Visibility.Visible && MusicVisuals.CanAnimate(this);
         if (!recalibrate && animate && animating) return true;
+        if (!animate && !animating && Math.Abs(progress - next) < 1e-6) return false;
         StopHighlight(); progress = next; ApplyClip(next);
         if (!animate) return false;
         var animation = highlightClip.Compositor.CreateScalarKeyFrameAnimation();

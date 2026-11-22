@@ -7,7 +7,7 @@ public partial class MusicCatalogView
 {
     private void ChannelMore_Click(object sender, RoutedEventArgs e)
     {
-        ChannelMoreContent.DataContext = Owner;
+        ChannelMoreContent.DataContext = Owner?.CatalogState;
         ChannelMoreContent.Width = Math.Min(540, Math.Max(0, XamlRoot.Size.Width - 60));
         ChannelMorePopup.ShowAt(ChannelMoreButton);
     }

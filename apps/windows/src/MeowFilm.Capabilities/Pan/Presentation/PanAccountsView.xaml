@@ -6,9 +6,6 @@
  Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/AccountSettingsTheme.xaml"/>
-   </ResourceDictionary.MergedDictionaries>
    <local:AccountAccessibleNameConverter x:Key="Account.AccessibleName"/>
   </ResourceDictionary>
  </UserControl.Resources>
@@ -66,8 +63,7 @@
    </Grid>
   </ScrollViewer>
   <desktop:NoticeOutlet Message="{Binding Notice}"/>
-  <ContentDialog x:Name="LoginPopup"
-         Opened="LoginPopup_Opened" Closed="LoginPopup_Closed" DataContext="{Binding}">
+  <Grid x:Name="ModalStash" Visibility="Collapsed">
    <local:AccountLoginSurface x:Name="LoginSurface" Title="{Binding LoginTitle}"
           Style="{StaticResource Account.LoginSurface}" CloseRequested="CloseLogin_Click">
     <StackPanel>
@@ -75,9 +71,9 @@
              Visibility="{Binding LoginRow.SupportsQr,Converter={StaticResource MeowFilm.BoolToVisibility}}">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
        <Button x:Name="QrModeButton" Content="二维码登录" Style="{StaticResource Login.Segment}" Click="QrMode_Click"
-               IsEnabled="{Binding CanChangeMethod}" Tag="{Binding Visibility,ElementName=QrPanel}"/>
+               IsEnabled="{Binding CanChangeMethod}"/>
        <Button Grid.Column="1" x:Name="ManualModeButton" Content="手动填写 Cookie" Style="{StaticResource Login.Segment}" Click="ManualMode_Click"
-               IsEnabled="{Binding CanChangeMethod}" Tag="{Binding Visibility,ElementName=ManualPanel}"/>
+               IsEnabled="{Binding CanChangeMethod}"/>
       </Grid>
      </Border>
      <StackPanel x:Name="QrPanel" HorizontalAlignment="Center">
@@ -103,12 +99,10 @@
      </StackPanel>
     </StackPanel>
    </local:AccountLoginSurface>
-  </ContentDialog>
-  <ContentDialog x:Name="LogoutPopup"
-         Opened="LogoutPopup_Opened" Closed="LogoutPopup_Closed">
-   <Border Width="216" Padding="16" Style="{StaticResource Settings.PopupSurface}">
+   <Border x:Name="LogoutPopupSurface" Width="240" Padding="20" CornerRadius="10" Style="{StaticResource Settings.PopupSurface}"
+           AutomationProperties.Name="退出网盘账号确认">
     <StackPanel TabFocusNavigation="Cycle">
-     <TextBlock Text="退出此账号？" Margin="0,0,0,14"/>
+     <TextBlock Text="退出此账号？" Margin="0,0,0,16"/>
      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
       <Button x:Name="CancelLogout" Content="取消" Click="CancelLogout_Click" MinWidth="64" Style="{StaticResource Settings.QuietButton}"/>
       <Button Content="确定" Click="ConfirmLogout_Click" MinWidth="64" Margin="8,0,0,0" Style="{StaticResource Settings.PrimaryButton}"
@@ -116,6 +110,6 @@
      </StackPanel>
     </StackPanel>
    </Border>
-  </ContentDialog>
+  </Grid>
  </Grid>
 </UserControl>

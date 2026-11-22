@@ -1,7 +1,6 @@
 <ResourceDictionary xmlns:local="using:MeowFilm.Capabilities" xmlns:desktop="using:MeowFilm.Desktop" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
  <ResourceDictionary.MergedDictionaries>
-  <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme.xaml" />
-  <ResourceDictionary Source="FilmFavoriteTemplate.xaml" />
+<ResourceDictionary Source="FilmFavoriteTemplate.xaml" />
   <ResourceDictionary Source="FilmShortVideoTemplate.xaml" />
  </ResourceDictionary.MergedDictionaries>
  <ResourceDictionary.ThemeDictionaries>

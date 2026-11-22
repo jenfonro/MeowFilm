@@ -70,9 +70,10 @@ internal sealed class FilmDirectory
     }
 }
 
-internal sealed class FilmDirectoryDialog : ContentDialog
+internal sealed class FilmDirectoryDialog
 {
     private readonly FilmPlaybackPage page;
+    private readonly FrameworkElement owner;
     private readonly JsonElement browsing;
     private readonly FilmDirectory directory;
     private readonly ListView list = new() { DisplayMemberPath = nameof(FilmDirectoryRow.Label), MinHeight = 220, MaxHeight = 400 };
@@ -80,16 +81,17 @@ internal sealed class FilmDirectoryDialog : ContentDialog
     private readonly Button back = new() { Content = "返回上级", MinHeight = 32 };
     private readonly Button play = new() { Content = "播放所选文件", MinHeight = 32 };
     private readonly NoticeOutlet notices = new();
+    private readonly StackPanel body = new() { Spacing = 8, MinWidth = 340 };
+    private CancellationTokenSource? lifetime;
 
-    internal FilmDirectoryDialog(FilmPlaybackPage page)
+    internal FilmDirectoryDialog(FrameworkElement owner, FilmPlaybackPage page)
     {
+        this.owner = owner;
         this.page = page; browsing = page.RawBrowsing.Clone();
         directory = new(browsing, page.CurrentCandidateId);
-        Title = "原始目录"; CloseButtonText = "关闭";
         AutomationProperties.SetName(list, "原始目录与文件");
-        var body = new StackPanel { Spacing = 8, MinWidth = 300 };
         body.Children.Add(back); body.Children.Add(path); body.Children.Add(list);
-        body.Children.Add(play); body.Children.Add(notices); Content = body;
+        body.Children.Add(play); body.Children.Add(notices);
         back.Click += (_, _) => { directory.Back(); Populate(); };
         list.SelectionChanged += (_, _) => play.IsEnabled = list.SelectedItem is FilmDirectoryRow
             { IsDirectory: false, PlaybackTarget: not null, CandidateId: not null };
@@ -104,6 +106,29 @@ internal sealed class FilmDirectoryDialog : ContentDialog
         };
         Populate();
     }
+    internal async Task ShowAsync()
+    {
+        lifetime = new CancellationTokenSource();
+        try
+        {
+            var request = new DesktopDialogRequest
+            {
+                Title = "原始目录",
+                Content = body,
+                CloseButtonText = "关闭",
+                MinWidth = 380,
+                MaxWidth = 560,
+                OnOpened = () => list.Focus(FocusState.Programmatic)
+            };
+            await DesktopModalHost.ShowDialogAsync(owner, request, lifetime.Token);
+        }
+        finally
+        {
+            lifetime.Dispose();
+            lifetime = null;
+        }
+    }
+    internal void Hide() => lifetime?.Cancel();
     internal bool IsCurrent(FilmPlaybackPage value) => ReferenceEquals(page, value) &&
         JsonElement.DeepEquals(FilmJson.Member(browsing, "sourceId"), FilmJson.Member(value.RawBrowsing, "sourceId")) &&
         JsonElement.DeepEquals(FilmJson.Member(browsing, "lineId"), FilmJson.Member(value.RawBrowsing, "lineId")) &&

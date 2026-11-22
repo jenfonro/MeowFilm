@@ -21,7 +21,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private readonly MusicPagePresenter content;
     private readonly Dictionary<ListView, ScrollViewer> songScrolls = [];
     private bool loadingMoreSongs, syncingDate, projectedSearch;
-    private ContentDialog? playlistDialog;
+    private bool playlistDialogOpen;
     private MenuFlyout? songMenu;
     private bool playlistDialogSubmitting;
     private Task dailyStyleRetired = Task.CompletedTask;
@@ -32,7 +32,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private bool insertAfter;
     private (bool CollectionActions, bool RefreshAction, bool Editable) publishedHeaderState;
     private ListView ActiveSongsGrid => module.IsSearchPage ? SearchSongsGrid : SongsGrid;
-    internal bool IsPlaylistDialogOpen => playlistDialog is not null;
+    internal bool IsPlaylistDialogOpen => playlistDialogOpen;
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }
     public MusicView(MusicCapability module)
     {
@@ -41,8 +41,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         refreshAction = new("music.refresh", "刷新", async token => { token.ThrowIfCancellationRequested(); await module.RefreshAsync(); token.ThrowIfCancellationRequested(); }, () => module.CanEdit, automationName: "刷新音乐内容");
         renamePlaylistAction = new("music.playlist.rename", "重命名", RenamePlaylistNameAsync, () => module.CanEdit && module.CanDeleteCollection);
         deletePlaylistAction = new("music.playlist.delete", "删除", token => { token.ThrowIfCancellationRequested(); return module.DeletePlaylistAsync(); }, () => module.CanEdit && module.CanDeleteCollection);
-        InitializeComponent(); DataContext = module; ((FrameworkElement)DailyStylePopup.Content).DataContext = module;
-        foreach (FrameworkElement page in BodyPages.Children) page.DataContext = module;
+        InitializeComponent(); DataContext = module.CatalogState; ((FrameworkElement)DailyStylePopup.Content).DataContext = module.CatalogState;
+        foreach (FrameworkElement page in BodyPages.Children) page.DataContext = module.CatalogState;
         BodyPages.Children.Clear();
         content = new(new() { [MusicContentPage.Catalog] = CatalogView, [MusicContentPage.Discovery] = DiscoveryView, [MusicContentPage.Archives] = ArchiveScroll, [MusicContentPage.Songs] = SongsPage, [MusicContentPage.SearchSongs] = SearchSongsPage });
         BodyPages.Children.Add(content); content.Show(module.ContentPage);
@@ -68,8 +68,18 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             list.ContainerContentChanging += (_, e) => RefreshSongRow(e.ItemContainer);
         }
         publishedHeaderState = HeaderState();
-        Loaded += (_, _) => { module.PropertyChanged -= ModuleChanged; module.PropertyChanged += ModuleChanged; Refresh(); UpdateVisibilityActivity(); };
-        Unloaded += (_, _) => { module.PropertyChanged -= ModuleChanged; UpdateVisibilityActivity(); };
+        Loaded += (_, _) =>
+        {
+            module.CatalogState.PropertyChanged -= ModuleChanged; module.CatalogState.PropertyChanged += ModuleChanged;
+            module.PlaybackState.PropertyChanged -= OnCurrentSongChanged; module.PlaybackState.PropertyChanged += OnCurrentSongChanged;
+            Refresh(); UpdateVisibilityActivity();
+        };
+        Unloaded += (_, _) =>
+        {
+            module.CatalogState.PropertyChanged -= ModuleChanged;
+            module.PlaybackState.PropertyChanged -= OnCurrentSongChanged;
+            UpdateVisibilityActivity();
+        };
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateVisibilityActivity());
     }
     internal void ResetSearchPresentation() => CatalogView.ResetSearchPlaylistProjection();
@@ -78,7 +88,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     {
         bool active = IsLoaded && Visibility == Visibility.Visible;
         if (active) module.Presentation.PageLoaded();
-        else { module.InvalidateCatalogAction(); playlistDialog?.Hide(); songMenu?.Hide(); DailyStylePopup.Hide(); songScrollIntent.Clear(); EndDrag(); }
+        else { module.InvalidateCatalogAction(); if (playlistDialogOpen) DesktopModalHost.CloseFor(this); songMenu?.Hide(); DailyStylePopup.Hide(); songScrollIntent.Clear(); EndDrag(); }
         try { await Task.WhenAll(active ? module.ActivateDiscoveryViewAsync() : module.DeactivateDiscoveryViewAsync(), module.UpdateVipPageAsync(active), active ? module.ActivateCatalogLandingAsync() : Task.CompletedTask); }
         catch { /* Navigation and shutdown retain final drain ownership. */ }
     }
@@ -86,7 +96,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     {
         if (e.PropertyName == nameof(MusicCapability.ContentPage)) content.Show(module.ContentPage);
         if (e.PropertyName == nameof(MusicCapability.CanReorderPlaylist) && !module.CanReorderPlaylist) EndDrag();
-        if (playlistDialog is not null && !playlistDialogSubmitting && e.PropertyName is nameof(MusicCapability.Heading) or nameof(MusicCapability.IsCollectionPage)) playlistDialog.Hide();
+        if (playlistDialogOpen && !playlistDialogSubmitting && e.PropertyName is nameof(MusicCapability.Heading) or nameof(MusicCapability.IsCollectionPage)) DesktopModalHost.CloseFor(this);
         if (e.PropertyName == nameof(MusicCapability.IsDailyStyleEditorOpen))
         {
             long request = ++dailyStyleRequest;
@@ -101,9 +111,12 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         {
             var state = HeaderState(); if (state != publishedHeaderState) { publishedHeaderState = state; HeaderChanged?.Invoke(this, EventArgs.Empty); }
         }
-        if (e.PropertyName == nameof(MusicCapability.CurrentSongId))
-            foreach (var list in new[] { SongsGrid, SearchSongsGrid })
-                for (int i = 0; i < list.Items.Count; i++) if (list.ContainerFromIndex(i) is ListViewItem row) RefreshSongRow(row);
+    }
+    private void OnCurrentSongChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(MusicPlaybackState.CurrentSongId)) return;
+        foreach (var list in new[] { SongsGrid, SearchSongsGrid })
+            for (int i = 0; i < list.Items.Count; i++) if (list.ContainerFromIndex(i) is ListViewItem row) RefreshSongRow(row);
     }
     private void Refresh()
     {
@@ -128,30 +141,47 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     {
         token.ThrowIfCancellationRequested(); var input = new TextBox { Text = module.Heading };
         AutomationProperties.SetName(input, "歌单名称");
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "重命名歌单", Content = input, PrimaryButtonText = "重命名", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary, IsPrimaryButtonEnabled = input.Text.Trim().Length > 0 };
-        input.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = input.Text.Trim().Length > 0;
-        dialog.Opened += (_, _) => { input.Focus(FocusState.Programmatic); input.SelectAll(); };
-        using var registration = token.Register(() => DispatcherQueue.TryEnqueue(dialog.Hide));
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        var request = new DesktopDialogRequest
+        {
+            Title = "重命名歌单",
+            Content = input,
+            PrimaryButtonText = "重命名",
+            CloseButtonText = "取消",
+            DefaultButton = DesktopDialogDefaultButton.Primary,
+            IsPrimaryEnabled = input.Text.Trim().Length > 0,
+            OnOpened = () => { input.Focus(FocusState.Programmatic); input.SelectAll(); }
+        };
+        input.TextChanged += (_, _) => request.IsPrimaryEnabled = input.Text.Trim().Length > 0;
+        if (await DesktopModalHost.ShowDialogAsync(this, request, token) != DesktopDialogResult.Primary) return;
         token.ThrowIfCancellationRequested(); await module.RenamePlaylistAsync(input.Text);
     }
     internal async void OpenCreatePlaylistDialog()
     {
-        if (playlistDialog is not null || !module.CanEdit) return;
+        if (playlistDialogOpen || !module.CanEdit) return;
         var input = new TextBox { PlaceholderText = "歌单名称" };
         var count = new TextBlock { Text = "0", HorizontalAlignment = HorizontalAlignment.Right, FontSize = 12 };
         var panel = new StackPanel { Spacing = 8 }; panel.Children.Add(input); panel.Children.Add(count);
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "创建歌单", Content = panel, PrimaryButtonText = "创建", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Primary, IsPrimaryButtonEnabled = false };
-        playlistDialog = dialog; CreatePlaylistAction.Refresh();
-        input.TextChanged += (_, _) => { count.Text = $"{input.Text.Length}"; dialog.IsPrimaryButtonEnabled = input.Text.Trim().Length > 0 && module.CanEdit && !playlistDialogSubmitting; };
-        dialog.PrimaryButtonClick += async (_, e) =>
+        DesktopDialogRequest request = null!;
+        request = new DesktopDialogRequest
         {
-            var deferral = e.GetDeferral(); playlistDialogSubmitting = true; input.IsEnabled = dialog.IsPrimaryButtonEnabled = false;
-            try { e.Cancel = !module.CanEdit || !await module.TryCreatePlaylistAsync(input.Text); }
-            finally { playlistDialogSubmitting = false; input.IsEnabled = true; dialog.IsPrimaryButtonEnabled = input.Text.Trim().Length > 0 && module.CanEdit; deferral.Complete(); }
+            Title = "创建歌单",
+            Content = panel,
+            PrimaryButtonText = "创建",
+            CloseButtonText = "取消",
+            DefaultButton = DesktopDialogDefaultButton.Primary,
+            IsPrimaryEnabled = false,
+            OnOpened = () => input.Focus(FocusState.Programmatic),
+            OnPrimaryAsync = async () =>
+            {
+                playlistDialogSubmitting = true; input.IsEnabled = request.IsPrimaryEnabled = false;
+                try { return module.CanEdit && await module.TryCreatePlaylistAsync(input.Text); }
+                finally { playlistDialogSubmitting = false; input.IsEnabled = true; request.IsPrimaryEnabled = input.Text.Trim().Length > 0 && module.CanEdit; }
+            }
         };
-        try { await dialog.ShowAsync(); }
-        finally { if (ReferenceEquals(playlistDialog, dialog)) playlistDialog = null; playlistDialogSubmitting = false; CreatePlaylistAction.Refresh(); }
+        playlistDialogOpen = true; CreatePlaylistAction.Refresh();
+        input.TextChanged += (_, _) => { count.Text = $"{input.Text.Length}"; request.IsPrimaryEnabled = input.Text.Trim().Length > 0 && module.CanEdit && !playlistDialogSubmitting; };
+        try { await DesktopModalHost.ShowDialogAsync(this, request); }
+        finally { playlistDialogOpen = false; playlistDialogSubmitting = false; CreatePlaylistAction.Refresh(); }
     }
     internal double CaptureScroll() => ActiveScroll()?.VerticalOffset ?? 0;
     internal void RestoreScroll(double offset) { songScrollIntent.Clear(); if (Visibility == Visibility.Visible) UpdateLayout(); ActiveScroll()?.ChangeView(null, offset, null, true); }
@@ -189,8 +219,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         bool pointer = false;
         void Refresh()
         {
-            var settings = new UISettings();
-            Brush SystemBrush(UIElementType type) => new SolidColorBrush(settings.UIElementColor(type));
+            static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
             Brush Resource(string name) => (Brush)DesktopVisual.Resource(button, name);
             if (DesktopTheme.GetIsHighContrast(button))
             {
@@ -246,6 +275,11 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         }
         template.Unloaded += Unloaded; RefreshSongRow(row);
     }
+    private static readonly SolidColorBrush SelectedSongBackground = MusicVisuals.Brush("#E9F0F6");
+    private static readonly SolidColorBrush HoveredSongBackground = MusicVisuals.Brush("#FFFFFF");
+    private static readonly SolidColorBrush TransparentSongBackground = new(Microsoft.UI.Colors.Transparent);
+    private static readonly SolidColorBrush SelectedSongBorder = MusicVisuals.Brush("#9AAEBF");
+
     private void RefreshSongRow(SelectorItem container)
     {
         if (container.Content is not SongRow song) return;
@@ -255,22 +289,31 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             ? VisualStateManager.GetVisualStateGroups((FrameworkElement)VisualTreeHelper.GetChild(container, 0))
                 .FirstOrDefault(group => group.Name == "CommonStates")?.CurrentState?.Name : null;
         bool hovered = state is "PointerOver" or "PointerOverSelected" or "Pressed" or "PressedSelected";
-        var settings = new UISettings();
-        Brush SystemBrush(UIElementType type) => new SolidColorBrush(settings.UIElementColor(type));
+        bool showActions = hovered || container.IsSelected || focused;
+        static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
         Brush Resource(string name) => (Brush)DesktopVisual.Resource(container, name);
         Brush foreground = contrast ? SystemBrush(container.IsSelected ? UIElementType.HighlightText : UIElementType.WindowText) : Resource("MeowFilm.Brush.Text");
         container.Foreground = foreground;
         container.Background = contrast ? SystemBrush(container.IsSelected ? UIElementType.Highlight : UIElementType.Window) :
-            container.IsSelected ? MusicVisuals.Brush("#E9F0F6") : hovered ? MusicVisuals.Brush("#FFFFFF") : MusicVisuals.Brush("#00000000");
+            container.IsSelected ? SelectedSongBackground : hovered ? HoveredSongBackground : TransparentSongBackground;
         if (!ReferenceEquals(container, insertionRow))
         {
-            container.BorderBrush = contrast ? foreground : focused ? Resource("MeowFilm.Brush.Text") : MusicVisuals.Brush("#9AAEBF");
+            container.BorderBrush = contrast ? foreground : focused ? Resource("MeowFilm.Brush.Text") : SelectedSongBorder;
             container.BorderThickness = new Thickness(container.IsSelected || focused ? 1 : 0);
         }
-        foreach (var text in SongDescendants(container).OfType<TextBlock>())
-            text.Foreground = !contrast && text.Name == "SongTitle" && song.Id == module.CurrentSongId ? Resource("MeowFilm.Brush.Accent") :
-                !contrast && text.Name == "SongArtist" ? Resource("MeowFilm.Brush.Muted") : foreground;
-        foreach (var button in SongDescendants(container).OfType<Button>()) button.Foreground = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
+        foreach (var node in SongDescendants(container))
+        {
+            if (node is TextBlock text)
+                text.Foreground = !contrast && text.Name == "SongTitle" && song.Id == module.CurrentSongId ? Resource("MeowFilm.Brush.Accent") :
+                    !contrast && text.Name == "SongArtist" ? Resource("MeowFilm.Brush.Muted") : foreground;
+            else if (node is StackPanel { Name: "SongActions" } actions)
+            {
+                actions.Opacity = showActions ? 1 : 0;
+                actions.IsHitTestVisible = showActions;
+            }
+            else if (node is Button button)
+                button.Foreground = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
+        }
         AutomationProperties.SetItemStatus(container, song.Id == module.CurrentSongId ? "正在播放" : "");
     }
     private static IEnumerable<DependencyObject> SongDescendants(DependencyObject parent)

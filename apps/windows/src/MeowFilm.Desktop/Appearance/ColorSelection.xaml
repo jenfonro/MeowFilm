@@ -3,9 +3,6 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="using:MeowFilm.Desktop"
  x:Name="Root" UseLayoutRounding="True">
- <UserControl.Resources><ResourceDictionary><ResourceDictionary.MergedDictionaries>
-  <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme.xaml"/>
- </ResourceDictionary.MergedDictionaries></ResourceDictionary></UserControl.Resources>
  <local:WrapPanel>
   <ComboBox x:Name="Choices" Width="190" Style="{StaticResource MeowFilm.SettingsComboBox}"
             DisplayMemberPath="Name" SelectedValuePath="Key" SelectionChanged="Choice_Changed"

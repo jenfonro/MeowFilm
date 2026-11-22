@@ -54,7 +54,6 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private readonly Microsoft.UI.Xaml.Controls.Image previous = new() { Stretch = XamlMedia.Stretch.Fill, IsHitTestVisible = false };
     private readonly XamlMedia.TranslateTransform frameTransform = new(), previousTransform = new();
     private readonly NovelPresentation.VisibilityWatch visibility;
-    private readonly Windows.UI.ViewManagement.UISettings uiSettings = new();
     private readonly IDisposable contrastObservation;
     private readonly NovelPageRaster raster = new();
     private XamlAnimation.Storyboard? turnAnimation;
@@ -107,7 +106,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
             backgroundRequest?.Cancel(); backgroundRequest = null; backgroundImage?.Dispose(); backgroundImage = null;
         };
         contrastObservation = DesktopTheme.Observe(this, Reflow);
-        uiSettings.ColorValuesChanged += HighContrastChanged;
+        SystemAppearance.Changed += HighContrastChanged;
         SizeChanged += (_, _) =>
         {
             Clip = new XamlMedia.RectangleGeometry { Rect = new(0, 0, ActualWidth, ActualHeight) };
@@ -118,7 +117,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         PointerCaptureLost += (_, _) => { pressed = null; pressedPointer = null; dragged = false; };
         KeyDown += KeyPressed;
     }
-    private void HighContrastChanged(Windows.UI.ViewManagement.UISettings sender, object args) =>
+    private void HighContrastChanged(object? sender, EventArgs args) =>
         DispatcherQueue.TryEnqueue(() => { if (!disposed) Reflow(); });
     private void RootChanged(Xaml.XamlRoot sender, Xaml.XamlRootChangedEventArgs args)
     { if (Math.Abs(PixelsPerDip - raster.Scale) > .001) Reflow(); }
@@ -246,8 +245,8 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         textWidth = Math.Max(1, Math.Min(appearance.ContentWidth, ActualWidth - appearance.Margin * 2));
         double height = Math.Max(1, ActualHeight - appearance.Margin * 2), y = appearance.Margin, pageStart = 0;
         bool contrast = DesktopTheme.GetIsHighContrast(this);
-        foreground = contrast ? uiSettings.UIElementColor(UIElementType.WindowText) : NovelTextStyle.Color(appearance.Foreground);
-        background = contrast ? uiSettings.UIElementColor(UIElementType.Window) : NovelTextStyle.Color(appearance.Background);
+        foreground = contrast ? SystemAppearance.GetElementColor(UIElementType.WindowText) : NovelTextStyle.Color(appearance.Foreground);
+        background = contrast ? SystemAppearance.GetElementColor(UIElementType.Window) : NovelTextStyle.Color(appearance.Background);
         if (session?.ContentTitle is { Length: > 0 } title)
         {
             Text(title, -1, "Segoe UI", appearance.FontSize * 1.15, false);
@@ -378,7 +377,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     {
         StopTurn();
         if (disposed || resourcesPaused || !IsLoaded || !DesktopVisual.IsVisible(this) ||
-            appearance.Mode is "none" or "scroll" || !new Windows.UI.ViewManagement.UISettings().AnimationsEnabled || ActualWidth < 1) return;
+            appearance.Mode is "none" or "scroll" || !SystemAppearance.AnimationsEnabled || ActualWidth < 1) return;
         RenderFrame();
         previous.Source = raster.Snapshot(); pendingTurn = delta;
     }
@@ -559,7 +558,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     {
         if (disposed) return; disposed = true; sources.Changed -= SourcesChanged;
         visibility.Dispose(); DetachRoot(); ClearFrame();
-        uiSettings.ColorValuesChanged -= HighContrastChanged;
+        SystemAppearance.Changed -= HighContrastChanged;
         contrastObservation.Dispose();
         contentGeneration++; backgroundRequest?.Cancel(); ReleaseAllImages();
         foreach (var layout in layouts) layout.Dispose(); layouts.Clear(); rows.Clear(); backgroundImage?.Dispose(); backgroundImage = null;

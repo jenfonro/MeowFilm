@@ -15,6 +15,7 @@ namespace MeowFilm.Capabilities;
 public partial class MusicPlayerView : UserControl
 {
     private readonly MusicCapability module;
+    public MusicPlaybackState State => module.PlaybackState;
     private string? scrubKey;
     private int qualityRequest;
     private long modeGeneration, fmGeneration;
@@ -26,7 +27,7 @@ public partial class MusicPlayerView : UserControl
     private string rateKey = "";
     private Task qualityRetired = Task.CompletedTask;
     private Task flyoutRetired = Task.CompletedTask;
-    private PlayerDialogHost? fmHost;
+    private DesktopModalHost? fmHost;
     internal Border FmPanel { get; }
     private ScrollViewer FmScroll { get; }
     private StackPanel FmModeChoices { get; }
@@ -35,18 +36,14 @@ public partial class MusicPlayerView : UserControl
     private readonly List<IDisposable> menuRegistrations = [];
     private readonly Geometry playGeometry = MusicVisuals.Geometry("M15.5,11 L29,20 L15.5,29 Z");
     private readonly Geometry pauseGeometry = MusicVisuals.Geometry("M13,11 L17,11 17,29 13,29 Z M23,11 L27,11 27,29 23,29 Z");
-    private readonly Brush favoriteFill = MusicVisuals.Brush("#FC3D49");
-    private readonly Brush emptyFavoriteFill = MusicVisuals.Brush("#00000000");
     public MusicPlayerView(MusicCapability module, bool showArtwork = true)
     {
-        this.module = module; InitializeComponent(); DataContext = module;
+        this.module = module; InitializeComponent(); DataContext = module.PlaybackState;
         DesktopTheme.Observe(SourcePanel, RefreshSourcePalette);
         DesktopTheme.Observe(this, RefreshFooterPalette);
         foreach (var button in new Button[] { FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
             QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton, PlayButton })
             button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => RefreshFooterPalette());
-        FavoriteBadge.RegisterPropertyChangedCallback(TextBlock.TextProperty, (_, _) =>
-            FavoriteBadge.Visibility = FavoriteBadge.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible);
         if (showArtwork)
         {
             var record = new MusicRecordView { Width = 60, Height = 60 };
@@ -59,7 +56,7 @@ public partial class MusicPlayerView : UserControl
         }
         else MetadataPanel.Children.Remove(ArtworkButton);
         foreach (var flyout in new[] { PlaylistPopup, VolumePopup, RatePopup, SourcePopup })
-            ((FrameworkElement)flyout.Content).DataContext = module;
+            ((FrameworkElement)flyout.Content).DataContext = module.PlaybackState;
         foreach (var (flyout, anchor) in new (FlyoutBase, Button)[]
         {
             (PlaylistPopup, PlaylistButton), (VolumePopup, VolumeButton), (RatePopup, MoreButton),
@@ -75,7 +72,7 @@ public partial class MusicPlayerView : UserControl
         FmScroll = (ScrollViewer)FmPanel.FindName("FmScroll");
         FmModeChoices = (StackPanel)FmPanel.FindName("FmModeChoices");
         FmSceneChoices = (Grid)FmPanel.FindName("FmSceneChoices");
-        FmPanel.DataContext = module;
+        FmPanel.DataContext = module.PlaybackState;
         DesktopTheme.Observe(FmPanel, RefreshFmPalette);
         ObserveFmButton((Button)FmPanel.FindName("CloseFmButton"), false, false, close: true);
         FmPanel.Loaded += (_, _) => RevealFmSelection();
@@ -88,7 +85,7 @@ public partial class MusicPlayerView : UserControl
         };
         Loaded += (_, _) =>
         {
-            module.PropertyChanged -= OnPlaybackChanged; module.PropertyChanged += OnPlaybackChanged;
+            module.PlaybackState.PropertyChanged -= OnPlaybackChanged; module.PlaybackState.PropertyChanged += OnPlaybackChanged;
             window = DesktopWindow.GetWindow(this);
             if (window is not null)
             {
@@ -111,7 +108,7 @@ public partial class MusicPlayerView : UserControl
         };
         Unloaded += (_, _) =>
         {
-            module.PropertyChanged -= OnPlaybackChanged;
+            module.PlaybackState.PropertyChanged -= OnPlaybackChanged;
             if (window is not null) window.VisibilityChanged -= WindowVisibilityChanged;
             Deactivate();
             foreach (var registration in menuRegistrations) registration.Dispose();
@@ -264,16 +261,14 @@ public partial class MusicPlayerView : UserControl
     private void RefreshSourcePalette()
     {
         bool contrast = DesktopTheme.GetIsHighContrast(SourcePanel);
-        var settings = new Windows.UI.ViewManagement.UISettings();
-        SourcePanel.Background = contrast ? new SolidColorBrush(settings.UIElementColor(Windows.UI.ViewManagement.UIElementType.Window)) : (Brush)DesktopVisual.Resource(SourcePanel, "MeowFilm.Brush.FloatingSurface");
+        SourcePanel.Background = contrast ? SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.Window) : (Brush)DesktopVisual.Resource(SourcePanel, "MeowFilm.Brush.FloatingSurface");
     }
     private static void RefreshSourceChoice(Button button)
     {
         bool contrast = DesktopTheme.GetIsHighContrast(button);
         bool current = button.Tag is MusicSourceChoice { Current: true };
-        var settings = new Windows.UI.ViewManagement.UISettings();
-        button.Foreground = contrast ? new SolidColorBrush(settings.UIElementColor(!button.IsEnabled ? Windows.UI.ViewManagement.UIElementType.GrayText : current ? Windows.UI.ViewManagement.UIElementType.HighlightText : Windows.UI.ViewManagement.UIElementType.WindowText)) : (Brush)DesktopVisual.Resource(button, button.IsEnabled ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Disabled");
-        button.Background = contrast ? new SolidColorBrush(settings.UIElementColor(button.IsEnabled && current ? Windows.UI.ViewManagement.UIElementType.Highlight : Windows.UI.ViewManagement.UIElementType.Window)) : current ? (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.ItemSelected") : MusicVisuals.Brush("#00000000");
+        button.Foreground = contrast ? SystemAppearance.GetElementBrush(!button.IsEnabled ? global::Windows.UI.ViewManagement.UIElementType.GrayText : current ? global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText) : (Brush)DesktopVisual.Resource(button, button.IsEnabled ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Disabled");
+        button.Background = contrast ? SystemAppearance.GetElementBrush(button.IsEnabled && current ? global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window) : current ? (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.ItemSelected") : MusicVisuals.Brush("#00000000");
     }
     private void CloseSources_Click(object sender, RoutedEventArgs e) => SourcePopup.Hide();
     private void More_Click(object sender, RoutedEventArgs e) => menuInput?.Toggle(MoreButton);
@@ -336,7 +331,7 @@ public partial class MusicPlayerView : UserControl
         await flyoutRetired;
         if (menuInput is null || menuInput.Generation != menuGeneration || actionKey != module.PlaybackFmActionKey ||
             !CanOpenFmChoices || !DesktopVisual.IsVisible(this)) return;
-        var host = PlayerDialogHost.Find(this) ?? throw new InvalidOperationException("PLAYER_DIALOG_HOST_UNAVAILABLE");
+        var host = DesktopModalHost.Find(this) ?? throw new InvalidOperationException("MODAL_HOST_UNAVAILABLE");
         CloseFm();
         fmActionKey = module.PlaybackFmActionKey; long generation = ++fmGeneration;
         foreach (var choice in module.PlaybackFmModes) FmModeChoices.Children.Add(FmChoice(choice, false, generation));
@@ -413,6 +408,9 @@ public partial class MusicPlayerView : UserControl
     private async void RateReset_Click(object sender, RoutedEventArgs e) => await module.ChangePlaybackRateAsync(1);
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
+        if (e.PropertyName is nameof(MusicPlaybackState.PositionSeconds) or nameof(MusicPlaybackState.PositionText) or
+            nameof(MusicPlaybackState.PlaybackCacheFraction) or nameof(MusicPlaybackState.DurationSeconds) or nameof(MusicPlaybackState.DurationText))
+            return;
         if (!module.HasSourceChoices && ReferenceEquals(activeFlyout, SourcePopup)) SourcePopup.Hide();
         if (!module.HasQualityButton && ReferenceEquals(activeFlyout, QualityMenu)) QualityMenu.Hide();
         if ((modeActionKey != module.PlaybackModeActionKey || !module.CanChangePlaybackMode) && ReferenceEquals(activeFlyout, ModeMenu)) ModeMenu.Hide();
@@ -424,14 +422,12 @@ public partial class MusicPlayerView : UserControl
     private void Refresh()
     {
         PlayGlyph.Data = module.IsPlaying ? pauseGeometry : playGeometry;
-        FavoriteGlyph.Fill = module.IsCurrentFavorite ? favoriteFill : emptyFavoriteFill;
-        FavoriteGlyph.Stroke = module.IsCurrentFavorite ? FavoriteGlyph.Fill : FavoriteButton.Foreground;
+        FavoriteButton.IsFavorited = module.IsCurrentFavorite;
     }
     private void RefreshFooterPalette()
     {
         bool contrast = DesktopTheme.GetIsHighContrast(this);
-        var settings = new global::Windows.UI.ViewManagement.UISettings();
-        Brush SystemBrush(global::Windows.UI.ViewManagement.UIElementType type) => new SolidColorBrush(settings.UIElementColor(type));
+        static Brush SystemBrush(global::Windows.UI.ViewManagement.UIElementType type) => SystemAppearance.GetElementBrush(type);
         Brush Resource(string name) => (Brush)DesktopVisual.Resource(this, "Capability.Player." + name);
         foreach (var button in new Button[] { FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
             QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton })

@@ -157,10 +157,9 @@ public sealed class SeekBar : Slider
         bool expanded = IsEnabled && visible && (pointerWithin || IsScrubbing || FocusState != FocusState.Unfocused);
         bool interactive = IsEnabled && visible && (pointerWithin || IsScrubbing);
         bool highContrast = DesktopTheme.GetIsHighContrast(this);
-        var settings = new global::Windows.UI.ViewManagement.UISettings();
-        var active = highContrast ? new SolidColorBrush(settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Highlight)) :
+        var active = highContrast ? SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.Highlight) :
             PlayedBrush ?? MusicVisuals.Brush("#808080");
-        rail.Fill = highContrast ? new SolidColorBrush(settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText)) :
+        rail.Fill = highContrast ? SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
             RailBrush ?? MusicVisuals.Brush("#0D000000");
         rail.Width = lowerHit.Width = shade.Width = width;
         double hitTop = RailAtTop && interactive ? RailOrigin - 3 : RailOrigin;
@@ -181,7 +180,7 @@ public sealed class SeekBar : Slider
         played.Fill = active; played.Width = width; scale.ScaleX = Fraction(display);
         foreach (var rectangle in new[] { rail, cache, played }) { rectangle.Height = 2; Canvas.SetTop(rectangle, y - 1); }
         head.Fill = marker.Fill = highContrast ?
-            new SolidColorBrush(settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.HighlightText)) : MusicVisuals.Brush("#FFFFFF");
+            SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) : MusicVisuals.Brush("#FFFFFF");
         Canvas.SetTop(head, y - 7); headPosition.X = Math.Clamp(Fraction(display) * width, 7.5, Math.Max(7.5, width - 7.5)) - 7;
         marker.Visibility = double.IsFinite(ChorusSeconds) && ChorusSeconds >= Minimum && ChorusSeconds < Maximum ? Visibility.Visible : Visibility.Collapsed;
         Canvas.SetLeft(marker, double.IsFinite(ChorusSeconds) ? Math.Clamp(Fraction(ChorusSeconds) * width - 2, 0, Math.Max(0, width - 4)) : 0);

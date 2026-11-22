@@ -14,15 +14,15 @@ public partial class ColorPicker : UserControl
     public string SelectedColor { get => (string)GetValue(SelectedColorProperty); set => SetValue(SelectedColorProperty, value); }
     public string Label { get => (string)GetValue(LabelProperty); set => SetValue(LabelProperty, value); }
     public event EventHandler<ColorCommittedEventArgs>? ColorCommitted;
-    private ContentDialog? editor;
+    private bool editing;
     private IDisposable? visibility;
     private readonly NoticeOutlet notice = new();
     public ColorPicker()
     {
         InitializeComponent(); UpdateSelected();
-        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, visible => { if (!visible) editor?.Hide(); });
-        Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; editor?.Hide(); };
-        IsEnabledChanged += (_, _) => { if (!IsEnabled) editor?.Hide(); };
+        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, visible => { if (!visible && editing) DesktopModalHost.CloseFor(this); });
+        Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; if (editing) DesktopModalHost.CloseFor(this); };
+        IsEnabledChanged += (_, _) => { if (!IsEnabled && editing) DesktopModalHost.CloseFor(this); };
     }
     private static void SelectedChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args) => ((ColorPicker)owner).UpdateSelected();
     private void UpdateSelected()
@@ -43,16 +43,23 @@ public partial class ColorPicker : UserControl
     }
     private async void Open_Click(object sender, RoutedEventArgs args)
     {
-        if (editor is not null || !AppearanceColors.TryParse(SelectedColor, out var color)) return;
+        if (editing || !AppearanceColors.TryParse(SelectedColor, out var color)) return;
         var picker = new Microsoft.UI.Xaml.Controls.ColorPicker { Color = color, IsAlphaEnabled = false, IsHexInputVisible = true, IsColorSpectrumVisible = true };
-        var dialog = new ContentDialog { Title = Label, Content = picker, PrimaryButtonText = "确定", CloseButtonText = "取消", DefaultButton = ContentDialogButton.Close };
-        editor = dialog;
+        var request = new DesktopDialogRequest
+        {
+            Title = Label,
+            Content = picker,
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = DesktopDialogDefaultButton.Close
+        };
+        editing = true;
         try
         {
-            if (await DialogPlacement.ShowAsync(this, dialog) == ContentDialogResult.Primary && IsEnabled && DesktopVisual.IsVisible(this))
+            if (await DesktopModalHost.ShowDialogAsync(this, request) == DesktopDialogResult.Primary && IsEnabled && DesktopVisual.IsVisible(this))
                 ColorCommitted?.Invoke(this, new(AppearanceColors.Hex(picker.Color)));
         }
         catch (Exception) { NoticeOutlet.Publish(this, new(notice, "暂时无法打开颜色设置")); }
-        finally { editor = null; }
+        finally { editing = false; }
     }
 }

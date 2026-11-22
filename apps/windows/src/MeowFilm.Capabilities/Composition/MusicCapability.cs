@@ -105,6 +105,12 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
     public FrameworkElement View => Presentation.Page;
     public FrameworkElement SettingsView => Presentation.Settings;
+    private FrameworkElement ModalOwner =>
+        SettingsView.IsLoaded && DesktopVisual.IsVisible(SettingsView) ? SettingsView
+        : PlayerView.IsLoaded ? PlayerView
+        : View;
+    private Task<bool> ConfirmAsync(string message, string title, CancellationToken token = default) =>
+        dialogs.ConfirmAsync(ModalOwner, message, title, token);
     public FrameworkElement AppearanceSettingsView => Presentation.Appearance;
     public FrameworkElement HomeSourceSettingsView => Presentation.HomeSourceSettings;
     public FrameworkElement CacheSettingsView => Presentation.CacheSettings;
@@ -138,7 +144,9 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public string PageText => !IsSongList || IsCollectionPage || Songs.Count == 0 ? "" : $"{location.Offset + 1}–{location.Offset + Songs.Count} / {total}";
     public string CollectionArtwork => IsCollectionPage ? Songs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "" : "";
     public bool CanPlayCollection => CanEdit && IsCollectionPage && total > 0;
-    public string DetailArtwork => IsCatalogDetailPage ? catalogArtwork : CollectionArtwork;
+    public string DetailArtwork => IsCatalogDetailPage
+        ? (catalogArtwork.Length > 0 ? catalogArtwork : Songs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "")
+        : CollectionArtwork;
     public string DetailCountText => IsCatalogDetailPage ? catalogSummaryCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "" :
         IsContentDetailPage ? total.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
     public string DetailSectionTitle => IsCatalogArtist ? "热门歌曲" : "歌曲";
@@ -205,7 +213,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     public string ModeText => mode switch { 1 => "列表循环", 2 => "随机播放", _ => "单曲循环" };
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
-    private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
+    private void Changed([CallerMemberName] string? property = null) => RouteStateNotification(property);
     private void RefreshBindings()
     {
         playbackPresentation.RefreshAvailability();
@@ -215,7 +223,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             nameof(ShowSongPager), nameof(HistoryDate),
             nameof(HasSelection), nameof(CanRemoveSelection), nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection), nameof(CanEditMetadata),
             nameof(CanImportLocalLyrics), nameof(CanRemoveLocalLyrics), nameof(CanEditFeedback), nameof(CanEditSearchPreferences),
-            nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText), nameof(CollectionArtwork),
+            nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText), nameof(CollectionArtwork), nameof(DetailArtwork),
             nameof(CanPlayCollection), nameof(CanPlay),
             nameof(CanSwitchSource) })
             Changed(name);
@@ -429,7 +437,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         return RunAsync(async () =>
         {
             if (selected is null || selected.Kind == "favorites") return;
-            if (!dialogs.Confirm("删除此歌单？", "删除歌单")) return;
+            if (!await ConfirmAsync("删除此歌单？", "删除歌单", lifetime.Token)) return;
             await Call("music.library.remove", new { id = selected.Id, ifRevision = selected.Revision }, lifetime.Token);
             await RefreshPlaylists(lifetime.Token);
             if (origin == loadGeneration) await RequestNavigationAsync("favorites");
@@ -775,8 +783,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         if (stopping || epoch != queueEpoch || serial != queueRead) return;
         ApplyQueue(state);
     }
-    private sealed record QueueState(SongRow? Current, int Mode, bool Saved, JsonElement? FeedbackContext = null, JsonElement? Source = null);
-    private static QueueState ParseQueue(JsonElement reply)
+    private sealed record QueueSnapshot(SongRow? Current, int Mode, bool Saved, JsonElement? FeedbackContext = null, JsonElement? Source = null);
+    private static QueueSnapshot ParseQueue(JsonElement reply)
     {
         var mode = MusicDto.Mode(reply);
         var persistence = MusicDto.Text(reply.GetProperty("persistence"), "state");
@@ -793,7 +801,7 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         return new(current, mode, persistence == "saved", feedbackContext,
             reply.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object ? source.Clone() : null);
     }
-    private void ApplyQueue(QueueState state)
+    private void ApplyQueue(QueueSnapshot state)
     {
         // Background recommendation append/read must not replace the same live
         // SongRow reference while an unchanged occurrence is resolving media.

@@ -510,7 +510,7 @@ public partial class FilmPlaybackView : UserControl
     private async void Directory_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not FilmPlaybackPage { CanBrowseRaw: true } page || directory is not null) return;
-        var dialog = new FilmDirectoryDialog(page) { XamlRoot = XamlRoot };
+        var dialog = new FilmDirectoryDialog(this, page);
         directory = dialog;
         try { await dialog.ShowAsync(); }
         finally { if (ReferenceEquals(directory, dialog)) directory = null; }

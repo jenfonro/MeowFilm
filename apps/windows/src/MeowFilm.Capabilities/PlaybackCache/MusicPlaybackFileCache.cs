@@ -12,7 +12,7 @@ public sealed partial class MusicCapability
     public bool CanClearPlaybackCache => CanEdit && audioFileCache is not null;
     public Task ClearPlaybackCacheAsync() => RunAsync(async () =>
     {
-        if (audioFileCache is null || !dialogs.Confirm("清空播放缓存？", "播放缓存")) return;
+        if (audioFileCache is null || !await ConfirmAsync("清空播放缓存？", "播放缓存", lifetime.Token)) return;
         CancelMusicPreload();
         ArtworkLoader.ClearMemory();
         await presentationCache.ClearAllAsync(lifetime.Token);

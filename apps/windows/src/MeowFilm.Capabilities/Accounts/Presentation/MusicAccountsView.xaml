@@ -7,9 +7,6 @@
  x:Name="AccountsRoot" Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
-   <ResourceDictionary.MergedDictionaries>
-    <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/AccountSettingsTheme.xaml"/>
-   </ResourceDictionary.MergedDictionaries>
    <local:AccountAccessibleNameConverter x:Key="Account.AccessibleName"/>
    <Style x:Key="Account.PlatformName" TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
     <Setter Property="Margin" Value="12,0,0,0"/><Setter Property="VerticalAlignment" Value="Center"/>
@@ -149,26 +146,19 @@
    <desktop:NoticeOutlet Message="{Binding LibrarySync.Status}"/>
   </StackPanel>
 
-  <ContentDialog x:Name="LogoutPopup"
-         Opened="LogoutPopup_Opened" Closed="LogoutPopup_Closed">
-   <Grid Width="216" TabFocusNavigation="Cycle" KeyDown="LogoutPopup_KeyDown"
-         AutomationProperties.Name="退出账号确认">
-    <Border x:Name="LogoutPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="8" Padding="16">
-     <StackPanel>
-      <TextBlock Text="退出此账号？" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="0,0,0,14"/>
-      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-       <Button x:Name="CancelLogoutButton" Content="取消" Click="CancelLogout_Click" MinWidth="64"
-               Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="取消退出账号"/>
-       <Button Content="确定" Click="ConfirmLogout_Click" MinWidth="64" Margin="8,0,0,0"
-               Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="确定退出账号"/>
-      </StackPanel>
+  <Grid x:Name="ModalStash" Visibility="Collapsed">
+   <Border x:Name="LogoutPopupSurface" Width="240" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20"
+           TabFocusNavigation="Cycle" KeyDown="LogoutPopup_KeyDown" AutomationProperties.Name="退出账号确认">
+    <StackPanel>
+     <TextBlock Text="退出此账号？" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="0,0,0,16"/>
+     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="CancelLogoutButton" Content="取消" Click="CancelLogout_Click" MinWidth="64"
+              Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="取消退出账号"/>
+      <Button Content="确定" Click="ConfirmLogout_Click" MinWidth="64" Margin="8,0,0,0"
+              Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="确定退出账号"/>
      </StackPanel>
-    </Border>
-   </Grid>
-  </ContentDialog>
-
-  <ContentDialog x:Name="LoginPopup"
-         Opened="LoginPopup_Opened" Closed="LoginPopup_Closed" DataContext="{Binding}">
+    </StackPanel>
+   </Border>
    <local:AccountLoginSurface x:Name="LoginSurface"
            Style="{StaticResource Account.LoginSurface}" CloseRequested="CloseLogin_Click">
     <Grid>
@@ -176,10 +166,8 @@
      <Border Background="{ThemeResource Settings.Brush.Active}" CornerRadius="6" Margin="0,0,0,16" Padding="2">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
        <Button x:Name="QrModeButton" Content="二维码登录" Click="QrMode_Click"
-               Tag="{Binding Visibility,ElementName=QrPanel}"
                Style="{StaticResource Login.Segment}"/>
        <Button Grid.Column="1" x:Name="SmsModeButton" Content="验证码登录" Click="SmsMode_Click"
-               Tag="{Binding Visibility,ElementName=SmsPanel}"
                Style="{StaticResource Login.Segment}" IsEnabled="{Binding ShowAccountSms}"/>
       </Grid>
      </Border>
@@ -229,6 +217,6 @@
      </Grid>
     </Grid>
    </local:AccountLoginSurface>
-  </ContentDialog>
+  </Grid>
  </Grid>
 </UserControl>

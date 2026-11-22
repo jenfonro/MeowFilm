@@ -17,6 +17,8 @@ namespace MeowFilm.Capabilities;
 public partial class MusicPlayerDetailView : UserControl
 {
     private readonly MusicCapability module;
+    public MusicPlaybackState Playback => module.PlaybackState;
+    public MusicLyricsState LyricsState => module.LyricsState;
     private readonly DispatcherTimer lyricResumeTimer = new() { Interval = TimeSpan.FromSeconds(4) };
     private int centeredLyric = -1;
     private int centeringLyric = -1;
@@ -40,7 +42,9 @@ public partial class MusicPlayerDetailView : UserControl
         this.module = module;
         lyricPresentationKey = module.PlaybackPresentationKey;
         InitializeComponent();
-        DataContext = module;
+        DataContext = module.PlaybackState;
+        LyricViewport.DataContext = module.LyricsState;
+        LyricControlRail.DataContext = module.LyricsState;
         ArtworkScope.SetLoader(DetailRecord, module.ArtworkLoader);
         DetailRecord.SetBinding(MusicRecordView.ArtworkIdentityProperty, new Microsoft.UI.Xaml.Data.Binding { Path = new PropertyPath(nameof(MusicCapability.CurrentArtworkIdentity)) });
         var footer = new MusicPlayerView(module, showArtwork: false);
@@ -84,7 +88,7 @@ public partial class MusicPlayerDetailView : UserControl
         };
         Loaded += (_, _) =>
         {
-            module.PropertyChanged -= OnModuleChanged; module.PropertyChanged += OnModuleChanged;
+            module.LyricsState.PropertyChanged -= OnModuleChanged; module.LyricsState.PropertyChanged += OnModuleChanged;
             module.Lyrics.CollectionChanged -= OnLyricRowsChanged; module.Lyrics.CollectionChanged += OnLyricRowsChanged;
             if (Descendant<ScrollViewer>(LyricList) is { } scroll)
             { scroll.ViewChanged -= OnLyricViewChanged; scroll.ViewChanged += OnLyricViewChanged; }
@@ -97,7 +101,7 @@ public partial class MusicPlayerDetailView : UserControl
         };
         Unloaded += (_, _) =>
         {
-            module.PropertyChanged -= OnModuleChanged; module.Lyrics.CollectionChanged -= OnLyricRowsChanged;
+            module.LyricsState.PropertyChanged -= OnModuleChanged; module.Lyrics.CollectionChanged -= OnLyricRowsChanged;
             visibility?.Dispose(); visibility = null;
             playbackSpacePressed = false;
             StopLyricMotion();
@@ -112,22 +116,20 @@ public partial class MusicPlayerDetailView : UserControl
     private void RefreshDetailPalette()
     {
         bool contrast = DesktopTheme.GetIsHighContrast(this);
-        var settings = new global::Windows.UI.ViewManagement.UISettings();
-        ((SolidColorBrush)Resources["Player.DetailText"]).Color = contrast ? settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
+        ((SolidColorBrush)Resources["Player.DetailText"]).Color = contrast ? SystemAppearance.GetElementColor(global::Windows.UI.ViewManagement.UIElementType.WindowText) :
             global::Windows.UI.Color.FromArgb(255, 235, 234, 237);
         Foreground = (Brush)Resources["Player.DetailText"];
         DetailMetadata.Opacity = contrast ? 1 : .68;
-        if (contrast) PageBackdrop.Background = new SolidColorBrush(settings.UIElementColor(global::Windows.UI.ViewManagement.UIElementType.Window));
-        else MusicVisuals.Bind(PageBackdrop, Border.BackgroundProperty, nameof(MusicCapability.PlayerBackground), module);
+        if (contrast) PageBackdrop.Background = SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.Window);
+        else MusicVisuals.Bind(PageBackdrop, Border.BackgroundProperty, nameof(MusicPlaybackState.PlayerBackground), module.PlaybackState);
     }
     private static void RefreshDetailTab(RadioButton tab, bool pointer)
     {
         bool selected = tab.IsChecked == true;
         if (DesktopTheme.GetIsHighContrast(tab))
         {
-            var settings = new global::Windows.UI.ViewManagement.UISettings();
-            tab.Foreground = new SolidColorBrush(settings.UIElementColor(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText));
-            tab.Background = new SolidColorBrush(settings.UIElementColor(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window));
+            tab.Foreground = SystemAppearance.GetElementBrush(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText);
+            tab.Background = SystemAppearance.GetElementBrush(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window);
         }
         else
         {

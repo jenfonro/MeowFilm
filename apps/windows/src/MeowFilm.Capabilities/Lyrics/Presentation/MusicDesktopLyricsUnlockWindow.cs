@@ -37,9 +37,8 @@ internal sealed class MusicDesktopLyricsUnlockWindow : Window
     {
         var button = (Button)Content;
         DesktopTheme.SetIsHighContrast(button, enabled);
-        var ui = new UISettings();
-        button.Background = enabled ? new SolidColorBrush(ui.UIElementColor(UIElementType.Window)) : MusicVisuals.Brush("#D2212121");
-        button.Foreground = enabled ? new SolidColorBrush(ui.UIElementColor(UIElementType.WindowText)) : MusicVisuals.Brush("#F5F5F5");
+        button.Background = enabled ? SystemAppearance.GetElementBrush(UIElementType.Window) : MusicVisuals.Brush("#D2212121");
+        button.Foreground = enabled ? SystemAppearance.GetElementBrush(UIElementType.WindowText) : MusicVisuals.Brush("#F5F5F5");
     }
 }
 

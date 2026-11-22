@@ -28,7 +28,7 @@ public partial class MusicCatalogView : UserControl
     private IDisposable? visibility;
     private bool visible, reportQueued;
     private readonly Dictionary<FrameworkElement, MusicCatalogCard> visibleSlots = [];
-    internal MusicCapability? Owner => DataContext as MusicCapability;
+    internal MusicCapability? Owner => (DataContext as MusicCatalogState)?.Owner;
     internal ScrollViewer ActiveScroll => Owner is { IsSearchPlaylists: true } ? searchScroll ?? CatalogScroll :
         Owner is { IsCatalogHome: true } ? HomeScroll : Owner is { IsSearchOverview: true } ? SearchOverviewScroll : Owner is { IsChannelLanding: true } ? CatalogScroll : UtilityScroll;
     public MusicCatalogView()
@@ -57,7 +57,7 @@ public partial class MusicCatalogView : UserControl
             observed?.UpdateCatalogVisibleCards([]);
             RememberSearchOffset(); restoreEpoch++; scrollIntent.Clear(); ChannelMorePopup.Hide();
             if (observed is not null)
-            { observed.PropertyChanged -= Changed; observed.ChannelPageRetired -= RetireChannelPresentation;
+            { observed.CatalogState.PropertyChanged -= Changed; observed.ChannelPageRetired -= RetireChannelPresentation;
                 observed.SearchPlaylistSections.CollectionChanged -= SearchPlaylistsChanged; }
             observed = null;
             homeDisplay.Dispose(); searchDisplay.Dispose(); utilityDisplay.Dispose(); ClearChannelPresentations();
@@ -96,7 +96,7 @@ public partial class MusicCatalogView : UserControl
     private void Observe()
     {
         if (observed is not null)
-        { observed.PropertyChanged -= Changed; observed.ChannelPageRetired -= RetireChannelPresentation;
+        { observed.CatalogState.PropertyChanged -= Changed; observed.ChannelPageRetired -= RetireChannelPresentation;
             observed.SearchPlaylistSections.CollectionChanged -= SearchPlaylistsChanged; }
         if (!ReferenceEquals(observed, Owner)) ClearChannelPresentations();
         observed = Owner;
@@ -104,7 +104,7 @@ public partial class MusicCatalogView : UserControl
         searchDisplay.Observe(observed?.SearchOverviewSections); utilityDisplay.Observe(observed?.UtilitySections);
         ShowChannelPresentation(); RefreshSearchCards();
         if (observed is not null)
-        { observed.PropertyChanged += Changed; observed.ChannelPageRetired += RetireChannelPresentation;
+        { observed.CatalogState.PropertyChanged += Changed; observed.ChannelPageRetired += RetireChannelPresentation;
             observed.SearchPlaylistSections.CollectionChanged += SearchPlaylistsChanged; }
     }
     private void Changed(object? sender, PropertyChangedEventArgs e)

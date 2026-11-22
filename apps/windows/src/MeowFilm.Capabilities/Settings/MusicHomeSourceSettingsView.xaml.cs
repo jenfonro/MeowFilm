@@ -15,7 +15,7 @@ public partial class MusicHomeSourceSettingsView : UserControl
     {
         this.module = module;
         InitializeComponent();
-        DataContext = module;
+        DataContext = module.SettingsState;
         _ = DesktopVisual.ObserveVisibility(this, async _ => await UpdateActivation());
     }
     private async Task UpdateActivation()

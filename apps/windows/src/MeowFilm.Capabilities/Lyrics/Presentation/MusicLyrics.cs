@@ -215,7 +215,7 @@ public sealed partial class MusicCapability
             {
                 var snapshot = await SelectedLyricSnapshot.ReadAsync(path, request.Token);
                 if (epoch != lyricEpoch || selected != current || stopping) return;
-                if (!dialogs.Confirm("将所选歌词用于“" + selected.Title + "”？", "导入歌词")) return;
+                if (!await ConfirmAsync("将所选歌词用于“" + selected.Title + "”？", "导入歌词", request.Token)) return;
                 request.Token.ThrowIfCancellationRequested();
                 if (epoch != lyricEpoch || selected != current || stopping) return;
                 // Once the sole native writer admits CAS, cancellation must not
@@ -243,7 +243,7 @@ public sealed partial class MusicCapability
         return RunAsync(async () =>
         {
             if (epoch != lyricEpoch || selected != current || stopping ||
-                !dialogs.Confirm("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词")) return;
+                !await ConfirmAsync("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词", lifetime.Token)) return;
             RetireLyrics();
             await Call("music.lyrics.local.remove", new { song = selected.Raw });
             if (selected == current) ResetLyricOffset();

@@ -1,0 +1,8 @@
+<UserControl x:Class="MeowFilm.Capabilities.NovelSourceEditor"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ AutomationProperties.AutomationId="novel.source.editor">
+ <Border Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="22" BorderThickness="1">
+  <TabView x:Name="Tabs" IsAddTabButtonVisible="False" CanDragTabs="False" CanReorderTabs="False"/>
+ </Border>
+</UserControl>

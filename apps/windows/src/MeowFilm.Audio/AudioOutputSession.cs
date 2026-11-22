@@ -13,7 +13,8 @@ internal sealed class AudioOutputSession : IAsyncDisposable
     private readonly AudioDecoder decoder;
     private readonly AudioPcmBuffer buffer;
     private readonly CancellationTokenSource production = new();
-    private readonly Task producer;
+    private readonly TaskCompletionSource producerDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Thread producerThread;
     private readonly NativeAudioOutput output;
     private readonly Stopwatch dummyClock = new();
     private readonly CancellationTokenSource dummyLifetime = new();
@@ -35,7 +36,15 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         buffer = new(decoder.SampleRate, decoder.Channels, decoder.CheckAvailable);
         buffer.Rendered += () => Volatile.Read(ref rendered)?.TrySetResult();
         Effects = new(buffer);
-        producer = Task.Run(Produce);
+        // Dedicated AboveNormal background thread isolates PCM decoding from ThreadPool bursts
+        // during window drag, UI layout, or concurrent artwork decoding (prevents audio stutter).
+        producerThread = new Thread(Produce)
+        {
+            Name = "MeowFilm.AudioDecode",
+            IsBackground = true,
+            Priority = ThreadPriority.AboveNormal
+        };
+        producerThread.Start();
     }
 
     private void Produce()
@@ -52,6 +61,7 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         }
         catch (OperationCanceledException) when (production.IsCancellationRequested) { }
         catch (Exception error) { buffer.Complete(error); }
+        finally { producerDone.TrySetResult(); }
     }
 
     internal async Task PrepareAsync(CancellationToken token)
@@ -163,7 +173,7 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         try { await StopRenderingAsync(); }
         finally
         {
-            try { await producer; }
+            try { await producerDone.Task; }
             finally
             {
                 Effects.Reset();
@@ -178,7 +188,7 @@ internal sealed class AudioOutputSession : IAsyncDisposable
 internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? validateRead = null) : ISampleProvider
 {
     private readonly object gate = new();
-    private readonly float[] samples = new float[sampleRate * channels];
+    private readonly float[] samples = new float[sampleRate * channels * 2];
     private readonly Queue<(long Start, long Count)> silence = new();
     private int head, count;
     private long submittedFrames, retiredSilence;

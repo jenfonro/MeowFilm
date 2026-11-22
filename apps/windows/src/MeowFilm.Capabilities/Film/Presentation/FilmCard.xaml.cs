@@ -45,12 +45,11 @@ public partial class FilmCard : UserControl
         };
         TextBadge.Visibility = badge ? Visibility.Visible : Visibility.Collapsed;
         bool contrast = DesktopTheme.GetIsHighContrast(this);
-        var colors = new Windows.UI.ViewManagement.UISettings();
         TextBadge.Background = contrast ? (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Accent") : new SolidColorBrush(Windows.UI.Color.FromArgb(255, 249, 115, 22));
         if (TextBadge.Child is TextBlock text)
             text.Foreground = contrast ? (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.OnAccent") : new SolidColorBrush(Microsoft.UI.Colors.White);
-        SiteLabel.Background = new SolidColorBrush(contrast ? colors.UIElementColor(Windows.UI.ViewManagement.UIElementType.Window) : Windows.UI.Color.FromArgb(255, 248, 250, 252));
-        SiteLabel.BorderBrush = new SolidColorBrush(contrast ? colors.UIElementColor(Windows.UI.ViewManagement.UIElementType.WindowText) : Windows.UI.Color.FromArgb(255, 226, 232, 240));
+        SiteLabel.Background = contrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.Window) : new SolidColorBrush(Windows.UI.Color.FromArgb(255, 248, 250, 252));
+        SiteLabel.BorderBrush = contrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.WindowText) : new SolidColorBrush(Windows.UI.Color.FromArgb(255, 226, 232, 240));
         if (IsLoaded) Subtitle.Foreground = (Brush)DesktopVisual.Resource(this, contrast ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Muted");
         ScoreBadge.Background = contrast ? (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Accent") : new SolidColorBrush(Windows.UI.Color.FromArgb(255, 236, 72, 153));
         ((TextBlock)ScoreBadge.Child).Foreground = contrast ? (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.OnAccent") : new SolidColorBrush(Microsoft.UI.Colors.White);
