@@ -6,7 +6,7 @@
  Loaded="View_Loaded" Unloaded="View_Unloaded" LostFocus="View_LostFocus">
  <UserControl.Resources>
   <ResourceDictionary>
-<Style x:Key="Shortcut.Editor" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
+   <Style x:Key="Shortcut.Editor" TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}">
     <Setter Property="Height" Value="34"/><Setter Property="MinHeight" Value="34"/>
     <Setter Property="Padding" Value="8,4"/><Setter Property="HorizontalContentAlignment" Value="Left"/>
     <Setter Property="HorizontalAlignment" Value="Stretch"/>
@@ -27,13 +27,13 @@
     <TextBlock Text="快捷键" Style="{StaticResource MeowFilm.SettingsSectionTitle}" Margin="0,0,0,8"/>
     <Grid MinHeight="36">
      <TextBlock Text="全局快捷键" VerticalAlignment="Center"/>
-    <CheckBox x:Name="GlobalSwitch" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.Switch}"
-              IsEnabled="{Binding CanEdit}" AutomationProperties.Name="全局快捷键" Click="GlobalSwitch_Toggled"/>
+     <CheckBox x:Name="GlobalSwitch" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.Switch}"
+               IsEnabled="{x:Bind settings.CanEdit,Mode=OneWay}" AutomationProperties.Name="全局快捷键" Click="GlobalSwitch_Toggled"/>
     </Grid>
     <Grid MinHeight="36">
      <TextBlock Text="使用系统媒体快捷键" VerticalAlignment="Center"/>
-    <CheckBox x:Name="SystemMediaSwitch" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.Switch}"
-              IsEnabled="{Binding CanEdit}" AutomationProperties.Name="使用系统媒体快捷键" Click="SystemMediaSwitch_Toggled"/>
+     <CheckBox x:Name="SystemMediaSwitch" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.Switch}"
+               IsEnabled="{x:Bind settings.CanEdit,Mode=OneWay}" AutomationProperties.Name="使用系统媒体快捷键" Click="SystemMediaSwitch_Toggled"/>
     </Grid>
    </StackPanel>
   </Border>
@@ -46,38 +46,38 @@
      <TextBlock Grid.Column="2" Text="全局快捷键" Margin="8,0,0,0"/>
     </Grid>
     <ItemsControl x:Name="ShortcutRows">
-     <ItemsControl.ItemTemplate><DataTemplate>
+     <ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MediaShortcutRow">
       <Grid Margin="0,4">
        <Grid.ColumnDefinitions><ColumnDefinition Width="136"/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
-       <TextBlock Text="{Binding Label}" VerticalAlignment="Top" Margin="0,8,8,0" TextWrapping="Wrap"/>
+       <TextBlock Text="{x:Bind Label}" VerticalAlignment="Top" Margin="0,8,8,0" TextWrapping="Wrap"/>
        <StackPanel Grid.Column="1" Margin="0,0,8,0">
         <Grid>
          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-         <Button Tag="local" Style="{StaticResource Shortcut.Editor}" Click="Record_Click" AutomationProperties.Name="{Binding LocalName}"
-                 IsEnabled="{Binding LocalEditorEnabled}">
-          <TextBlock Text="{Binding LocalText}" TextTrimming="CharacterEllipsis"/>
+         <Button Tag="local" Style="{StaticResource Shortcut.Editor}" Click="Record_Click" AutomationProperties.Name="{x:Bind LocalName}"
+                 IsEnabled="{x:Bind LocalEditorEnabled,Mode=OneWay}">
+          <TextBlock Text="{x:Bind LocalText,Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
          </Button>
-         <Button Grid.Column="1" Tag="local" Content="清除" Style="{StaticResource Shortcut.Clear}" Click="Clear_Click" AutomationProperties.Name="{Binding ClearLocalName}"
-                 IsEnabled="{Binding CanClear}"/>
+         <Button Grid.Column="1" Tag="local" Content="清除" Style="{StaticResource Shortcut.Clear}" Click="Clear_Click" AutomationProperties.Name="{x:Bind ClearLocalName}"
+                 IsEnabled="{x:Bind CanClear,Mode=OneWay}"/>
         </Grid>
-        <TextBlock Text="{Binding LocalError}" Style="{StaticResource Shortcut.Error}"
-                   Visibility="{Binding LocalError,Converter={StaticResource MeowFilm.StringToVisibility}}"/>
+        <TextBlock Text="{x:Bind LocalError,Mode=OneWay}" Style="{StaticResource Shortcut.Error}"
+                   Visibility="{x:Bind LocalError,Mode=OneWay,Converter={StaticResource MeowFilm.StringToVisibility}}"/>
        </StackPanel>
        <Grid Grid.Column="2" Margin="8,0,0,0">
-        <StackPanel Visibility="{Binding GlobalVisibility}">
+        <StackPanel Visibility="{x:Bind GlobalVisibility}">
          <Grid>
           <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <Button Tag="global" Style="{StaticResource Shortcut.Editor}" Click="Record_Click" AutomationProperties.Name="{Binding GlobalName}"
-                  IsEnabled="{Binding GlobalEditorEnabled}">
-           <TextBlock Text="{Binding GlobalText}" TextTrimming="CharacterEllipsis"/>
+          <Button Tag="global" Style="{StaticResource Shortcut.Editor}" Click="Record_Click" AutomationProperties.Name="{x:Bind GlobalName}"
+                  IsEnabled="{x:Bind GlobalEditorEnabled,Mode=OneWay}">
+           <TextBlock Text="{x:Bind GlobalText,Mode=OneWay}" TextTrimming="CharacterEllipsis"/>
           </Button>
-          <Button Grid.Column="1" Tag="global" Content="清除" Style="{StaticResource Shortcut.Clear}" Click="Clear_Click" AutomationProperties.Name="{Binding ClearGlobalName}"
-                  IsEnabled="{Binding CanClear}"/>
+          <Button Grid.Column="1" Tag="global" Content="清除" Style="{StaticResource Shortcut.Clear}" Click="Clear_Click" AutomationProperties.Name="{x:Bind ClearGlobalName}"
+                  IsEnabled="{x:Bind CanClear,Mode=OneWay}"/>
          </Grid>
-         <TextBlock Text="{Binding GlobalError}" Style="{StaticResource Shortcut.Error}"
-                    Visibility="{Binding GlobalError,Converter={StaticResource MeowFilm.StringToVisibility}}"/>
+         <TextBlock Text="{x:Bind GlobalError,Mode=OneWay}" Style="{StaticResource Shortcut.Error}"
+                    Visibility="{x:Bind GlobalError,Mode=OneWay,Converter={StaticResource MeowFilm.StringToVisibility}}"/>
         </StackPanel>
-        <TextBlock Text="不适用" VerticalAlignment="Top" Margin="0,8,0,0" Visibility="{Binding UnavailableVisibility}"/>
+        <TextBlock Text="不适用" VerticalAlignment="Top" Margin="0,8,0,0" Visibility="{x:Bind UnavailableVisibility}"/>
        </Grid>
       </Grid>
      </DataTemplate></ItemsControl.ItemTemplate>
@@ -88,7 +88,7 @@
     </StackPanel>
    </StackPanel>
   </Border>
-  <local:NoticeOutlet Message="{Binding Status}"/>
+  <local:NoticeOutlet Message="{x:Bind settings.Status,Mode=OneWay}"/>
   <local:NoticeOutlet x:Name="EditorNotice"/>
  </StackPanel>
 </UserControl>

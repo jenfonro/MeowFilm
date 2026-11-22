@@ -10,13 +10,13 @@ namespace MeowFilm.Desktop;
 public partial class MediaControlSettingsView : UserControl
 {
     private readonly IDesktopMediaControlSettings settings;
-    private readonly Row[] rows = Enum.GetValues<MediaShortcutAction>().Select(action => new Row(action)).ToArray();
+    private readonly MediaShortcutRow[] rows = Enum.GetValues<MediaShortcutAction>().Select(action => new MediaShortcutRow(action)).ToArray();
     private readonly HashSet<Key> consumedKeys = [];
     private readonly KeyEventHandler keyDownHandler, keyUpHandler;
     private DesktopWindow? window;
     private FrameworkElement? inputRoot;
     private Button? recordingButton;
-    private Row? recordingRow;
+    private MediaShortcutRow? recordingRow;
     private bool recordingGlobal, subscribed, refreshing;
 
     public MediaControlSettingsView(IDesktopMediaControlSettings settings)
@@ -103,7 +103,7 @@ public partial class MediaControlSettingsView : UserControl
     }
     private void Record_Click(object sender, RoutedEventArgs e)
     {
-        if (!settings.CanEdit || sender is not Button { DataContext: Row row, Tag: string column } button) return;
+        if (!settings.CanEdit || sender is not Button { DataContext: MediaShortcutRow row, Tag: string column } button) return;
         EndRecording();
         // A previous session may have lost its KeyUp outside this window.
         consumedKeys.Clear();
@@ -116,7 +116,7 @@ public partial class MediaControlSettingsView : UserControl
     }
     private async void Clear_Click(object sender, RoutedEventArgs e)
     {
-        if (!settings.CanEdit || sender is not Button { DataContext: Row row, Tag: string column }) return;
+        if (!settings.CanEdit || sender is not Button { DataContext: MediaShortcutRow row, Tag: string column }) return;
         EndRecording();
         await SaveGesture(row, column == "global", null);
     }
@@ -176,7 +176,7 @@ public partial class MediaControlSettingsView : UserControl
         _ = SaveGesture(row, global, gesture);
         return true;
     }
-    private async Task SaveGesture(Row row, bool global, MediaShortcutGesture? gesture)
+    private async Task SaveGesture(MediaShortcutRow row, bool global, MediaShortcutGesture? gesture)
     {
         row.LocalError = row.DraftGlobalError = "";
         EditorNotice.Message = "";
@@ -216,29 +216,29 @@ public partial class MediaControlSettingsView : UserControl
     private void Refresh_Click(object sender, RoutedEventArgs e) => settings.RequestRegistrationRefresh();
     private async void Reload_Click(object sender, RoutedEventArgs e)
     { EndRecording(); await settings.LoadAsync(); }
+}
 
-    [Microsoft.UI.Xaml.Data.Bindable]
-    public sealed class Row(MediaShortcutAction action) : INotifyPropertyChanged
-    {
-        public MediaShortcutAction Action { get; } = action;
-        public string Label => MediaControlDefaults.Label(Action);
-        public bool HasGlobal => Action != MediaShortcutAction.ToggleTranslation;
-        public Visibility GlobalVisibility => HasGlobal ? Visibility.Visible : Visibility.Collapsed;
-        public Visibility UnavailableVisibility => HasGlobal ? Visibility.Collapsed : Visibility.Visible;
-        public string LocalName => Label + "，应用内快捷键";
-        public string GlobalName => Label + "，全局快捷键";
-        public string ClearLocalName => "清除" + LocalName;
-        public string ClearGlobalName => "清除" + GlobalName;
-        public string LocalText { get; set; } = "";
-        public string GlobalText { get; set; } = "";
-        public string LocalError { get; set; } = "";
-        public string DraftGlobalError { get; set; } = "";
-        public string RegistrationError { get; set; } = "";
-        public bool LocalEditorEnabled { get; set; }
-        public bool GlobalEditorEnabled { get; set; }
-        public bool CanClear { get; set; }
-        public string GlobalError => DraftGlobalError.Length > 0 ? DraftGlobalError : RegistrationError;
-        public event PropertyChangedEventHandler? PropertyChanged;
-        public void Changed() => PropertyChanged?.Invoke(this, new(""));
-    }
+[Microsoft.UI.Xaml.Data.Bindable]
+public sealed class MediaShortcutRow(MediaShortcutAction action) : INotifyPropertyChanged
+{
+    public MediaShortcutAction Action { get; } = action;
+    public string Label => MediaControlDefaults.Label(Action);
+    public bool HasGlobal => Action != MediaShortcutAction.ToggleTranslation;
+    public Visibility GlobalVisibility => HasGlobal ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility UnavailableVisibility => HasGlobal ? Visibility.Collapsed : Visibility.Visible;
+    public string LocalName => Label + "，应用内快捷键";
+    public string GlobalName => Label + "，全局快捷键";
+    public string ClearLocalName => "清除" + LocalName;
+    public string ClearGlobalName => "清除" + GlobalName;
+    public string LocalText { get; set; } = "";
+    public string GlobalText { get; set; } = "";
+    public string LocalError { get; set; } = "";
+    public string DraftGlobalError { get; set; } = "";
+    public string RegistrationError { get; set; } = "";
+    public bool LocalEditorEnabled { get; set; }
+    public bool GlobalEditorEnabled { get; set; }
+    public bool CanClear { get; set; }
+    public string GlobalError => DraftGlobalError.Length > 0 ? DraftGlobalError : RegistrationError;
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public void Changed() => PropertyChanged?.Invoke(this, new(""));
 }

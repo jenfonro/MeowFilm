@@ -20,20 +20,29 @@ public sealed class PlayerSurfaceInput : IDisposable
     private readonly Func<bool> layersOpen;
     private readonly IDisposable visibility;
     private readonly SurfaceGesture gesture = new();
-    private bool pressed, disposed;
+    private bool pressed, disposed, surfaceVisible;
     public PlayerSurfaceInput(DesktopWindow window, FrameworkElement surface, Func<bool> layersOpen)
     {
         this.window = window; root = window.Root; this.surface = surface; this.layersOpen = layersOpen;
+        surfaceVisible = DesktopVisual.IsVisible(surface);
         window.NativeMessage += Message; window.Deactivated += Deactivated;
         root.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(KeyDown), true);
         root.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released), true);
         root.AddHandler(UIElement.PointerCanceledEvent, new PointerEventHandler(Cancelled), true);
-        visibility = DesktopVisual.ObserveVisibility(surface, visible => { if (!visible) Cancel(); });
+        visibility = DesktopVisual.ObserveVisibility(surface, visible =>
+        {
+            surfaceVisible = visible;
+            if (!visible) Cancel();
+        });
     }
     private nint Message(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
-        if (!DesktopVisual.IsVisible(surface)) return 0;
-        gesture.Message(message, wParam, lParam, window.IsActive, layersOpen() || GetQueueOpen(surface));
+        // Fast-path filter: ignore high-frequency messages (WM_MOVE, WM_WINDOWPOSCHANGING, WM_MOUSEMOVE, etc.)
+        // before touching visual tree visibility or layer state.
+        if (message is not (0x21 or 0x201 or 0x203 or 0x100 or 0x104 or 0x1f or 0x6)) return 0;
+        if (!surfaceVisible) return 0;
+        bool blocked = message is 0x201 or 0x203 && (layersOpen() || GetQueueOpen(surface));
+        gesture.Message(message, wParam, lParam, window.IsActive, blocked);
         if (message is 0x201 or 0x203) pressed = true;
         return 0;
     }

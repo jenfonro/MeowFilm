@@ -1,0 +1,92 @@
+<UserControl x:Class="MeowFilm.Capabilities.NovelDiscoveryChannelBar"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop"
+ Height="44"
+ Margin="0,0,12,0"
+ AutomationProperties.Name="发现频道"
+ AutomationProperties.AutomationId="novel.discovery.channels">
+ <Grid>
+  <Grid.ColumnDefinitions>
+   <ColumnDefinition Width="*"/>
+   <ColumnDefinition Width="Auto"/>
+  </Grid.ColumnDefinitions>
+  <ItemsControl x:Name="BarItems" VerticalAlignment="Center">
+   <ItemsControl.ItemsPanel>
+    <ItemsPanelTemplate>
+     <StackPanel Orientation="Horizontal"/>
+    </ItemsPanelTemplate>
+   </ItemsControl.ItemsPanel>
+   <ItemsControl.ItemTemplate>
+    <DataTemplate x:DataType="local:NovelChannelItem">
+     <RadioButton Content="{x:Bind Title}"
+                  IsChecked="{x:Bind IsSelected, Mode=OneWay}"
+                  Visibility="{x:Bind BarVisibility, Mode=OneWay}"
+                  MaxWidth="{x:Bind MaxItemWidth, Mode=OneWay}"
+                  GroupName="novel.discovery.channels"
+                  Style="{StaticResource Novel.Discovery.Tab}"
+                  AutomationProperties.Name="{x:Bind Title}"
+                  AutomationProperties.AutomationId="{x:Bind AutomationId}"
+                  Click="ChannelTab_Click"
+                  KeyDown="ChannelTab_KeyDown"/>
+    </DataTemplate>
+   </ItemsControl.ItemTemplate>
+  </ItemsControl>
+  <Button x:Name="ExpandButton" Grid.Column="1"
+          Style="{StaticResource Novel.Discovery.Action}"
+          Width="30" Margin="8,0,8,0" Padding="0"
+          VerticalAlignment="Center" Visibility="Collapsed"
+          AutomationProperties.Name="展开频道"
+          AutomationProperties.AutomationId="novel.discovery.channels.expand"
+          KeyDown="ExpandButton_KeyDown">
+   <Path Data="M1,1 L6,6 11,1" Width="11" Height="6" Stretch="Fill"
+         Stroke="{x:Bind ExpandButton.Foreground, Mode=OneWay}"
+         StrokeThickness="1.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+         RenderTransformOrigin="0.5,0.5">
+    <Path.RenderTransform>
+     <RotateTransform x:Name="ChevronRotate" Angle="0"/>
+    </Path.RenderTransform>
+   </Path>
+   <Button.Flyout>
+    <Flyout x:Name="ExpandedFlyout" Placement="BottomEdgeAlignedLeft"
+            Opening="ExpandedFlyout_Opening" Closed="ExpandedFlyout_Closed">
+     <Flyout.FlyoutPresenterStyle>
+      <Style TargetType="FlyoutPresenter" BasedOn="{StaticResource MeowFilm.FlyoutPresenter}">
+       <Setter Property="CornerRadius" Value="10"/>
+       <Setter Property="Padding" Value="12,6"/>
+       <Setter Property="MaxWidth" Value="1100"/>
+      </Style>
+     </Flyout.FlyoutPresenterStyle>
+     <ScrollViewer x:Name="ExpandedScroll" MaxHeight="200"
+                   Style="{StaticResource MeowFilm.SettingsScrollViewer}"
+                   HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto"
+                   AutomationProperties.Name="全部频道"
+                   AutomationProperties.AutomationId="novel.discovery.channels.expanded">
+      <ItemsControl x:Name="ExpandedItems">
+       <ItemsControl.ItemsPanel>
+        <ItemsPanelTemplate>
+         <desktop:WrapPanel/>
+        </ItemsPanelTemplate>
+       </ItemsControl.ItemsPanel>
+       <ItemsControl.ItemTemplate>
+        <DataTemplate x:DataType="local:NovelChannelItem">
+         <RadioButton Content="{x:Bind Title}"
+                      IsChecked="{x:Bind IsSelected, Mode=OneWay}"
+                      MaxWidth="{x:Bind ExpandedMaxWidth, Mode=OneWay}"
+                      GroupName="novel.discovery.expanded-channels"
+                      Style="{StaticResource Novel.Discovery.Tab}"
+                      ToolTipService.ToolTip="{x:Bind Title}"
+                      AutomationProperties.Name="{x:Bind Title}"
+                      AutomationProperties.AutomationId="{x:Bind ExpandedAutomationId}"
+                      Click="ExpandedChannel_Click"
+                      KeyDown="ChannelTab_KeyDown"/>
+        </DataTemplate>
+       </ItemsControl.ItemTemplate>
+      </ItemsControl>
+     </ScrollViewer>
+    </Flyout>
+   </Button.Flyout>
+  </Button>
+ </Grid>
+</UserControl>

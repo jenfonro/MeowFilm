@@ -3,21 +3,22 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Desktop;
 
+internal sealed class ShellPageSession(IDesktopPage page)
+{
+    public IDesktopPage Page { get; } = page;
+    public ContentControl Host { get; } = new()
+    {
+        Visibility = Visibility.Collapsed,
+        HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        VerticalContentAlignment = VerticalAlignment.Stretch,
+        IsTabStop = false
+    };
+    public SemaphoreSlim Gate { get; } = new(1, 1);
+    public string? SearchDraft { get; set; }
+}
+
 public sealed partial class ShellWindow
 {
-    private sealed class PageSession(IDesktopPage page)
-    {
-        public IDesktopPage Page { get; } = page;
-        public ContentControl Host { get; } = new()
-        {
-            Visibility = Visibility.Collapsed,
-            HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            VerticalContentAlignment = VerticalAlignment.Stretch,
-            IsTabStop = false
-        };
-        public SemaphoreSlim Gate { get; } = new(1, 1);
-        public string? SearchDraft { get; set; }
-    }
     private sealed class PageRequest
     {
         public CancellationTokenSource Source { get; } = new();
@@ -30,8 +31,9 @@ public sealed partial class ShellWindow
             _ = ShellRequest.ObserveAsync(Cancellation);
         }
     }
-    private readonly PageSession[] _pages;
-    private PageSession? _currentPage, _retryPage;
+
+    private readonly ShellPageSession[] _pages;
+    private ShellPageSession? _currentPage, _retryPage;
     private PageRequest? _pageRequest;
 
     private void OnPublicPageSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -40,7 +42,8 @@ public sealed partial class ShellWindow
         if (PublicNavigationList.SelectedItem is IDesktopPage page)
             RunUiAction(() => ActivatePageAsync(_pages.Single(item => ReferenceEquals(item.Page, page))));
     }
-    private async Task ActivatePageAsync(PageSession session, Func<CancellationToken, Task>? operation = null,
+
+    internal async Task ActivatePageAsync(ShellPageSession session, Func<CancellationToken, Task>? operation = null,
         RequestPlan? navigation = null, bool recordNavigation = true)
     {
         if (_isClosing) return;
@@ -55,14 +58,11 @@ public sealed partial class ShellWindow
         var generation = Interlocked.Increment(ref _presentationGeneration);
         var navigationOwner = navigation?.Session ?? _current ?? _sessions[0];
         var destination = navigation?.Destination ?? new Destination(session.Page.Id, Location: session.Page.Id, PageId: session.Page.Id);
-        ApplyPresentation(); // Hide the capability surface even if a supplied page getter fails.
+        ApplyPresentation();
         if (session.Page is IDesktopSearchPage searchPage)
         {
-            _suppressSearch = true;
-            try { SearchBox.Text = session.SearchDraft ?? searchPage.Query; }
-            finally { _suppressSearch = false; }
+            _search.SetBoxText(session.SearchDraft ?? searchPage.Query);
             var owner = _sessions.Single(item => ReferenceEquals(item.Module, searchPage.ContentOwner));
-            // One retained visual can be projected into a public page, then returned on exit.
             owner.MainHost.Content = null;
         }
         if (!ContentDeck.Children.Contains(session.Host))
@@ -84,7 +84,7 @@ public sealed partial class ShellWindow
             await work.WaitAsync(OperationTimeout, _timeProvider, token);
             if (Current())
             {
-                if (recordNavigation) CommitDestination(navigation ?? new(navigationOwner, destination), destination);
+                if (recordNavigation) _history.Commit(navigation ?? new(navigationOwner, destination), destination);
                 SetStatus();
                 ApplyPresentation();
             }
@@ -139,6 +139,7 @@ public sealed partial class ShellWindow
             request.Source.Dispose();
         }
     }
+
     private void CancelPageActivation()
     {
         CancelPageNavigation();
@@ -147,7 +148,8 @@ public sealed partial class ShellWindow
         request?.Cancel();
         _retryPage = null;
     }
-    private void LeavePublicPage()
+
+    internal void LeavePublicPage()
     {
         if (_currentPage is not { } page) return;
         if (page.Page is IDesktopSearchPage) page.SearchDraft = SearchBox.Text;
@@ -161,7 +163,7 @@ public sealed partial class ShellWindow
         finally { _suppressSelection = false; }
     }
 
-    private void UnmountPage(PageSession session)
+    private void UnmountPage(ShellPageSession session)
     {
         session.Page.Deactivate();
         session.Host.Visibility = Visibility.Collapsed;

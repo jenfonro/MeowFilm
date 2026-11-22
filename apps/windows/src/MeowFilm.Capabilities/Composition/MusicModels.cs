@@ -76,37 +76,6 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null) : System.C
     }
 }
 
-public sealed partial class MusicCapability
-{
-    private static void ReconcileSongRows(ObservableCollection<SongRow> target, IReadOnlyList<SongRow> next)
-    {
-        // A queue occurrence has EntryId; catalog members can repeat the same permanent song.
-        // Match each occurrence once, in order, rather than deduplicating songs by their Id.
-        var available = target.GroupBy(row => row.SelectionKey, StringComparer.Ordinal)
-            .ToDictionary(group => group.Key, group => new Queue<SongRow>(group), StringComparer.Ordinal);
-        var rows = next.Select(song =>
-        {
-            if (!available.TryGetValue(song.SelectionKey, out var occurrences) || occurrences.Count == 0) return song;
-            var retained = occurrences.Dequeue();
-            if (!ReferenceEquals(retained, song)) retained.ApplyRepository(song.Raw, song.RepositoryPublication);
-            return retained;
-        }).ToArray();
-        var retainedRows = rows.ToHashSet(ReferenceEqualityComparer.Instance);
-        for (int index = target.Count - 1; index >= 0; index--)
-            if (!retainedRows.Contains(target[index])) target.RemoveAt(index);
-        for (int index = 0; index < rows.Length; index++)
-        {
-            var row = rows[index];
-            if (index < target.Count && ReferenceEquals(target[index], row)) continue;
-            int previous = -1;
-            for (int position = index + 1; position < target.Count; position++)
-                if (ReferenceEquals(target[position], row)) { previous = position; break; }
-            if (previous >= 0) target.Move(previous, index);
-            else target.Insert(index, row);
-        }
-    }
-}
-
 /// <summary>Read-only accessors for the lean song wire shape (sources[0] is the primary recording).</summary>
 internal static class SongJson
 {

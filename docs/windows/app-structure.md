@@ -6,7 +6,7 @@
 
 Windows 全应用的显示投影由业务数据 owner 更新：内容回执、刷新、筛选、账号变化等决定栏目、卡片和列表成员。布局和滚动不重新筛选成员、不扫描整页 XAML 树以决定业务显示，也不触发刷新。到底分页仍按真实滚动意图请求尚未取得的下一页。几何、裁剪、命中区域、动画及绘制更新只处理呈现，不取得业务数据。
 
-回执按稳定身份增量协调：音乐目录显示槽持有最新业务快照并保留栏目和卡片；影视栏目保留内容相同的条目；小说发现、详情和统一搜索局部更新文字、状态及受影响封面。共享 `ManagementList` 保留同 ID 的行状态和控件，选择只更新选择框，列变更只更新列定义；自定义 cells 以显式绑定 owner 身份复用。加载状态、选择及无关属性通知不清空集合或重建整页。回归验证集合通知、控件／像素身份、读取和释放次数，CPU／帧耗时仅作辅助诊断。
+回执按稳定身份增量协调：音乐目录显示槽持有最新业务快照并保留栏目和卡片；影视栏目保留内容相同的条目；小说发现、详情和统一搜索局部更新文字、状态及受影响封面。共享 `ManagementList` 保留同 ID 的行状态和控件，选择只更新选择框，列变更只更新列定义；自定义 cells 以显式绑定 owner 身份复用。加载状态、选择及无关属性通知不清空集合或重建整页。真实运行与 `--debug` 模式核对集合通知、控件／像素身份、读取和释放次数，CPU／帧耗时仅作辅助诊断。
 
 歌曲分页与同目标刷新保留存活 `SongRow`，重复歌曲按各自 occurrence 匹配，不去重或清空重填；仓库元数据沿现有 publication fence 更新。播放队列按 `EntryId` 增删移动并保留行对象，当前播放标记只通知前后受影响行。三行歌曲栏让每首歌曲成为原生虚拟列表的数据项，换列不更换资源 owner。
 
@@ -26,29 +26,33 @@ Platform → Core
 
 Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
 
-`scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、实际运行时入口与依赖和 WinUI 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。公共与 Windows Node 运行器使用 `node:module` 的 `isBuiltin()` 识别内置模块，workspace 导入按包声明的公开 `exports` 和实际目标文件解析，新增公开子路径或被引用的 helper 无需逐文件登记。portable source-runtime 的无 Node／宿主全局边界仍由公共依赖检查负责，第三方脚本权限不因此改变。结构检查不解析 C#／JS 源码中的完整操作表；协议与方法行为由实际消费者回归验证。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、测试、共享引擎输入和随包许可；独立 iOS 代码、工具目录及测试不影响该指纹，共享引擎工具仍按整个职责目录计入。
+`scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、实际运行时入口与依赖和 WinUI 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。公共与 Windows Node 运行器使用 `node:module` 的 `isBuiltin()` 识别内置模块，workspace 导入按包声明的公开 `exports` 和实际目标文件解析，新增公开子路径或被引用的 helper 无需逐文件登记。portable source-runtime 的无 Node／宿主全局边界仍由公共依赖检查负责，第三方脚本权限不因此改变。结构检查不解析 C#／JS 源码中的完整操作表；协议与方法行为由真实应用 `--debug` 模式实跑核对。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、共享引擎输入和随包许可；独立 iOS 代码与工具目录不影响该指纹，共享引擎工具仍按整个职责目录计入。
 
-## 能力源码
+## 桌面壳与能力源码
+
+`apps/windows/src/MeowFilm.Desktop` 按职责划分为 `Appearance/`、`Artwork/`、`Contracts/`、`Controls/`、`Dialogs/`、`Management/`、`MediaControls/`、`Navigation/`、`Shell/`、`Theme/`、`Viewport/`（资源入口为 `ms-appx:///MeowFilm.Desktop/Theme/Theme.xaml`，详细接线见[桌面壳](desktop-shell.md)）。
 
 `apps/windows/src/MeowFilm.Capabilities` 按真实职责组织：
 
 | 目录 | 责任 |
 | --- | --- |
-| Composition | 本期能力注册、原生调度入口、公开 seam、导航与共同模型 |
-| Accounts | 原生授权、登录交接和账号资料权益 |
+| Composition | 能力注册、原生调度入口、公开 seam、薄导航、共同模型、`MusicDomainController` 基类与独立 `MusicDebugAdapter` |
+| Accounts | 原生授权、登录交接、账号资料权益、`MusicAccountsController` 及账号视图 |
 | Platforms | 固定 HTTP／加密协议、来源元数据；`ClientContexts` 独立管理客户端身份、匿名登记、快照及唯一客户端 writer |
-| Catalog / Search / Recommendations | 目录、搜索、发现及推荐消费者 |
-| Library / Sync | 歌单、队列、历史、当前本地曲库与显式同步 |
-| Playback / Lyrics | 实际播放编排、恢复、来源选择与歌词 |
+| Catalog / Search / Recommendations | 目录、搜索、发现及推荐消费者，含 `MusicCatalogController`、`MusicDiscoveryController`、`MusicSearchController`、声明式 `MusicCatalogSectionView`/`MusicCatalogCardView` 与统一 `SearchResultsPage` + `SearchResultsDebugAdapter` |
+| Library / Sync | `Library/Storage/` 持久仓储、`Library/Owners/` 业务写入与曲库／队列／历史 owner、`MusicLibraryController` 及显式同步 |
+| Playback / Lyrics | 实际播放编排、恢复、来源选择、歌词与桌面歌词，含 `MusicPlaybackClock`、`MusicPlaybackController`、`MusicQueueController`、`MusicLyricsController` 及 `MusicSourcePickerDialogView` |
 | PlaybackCache | 可淘汰播放缓存、授权复核、容量及读取生命周期 |
 | Scripting | 原始 LX 音源管理、CatNode 与来源运行时通信及必要宿主调用，不拥有官方业务 |
-| Feedback / Settings | 实际反馈协议与设置消费者 |
+| Feedback / Settings | 实际反馈协议、`MusicSettingsController`、`MusicSettingReceiptTracker` 与音乐设置视图 |
+| Shared/Settings | 跨模块共享的设置基础设施：`ISettingsPriorityItem`、`SettingsPriorityList`、`SettingsReorderDrag`/`Shift`、`SettingsLayout` 与 `SettingsTheme.xaml` |
 | Presentation | 共同视图、主题及中性命名的控件 |
-| Film | 影视首页、来源取数、原生搜索会话、播放交接、模块生命周期和影片专属展示 |
+| Film | 影视首页、来源取数、原生搜索会话、播放交接、独立 `FilmDebugAdapter` 与按 `Views/`、`Settings/`、`Dialogs/`、`Controls/`、`Assets/` 分层的影视展示（含 `FilmEpisodeDirectoryView`、`FilmManualMatchDialogView`） |
+| Novel | 小说书源配置、本地书架／历史／净化库、规则调用、独立 `NovelDebugAdapter` 与按 `Reader/`、`Views/`、`Dialogs/`、`Settings/`、`Controls/` 分层的声明式 XAML 页面及 Win2D／DirectWrite 原生阅读器 |
 
-具体歌曲、歌词、音乐平台协议保留 `Music` 语义。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`EntryCard`、`Shelf`、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。WinUI 共享资源使用带库身份的 `ms-appx:///` URI，不靠移动后目录的相对搜索回退。
+音乐能力已彻底拆解为 9 个独立领域控制器（`MusicPlaybackController`、`MusicQueueController`、`MusicLyricsController`、`MusicCatalogController`、`MusicDiscoveryController`、`MusicLibraryController`、`MusicSearchController`、`MusicAccountsController`、`MusicSettingsController`）外加高频 `MusicPlaybackClock`，直接作为各自领域的唯一状态与业务事实源，不存在中间镜像壳层或转发 state；`MusicCapability` 仅保留壳级装配与薄导航入口，各音乐视图直接绑定对应领域控制器且不持有 `MusicCapability`。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`Shelf`（通过 `IShelfSection` 解耦）、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。全应用共享样式字典统一在 `apps/windows/app/App.xaml` 单次合并（使用带库身份的 `ms-appx:///` URI，不重复合并或靠相对路径搜索回退），业务视图与弹层统一使用编译期 `{x:Bind}`，不使用 `XamlReader.Load` 或运行时业务 `SetBinding`。
 
-Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。`MeowFilm.Threading` 只封装 Windows App SDK `DispatcherQueue` 的 owner 调度，不依赖 XAML、Desktop 或业务。音视频核心当前使用 Core 与该调度机制，彼此保持独立 owner；阅读器的排版与绘制使用 Win2D／DirectWrite，不引用 WPF framework。工程边界按实际 MSBuild 求值图、App／AppHost／Capabilities 的职责目录、音视频 owner 及依赖项的 `UseWinUI` 声明核对，覆盖传递依赖；新增中性 helper 无需登记项目名全集。循环、重复引用、仓库逃逸、共享层反依赖业务、音视频交叉依赖及调度／播放核心引入 WinUI 呈现依赖仍拒绝。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、控件测试和真实桌面呈现分别验收。
+Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。`MeowFilm.Threading` 只封装 Windows App SDK `DispatcherQueue` 的 owner 调度，不依赖 XAML、Desktop 或业务。音视频核心当前使用 Core 与该调度机制，彼此保持独立 owner；阅读器的排版与绘制使用 Win2D／DirectWrite，不引用 WPF framework。工程边界按实际 MSBuild 求值图、App／AppHost／Capabilities 的职责目录、音视频 owner 及依赖项的 `UseWinUI` 声明核对，覆盖传递依赖；新增中性 helper 无需登记项目名全集。循环、重复引用、仓库逃逸、共享层反依赖业务、音视频交叉依赖及调度／播放核心引入 WinUI 呈现依赖仍拒绝。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、结构边界检查与 `--debug` 实跑分别记录，不互相冒充。
 
 ## 当前身份与唯一数据格式
 
@@ -63,7 +67,7 @@ Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器
 - 当前提供可淘汰的播放缓存，未提供用户下载管理。
 - 不兼容数据明确失败并保留原始内容。
 
-可执行文件名、程序集名、源文件位置、测试分组和界面资源键的变化都不等于持久化键变化。
+可执行文件名、程序集名、源文件位置和界面资源键的变化都不等于持久化键变化。
 
 ## 主窗口启动门槛
 
@@ -83,7 +87,7 @@ Windows 的唯一 Node 入口是 `apps/windows/runtime/entries/aggregate.mjs`，
 
 App 原生能力装配与 `AppIdentity.ScriptModules` 独立校验：原生能力数量和 `IDesktopModule.Id` 不要求等于脚本模块数量或名称。增加不依赖脚本的原生能力不会被迫增加 Node 模块；脚本清单只决定 App 启动时的 JS 载荷与协议版本。
 
-当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。电影由独立 FilmPlayback／FilmKernel 持有解码、WASAPI 设备时钟及 D3D11 原生 HDR／DOVI 输出；经 App 既有仲裁器与音乐 NativeAudioPlayback 互斥准入，不借用音乐 PCM／时钟。Core 的 `NativeHttpMediaTransfer.CopyCompleteAsync` 供音乐缓存完整文件 producer 使用，缓存不依赖电影解码／输出。固定来源、许可及构建与真实输出的验证边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建、原生测试与真实媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通状态和原生测试清单见[影视搜索](film-search.md)。
+当前 App 依次注册音乐、`FilmCapability` 和 `NovelCapability`，因此启动页保持音乐推荐。影视能力拥有规则设置草稿及 Node 回执快照、视频源、元数据设置、搜索与播放会话消费者；首页通过元数据适配读取豆瓣，正式播放实现通过 `FilmPlaybackSession` 消费 Node film，而不是由首页本地 preview 提供片源。电影由独立 FilmPlayback／FilmKernel 持有解码、WASAPI 设备时钟及 D3D11 原生 HDR／DOVI 输出；经 App 既有仲裁器与音乐 NativeAudioPlayback 互斥准入，不借用音乐 PCM／时钟。Core 的 `NativeHttpMediaTransfer.CopyCompleteAsync` 供音乐缓存完整文件 producer 使用，缓存不依赖电影解码／输出。固定来源、许可及构建与真实输出的验证边界见[原生媒体实现](media-playback.md)。App 另通过 `AppLauncher.createPages` 装配 `SearchResultsPage`，Desktop 只消费中性 `IDesktopSearchPage`；影视规则及搜索 JS 只在 Node 载荷执行，Capabilities 不嵌入规则／搜索程序，也不保留客户端引擎回退。小说规则消费者借用同一运行器，原生 UI 和数据 owner 不迁移。原生导航／搜索已接入正式播放会话与小说详情；实现接通、构建与 `--debug` 真实业务／媒体验证分别记录，不代表整 App 已全部通过。搜索交接只见[共同契约](../common/film/search.md)。影视首页见[影视首页](film-home.md)，设置见[影视设置](film-settings.md)，端侧搜索接通边界见[影视搜索](film-search.md)。
 
 
 ## 同进程清除本机数据

@@ -4,19 +4,24 @@ using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Windows.System;
 using MeowFilm.Desktop;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopImmersiveSource, IDesktopSidebarSource
+public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopImmersiveSource, IDesktopSidebarSource, IDebugModuleAdapterSource
 {
-    public const string HomeRoute = "novel-home", CategoriesRoute = "novel-categories", BookRoute = "novel-book", ReaderRoute = "novel-reader";
+    public const string HomeRoute = "novel-home", CategoriesRoute = "novel-categories", ShelfRoute = "novel-shelf", HistoryRoute = "novel-history", BookRoute = "novel-book", ReaderRoute = "novel-reader";
     private readonly NovelWork work = new();
     private CancellationTokenSource presentation = new();
     private readonly Dictionary<string, NovelBookSession> sessions = [];
     private readonly NovelView view;
     private readonly NovelSettingsView settings;
+    private readonly NovelDebugAdapter debugAdapter;
+    internal NovelView DebugView => view;
+    internal NovelSettingsView DebugSettings => settings;
+    public IDebugModuleAdapter DebugAdapter => debugAdapter;
     internal FrameworkElement? SearchWebOwner { get; set; }
     internal CancellationToken PresentationToken => presentation.Token;
     private bool stopping, disposed, applyingReaderSettings;
@@ -30,8 +35,10 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         Navigation = [new(HomeRoute, "小说", "\uE8F1", ShowInSidebar: false)
             { IconData = "M12,5 C9,3 6,3 3,4 L3,19 C6,18 9,18 12,20 C15,18 18,18 21,19 L21,4 C18,3 15,3 12,5 L12,20" },
             new(CategoriesRoute, "分类", "\uE8A9"),
+            new(ShelfRoute, "书架", "\uE82D"),
+            new(HistoryRoute, "阅读历史", "\uE81C"),
             new(BookRoute, "书籍详情", "\uE8F1", ShowInSidebar: false), new(ReaderRoute, "阅读", "\uE8F1", ShowInSidebar: false)];
-        view = new(this); settings = new(this);
+        view = new(this); settings = new(this); debugAdapter = new(this);
         Library.Changed += LibraryChanged; Sources.Changed += SourcesChanged; Sources.ApplyFailed += SourceApplyFailed;
         Sources.InteractAsync = (request, token) =>
         {
@@ -150,6 +157,13 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
             session.Changed += SessionChanged; session.SelectChapterAsync = view.SelectChapterAsync;
         }
         if (!ReferenceEquals(Session, session)) { Session?.Cancel(); Session = session; }
+    }
+    internal Task OpenEntryAsync(NovelEntry entry, CancellationToken token = default)
+    {
+        token.ThrowIfCancellationRequested();
+        ReceiveEntry(entry);
+        Request(BookRoute);
+        return Task.CompletedTask;
     }
     internal Task ContinueReadingAsync(NovelEntry entry, CancellationToken token)
     {

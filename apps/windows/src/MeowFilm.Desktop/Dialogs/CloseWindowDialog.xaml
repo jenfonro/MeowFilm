@@ -3,17 +3,13 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="using:MeowFilm.Desktop"
  UseLayoutRounding="True"
+ Foreground="{ThemeResource MeowFilm.Brush.Text}"
  TabFocusNavigation="Cycle"
  KeyDown="OnPreviewKeyDown" AutomationProperties.Name="关闭主窗口">
- <UserControl.Style>
-  <Style TargetType="UserControl">
-   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
-
-  </Style>
- </UserControl.Style>
- <Grid Background="Transparent">
+ <Grid Style="{ThemeResource MeowFilm.DialogHost}">
   <Border x:Name="DialogSurface" Style="{ThemeResource MeowFilm.FloatingSurface}" MaxWidth="440"
-          Margin="24" Padding="20" VerticalAlignment="Center">
+          Margin="24" Padding="20" VerticalAlignment="Center" Translation="0,0,16">
+   <Border.Shadow><ThemeShadow/></Border.Shadow>
    <StackPanel>
     <local:DockPanel Margin="0,0,0,16">
      <Button x:Name="DismissButton" local:DockPanel.Dock="Right" Style="{ThemeResource MeowFilm.IconButton}"
@@ -23,11 +19,8 @@
                 VerticalAlignment="Center" TextWrapping="Wrap"/>
     </local:DockPanel>
     <CheckBox x:Name="RememberChoice" Content="记住我的选择" Padding="4" Margin="0,0,0,16"
-              VerticalContentAlignment="Center" AutomationProperties.Name="记住我的选择">
-     <CheckBox.Style><Style TargetType="CheckBox" BasedOn="{StaticResource MeowFilm.ManagementCheck}">
-      <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
-     </Style></CheckBox.Style>
-    </CheckBox>
+              VerticalContentAlignment="Center" Style="{StaticResource MeowFilm.ManagementCheck}"
+              AutomationProperties.Name="记住我的选择"/>
     <local:WrapPanel x:Name="Choices" HorizontalAlignment="Right">
      <Button x:Name="MinimizeChoice" Content="最小化到托盘" Margin="0,0,8,8"
              Tag="MinimizeToTray" Click="OnChoiceClick"

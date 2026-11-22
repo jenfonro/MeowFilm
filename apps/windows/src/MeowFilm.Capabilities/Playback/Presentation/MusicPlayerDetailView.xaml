@@ -20,15 +20,15 @@
  </UserControl.Resources>
  <Grid>
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-  <Border x:Name="PageBackdrop" Grid.RowSpan="2" IsHitTestVisible="False"
-          Background="{Binding PlayerBackground}"/>
+  <Border x:Name="PageBackdrop" Grid.RowSpan="2" IsHitTestVisible="False"/>
  <Grid MaxWidth="1240" Margin="0,88,0,0">
   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
   <Viewbox Margin="12,0,0,0" MaxWidth="500" MaxHeight="560" Stretch="Uniform" VerticalAlignment="Center">
    <Canvas Width="520" Height="600">
     <Ellipse Canvas.Left="53" Canvas.Top="103" Width="414" Height="414" Fill="#0AFFFFFF" Stroke="#20FFFFFF" StrokeThickness="1"/>
     <local:MusicRecordView x:Name="DetailRecord" Canvas.Left="66" Canvas.Top="116" Width="388" Height="388"
-    Address="{x:Bind Playback.CurrentArtwork,Mode=OneWay}" Playing="{x:Bind Playback.IsPlaying,Mode=OneWay}" SwipeEnabled="{x:Bind Playback.CanPlay,Mode=OneWay}"
+    Address="{x:Bind Playback.CurrentArtwork,Mode=OneWay}" ArtworkIdentity="{x:Bind Playback.CurrentArtworkIdentity,Mode=OneWay}"
+    Playing="{x:Bind Playback.IsPlaying,Mode=OneWay}" SwipeEnabled="{x:Bind Playback.CanStep,Mode=OneWay}"
     TrackIdentity="{x:Bind Playback.CurrentTrackIdentity,Mode=OneWay}" SwipeIdentity="{x:Bind Playback.PlaybackPresentationKey,Mode=OneWay}" SwipeCommitted="DetailRecord_SwipeCommitted"
      AutomationProperties.Name="唱片切歌"/>
     <Canvas Canvas.Left="244" Canvas.Top="8" Width="220" Height="130" IsHitTestVisible="False">
@@ -51,11 +51,11 @@
    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
    <StackPanel>
-    <TextBlock x:Name="DetailTitle" Text="{Binding CurrentTitle}" FontSize="26" TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
+    <TextBlock x:Name="DetailTitle" Text="{x:Bind Playback.CurrentTitle,Mode=OneWay}" FontSize="26" TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
     <desktop:WrapPanel x:Name="DetailMetadata" Opacity=".68" Margin="0,0,0,18">
-     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentAlbum,Converter={StaticResource Visible}}"><TextBlock Text="专辑："/><TextBlock Text="{Binding CurrentAlbum}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
-     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{Binding CurrentArtist,Converter={StaticResource Visible}}"><TextBlock Text="歌手："/><TextBlock Text="{Binding CurrentArtist}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
-     <StackPanel Orientation="Horizontal" Visibility="{Binding CurrentSource,Converter={StaticResource Visible}}"><TextBlock Text="来源："/><TextBlock Text="{Binding CurrentSource}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{x:Bind Playback.CurrentAlbum,Mode=OneWay,Converter={StaticResource Visible}}"><TextBlock Text="专辑："/><TextBlock Text="{x:Bind Playback.CurrentAlbum,Mode=OneWay}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{x:Bind Playback.CurrentArtist,Mode=OneWay,Converter={StaticResource Visible}}"><TextBlock Text="歌手："/><TextBlock Text="{x:Bind Playback.CurrentArtist,Mode=OneWay}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Visibility="{x:Bind Playback.CurrentSource,Mode=OneWay,Converter={StaticResource Visible}}"><TextBlock Text="来源："/><TextBlock Text="{x:Bind Playback.CurrentSource,Mode=OneWay}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
     </desktop:WrapPanel>
    </StackPanel>
    <Border Grid.Row="1" Margin="0,0,0,8" Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
@@ -64,38 +64,38 @@
    </Border>
    <Grid x:Name="LyricViewport" Grid.Row="2" Margin="-76,0,0,0">
     <Grid x:Name="LyricFadeViewport">
-   <local:MusicLyricList x:Name="LyricList" Background="Transparent" BorderThickness="0" Padding="0" Position="{x:Bind LyricsState.LyricPositionSeconds,Mode=OneWay}" IsPlaying="{x:Bind LyricsState.IsPlaying,Mode=OneWay}" PlaybackRate="{x:Bind LyricsState.AcceptedPlaybackRate,Mode=OneWay}" PresentationKey="{x:Bind LyricsState.PlaybackPresentationKey,Mode=OneWay}" ItemsSource="{x:Bind LyricsState.Lyrics}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" AutomationProperties.Name="歌词">
+   <local:MusicLyricList x:Name="LyricList" Background="Transparent" BorderThickness="0" Padding="0" Position="{x:Bind Lyrics.LyricPositionSeconds,Mode=OneWay}" IsPlaying="{x:Bind Playback.IsPlaying,Mode=OneWay}" PlaybackRate="{x:Bind Playback.AcceptedPlaybackRate,Mode=OneWay}" PresentationKey="{x:Bind Playback.PlaybackPresentationKey,Mode=OneWay}" ItemsSource="{x:Bind Lyrics.Lyrics}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" AutomationProperties.Name="歌词">
      <ListView.Header><Border x:Name="LyricLeadingSpace"/></ListView.Header><ListView.Footer><Border x:Name="LyricTrailingSpace"/></ListView.Footer>
      <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"><Setter Property="IsHitTestVisible" Value="False"/></Style></ListView.ItemContainerStyle>
-     <ListView.ItemTemplate><DataTemplate><local:MusicLyricRowView/></DataTemplate></ListView.ItemTemplate>
+     <ListView.ItemTemplate><DataTemplate x:DataType="local:MusicLyricRow"><local:MusicLyricRowView/></DataTemplate></ListView.ItemTemplate>
     </local:MusicLyricList>
-    <local:MusicArtworkFade x:Name="LyricEdgeFade" Source="{Binding ElementName=PageBackdrop}"/>
+    <local:MusicArtworkFade x:Name="LyricEdgeFade" Source="{x:Bind PageBackdrop}"/>
     </Grid>
-   <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12" Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47" Visibility="{x:Bind LyricsState.HasLyricPreview,Mode=OneWay,Converter={StaticResource Visible}}">
-    <Button x:Name="ConfirmLyric" Padding="8,3" MinHeight="0" Height="24" MinWidth="0" CornerRadius="12" Background="#2AFFFFFF" Click="PlayLyric_Click" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0" IsEnabled="{x:Bind LyricsState.CanConfirmLyricPreview,Mode=OneWay}" AutomationProperties.Name="播放此处">
-     <StackPanel Orientation="Horizontal" Spacing="4"><FontIcon Glyph="&#xE768;" FontSize="9"/><TextBlock Text="{x:Bind LyricsState.LyricPreviewTime,Mode=OneWay}" FontSize="12"/></StackPanel>
+   <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12" Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47" Visibility="{x:Bind Lyrics.HasLyricPreview,Mode=OneWay,Converter={StaticResource Visible}}">
+    <Button x:Name="ConfirmLyric" Padding="8,3" MinHeight="0" Height="24" MinWidth="0" CornerRadius="12" Background="#2AFFFFFF" Click="PlayLyric_Click" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0" IsEnabled="{x:Bind Lyrics.CanConfirmLyricPreview,Mode=OneWay}" AutomationProperties.Name="播放此处">
+     <StackPanel Orientation="Horizontal" Spacing="4"><FontIcon Glyph="&#xE768;" FontSize="9"/><TextBlock Text="{x:Bind Lyrics.LyricPreviewTime,Mode=OneWay}" FontSize="12"/></StackPanel>
      </Button>
     </Border>
-   <TextBlock x:Name="LyricState" Text="{x:Bind LyricsState.LyricStatus,Mode=OneWay}" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
+   <TextBlock x:Name="LyricState" Text="{x:Bind Lyrics.LyricStatus,Mode=OneWay}" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
    </Grid>
    <StackPanel x:Name="LyricControlRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
     <StackPanel x:Name="LyricTimingRail">
-    <Button x:Name="DelayLyricButton" Click="DelayLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{x:Bind LyricsState.CanAdjustLyricOffset,Mode=OneWay}" ToolTipService.ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒">
+    <Button x:Name="DelayLyricButton" Click="DelayLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{x:Bind Lyrics.CanAdjustLyricOffset,Mode=OneWay}" ToolTipService.ToolTip="歌词延后 0.5 秒" AutomationProperties.Name="歌词延后 0.5 秒">
       <Grid Width="26" Height="26" IsHitTestVisible="False">
-       <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{Binding Foreground,ElementName=DelayLyricButton}"/>
-       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{Binding Foreground,ElementName=DelayLyricButton}"/>
+       <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{x:Bind DelayLyricButton.Foreground,Mode=OneWay}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{x:Bind DelayLyricButton.Foreground,Mode=OneWay}"/>
       </Grid>
      </Button>
-    <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{x:Bind LyricsState.CanAdjustLyricOffset,Mode=OneWay}" ToolTipService.ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒">
+    <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{x:Bind Lyrics.CanAdjustLyricOffset,Mode=OneWay}" ToolTipService.ToolTip="歌词提前 0.5 秒" AutomationProperties.Name="歌词提前 0.5 秒">
       <Grid Width="26" Height="26" IsHitTestVisible="False">
-       <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{Binding Foreground,ElementName=AdvanceLyricButton}"/>
-       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{Binding Foreground,ElementName=AdvanceLyricButton}"/>
+       <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{x:Bind AdvanceLyricButton.Foreground,Mode=OneWay}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{x:Bind AdvanceLyricButton.Foreground,Mode=OneWay}"/>
       </Grid>
      </Button>
     </StackPanel>
     <Border Height="1" Margin="9,2,9,0" Background="#30FFFFFF"/>
-   <Button x:Name="LyricTranslationButton" Click="Translation_Click" Style="{StaticResource Player.LyricAdjust}" Margin="0,10,0,0" IsEnabled="{x:Bind LyricsState.IsLyrics,Mode=OneWay}">
-     <Viewbox Width="24" Height="24" Stretch="Uniform" IsHitTestVisible="False"><Path Data="M3,5 L15,5 M9,3 L9,5 M12,5 C11,11 8,14 3,16 M5,8 C6,12 9,14 12,16 M13,21 L17,10 L21,21 M14.5,17 L19.5,17" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{Binding Foreground,ElementName=LyricTranslationButton}"/></Viewbox>
+   <Button x:Name="LyricTranslationButton" Click="Translation_Click" Style="{StaticResource Player.LyricAdjust}" Margin="0,10,0,0" IsEnabled="{x:Bind Lyrics.IsLyrics,Mode=OneWay}">
+     <Viewbox Width="24" Height="24" Stretch="Uniform" IsHitTestVisible="False"><Path Data="M3,5 L15,5 M9,3 L9,5 M12,5 C11,11 8,14 3,16 M5,8 C6,12 9,14 12,16 M13,21 L17,10 L21,21 M14.5,17 L19.5,17" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{x:Bind LyricTranslationButton.Foreground,Mode=OneWay}"/></Viewbox>
     </Button>
    </StackPanel>
   </Grid>

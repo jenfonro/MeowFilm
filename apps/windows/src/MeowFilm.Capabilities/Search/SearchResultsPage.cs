@@ -2,16 +2,18 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>App-level composition of existing music results and film-owned search. Owns no domain requests.</summary>
-public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChanged, IDisposable
+public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModuleAdapterSource, INotifyPropertyChanged, IDisposable
 {
     private readonly FilmCapability film;
     private readonly NovelCapability? novel;
     private readonly SearchResultsView view;
+    private readonly SearchResultsDebugAdapter debugAdapter;
     private string query = "", tab = "overview", error = "";
     private bool raw, active;
     private string? musicLocation;
@@ -23,6 +25,8 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
     private readonly SemaphoreSlim musicGate = new(1, 1);
     private readonly ObservableCollection<FilmSearchCardItem> emptyCards = [];
     private ObservableCollection<FilmSearchCardItem> shownCards;
+    public IDebugModuleAdapter DebugAdapter => debugAdapter;
+    internal bool FilmLoading => session?.Loading ?? false;
     public SearchResultsPage(MusicCapability music, FilmCapability film, NovelCapability? novel = null)
     {
         Music = music;
@@ -32,9 +36,10 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
         Tabs = Array.AsReadOnly(new[] { new SearchResultTab("overview", "综合"), new("songs", "单曲"),
             new("playlists", "歌单"), new("film", "影视"), new("novel", "小说") });
         view = new(this);
+        debugAdapter = new(this);
         film.Search.Changed += FilmChanged;
         film.RuntimeRestored += RuntimeRestored;
-        music.PropertyChanged += MusicChanged;
+        music.Search.PropertyChanged += MusicSearchChanged;
         if (novel is not null) novel.Search.Changed += NovelChanged;
     }
     private void NovelChanged(object? sender, EventArgs e) { if (!disposed && active && tab == "novel") view.PublishNovel(); }
@@ -51,11 +56,11 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
             PublishFilm();
         }
     }
-    private void MusicChanged(object? sender, PropertyChangedEventArgs e)
+    private void MusicSearchChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!disposed && active && !changingMusic && tab is not ("film" or "novel") &&
-            e.PropertyName == nameof(MusicCapability.SearchTab))
-        { tab = Music.SearchTab; musicLocation = Music.CaptureNavigationLocation(); RefreshTabs(); }
+        if (e.PropertyName != nameof(MusicSearchController.SearchTab)) return;
+        if (!disposed && active && !changingMusic && tab is not ("film" or "novel"))
+        { tab = Music.Search.SearchTab; musicLocation = Music.CaptureNavigationLocation(); RefreshTabs(); }
     }
     public void Dispose()
     {
@@ -63,7 +68,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
         Deactivate(); disposed = true;
         film.Search.Changed -= FilmChanged;
         film.RuntimeRestored -= RuntimeRestored;
-        Music.PropertyChanged -= MusicChanged;
+        Music.Search.PropertyChanged -= MusicSearchChanged;
         if (novel is not null) novel.Search.Changed -= NovelChanged;
         NavigateToPlaybackAsync = null; NavigationToken = null;
         NavigateToNovelAsync = null; NovelNavigationToken = null;
@@ -259,7 +264,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
             if (submit || musicLocation is null) await Music.SearchOnlineAsync(word, token);
             else await Music.RestoreNavigationAsync(musicLocation, token);
             if (!IsCurrent(operation, token)) return;
-            await Music.OpenSearchTabAsync(next);
+            await Music.Search.OpenSearchTabAsync(next);
             if (IsCurrent(operation, token)) musicLocation = Music.CaptureNavigationLocation();
         }
         finally { changingMusic = false; musicGate.Release(); }

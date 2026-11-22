@@ -1,10 +1,18 @@
 <UserControl x:Class="MeowFilm.Capabilities.Shelf" x:Name="ShelfRoot"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="using:MeowFilm.Capabilities">
+ <UserControl.Resources>
+  <ItemsPanelTemplate x:Key="SingleRowPanel">
+   <ItemsStackPanel Orientation="Horizontal"/>
+  </ItemsPanelTemplate>
+  <ItemsPanelTemplate x:Key="ThreeRowPanel">
+   <ItemsWrapGrid Orientation="Vertical" MaximumRowsOrColumns="3" ItemHeight="84"/>
+  </ItemsPanelTemplate>
+ </UserControl.Resources>
  <Grid Margin="-32,0" Background="Transparent"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-  <ListView x:Name="ItemsHost" Margin="32,0" ItemsSource="{Binding ItemsSource,ElementName=ShelfRoot}" ItemTemplate="{Binding CardTemplate,ElementName=ShelfRoot}"
-   SelectionMode="None" IsTabStop="False" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.IsHorizontalScrollChainingEnabled="True" ScrollViewer.IsVerticalScrollChainingEnabled="True" ScrollViewer.VerticalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Hidden" ScrollViewer.VerticalScrollBarVisibility="Disabled">
-   <ListView.ItemsPanel><ItemsPanelTemplate><ItemsStackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ListView.ItemsPanel>
+  <ListView x:Name="ItemsHost" Margin="32,0" ItemsSource="{x:Bind ItemsSource,Mode=OneWay}" ItemTemplate="{x:Bind CardTemplate,Mode=OneWay}"
+   SelectionMode="None" IsTabStop="False" ScrollViewer.HorizontalScrollMode="Disabled" ScrollViewer.IsHorizontalScrollChainingEnabled="True" ScrollViewer.IsVerticalScrollChainingEnabled="True" ScrollViewer.VerticalScrollMode="Disabled" ScrollViewer.HorizontalScrollBarVisibility="Hidden" ScrollViewer.VerticalScrollBarVisibility="Disabled"
+   ItemsPanel="{StaticResource SingleRowPanel}">
    <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"/></ListView.ItemContainerStyle>
   </ListView>
   <Button x:Name="Previous" Click="Previous_Click" Width="28" Padding="0" HorizontalAlignment="Left" VerticalAlignment="Stretch" Background="Transparent" BorderThickness="0" AutomationProperties.Name="上一组"><FontIcon Glyph="&#xE76B;" FontSize="16"/></Button>

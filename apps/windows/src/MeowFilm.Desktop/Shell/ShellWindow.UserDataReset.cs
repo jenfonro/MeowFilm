@@ -1,7 +1,5 @@
-using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Input;
-using Windows.System;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Desktop;
 
@@ -11,28 +9,30 @@ public sealed partial class ShellWindow
     private DependencyObject? _resetFocus;
     private bool _userDataResetStarted, _userDataResetBusy;
 
-    private void ConfirmUserDataReset()
+    internal void ConfirmUserDataReset()
     {
-        if (_resetUserData is null || _isClosing || _isClosed || _sessionEnding ||
-            _closeChoiceQueued || CloseDialog.IsOpen || ResetDialog.IsOpen) return;
+        if (_resetUserData is null || _isClosing || _isClosed || _closeCoordinator.IsSessionEnding ||
+            _closeCoordinator.IsChoiceQueued || CloseDialog.IsOpen || ResetDialog.IsOpen) return;
         _resetFocus = DesktopVisual.Focused(Root);
-        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = false;
+        SetModalGatesEnabled(false);
         ResetDialog.Open();
     }
 
-    private void CancelUserDataReset()
+    internal void CancelUserDataReset()
     {
-        if (_userDataResetStarted || !ResetDialog.IsOpen || _isClosing || _sessionEnding) return;
+        if (_userDataResetStarted || !ResetDialog.IsOpen || _isClosing || _closeCoordinator.IsSessionEnding) return;
         ResetDialog.Visibility = Visibility.Collapsed;
-        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = true;
+        SetModalGatesEnabled(true);
         var focus = _resetFocus;
         _resetFocus = null;
         if (focus is Control { IsEnabled: true, Visibility: Visibility.Visible } target) target.Focus(FocusState.Programmatic);
     }
 
+    internal void ConfirmUserDataResetAction() => OnUserDataResetConfirmed();
+
     private async void OnUserDataResetConfirmed()
     {
-        if (_resetUserData is null || _userDataResetBusy || _isClosed || _sessionEnding || !ResetDialog.IsOpen) return;
+        if (_resetUserData is null || _userDataResetBusy || _isClosed || _closeCoordinator.IsSessionEnding || !ResetDialog.IsOpen) return;
         _userDataResetBusy = _userDataResetStarted = true;
         _resetFocus = null;
         _isClosing = true;
@@ -47,8 +47,6 @@ public sealed partial class ShellWindow
         ResetDialog.SetBusy("正在清除…");
         try
         {
-            // The App owns request persistence, actual release, deletion and
-            // same-process replacement. Its successful callback closes this shell.
             await _resetUserData();
             ShowUserDataResetFailure("清除尚未完成，请重试");
         }
@@ -56,11 +54,9 @@ public sealed partial class ShellWindow
         finally { _userDataResetBusy = false; }
     }
 
-    private void OnUserDataResetExit()
+    internal void OnUserDataResetExit()
     {
-        if (!_userDataResetStarted || _userDataResetBusy || _isClosed || _sessionEnding || !ResetDialog.IsOpen) return;
-        // The durable reset marker is completed by the next launch. Exit must not
-        // retry a failed in-process reset or require its release result.
+        if (!_userDataResetStarted || _userDataResetBusy || _isClosed || _closeCoordinator.IsSessionEnding || !ResetDialog.IsOpen) return;
         _userDataResetStarted = false;
         _ = EnsureShutdownAsync();
         _ = RequestFinalCloseAsync();
@@ -68,8 +64,8 @@ public sealed partial class ShellWindow
 
     private void ShowUserDataResetFailure(string message)
     {
-        if (_isClosed || _sessionEnding) return;
-        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = false;
+        if (_isClosed || _closeCoordinator.IsSessionEnding) return;
+        SetModalGatesEnabled(false);
         ResetDialog.ShowFailure(message);
     }
 }

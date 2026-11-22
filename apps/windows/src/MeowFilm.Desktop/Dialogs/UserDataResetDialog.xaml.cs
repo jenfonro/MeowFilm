@@ -13,6 +13,7 @@ public partial class UserDataResetDialog : UserControl
     internal event Action? ExitRequested;
     internal bool IsOpen => Visibility == Visibility.Visible;
     internal bool IsPending { get; private set; }
+    internal FrameworkElement SurfaceElement => DialogSurface;
     private bool confirming;
 
     public UserDataResetDialog() => InitializeComponent();

@@ -5,7 +5,7 @@ using System.Text.Json;
 namespace MeowFilm.Capabilities;
 
 /// <summary>Search presentation keeps the runtime's business identity and optional live selection reference.</summary>
-public sealed class FilmSearchCardItem : INotifyPropertyChanged
+public sealed class FilmSearchCardItem : IFilmCardDisplay, INotifyPropertyChanged
 {
     private FilmSearchCardValue value;
     internal FilmSearchCardItem(FilmSearchSession session, FilmSearchCardValue value)
@@ -26,7 +26,7 @@ public sealed class FilmSearchCardItem : INotifyPropertyChanged
     public FilmSearchContext SearchContext { get; }
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    internal FilmCardItem ToCard() => new(Id, Title, Poster, Score)
+    public FilmCardItem ToCard() => new(Id, Title, Poster, Score)
     {
         TextBadge = TextBadge, Subtitle = Subtitle, SearchContext = SearchContext, PlaybackContext = SearchContext.PlaybackRequest
     };

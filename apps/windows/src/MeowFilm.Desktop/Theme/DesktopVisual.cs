@@ -2,8 +2,11 @@ using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.System;
+using Windows.UI;
 using Windows.UI.Core;
 
 namespace MeowFilm.Desktop;
@@ -11,6 +14,45 @@ namespace MeowFilm.Desktop;
 /// <summary>Tree-local presentation helpers; no view registry or business service lookup.</summary>
 public static class DesktopVisual
 {
+    public static bool CanAnimate(DependencyObject view) =>
+        SystemAppearance.AnimationsEnabled && !SystemAppearance.IsHighContrast && !DesktopTheme.GetIsHighContrast(view);
+
+    public static SolidColorBrush Brush(byte r, byte g, byte b, byte a = 255) => new(Color.FromArgb(a, r, g, b));
+    public static SolidColorBrush Brush(string value) => new(SystemAppearance.ParseColor(value));
+    public static Geometry Geometry(string value) => (Geometry)XamlBindingHelper.ConvertValue(typeof(Geometry), value);
+
+    public static T? Descendant<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T match) return match;
+            if (Descendant<T>(child) is { } nested) return nested;
+        }
+        return null;
+    }
+
+    public static Storyboard AnimateDouble(DependencyObject target, string property, double from, double to,
+        TimeSpan duration, Action? completed = null, bool forever = false)
+    {
+        var animation = new DoubleAnimation
+        {
+            From = from,
+            To = to,
+            Duration = duration,
+            EnableDependentAnimation = true,
+            EasingFunction = forever ? null : new CubicEase { EasingMode = EasingMode.EaseOut },
+            RepeatBehavior = forever ? RepeatBehavior.Forever : new RepeatBehavior(1)
+        };
+        Storyboard.SetTarget(animation, target);
+        Storyboard.SetTargetProperty(animation, property);
+        var storyboard = new Storyboard();
+        storyboard.Children.Add(animation);
+        if (completed is not null) storyboard.Completed += (_, _) => completed();
+        storyboard.Begin();
+        return storyboard;
+    }
+
     public static bool Contains(DependencyObject ancestor, DependencyObject? child)
     {
         for (var node = child; node is not null; node = VisualTreeHelper.GetParent(node))

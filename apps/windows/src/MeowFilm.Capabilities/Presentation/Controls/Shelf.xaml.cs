@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Markup;
 using Windows.System;
 using MeowFilm.Desktop;
 
@@ -37,19 +36,19 @@ public partial class Shelf : UserControl
             rowsPerColumn = value;
             if (value == 3)
             {
-                ItemsHost.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsWrapGrid Orientation='Vertical' MaximumRowsOrColumns='3' ItemHeight='84'/></ItemsPanelTemplate>");
+                ItemsHost.ItemsPanel = (ItemsPanelTemplate)Resources["ThreeRowPanel"];
                 ItemsHost.Height = 252;
             }
             else
             {
-                ItemsHost.ItemsPanel = (ItemsPanelTemplate)XamlReader.Load("<ItemsPanelTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'><ItemsStackPanel Orientation='Horizontal'/></ItemsPanelTemplate>");
+                ItemsHost.ItemsPanel = (ItemsPanelTemplate)Resources["SingleRowPanel"];
                 ItemsHost.ClearValue(HeightProperty);
             }
         }
     }
     private int ColumnCount => (ItemsHost.Items.Count + RowsPerColumn - 1) / RowsPerColumn;
     private ScrollViewer? rail;
-    private MusicCatalogSection? section;
+    private IShelfSection? section;
     private int visibleCards = 1;
     private bool committing, restoring;
     private bool usesSectionItems = true, settingSectionItems;
@@ -70,7 +69,7 @@ public partial class Shelf : UserControl
         InitializeComponent();
         Loaded += (_, _) =>
         {
-            rail = MusicVisuals.Descendant<ScrollViewer>(ItemsHost);
+            rail = DesktopVisual.Descendant<ScrollViewer>(ItemsHost);
             if (rail is not null) { rail.ViewChanged -= Scrolled; rail.ViewChanged += Scrolled; }
             window = DesktopWindow.GetWindow(this);
             if (window is not null) window.Deactivated += Deactivated;
@@ -98,7 +97,7 @@ public partial class Shelf : UserControl
         DataContextChanged += (_, _) =>
         {
             if (ReferenceEquals(section, DataContext)) return;
-            CommitOffset(); section = DataContext as MusicCatalogSection;
+            CommitOffset(); section = DataContext as IShelfSection;
             if (usesSectionItems && GetBindingExpression(ItemsSourceProperty) is null)
             {
                 settingSectionItems = true;
@@ -190,7 +189,7 @@ public partial class Shelf : UserControl
         target = Math.Clamp(target, 0, MaximumOffset);
         if (Math.Abs(PresentedOffset - target) < .5) { targetOffset = null; IsSettled = true; CommitOffset(); return; }
         targetOffset = target; IsSettled = false;
-        rail.ChangeView(target, null, null, !MusicVisuals.CanAnimate(this)); UpdateButtons();
+        rail.ChangeView(target, null, null, !DesktopVisual.CanAnimate(this)); UpdateButtons();
     }
     private double? PageTarget(int direction)
     {

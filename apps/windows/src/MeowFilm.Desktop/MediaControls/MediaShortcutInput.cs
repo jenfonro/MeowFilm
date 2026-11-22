@@ -75,5 +75,5 @@ internal static class MediaShortcutInput
     private static bool Protected(DependencyObject node) =>
         node is DesktopModalHost or TextBox or RichEditBox or PasswordBox or AutoSuggestBox or
             ComboBox { IsEditable: true } or MenuFlyoutPresenter or MenuFlyoutItemBase or MenuBar or
-            MenuBarItem or FlyoutPresenter or Popup or ContentDialog or WebView2;
+            MenuBarItem or FlyoutPresenter or Popup or WebView2;
 }

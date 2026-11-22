@@ -1,13 +1,12 @@
-using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
-using System.Runtime.CompilerServices;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 using MeowFilm.Media;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Files;
@@ -15,7 +14,19 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupParticipant, IDesktopNavigationSource, IDesktopGeneralSettingsSource
+/// <summary>
+/// Slim composition root and runtime kernel for the music capability.
+/// All domain state, bindable properties, and commands live in the 9 standalone domain controllers;
+/// views never reference <see cref="MusicCapability"/>.
+/// </summary>
+public sealed partial class MusicCapability :
+    IDesktopModule,
+    IDesktopStartupParticipant,
+    IDesktopNavigationSource,
+    IDesktopGeneralSettingsSource,
+    IDesktopGlobalSurfaceSource,
+    IDesktopOwnedNoticeSource,
+    IDebugModuleAdapterSource
 {
     private readonly IMusicApplication application;
     private readonly IMusicPlayback playback;
@@ -25,23 +36,18 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     private readonly PlaybackCache.MusicChorusCache persistentChorus;
     private readonly IStorageDatabase database;
     private readonly PlaybackCache.MusicPresentationCache presentationCache;
-    internal MeowFilm.Desktop.Artwork.ArtworkService ArtworkLoader { get; }
     private readonly bool ownsPresentationCache;
     private readonly CancellationTokenSource lifetime = new();
-    internal MusicPresentation Presentation { get; }
-    private readonly MusicPlaybackPresentation playbackPresentation;
-    private Task commandTail = Task.CompletedTask;
     private readonly HashSet<Task> eventWrites = [];
+    private Task commandTail = Task.CompletedTask;
+    private Task playbackCommandTail = Task.CompletedTask;
+    private long playbackActionGeneration;
     private Task? preparation, abortion;
-    private string status = "", heading = "推荐";
-    private PlaylistRow? collection;
-    private SongRow? current, selectedSong;
-    private JsonElement? queueSource;
-    private long playbackEvent;
-    private int total, mode = 1, commands;
-    private long queueEpoch, queueRead, playbackEpoch, endedEpoch = -1, statusEpoch;
-    private bool stopping, disposed, recorded, queueSaved = true, playbackSubscribed;
-    private string? openedEntry;
+    private string status = "";
+    private int commands;
+    private long statusEpoch;
+    private bool stopping, disposed;
+    private readonly MusicDebugAdapter debugAdapter;
 
     public MusicCapability(IRuntimeClient runtime, IStorageDatabase store, IMusicLibraryStore libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null)
         : this(new MusicNativeApplication(store, libraryStore, runtime),
@@ -64,186 +70,222 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         string? playbackCacheRoot = null)
     {
         this.application = application ?? throw new ArgumentNullException(nameof(application));
-        this.playback = playback; this.dialogs = dialogs ?? new MusicDialogs();
+        this.playback = playback;
+        this.dialogs = dialogs ?? new MusicDialogs();
         database = store;
         ownsPresentationCache = application is not MusicNativeApplication;
         presentationCache = application is MusicNativeApplication native ? native.PresentationCache : new(store);
         ArtworkLoader = new(byteCache: presentationCache, loadCompleted:
             application is MusicNativeApplication artworkOwner ? artworkOwner.ArtworkLoadCompletedAsync : null);
-        if (application is MusicNativeApplication repositoryOwner)
-            repositoryOwner.SongMetadataChanged += RepositorySongsChanged;
-        Presentation = new(this);
-        playbackPresentation = new(this, property => Changed(property));
         audioFileCache = playbackCache ?? (playbackCacheRoot is null ? null :
             new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, store));
         persistentChorus = new(store);
-        homeSnapshotStore = new(store);
         files = new(store, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
-        Lyrics.CollectionChanged += OnLyricRowsChanged;
-        InitializeLibrarySync();
-        vipPage = new(application, OwnerDispatcher.Current);
-        InitializePlatformSettings();
-        InitializeGlobalSurfaces();
-        InitializeSearch();
-        InitializeDiscovery();
-        InitializeRecommendations();
-        SubscribePlayback();
-        RebuildNavigation();
+        Receipts = new();
+        Presentation = new(this);
+
+        Settings = new(this);
+        Accounts = new(this);
+        Discovery = new(this);
+        Lyrics = new(this);
+        Queue = new(this);
+        Search = new(this);
+        Catalog = new(this);
+        Playback = new(this);
+        Library = new(this);
+        debugAdapter = new(this);
+
+        Accounts.InitializeAfterSettings();
+        if (application is MusicNativeApplication repositoryOwner)
+            repositoryOwner.SongMetadataChanged += Playback.RepositorySongsChanged;
+        Playback.SubscribePlayback();
+        Library.RebuildNavigation();
     }
+
+    public MusicSettingsController Settings { get; }
+    public MusicAccountsController Accounts { get; }
+    public MusicDiscoveryController Discovery { get; }
+    public MusicLyricsController Lyrics { get; }
+    public MusicQueueController Queue { get; }
+    public MusicSearchController Search { get; }
+    public MusicCatalogController Catalog { get; }
+    public MusicPlaybackController Playback { get; }
+    public MusicLibraryController Library { get; }
+
+    internal MusicSettingReceiptTracker Receipts { get; }
+    internal MusicPresentation Presentation { get; }
+    internal ArtworkService ArtworkLoader { get; }
+    internal MusicDebugAdapter DebugAdapterInstance => debugAdapter;
+    public IDebugModuleAdapter DebugAdapter => debugAdapter;
+
+    internal IMusicApplication Application => application;
+    internal IMusicPlayback PlaybackDevice => playback;
+    internal IMusicDialogs Dialogs => dialogs;
+    internal GrantedMediaFiles Files => files;
+    internal IStorageDatabase Database => database;
+    internal PlaybackCache.MusicAudioFileCache? AudioFileCache => audioFileCache;
+    internal PlaybackCache.MusicChorusCache PersistentChorus => persistentChorus;
+    internal PlaybackCache.MusicPresentationCache PresentationCache => presentationCache;
+    internal CancellationTokenSource Lifetime => lifetime;
+    internal HashSet<Task> LoadDrains => loadDrains;
+    internal HashSet<Task> EventWrites => eventWrites;
+    internal Task CommandTail => commandTail;
+    internal long PlaybackActionGeneration => playbackActionGeneration;
+    internal bool Stopping => stopping;
+    internal bool Disposed => disposed;
+    internal int Commands => commands;
+    internal bool Busy => commands > 0 || loadCancellation is not null;
+    internal bool CanEdit => !stopping && !Busy;
+    internal string RawStatus => status;
+    internal string Status => Catalog.CatalogAccountNotice.Length > 0 ? Catalog.CatalogAccountNotice : status;
+    internal long StatusEpoch => statusEpoch;
+    internal ObservableCollection<SongRow> ActiveSongs => Search.IsSearchPage ? Search.SearchSongsSource : Library.CatalogSongsSource;
 
     public string Id => "music";
     public string Title => "音乐";
     public string Version => "0.4.0";
     public ObservableCollection<NavigationItem> Navigation { get; } = [];
-    public ObservableCollection<PlaylistRow> Playlists { get; } = [];
-    public ObservableCollection<PlaylistRow> NetworkPlaylists { get; } = [];
-    private readonly ObservableCollection<SongRow> searchSongs = [], catalogSongs = [];
-    public ObservableCollection<SongRow> Songs => IsSearchPage ? searchSongs : catalogSongs;
-    public ObservableCollection<SongRow> SearchSongsSource => searchSongs;
-    public ObservableCollection<SongRow> CatalogSongsSource => catalogSongs;
-    public ObservableCollection<string> HistoryDates { get; } = [];
-    public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
     public FrameworkElement View => Presentation.Page;
     public FrameworkElement SettingsView => Presentation.Settings;
-    private FrameworkElement ModalOwner =>
-        SettingsView.IsLoaded && DesktopVisual.IsVisible(SettingsView) ? SettingsView
-        : PlayerView.IsLoaded ? PlayerView
-        : View;
-    private Task<bool> ConfirmAsync(string message, string title, CancellationToken token = default) =>
-        dialogs.ConfirmAsync(ModalOwner, message, title, token);
     public FrameworkElement AppearanceSettingsView => Presentation.Appearance;
     public FrameworkElement HomeSourceSettingsView => Presentation.HomeSourceSettings;
     public FrameworkElement CacheSettingsView => Presentation.CacheSettings;
     public FrameworkElement PlayerView => Presentation.Player;
-    public Microsoft.UI.Xaml.Media.Brush PlayerBackground => Presentation.PlayerBackground;
-    public Microsoft.UI.Xaml.Media.Brush PlayerProgressBrush => Presentation.PlayerProgress;
-    internal void RefreshPlayerBackground()
-    { Changed(nameof(PlayerBackground)); Changed(nameof(PlayerProgressBrush)); }
-    internal void RefreshPlayerAppearance(Microsoft.UI.Xaml.Media.Brush sampled, bool animate = true) => Presentation.RefreshAppearance(sampled, animate);
-    public MusicContentPage ContentPage => IsDiscovery ? MusicContentPage.Discovery :
-        IsArchives ? MusicContentPage.Archives : IsSearchSongs ? MusicContentPage.SearchSongs :
-        ShowsSongTable ? MusicContentPage.Songs : MusicContentPage.Catalog;
-    public string Heading => heading;
-    public string Status => catalogAccountNotice.Length > 0 ? catalogAccountNotice : status;
-    public bool Busy => commands > 0 || loadCancellation is not null;
-    public bool CanEdit => !stopping && !Busy;
-    public bool IsHistory => location.Route == "history";
-    public bool IsArchives => location.Route == "archives";
-    public bool IsSongList => location.Route is "favorites" or "history" or "search" ||
-        location.Route.StartsWith("playlist/", StringComparison.Ordinal);
-    public bool IsCollectionPage => IsSongList && collection is not null;
-    public bool IsContentDetailPage => IsCollectionPage || IsCatalogDetailPage;
-    public bool ShowsSongTable => IsSongList || IsCatalogDetailPage || IsSearchSongs;
-    public bool ShowSongPager => IsSongList && !IsCollectionPage;
-    public string? HistoryDate => location.Date;
-    public bool HasCollection => collection is not null;
-    public bool CanDeleteCollection => HasCollection && collection!.Kind != "favorites";
-    public bool CanPreviousPage => CanEdit && IsSongList && !IsCollectionPage && location.Offset > 0;
-    public bool CanNextPage => CanEdit && IsSongList && !IsCollectionPage && location.Offset + Songs.Count < total;
-    public string CountText => IsCatalogPage ? "" : IsArchives ? $"{Archives.Count} 个歌单" : $"{total} 首歌曲";
-    public string PageText => !IsSongList || IsCollectionPage || Songs.Count == 0 ? "" : $"{location.Offset + 1}–{location.Offset + Songs.Count} / {total}";
-    public string CollectionArtwork => IsCollectionPage ? Songs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "" : "";
-    public bool CanPlayCollection => CanEdit && IsCollectionPage && total > 0;
-    public string DetailArtwork => IsCatalogDetailPage
-        ? (catalogArtwork.Length > 0 ? catalogArtwork : Songs.FirstOrDefault(row => row.Cover.Length > 0)?.Cover ?? "")
-        : CollectionArtwork;
-    public string DetailCountText => IsCatalogDetailPage ? catalogSummaryCount?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "" :
-        IsContentDetailPage ? total.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
-    public string DetailSectionTitle => IsCatalogArtist ? "热门歌曲" : "歌曲";
-    public string DetailArtworkName => IsCatalogArtist ? "歌手头像" : "歌单封面";
-    public bool CanPlayContentDetail => IsCatalogDetailPage ? CanPlayCatalogPlaylist : CanPlayCollection;
-    public SongRow? CatalogSelectedSong
+
+    public IReadOnlyList<DesktopOwnedNotice> OwnedNotices => Receipts.OwnedNotices;
+    public event EventHandler? OwnedNoticesChanged
     {
-        get => IsSearchPage ? null : selectedSong;
-        set { if (!IsSearchPage) SelectedSong = value; }
+        add => Receipts.OwnedNoticesChanged += value;
+        remove => Receipts.OwnedNoticesChanged -= value;
     }
-    public SongRow? SearchSelectedSong
+
+    // MusicCapability exposes immutable module-level properties; all mutable domain state lives on the 9 controllers.
+    event PropertyChangedEventHandler? INotifyPropertyChanged.PropertyChanged { add { } remove { } }
+    public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
+    public event EventHandler<DesktopGlobalSurfaceRequestEventArgs>? GlobalSurfaceRequested;
+
+    public Task PrepareStartupAsync(CancellationToken cancellationToken = default) =>
+        Catalog.PrepareStartupAsync(cancellationToken);
+
+    public FrameworkElement GetGlobalSurface(DesktopGlobalSurface surface) => surface switch
     {
-        get => IsSearchPage ? selectedSong : searchSongs.FirstOrDefault(song => song.SelectionKey == searchSelectedKey);
-        set { if (IsSearchPage) SelectedSong = value; }
-    }
-    public SongRow? SelectedSong
+        DesktopGlobalSurface.PlayerDetail => Presentation.Detail,
+        DesktopGlobalSurface.PlayQueue => Presentation.Queue,
+        _ => throw new ArgumentOutOfRangeException(nameof(surface))
+    };
+
+    public async Task ActivateGlobalSurfaceAsync(DesktopGlobalSurface surface, CancellationToken cancellationToken)
     {
-        get => selectedSong;
-        set
+        cancellationToken.ThrowIfCancellationRequested();
+        switch (surface)
         {
-            if (stopping) return;
-            // Ignore a binding/context-menu callback from a retired page.
-            if (value is not null && !Songs.Any(row => ReferenceEquals(row, value))) { Changed(); return; }
-            if (!publishing && value is not null && !ReferenceEquals(value, selectedSong)) InvalidateCatalogAction();
-            selectedSong = value;
-            if (IsSearchPage) searchSelectedKey = value?.SelectionKey;
-            Changed(nameof(CatalogSelectedSong)); Changed(nameof(SearchSelectedSong));
-            UpdateRecordingCandidates();
-            Changed(); Changed(nameof(HasSelection)); Changed(nameof(CanRemoveSelection));
+            case DesktopGlobalSurface.PlayerDetail:
+                Presentation.DeactivatePlayer();
+                Lyrics.SetPlayerDetailOpen(true);
+                await Presentation.Detail.ActivateAsync(cancellationToken);
+                break;
+            case DesktopGlobalSurface.PlayQueue:
+                await Queue.ActivatePlayQueueAsync(cancellationToken);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(surface));
         }
     }
-    public bool HasSelection => CanEdit && selectedSong is not null;
-    public bool CanRemoveSelection => HasSelection && HasCollection;
-    public bool CanReorderPlaylist => CanEdit && HasCollection && IsSongList;
-    public bool CanLoadMoreCollection => CanEdit && IsCollectionPage && Songs.Count < total &&
-        collectionPageCancellation is null;
-    public string CurrentSongId => current?.Id ?? "";
-    public string CurrentTitle => current?.Title ?? "未在播放";
-    public string CurrentArtist => current?.Artist ?? "";
-    public string CurrentAlbum => current?.Album ?? "";
-    public string CurrentSource => musicRecovery?.Media?.Target is { Official: true } official
-        ? official.Platform switch { "wy" => "网易云音乐", "tx" => "QQ 音乐", "kg" => "酷狗音乐", _ => "" }
-        : playbackInstallation is not null ? Sources.FirstOrDefault(s => s.InstallationId == playbackInstallation)?.Label ??
-            (musicRecovery?.Media?.Target?.ProviderName is { Length: > 0 } name ? name : "JS 音源")
-        : current is { IsOnline: false } ? "本地音乐" : "";
-    public bool IsPlaying => OwnsCurrent && playback.IsPlaying;
-    public bool HasCurrent => current is not null;
-    public bool CanPlay => !stopping && commands == 0 && HasCurrent && queueSaved;
-    public bool CanTogglePlayback => !stopping && HasCurrent && queueSaved &&
-        (CanEdit || OwnsCurrent && (playback.HasMedia || musicRecovery?.Recovering == true));
-    private bool OwnsCurrent => current is not null && playback.OwnerId == Id && playback.Identity == current.EntryId;
-    public string PlaybackPresentationKey => (current?.EntryId ?? "") + ":" + playbackEpoch;
-    public string CurrentTrackIdentity => current is null ? "" : (current.EntryId ?? "") + "\0" + current.Id;
-    public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia;
-    public string PlayGlyph => OwnsCurrent && playback.IsPlaying ? "Ⅱ" : "▶";
-    public double PositionSeconds => OwnsCurrent ? playback.PositionSeconds : 0;
-    public double DurationSeconds => OwnsCurrent ? Math.Max(1, playback.DurationSeconds) : 1;
-    public string PositionText => Clock(PositionSeconds);
-    public string DurationText => Clock(OwnsCurrent ? playback.DurationSeconds : 0);
-    private static string Clock(double value) => double.IsFinite(value) && value is >= 0 and < 86400000
-        ? TimeSpan.FromSeconds(value).ToString(value >= 3600 ? @"h\:mm\:ss" : @"m\:ss") : "0:00";
-    public int Volume { get => playback.Volume; set { if (!stopping) { volumeEdit++; playback.Volume = Math.Clamp(value, 0, 100); } Changed(); } }
-    public int Mode => mode;
-    public string ModeText => mode switch { 1 => "列表循环", 2 => "随机播放", _ => "单曲循环" };
-    public event PropertyChangedEventHandler? PropertyChanged;
-    public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
-    private void Changed([CallerMemberName] string? property = null) => RouteStateNotification(property);
-    private void RefreshBindings()
+
+    public void DeactivateGlobalSurface(DesktopGlobalSurface surface)
     {
-        playbackPresentation.RefreshAvailability();
-        foreach (var name in new[] { nameof(CatalogSelectedSong), nameof(SearchSelectedSong), nameof(Heading), nameof(Status), nameof(Busy), nameof(CanEdit), nameof(CanEditQuality),
-            nameof(CanEditAppearance), nameof(CanEditFixedAppearance), nameof(CanClearPlaybackCache),
-            nameof(IsCollectionPage),
-            nameof(ShowSongPager), nameof(HistoryDate),
-            nameof(HasSelection), nameof(CanRemoveSelection), nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection), nameof(CanEditMetadata),
-            nameof(CanImportLocalLyrics), nameof(CanRemoveLocalLyrics), nameof(CanEditFeedback), nameof(CanEditSearchPreferences),
-            nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText), nameof(CollectionArtwork), nameof(DetailArtwork),
-            nameof(CanPlayCollection), nameof(CanPlay),
-            nameof(CanSwitchSource) })
-            Changed(name);
-        SourceBindings();
-        DesktopLyricSettingsBindings();
-        CatalogSourceBindings();
-        AccountBindings();
-        CatalogBindings();
-        DiscoveryBindings();
-        RecommendationBindings();
+        switch (surface)
+        {
+            case DesktopGlobalSurface.PlayerDetail:
+                Lyrics.SetPlayerDetailOpen(false);
+                Presentation.DeactivateDetail();
+                if (!Lyrics.NeedsLyrics) Lyrics.CancelLyrics();
+                break;
+            case DesktopGlobalSurface.PlayQueue:
+                Queue.DeactivatePlayQueue();
+                break;
+        }
     }
-    private async Task<JsonElement> Call(string method, object? parameters = null, CancellationToken cancellationToken = default)
+
+    public Task OpenPlayerDetailAsync()
     {
-        if (SettingLabel(method) is not null)
+        if (!stopping) GlobalSurfaceRequested?.Invoke(this, new(DesktopGlobalSurface.PlayerDetail));
+        return Task.CompletedTask;
+    }
+
+    public Task OpenPlayQueueAsync()
+    {
+        if (!stopping) GlobalSurfaceRequested?.Invoke(this, new(DesktopGlobalSurface.PlayQueue));
+        return Task.CompletedTask;
+    }
+
+    private FrameworkElement ModalOwner =>
+        SettingsView.IsLoaded && DesktopVisual.IsVisible(SettingsView) ? SettingsView
+        : PlayerView.IsLoaded ? PlayerView
+        : View;
+
+    internal Task<bool> ConfirmAsync(string message, string title, CancellationToken token = default) =>
+        dialogs.ConfirmAsync(ModalOwner, message, title, token);
+
+    internal long NextStatusEpoch() => ++statusEpoch;
+    internal void SetStatus(string message) { status = message; NotifyStatusChanged(); }
+    internal void SetStatusQuiet(string message) => status = message;
+    internal void ClearStatusQuiet() => status = "";
+    internal void ClearTransientStatus() { status = ""; Catalog.ClearCatalogAccountNotice(); NotifyStatusChanged(); }
+    internal Task Notify(string message) { SetStatus(message); return Task.CompletedTask; }
+
+    internal void NotifyStatusChanged()
+    {
+        Settings.NotifyStatusChanged();
+        Catalog.NotifyStatusChanged();
+        Library.NotifyStatusChanged();
+    }
+
+    internal void RetireOperationStatus()
+    {
+        ++statusEpoch;
+        status = "";
+        Catalog.ClearCatalogAccountNotice();
+        NotifyStatusChanged();
+    }
+
+    internal void NotifyMusicSourcesChanged()
+    {
+        Playback.IncrementSelectionSourcesRevision();
+        Lyrics.NotifySourcesChanged();
+    }
+
+    internal void RefreshBindings()
+    {
+        Settings.RefreshAvailability();
+        Accounts.RefreshAvailability();
+        Discovery.RefreshAvailability();
+        Lyrics.RefreshAvailability();
+        Queue.RefreshAvailability();
+        Search.RefreshAvailability();
+        Catalog.RefreshAvailability();
+        Playback.RefreshAvailability();
+        Library.RefreshAvailability();
+    }
+
+    internal Task RequestNavigationAsync(string destination)
+    {
+        if (stopping) return Task.CompletedTask;
+        if (NavigationRequested is not { } requested) return NavigateAsync(destination, lifetime.Token);
+        requested(this, new(destination)); // Shell owns route history and back.
+        return Task.CompletedTask;
+    }
+
+    internal async Task<JsonElement> Call(string method, object? parameters = null, CancellationToken cancellationToken = default)
+    {
+        if (MusicSettingReceiptTracker.SettingLabel(method) is not null)
             return await CallSettledReceipt(method, parameters, cancellationToken);
         var reply = await application.ExecuteAsync(method, parameters ?? new { }, cancellationToken).WaitAsync(cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         return ValidateReply(method, reply);
     }
-    private async Task<JsonElement> CallSettled(string method, object? parameters = null,
+
+    internal async Task<JsonElement> CallSettled(string method, object? parameters = null,
         CancellationToken cancellationToken = default)
     {
         // Request owners that promise physical drain must retain the application
@@ -252,27 +294,28 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         cancellationToken.ThrowIfCancellationRequested();
         return ValidateReply(method, reply);
     }
-    private async Task<JsonElement> CallSettledReceipt(string method, object? parameters = null,
+
+    internal async Task<JsonElement> CallSettledReceipt(string method, object? parameters = null,
         CancellationToken cancellationToken = default)
     {
         // Mutating commands must observe a successful commit receipt even
         // when caller cancellation raced with its delivery. Only an explicit
         // cancelled receipt means the command was not admitted.
-        var label = SettingLabel(method);
-        var settings = SettingKeys(method, parameters);
-        long submission = label is null ? 0 : ++settingSubmission;
+        var label = MusicSettingReceiptTracker.SettingLabel(method);
+        var settings = MusicSettingReceiptTracker.SettingKeys(method, parameters);
+        long submission = label is null ? 0 : Receipts.NextSubmission();
         try
         {
             var reply = await application.ExecuteAsync(method, parameters ?? new { }, cancellationToken);
             var result = ValidateReply(method, reply);
             if (label is not null)
-                foreach (var setting in settings) SettingReceipt(setting, label, submission, confirmed: true);
+                foreach (var setting in settings) Receipts.Record(setting, label, submission, confirmed: true);
             return result;
         }
         catch (MusicOperationException error) when (error.Code == "COMMIT_UNKNOWN")
         {
             if (label is not null)
-                foreach (var setting in settings) SettingReceipt(setting, label, submission, confirmed: false);
+                foreach (var setting in settings) Receipts.Record(setting, label, submission, confirmed: false);
             throw;
         }
         catch (MusicOperationException error) when (error.Code == "CANCELLED" &&
@@ -281,7 +324,8 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             throw new OperationCanceledException(cancellationToken);
         }
     }
-    private static JsonElement ValidateReply(string method, JsonElement reply)
+
+    internal static JsonElement ValidateReply(string method, JsonElement reply)
     {
         MusicDto.Require(reply.ValueKind == JsonValueKind.Object && reply.TryGetProperty("ok", out _));
         var success = reply.GetProperty("ok");
@@ -301,14 +345,15 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
     // Commands are never dropped because another action is awaiting the application. Targets
     // are captured by the public methods before admission, not read after waiting.
     public Task RunAsync(Func<Task> action) => RunAsync(action, publishStatus: true);
-    private Task RunAsync(Func<Task> action, bool publishStatus)
+
+    internal Task RunAsync(Func<Task> action, bool publishStatus)
     {
         if (stopping) return Task.CompletedTask;
         var previous = commandTail;
         // Passive Sync refreshes share admission/drain, not foreground status ownership.
         var stamp = publishStatus ? ++statusEpoch : statusEpoch;
         commands++;
-        if (publishStatus) { status = ""; catalogAccountNotice = ""; }
+        if (publishStatus) { status = ""; Catalog.ClearCatalogAccountNotice(); }
         RefreshBindings();
         return commandTail = Execute();
         async Task Execute()
@@ -324,14 +369,109 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
             finally { commands--; if (!disposed) RefreshBindings(); }
         }
     }
+
+    // Dedicated playback/transition lane: keeps transport, step, seek, mode, and source
+    // switches responsive without incrementing global editing commands or greying out controls.
+    internal Task RunPlaybackActionAsync(Func<long, Task> action, bool publishStatus = true, bool supersede = true)
+    {
+        if (stopping) return Task.CompletedTask;
+        var previous = playbackCommandTail;
+        var generation = supersede ? ++playbackActionGeneration : playbackActionGeneration;
+        if (supersede) Playback.CancelOnline();
+        var stamp = publishStatus ? ++statusEpoch : statusEpoch;
+        if (publishStatus) ClearTransientStatus();
+        return playbackCommandTail = Execute();
+        async Task Execute()
+        {
+            await Task.Yield();
+            await previous;
+            if (disposed || stopping || supersede && generation != playbackActionGeneration) return;
+            try { await action(generation); }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                if (publishStatus && !disposed && stamp == statusEpoch) SetStatus(ErrorText(error));
+            }
+            finally { if (!disposed) Playback.RefreshPresentationAvailability(); }
+        }
+    }
+
+    public async Task ExecuteMediaShortcutAsync(MediaShortcutAction action)
+    {
+        if (stopping || disposed) return;
+        try
+        {
+            switch (action)
+            {
+                case MediaShortcutAction.TogglePlayback:
+                    if (Playback.CanTogglePlayback) await Playback.TogglePlaybackAsync();
+                    else await Notify("当前无法播放或暂停");
+                    break;
+                case MediaShortcutAction.Previous:
+                case MediaShortcutAction.Next:
+                    if (Playback.CanStep) await Playback.StepAsync(action == MediaShortcutAction.Next);
+                    else await Notify("当前无法切换歌曲");
+                    break;
+                case MediaShortcutAction.VolumeUp:
+                case MediaShortcutAction.VolumeDown:
+                    Playback.Volume += action == MediaShortcutAction.VolumeUp ? 5 : -5;
+                    await Settings.SaveVolumeAsync();
+                    break;
+                case MediaShortcutAction.ToggleFavorite:
+                    if (Playback.CanFavoriteCurrent) await Playback.ToggleCurrentFavoriteAsync();
+                    else await Notify("当前无法收藏歌曲");
+                    break;
+                case MediaShortcutAction.ToggleDesktopLyrics:
+                    await Lyrics.ToggleDesktopLyricsAsync();
+                    break;
+                case MediaShortcutAction.ToggleTranslation:
+                    Lyrics.ToggleLyricTranslation();
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(action));
+            }
+        }
+        catch (OperationCanceledException) { if (!stopping) await Notify("操作已取消"); }
+        catch (Exception error) { if (!stopping) await Notify(ErrorText(error)); }
+    }
+
+    internal static void ReconcileSongRows(ObservableCollection<SongRow> target, IReadOnlyList<SongRow> next)
+    {
+        // A queue occurrence has EntryId; catalog members can repeat the same permanent song.
+        // Match each occurrence once, in order, rather than deduplicating songs by their Id.
+        var available = target.GroupBy(row => row.SelectionKey, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => new Queue<SongRow>(group), StringComparer.Ordinal);
+        var rows = next.Select(song =>
+        {
+            if (!available.TryGetValue(song.SelectionKey, out var occurrences) || occurrences.Count == 0) return song;
+            var retained = occurrences.Dequeue();
+            if (!ReferenceEquals(retained, song)) retained.ApplyRepository(song.Raw, song.RepositoryPublication);
+            return retained;
+        }).ToArray();
+        var retainedRows = rows.ToHashSet(ReferenceEqualityComparer.Instance);
+        for (int index = target.Count - 1; index >= 0; index--)
+            if (!retainedRows.Contains(target[index])) target.RemoveAt(index);
+        for (int index = 0; index < rows.Length; index++)
+        {
+            var row = rows[index];
+            if (index < target.Count && ReferenceEquals(target[index], row)) continue;
+            int previous = -1;
+            for (int position = index + 1; position < target.Count; position++)
+                if (ReferenceEquals(target[position], row)) { previous = position; break; }
+            if (previous >= 0) target.Move(previous, index);
+            else target.Insert(index, row);
+        }
+    }
+
     public string OperationErrorText(Exception error) => ErrorText(error);
-    private static string ErrorText(Exception error) => error switch
+
+    internal static string ErrorText(Exception error) => error switch
     {
         PlaybackException { Code: PlaybackError.InvalidRate } or MusicOperationException { Code: PlaybackError.InvalidRate } => "播放倍速须为 0.5–3，间隔 0.1",
         PlaybackException { Code: PlaybackError.RateUnsupported } or MusicOperationException { Code: PlaybackError.RateUnsupported or "RATE_UNSUPPORTED" } => "当前音频不支持此播放倍速",
         PlaybackException { Code: PlaybackError.Superseded } or MusicOperationException { Code: PlaybackError.Superseded } => "播放内容已变更",
         InvalidDataException => "文件不可用",
-        Library.MusicLibraryException native => ErrorText(new MusicOperationException(native.Code)),
+        MusicLibraryException native => ErrorText(new MusicOperationException(native.Code)),
         MusicOperationException { Code: "CORRUPT_QUEUE" } => "播放队列数据无效或格式不兼容",
         MusicOperationException { Code: "CORRUPT_HISTORY" } => "播放历史数据无效或格式不兼容",
         MusicOperationException { Code: "CORRUPT_LIBRARY" } => "曲库数据无效或格式不兼容",
@@ -380,730 +520,72 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         MusicOperationException { Code: "SCRIPT_CLEANUP" } => "音源未能完全停止，请重启后重试",
         MusicOperationException { Code: "MEDIA_UNAVAILABLE" or "INVALID_MEDIA_CANDIDATE" or "EXPIRED_MEDIA_CANDIDATE" } => "音源未返回可用音频",
         MusicOperationException { Code: "RECORDING_MISMATCH" } => "音源返回的歌曲不匹配",
-        System.Text.Json.JsonException => "JSON 格式错误",
+        JsonException => "JSON 格式错误",
         BridgeException { Code: "CLOSED" } => "业务连接已中断",
         _ => "操作失败，请重试"
     };
 
-    private Task RequestNavigationAsync(string destination)
-    {
-        if (stopping) return Task.CompletedTask;
-        if (NavigationRequested is not { } requested) return NavigateAsync(destination, lifetime.Token);
-        requested(this, new(destination)); // Shell owns route history and back.
-        return Task.CompletedTask;
-    }
-    public Task OpenPlaylistAsync(string id) => RequestNavigationAsync(NetworkPlaylists.FirstOrDefault(p => p.Id == id)?.Route
-        ?? (id == "favorites" ? "favorites" : "playlist/" + id));
-    public Task RefreshAsync()
-    {
-        if (IsDiscovery) return RefreshDiscoveryAsync();
-        if (IsCatalogPage)
-            return RefreshCatalogAsync();
-        var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            await RefreshPlaylists(lifetime.Token);
-            if (origin == loadGeneration) await LoadAsync(CaptureLocation(), lifetime.Token);
-        });
-    }
-    public Task PageAsync(int direction)
-    {
-        if (direction is not (-1 or 1)) return Task.CompletedTask;
-        if (IsCollectionPage) return Task.CompletedTask;
-        var origin = loadGeneration;
-        var target = CaptureLocation() with { Offset = Math.Max(0, location.Offset + direction * 100), Selected = null, Scroll = 0 };
-        if (!IsSongList || direction > 0 && target.Offset >= total) return Task.CompletedTask;
-        return RunAsync(async () => { if (origin == loadGeneration) await LoadAsync(target, lifetime.Token); });
-    }
-    public Task CreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
-    internal Task<bool> TryCreatePlaylistAsync(string name) => CreatePlaylistCoreAsync(name);
-    private async Task<bool> CreatePlaylistCoreAsync(string name)
-    {
-        name = name.Trim(); var origin = loadGeneration;
-        var created = false;
-        await RunAsync(async () =>
-        {
-            if (name.Length == 0) { status = "请输入歌单名称"; return; }
-            var reply = await Call("music.library.create", new { name }, lifetime.Token);
-            created = true;
-            await RefreshPlaylists(lifetime.Token);
-            if (origin == loadGeneration) await RequestNavigationAsync("playlist/" + MusicDto.Text(reply.GetProperty("collection"), "id"));
-        });
-        return created;
-    }
-    public Task DeletePlaylistAsync()
-    {
-        var selected = collection; var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            if (selected is null || selected.Kind == "favorites") return;
-            if (!await ConfirmAsync("删除此歌单？", "删除歌单", lifetime.Token)) return;
-            await Call("music.library.remove", new { id = selected.Id, ifRevision = selected.Revision }, lifetime.Token);
-            await RefreshPlaylists(lifetime.Token);
-            if (origin == loadGeneration) await RequestNavigationAsync("favorites");
-        });
-    }
-    public Task RenamePlaylistAsync(string name)
-    {
-        var selected = collection; name = name.Trim(); var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            if (selected is null || selected.Kind == "favorites") return;
-            if (name.Length == 0) { status = "请输入歌单名称"; return; }
-            await Call("music.library.edit", new { id = selected.Id, ifRevision = selected.Revision, name }, lifetime.Token);
-            await RefreshAfterEdit(origin);
-        });
-    }
-    private async Task RefreshAfterEdit(long origin)
-    {
-        await RefreshPlaylists(lifetime.Token);
-        if (origin == loadGeneration && !IsCatalogPage) await LoadAsync(CaptureLocation(), lifetime.Token);
-    }
-    public Task SelectHistoryDateAsync(string date)
-    {
-        if (stopping || publishing || !IsHistory || !HistoryDates.Contains(date) || date == HistoryDate) return Task.CompletedTask;
-        return LoadUiAsync(CaptureLocation() with { Date = date, Offset = 0, Selected = null, Scroll = 0 });
-    }
-    public Task RestoreArchiveAsync(string id)
-    {
-        InvalidateCatalogAction();
-        var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            await QueueCall("music.history.restorePlaylist", new { id });
-            await StopOwnedPlayback(); await ReadQueue(lifetime.Token);
-            if (origin == loadGeneration) await OpenPlayQueueAsync();
-        });
-    }
-    public Task DeleteArchiveAsync(string id)
-    {
-        var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            await Call("music.history.removePlaylist", new { id }, lifetime.Token);
-            if (origin == loadGeneration) await LoadAsync(CaptureLocation(), lifetime.Token);
-        });
-    }
-    public Task ImportFilesAsync()
-    {
-        var selected = collection; var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            if (selected is null || await dialogs.SelectAudioFilesAsync(View) is not { Length: > 0 } paths) return;
-            if (stopping || origin != loadGeneration || selected != collection) return;
-            var grants = await files.GrantAsync(paths, lifetime.Token);
-            if (stopping || origin != loadGeneration || selected != collection) return;
-            var songs = grants.Select(file => NativeMusicSong.CreateLocal(file.Id, file.Title)).ToArray();
-            await Call("music.library.addSongs", new { id = selected.Id, ifRevision = selected.Revision, songs }, lifetime.Token);
-            await RefreshAfterEdit(origin);
-        });
-    }
-    public Task RemoveSongAsync()
-    {
-        InvalidateCatalogAction();
-        var song = selectedSong; var selected = collection; var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            if (song is null) return;
-            if (selected is not null)
-                await Call("music.library.removeSong", new { id = selected.Id, ifRevision = selected.Revision, songId = song.Id }, lifetime.Token);
-            await RefreshAfterEdit(origin);
-        });
-    }
-
-    // The footer acts on the captured playing song, not the content-page selection.
-    public Task AddCurrentToPlaylistAsync(string id)
-    {
-        var song = current; var origin = loadGeneration;
-        if (song is null || !Playlists.Any(p => p.Id == id)) return Task.CompletedTask;
-        return RunAsync(async () =>
-        {
-            var detail = await Call("music.library.detail", new { id, limit = 1 }, lifetime.Token);
-            await Call("music.library.addSongs", new { id,
-                ifRevision = MusicDto.Integer(detail.GetProperty("collection"), "revision"),
-                songs = new[] { song.Raw } }, lifetime.Token);
-            await RefreshAfterEdit(origin);
-        });
-    }
-
-    public Task FavoriteAsync() => FavoriteSongAsync(selectedSong);
-    private Task FavoriteSongAsync(SongRow? song)
-    {
-        var origin = loadGeneration;
-        return RunAsync(async () =>
-        {
-            if (song is null || IsDailyStyle && !Songs.Any(row => ReferenceEquals(row, song))) return;
-            var favorite = await Call("music.library.detail", new { id = "favorites", limit = 1 }, lifetime.Token);
-            await Call("music.library.addSongs", new { id = "favorites", ifRevision = MusicDto.Integer(favorite.GetProperty("collection"), "revision"),
-                songs = new[] { song.Raw } }, lifetime.Token);
-            await RefreshAfterEdit(origin);
-        });
-    }
-    public Task AppendNextAsync() => AppendSongNextAsync(selectedSong);
-    private Task AppendSongNextAsync(SongRow? song)
-    {
-        InvalidateCatalogAction();
-        var queueContext = CaptureFeedbackContext();
-        return RunAsync(async () =>
-        {
-            if (song is null || IsDailyStyle && !Songs.Any(row => ReferenceEquals(row, song))) return;
-            await QueueCall("music.queue.append", new { songs = new[] { song.Raw }, next = true, context = queueContext });
-            await ReadQueue(lifetime.Token);
-            InvalidateQueueSurface();
-        });
-    }
-    public Task PlaySelectionAsync()
-    {
-        TrackMusicRecovery(RetireMusicRecovery());
-        InvalidateCatalogAction();
-        onlineCancellation?.Cancel();
-        var song = selectedSong; var selected = collection;
-        bool searchDirect = IsSearchPage;
-        var queueContext = CaptureFeedbackContext();
-        var index = song is null ? -1 : location.Offset + Songs.IndexOf(song);
-        return RunAsync(async () =>
-        {
-            if (song is null || index < 0) return;
-            if (selected is not null) await QueueCall("music.queue.playCollection", new { id = selected.Id, ifRevision = selected.Revision, index });
-            else await QueueCall("music.queue.replace", new { songs = new[] { song.Raw }, index = 0, context = queueContext });
-            await ReadQueue(lifetime.Token);
-            long searchPlayback = -1;
-            try
-            {
-                await StartCurrent(lifetime.Token, ownsEpoch: searchDirect ? epoch =>
-                {
-                    searchPlayback = epoch;
-                    AwaitSearchRecommendationStart(epoch);
-                } : null);
-            }
-            catch
-            {
-                if (searchPlayback == playbackEpoch) searchRecommendationStart = null;
-                throw;
-            }
-        });
-    }
-    public Task PlayCollectionAsync()
-    {
-        TrackMusicRecovery(RetireMusicRecovery());
-        InvalidateCatalogAction();
-        onlineCancellation?.Cancel();
-        var selected = collection;
-        return RunAsync(async () =>
-        {
-            if (selected is null || selected.Count == 0) return;
-            await QueueCall("music.queue.playCollection", new
-            {
-                id = selected.Id,
-                ifRevision = selected.Revision,
-                index = 0
-            });
-            await ReadQueue(lifetime.Token);
-            await StartCurrent(lifetime.Token);
-        });
-    }
-    public Task PlayContentDetailAsync() =>
-        IsCatalogDetailPage ? PlayCatalogPlaylistAsync() : PlayCollectionAsync();
-    public Task PlayContentSelectionAsync()
-    {
-        if (!IsCatalogDetailPage) return PlaySelectionAsync();
-        var song = selectedSong;
-        var card = song is null ? null : CatalogSections.SelectMany(section => section.Items)
-            .FirstOrDefault(item => ReferenceEquals(item.Song, song));
-        return card is null ? Task.CompletedTask : OpenCatalogCardAsync(card);
-    }
-    public async Task ExecuteMediaShortcutAsync(MediaShortcutAction action)
-    {
-        if (stopping || disposed) return;
-        try
-        {
-            switch (action)
-            {
-                case MediaShortcutAction.TogglePlayback:
-                    if (CanTogglePlayback) await TogglePlaybackAsync();
-                    else await Notify("当前无法播放或暂停");
-                    break;
-                case MediaShortcutAction.Previous:
-                case MediaShortcutAction.Next:
-                    if (CanPlay) await StepAsync(action == MediaShortcutAction.Next);
-                    else await Notify("当前无法切换歌曲");
-                    break;
-                case MediaShortcutAction.VolumeUp:
-                case MediaShortcutAction.VolumeDown:
-                    Volume += action == MediaShortcutAction.VolumeUp ? 5 : -5;
-                    await SaveVolumeAsync();
-                    break;
-                case MediaShortcutAction.ToggleFavorite:
-                    if (HasCurrent && CanEdit) await ToggleCurrentFavoriteAsync();
-                    else await Notify("当前无法收藏歌曲");
-                    break;
-                case MediaShortcutAction.ToggleDesktopLyrics:
-                    await ToggleDesktopLyricsAsync();
-                    break;
-                case MediaShortcutAction.ToggleTranslation:
-                    ToggleLyricTranslation();
-                    break;
-                default:
-                    throw new ArgumentOutOfRangeException(nameof(action));
-            }
-        }
-        catch (OperationCanceledException) { if (!stopping) await Notify("操作已取消"); }
-        catch (Exception error) { if (!stopping) await Notify(ErrorText(error)); }
-    }
-    public Task TogglePlaybackAsync()
-    {
-        InvalidateCatalogAction();
-        if (!stopping && current is not null && playback.OwnerId == Id && playback.Identity == current.EntryId &&
-            playback is INativePlaybackContinuation intent && (playback.HasMedia || musicRecovery?.Recovering == true))
-        {
-            // Admission is synchronous: a queued/awaiting resolver cannot delay Pause.
-            if (!intent.PauseRequested) ObserveExplicitRecommendationPause();
-            var command = intent.PauseRequested ? ResumePlaybackAsync() : playback.PauseAsync();
-            return RunAsync(() => command);
-        }
-        if (CurrentPlaybackExcluded) return ResumePlaybackAsync();
-        onlineCancellation?.Cancel();
-        return RunAsync(async () =>
-        {
-            if (current is null || !queueSaved) return;
-            if (playback.OwnerId == Id && playback.Identity == current.EntryId && playback.HasMedia)
-            {
-                if (playback.IsPlaying) await playback.PauseAsync(); else await ResumePlaybackAsync();
-            }
-            else await StartCurrent(lifetime.Token);
-        });
-    }
-    private bool CurrentPlaybackExcluded =>
-        musicRecovery is { Session: { } session, Media.Target: { } target } && session.Excluded(target);
-    /// <summary>Every resume entry, including system Play, keeps durable wrong-source exclusions.</summary>
-    public Task ResumePlaybackAsync()
-    {
-        if (stopping || !OwnsCurrent) return Task.CompletedTask;
-        if (CurrentPlaybackExcluded)
-            return Notify("当前音源已排除，请切换音源或在错源管理中恢复");
-        // Keep admission synchronous: a Pause during an awaiting operation must still win.
-        return playback.ResumeAsync();
-    }
-    public Task StepAsync(bool next, string reason = "manual")
-    {
-        InvalidateCatalogAction();
-        TrackMusicRecovery(RetireMusicRecovery());
-        onlineCancellation?.Cancel();
-        return RunAsync(() => StepCore(next, reason));
-    }
-    public Task StepFromPresentationAsync(bool next, string presentationKey)
-    {
-        if (stopping || string.IsNullOrEmpty(presentationKey) || presentationKey != PlaybackPresentationKey)
-            return Task.CompletedTask;
-        return RunAsync(async () =>
-        {
-            if (presentationKey != PlaybackPresentationKey || current is null || !queueSaved) return;
-            InvalidateCatalogAction();
-            TrackMusicRecovery(RetireMusicRecovery());
-            onlineCancellation?.Cancel();
-            await StepCore(next, "manual");
-        });
-    }
-    private async Task StepCore(bool next, string reason)
-    {
-        var origin = loadGeneration;
-        if (next && await AdvanceRecommendation(reason == "ended"))
-        {
-            await RefreshRecommendationQueue(lifetime.Token);
-            return;
-        }
-        var reply = await QueueCall(next ? "music.queue.next" : "music.queue.previous", next ? new { reason } : new { });
-        var target = reply.GetProperty("targetId");
-        if (target.ValueKind == JsonValueKind.Null)
-        {
-            if (reason == "ended") await StopOwnedPlayback();
-            return;
-        }
-        MusicDto.Require(target.ValueKind == JsonValueKind.String);
-        await ReadQueue(lifetime.Token); await StartCurrent(lifetime.Token, reason == "ended");
-        InvalidateQueueSurface();
-    }
-    public Task ChangeModeAsync(int value)
-    {
-        InvalidateCatalogAction();
-        return RunAsync(async () =>
-        {
-            if (value is < 1 or > 3) throw new MusicOperationException("INVALID_REQUEST");
-            var reply = await QueueCall("music.queue.mode", new { mode = value });
-            int next = MusicDto.Mode(reply);
-            if (mode != next)
-            {
-                mode = next;
-                Changed(nameof(Mode)); Changed(nameof(ModeText));
-            }
-        });
-    }
-    public Task SeekAsync(double seconds)
-    {
-        var epoch = playbackEpoch;
-        return RunAsync(async () =>
-        {
-            if (epoch != playbackEpoch || playback.OwnerId != Id || !playback.HasMedia) return;
-            // Explicit discontinuity: never count a short seek as a listened interval.
-            SuspendFeedback();
-            try { await playback.SeekAsync(seconds); }
-            finally { ResumeFeedback(epoch); }
-        });
-    }
-    private async Task<JsonElement> QueueCall(string method, object? parameters = null)
-    {
-        queueEpoch++;
-        if (method is "music.queue.replace" or "music.queue.playCollection" or "music.queue.clear" or "music.history.restorePlaylist" ||
-            method == "music.queue.append" && (!JsonSerializer.SerializeToElement(parameters ?? new { }).TryGetProperty("next", out var next) ||
-                next.ValueKind != JsonValueKind.True))
-            searchRecommendationStart = null;
-        try
-        {
-            var result = await Call(method, parameters, lifetime.Token);
-            ObservePreloadQueueMutation(result);
-            InvalidateQueueSurface();
-            return result;
-        }
-        catch
-        {
-            // A failed command may leave a pending candidate in the native owner. Playback
-            // stays gated until a later queue snapshot explicitly reports persisted state.
-            queueSaved = false; RefreshBindings();
-            InvalidateQueueSurface();
-            throw;
-        }
-    }
-    private async Task ReadQueue(CancellationToken cancellationToken)
-    {
-        if (stopping) return;
-        var epoch = queueEpoch; var serial = ++queueRead;
-        var result = await Call("music.queue.get", new { offset = 0, limit = 1 }, cancellationToken);
-        ObservePreloadQueueSnapshot(result);
-        var state = ParseQueue(result);
-        if (stopping || epoch != queueEpoch || serial != queueRead) return;
-        ApplyQueue(state);
-    }
-    private sealed record QueueSnapshot(SongRow? Current, int Mode, bool Saved, JsonElement? FeedbackContext = null, JsonElement? Source = null);
-    private static QueueSnapshot ParseQueue(JsonElement reply)
-    {
-        var mode = MusicDto.Mode(reply);
-        var persistence = MusicDto.Text(reply.GetProperty("persistence"), "state");
-        MusicDto.Require(persistence is "saved" or "pending");
-        var value = reply.GetProperty("current");
-        SongRow? current = value.ValueKind == JsonValueKind.Null ? null
-            : SongRow.Read(value.GetProperty("song"), MusicDto.Text(value, "id"));
-        var id = reply.GetProperty("currentId");
-        MusicDto.Require(current is null ? id.ValueKind == JsonValueKind.Null
-            : id.ValueKind == JsonValueKind.String && id.GetString() == current.EntryId);
-        JsonElement? feedbackContext = value.ValueKind == JsonValueKind.Object &&
-            value.TryGetProperty("context", out var sourceContext) && sourceContext.ValueKind == JsonValueKind.Object
-            ? sourceContext.Clone() : null;
-        return new(current, mode, persistence == "saved", feedbackContext,
-            reply.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object ? source.Clone() : null);
-    }
-    private void ApplyQueue(QueueSnapshot state)
-    {
-        // Background recommendation append/read must not replace the same live
-        // SongRow reference while an unchanged occurrence is resolving media.
-        if (current is not null && state.Current is not null && current.EntryId == state.Current.EntryId &&
-            current.Raw.GetRawText() == state.Current.Raw.GetRawText())
-            state = state with { Current = current };
-        var before = (CurrentSongId, CurrentTitle, CurrentArtist, CurrentAlbum, HasCurrent,
-            CurrentTrackIdentity, PlaybackPresentationKey, Mode, Saved: queueSaved);
-        var changedCurrent = !ReferenceEquals(current, state.Current);
-        if (changedCurrent && current is not null) current.PropertyChanged -= CurrentSongChanged;
-        current = state.Current; queueSource = state.Source; mode = state.Mode; queueSaved = state.Saved;
-        if (changedCurrent && current is not null && playbackSubscribed) current.PropertyChanged += CurrentSongChanged;
-        if (before.CurrentSongId != CurrentSongId) Changed(nameof(CurrentSongId));
-        if (before.CurrentTitle != CurrentTitle) Changed(nameof(CurrentTitle));
-        if (before.CurrentArtist != CurrentArtist) Changed(nameof(CurrentArtist));
-        if (before.CurrentAlbum != CurrentAlbum) Changed(nameof(CurrentAlbum));
-        if (before.HasCurrent != HasCurrent) Changed(nameof(HasCurrent));
-        if (before.CurrentTrackIdentity != CurrentTrackIdentity) Changed(nameof(CurrentTrackIdentity));
-        if (before.PlaybackPresentationKey != PlaybackPresentationKey) Changed(nameof(PlaybackPresentationKey));
-        if (before.Mode != Mode) { Changed(nameof(Mode)); Changed(nameof(ModeText)); }
-        RefreshCurrentArtwork();
-        if (changedCurrent || before.Saved != queueSaved) playbackPresentation.Refresh();
-        currentFeedbackContext = state.FeedbackContext; UpdateFeedbackSelection();
-        UpdateRecordingCandidates(); UpdateLyricSources(); RefreshQueueSurfaceCurrent(); RefreshBindings();
-        if (changedCurrent) { PublishFavorite(false); _ = RefreshCurrentFavoriteAsync(); }
-    }
-    private void CurrentSongChanged(object? sender, PropertyChangedEventArgs args)
-    {
-        if (stopping || !ReferenceEquals(sender, current)) return;
-        switch (args.PropertyName)
-        {
-            case nameof(SongRow.Title): Changed(nameof(CurrentTitle)); break;
-            case nameof(SongRow.Artist): Changed(nameof(CurrentArtist)); break;
-            case nameof(SongRow.Album): Changed(nameof(CurrentAlbum)); break;
-            case nameof(SongRow.Cover): RefreshCurrentArtwork(); break;
-            case nameof(SongRow.IsOnline): playbackPresentation.Refresh(); break;
-        }
-    }
-    private async Task<bool> StopOwnedPlayback(Func<bool>? admission = null)
-    {
-        if (admission is not null && !admission()) return false;
-        var epoch = playbackEpoch; var entry = openedEntry;
-        var outputIdentity = playback.OwnerId == Id ? playback.Identity : null;
-        await RetireMusicRecovery();
-        // Retiring an uncooperative resolver can yield while a newer selection
-        // opens media. That newer input and its handles do not belong to this stop.
-        if (epoch != playbackEpoch || openedEntry != entry || admission is not null && !admission() ||
-            playback.OwnerId == Id && playback.Identity != outputIdentity && playback.Identity != entry)
-            return false;
-        FinishFeedback("ui");
-        ClearChorus();
-        RetireLyrics();
-        onlineCancellation?.Cancel(); onlineGeneration++;
-        playbackEpoch++; openedEntry = null; recorded = false; searchRecommendationStart = null;
-        Changed(nameof(PlaybackPresentationKey));
-        bool hadInstallation = playbackInstallation is not null;
-        playbackInstallation = null; Lyrics.Clear(); lyricStatus = ""; OnlineBindings();
-        if (hadInstallation) PlaybackSourceBindings();
-        if (playback.OwnerId == Id) await playback.StopAsync();
-        return true;
-    }
-    private async Task StartCurrent(CancellationToken cancellationToken, bool automatic = false,
-        Func<bool>? admission = null, Action<long>? ownsEpoch = null,
-        Recommendations.MusicRecommendationFeedback? recommendation = null)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        if (admission is not null && !admission()) throw new OperationCanceledException();
-        if (stopping) throw new MusicOperationException("SHUTTING_DOWN");
-        if (current is not { EntryId: not null } selected) throw new MusicOperationException("NO_PLAYBACK_TARGET");
-        if (!queueSaved) throw new MusicOperationException("PENDING_WRITE");
-        // A newly selected unavailable file must not leave the previous audio
-        // running under the new song's metadata or seek controls.
-        bool Admitted() => !stopping && !disposed && selected == current && (admission is null || admission());
-        if (!await StopOwnedPlayback(Admitted) || !Admitted()) throw new OperationCanceledException();
-        SelectFeedback(selected, automatic, recommendation);
-        var epoch = playbackEpoch;
-        ownsEpoch?.Invoke(epoch);
-        if (selected.IsOnline)
-        {
-            await OpenOnlineCurrent(selected, epoch, cancellationToken, admission);
-            await RestorePlaybackRateAsync(selected, epoch, cancellationToken);
-            if (NeedsLyrics && epoch == playbackEpoch) _ = RestoreLyricsAsync();
-            return;
-        }
-        using var request = BeginOnline(cancellationToken);
-        try
-        {
-            var media = new ResolvedMusic(await files.ResolveAsync(SongJson.Text(selected.Raw, "localFileId"), request.Token), new Dictionary<string, string>());
-            request.Token.ThrowIfCancellationRequested();
-            if (stopping || epoch != playbackEpoch || selected != current || admission is not null && !admission())
-                throw new OperationCanceledException();
-            openedEntry = selected.EntryId; recorded = false;
-            await playback.OpenAsync(Id, selected.EntryId, media.Uri!, selected.Title, media.Headers, request.Token);
-            await RestorePlaybackRateAsync(selected, epoch, request.Token);
-            if (NeedsLyrics && epoch == playbackEpoch) _ = RestoreLyricsAsync();
-        }
-        finally { EndOnline(request); }
-    }
-    private void PlaybackChanged(object? sender, PropertyChangedEventArgs args)
-    {
-        if (stopping) return;
-        if (string.IsNullOrEmpty(args.PropertyName) ||
-            args.PropertyName is nameof(IMusicPlayback.DurationSeconds) or nameof(IMusicPlayback.HasMedia))
-            CheckMediaDuration();
-        if (string.IsNullOrEmpty(args.PropertyName) ||
-            args.PropertyName is nameof(IMusicPlayback.PositionSeconds) or nameof(IMusicPlayback.DurationSeconds) or
-            nameof(IMusicPlayback.IsPlaying) or nameof(IMusicPlayback.HasMedia) or
-            nameof(IMusicPlayback.OwnerId) or nameof(IMusicPlayback.Identity))
-            SampleFeedback();
-        if (!OwnsCurrent || !playback.HasMedia) playbackRateReceipt = null;
-        if ((!OwnsCurrent || !playback.HasMedia) && musicRecovery is not { Opening: true } ||
-            args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId is not null && playback.OwnerId != Id)
-            searchRecommendationStart = null;
-        if (args.PropertyName == nameof(IMusicPlayback.OwnerId) && playback.OwnerId != Id &&
-            musicRecovery is { Opening: false })
-            TrackMusicRecovery(RetireMusicRecovery());
-        ObserveRecommendationPlayback();
-        ObserveMusicPreload();
-        if (args.PropertyName == nameof(IMusicPlayback.PositionSeconds))
-            playbackPresentation.RefreshPosition();
-        else
-        {
-            if (args.PropertyName != nameof(IMusicPlayback.Volume)) SyncChorus();
-            playbackPresentation.Refresh();
-            DesktopLyricBindings();
-            Changed(nameof(CanHeartbeatCurrent));
-            Changed(nameof(CanRecommendCurrent));
-        }
-    }
-    private void PlaybackStarted(object? sender, EventArgs args)
-    {
-        if (stopping || playback.OwnerId != Id || playback.Identity != openedEntry || openedEntry is null) return;
-        var state = musicRecovery;
-        if (state is not null)
-        {
-            if (!CurrentRecovery(state)) return;
-            if (state.Pending is { } pending)
-            {
-                if (CurrentPendingMedia(state, pending)) pending.SourceStarted = true;
-                return;
-            }
-        }
-        AcceptPlaybackStarted(state);
-    }
-    private void AcceptPlaybackStarted(MusicRecovery? state)
-    {
-        if (state is not null && !CurrentRecovery(state)) return;
-        CheckMediaDuration();
-        if (state?.PendingFailure == "RECORDING_MISMATCH") return;
-        CommitCatalogPlayback();
-        if (recorded)
-        {
-            if (state is { ConfirmSourceOnStart: true })
-            {
-                state.ConfirmSourceOnStart = false;
-                ConfirmOfficialPlayback();
-                ConfirmPlaybackFileCache();
-                StartFeedback(); SampleFeedback();
-            }
-            return;
-        }
-        if (state is not null)
-        {
-            state.ConfirmSourceOnStart = false;
-        }
-        var entry = openedEntry; var epoch = playbackEpoch; var stamp = statusEpoch;
-        recorded = true; playbackEvent++;
-        ConfirmOfficialPlayback();
-        ConfirmPlaybackFileCache();
-        StartFeedback(observedStart: true);
-        ObserveRecommendationPlayback();
-        if (searchRecommendationStart is { } searchPreview)
-            _ = TrackRecommendation(StartQueueRecommendationPreviewAsync(searchPreview));
-        var task = Record();
-        eventWrites.Add(task); _ = Observe();
-        async Task Record()
-        {
-            try { await Call("music.history.recordPlayed", new { entryId = entry, at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }, lifetime.Token); }
-            catch (OperationCanceledException) { }
-            catch
-            {
-                if (!stopping && epoch == playbackEpoch && stamp == statusEpoch)
-                { status = "播放记录保存失败"; Changed(nameof(Status)); }
-            }
-        }
-        async Task Observe() { try { await task; } finally { eventWrites.Remove(task); } }
-    }
-    private void PlaybackEnded(object? sender, EventArgs args)
-    {
-        if (stopping || playback.OwnerId != Id || openedEntry is null || playback.Identity != openedEntry || endedEpoch == playbackEpoch) return;
-        TrackMusicRecovery(RetireMusicRecovery());
-        FinishFeedback("end");
-        var epoch = endedEpoch = playbackEpoch; var entry = openedEntry;
-        _ = RunAsync(async () =>
-        {
-            // Preserve one terminal event while busy, never advance a replacement session.
-            if (!stopping && epoch == playbackEpoch && current?.EntryId == entry && playback.OwnerId == Id && playback.Identity == entry)
-                await StepCore(true, "ended");
-        });
-    }
-    private void PlaybackFailed(object? sender, EventArgs args)
-    {
-        if (playback.OwnerId == Id && playback.Identity == openedEntry && !recorded)
-            searchRecommendationStart = null;
-        if (TryMusicRecovery()) return;
-        if (!stopping && playback.OwnerId == Id && playback.Identity == openedEntry)
-        { FinishFeedback("error"); status = "播放失败"; Changed(nameof(Status)); }
-    }
     public Task PrepareShutdownAsync()
     {
         if (preparation is not null) return preparation;
-        FinishFeedback("interrupt");
-        if (desktopLyricsWindow is { } activeLyrics)
-        {
-            var state = activeLyrics.CapturePresentationState();
-            if (desktopLyricSettingsLoaded && state.Geometry is { } geometry)
-                _ = activeLyrics.SaveGeometryForShutdown(geometry);
-        }
-        desktopLyricsOpenEpoch++;
-        desktopLyricsOpening = false;
-        desktopLyricsReopenAfterClose = false;
+        Playback.FinishFeedback("interrupt");
+        Lyrics.PrepareDesktopLyricsShutdown();
         stopping = true; // Seal admission synchronously, before yielding to any callback.
-        RefreshCurrentArtwork();
-        PrepareDesktopLyricsShutdown();
-        RetireQueueSurfaceRequest();
+        Playback.RefreshCurrentArtwork();
+        Queue.RetireQueueSurfaceRequest();
         Presentation.DeactivateDetail();
-        SealRecommendations();
-        TrackMusicRecovery(RetireMusicRecovery());
-        searchEpoch++;
-        discoveryEpoch++; discoveryRequest?.Cancel();
-        searchHistoryRequest?.Cancel();
-        InvalidateCatalogAction();
-        ClearAccountQr();
-        _ = DeactivateSettingsAsync();
-        _ = vipPage.PrepareShutdownAsync();
+        Queue.SealRecommendations();
+        Playback.TrackMusicRecovery(Playback.RetireMusicRecovery());
+        Search.CancelForShutdown();
+        Discovery.CancelForShutdown();
+        Settings.CancelSearchHistoryForShutdown();
+        Catalog.InvalidateCatalogAction();
+        Accounts.ClearAccountQr();
+        _ = Settings.DeactivateSettingsAsync();
+        _ = Catalog.VipPage.PrepareShutdownAsync();
         return preparation = PrepareCore();
     }
 
-    private void SubscribePlayback()
-    {
-        if (playbackSubscribed) return;
-        if (current is not null) current.PropertyChanged += CurrentSongChanged;
-        application.ChorusInvalidated += ChorusAccountChanged;
-        application.AccountDetailsInvalidated += OfficialAccountChanged;
-        application.AccountDetailsInvalidated += CatalogAccountChanged;
-        playback.PropertyChanged += PlaybackChanged;
-        playback.Started += PlaybackStarted; playback.Ended += PlaybackEnded; playback.Failed += PlaybackFailed;
-        playbackSubscribed = true;
-    }
-    private void UnsubscribePlayback()
-    {
-        if (!playbackSubscribed) return;
-        if (current is not null) current.PropertyChanged -= CurrentSongChanged;
-        application.ChorusInvalidated -= ChorusAccountChanged;
-        application.AccountDetailsInvalidated -= OfficialAccountChanged;
-        application.AccountDetailsInvalidated -= CatalogAccountChanged;
-        ClearChorus();
-        playback.PropertyChanged -= PlaybackChanged;
-        playback.Started -= PlaybackStarted; playback.Ended -= PlaybackEnded; playback.Failed -= PlaybackFailed;
-        playbackSubscribed = false;
-    }
     private async Task PrepareCore()
     {
         // Publish the cached task before bindings/cancellation can re-enter shutdown.
         await Task.Yield();
-        AdvanceLoadGeneration(); playbackEpoch++;
-        Changed(nameof(PlaybackPresentationKey));
-        UnsubscribePlayback();
-        playbackPresentation.Refresh();
+        AdvanceLoadGeneration();
+        Playback.AdvancePlaybackEpochForShutdown();
+        Playback.UnsubscribePlayback();
+        Playback.RefreshPresentation();
         loadCancellation?.Cancel(); // Only reads: never cancel admitted mutations/history writes.
-        catalogSourceReadCancellation?.Cancel(); // The shared startup source read is independent of its waiters.
-        startupCancellation?.Cancel();
-        // Cancellation settlement owns its confirming read. Cancelling that
-        // read here would turn an ordinary page exit into an unknown receipt.
-        if (accountSettlement.IsCompleted) accountReadCancellation?.Cancel();
-        collectionPageCancellation?.Cancel();
+        Settings.CancelCatalogSourceReadForShutdown(); // The shared startup source read is independent of its waiters.
+        Catalog.CancelStartupForShutdown();
+        Accounts.CancelReadForShutdown();
+        Library.CancelCollectionPage();
         // Resolution may be a network read; cancel it before waiting for commandTail.
-        onlineCancellation?.Cancel(); RetireLyrics(); CancelMusicPreload();
+        Playback.CancelOnline(); Lyrics.RetireLyrics(); Playback.CancelMusicPreload();
         RefreshBindings();
         Exception? settingsFailure = null;
-        try { await RetireAccountTransferAsync(); await DeactivateSettingsAsync(); }
+        try { await Accounts.RetireAccountTransferAsync(); await Settings.DeactivateSettingsAsync(); }
         catch (Exception error) { settingsFailure = error; }
-        try { await DeactivateCatalogSourceSettingsAsync(); }
+        try { await Settings.DeactivateCatalogSourceSettingsAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
-        try { await vipPage.PrepareShutdownAsync(); }
+        try { await Catalog.VipPage.PrepareShutdownAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
-        await Task.WhenAll(commandTail, accountRead, accountSettlement, Task.WhenAll(eventWrites.ToArray()),
-            Task.WhenAll(loadDrains.ToArray()), RetireSearchHistoryAsync());
+        await Task.WhenAll(commandTail, playbackCommandTail, Accounts.AccountReadTask, Accounts.AccountSettlementTask,
+            Task.WhenAll(eventWrites.ToArray()), Task.WhenAll(loadDrains.ToArray()), Settings.RetireSearchHistoryAsync());
         // A failure stays cached, sealed and observable. Do not tear down the
         // lifetime or any App-owned runtime/store/player before final release.
-        Exception? failure = accountSaveUncertain ? new MusicOperationException("COMMIT_UNKNOWN") : settingsFailure;
-        try { await SaveVolumeCore(lifetime.Token); }
+        Exception? failure = Accounts.AccountSaveUncertain ? new MusicOperationException("COMMIT_UNKNOWN") : settingsFailure;
+        try { await Settings.SaveVolumeCore(lifetime.Token); }
         catch (Exception error) { failure ??= error; }
-        try { await DrainRecommendations(); }
+        try { await Queue.DrainRecommendations(); }
         catch (Exception error) { failure ??= error; }
-        try { await RetireDiscoveryAsync(); }
+        try { await Discovery.RetireDiscoveryAsync(); }
         catch (Exception error) { failure ??= error; }
         try { await application.PrepareShutdownAsync(); }
         catch (Exception error) { failure ??= error; }
         await database.DrainAsync();
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
+
     public ValueTask DisposeAsync() => new(AbortAsync());
 
     public Task AbortAsync()
@@ -1112,27 +594,30 @@ public sealed partial class MusicCapability : IDesktopModule, IDesktopStartupPar
         var prepare = preparation ?? PrepareShutdownAsync();
         return abortion = AbortCore(prepare);
     }
+
     private async Task AbortCore(Task prepare)
     {
         await Task.Yield();
         Exception? failure = null;
         stopping = true;
-        ReleaseDesktopLyrics();
+        Lyrics.ReleaseDesktopLyrics();
         try { lifetime.Cancel(); } catch (Exception error) { failure = error; }
         try { await prepare; } catch { /* The save receipt retains its failure; release still retires settled owners. */ }
-        try { await DisposeLibrarySyncAsync(); } catch (Exception error) { failure ??= error; }
-        try { await DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
-        try { await vipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
+        try { await Accounts.DisposeLibrarySyncAsync(); } catch (Exception error) { failure ??= error; }
+        try { await Accounts.DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
+        try { await Catalog.VipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await application.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         if (application is MusicNativeApplication repositoryOwner)
-            repositoryOwner.SongMetadataChanged -= RepositorySongsChanged;
+            repositoryOwner.SongMetadataChanged -= Playback.RepositorySongsChanged;
         try { await ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         if (ownsPresentationCache)
             try { await presentationCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-        UnsubscribeSearch();
-        UnsubscribeDiscovery();
-        ReleaseRecommendations();
-        disposed = true; UnsubscribePlayback(); lifetime.Dispose();
+        Search.Unsubscribe();
+        Discovery.Unsubscribe();
+        Queue.ReleaseRecommendations();
+        disposed = true;
+        Playback.UnsubscribePlayback();
+        lifetime.Dispose();
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 }

@@ -13,10 +13,18 @@ public sealed class MusicQueueRowView : Grid
     private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
     private MusicQueueSurfaceRow? observed;
     private IDisposable? themeObserver;
+    private bool pointerOver;
+    private bool focusWithin;
+
     public MusicQueueRowView()
     {
         Background = TransparentBrush;
         CornerRadius = new CornerRadius(6);
+        PointerEntered += (_, _) => SetPointerOver(true);
+        PointerExited += (_, _) => SetPointerOver(false);
+        PointerCaptureLost += (_, _) => SetPointerOver(false);
+        GotFocus += (_, _) => SetFocusWithin(true);
+        LostFocus += (_, _) => SetFocusWithin(false);
         Loaded += (_, _) =>
         {
             themeObserver ??= DesktopTheme.Observe(this, Refresh);
@@ -24,14 +32,35 @@ public sealed class MusicQueueRowView : Grid
         };
         Unloaded += (_, _) =>
         {
+            pointerOver = false;
+            focusWithin = false;
             if (observed is not null) observed.PropertyChanged -= RowChanged;
             observed = null;
             themeObserver?.Dispose();
             themeObserver = null;
         };
-        DataContextChanged += (_, _) => Observe();
-        RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => Refresh());
+        DataContextChanged += (_, _) =>
+        {
+            pointerOver = false;
+            focusWithin = false;
+            Observe();
+        };
     }
+
+    private void SetPointerOver(bool value)
+    {
+        if (pointerOver == value) return;
+        pointerOver = value;
+        Refresh();
+    }
+
+    private void SetFocusWithin(bool value)
+    {
+        if (focusWithin == value) return;
+        focusWithin = value;
+        Refresh();
+    }
+
     private void Observe()
     {
         if (observed is not null) observed.PropertyChanged -= RowChanged;
@@ -39,13 +68,15 @@ public sealed class MusicQueueRowView : Grid
         if (observed is not null) observed.PropertyChanged += RowChanged;
         Refresh();
     }
+
     private void RowChanged(object? sender, PropertyChangedEventArgs args)
     {
         if (args.PropertyName == nameof(MusicQueueSurfaceRow.IsCurrent)) Refresh();
     }
+
     private void Refresh()
     {
-        bool highlighted = CardMotion.GetProgress(this) > .001;
+        bool highlighted = pointerOver || focusWithin;
         bool current = DataContext is MusicQueueSurfaceRow { IsCurrent: true };
         bool contrast = DesktopTheme.GetIsHighContrast(this);
         static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
@@ -62,13 +93,21 @@ public sealed class MusicQueueRowView : Grid
             if (node is Button button)
             {
                 button.Foreground = foreground;
-                if (DataContext is MusicQueueSurfaceRow row && button.Tag is MusicQueueSurfaceRow)
+                if (button.Name == "QueueRemoveButton")
+                {
+                    button.Opacity = highlighted ? 1 : 0;
+                    button.IsHitTestVisible = highlighted;
+                }
+                else if (DataContext is MusicQueueSurfaceRow row && button.Tag is MusicQueueSurfaceRow)
+                {
                     AutomationProperties.SetItemStatus(button, row.IsCurrent ? "正在播放" : "");
+                }
             }
             if (node is Border { Name: "QueuePlayMark" } mark)
                 mark.Opacity = highlighted || contrast && current ? 1 : 0;
         }
     }
+
     private static IEnumerable<DependencyObject> Descendants(DependencyObject root)
     {
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)

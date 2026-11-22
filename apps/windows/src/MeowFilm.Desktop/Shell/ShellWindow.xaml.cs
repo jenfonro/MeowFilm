@@ -1,16 +1,15 @@
 using System.Collections.Specialized;
 using System.ComponentModel;
+using MeowFilm.Core.Debug;
+using MeowFilm.Threading;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Input;
-using Windows.UI.ViewManagement;
+using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
 using Windows.System;
-
-using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
 using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority;
 
 namespace MeowFilm.Desktop;
@@ -18,9 +17,13 @@ namespace MeowFilm.Desktop;
 public sealed partial class ShellWindow : DesktopWindow
 {
     private static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(30);
-    private const int HistoryLimit = 64;
 
     private readonly ShellState _state = new();
+    private readonly ShellNavigationHistory _history = new();
+    private readonly ShellSearchCoordinator _search;
+    private readonly ShellCloseCoordinator _closeCoordinator;
+    private readonly ShellOwnedNoticeBridge _ownedNotices;
+    private readonly ShellSurfaceMotion _motion = new();
     private readonly List<ModuleSession> _sessions;
     private readonly Func<Task> _shutdown;
     private readonly TimeProvider _timeProvider;
@@ -31,14 +34,12 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly Dictionary<IDesktopModule, (bool Navigation, bool Presentation, bool Player)> _moduleChanges = new(ReferenceEqualityComparer.Instance);
     private bool _moduleChangesQueued;
     private TaskCompletionSource _shutdownCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private ShellDebugAdapter? _debugAdapter;
     private ModuleSession? _current, _playerSession;
     private ShellRequest? _activeRequest;
     private RequestPlan? _retryPlan;
     private NativeCaption? _nativeCaption;
     private bool _suppressSelection;
-    private bool _suppressSearch;
-    private ModuleSession? _searchSession;
-    private string? _searchPresentationKey;
     private bool _loaded;
     private bool _isClosing;
     private bool _allowClose;
@@ -48,17 +49,11 @@ public sealed partial class ShellWindow : DesktopWindow
     private int _shutdownStarted;
     private long _presentationGeneration;
 
-    /// <summary>
-    /// The first supplied module is the default. No runtime, account, storage, or player is created here.
-    /// shutdown must return promptly with its asynchronous Task; it owns module/runtime disposal.
-    /// </summary>
     public ShellWindow(IReadOnlyList<IDesktopModule> modules, Func<Task> shutdown)
         : this(modules, shutdown, TimeProvider.System)
     {
     }
 
-    // Deterministic code tests can advance the existing production deadlines without sleeping.
-    // No public timeout override or App configuration is introduced.
     internal ShellWindow(IReadOnlyList<IDesktopModule> modules, Func<Task> shutdown, TimeProvider timeProvider)
         : this(modules, [], shutdown, timeProvider) { }
 
@@ -91,14 +86,16 @@ public sealed partial class ShellWindow : DesktopWindow
         ArgumentNullException.ThrowIfNull(pages);
         if (pages.Any(page => page is null || string.IsNullOrWhiteSpace(page.Id) || !ids.Add(page.Id)))
             throw new ArgumentException("Pages must have distinct, non-empty identities.", nameof(pages));
-        _pages = pages.Select(page => new PageSession(page)).ToArray();
+        _pages = pages.Select(page => new ShellPageSession(page)).ToArray();
         _shutdown = shutdown;
         _resetUserData = resetUserData;
         MediaControls = mediaControls;
-        _closePreferences = closePreferences;
-        _trayIconFactory = trayIconFactory;
         InitializeComponent();
+        Bindings?.Initialize();
         AttachRoot();
+        _search = new ShellSearchCoordinator(SearchBox, SearchTargetPicker, SearchInput, SearchDivider, () => _currentPage, () => _activeRequest);
+        _closeCoordinator = new ShellCloseCoordinator(this, closePreferences, trayIconFactory);
+        _ownedNotices = new ShellOwnedNoticeBridge(Notices, QueueUi);
         SessionEnding += (_, _) => PrepareForSessionEnding();
         Root.Loaded += OnLoaded;
         Root.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnPreviewKeyDown), true);
@@ -111,33 +108,32 @@ public sealed partial class ShellWindow : DesktopWindow
         _nativeCaption = new(
             this,
             CaptionDragRegion,
-            HeaderChrome,
+            WindowCaptionButtons,
             () => _playerDetailOpen,
             [BackButton, ForwardButton, SearchInput, PageHeaderHost, CaptionBar],
-            [PlayerDetailBackButton, ChannelDialogHost, CloseDialog, ResetDialog, NotificationOverlay]);
-        InitializeTrayIcon();
+            [WindowCaptionButtons, PlayerDetailBackButton, ChannelDialogHost, CloseDialog, ResetDialog, NotificationOverlay]);
+        _closeCoordinator.InitializeTrayIcon();
         ChannelDialogHost.Attach(this);
         ChannelDialogHost.OpenStateChanged += (_, _) => _nativeCaption?.Refresh();
+        Activated += (_, _) => UpdateCaption();
         Root.ActualThemeChanged += (_, _) => UpdateCaption();
         InitializeGeneralSettings(appearance, closePreferences);
-        CloseDialog.ChoiceRequested += OnCloseChoiceRequested;
-        CloseDialog.CancelRequested += CancelCloseChoice;
+        CloseDialog.ChoiceRequested += _closeCoordinator.OnCloseChoiceRequested;
+        CloseDialog.CancelRequested += _closeCoordinator.CancelCloseChoice;
         ResetDialog.ConfirmRequested += OnUserDataResetConfirmed;
         ResetDialog.CancelRequested += CancelUserDataReset;
         ResetDialog.ExitRequested += OnUserDataResetExit;
         NoticeOutlet.SetReceiver(Root, notice => Notices.Show(notice.Identity, notice.Message));
-        Root.DataContext = _state;
         _state.PropertyChanged += (_, _) => UpdateStatusPresentation();
         SystemAppearance.Changed += OnSystemAppearanceChanged;
         ApplyAccessibilityPresentation();
         foreach (var session in _sessions)
         {
             session.Module.PropertyChanged += OnModulePropertyChanged;
-            SubscribeOwnedNotices(session.Module);
+            _ownedNotices.Subscribe(session.Module);
             SubscribeGlobalSurfaces(session);
             if (session.Module is IDesktopNavigationSource source)
             {
-                // Capture the subscribed module, not the caller-supplied sender argument.
                 EventHandler<DesktopNavigationRequestEventArgs> handler = (_, args) => OnNavigationRequested(session, args);
                 source.NavigationRequested += handler;
                 _navigationSubscriptions.Add((source, handler));
@@ -163,34 +159,69 @@ public sealed partial class ShellWindow : DesktopWindow
         UpdateCaption();
     }
 
-
-    /// <summary>The owner's actual shutdown result; window closure never waits for it.</summary>
     public Task ShutdownCompletion => _shutdownCompletion.Task;
     public IDesktopMediaControlSettings? MediaControls { get; }
-
-    /// <summary>Window closure does not imply that owner release succeeded.</summary>
+    public IDebugShellHost DebugHost => _debugAdapter ??= new ShellDebugAdapter(this);
     public bool ShutdownSucceeded { get; private set; }
     public bool CleanupCompleted { get; private set; }
+    public bool IsHiddenToTray => _closeCoordinator.IsHiddenToTray;
+
+    internal ShellState State => _state;
+    internal ShellNavigationHistory History => _history;
+    internal ShellSearchCoordinator SearchCoordinator => _search;
+    internal ShellCloseCoordinator CloseCoordinator => _closeCoordinator;
+    internal ShellOwnedNoticeBridge OwnedNotices => _ownedNotices;
+    internal IReadOnlyList<ModuleSession> Sessions => _sessions;
+    internal IReadOnlyList<ShellPageSession> Pages => _pages;
+    internal ModuleSession? CurrentSession => _current;
+    internal ShellPageSession? CurrentPage => _currentPage;
+    internal ModuleSession? PlayerDetailSession => _playerDetailSession;
+    internal ModuleSession? QueueSession => _queueSession;
+    internal NativeCaption? NativeCaption => _nativeCaption;
+    internal ContentControl GeneralSettingsHost => _generalSettingsHost;
+    internal bool IsLoaded => _loaded;
+    internal bool IsClosing => _isClosing;
+    internal bool IsClosed => _isClosed;
+    internal bool IsRequestBusy => _state.IsBusy || _activeRequest is not null || _pageRequest is not null;
+    internal bool IsGeneralSettingsOpen => _generalSettingsOpen;
+    internal bool IsPlayerDetailOpen => _playerDetailOpen;
+    internal bool IsQueueOpen => _queueOpen;
+    internal Grid HeaderChromeElement => HeaderChrome;
+    internal Grid SearchInputElement => SearchInput;
+    internal TextBox SearchBoxElement => SearchBox;
+    internal ShellSearchScope SearchTargetPickerElement => SearchTargetPicker;
+    internal StackPanel WindowCaptionButtonsElement => WindowCaptionButtons;
+    internal Border SidebarBackgroundElement => SidebarBackground;
+    internal ContentControl PlayerHostElement => PlayerHost;
+    internal DesktopModalHost ChannelDialogHostElement => ChannelDialogHost;
+    internal CloseWindowDialog CloseDialogElement => CloseDialog;
+    internal UserDataResetDialog ResetDialogElement => ResetDialog;
+    internal NoticeStack NoticesElement => Notices;
+
+    public void RestoreFromTray() => _closeCoordinator.RestoreFromTray();
+    public void PrepareForSessionEnding() => _closeCoordinator.PrepareForSessionEnding();
+
+    internal void SetModalGatesEnabled(bool enabled) =>
+        RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = enabled;
 
     protected override void OnStateChanged(EventArgs e)
     {
         base.OnStateChanged(e);
-        if (WindowState != DesktopWindowState.Minimized) _trayRestoreState = WindowState;
+        _closeCoordinator.OnWindowStateChanged(WindowState);
         UpdateCaption();
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        Bindings?.Update();
         if (_loaded || _isClosing) return;
         _loaded = true;
         RunUiAction(() => ActivateAsync(_current ?? _sessions[0]));
     }
 
-    /// <summary>
-    /// Synchronously mounts the default/current supplied views for an STA offscreen layout/render test.
-    /// Does not show the window, raise Loaded, initialize modules, or call any business operation.
-    /// Repeated calls retain the same view instances. Normal Loaded performs async initialization later.
-    /// </summary>
+    private void OnPresentationSizeChanged(object sender, SizeChangedEventArgs args) =>
+        PresentationSurface.Clip = new RectangleGeometry { Rect = new Rect(0, 0, args.NewSize.Width, args.NewSize.Height) };
+
     public void PrepareForRender()
     {
         Dispatcher.VerifyAccess();
@@ -205,7 +236,7 @@ public sealed partial class ShellWindow : DesktopWindow
         await RunRequestAsync(new(session));
     }
 
-    private void PreparePresentation(ModuleSession session)
+    internal void PreparePresentation(ModuleSession session)
     {
         LeavePublicPage();
         if (!ReferenceEquals(_current, session))
@@ -217,8 +248,6 @@ public sealed partial class ShellWindow : DesktopWindow
             _retryPlan = null;
             SetStatus();
         }
-        // Hide the previous capability before attaching the first-visited surface.
-        // Visited surfaces retain their visual tree and owner-managed state.
         ApplyPresentation();
         Mount(session);
         ApplyPresentation();
@@ -257,7 +286,7 @@ public sealed partial class ShellWindow : DesktopWindow
     {
         if (!view.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException();
         if (!ReferenceEquals(host.Content, view) &&
-            Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(view) is not null)
+            VisualTreeHelper.GetParent(view) is not null)
             throw new InvalidOperationException();
     }
 
@@ -271,7 +300,7 @@ public sealed partial class ShellWindow : DesktopWindow
         SynchronizeNavigation(session);
     }
 
-    private void ApplyPresentation()
+    internal void ApplyPresentation()
     {
         if (_current is not { } current) return;
         if (current.Mounted && _currentPage is null) RefreshSuppliedViews(current);
@@ -304,10 +333,10 @@ public sealed partial class ShellWindow : DesktopWindow
             immersive ? Visibility.Collapsed : Visibility.Visible;
         SidebarEdge.Visibility = immersive || SystemAppearance.IsHighContrast ? Visibility.Collapsed : Visibility.Visible;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null ||
-            current.IsSettingsOpen || _history.Count > 1;
+            current.IsSettingsOpen || _history.CanGoBack;
         _state.CanGoForward = !_queueOpen && !_playerDetailOpen &&
-            !current.IsSettingsOpen && _future.Count > 0;
-        ApplySearchPresentation();
+            !current.IsSettingsOpen && _history.CanGoForward;
+        _search.ApplyPresentation();
         foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
         AutomationProperties.SetName(SettingsButton, "设置");
         AutomationProperties.SetName(NavigationList, "内容导航");
@@ -321,10 +350,7 @@ public sealed partial class ShellWindow : DesktopWindow
         {
             if (session.Module is not IDesktopNavigationRetention owner) continue;
             var locations = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var entry in _history)
-                if (ReferenceEquals(entry.Session, session)) Retain(entry.Destination);
-            foreach (var entry in _future)
-                if (ReferenceEquals(entry.Session, session)) Retain(entry.Destination);
+            _history.CollectRetainedLocations(session, locations);
             if (_currentPage is null && ReferenceEquals(_current, session)) Retain(session.Current);
             if (ReferenceEquals(_settingsReturn, session)) Retain(session.Current);
             foreach (var request in _requests)
@@ -377,44 +403,13 @@ public sealed partial class ShellWindow : DesktopWindow
         UpdateCaption();
     }
 
-    private static string SearchKey(Destination? destination) => destination switch
-    {
-        { IsSearch: true } => "search",
-        { Value.Length: > 0 } value => "route/" + value.Value,
-        _ => "default"
-    };
-
-    private void ApplySearchDraft(ModuleSession session, Destination? destination = null, bool force = false)
-    {
-        var key = SearchKey(destination ?? session.Current);
-        if (!force && ReferenceEquals(_searchSession, session) &&
-            string.Equals(_searchPresentationKey, key, StringComparison.Ordinal)) return;
-        _searchSession = session;
-        _searchPresentationKey = key;
-        session.ActiveSearchKey = key;
-        _suppressSearch = true;
-        try { SearchBox.Text = session.SearchDrafts.GetValueOrDefault(key) ?? ""; }
-        finally { _suppressSearch = false; }
-    }
-
-    private void ApplySearchPresentation(bool force = false)
-    {
-        if (_currentPage?.Page is IDesktopSearchPage || _searchOwnerSession is not { } owner) return;
-        var destination = _activeRequest is { } request && ReferenceEquals(request.Plan.Session, owner)
-            ? request.Plan.Destination
-            : owner.Current;
-        ApplySearchDraft(owner, destination, force);
-    }
-
     private void ApplyModuleAccent(ModuleSession current)
     {
-        // Only explicit resources on the supplied main view opt into shell accent overrides.
-        // Never identify a capability by Id or copy its business resources into another owner.
         string[] keys = ["MeowFilm.Brush.Accent", "MeowFilm.Brush.AccentHover", "MeowFilm.Brush.OnAccent", "MeowFilm.Brush.AccentSoft"];
         var resources = (current.MainHost.Content as FrameworkElement ?? current.Module.View)?.Resources;
         foreach (var key in keys)
         {
-            if (resources?.ContainsKey(key) == true && resources[key] is Microsoft.UI.Xaml.Media.Brush brush)
+            if (resources?.ContainsKey(key) == true && resources[key] is Brush brush)
             {
                 if (!RootLayout.Resources.ContainsKey(key) || !ReferenceEquals(RootLayout.Resources[key], brush))
                     RootLayout.Resources[key] = brush;
@@ -422,6 +417,7 @@ public sealed partial class ShellWindow : DesktopWindow
             else RootLayout.Resources.Remove(key);
         }
     }
+
     private void RestoreNavigationSelection()
     {
         if (_current is not { } current) return;
@@ -459,7 +455,6 @@ public sealed partial class ShellWindow : DesktopWindow
             return;
         QueueUi(() =>
         {
-            // A queued request from an old presentation must not navigate after switching away/back.
             if (!MayNavigate(session, args.FromPlayer) || generation != Interlocked.Read(ref _presentationGeneration)) return;
             RunUiAction(() => NavigateFromUiAsync(session, route));
         });
@@ -471,22 +466,21 @@ public sealed partial class ShellWindow : DesktopWindow
         return fromPlayer
             ? current is { IsSettingsOpen: false } &&
                 ReferenceEquals(Volatile.Read(ref _playerSession), session)
-             : Volatile.Read(ref _currentPage) is { Page: IDesktopSearchPage search }
+            : Volatile.Read(ref _currentPage) is { Page: IDesktopSearchPage search }
                 ? ReferenceEquals(search.ContentOwner, session.Module)
                 : Volatile.Read(ref _currentPage) is null && ReferenceEquals(current, session);
     }
 
-    private Task NavigateFromUiAsync(ModuleSession session, string route)
+    internal Task NavigateFromUiAsync(ModuleSession session, string route)
     {
         if (_isClosing) return Task.CompletedTask;
-        if (MeowFilm.Core.Debug.DebugLog.IsEnabled)
-            MeowFilm.Core.Debug.DebugLog.Info(MeowFilm.Core.Debug.DebugCategories.UiNav, "shell", "navigate",
+        if (DebugLog.IsEnabled)
+            DebugLog.Info(DebugCategories.UiNav, "shell", "navigate",
                 new { moduleId = session.Module.Id, route });
         _settingsReturn = null;
         if (_current is { } previous) previous.IsSettingsOpen = false;
         PreparePresentation(session);
         LeavePublicPage();
-        // Avoid a same-route feedback loop if an adapter mistakenly re-emits an in-flight request.
         if (_activeRequest is { } active && ReferenceEquals(active.Plan.Session, session) &&
             active.Plan.Destination is { IsSearch: false } pending && string.Equals(pending.Value, route, StringComparison.Ordinal))
             return Task.CompletedTask;
@@ -502,8 +496,7 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void OnModulePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (sender is not IDesktopModule module || _isClosing ||
-            Dispatcher.IsClosing) return;
+        if (sender is not IDesktopModule module || _isClosing || Dispatcher.IsClosing) return;
         var all = string.IsNullOrEmpty(e.PropertyName);
         bool navigation = all || e.PropertyName == nameof(IDesktopModule.Navigation);
         bool player = all || e.PropertyName == nameof(IDesktopModule.PlayerView);
@@ -529,7 +522,7 @@ public sealed partial class ShellWindow : DesktopWindow
                 catch (Exception) { if (!_isClosing) SetStatus("暂时无法完成操作", error: true); }
             }, DispatcherQueuePriority.Normal);
         }
-        catch (InvalidOperationException) { /* Dispatcher teardown retires this batch. */ }
+        catch (InvalidOperationException) { }
     }
 
     private void ApplyModuleChanges()
@@ -541,7 +534,6 @@ public sealed partial class ShellWindow : DesktopWindow
             _moduleChanges.Clear();
             _moduleChangesQueued = false;
         }
-        // Retire queued notifications even when closing suppresses presentation.
         if (_isClosing) return;
         var refreshPresentation = false;
         var refreshPlayer = false;
@@ -577,18 +569,80 @@ public sealed partial class ShellWindow : DesktopWindow
         QueueUi(() =>
         {
             if (ReferenceEquals(_current, current) && current.IsSettingsOpen)
-                DesktopVisual.FocusFirst((_generalSettingsOpen ? _generalSettingsHost : current.SettingsHost));
+                DesktopVisual.FocusFirst(_generalSettingsOpen ? _generalSettingsHost : current.SettingsHost);
         });
         if (!_generalSettingsOpen && !current.Initialized) await RunRequestAsync(new(current));
     });
 
+    internal void EnterGeneralSettings()
+    {
+        var current = _current ?? _sessions[0];
+        if (!current.IsSettingsOpen || _currentPage is not null)
+        {
+            LeavePublicPage();
+            CancelActive();
+            RetireHeaderPresentation();
+            _settingsReturn = current;
+            current.IsSettingsOpen = true;
+        }
+        _generalSettingsOpen = _generalSettingsHost.Content is not null;
+        SetStatus();
+        ApplyPresentation();
+    }
+
+    internal async Task EnterModuleSettingsAsync(ModuleSession targetSession)
+    {
+        var current = _current ?? _sessions[0];
+        if (!current.IsSettingsOpen || _currentPage is not null)
+        {
+            LeavePublicPage();
+            CancelActive();
+            RetireHeaderPresentation();
+            _settingsReturn = current;
+            current.IsSettingsOpen = true;
+        }
+        _generalSettingsOpen = false;
+        if (!ReferenceEquals(_current, targetSession))
+        {
+            if (_current is { } prev) prev.IsSettingsOpen = false;
+            targetSession.IsSettingsOpen = true;
+            PreparePresentation(targetSession);
+        }
+        else
+        {
+            targetSession.IsSettingsOpen = true;
+        }
+        SetStatus();
+        ApplyPresentation();
+        if (!targetSession.Initialized) await RunRequestAsync(new(targetSession));
+    }
+
+    internal async Task PrepareModuleTargetAsync(ModuleSession session)
+    {
+        _generalSettingsOpen = false;
+        if (_current is { } prev) prev.IsSettingsOpen = false;
+        session.IsSettingsOpen = false;
+        LeavePublicPage();
+        PreparePresentation(session);
+        if (!session.Initialized) await RunRequestAsync(new(session));
+    }
+
+    internal void CommitDebugDestination(ModuleSession session)
+    {
+        var location = session.Module.CaptureNavigationLocation();
+        if (string.IsNullOrEmpty(location)) return;
+        var destination = new Destination(location, Location: location);
+        _history.Commit(new(session, destination), destination);
+        ApplyPresentation();
+    }
+
     private void OnBackClick(object sender, RoutedEventArgs e) => RunUiAction(GoBackAsync);
     private void OnForwardClick(object sender, RoutedEventArgs e) => RunUiAction(GoForwardAsync);
 
-    private async Task GoForwardAsync()
+    internal async Task GoForwardAsync()
     {
         if (!_state.CanGoForward) return;
-        var next = _future[^1];
+        var next = _history.PeekForward();
         await RestoreHistoryAsync(new(next.Session, next.Destination, IsForward: true));
     }
 
@@ -605,12 +659,12 @@ public sealed partial class ShellWindow : DesktopWindow
         await RunRequestAsync(plan);
     }
 
-    private async Task GoBackAsync()
+    internal async Task GoBackAsync()
     {
         if (_queueOpen) { await CloseQueueAsync(); return; }
         if (_playerDetailOpen) { await ClosePlayerDetailAsync(); return; }
         if (_current is not { } current) return;
-        if (_currentPage is not null && _history.Count <= 1)
+        if (_currentPage is not null && !_history.CanGoBack)
         {
             LeavePublicPage();
             SetStatus();
@@ -619,7 +673,7 @@ public sealed partial class ShellWindow : DesktopWindow
         }
         if (_currentPage is not null)
         {
-            var previous = _history[^2];
+            var previous = _history.PeekBack();
             await RestoreHistoryAsync(new(previous.Session, previous.Destination, IsBack: true));
             return;
         }
@@ -635,7 +689,7 @@ public sealed partial class ShellWindow : DesktopWindow
             _retryPlan = null;
             SetStatus();
             ApplyPresentation();
-            if (_history.LastOrDefault().Destination?.PageId is { } pageId)
+            if (_history.LastPageId is { } pageId)
             {
                 await ActivatePageAsync(_pages.Single(page => page.Page.Id == pageId), recordNavigation: false);
                 return;
@@ -647,13 +701,12 @@ public sealed partial class ShellWindow : DesktopWindow
                     focus.Focus(FocusState.Programmatic);
                 else DesktopVisual.FocusFirst(restore.MainHost);
             });
-            // No navigation replay: returning from settings reveals the same view and scroll state.
             if (!restore.Initialized) await RunRequestAsync(new(restore));
             return;
         }
-        if (_history.Count > 1)
+        if (_history.CanGoBack)
         {
-            var previous = _history[^2];
+            var previous = _history.PeekBack();
             await RestoreHistoryAsync(new(previous.Session, previous.Destination, IsBack: true));
         }
     }
@@ -663,23 +716,15 @@ public sealed partial class ShellWindow : DesktopWindow
         if (_current is { } current && DesktopVisual.ContainsFocus(current.MainHost))
             current.ContentFocus = DesktopVisual.Focused(Root);
     }
-    private bool _searchComposing;
-    private void OnSearchCompositionStarted(TextBox sender, TextCompositionStartedEventArgs args) => _searchComposing = true;
-    private void OnSearchCompositionEnded(TextBox sender, TextCompositionEndedEventArgs args) => _searchComposing = false;
 
-    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
-    {
-        if (_suppressSearch) return;
-        if (_currentPage is { Page: IDesktopSearchPage } page) page.SearchDraft = SearchBox.Text;
-        else if (_searchSession is { } owner)
-            owner.SearchDrafts[owner.ActiveSearchKey] = SearchBox.Text;
-    }
+    private void OnSearchCompositionStarted(TextBox sender, TextCompositionStartedEventArgs args) => _search.OnCompositionStarted();
+    private void OnSearchCompositionEnded(TextBox sender, TextCompositionEndedEventArgs args) => _search.OnCompositionEnded();
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => _search.OnTextChanged();
 
     private void OnSearchKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        // Composition commits are not shell search submissions.
         if (e.Handled || e.Key != VirtualKey.Enter) return;
-        e.Handled = TrySubmitSearch(DesktopVisual.Modifiers, _searchComposing);
+        e.Handled = TrySubmitSearch(DesktopVisual.Modifiers, _search.IsComposing);
     }
 
     internal bool TrySubmitSearch(VirtualKeyModifiers modifiers, bool composing)
@@ -691,7 +736,7 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private Task SearchAsync()
     {
-        if (!_isClosing && _current is { IsSettingsOpen: false } && _searchPage is { } searchPage &&
+        if (!_isClosing && _current is { IsSettingsOpen: false } && _search.SearchPage is { } searchPage &&
             SearchBox.IsEnabled && !string.IsNullOrWhiteSpace(SearchBox.Text) &&
             SearchTargetPicker.SelectedValue is string target)
         {
@@ -701,7 +746,7 @@ public sealed partial class ShellWindow : DesktopWindow
             return ActivatePageAsync(page, token => searchPage.SubmitAsync(query, target, token));
         }
         if (_current is not { } current || current.IsSettingsOpen ||
-            _searchOwnerSession is not { } owner || !SearchBox.IsEnabled ||
+            _search.OwnerSession is not { } owner || !SearchBox.IsEnabled ||
             string.IsNullOrWhiteSpace(SearchBox.Text)) return Task.CompletedTask;
         owner.SearchDrafts[owner.ActiveSearchKey] = SearchBox.Text;
         owner.IsSettingsOpen = false;
@@ -714,7 +759,7 @@ public sealed partial class ShellWindow : DesktopWindow
     private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Handled) return;
-        if (CloseDialog.IsOpen || ResetDialog.IsOpen) return; // The active dialog owns keyboard navigation and Escape.
+        if (CloseDialog.IsOpen || ResetDialog.IsOpen) return;
         if (_isClosing) return;
         if (ChannelDialogHost.IsOpen)
         {
@@ -730,8 +775,6 @@ public sealed partial class ShellWindow : DesktopWindow
     internal bool TryExecuteShortcut(VirtualKey key, VirtualKeyModifiers modifiers)
     {
         if (_isClosing || CloseDialog.IsOpen || ResetDialog.IsOpen || ChannelDialogHost.IsOpen) return false;
-        // Let a native range editor cancel its own gesture before Escape closes
-        // the full player. The shell must not depend on a music-specific type.
         if (key == VirtualKey.Escape && DesktopVisual.Focused(Root) is Slider) return false;
         if (key is VirtualKey.F or VirtualKey.K && modifiers == VirtualKeyModifiers.Control &&
             SearchInput.Visibility == Visibility.Visible && SearchBox.IsEnabled)
@@ -740,22 +783,22 @@ public sealed partial class ShellWindow : DesktopWindow
             SearchBox.SelectAll();
             return true;
         }
-        else if (key == VirtualKey.Left && modifiers == VirtualKeyModifiers.Menu)
+        if (key == VirtualKey.Left && modifiers == VirtualKeyModifiers.Menu)
         {
             RunUiAction(GoBackAsync);
             return true;
         }
-        else if (key == VirtualKey.Right && modifiers == VirtualKeyModifiers.Menu)
+        if (key == VirtualKey.Right && modifiers == VirtualKeyModifiers.Menu)
         {
             RunUiAction(GoForwardAsync);
             return true;
         }
-        else if (key == VirtualKey.Escape && modifiers == VirtualKeyModifiers.None && _state.CanCancel)
+        if (key == VirtualKey.Escape && modifiers == VirtualKeyModifiers.None && _state.CanCancel)
         {
             OnCancelClick(this, new RoutedEventArgs());
             return true;
         }
-        else if (key == VirtualKey.Escape && modifiers == VirtualKeyModifiers.None &&
+        if (key == VirtualKey.Escape && modifiers == VirtualKeyModifiers.None &&
             (_queueOpen || _playerDetailOpen))
         {
             RunUiAction(GoBackAsync);
@@ -766,7 +809,6 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void ProtectChannelKeyboard(KeyRoutedEventArgs e)
     {
-        // Only controls within the active channel keep their own keyboard input.
         if (e.OriginalSource is not DependencyObject target ||
             !DesktopVisual.Contains(ChannelDialogHost, target)) e.Handled = true;
     }
@@ -791,7 +833,7 @@ public sealed partial class ShellWindow : DesktopWindow
             In(PlayerDetailBackButton) || In(PageHeaderHost)) ChannelDialogHost.HandleOutsidePointer(e, RootLayout, pressed);
     }
 
-    private async Task RunRequestAsync(RequestPlan plan, CancellationToken cancellationToken = default, bool reportOutcome = false)
+    internal async Task RunRequestAsync(RequestPlan plan, CancellationToken cancellationToken = default, bool reportOutcome = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (_isClosing || _currentPage is not null || !ReferenceEquals(_current, plan.Session))
@@ -801,12 +843,7 @@ public sealed partial class ShellWindow : DesktopWindow
         }
         CancelActive();
         RetireHeaderPresentation();
-        if (plan.Destination is { } target)
-        {
-            if (target.IsSearch) plan.Session.SearchDrafts[SearchKey(target)] = target.Value;
-            if (ReferenceEquals(plan.Session, _searchOwnerSession))
-                ApplySearchDraft(plan.Session, target, force: true);
-        }
+        if (plan.Destination is { } target) _search.PrepareDestination(plan.Session, target);
         var request = new ShellRequest(plan);
         var token = request.GetToken();
         _requests.Add(request);
@@ -828,18 +865,8 @@ public sealed partial class ShellWindow : DesktopWindow
             }
             if (destination is not null)
             {
-                CommitDestination(plan, destination);
-                if (destination.IsSearch)
-                {
-                    plan.Session.ActiveSearchKey = SearchKey(destination);
-                    plan.Session.SearchDrafts[plan.Session.ActiveSearchKey] = destination.Value;
-                    if (ReferenceEquals(plan.Session, _searchOwnerSession))
-                    {
-                        _suppressSearch = true;
-                        try { SearchBox.Text = destination.Value; }
-                        finally { _suppressSearch = false; }
-                    }
-                }
+                _history.Commit(plan, destination);
+                _search.CommitSearchDestination(plan.Session, destination);
             }
             RefreshSuppliedViews(plan.Session);
             SetStatus();
@@ -881,8 +908,6 @@ public sealed partial class ShellWindow : DesktopWindow
     private static async Task<Destination?> ExecuteModuleRequestAsync(RequestPlan plan, CancellationToken token)
     {
         var session = plan.Session;
-        // The lease follows the actual module task, not the shell's timeout. A non-cooperative old
-        // request can delay this module but can never overlap a replacement operation on it.
         await session.Gate.WaitAsync(token);
         try
         {
@@ -917,28 +942,6 @@ public sealed partial class ShellWindow : DesktopWindow
         finally { session.Gate.Release(); }
     }
 
-    private void CommitDestination(RequestPlan plan, Destination destination)
-    {
-        var target = (plan.Session, destination);
-        if (plan.IsBack && _history.Count > 1 && _history[^2] == target)
-        {
-            _future.Add(_history[^1]);
-            if (_future.Count > HistoryLimit) _future.RemoveAt(0);
-            _history.RemoveAt(_history.Count - 1);
-        }
-        else
-        {
-            if (plan.IsForward && _future.Count > 0 && _future[^1] == target) _future.RemoveAt(_future.Count - 1);
-            else if (!plan.IsBack) _future.Clear();
-            if (_history.Count == 0 || _history[^1] != target)
-            {
-                _history.Add(target);
-                if (_history.Count > HistoryLimit) _history.RemoveAt(0);
-            }
-        }
-        if (destination.PageId is null) plan.Session.Current = destination;
-    }
-
     private async Task ReapRequestAsync(ShellRequest request, Task work)
     {
         await ShellRequest.ObserveAsync(work);
@@ -951,10 +954,10 @@ public sealed partial class ShellWindow : DesktopWindow
     private bool IsCurrent(ShellRequest request) => !_isClosing && _currentPage is null && ReferenceEquals(_activeRequest, request) &&
         ReferenceEquals(_current, request.Plan.Session);
 
-    private void CancelActive()
+    internal void CancelActive()
     {
         var request = _activeRequest;
-        _activeRequest = null; // Retire UI ownership before invoking arbitrary cancellation registrations.
+        _activeRequest = null;
         request?.Cancel();
     }
 
@@ -965,7 +968,7 @@ public sealed partial class ShellWindow : DesktopWindow
         CancelActive();
         if (_currentPage is not null) _pageNavigation = new CancellationTokenSource();
         _retryPlan = null;
-        ApplySearchPresentation(force: true);
+        _search.ApplyPresentation(force: true);
         SetStatus("已取消");
         RestoreNavigationSelection();
     }
@@ -983,10 +986,10 @@ public sealed partial class ShellWindow : DesktopWindow
         SetStatus();
     }
 
-    private void SetStatus(string message = "", bool busy = false, bool error = false, bool retry = false)
+    internal void SetStatus(string message = "", bool busy = false, bool error = false, bool retry = false)
     {
-        if (MeowFilm.Core.Debug.DebugLog.IsEnabled && (message.Length > 0 || error))
-            MeowFilm.Core.Debug.DebugLog.Write(error ? "warn" : "debug", MeowFilm.Core.Debug.DebugCategories.UiNav, "shell.status",
+        if (DebugLog.IsEnabled && (message.Length > 0 || error))
+            DebugLog.Write(error ? "warn" : "debug", DebugCategories.UiNav, "shell.status",
                 "status.changed", new { message, busy, error, retry });
         _state.SetStatus(message, busy, error, retry);
         if (StatusText.IsLoaded && AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
@@ -1017,7 +1020,7 @@ public sealed partial class ShellWindow : DesktopWindow
                 catch (Exception) { SetStatus("暂时无法完成操作", error: true); }
             }, DispatcherQueuePriority.Normal);
         }
-        catch (InvalidOperationException) { /* The dispatcher is already closing. */ }
+        catch (InvalidOperationException) { }
     }
 
     private void OnSystemAppearanceChanged(object? sender, EventArgs args) => QueueUi(() =>
@@ -1025,11 +1028,12 @@ public sealed partial class ShellWindow : DesktopWindow
         ApplyAccessibilityPresentation();
         ApplyPresentation();
     });
+
     private void ApplyAccessibilityPresentation()
     {
         bool highContrast = SystemAppearance.IsHighContrast;
         DesktopTheme.SetIsHighContrast(Root, highContrast);
-        var background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
+        var background = (Brush)DesktopVisual.Resource(Root,
             highContrast ? "MeowFilm.Brush.Window" : "MeowFilm.Brush.AppBackground");
         WindowFrame.Background = ApplicationBackground.Background = background;
         SidebarMaterial.Visibility = SidebarTint.Visibility = highContrast ? Visibility.Collapsed : Visibility.Visible;
@@ -1038,77 +1042,64 @@ public sealed partial class ShellWindow : DesktopWindow
         UpdateCaption();
         UpdateStatusPresentation();
     }
+
+    private void OnMinimizeCaptionClick(object sender, RoutedEventArgs e)
+    {
+        if (AppWindow.Presenter is Microsoft.UI.Windowing.OverlappedPresenter presenter)
+            presenter.Minimize();
+    }
+
+    private void OnMaximizeCaptionClick(object sender, RoutedEventArgs e)
+    {
+        if (AppWindow.Presenter is not Microsoft.UI.Windowing.OverlappedPresenter presenter) return;
+        if (presenter.State == Microsoft.UI.Windowing.OverlappedPresenterState.Maximized)
+            presenter.Restore();
+        else
+            presenter.Maximize();
+    }
+
+    private void OnCloseCaptionClick(object sender, RoutedEventArgs e) => Close();
+
     private void UpdateCaption()
     {
-        var titleBar = AppWindow.TitleBar;
-        if (SystemAppearance.IsHighContrast)
-        {
-            titleBar.ButtonBackgroundColor = null;
-            titleBar.ButtonForegroundColor = null;
-            titleBar.ButtonHoverBackgroundColor = null;
-            titleBar.ButtonHoverForegroundColor = null;
-            titleBar.ButtonPressedBackgroundColor = null;
-            titleBar.ButtonPressedForegroundColor = null;
-            titleBar.ButtonInactiveBackgroundColor = null;
-            titleBar.ButtonInactiveForegroundColor = null;
-            _nativeCaption?.Refresh();
-            return;
-        }
-        titleBar.ButtonBackgroundColor = Microsoft.UI.Colors.Transparent;
-        titleBar.ButtonInactiveBackgroundColor = Microsoft.UI.Colors.Transparent;
-        bool darkSurface = _playerDetailOpen || Root.ActualTheme == ElementTheme.Dark;
-        if (darkSurface)
-        {
-            titleBar.ButtonForegroundColor = Windows.UI.Color.FromArgb(255, 235, 234, 237);
-            titleBar.ButtonHoverForegroundColor = Microsoft.UI.Colors.White;
-            titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(26, 255, 255, 255);
-            titleBar.ButtonPressedForegroundColor = Microsoft.UI.Colors.White;
-            titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(41, 255, 255, 255);
-            titleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(153, 235, 234, 237);
-        }
-        else
-        {
-            titleBar.ButtonForegroundColor = Windows.UI.Color.FromArgb(255, 55, 65, 81);
-            titleBar.ButtonHoverForegroundColor = Windows.UI.Color.FromArgb(255, 17, 24, 39);
-            titleBar.ButtonHoverBackgroundColor = Windows.UI.Color.FromArgb(16, 0, 0, 0);
-            titleBar.ButtonPressedForegroundColor = Windows.UI.Color.FromArgb(255, 17, 24, 39);
-            titleBar.ButtonPressedBackgroundColor = Windows.UI.Color.FromArgb(28, 0, 0, 0);
-            titleBar.ButtonInactiveForegroundColor = Windows.UI.Color.FromArgb(255, 107, 114, 128);
-        }
+        bool maximized = WindowState == DesktopWindowState.Maximized;
+        MaximizeCaptionButton.Content = maximized ? "\uE923" : "\uE922";
+        AutomationProperties.SetName(MaximizeCaptionButton, maximized ? "向下还原" : "最大化");
+        WindowCaptionButtons.RequestedTheme = _playerDetailOpen ? ElementTheme.Dark : ElementTheme.Light;
+        WindowCaptionButtons.Opacity = IsActive ? 1.0 : 0.68;
         _nativeCaption?.Refresh();
     }
+
     private void UpdateStatusPresentation()
     {
         StatusPanel.Visibility = _state.HasStatus && !_state.IsBusy
             ? Visibility.Visible : Visibility.Collapsed;
-        StatusPanel.Background = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
-            _state.IsError ? "MeowFilm.Brush.ErrorSurface" : "MeowFilm.Brush.Surface");
-        StatusPanel.BorderBrush = (Microsoft.UI.Xaml.Media.Brush)DesktopVisual.Resource(Root,
+        StatusPanel.Background = (Brush)DesktopVisual.Resource(Root,
+            _state.IsError ? "MeowFilm.Brush.ErrorSurface" : "MeowFilm.Brush.FloatingSurface");
+        StatusPanel.BorderBrush = (Brush)DesktopVisual.Resource(Root,
             _state.IsError ? "MeowFilm.Brush.Error" : "MeowFilm.Brush.Border");
     }
 
     protected override void OnClosing(CancelEventArgs e)
     {
         base.OnClosing(e);
-        if (_allowClose || _sessionEnding || e.Cancel) return;
+        if (_allowClose || _closeCoordinator.IsSessionEnding || e.Cancel) return;
         e.Cancel = true;
         if (_isClosing || ResetDialog.IsOpen) return;
-        if (_closePreferences is not null)
+        if (_closeCoordinator.HasPreferences)
         {
-            QueueCloseChoice();
+            _closeCoordinator.QueueCloseChoice();
             return;
         }
         BeginShutdown();
     }
 
-    private void BeginShutdown()
+    internal void BeginShutdown()
     {
-        if (_isClosed || (_isClosing && !(_userDataResetStarted && _sessionEnding)) ||
-            (ResetDialog.IsOpen && !_sessionEnding)) return;
-        // OS session ending retains its existing best-effort shutdown path.
-        // Ordinary close/tray exit cannot compete with a confirmed reset.
-        if (_sessionEnding) ResetDialog.Visibility = Visibility.Collapsed;
-        DismissCloseChoice(restoreFocus: false);
+        if (_isClosed || (_isClosing && !(_userDataResetStarted && _closeCoordinator.IsSessionEnding)) ||
+            (ResetDialog.IsOpen && !_closeCoordinator.IsSessionEnding)) return;
+        if (_closeCoordinator.IsSessionEnding) ResetDialog.Visibility = Visibility.Collapsed;
+        _closeCoordinator.DismissCloseChoice(restoreFocus: false);
         _isClosing = true;
         _state.IsInteractive = false;
         _retryPlan = null;
@@ -1126,19 +1117,14 @@ public sealed partial class ShellWindow : DesktopWindow
         _closeQueued = true;
         try
         {
-            // Even a synchronously completed callback must not re-enter Close from inside OnClosing.
             await OwnerDispatcher.YieldAsync(DispatcherQueuePriority.Low);
             if (_isClosed || Dispatcher.IsClosing) return;
             _allowClose = true;
             Close();
-            if (!_isClosed)
-            {
-                // A caller can still veto the final Closing event; never restart disposal.
-                _allowClose = false;
-            }
+            if (!_isClosed) _allowClose = false;
         }
-        catch (OperationCanceledException) { /* Dispatcher teardown can cancel the deferred close. */ }
-        catch (InvalidOperationException) { /* A forced application shutdown may already have closed the window. */ }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
         finally { _closeQueued = false; }
     }
 
@@ -1148,8 +1134,6 @@ public sealed partial class ShellWindow : DesktopWindow
         {
             try
             {
-                // UI-affine disposal begins on this dispatcher. The callback must return promptly;
-                // no in-process deadline can safely preempt synchronous dispatcher blocking.
                 _shutdownTask = _shutdown() ?? Task.FromException(new InvalidOperationException());
             }
             catch (Exception error) { _shutdownTask = Task.FromException(error); }
@@ -1166,14 +1150,13 @@ public sealed partial class ShellWindow : DesktopWindow
             await _shutdownTask!;
             ShutdownSucceeded = CleanupCompleted = true;
         }
-        catch { /* The App owns shutdown diagnostics; a closed window is not a release receipt. */ }
+        catch { }
         finally { _shutdownCompletion.TrySetResult(); }
     }
 
-    /// <summary>Replacement closes the old shell only after its App generation is released.</summary>
     public async Task CloseAfterReleaseAsync()
     {
-        DismissCloseChoice(restoreFocus: false);
+        _closeCoordinator.DismissCloseChoice(restoreFocus: false);
         _isClosing = true;
         _state.IsInteractive = false;
         RetireHeaderPresentation();
@@ -1185,12 +1168,10 @@ public sealed partial class ShellWindow : DesktopWindow
 
     protected override void OnClosed(EventArgs e)
     {
-        DisposePresentationMotion();
+        _motion.Dispose();
         _isClosed = true;
         _isClosing = true;
-        DismissCloseChoice(restoreFocus: false);
-        _trayIcon?.Dispose();
-        _trayIcon = null;
+        _closeCoordinator.Dispose();
         CancelActive();
         CancelPageActivation();
         foreach (var request in _requests.ToArray()) request.Cancel();
@@ -1203,7 +1184,7 @@ public sealed partial class ShellWindow : DesktopWindow
         }
         foreach (var (source, handler) in _navigationSubscriptions) source.NavigationRequested -= handler;
         _navigationSubscriptions.Clear();
-        UnsubscribeOwnedNotices();
+        _ownedNotices.Dispose();
         foreach (var (source, handler) in _sidebarSubscriptions) source.SettingsRequested -= handler;
         _sidebarSubscriptions.Clear();
         SidebarContributionHost.Content = null;
@@ -1211,9 +1192,7 @@ public sealed partial class ShellWindow : DesktopWindow
         DisposeGlobalSurfaces();
         _nativeCaption?.Dispose();
         _nativeCaption = null;
-        // A confirmed reset is already released by the App's abort/replacement path.
-        // Only ordinary/OS closure shares the once-only normal shutdown attempt.
-        if (!_userDataResetStarted || _sessionEnding) _ = EnsureShutdownAsync();
+        if (!_userDataResetStarted || _closeCoordinator.IsSessionEnding) _ = EnsureShutdownAsync();
         else _shutdownCompletion.TrySetResult();
         base.OnClosed(e);
     }

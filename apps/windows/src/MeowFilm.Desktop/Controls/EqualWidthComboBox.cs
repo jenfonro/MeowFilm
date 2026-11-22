@@ -10,6 +10,7 @@ public sealed class EqualWidthComboBox : ComboBox
     private Popup? popup;
     public EqualWidthComboBox()
     {
+        DropdownPlacement.SetEnabled(this, true);
         DropDownOpened += (_, _) => Constrain();
         SizeChanged += (_, _) => Constrain();
     }

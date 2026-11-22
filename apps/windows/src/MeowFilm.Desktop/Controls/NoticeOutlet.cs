@@ -1,4 +1,7 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using Windows.Foundation;
 
 namespace MeowFilm.Desktop;
 
@@ -33,7 +36,11 @@ public sealed class NoticeOutlet : FrameworkElement
             Send(""); root = null;
         };
     }
-    public void Post(string message) { if (root is not null) Publish(root, new(this, message, true)); }
+    public void Post(string message)
+    {
+        if (root is not null && IsVisibleInViewport())
+            Publish(root, new(this, message, true));
+    }
     private void Queue() { pending = true; Schedule(); }
     private void Schedule()
     {
@@ -42,12 +49,47 @@ public sealed class NoticeOutlet : FrameworkElement
         DispatcherQueue.TryEnqueue(() =>
         {
             if (ticket != generation || !IsLoaded) return;
-            if (!DesktopVisual.IsVisible(this)) { Send(""); return; }
+            if (!IsVisibleInViewport()) { Send(""); return; }
             if (!pending) return;
             pending = false; Send(Message);
         });
     }
     private void Send(string message) { if (root is not null) Publish(root, new(this, message)); }
+
+    /// <summary>
+    /// On-demand ancestor visibility and ScrollViewer viewport intersection check.
+    /// Prevents scrolled-off sections from pushing stale notices into the global overlay
+    /// without attaching any ScrollViewer.ViewChanged listener.
+    /// </summary>
+    private bool IsVisibleInViewport()
+    {
+        if (!DesktopVisual.IsVisible(this)) return false;
+        var parent = VisualTreeHelper.GetParent(this) as FrameworkElement;
+        for (DependencyObject? current = this; current is not null; current = VisualTreeHelper.GetParent(current))
+        {
+            if (current is UIElement ui && ui.Opacity <= 0.001) return false;
+            if (current is ScrollViewer scroller)
+            {
+                if (scroller.ActualWidth <= 0 || scroller.ActualHeight <= 0) return false;
+                try
+                {
+                    FrameworkElement anchor = parent is not null &&
+                        !ReferenceEquals(parent, scroller.Content) &&
+                        !ReferenceEquals(parent, scroller) &&
+                        (parent.ActualWidth > 0 || parent.ActualHeight > 0)
+                        ? parent
+                        : this;
+                    Rect bounds = anchor.TransformToVisual(scroller).TransformBounds(new Rect(
+                        0, 0, Math.Max(1, anchor.ActualWidth), Math.Max(1, anchor.ActualHeight)));
+                    if (bounds.Bottom < 0 || bounds.Top > scroller.ActualHeight ||
+                        bounds.Right < 0 || bounds.Left > scroller.ActualWidth)
+                        return false;
+                }
+                catch { return false; }
+            }
+        }
+        return true;
+    }
 }
 public sealed class DesktopNoticeEventArgs(NoticeOutlet source, string message, bool transient = false) : EventArgs
 {

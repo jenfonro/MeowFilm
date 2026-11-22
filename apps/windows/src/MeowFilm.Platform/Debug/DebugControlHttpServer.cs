@@ -21,7 +21,8 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-        WriteIndented = false
+        WriteIndented = false,
+        MaxDepth = 128
     };
 
     private readonly DebugSession session;
@@ -178,12 +179,16 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 actions = shell?.SupportedActions ?? [],
                 diagnostics = new[] { "summary", "threads", "gc", "dump", "node/heapsnapshot", "node/cpu-profile", "exceptions" },
                 logCategories = DebugCategories.All,
+                uiEndpoints = new[] { "ui/state", "ui/content", "ui/tree", "ui/images", "ui/screenshot" },
+                waitConditions = new[] { "idle", "route_changed", "content_non_empty", "playback_state", "images_settled", "log_event" },
                 platformFeatures = new
                 {
                     minidump = true,
                     forwardNavigation = true,
                     mediaControlsSettings = true,
                     screenshot = true,
+                    uiImages = true,
+                    imagesSettled = true,
                     readOnlySql = true,
                     runtimeInvoke = true,
                     sessionFiles = true
@@ -288,13 +293,20 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             await WriteOkAsync(stream, traceId, await RequireShell().GetUiTreeAsync(maxDepth, visibleOnly, token).ConfigureAwait(false), token).ConfigureAwait(false);
             return;
         }
+        if (method == "GET" && path == "/debug/v1/ui/images")
+        {
+            await WriteOkAsync(stream, traceId, await RequireShell().GetUiImagesAsync(token).ConfigureAwait(false), token).ConfigureAwait(false);
+            return;
+        }
         if (method == "GET" && path == "/debug/v1/ui/screenshot")
         {
             bool save = ParseQueryBool(req.Query, "save", true);
             var format = (req.Query.GetValueOrDefault("format") ?? "png").Trim().ToLowerInvariant();
             if (format != "png")
                 throw DebugApiException.InvalidArgument($"Unsupported screenshot format: '{format}' (only 'png' is supported).");
-            var png = await RequireShell().CaptureScreenshotPngAsync(token).ConfigureAwait(false);
+            var rawWindow = req.Query.GetValueOrDefault("window")?.Trim();
+            var window = string.IsNullOrEmpty(rawWindow) ? null : rawWindow;
+            var png = await RequireShell().CaptureScreenshotPngAsync(window, token).ConfigureAwait(false);
             var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (save)
             {

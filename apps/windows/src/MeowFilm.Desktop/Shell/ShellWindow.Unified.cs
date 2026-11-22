@@ -7,11 +7,16 @@ using Microsoft.UI.Xaml.Data;
 
 namespace MeowFilm.Desktop;
 
-// The selected owner scopes navigation; business state remains capability-owned.
-internal sealed class ShellNavigationEntry(ModuleSession owner, NavigationItem item) : INotifyPropertyChanged
+public sealed class ShellNavigationEntry : INotifyPropertyChanged
 {
-    public ModuleSession Owner { get; } = owner;
-    public NavigationItem Item { get; private set; } = item;
+    internal ShellNavigationEntry(ModuleSession owner, NavigationItem item)
+    {
+        Owner = owner;
+        Item = item;
+    }
+
+    internal ModuleSession Owner { get; }
+    public NavigationItem Item { get; private set; }
     public string Route => Item.Route;
     public string Title => Item.Title;
     public string Glyph => Item.Glyph;
@@ -19,6 +24,7 @@ internal sealed class ShellNavigationEntry(ModuleSession owner, NavigationItem i
     public string? Group => Item.Group;
     public DesktopNavigationGroupAction? GroupAction => Item.GroupAction;
     public event PropertyChangedEventHandler? PropertyChanged;
+
     internal void Apply(NavigationItem next)
     {
         var previous = Item; Item = next;
@@ -28,46 +34,62 @@ internal sealed class ShellNavigationEntry(ModuleSession owner, NavigationItem i
         if (previous.Group != next.Group) Changed(nameof(Group));
         if (!ReferenceEquals(previous.GroupAction, next.GroupAction)) Changed(nameof(GroupAction));
     }
+
     private void Changed(string name) => PropertyChanged?.Invoke(this, new(name));
+}
+
+public sealed class ShellNavigationGroup : INotifyPropertyChanged
+{
+    internal ShellNavigationGroup(ModuleSession owner, string name)
+    {
+        Owner = owner;
+        Name = name;
+    }
+
+    internal ModuleSession Owner { get; }
+    public string Name { get; }
+    public ObservableCollection<ShellNavigationEntry> Items { get; } = [];
+    public DesktopNavigationGroupAction? Action { get; private set; }
+    public bool HasAction => Action is not null;
+    public string ActionAutomationName => Action?.AutomationName ?? "";
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    internal void RefreshAction()
+    {
+        var next = Items.FirstOrDefault()?.GroupAction;
+        if (ReferenceEquals(Action, next)) return;
+        Action = next;
+        PropertyChanged?.Invoke(this, new(nameof(Action)));
+        PropertyChanged?.Invoke(this, new(nameof(HasAction)));
+        PropertyChanged?.Invoke(this, new(nameof(ActionAutomationName)));
+    }
 }
 
 public sealed partial class ShellWindow
 {
     private readonly List<ShellNavigationEntry> _sidebar = [];
-    private readonly List<(ModuleSession Session, Destination Destination)> _history = [];
-    private readonly List<(ModuleSession Session, Destination Destination)> _future = [];
     private ModuleSession? _settingsReturn;
     private ModuleSession? _sidebarOwner;
-    private readonly CollectionViewSource _collectionNavigation = new() { IsSourceGrouped = true };
+    private readonly CollectionViewSource _collectionNavigation = new() { IsSourceGrouped = true, ItemsPath = new PropertyPath(nameof(ShellNavigationGroup.Items)) };
     private readonly ObservableCollection<ShellNavigationEntry> _contentNavigation = [];
-    private readonly ObservableCollection<NavigationGroup> _navigationGroups = [];
-    private sealed class NavigationGroup(ModuleSession owner, string name) : ObservableCollection<ShellNavigationEntry>
-    {
-        internal ModuleSession Owner { get; } = owner;
-        public string Name { get; } = name;
-        public DesktopNavigationGroupAction? Action { get; private set; }
-        public bool HasAction => Action is not null;
-        internal void RefreshAction()
-        {
-            var next = this.FirstOrDefault()?.GroupAction;
-            if (ReferenceEquals(Action, next)) return;
-            Action = next;
-            OnPropertyChanged(new(nameof(Action))); OnPropertyChanged(new(nameof(HasAction)));
-        }
-    }
+    private readonly ObservableCollection<ShellNavigationGroup> _navigationGroups = [];
+
     private void RefreshNavigation()
     {
         ReconcileNavigation(_contentNavigation, _sidebar.Where(item => IsCurrentNavigation(item, false)).ToArray());
         var groups = _sidebar.Where(item => IsCurrentNavigation(item, true)).GroupBy(item => item.Group!);
-        var next = new List<NavigationGroup>();
+        var next = new List<ShellNavigationGroup>();
         foreach (var group in groups)
         {
             var retained = _navigationGroups.FirstOrDefault(item => ReferenceEquals(item.Owner, _sidebarOwner) && item.Name == group.Key)
-                ?? new NavigationGroup(_sidebarOwner!, group.Key);
-            ReconcileNavigation(retained, group.ToArray()); retained.RefreshAction(); next.Add(retained);
+                ?? new ShellNavigationGroup(_sidebarOwner!, group.Key);
+            ReconcileNavigation(retained.Items, group.ToArray());
+            retained.RefreshAction();
+            next.Add(retained);
         }
         ReconcileNavigation(_navigationGroups, next);
     }
+
     private static void ReconcileNavigation<T>(ObservableCollection<T> target, IReadOnlyList<T> next) where T : class
     {
         var members = next.ToHashSet(ReferenceEqualityComparer.Instance);
@@ -120,18 +142,16 @@ public sealed partial class ShellWindow
     private void OnNavigationContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
         args.ItemContainer.ClearValue(AutomationProperties.NameProperty);
-        if (args.InRecycleQueue)
+        if (args.InRecycleQueue) return;
+        string? name = args.Item switch
         {
-            if (args.ItemContainer.ContentTemplateRoot is FrameworkElement template) template.DataContext = null;
-            args.ItemContainer.Content = null;
-            return;
-        }
-        if (args.ItemContainer.ContentTemplateRoot is FrameworkElement content) content.ClearValue(FrameworkElement.DataContextProperty);
-        args.ItemContainer.SetBinding(AutomationProperties.NameProperty, new Binding
-        {
-            Source = args.Item,
-            Path = new PropertyPath(args.Item is ModuleSession ? "Module.Title" : "Title")
-        });
+            ModuleSession session => session.ModuleTitle,
+            ShellNavigationEntry entry => entry.Title,
+            IDesktopPage page => page.Title,
+            _ => null
+        };
+        if (!string.IsNullOrEmpty(name))
+            AutomationProperties.SetName(args.ItemContainer, name);
     }
 
     private void SynchronizeNavigation(ModuleSession session)
@@ -145,7 +165,12 @@ public sealed partial class ShellWindow
             {
                 var entry = _sidebar.FirstOrDefault(entry => ReferenceEquals(entry.Owner, session) && entry.Route == item.Route)
                     ?? new ShellNavigationEntry(session, item);
-                entry.Apply(item); next.Add(entry);
+                entry.Apply(item);
+                if (NavigationList.ContainerFromItem(entry) is DependencyObject navContainer)
+                    AutomationProperties.SetName(navContainer, entry.Title);
+                if (CollectionNavigationList.ContainerFromItem(entry) is DependencyObject colContainer)
+                    AutomationProperties.SetName(colContainer, entry.Title);
+                next.Add(entry);
             }
             _sidebar.RemoveAll(entry => ReferenceEquals(entry.Owner, session));
             _sidebar.AddRange(next);
@@ -154,5 +179,4 @@ public sealed partial class ShellWindow
         finally { _suppressSelection = suppressed; }
         if (ReferenceEquals(_current, session)) RestoreNavigationSelection();
     }
-
 }

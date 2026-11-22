@@ -1,59 +1,49 @@
 namespace MeowFilm.Capabilities;
 
-public sealed partial class MusicCapability
-{
-    private void PlaybackSourceBindings()
-    {
-        // A replacement receipt can be committed after the native state events.
-        // Publish from that commit, not from a later unrelated position tick.
-        SyncChorus();
-        playbackPresentation.Refresh();
-    }
-}
-
 // A publication boundary, not another playback clock. Only changed display
 // values cross into WinUI bindings; the media port remains the source of truth.
-internal sealed class MusicPlaybackPresentation(MusicCapability module, Action<string> changed)
+internal sealed class MusicPlaybackPresentation(MusicPlaybackController controller, Action<string> changed)
 {
-    private bool playing, canSeek, canRate, canToggle, hasQuality;
-    private double position, duration = 1, cacheFraction;
+    private bool playing, canPlay, canStep, canSeek, canRate, canToggle, canFavorite, canAddToPlaylist, hasQuality;
     private double? rate;
     private int volume;
     private string source = "", quality = "", sourceQuality = "", sourceSymbol = "", sourceDescription = "",
-        glyph = "▶", positionText = "0:00", durationText = "0:00";
+        glyph = "▶";
 
     internal void RefreshPosition()
     {
-        Publish(ref position, module.PositionSeconds, nameof(MusicCapability.PositionSeconds));
-        Publish(ref positionText, module.PositionText, nameof(MusicCapability.PositionText));
-        module.RefreshLyricPosition();
+        controller.SyncPlaybackClockPosition();
+        controller.HostLyrics.RefreshLyricPosition();
     }
 
     internal void Refresh()
     {
-        Publish(ref cacheFraction, module.PlaybackCacheFraction, nameof(MusicCapability.PlaybackCacheFraction));
-        Publish(ref playing, module.IsPlaying, nameof(MusicCapability.IsPlaying));
-        Publish(ref source, module.CurrentSource, nameof(MusicCapability.CurrentSource));
-        Publish(ref sourceQuality, module.CurrentSourceQuality, nameof(MusicCapability.CurrentSourceQuality));
-        Publish(ref sourceSymbol, module.CurrentSourceSymbol, nameof(MusicCapability.CurrentSourceSymbol));
-        Publish(ref sourceDescription, module.CurrentSourceDescription, nameof(MusicCapability.CurrentSourceDescription));
-        Publish(ref quality, module.CurrentQualityLabel, nameof(MusicCapability.CurrentQualityLabel));
-        Publish(ref hasQuality, module.HasQualityButton, nameof(MusicCapability.HasQualityButton));
-        Publish(ref glyph, module.PlayGlyph, nameof(MusicCapability.PlayGlyph));
-        Publish(ref duration, module.DurationSeconds, nameof(MusicCapability.DurationSeconds));
-        Publish(ref durationText, module.DurationText, nameof(MusicCapability.DurationText));
-        Publish(ref volume, module.Volume, nameof(MusicCapability.Volume));
-        Publish(ref rate, module.AcceptedPlaybackRate, nameof(MusicCapability.AcceptedPlaybackRate));
+        controller.SyncPlaybackClock();
+        Publish(ref playing, controller.IsPlaying, nameof(MusicPlaybackController.IsPlaying));
+        Publish(ref source, controller.CurrentSource, nameof(MusicPlaybackController.CurrentSource));
+        Publish(ref sourceQuality, controller.CurrentSourceQuality, nameof(MusicPlaybackController.CurrentSourceQuality));
+        Publish(ref sourceSymbol, controller.CurrentSourceSymbol, nameof(MusicPlaybackController.CurrentSourceSymbol));
+        Publish(ref sourceDescription, controller.CurrentSourceDescription, nameof(MusicPlaybackController.CurrentSourceDescription));
+        Publish(ref quality, controller.CurrentQualityLabel, nameof(MusicPlaybackController.CurrentQualityLabel));
+        Publish(ref hasQuality, controller.HasQualityButton, nameof(MusicPlaybackController.HasQualityButton));
+        Publish(ref glyph, controller.PlayGlyph, nameof(MusicPlaybackController.PlayGlyph));
+        Publish(ref volume, controller.Volume, nameof(MusicPlaybackController.Volume));
+        Publish(ref rate, controller.AcceptedPlaybackRate, nameof(MusicPlaybackController.AcceptedPlaybackRate));
         RefreshAvailability();
         RefreshPosition();
     }
 
     internal void RefreshAvailability()
     {
-        Publish(ref canSeek, module.CanSeek, nameof(MusicCapability.CanSeek));
-        Publish(ref canRate, module.CanChangePlaybackRate, nameof(MusicCapability.CanChangePlaybackRate));
-        Publish(ref canToggle, module.CanTogglePlayback, nameof(MusicCapability.CanTogglePlayback));
-        module.RefreshLyricPreviewAvailability();
+        Publish(ref canPlay, controller.CanPlay, nameof(MusicPlaybackController.CanPlay));
+        Publish(ref canStep, controller.CanStep, nameof(MusicPlaybackController.CanStep));
+        Publish(ref canSeek, controller.CanSeek, nameof(MusicPlaybackController.CanSeek));
+        Publish(ref canRate, controller.CanChangePlaybackRate, nameof(MusicPlaybackController.CanChangePlaybackRate));
+        Publish(ref canToggle, controller.CanTogglePlayback, nameof(MusicPlaybackController.CanTogglePlayback));
+        Publish(ref canFavorite, controller.CanFavoriteCurrent, nameof(MusicPlaybackController.CanFavoriteCurrent));
+        Publish(ref canAddToPlaylist, controller.CanAddCurrentToPlaylist, nameof(MusicPlaybackController.CanAddCurrentToPlaylist));
+        controller.HostQueue.NotifyPlaybackModeAvailability();
+        controller.HostLyrics.RefreshLyricPreviewAvailability();
     }
 
     private void Publish<T>(ref T prior, T next, string property)

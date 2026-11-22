@@ -2,11 +2,11 @@
 
 共同业务、共享纯规则与排版位置语义见[小说业务与阅读契约](../common/novel/reading.md)。本端使用 `source@0.3.0` / `source.runtime.v2` 的原生配置模式，RPC 与受信图片见[运行器书源仓库](../runtime/source-library.md)。
 
-`NovelCapability` 装配在影视之后，拥有小说首页、分类、书籍页与原生阅读路由；统一搜索显式区分音乐、影视和小说会话。顶部媒体“小说”进入 `novel-home`，该首项不在下方侧栏重复展示；下方保留 `novel-categories` 分类入口。独立书架／历史页面已移除，不迁移或删除原生库数据，也不另建替代页面。阅读请求 Shell 隐藏侧栏与播放器控件，保留音乐播放 owner；非沉浸页面继续提供原有 Header 契约。设置沿用壳的小说类别，编辑草稿只在当前窗口内存在，配置经独立 owner 保存。
+`NovelCapability` 装配在影视之后，拥有 `novel-home`（首页）、`novel-categories`（分类）、`novel-shelf`（书架）、`novel-history`（阅读历史）、`novel-book`（书籍详情）与 `novel-reader`（原生阅读器）六个路由；统一搜索显式区分音乐、影视和小说会话。顶部媒体“小说”进入 `novel-home`，该首项不在下方侧栏重复展示；下方保留 `novel-categories`、`novel-shelf`、`novel-history` 导航入口。阅读请求 Shell 隐藏侧栏与播放器控件，保留音乐播放 owner；非沉浸页面继续提供原有 Header 契约。设置沿用壳的小说类别，编辑草稿只在当前窗口内存在，配置经独立 owner 保存。
 
-分类入口沿用音乐频道的同一图标字形及 Shell 公共导航项模板。发现页正文、次要文字、操作按钮、选中标签及应用浮层标题复用公共基础样式，普通文字统一使用系统常规字体，层级只通过字号区分；不另建字体或文字配色。紧凑发现布局及封面比例仍由小说视图拥有。
+分类、书架与历史入口沿用 Shell 公共导航项模板。小说呈现体系按 `Novel/Presentation/{Reader,Views,Dialogs,Settings,Controls}/` 分层组织，全面采用编译期 `{x:Bind}` 的声明式 WinUI XAML 构建：`Views/NovelView.xaml` 负责内容视图切换与阅读器工具栏，`Views/NovelDiscoveryView.xaml` 与 `Controls/NovelDiscoveryChannelBar.xaml`（配套 `Controls/NovelDiscoveryTheme.xaml`）承载首页与分类，`Views/NovelShelfView.xaml` 与 `Views/NovelHistoryView.xaml` 分别承载独立书架与阅读历史，`Views/NovelBookView.xaml`、`Views/NovelSidebarView.xaml`、`Settings/NovelSettingsView.xaml` 以及 `Dialogs/` 下各类编辑／导入／目录／换源／分组浮层均以独立 `.xaml` 视图声明；普通文字统一使用系统常规字体，层级只通过字号区分。封面与正文图片由独立 `NovelImage`（`Controls/NovelImage.cs` + `Reader/NovelImagePixels.cs`）承载，复用 `DesktopViewport` 首次视口准入并实现 `IDebugImageVisual`。
 
-发现、书籍、设置、编辑器及阅读可视面使用 WinUI，普通控件、菜单和应用内确认层由同一 Shell 呈现树负责剪裁、层叠与命中，不保留 WPF 可视岛或独立窗口追位。正文排版与绘制使用 Win2D／DirectWrite，字体枚举使用 `CanvasTextFormat`，颜色使用 WinUI 类型转换，图片使用 SkiaSharp 解码；小说数据、规则或存储 owner 不变。
+发现、书架、历史、书籍、设置、编辑器及阅读可视面均位于同一 Shell WinUI 呈现树内，弹窗统一通过 `DesktopModalHost`（`ShowDialogAsync`／`ShowSurfaceAsync`，支持 `stack: true` 叠层确认）居中呈现，不保留 WPF 可视岛或独立窗口追位。阅读核心仍保留 Win2D／DirectWrite 正文排版与绘制（`NovelReadingSurface`、`NovelPageRaster`、`CanvasTextLayout`、`CanvasRenderTarget`、`CanvasImageSource`），字体枚举使用 `CanvasTextFormat`，颜色使用 WinUI 类型转换，图片使用 SkiaSharp 解码；小说数据、规则或存储 owner 不变。
 
 ## 首页与分类
 
@@ -79,7 +79,7 @@
 
 host-only 与同域 Domain Cookie 互换时，先回传旧 scope 删除、再回传新 scope 写入；避免运行器按归一域／路径／名称写入时误删替代值。双向回归经真实运行器 owner 和 WebView2，检查主域的新值及子域可见性，不仅检查 diff 顺序。
 
-章节选择、换源、购章确认、设置编辑、导入及 Web 交互统一使用 Shell 内的 `PlayerDialogHost`；未保存确认在当前编辑器内部的普通 `Grid` 嵌套，不替换正在编辑的父层。浮层实际移除与在途提交／继续动作全部结束后才完成操作回执，一次性解除可见性订阅、取消登记并释放取消源；关闭请求不代替真实排空。设置普通浮层宽度不超过520 DIP，书源编辑器不超过760 DIP，阅读交互的普通浮层不超过640 DIP，并由实际宿主视口约束。仅书源编辑器接受外点取消，并先完成未保存输入确认；其他浮层保持外点不关闭。仍打开的手工浮层通过统一通知显示错误并允许重试；已关闭浮层的非取消真实写失败交回页面或设置 owner 的现有通知，普通取消不报保存失败。Web使用 WinUI `WebView2`，先排空初始化及资源请求，`Close` 后等待环境级 `BrowserProcessExited` 确认整个进程组和用户目录资源释放，再删除临时profile并返回；不以主browser PID退出、固定延时或文件删除重试代替。
+章节选择（`NovelCatalogDialogView`）、换源（`NovelSwitchSourceDialogView`）、分组管理（`NovelGroupManagerDialogView`）、购章确认、设置编辑（`NovelSourceEditorDialogView`／`NovelRuleEditor`／`NovelAppearanceEditor`）、导入（`NovelImportInputDialogView`／`NovelImportPreviewDialogView`）及 Web 交互（`NovelWebInteractionView`）统一通过 Shell 内的 `DesktopModalHost` 呈现；未保存确认通过 `DesktopModalHost` 的 `stack: true` 叠层或编辑器内确认完成，不替换正在编辑的父层。浮层实际移除与在途提交／继续动作全部结束后才完成操作回执，一次性解除可见性订阅、取消登记并释放取消源；关闭请求不代替真实排空。设置普通浮层宽度不超过 520 DIP，书源编辑器不超过 760 DIP，阅读交互的普通浮层不超过 640 DIP，并由 `DesktopModalHost` 按实际宿主视口约束。仅书源编辑器接受外点取消，并先完成未保存输入确认；其他浮层保持外点不关闭。仍打开的手工浮层通过统一通知显示错误并允许重试；已关闭浮层的非取消真实写失败交回页面或设置 owner 的现有通知，普通取消不报保存失败。Web 使用 WinUI `WebView2`，先排空初始化及资源请求，`Close` 后等待环境级 `BrowserProcessExited` 确认整个进程组和用户目录资源释放，再删除临时 profile 并返回；不以主 browser PID 退出、固定延时或文件删除重试代替。
 
 小说存储、规则 RPC、发现／搜索／书架、WebView2 生命周期与页面视觉呈现统一通过真实应用 `--debug` 模式（控制面导航、状态快照、分类日志与窗口截图，详见[Debug 模式](debug-mode.md)）验证；增量 App 编译使用普通 `dotnet build`（不调用会 publish 并替换安装目录的 `build-windows.ps1`）：
 
@@ -92,4 +92,4 @@ dotnet build apps/windows/app/MeowFilm.Windows.App.csproj --configuration Releas
 
 管理与导入行为、当前协议字段和净化表单遵循[共同管理契约](../common/novel/reading.md#书源与替换管理)。原生书源表单仅提供 Legado 和 QYSG；独立 Cat 输入不由该表单转换。净化导入只消费当前 `pattern/isEnabled/order` 等字段，旧别名只作为普通扩展保留，不回填或改变当前规则语义。
 
-`NovelSettingsView` 的书源与替换标签使用 Desktop 的 `ManagementList`、`ManagementForm`、`ManagementImportSelection`。列表为 WinUI 虚拟化 `ListView`，编辑器为禁用增删／拖动标签的原生 `TabView`／表单，行启用控件使用共享开关样式。设置编辑与网络导入由 `NovelUi.DialogAsync` 挂入 Shell 的 `PlayerDialogHost`，复用桌面浮层的主题边框／表面、输入行分隔并在应用窗口内居中。书源编辑器使用前述固定标题／操作区、协议下拉和未保存确认；普通导入与规则浮层保留原提交、取消及 Escape 语义。文件选择器显式绑定当前 `DesktopWindow.Handle`，剪贴板使用 Windows DataTransfer；这些平台能力不成为来源或配置 owner。二维码图片由 SkiaSharp 解码，再由锁定的 ZXing.Net 0.16.11 本地读取，Apache-2.0 许可随 Windows 清单发布。
+`NovelSettingsView`（声明式 XAML `NovelSettingsView.xaml`）的书源与替换标签使用 Desktop 的 `ManagementList`、`ManagementForm`、`ManagementImportSelection`。列表为 WinUI 虚拟化 `ListView`，编辑器为禁用增删／拖动标签的原生 `TabView`／表单，行启用控件使用共享 `MeowFilm.Switch` 样式。设置编辑与网络导入统一经 `DesktopModalHost.ShowSurfaceAsync`／`ShowDialogAsync` 居中挂入应用窗口。书源编辑器使用前述固定标题／操作区、统一下拉协议选择器（`DropdownPlacement`）和未保存确认；普通导入与规则浮层保留原提交、取消及 Escape 语义。文件选择器显式绑定当前 `DesktopWindow.Handle`，剪贴板使用 Windows DataTransfer；这些平台能力不成为来源或配置 owner。二维码图片由 SkiaSharp 解码，再由锁定的 ZXing.Net 0.16.11 本地读取，Apache-2.0 许可随 Windows 清单发布。

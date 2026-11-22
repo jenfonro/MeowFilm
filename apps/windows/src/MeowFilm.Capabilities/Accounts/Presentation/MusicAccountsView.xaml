@@ -12,33 +12,32 @@
     <Setter Property="Margin" Value="12,0,0,0"/><Setter Property="VerticalAlignment" Value="Center"/>
     <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
    </Style>
-   <Style x:Key="Account.PreferenceSwitch" TargetType="CheckBox" BasedOn="{StaticResource Settings.Switch}">
+   <Style x:Key="Account.PreferenceSwitch" TargetType="CheckBox" BasedOn="{StaticResource MeowFilm.Switch}">
     <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="VerticalAlignment" Value="Center"/>
    </Style>
    <Style x:Key="Account.Dash" TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
     <Setter Property="Text" Value="—"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/>
     <Setter Property="HorizontalAlignment" Value="Center"/><Setter Property="VerticalAlignment" Value="Center"/>
    </Style>
-   <DataTemplate x:Key="Account.Person">
+   <DataTemplate x:Key="Account.Person" x:DataType="local:MusicPlatformSettingsRow">
     <Grid>
-     <Grid x:Name="Person" Visibility="{Binding IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+     <Grid x:Name="Person" Visibility="{x:Bind IsLoggedIn,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility}}">
       <Grid.ColumnDefinitions><ColumnDefinition Width="32"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
       <Grid Width="32" Height="32" VerticalAlignment="Center">
-
-       <art:ArtworkImage Address="{Binding Avatar}" Width="32" Height="32" Stretch="UniformToFill"
-                         Visibility="{Binding IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}"
-                         AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=头像}">
+       <art:ArtworkImage Address="{x:Bind Avatar,Mode=OneWay}" Width="32" Height="32" Stretch="UniformToFill"
+                         Visibility="{x:Bind IsLoggedIn,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}"
+                         AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=头像}">
         <art:ArtworkImage.Resources>
          <Style TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}"/>
         </art:ArtworkImage.Resources>
        </art:ArtworkImage>
       </Grid>
       <StackPanel Grid.Column="1" Margin="11,0,0,0" VerticalAlignment="Center">
-       <TextBlock Text="{Binding DisplayName}" Style="{StaticResource Settings.Text}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" LineHeight="21" TextTrimming="CharacterEllipsis"/>
-       <TextBlock Text="{Binding Membership}" Style="{StaticResource Settings.Subtitle}" FontSize="11" LineHeight="19" TextTrimming="CharacterEllipsis"/>
+       <TextBlock Text="{x:Bind DisplayName,Mode=OneWay}" Style="{StaticResource Settings.Text}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" LineHeight="21" TextTrimming="CharacterEllipsis"/>
+       <TextBlock Text="{x:Bind Membership,Mode=OneWay}" Style="{StaticResource Settings.Subtitle}" FontSize="11" LineHeight="19" TextTrimming="CharacterEllipsis"/>
       </StackPanel>
      </Grid>
-     <TextBlock x:Name="AccountState" Visibility="{Binding IsLoggedIn,Converter={StaticResource Settings.InverseVisibility}}" Text="{Binding DisplayName}" Style="{StaticResource Settings.Subtitle}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"
+     <TextBlock x:Name="AccountState" Visibility="{x:Bind IsLoggedIn,Mode=OneWay,Converter={StaticResource Settings.InverseVisibility}}" Text="{x:Bind DisplayName,Mode=OneWay}" Style="{StaticResource Settings.Subtitle}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"
                 VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
     </Grid>
    </DataTemplate>
@@ -72,8 +71,8 @@
      </Grid>
      <Border x:Name="AccountBody" Grid.Row="1" Style="{StaticResource Settings.ListSurface}">
       <ItemsControl x:Name="PlatformSettingsList"
-                    ItemsSource="{Binding AccountTableRows,ElementName=AccountsRoot}">
-       <ItemsControl.ItemTemplate><DataTemplate>
+                    ItemsSource="{x:Bind AccountTableRows}">
+       <ItemsControl.ItemTemplate><DataTemplate x:DataType="local:MusicAccountTableRow">
         <Border x:Name="AccountTableRow" Style="{StaticResource Account.Row}">
          <Grid x:Name="AccountCells" Loaded="AccountCells_Loaded">
           <Grid.ColumnDefinitions>
@@ -86,50 +85,50 @@
           </Grid.ColumnDefinitions>
           <Grid VerticalAlignment="Center">
            <Grid.ColumnDefinitions><ColumnDefinition Width="26"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-           <Image Source="{Binding Platform,Converter={StaticResource Settings.PlatformLogo}}" Width="26" Height="26"
-                  AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=标志}"/>
-           <TextBlock Grid.Column="1" Text="{Binding Name}" Style="{StaticResource Account.PlatformName}"/>
+           <Image Source="{x:Bind Platform,Converter={StaticResource Settings.PlatformLogo}}" Width="26" Height="26"
+                  AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=标志}"/>
+           <TextBlock Grid.Column="1" Text="{x:Bind Name}" Style="{StaticResource Account.PlatformName}"/>
           </Grid>
           <Grid Grid.Column="2">
-           <ContentControl Content="{Binding Source}" ContentTemplate="{StaticResource Account.Person}"
+           <ContentControl Content="{x:Bind Source}" ContentTemplate="{StaticResource Account.Person}"
                            HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" IsTabStop="False"
-                           Visibility="{Binding IsPublicCatalog,Converter={StaticResource Settings.InverseVisibility}}"/>
+                           Visibility="{x:Bind IsPublicCatalog,Converter={StaticResource Settings.InverseVisibility}}"/>
            <TextBlock Text="无需登录" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center"
-                      Visibility="{Binding IsPublicCatalog,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+                      Visibility="{x:Bind IsPublicCatalog,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
           </Grid>
           <Grid Grid.Column="4">
            <CheckBox Style="{StaticResource Account.PreferenceSwitch}"
-                     Visibility="{Binding Source.IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{Binding Source.CanEditFeedback,FallbackValue=False}" IsChecked="{Binding Source.FeedbackEnabled,Mode=OneWay}"
-                     Tag="{Binding Source}" Click="Feedback_Click" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=播放上报}"/>
-           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{Binding Source.IsLoggedIn,Converter={StaticResource Settings.InverseVisibility},FallbackValue=Visible}"/>
+                     Visibility="{x:Bind Source.IsLoggedIn,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{x:Bind Source.CanEditFeedback,Mode=OneWay,FallbackValue=False}" IsChecked="{x:Bind Source.FeedbackEnabled,Mode=OneWay,FallbackValue=False}"
+                     Tag="{x:Bind Source}" Click="Feedback_Click" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=播放上报}"/>
+           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{x:Bind Source.IsLoggedIn,Mode=OneWay,Converter={StaticResource Settings.InverseVisibility},FallbackValue=Visible}"/>
           </Grid>
           <Grid Grid.Column="6">
            <CheckBox Style="{StaticResource Account.PreferenceSwitch}"
-                     Visibility="{Binding Source.IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{Binding Source.CanEditSync,FallbackValue=False}" IsChecked="{Binding Source.FavoritesSyncEnabled,Mode=OneWay}"
-                     Tag="{Binding Source}" Click="FavoritesSync_Click" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=收藏歌曲同步}"/>
-           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{Binding Source.IsLoggedIn,Converter={StaticResource Settings.InverseVisibility},FallbackValue=Visible}"/>
+                     Visibility="{x:Bind Source.IsLoggedIn,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{x:Bind Source.CanEditSync,Mode=OneWay,FallbackValue=False}" IsChecked="{x:Bind Source.FavoritesSyncEnabled,Mode=OneWay,FallbackValue=False}"
+                     Tag="{x:Bind Source}" Click="FavoritesSync_Click" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=收藏歌曲同步}"/>
+           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{x:Bind Source.IsLoggedIn,Mode=OneWay,Converter={StaticResource Settings.InverseVisibility},FallbackValue=Visible}"/>
           </Grid>
           <Grid Grid.Column="8">
            <CheckBox Style="{StaticResource Account.PreferenceSwitch}"
-                     Visibility="{Binding Source.IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{Binding Source.CanEditSync,FallbackValue=False}" IsChecked="{Binding Source.PlaylistsSyncEnabled,Mode=OneWay}"
-                     Tag="{Binding Source}" Click="PlaylistsSync_Click" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=歌单同步}"/>
-           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{Binding Source.IsLoggedIn,Converter={StaticResource Settings.InverseVisibility},FallbackValue=Visible}"/>
+                     Visibility="{x:Bind Source.IsLoggedIn,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{x:Bind Source.CanEditSync,Mode=OneWay,FallbackValue=False}" IsChecked="{x:Bind Source.PlaylistsSyncEnabled,Mode=OneWay,FallbackValue=False}"
+                     Tag="{x:Bind Source}" Click="PlaylistsSync_Click" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=歌单同步}"/>
+           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{x:Bind Source.IsLoggedIn,Mode=OneWay,Converter={StaticResource Settings.InverseVisibility},FallbackValue=Visible}"/>
           </Grid>
           <Grid Grid.Column="10">
            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center"
-                       Visibility="{Binding Source.IsLoggedIn,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}">
-            <Button Tag="{Binding Source}" Click="RefreshDetails_Click" Style="{StaticResource Settings.QuietButton}" Content="{Binding Source.RefreshText}"
-                    IsEnabled="{Binding Source.CanRefresh,FallbackValue=False}" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=刷新资料}"/>
-            <Button Content="退出登录" Tag="{Binding Source}" Click="Logout_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0"
-                    IsEnabled="{Binding Source.CanLogout,FallbackValue=False}" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=退出账号}"/>
+                       Visibility="{x:Bind Source.IsLoggedIn,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}">
+            <Button Tag="{x:Bind Source}" Click="RefreshDetails_Click" Style="{StaticResource Settings.QuietButton}" Content="{x:Bind Source.RefreshText,Mode=OneWay,FallbackValue=''}"
+                    IsEnabled="{x:Bind Source.CanRefresh,Mode=OneWay,FallbackValue=False}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=刷新资料}"/>
+            <Button Content="退出登录" Tag="{x:Bind Source}" Click="Logout_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0"
+                    IsEnabled="{x:Bind Source.CanLogout,Mode=OneWay,FallbackValue=False}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=退出账号}"/>
            </StackPanel>
-           <Button Content="登录" Tag="{Binding Source}" Click="Login_Click" Style="{StaticResource Settings.PrimaryButton}"
-                   Visibility="{Binding Source.ShowLogin,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{Binding Source.CanLogin,FallbackValue=False}"
+           <Button Content="登录" Tag="{x:Bind Source}" Click="Login_Click" Style="{StaticResource Settings.PrimaryButton}"
+                   Visibility="{x:Bind Source.ShowLogin,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}" IsEnabled="{x:Bind Source.CanLogin,Mode=OneWay,FallbackValue=False}"
                    MinWidth="70" HorizontalAlignment="Center" VerticalAlignment="Center"
-                   AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=登录}"/>
-           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{Binding Source.ShowActionDash,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Visible}"/>
+                   AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=登录}"/>
+           <TextBlock Style="{StaticResource Account.Dash}" Visibility="{x:Bind Source.ShowActionDash,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Visible}"/>
           </Grid>
-          <desktop:NoticeOutlet Message="{Binding Source.DetailsStatus}"/>
+          <desktop:NoticeOutlet Message="{x:Bind Source.DetailsStatus,Mode=OneWay,FallbackValue=''}"/>
          </Grid>
         </Border>
        </DataTemplate></ItemsControl.ItemTemplate>
@@ -138,12 +137,12 @@
     </Grid>
    </ScrollViewer>
    <Button Content="确认同步变更" Click="ConfirmSync_Click" HorizontalAlignment="Left"
-           Style="{StaticResource Settings.Button32}" Margin="0,16,0,0"
-           Visibility="{Binding LibrarySync.HasConfirmation,Converter={StaticResource MeowFilm.BoolToVisibility}}"
-           IsEnabled="{Binding LibrarySync.CanEdit}"/>
-   <desktop:NoticeOutlet Message="{Binding AccountNotice}"/>
-   <desktop:NoticeOutlet Message="{Binding FeedbackStatus}"/>
-   <desktop:NoticeOutlet Message="{Binding LibrarySync.Status}"/>
+           Style="{StaticResource Settings.Button}" Margin="0,16,0,0"
+           Visibility="{x:Bind Accounts.LibrarySync.HasConfirmation,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility},FallbackValue=Collapsed}"
+           IsEnabled="{x:Bind Accounts.LibrarySync.CanEdit,Mode=OneWay,FallbackValue=False}"/>
+   <desktop:NoticeOutlet Message="{x:Bind Accounts.AccountNotice,Mode=OneWay,TargetNullValue=''}"/>
+   <desktop:NoticeOutlet Message="{x:Bind Settings.FeedbackStatus,Mode=OneWay,TargetNullValue=''}"/>
+   <desktop:NoticeOutlet Message="{x:Bind Accounts.LibrarySync.Status,Mode=OneWay,TargetNullValue=''}"/>
   </StackPanel>
 
   <Grid x:Name="ModalStash" Visibility="Collapsed">
@@ -168,22 +167,21 @@
        <Button x:Name="QrModeButton" Content="二维码登录" Click="QrMode_Click"
                Style="{StaticResource Login.Segment}"/>
        <Button Grid.Column="1" x:Name="SmsModeButton" Content="验证码登录" Click="SmsMode_Click"
-               Style="{StaticResource Login.Segment}" IsEnabled="{Binding ShowAccountSms}"/>
+               Style="{StaticResource Login.Segment}" IsEnabled="{x:Bind Accounts.ShowAccountSms,Mode=OneWay,FallbackValue=False}"/>
       </Grid>
      </Border>
      <Grid Grid.Row="1">
       <StackPanel x:Name="QrPanel" HorizontalAlignment="Center">
        <Border Style="{StaticResource Account.QrFrame}">
-        <Image x:Name="AccountQrImage" Source="{Binding AccountQrImage}" Stretch="Uniform"
-
-               AutomationProperties.Name="{Binding AccountQrAccessibleName}"/>
+        <Image x:Name="AccountQrImage" Source="{x:Bind Accounts.AccountQrImage,Mode=OneWay}" Stretch="Uniform"
+               AutomationProperties.Name="{x:Bind Accounts.AccountQrAccessibleName,Mode=OneWay,TargetNullValue=''}"/>
        </Border>
        <Button Content="刷新二维码" Click="RefreshQr_Click" HorizontalAlignment="Center" Margin="0,14,0,0"
-               Style="{StaticResource Settings.QuietButton}" IsEnabled="{Binding CanBeginAccountQr}"/>
-       <TextBlock Text="{Binding AccountStatus}" Style="{StaticResource Settings.Subtitle}"
+               Style="{StaticResource Settings.QuietButton}" IsEnabled="{x:Bind Accounts.CanBeginAccountQr,Mode=OneWay,FallbackValue=False}"/>
+       <TextBlock Text="{x:Bind Accounts.AccountStatus,Mode=OneWay,TargetNullValue=''}" Style="{StaticResource Settings.Subtitle}"
                   HorizontalAlignment="Center" Margin="0,8,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"/>
        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,14,0,0">
-        <Button x:Name="SaveQrButton" Content="保存二维码" Click="SaveQr_Click" Style="{StaticResource Settings.Button32}" IsEnabled="{Binding CanSaveAccountQr}"/>
+        <Button x:Name="SaveQrButton" Content="保存二维码" Click="SaveQr_Click" Style="{StaticResource Settings.Button}" IsEnabled="{x:Bind Accounts.CanSaveAccountQr,Mode=OneWay,FallbackValue=False}"/>
        </StackPanel>
       </StackPanel>
       <StackPanel x:Name="SmsPanel" Visibility="Collapsed" VerticalAlignment="Center">
@@ -205,13 +203,13 @@
                       Padding="12,6" MaxLength="8" VerticalContentAlignment="Center"
                       AutomationProperties.Name="验证码"/>
          <Border Grid.Column="1" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,8"/>
-         <Button x:Name="SmsSendButton" Grid.Column="2" Content="{Binding AccountSmsSendText}" Click="SmsSend_Click"
-                 Style="{StaticResource Settings.QuietButton}" IsEnabled="{Binding CanSendAccountSms}"/>
+         <Button x:Name="SmsSendButton" Grid.Column="2" Content="{x:Bind Accounts.AccountSmsSendText,Mode=OneWay,TargetNullValue=''}" Click="SmsSend_Click"
+                 Style="{StaticResource Settings.QuietButton}" IsEnabled="{x:Bind Accounts.CanSendAccountSms,Mode=OneWay,FallbackValue=False}"/>
         </Grid>
        </Border>
        <Button x:Name="SmsLoginButton" Content="登录" Click="SmsLogin_Click"
-               Style="{StaticResource Settings.PrimaryButton}" IsEnabled="{Binding CanLoginAccountSms}"/>
-       <TextBlock Text="{Binding AccountStatus}" Style="{StaticResource Settings.Subtitle}"
+               Style="{StaticResource Settings.PrimaryButton}" IsEnabled="{x:Bind Accounts.CanLoginAccountSms,Mode=OneWay,FallbackValue=False}"/>
+       <TextBlock Text="{x:Bind Accounts.AccountStatus,Mode=OneWay,TargetNullValue=''}" Style="{StaticResource Settings.Subtitle}"
                   HorizontalAlignment="Center" Margin="0,12,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}"/>
       </StackPanel>
      </Grid>

@@ -23,7 +23,35 @@ public class DesktopWindow : Window
     public event EventHandler? WindowStateChanged;
     public event EventHandler? SessionEnding;
     public event EventHandler<CancelEventArgs>? Closing;
-    internal event DesktopWindowMessageHandler? NativeMessage;
+    private DesktopWindowMessageHandler[] nativeMessageHandlers = [];
+    internal event DesktopWindowMessageHandler? NativeMessage
+    {
+        add
+        {
+            if (value is null) return;
+            var current = nativeMessageHandlers;
+            var next = new DesktopWindowMessageHandler[current.Length + 1];
+            Array.Copy(current, next, current.Length);
+            next[^1] = value;
+            nativeMessageHandlers = next;
+        }
+        remove
+        {
+            if (value is null) return;
+            var current = nativeMessageHandlers;
+            int index = Array.LastIndexOf(current, value);
+            if (index < 0) return;
+            if (current.Length == 1)
+            {
+                nativeMessageHandlers = [];
+                return;
+            }
+            var next = new DesktopWindowMessageHandler[current.Length - 1];
+            if (index > 0) Array.Copy(current, 0, next, 0, index);
+            if (index < current.Length - 1) Array.Copy(current, index + 1, next, index, current.Length - index - 1);
+            nativeMessageHandlers = next;
+        }
+    }
     private readonly NativeSubclass callback;
     private bool visible, sessionEnding, closingProgrammatically, closed, keepBackgroundOnShow;
     private DesktopWindowState state;
@@ -38,8 +66,9 @@ public class DesktopWindow : Window
         {
             if (!closingProgrammatically) args.Cancel = !RequestClose();
         };
-        AppWindow.Changed += (_, _) =>
+        AppWindow.Changed += (_, args) =>
         {
+            if (!args.DidSizeChange && !args.DidPresenterChange && !args.DidVisibilityChange) return;
             if (state != WindowState) { state = WindowState; OnStateChanged(EventArgs.Empty); }
             if (visible != IsVisible) { visible = IsVisible; VisibilityChanged?.Invoke(this, EventArgs.Empty); }
         };
@@ -162,13 +191,12 @@ public class DesktopWindow : Window
             Marshal.StructureToPtr(pos, lParam, false);
         }
         bool handled = false;
-        nint result = 0;
-        if (NativeMessage is { } handlers)
-            foreach (DesktopWindowMessageHandler handler in handlers.GetInvocationList())
-            {
-                result = handler(hwnd, (int)message, (nint)wParam, lParam, ref handled);
-                if (handled) return result;
-            }
+        var handlers = nativeMessageHandlers;
+        for (int i = 0; i < handlers.Length; i++)
+        {
+            nint result = handlers[i](hwnd, (int)message, (nint)wParam, lParam, ref handled);
+            if (handled) return result;
+        }
         return DefSubclassProc(hwnd, message, wParam, lParam);
     }
     [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }

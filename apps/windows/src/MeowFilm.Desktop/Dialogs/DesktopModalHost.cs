@@ -37,6 +37,7 @@ public sealed class DesktopModalHost : Grid
     private uint? dismissPointer;
 
     public bool IsOpen => active is not null;
+    public int StackDepth => modals.Count;
     public bool HasOutsidePress => dismissPointer is not null;
     public FrameworkElement? ActiveContent => active?.Content;
     public event EventHandler? OpenStateChanged;

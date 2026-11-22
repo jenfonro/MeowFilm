@@ -167,6 +167,47 @@ public sealed class NovelLibrary(IStorageDatabase database)
     }, token);
     public Task DeleteHistoryAsync(string id, CancellationToken token = default) => EditEntry(id, current =>
         current?.OnShelf == true ? current with { ReadAt = null, Anchor = null } : null, token);
+    public Task ClearHistoryAsync(CancellationToken token = default) => work.Run(async ct =>
+    {
+        await serial.WaitAsync(ct);
+        try
+        {
+            var result = await database.WriteAsync(db =>
+            {
+                EnsureRoot(db, create: false);
+                var previousRows = NovelStorageRecords.Entry.ReadMany(db, ["device"]);
+                bool any = false;
+                var updated = new List<NovelEntry>(previousRows.Count);
+                for (int ordinal = 0; ordinal < previousRows.Count; ordinal++)
+                {
+                    var previous = previousRows[ordinal];
+                    NovelEntry current;
+                    try { current = previous.Deserialize<NovelEntry>(NovelJson.Options) ?? throw Corrupt(); }
+                    catch (JsonException) { throw Corrupt(); }
+                    Validate(current, stored: true);
+                    if (current.ReadAt is null)
+                    {
+                        updated.Add(current);
+                        continue;
+                    }
+                    any = true;
+                    var next = current.OnShelf ? current with { ReadAt = null, Anchor = null } : null;
+                    var row = next is null ? null : Row(next);
+                    NovelStorageRecords.Entry.Save(db, row, previous, ["device", current.BookId], ordinal, ordinal);
+                    if (next is not null) updated.Add(next);
+                }
+                if (any) db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                return (Changed: any, Entries: updated.ToArray());
+            }, ct);
+            if (result.Changed)
+            {
+                entries = result.Entries;
+                Changed?.Invoke(this, EventArgs.Empty);
+            }
+            return true;
+        }
+        finally { serial.Release(); }
+    }, token);
     public Task PinAsync(string id, CancellationToken token = default) => EditEntry(id, current =>
         current is null ? null : current with { PinnedAt = current.PinnedAt is null ? DateTimeOffset.UtcNow : null }, token);
 

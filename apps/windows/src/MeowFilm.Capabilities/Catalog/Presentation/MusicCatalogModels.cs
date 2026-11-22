@@ -15,6 +15,7 @@ public sealed record MusicRankPreview(string Title, string Artist, string Cover,
     public string Cover { get => Song?.Cover ?? cover; init => cover = value; }
     // A provider without previous-rank data publishes no movement; it is not a new entry.
     public string Movement => LastRank is not { } last ? "" : last == 0 ? "新" : last > Rank ? "↑" : last < Rank ? "↓" : "−";
+    public string DisplayLine => $"{Rank}  {Title} − {Artist}  {Movement}";
 }
 public enum MusicCatalogEntryPresentation
 {
@@ -42,6 +43,14 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public string Title { get => UsesSongDisplay ? Song?.Title ?? title : title; init => title = value; }
     public string Subtitle { get => UsesSongDisplay ? Song?.Artist ?? subtitle : subtitle; init => subtitle = value; }
     public string Cover { get => UsesSongDisplay ? Song?.Cover ?? cover : cover; init => cover = value; }
+    public string SongId => Song?.Id ?? "";
+    public bool HasCover => !string.IsNullOrWhiteSpace(Cover);
+    private bool isSelected;
+    public bool IsSelected
+    {
+        get => isSelected;
+        internal set { if (isSelected == value) return; isSelected = value; PropertyChanged?.Invoke(this, new(nameof(IsSelected))); }
+    }
     public bool HasLabel => Label.Length > 0;
     public long? PlayCount { get => playCount; init => playCount = value; }
     public string ContextText { get => contextText; init => contextText = value; }
@@ -57,7 +66,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     {
         if (Cover.Length > 0 || value.Length == 0) return;
         cover = value;
-        foreach (var name in new[] { nameof(Cover), nameof(FirstPreviewCover) })
+        foreach (var name in new[] { nameof(Cover), nameof(HasCover), nameof(FirstPreviewCover) })
             PropertyChanged?.Invoke(this, new(name));
     }
     internal void FillCollectionMetadata(string name, string artwork, long? plays)
@@ -86,12 +95,13 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     {
         if (Song is null || value is null) return;
         Song.ApplyRepository(value, publication);
-        foreach (var name in new[] { nameof(Title), nameof(Subtitle), nameof(Cover), nameof(CanAlbum), nameof(Caption) })
+        foreach (var name in new[] { nameof(Title), nameof(Subtitle), nameof(Cover), nameof(HasCover), nameof(CanAlbum), nameof(Caption) })
             PropertyChanged?.Invoke(this, new(name));
     }
     private IReadOnlyList<MusicRankPreview>? initializedPreview;
     private bool isPreparing;
     public IReadOnlyList<MusicRankPreview> PreviewSongs => Preview is { Count: > 0 } ? Preview : initializedPreview ?? [];
+    public IReadOnlyList<MusicRankPreview> TopPreviewSongs => PreviewSongs.Count <= 3 ? PreviewSongs : PreviewSongs.Take(3).ToArray();
     public IReadOnlyList<string> PreviewTitles => PreviewSongs.Take(3).Select((song, index) => $"{index + 1} {song.Title}").ToArray();
     public string FirstPreviewCover => PreviewSongs.ElementAtOrDefault(0)?.Cover is { Length: > 0 } cover ? cover : Cover;
     public string SecondPreviewCover => PreviewSongs.ElementAtOrDefault(1)?.Cover ?? "";
@@ -109,7 +119,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     {
         if (ReferenceEquals(initializedPreview, songs) || Preview is { Count: > 0 }) return;
         initializedPreview = songs;
-        foreach (var name in new[] { nameof(PreviewSongs), nameof(PreviewTitles), nameof(HasPreview),
+        foreach (var name in new[] { nameof(PreviewSongs), nameof(TopPreviewSongs), nameof(PreviewTitles), nameof(HasPreview),
             nameof(FirstPreviewCover), nameof(SecondPreviewCover), nameof(ThirdPreviewCover),
             nameof(FirstPreviewIdentity), nameof(SecondPreviewIdentity), nameof(ThirdPreviewIdentity) })
             PropertyChanged?.Invoke(this, new(name));
@@ -120,7 +130,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
         foreach (var preview in PreviewSongs)
             if (preview.Song is { } song) changed |= song.ApplyRepository(read(song.Id), publication);
         if (changed)
-            foreach (var name in new[] { nameof(PreviewSongs), nameof(PreviewTitles),
+            foreach (var name in new[] { nameof(PreviewSongs), nameof(TopPreviewSongs), nameof(PreviewTitles),
                 nameof(FirstPreviewCover), nameof(SecondPreviewCover), nameof(ThirdPreviewCover),
                 nameof(FirstPreviewIdentity), nameof(SecondPreviewIdentity), nameof(ThirdPreviewIdentity) })
                 PropertyChanged?.Invoke(this, new(name));
@@ -160,12 +170,13 @@ public enum MusicCatalogSectionPresentation
 }
 public sealed record MusicCatalogSection(string Title, IReadOnlyList<MusicCatalogCard> Items,
     string Id = "", string Type = "", MusicCatalogCard? Action = null, string Layout = "",
-    bool IsLoading = false, IReadOnlyList<MusicCatalogTab>? Tabs = null, string SelectedTab = "", string ErrorCode = "") : INotifyPropertyChanged
+    bool IsLoading = false, IReadOnlyList<MusicCatalogTab>? Tabs = null, string SelectedTab = "", string ErrorCode = "") : INotifyPropertyChanged, IShelfSection
 {
     public event PropertyChangedEventHandler? PropertyChanged;
     private IReadOnlyList<MusicCatalogCard> items = Items;
     private string selectedTab = SelectedTab;
     public IReadOnlyList<MusicCatalogCard> Items { get => items; init => items = value; }
+    System.Collections.IEnumerable IShelfSection.Items => Items;
     public string SelectedTab { get => selectedTab; init => selectedTab = value; }
     public bool HasTabs => Tabs is { Count: > 0 };
     internal void SelectTab(MusicCatalogTab tab)

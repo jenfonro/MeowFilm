@@ -14,6 +14,13 @@ public sealed record StorageRevision(long Revision, string Receipt)
     public static StorageRevision Empty { get; } = new(0, "");
 }
 
+/// <summary>Raised only after SQLite transaction.Commit() was invoked and failed, leaving commit durability uncertain.</summary>
+public sealed class TransactionCommitUnknownException : Exception
+{
+    public DocumentStoreError Error { get; }
+    public TransactionCommitUnknownException(DocumentStoreError error) : base(error.ToString()) => Error = error;
+}
+
 /// <summary>One bounded native I/O lane. Repositories own SQL and business policy.</summary>
 public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
 {
@@ -69,11 +76,17 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         {
             var started = DebugLog.IsEnabled ? Stopwatch.GetTimestamp() : 0L;
             using var transaction = session.Connection.BeginTransaction();
+            bool commitAttempted = false;
+            bool committed = false;
             try
             {
                 var result = write(new(session.Connection, transaction));
-                bool committed = false;
-                void Commit() { transaction.Commit(); committed = true; }
+                void Commit()
+                {
+                    commitAttempted = true;
+                    transaction.Commit();
+                    committed = true;
+                }
                 if (commit is null) Commit(); else commit(Commit);
                 if (!committed) throw new DocumentStoreException(DocumentStoreError.Conflict);
                 commits++;
@@ -90,8 +103,16 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 if (started != 0)
                 {
                     DebugLog.Warn(DebugCategories.Storage, "sqlite", "tx.error",
-                        new { retainedBytes }, error: ex,
+                        new { retainedBytes, commitAttempted, committed }, error: ex,
                         durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                }
+                if (commitAttempted)
+                {
+                    var translated = Translate(ex);
+                    var error = translated is DocumentStoreException storeError
+                        ? storeError.Error
+                        : DocumentStoreError.Storage;
+                    throw new TransactionCommitUnknownException(error);
                 }
                 throw;
             }

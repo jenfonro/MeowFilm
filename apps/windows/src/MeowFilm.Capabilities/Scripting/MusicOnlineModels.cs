@@ -23,7 +23,7 @@ public sealed record MusicSourcePlatformState(string Platform, string State)
 /// </summary>
 public sealed class MusicSourceRow : INotifyPropertyChanged
 {
-    private bool selected, checking;
+    private bool selected, checking, canToggle = true;
 
     internal MusicSourceRow(string key, MusicSourceKind kind, string name, string version, bool enabled,
         string state, IReadOnlyList<MusicSourcePlatformState> platforms, string summary, string? installationId = null,
@@ -71,6 +71,11 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
     {
         get => checking;
         internal set { if (checking == value) return; checking = value; Changed(); Changed(nameof(StatusKind)); Changed(nameof(StatusText)); }
+    }
+    public bool CanToggle
+    {
+        get => canToggle;
+        internal set { if (canToggle == value) return; canToggle = value; Changed(); }
     }
     /// <summary>The platforms this row may resolve, as far as its declaration is known.</summary>
     internal bool Declares(string platform) => IsBuiltIn ? Platform == platform :

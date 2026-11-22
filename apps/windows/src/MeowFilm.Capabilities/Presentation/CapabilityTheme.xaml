@@ -16,13 +16,14 @@
  <SolidColorBrush x:Key="Capability.Player.Hover" Color="#0B000000"/>
  <SolidColorBrush x:Key="Capability.Player.Pressed" Color="#12000000"/>
  <SolidColorBrush x:Key="Capability.Player.Rail" Color="#0D000000"/>
- <Style x:Key="Capability.OverlayScrollViewer" TargetType="ScrollViewer" BasedOn="{StaticResource MeowFilm.OverlayScrollViewer}"/>
+ <ControlTemplate x:Key="MeowFilm.SeekBarTemplate" TargetType="Slider">
+  <Canvas x:Name="RailCanvas"/>
+ </ControlTemplate>
  <Style x:Key="Capability.SeekPreview" TargetType="ToolTip" BasedOn="{StaticResource MeowFilm.ToolTip}"><Setter Property="CornerRadius" Value="16"/><Setter Property="FontWeight" Value="Normal"/></Style>
  <Style x:Key="Capability.Text" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"/>
  <Style x:Key="Capability.Muted" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.MutedText}"/>
  <Style x:Key="Capability.Error" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.ErrorText}"><Setter Property="TextWrapping" Value="Wrap"/></Style>
  <Style x:Key="Novel.Input" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/></Style>
- <Style x:Key="Novel.ComboBox" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}"><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/></Style>
  <Style x:Key="Novel.CheckBox" TargetType="CheckBox"><Setter Property="FontWeight" Value="Normal"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/></Style>
  <Style x:Key="Novel.Row" TargetType="Border"><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="0,0,0,1"/><Setter Property="Padding" Value="0,0,0,12"/><Setter Property="Margin" Value="0,0,0,12"/></Style>
  <Style x:Key="Capability.CellText" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}"><Setter Property="TextTrimming" Value="CharacterEllipsis"/></Style>

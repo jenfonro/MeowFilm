@@ -1,7 +1,9 @@
+using System.Numerics;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Desktop;
 
@@ -20,7 +22,7 @@ public sealed class NoticeStack : StackPanel
     private readonly List<Item> items = [];
     public NoticeStack()
     {
-        MaxWidth = 480; HorizontalAlignment = HorizontalAlignment.Center; VerticalAlignment = VerticalAlignment.Top;
+        MaxWidth = 460; HorizontalAlignment = HorizontalAlignment.Right; VerticalAlignment = VerticalAlignment.Bottom;
         Unloaded += (_, _) => Clear();
     }
     public void Show(object source, string message, bool persistent = false)
@@ -29,14 +31,35 @@ public sealed class NoticeStack : StackPanel
         foreach (var old in items.Where(item => ReferenceEquals(item.Source, source) || !persistent && !item.Persistent && item.Message == message).ToArray()) Remove(old);
         if (string.IsNullOrWhiteSpace(message)) return;
         while (!persistent && items.Count(item => !item.Persistent) >= 3) Remove(items.First(item => !item.Persistent));
-        var text = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center, Margin = new(0, 0, 12, 0) };
+        var text = new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap, VerticalAlignment = VerticalAlignment.Center };
         text.UseResource(TextBlock.ForegroundProperty, "MeowFilm.Brush.Text");
         AutomationProperties.SetLiveSetting(text, AutomationLiveSetting.Polite);
-        var close = new Button { Content = "\uE711", Width = 30, Height = 30, Visibility = persistent ? Visibility.Collapsed : Visibility.Visible };
-        close.UseResource(StyleProperty, "MeowFilm.IconButton"); AutomationProperties.SetName(close, "关闭通知");
-        var layout = new DockPanel(); DockPanel.SetDock(close, Dock.Right); layout.Children.Add(close); layout.Children.Add(text);
-        var card = new Border { Child = layout, Padding = new(16, 10, 10, 10), Margin = new(0, 0, 0, 8), CornerRadius = new(10), BorderThickness = new(1) };
-        card.UseResource(Border.BackgroundProperty, "MeowFilm.Brush.Surface"); card.UseResource(Border.BorderBrushProperty, "MeowFilm.Brush.Border");
+        var close = new Button { Content = "\uE711", Visibility = persistent ? Visibility.Collapsed : Visibility.Visible };
+        close.UseResource(StyleProperty, "MeowFilm.IconButton");
+        close.Width = close.Height = close.MinWidth = close.MinHeight = 30;
+        close.Padding = new(0);
+        close.VerticalAlignment = VerticalAlignment.Center;
+        AutomationProperties.SetName(close, "关闭通知");
+        var layout = new Grid { ColumnSpacing = 12 };
+        layout.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        layout.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
+        Grid.SetColumn(text, 0);
+        Grid.SetColumn(close, 1);
+        layout.Children.Add(text);
+        layout.Children.Add(close);
+        var card = new Border
+        {
+            Child = layout,
+            Padding = new(16, 10, 10, 10),
+            Margin = new(0, 0, 0, 8),
+            CornerRadius = new(10),
+            BorderThickness = new(1),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Shadow = new ThemeShadow(),
+            Translation = new Vector3(0, 0, 16)
+        };
+        card.UseResource(Border.BackgroundProperty, "MeowFilm.Brush.FloatingSurface");
+        card.UseResource(Border.BorderBrushProperty, "MeowFilm.Brush.Border");
         var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
         var item = new Item(source, message, card, timer, persistent);
         timer.Tick += (_, _) => { if (!item.Hovered && !DesktopVisual.ContainsFocus(card)) Remove(item); };

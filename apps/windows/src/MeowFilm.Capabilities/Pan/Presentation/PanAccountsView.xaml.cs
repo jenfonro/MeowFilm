@@ -1,3 +1,4 @@
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
@@ -6,7 +7,6 @@ using Windows.System;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Data;
 
 namespace MeowFilm.Capabilities;
 
@@ -22,17 +22,18 @@ public partial class PanAccountsView : UserControl
     private bool formQr;
     private Button? loginAnchor;
     private (PanAccountRow Row, long? Revision)? logout;
-    private PanAccounts? Owner => DataContext as PanAccounts;
+    public PanAccounts? Accounts => DataContext as PanAccounts;
+    private PanAccounts? Owner => Accounts;
     private bool Active => IsLoaded && DesktopVisual.IsVisible(this) && window?.WindowState != DesktopWindowState.Minimized;
 
     public PanAccountsView()
     {
         InitializeComponent();
         ModalStash.Children.Clear();
-        Loaded += (_, _) => Attach();
+        Loaded += (_, _) => { Bindings?.Update(); Attach(); };
         Unloaded += (_, _) => Detach();
         SizeChanged += (_, _) => SizePopup();
-        DataContextChanged += (_, _) => { Detach(); if (IsLoaded) Attach(); };
+        DataContextChanged += (_, _) => { Bindings?.Update(); Detach(); if (IsLoaded) Attach(); };
     }
     private void Attach()
     {
@@ -118,10 +119,6 @@ public partial class PanAccountsView : UserControl
                         ? new PasswordBox { Style = (Style)DesktopVisual.Resource(this, "Account.Password") }
                         : new TextBox { Style = (Style)DesktopVisual.Resource(this, "Settings.TextBox") };
                     input.Tag = field;
-                    input.SetBinding(Control.IsEnabledProperty, new Binding
-                    {
-                        Path = new PropertyPath(nameof(PanAccounts.CanSave)), Mode = BindingMode.OneWay
-                    });
                     input.Margin = new(0, 0, 0, 14);
                     AutomationProperties.SetName(input, field.Label);
                     CredentialInputs.Children.Add(input);
@@ -257,5 +254,113 @@ public partial class PanAccountsView : UserControl
         DesktopModalHost.CloseFor(this, LogoutPopupSurface);
         if (Active && Owner is { } owner && confirmation is { } captured &&
             captured.Row.Revision == captured.Revision) await owner.LogoutAsync(captured.Row);
+    }
+
+    private PanAccountRow ResolveDebugRow(PanAccounts owner, string? platform)
+    {
+        if (owner.Rows.Count == 0)
+            throw DebugApiException.InvalidState("Pan account rows are not loaded.");
+        if (string.IsNullOrWhiteSpace(platform))
+            return owner.Rows.FirstOrDefault(r => r.CanLogin) ?? owner.Rows[0];
+        var key = platform.Trim();
+        return owner.Rows.FirstOrDefault(r =>
+            string.Equals(r.Provider, key, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(r.Name, key, StringComparison.OrdinalIgnoreCase))
+            ?? throw DebugApiException.NotFound($"Pan platform not found: '{platform}'.");
+    }
+
+    internal async Task<object> DebugAccountLoginAsync(string? platform, bool close, string? mode, CancellationToken cancellationToken)
+    {
+        if (Owner is not { } owner)
+            throw DebugApiException.InvalidState("Pan accounts owner is unavailable.");
+        if (close)
+        {
+            DesktopModalHost.CloseFor(this, LoginSurface);
+            await owner.CloseLoginAsync();
+            return new { executed = true, domain = "film", command = "account.login", closed = true, loginOpen = owner.LoginOpen };
+        }
+        if (observed is null) Attach();
+        var row = ResolveDebugRow(owner, platform);
+        if (logoutShowing) DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+        var normalizedMode = mode?.Trim().ToLowerInvariant();
+        if (normalizedMode == "manual")
+        {
+            if (!row.CanEdit)
+                throw DebugApiException.InvalidState($"Pan account '{row.Provider}' cannot open credential editor right now.");
+            await owner.OpenCredentialsAsync(row);
+        }
+        else if (row.CanLogin)
+        {
+            await owner.OpenLoginAsync(row);
+            if (normalizedMode == "qr" && !owner.QrMode && row.SupportsQr)
+                await owner.SwitchMethodAsync(qr: true);
+        }
+        else if (row.CanEdit)
+        {
+            await owner.OpenCredentialsAsync(row);
+        }
+        else
+        {
+            throw DebugApiException.InvalidState($"Pan account '{row.Provider}' cannot start login (status: {row.Status ?? "unknown"}).");
+        }
+        SyncLogin();
+        return new
+        {
+            executed = true,
+            domain = "film",
+            command = "account.login",
+            platform = row.Provider,
+            name = row.Name,
+            loginOpen = owner.LoginOpen,
+            qrMode = owner.QrMode
+        };
+    }
+
+    internal async Task<object> DebugAccountLogoutAsync(string? platform, bool close, bool confirm, CancellationToken cancellationToken)
+    {
+        if (Owner is not { } owner)
+            throw DebugApiException.InvalidState("Pan accounts owner is unavailable.");
+        if (close)
+        {
+            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+            logout = null;
+            return new { executed = true, domain = "film", command = "account.logout", closed = true };
+        }
+        if (observed is null) Attach();
+        var row = ResolveDebugRow(owner, platform);
+        if (!row.CanLogout)
+            throw DebugApiException.InvalidState($"Pan account '{row.Provider}' cannot logout (status: {row.Status ?? "unknown"}).");
+        if (loginShowing)
+        {
+            DesktopModalHost.CloseFor(this, LoginSurface);
+            await owner.CloseLoginAsync();
+        }
+        if (confirm)
+        {
+            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+            await owner.LogoutAsync(row);
+            return new
+            {
+                executed = true,
+                domain = "film",
+                command = "account.logout",
+                platform = row.Provider,
+                name = row.Name,
+                confirmed = true,
+                status = row.Status
+            };
+        }
+        logout = (row, row.Revision);
+        logoutAnchor = null;
+        ShowLogout();
+        return new
+        {
+            executed = true,
+            domain = "film",
+            command = "account.logout",
+            platform = row.Provider,
+            name = row.Name,
+            popupOpen = true
+        };
     }
 }

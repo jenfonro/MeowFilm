@@ -1,0 +1,15 @@
+<UserControl x:Class="MeowFilm.Desktop.ShellNavigationGroupHeader"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <StackPanel>
+  <Border Height="1" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="14,0"/>
+  <Grid Margin="14,16,8,6">
+   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+   <TextBlock Text="{x:Bind Group.Name,Mode=OneWay}" Style="{StaticResource MeowFilm.NavigationGroup}" Margin="0" VerticalAlignment="Center"/>
+   <Button Grid.Column="1" Command="{x:Bind Group.Action,Mode=OneWay}" Visibility="{x:Bind Group.HasAction,Mode=OneWay,FallbackValue=Collapsed}"
+           AutomationProperties.Name="{x:Bind Group.ActionAutomationName,Mode=OneWay}"
+           Content="&#xE710;" FontFamily="{StaticResource MeowFilm.Font.Icons}"
+           Style="{StaticResource MeowFilm.QuietButton}" Width="28" Height="28" MinHeight="28" Padding="0"/>
+  </Grid>
+ </StackPanel>
+</UserControl>

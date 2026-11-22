@@ -87,7 +87,7 @@ public static class AppLauncher
                     debugServer = new DebugControlHttpServer(
                         debugSession,
                         debugDiagnostics,
-                        () => Volatile.Read(ref activeShell),
+                        () => Volatile.Read(ref activeShell)?.DebugHost,
                         () => Volatile.Read(ref activeRuntime),
                         () => Volatile.Read(ref activeStore));
                     DebugLog.Info(DebugCategories.Lifecycle, "app.launch", "debug.started", new

@@ -31,6 +31,13 @@ public partial class MusicDesktopLyricLineView : UserControl
     private void UpdateRow()
     {
         if (PlainText is null) return;
+        PlainText.Text = Row?.Text ?? "";
+        if (TranslationText is not null) TranslationText.Text = Row?.Translation ?? "";
+        if (Normal is not null)
+        {
+            PlainText.Foreground = Normal;
+            if (TranslationText is not null) TranslationText.Foreground = Normal;
+        }
         Words.Children.Clear();
         if (Row?.Words is { } words)
             foreach (var word in words) Words.Children.Add(new MusicLyricWordView
@@ -47,6 +54,8 @@ public partial class MusicDesktopLyricLineView : UserControl
     }
     private void UpdateNormalColor()
     {
+        if (PlainText is not null && Normal is not null) PlainText.Foreground = Normal;
+        if (TranslationText is not null && Normal is not null) TranslationText.Foreground = Normal;
         if (Words is null) return;
         foreach (var word in Words.Children.OfType<MusicLyricWordView>()) word.Foreground = Normal;
     }

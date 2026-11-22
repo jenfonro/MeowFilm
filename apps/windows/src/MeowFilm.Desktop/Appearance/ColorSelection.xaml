@@ -6,8 +6,8 @@
  <local:WrapPanel>
   <ComboBox x:Name="Choices" Width="190" Style="{StaticResource MeowFilm.SettingsComboBox}"
             DisplayMemberPath="Name" SelectedValuePath="Key" SelectionChanged="Choice_Changed"
-            AutomationProperties.Name="{Binding Label,ElementName=Root}"/>
-  <local:ColorPicker x:Name="Custom" Margin="12,0,0,0" Label="{Binding Label,ElementName=Root}"
+            AutomationProperties.Name="{x:Bind Label,Mode=OneWay}"/>
+  <local:ColorPicker x:Name="Custom" Margin="12,0,0,0" Label="{x:Bind Label,Mode=OneWay}"
                      ColorCommitted="Custom_Committed"/>
  </local:WrapPanel>
 </UserControl>

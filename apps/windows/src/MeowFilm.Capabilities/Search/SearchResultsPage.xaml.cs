@@ -12,6 +12,7 @@ namespace MeowFilm.Capabilities;
 public partial class SearchResultsView : UserControl, IDesktopHeaderSource
 {
     private readonly SearchResultsPage page;
+    public SearchResultsPage Page => page;
     private bool cardSizeUpdateQueued;
     private int filmColumns = 1;
     private IDisposable? filmVisibility;
@@ -133,10 +134,6 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         if (novel && page.Novel is { } module) { module.SearchWebOwner = this; PublishNovel(); }
         HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
-    private FrameworkElement? novelLayout;
-    private MeowFilm.Desktop.WrapPanel? novelBooks, novelStatus;
-    private TextBlock? novelState;
-    private Button? novelMore, novelCancel;
     private bool novelBooksDirty = true, novelStatesDirty = true;
     private readonly Dictionary<string, TextBlock> novelStatuses = new(StringComparer.Ordinal);
     private readonly Dictionary<string, NovelSearchCard> novelCards = new(StringComparer.Ordinal);
@@ -147,35 +144,35 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         if (index < panel.Children.Count && ReferenceEquals(panel.Children[index], child)) return;
         panel.Children.Remove(child); panel.Children.Insert(index, child);
     }
+    private Style? SharedStyle(string key) => DesktopVisual.Resource(this, key) as Style;
     internal void PublishNovel()
     {
         if (page.SelectedTab != "novel" || page.Novel is not { } module) return;
-        if (novelLayout is null)
-        {
-            var layout = new StackPanel(); novelStatus = new MeowFilm.Desktop.WrapPanel(); novelBooks = new MeowFilm.Desktop.WrapPanel(); novelState = NovelUi.Text("", muted: true);
-            novelMore = NovelUi.Button("加载更多", () => _ = page.LoadMoreNovelAsync());
-            novelCancel = NovelUi.Button("取消", module.Search.Cancel);
-            layout.Children.Add(novelStatus); layout.Children.Add(novelBooks); layout.Children.Add(novelState);
-            layout.Children.Add(NovelUi.Bar(novelMore, novelCancel)); novelLayout = layout; NovelScroll.Content = layout;
-        }
         if (novelStatesDirty)
         {
             novelStatesDirty = false;
             var ids = module.Search.States.Select(state => state.Source.InstallationId).ToHashSet(StringComparer.Ordinal);
             foreach (var id in novelStatuses.Keys.Where(id => !ids.Contains(id)).ToArray())
             {
-                novelStatus!.Children.Remove(novelStatuses[id]); novelStatuses.Remove(id);
+                NovelStatus.Children.Remove(novelStatuses[id]); novelStatuses.Remove(id);
             }
             for (int index = 0; index < module.Search.States.Count; index++)
             {
                 var source = module.Search.States[index];
                 if (!novelStatuses.TryGetValue(source.Source.InstallationId, out var text))
                 {
-                    text = NovelUi.Text("", 12, true); novelStatuses.Add(source.Source.InstallationId, text);
+                    text = new TextBlock
+                    {
+                        Style = SharedStyle("MeowFilm.MutedText"),
+                        FontSize = 12,
+                        FontWeight = Microsoft.UI.Text.FontWeights.Normal,
+                        Margin = new Thickness(0, 0, 12, 8)
+                    };
+                    novelStatuses.Add(source.Source.InstallationId, text);
                 }
                 string value = source.Source.Name + " · " + source.Status;
                 if (text.Text != value) text.Text = value;
-                PlaceNovelChild(novelStatus!, text, index);
+                PlaceNovelChild(NovelStatus, text, index);
             }
         }
         if (novelBooksDirty)
@@ -184,35 +181,61 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
             var ids = module.Search.Books.Select(book => book.SourceIdentity).ToHashSet(StringComparer.Ordinal);
             foreach (var id in novelCards.Keys.Where(id => !ids.Contains(id)).ToArray())
             {
-                novelBooks!.Children.Remove(novelCards[id].Button); novelCards.Remove(id);
+                NovelBooks.Children.Remove(novelCards[id].Button); novelCards.Remove(id);
             }
             for (int index = 0; index < module.Search.Books.Count; index++)
             {
                 var book = module.Search.Books[index];
                 if (!novelCards.TryGetValue(book.SourceIdentity, out var card))
                 {
-                    card = new(module, page, book); novelCards.Add(book.SourceIdentity, card);
+                    card = new(this, module, page, book); novelCards.Add(book.SourceIdentity, card);
                 }
                 else card.Update(module, book);
-                PlaceNovelChild(novelBooks!, card.Button, index);
+                PlaceNovelChild(NovelBooks, card.Button, index);
             }
         }
-        novelState!.Text = module.Search.Status; novelMore!.IsEnabled = module.Search.CanLoadMore; novelCancel!.IsEnabled = module.Search.Loading;
+        NovelState.Text = module.Search.Status;
+        NovelMoreButton.IsEnabled = module.Search.CanLoadMore;
+        NovelCancelButton.IsEnabled = module.Search.Loading;
     }
     private sealed class NovelSearchCard
     {
         internal Button Button { get; }
         private readonly StackPanel content = new() { Width = 148, Margin = new(0, 0, 24, 24) };
-        private readonly TextBlock title = NovelUi.Text("", 15), author = NovelUi.Text("", 12, true);
+        private readonly TextBlock title;
+        private readonly TextBlock author;
         private NovelImage image;
         private NovelCapability module;
         private NovelBook book;
-        internal NovelSearchCard(NovelCapability module, SearchResultsPage page, NovelBook book)
+        internal NovelSearchCard(SearchResultsView ownerView, NovelCapability module, SearchResultsPage page, NovelBook book)
         {
             this.module = module; this.book = book;
+            title = new TextBlock
+            {
+                Style = ownerView.SharedStyle("MeowFilm.Text"),
+                FontSize = 15,
+                FontWeight = Microsoft.UI.Text.FontWeights.Normal,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            author = new TextBlock
+            {
+                Style = ownerView.SharedStyle("MeowFilm.MutedText"),
+                FontSize = 12,
+                FontWeight = Microsoft.UI.Text.FontWeights.Normal,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
             image = Cover(module, book); content.Children.Add(image); content.Children.Add(title); content.Children.Add(author);
-            Button = NovelUi.Button(book.Name, () => this.module.RunUi(() => page.OpenNovelAsync(this.book)));
-            Button.Content = content; Button.Padding = new(0); Update(module, book);
+            Button = new Button
+            {
+                Style = ownerView.SharedStyle("MeowFilm.QuietButton"),
+                Content = content,
+                Padding = new Thickness(0),
+                FontWeight = Microsoft.UI.Text.FontWeights.Normal,
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                VerticalContentAlignment = VerticalAlignment.Top
+            };
+            Button.Click += (_, _) => this.module.RunUi(() => page.OpenNovelAsync(this.book));
+            Update(module, book);
         }
         private static NovelImage Cover(NovelCapability module, NovelBook book) => new(module.Sources, book)
             { Width = 148, Height = 200, Margin = new(0, 0, 0, 10) };
@@ -230,6 +253,8 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
             AutomationProperties.SetName(Button, next.Name); AutomationProperties.SetName(image, next.Name + "封面");
         }
     }
+    private void NovelMore_Click(object sender, RoutedEventArgs e) => _ = page.LoadMoreNovelAsync();
+    private void NovelCancel_Click(object sender, RoutedEventArgs e) => page.Novel?.Search.Cancel();
     internal void ReleaseMusic()
     {
         MusicHost.Content = null;
@@ -250,6 +275,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
                     ? Windows.UI.ViewManagement.UIElementType.WindowText : Windows.UI.ViewManagement.UIElementType.GrayText)
                 : (Brush)DesktopVisual.Resource(button, !button.IsEnabled ? "MeowFilm.Brush.Disabled"
                     : tab.Selected ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Muted");
+            indicator.Visibility = tab.Selected ? Visibility.Visible : Visibility.Collapsed;
             indicator.Background = contrast ? button.Foreground : (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.Accent");
         }
         void Changed(object? owner, PropertyChangedEventArgs args) => Refresh();
@@ -269,6 +295,7 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
     {
         if (sender is Button { Tag: string tab }) await page.OpenTabAsync(tab);
     }
+    private void RawList_Click(object sender, RoutedEventArgs e) => page.RawListMode = RawListToggle.IsChecked == true;
     private async void More_Click(object sender, RoutedEventArgs e) => await page.LoadMoreAsync();
     private async void Card_Activated(object? sender, FilmCardActivatedEventArgs e) => await page.OpenCardAsync(e.Item);
 }

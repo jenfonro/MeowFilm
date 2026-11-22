@@ -49,7 +49,7 @@ public sealed partial class ShellWindow
         _ => Task.CompletedTask
     };
 
-    private async Task OpenPlayerDetailAsync(ModuleSession session, IDesktopGlobalSurfaceSource source)
+    internal async Task OpenPlayerDetailAsync(ModuleSession session, IDesktopGlobalSurfaceSource source)
     {
         if (!CanPresentPlayerSurface(session)) return;
         var view = source.GetGlobalSurface(DesktopGlobalSurface.PlayerDetail)
@@ -89,7 +89,7 @@ public sealed partial class ShellWindow
         }
     }
 
-    private Task ClosePlayerDetailAsync()
+    internal Task ClosePlayerDetailAsync()
     {
         if (!_playerDetailOpen && PlayerDetailSurface.Visibility != Visibility.Visible) return Task.CompletedTask;
         _playerDetailOpen = false;
@@ -101,7 +101,7 @@ public sealed partial class ShellWindow
         return Task.CompletedTask;
     }
 
-    private async Task OpenQueueAsync(ModuleSession session, IDesktopGlobalSurfaceSource source)
+    internal async Task OpenQueueAsync(ModuleSession session, IDesktopGlobalSurfaceSource source)
     {
         if (!CanPresentPlayerSurface(session)) return;
         var view = source.GetGlobalSurface(DesktopGlobalSurface.PlayQueue)
@@ -139,7 +139,7 @@ public sealed partial class ShellWindow
         }
     }
 
-    private Task CloseQueueAsync()
+    internal Task CloseQueueAsync()
     {
         if (!_queueOpen && QueueSurface.Visibility != Visibility.Visible) return Task.CompletedTask;
         _queueOpen = false;
@@ -164,7 +164,7 @@ public sealed partial class ShellWindow
             _ = CloseQueueAsync();
     }
 
-    private bool CanPresentPlayerSurface(ModuleSession session) =>
+    internal bool CanPresentPlayerSurface(ModuleSession session) =>
         !_isClosing &&
         _current is not null &&
         (_currentPage is not null || _current.IsSettingsOpen || _current.Module is not IDesktopImmersiveSource { IsImmersive: true }) &&
@@ -174,24 +174,25 @@ public sealed partial class ShellWindow
     private void AnimatePlayerDetail(bool open, long generation)
     {
         var presented = PlayerDetailTransform.Y;
-        detailMotion?.Stop();
+        _motion.StopDetail();
         var height = Math.Max(1, PresentationSurface.ActualHeight);
         var from = Math.Clamp(presented, 0, height);
         if (open && from < 1) from = height;
         var to = open ? 0 : height;
         PlayerDetailTransform.Y = from;
-        if (ReducedMotion || !IsVisible || PlayerDetailSurface.Visibility != Visibility.Visible || Math.Abs(to - from) < .5)
+        _nativeCaption?.Refresh();
+        if (ShellSurfaceMotion.ReducedMotion || !IsVisible || PlayerDetailSurface.Visibility != Visibility.Visible || Math.Abs(to - from) < .5)
         {
             Complete();
             return;
         }
         var duration = TimeSpan.FromMilliseconds((open ? 520d : 360d) * Math.Abs(to - from) / height);
-        detailMotion = Animate(PlayerDetailTransform, "Y", from, to, duration, Complete);
+        _motion.StartDetail(PlayerDetailTransform, from, to, duration, Complete);
 
         void Complete()
         {
             if (generation != _playerDetailGeneration) return;
-            detailMotion?.Stop();
+            _motion.StopDetail();
             PlayerDetailTransform.Y = to;
             if (!open)
             {
@@ -203,30 +204,31 @@ public sealed partial class ShellWindow
             {
                 DesktopViewport.NotifyTransformSettled(PlayerDetailSurface);
             }
+            _nativeCaption?.RefreshImmediate();
         }
     }
 
     private void AnimateQueue(bool open, long generation)
     {
         var presented = QueueTransform.X;
-        queueMotion?.Stop();
+        _motion.StopQueue();
         var width = Math.Max(1, QueueSurface.ActualWidth > 0 ? QueueSurface.ActualWidth : QueueSurface.Width);
         var from = Math.Clamp(presented, 0, width + 24);
         if (open && from < 1) from = width + 24;
         var to = open ? 0 : width + 24;
         QueueTransform.X = from;
-        if (ReducedMotion || !IsVisible)
+        if (ShellSurfaceMotion.ReducedMotion || !IsVisible)
         {
             Complete();
             return;
         }
         var duration = TimeSpan.FromMilliseconds(open ? 180 : 120);
-        queueMotion = Animate(QueueTransform, "X", from, to, duration, Complete);
+        _motion.StartQueue(QueueTransform, from, to, duration, Complete);
 
         void Complete()
         {
             if (generation != _queueGeneration) return;
-            queueMotion?.Stop();
+            _motion.StopQueue();
             QueueTransform.X = to;
             if (!open)
             {

@@ -34,9 +34,9 @@
                     <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
                 <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Button Content="{Binding Label}" Tag="{Binding}" Click="OnActionClick"
-                                IsEnabled="{Binding IsEnabled}" AutomationProperties.Name="{Binding AutomationName}"
+                    <DataTemplate x:DataType="local:DesktopHeaderActionItem">
+                        <Button Content="{x:Bind Label}" Tag="{x:Bind}" Click="OnActionClick"
+                                IsEnabled="{x:Bind IsEnabled, Mode=OneWay}" AutomationProperties.Name="{x:Bind AutomationName}"
                                 Style="{ThemeResource MeowFilm.HeaderAction}" />
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>

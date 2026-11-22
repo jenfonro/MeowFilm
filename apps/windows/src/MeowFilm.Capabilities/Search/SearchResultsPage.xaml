@@ -18,28 +18,38 @@
      </Border>
      <Border x:Name="SelectionIndicator" Width="20" Height="3" CornerRadius="1.5"
       HorizontalAlignment="Center" VerticalAlignment="Bottom" IsHitTestVisible="False"
-      Background="{ThemeResource MeowFilm.Brush.Accent}" Visibility="{Binding Selected,Converter={StaticResource Visible}}"/>
+      Background="{ThemeResource MeowFilm.Brush.Accent}" Visibility="Collapsed"/>
     </Grid>
    </ControlTemplate></Setter.Value></Setter>
   </Style>
  </ResourceDictionary></UserControl.Resources>
  <Grid Margin="40,20,24,20" MaxWidth="1490"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-  <StackPanel Margin="0,0,0,24"><TextBlock Text="{Binding Query}" FontSize="23" TextTrimming="CharacterEllipsis"/>
+  <StackPanel Margin="0,0,0,24"><TextBlock Text="{x:Bind Page.Query, Mode=OneWay}" FontSize="23" TextTrimming="CharacterEllipsis"/>
    <Grid Margin="0,14,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-    <ScrollViewer x:Name="TabScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"><ItemsControl ItemsSource="{Binding Tabs}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate>
-     <Button Content="{Binding Label}" Tag="{Binding Id}" Style="{StaticResource Search.Tab}" Loaded="Tab_Loaded" Click="Tab_Click"/>
+    <ScrollViewer x:Name="TabScroll" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled"><ItemsControl ItemsSource="{x:Bind Page.Tabs}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate x:DataType="local:SearchResultTab">
+     <Button Content="{x:Bind Label}" Tag="{x:Bind Id}" Style="{StaticResource Search.Tab}" Loaded="Tab_Loaded" Click="Tab_Click"/>
     </DataTemplate></ItemsControl.ItemTemplate></ItemsControl></ScrollViewer>
-    <StackPanel x:Name="FilmTools" Grid.Column="1" Orientation="Horizontal" Visibility="Collapsed" Margin="16,0,0,0"><TextBlock Text="{Binding MetadataStatus}" Margin="0,0,16,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/><TextBlock Text="原始列表" VerticalAlignment="Center" Margin="0,0,8,0"/><CheckBox x:Name="RawListToggle" IsChecked="{Binding RawListMode,Mode=TwoWay}" Style="{StaticResource Settings.Switch}" VerticalAlignment="Center" AutomationProperties.Name="原始列表"/></StackPanel>
-   </Grid><desktop:NoticeOutlet Message="{Binding Error}"/>
+    <StackPanel x:Name="FilmTools" Grid.Column="1" Orientation="Horizontal" Visibility="Collapsed" Margin="16,0,0,0"><TextBlock Text="{x:Bind Page.MetadataStatus, Mode=OneWay}" Margin="0,0,16,0" Style="{StaticResource Capability.Muted}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/><TextBlock Text="原始列表" VerticalAlignment="Center" Margin="0,0,8,0"/><CheckBox x:Name="RawListToggle" IsChecked="{x:Bind Page.RawListMode, Mode=OneWay}" Click="RawList_Click" Style="{StaticResource MeowFilm.Switch}" VerticalAlignment="Center" AutomationProperties.Name="原始列表"/></StackPanel>
+   </Grid><desktop:NoticeOutlet Message="{x:Bind Page.Error, Mode=OneWay}"/>
   </StackPanel>
   <ContentControl x:Name="MusicHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
-  <ScrollViewer x:Name="NovelScroll" x:FieldModifier="internal" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" AutomationProperties.Name="小说搜索结果"/>
+  <ScrollViewer x:Name="NovelScroll" x:FieldModifier="internal" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" AutomationProperties.Name="小说搜索结果">
+   <StackPanel x:Name="NovelLayout">
+    <desktop:WrapPanel x:Name="NovelStatus"/>
+    <desktop:WrapPanel x:Name="NovelBooks"/>
+    <TextBlock x:Name="NovelState" Style="{StaticResource MeowFilm.MutedText}" FontWeight="Normal" Margin="0,8,0,0" AutomationProperties.LiveSetting="Polite"/>
+    <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,12,0,0">
+     <Button x:Name="NovelMoreButton" Content="加载更多" Style="{StaticResource MeowFilm.Button}" FontWeight="Normal" Click="NovelMore_Click"/>
+     <Button x:Name="NovelCancelButton" Content="取消" Style="{StaticResource MeowFilm.Button}" FontWeight="Normal" Click="NovelCancel_Click"/>
+    </StackPanel>
+   </StackPanel>
+  </ScrollViewer>
   <Grid x:Name="FilmBody" Grid.Row="1" Visibility="Collapsed">
-   <GridView x:Name="FilmItems" Margin="0,0,-36,0" ItemsSource="{Binding Cards}" SelectionMode="None" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="影视搜索结果" SizeChanged="Film_SizeChanged" ContainerContentChanging="Film_ContainerChanging">
-    <GridView.ItemContainerStyle><Style TargetType="GridViewItem"><Setter Property="Padding" Value="0,0,36,36"/><Setter Property="Margin" Value="0"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Top"/></Style></GridView.ItemContainerStyle>
+   <GridView x:Name="FilmItems" Margin="0,0,-36,0" ItemsSource="{x:Bind Page.Cards, Mode=OneWay}" SelectionMode="None" ScrollViewer.HorizontalScrollBarVisibility="Disabled" AutomationProperties.Name="影视搜索结果" SizeChanged="Film_SizeChanged" ContainerContentChanging="Film_ContainerChanging">
+    <GridView.ItemContainerStyle><Style TargetType="GridViewItem" BasedOn="{StaticResource MeowFilm.BareGridViewItem}"><Setter Property="Padding" Value="0,0,36,36"/></Style></GridView.ItemContainerStyle>
     <GridView.ItemsPanel><ItemsPanelTemplate><ItemsWrapGrid Orientation="Horizontal"/></ItemsPanelTemplate></GridView.ItemsPanel>
-    <GridView.ItemTemplate><DataTemplate><local:FilmCard Activated="Card_Activated"/></DataTemplate></GridView.ItemTemplate>
-    <GridView.Footer><StackPanel><TextBlock Text="{Binding Status}" Margin="0,16" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}" AutomationProperties.LiveSetting="Polite"/><Button Content="加载更多" Click="More_Click" IsEnabled="{Binding CanLoadMore}" HorizontalAlignment="Center" Visibility="{Binding HasMore,Converter={StaticResource Visible}}"/></StackPanel></GridView.Footer>
+    <GridView.ItemTemplate><DataTemplate x:DataType="local:FilmSearchCardItem"><local:FilmCard Activated="Card_Activated"/></DataTemplate></GridView.ItemTemplate>
+    <GridView.Footer><StackPanel><TextBlock Text="{x:Bind Page.Status, Mode=OneWay}" Margin="0,16" HorizontalAlignment="Center" Style="{StaticResource Capability.Muted}" AutomationProperties.LiveSetting="Polite"/><Button Content="加载更多" Click="More_Click" IsEnabled="{x:Bind Page.CanLoadMore, Mode=OneWay}" HorizontalAlignment="Center" Visibility="{x:Bind Page.HasMore, Mode=OneWay, Converter={StaticResource Visible}}"/></StackPanel></GridView.Footer>
    </GridView>
   </Grid>
  </Grid>

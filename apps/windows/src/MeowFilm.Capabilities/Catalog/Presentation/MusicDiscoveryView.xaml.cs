@@ -5,20 +5,30 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicDiscoveryView : UserControl
 {
-    private MusicCapability? Model => (DataContext as MusicCatalogState)?.Owner;
+    public MusicDiscoveryController? Discovery { get; private set; }
+    public MusicSettingsController? Settings { get; private set; }
+
     public MusicDiscoveryView() => InitializeComponent();
+
+    internal void Bind(MusicDiscoveryController discovery, MusicSettingsController settings)
+    {
+        Discovery = discovery;
+        Settings = settings;
+        Bindings.Update();
+    }
+
     private async void Rotate_Click(object sender, RoutedEventArgs e)
-    { if (Model is { } m) await m.RotateDiscoveryAsync(); }
+    { if (Discovery is { } d) await d.RotateDiscoveryAsync(); }
     private async void Cancel_Click(object sender, RoutedEventArgs e)
-    { if (Model is { } m) await m.CancelDiscoveryAsync(); }
+    { if (Discovery is { } d) await d.CancelDiscoveryAsync(); }
     private async void Keyword_Click(object sender, RoutedEventArgs e)
-    { if (Model is { } m && sender is Button { Tag: MusicDiscoveryKeyword word }) await m.SearchDiscoveryKeywordAsync(word); }
+    { if (Discovery is { } d && sender is Button { Tag: MusicDiscoveryKeyword word }) await d.SearchDiscoveryKeywordAsync(word); }
     private async void Chart_Click(object sender, RoutedEventArgs e)
-    { if (Model is { } m && sender is Button { Tag: MusicDiscoveryChart chart }) await m.OpenDiscoveryChartAsync(chart); }
+    { if (Discovery is { } d && sender is Button { Tag: MusicDiscoveryChart chart }) await d.OpenDiscoveryChartAsync(chart); }
     private async void Play_Click(object sender, RoutedEventArgs e)
-    { if (Model is { } m && sender is Button { Tag: MusicDiscoverySong song }) await m.UseDiscoverySongAsync(song, true); }
+    { if (Discovery is { } d && sender is Button { Tag: MusicDiscoverySong song }) await d.UseDiscoverySongAsync(song, true); }
     private async void Queue_Click(object sender, RoutedEventArgs e)
-    { if (Model is { } m && sender is Button { Tag: MusicDiscoverySong song }) await m.UseDiscoverySongAsync(song, false); }
+    { if (Discovery is { } d && sender is Button { Tag: MusicDiscoverySong song }) await d.UseDiscoverySongAsync(song, false); }
     private async void ClearHistory_Click(object sender, RoutedEventArgs e)
-    { if (Model is { } m) await m.ClearSearchHistoryAsync(); }
+    { if (Settings is { } s) await s.ClearSearchHistoryAsync(); }
 }

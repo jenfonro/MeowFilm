@@ -9,6 +9,7 @@ using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities.Film.Rules;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
@@ -17,7 +18,7 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities;
 
 public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationSource, IDesktopNavigationRetention, IDesktopGeneralSettingsSource,
-    IRuntimeRecoveryScope
+    IDebugModuleAdapterSource, IRuntimeRecoveryScope
 {
     internal const string HomeRoute = "film-home";
     internal const string DataRoute = "film-data";
@@ -32,6 +33,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
     private IReadOnlySet<string> retainedNavigationLocations = new HashSet<string>(StringComparer.Ordinal);
     private readonly FilmView view;
     private readonly FrameworkElement settings;
+    private readonly FilmDebugAdapter debugAdapter;
     private readonly FilmRuleService? rules;
     private readonly FilmSourceService? sources;
     private readonly FilmSearchService? search;
@@ -124,11 +126,26 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         settings = rules is not null && sources is not null
             ? new FilmSettingsView(rules, sources, storage ?? sources.Storage, business, () => Playback?.ActiveTarget, metadata)
             : new Grid { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) }; // Home-only test composition.
+        debugAdapter = new(this);
     }
 
     public string Id => "film";
     public string Title => "影视";
     public string Version => "0.1.0";
+    public IDebugModuleAdapter DebugAdapter => debugAdapter;
+    internal FrameworkElement DebugSettings => settings;
+    internal string DebugRoute => route;
+    internal FilmPlaybackSession? DebugFilmPlayback => filmPlayback;
+    internal FilmPlayback? DebugNativeFilmPlayback => nativeFilmPlayback;
+    internal async Task SwitchToDataSectionAsync(FilmDataSection selected, CancellationToken cancellationToken)
+    {
+        if (!ReferenceEquals(ActiveData, selected))
+        {
+            ActiveData = selected;
+            Changed(nameof(ActiveData));
+        }
+        await NavigateAsync(DataRoute, cancellationToken);
+    }
     public ObservableCollection<NavigationItem> Navigation { get; }
     public FrameworkElement View => view;
     public FrameworkElement SettingsView => settings;

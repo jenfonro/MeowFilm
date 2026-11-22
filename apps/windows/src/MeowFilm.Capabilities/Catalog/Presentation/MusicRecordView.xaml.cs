@@ -1,19 +1,26 @@
-using Microsoft.UI.Xaml.Data;
+using System.Diagnostics;
+using System.Numerics;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
-using Windows.System;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Shapes;
 using Microsoft.UI.Xaml.Media.Animation;
+using Microsoft.UI.Xaml.Shapes;
+using Windows.Foundation;
+using Windows.System;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
-// One native animation clock per visible disc; never starts or samples media.
+// One compositor-owned rotation animation per visible disc; never occupies UI frames or samples media.
 public partial class MusicRecordView : UserControl
 {
+    private const double SpinPeriodSeconds = 24.0;
+    private static readonly SolidColorBrush DiscBaseBrush = MusicVisuals.Brush("#161719");
+    private static readonly SolidColorBrush GrooveStrokeBrush = MusicVisuals.Brush("#3C444547");
+
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(nameof(Address),
         typeof(string), typeof(MusicRecordView), new PropertyMetadata("", Changed));
     public static readonly DependencyProperty PlayingProperty = DependencyProperty.Register(nameof(Playing),
@@ -26,21 +33,28 @@ public partial class MusicRecordView : UserControl
         typeof(bool), typeof(MusicRecordView), new PropertyMetadata(false, SwipeStateChanged));
     public static readonly DependencyProperty SwipeIdentityProperty = DependencyProperty.Register(nameof(SwipeIdentity),
         typeof(string), typeof(MusicRecordView), new PropertyMetadata("", SwipeStateChanged));
+
     public string Address { get => (string)GetValue(AddressProperty); set => SetValue(AddressProperty, value); }
     public bool Playing { get => (bool)GetValue(PlayingProperty); set => SetValue(PlayingProperty, value); }
     public string TrackIdentity { get => (string)GetValue(TrackIdentityProperty); set => SetValue(TrackIdentityProperty, value); }
     public string ArtworkIdentity { get => (string)GetValue(ArtworkIdentityProperty); set => SetValue(ArtworkIdentityProperty, value); }
     public bool SwipeEnabled { get => (bool)GetValue(SwipeEnabledProperty); set => SetValue(SwipeEnabledProperty, value); }
     public string SwipeIdentity { get => (string)GetValue(SwipeIdentityProperty); set => SetValue(SwipeIdentityProperty, value); }
+
     public static readonly DependencyProperty PaletteBrushProperty = DependencyProperty.Register(nameof(PaletteBrush),
         typeof(Brush), typeof(MusicRecordView), new PropertyMetadata(null, PaletteChanged));
     public Brush PaletteBrush => (Brush)GetValue(PaletteBrushProperty);
     public event EventHandler? PaletteUpdated;
     private static void PaletteChanged(DependencyObject value, DependencyPropertyChangedEventArgs e)
         => ((MusicRecordView)value).PaletteUpdated?.Invoke(value, EventArgs.Empty);
-    private Storyboard? clock;
+
+    private Visual? discVisual;
+    private ScalarKeyFrameAnimation? spinAnimation;
+    private LinearEasingFunction? spinEasing;
+    private float retainedAngle;
+    private bool spinning;
+    private long spinStartedAt;
     private Storyboard? swipeMotion;
-    private double retainedAngle;
     private Point pointerOrigin;
     private double gestureOrigin;
     private bool pointerPending;
@@ -57,29 +71,32 @@ public partial class MusicRecordView : UserControl
     public MusicRecordView()
     {
         InitializeComponent();
-        Grooves.Children.Add(new Ellipse { Fill = MusicVisuals.Brush("#161719"), Width = 300, Height = 300 });
+        Grooves.Children.Add(new Ellipse { Fill = DiscBaseBrush, Width = 300, Height = 300 });
         BuildGrooves(compactGrooves, compact: true); BuildGrooves(detailGrooves, compact: false);
         Grooves.Children.Add(compactGrooves); Grooves.Children.Add(detailGrooves);
         UpdateGrooves();
-        SetBinding(PaletteBrushProperty, new Binding { Path = new PropertyPath(nameof(ArtworkImage.PaletteBrush)), Source = Cover, Mode = BindingMode.OneWay });
+        SetValue(PaletteBrushProperty, Cover.PaletteBrush);
+        Cover.RegisterPropertyChangedCallback(ArtworkImage.PaletteBrushProperty, (_, _) => SetValue(PaletteBrushProperty, Cover.PaletteBrush));
         IsTabStop = true;
         PointerPressed += OnPointerDown;
         PointerMoved += OnPointerMove;
         PointerReleased += OnPointerUp;
         PointerCaptureLost += (_, _) => { if (pointerPending) CancelSwipe(); };
         KeyDown += OnRecordKeyDown;
+        DiscVisual.SizeChanged += (_, _) => UpdateDiscCenterPoint();
         Loaded += (_, _) =>
         {
             window = MeowFilm.Desktop.DesktopWindow.GetWindow(this);
             if (window is not null)
             { window.Deactivated += WindowDeactivated; window.VisibilityChanged += WindowVisibilityChanged; }
+            UpdateDiscCenterPoint();
             Sync();
         };
         Unloaded += (_, _) =>
         {
             if (window is not null)
             { window.Deactivated -= WindowDeactivated; window.VisibilityChanged -= WindowVisibilityChanged; }
-            window = null; CancelSwipe(immediate: true); Release();
+            window = null; CancelSwipe(immediate: true); Release(); DisposeComposition();
         };
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
@@ -89,11 +106,13 @@ public partial class MusicRecordView : UserControl
         SizeChanged += (_, e) =>
         {
             UpdateGrooves();
+            UpdateDiscCenterPoint();
             if (e.PreviousSize.Width > 0 && e.NewSize.Width != e.PreviousSize.Width &&
                 (pointerPending || IsSwiping || pendingIdentity is not null || Math.Abs(SwipeTranslation.X) > .5))
                 CancelSwipe();
         };
     }
+
     private void WindowDeactivated(object? sender, EventArgs e) => CancelSwipe(immediate: true);
     private void WindowVisibilityChanged(object? sender, EventArgs e)
     { if (!IsVisible) CancelSwipe(immediate: true); Sync(); }
@@ -106,13 +125,47 @@ public partial class MusicRecordView : UserControl
         compactGrooves.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
         detailGrooves.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
     }
+
     private static void BuildGrooves(Grid host, bool compact)
     {
         for (double radius = 100; radius < 148; radius += compact ? 14 : 1.7)
-            host.Children.Add(new Ellipse { Stroke = MusicVisuals.Brush("#3C444547"),
-                StrokeThickness = compact ? 4 : .65, Width = radius * 2, Height = radius * 2,
-                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center });
+            host.Children.Add(new Ellipse
+            {
+                Stroke = GrooveStrokeBrush,
+                StrokeThickness = compact ? 4 : .65,
+                Width = radius * 2,
+                Height = radius * 2,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            });
     }
+
+    private Visual EnsureDiscVisual()
+    {
+        if (discVisual is null)
+        {
+            discVisual = ElementCompositionPreview.GetElementVisual(DiscVisual);
+            UpdateDiscCenterPoint();
+            discVisual.RotationAngleInDegrees = retainedAngle;
+        }
+        return discVisual;
+    }
+
+    private void UpdateDiscCenterPoint()
+    {
+        if (discVisual is null) return;
+        float cx = (float)(DiscVisual.ActualWidth > 0 ? DiscVisual.ActualWidth * 0.5 : 150.0);
+        float cy = (float)(DiscVisual.ActualHeight > 0 ? DiscVisual.ActualHeight * 0.5 : 150.0);
+        discVisual.CenterPoint = new Vector3(cx, cy, 0f);
+    }
+
+    private float CurrentAngle()
+    {
+        if (!spinning) return retainedAngle;
+        double elapsed = Stopwatch.GetElapsedTime(spinStartedAt).TotalSeconds;
+        return (float)((retainedAngle + elapsed / SpinPeriodSeconds * 360.0) % 360.0);
+    }
+
     private static void Changed(DependencyObject value, DependencyPropertyChangedEventArgs args)
     {
         var record = (MusicRecordView)value;
@@ -125,32 +178,78 @@ public partial class MusicRecordView : UserControl
         {
             // A committed swipe has already taken the old disc out of view.
             // Artwork updates and media retries do not end a track's posture.
-            record.Release(); record.retainedAngle = 0; record.DiscRotation.Angle = 0;
+            record.ResetAngle();
         }
         record.Sync();
     }
+
     private static void SwipeStateChanged(DependencyObject value, DependencyPropertyChangedEventArgs e)
     {
         var record = (MusicRecordView)value;
         if (e.Property == SwipeIdentityProperty || !record.SwipeEnabled)
             record.CancelSwipe(immediate: true);
     }
+
     private void Sync()
     {
         if (!IsLoaded || !IsVisible || !MusicVisuals.CanAnimate(this)) { Release(); return; }
-        if (Playing)
-        {
-            if (clock is null) clock = MusicVisuals.AnimateDouble(DiscRotation, "Angle", retainedAngle,
-                retainedAngle + 360, TimeSpan.FromSeconds(24), forever: true);
-            else clock.Resume();
-        }
-        else clock?.Pause();
+        if (Playing) StartSpin();
+        else Release();
     }
+
+    private void StartSpin()
+    {
+        if (spinning) return;
+        var visual = EnsureDiscVisual();
+        UpdateDiscCenterPoint();
+        spinEasing ??= visual.Compositor.CreateLinearEasingFunction();
+        spinAnimation?.Dispose();
+        var anim = visual.Compositor.CreateScalarKeyFrameAnimation();
+        anim.InsertKeyFrame(0f, retainedAngle);
+        anim.InsertKeyFrame(1f, retainedAngle + 360f, spinEasing);
+        anim.Duration = TimeSpan.FromSeconds(SpinPeriodSeconds);
+        anim.IterationBehavior = AnimationIterationBehavior.Forever;
+        spinAnimation = anim;
+        visual.StartAnimation("RotationAngleInDegrees", anim);
+        spinStartedAt = Stopwatch.GetTimestamp();
+        spinning = true;
+    }
+
     private void Release()
     {
-        retainedAngle = DiscRotation.Angle % 360;
-        clock?.Stop(); clock = null; DiscRotation.Angle = retainedAngle;
+        retainedAngle = CurrentAngle();
+        spinning = false;
+        if (discVisual is not null)
+        {
+            discVisual.StopAnimation("RotationAngleInDegrees");
+            discVisual.RotationAngleInDegrees = retainedAngle;
+        }
+        spinAnimation?.Dispose();
+        spinAnimation = null;
     }
+
+    private void ResetAngle()
+    {
+        spinning = false;
+        retainedAngle = 0f;
+        if (discVisual is not null)
+        {
+            discVisual.StopAnimation("RotationAngleInDegrees");
+            discVisual.RotationAngleInDegrees = 0f;
+        }
+        spinAnimation?.Dispose();
+        spinAnimation = null;
+    }
+
+    private void DisposeComposition()
+    {
+        spinAnimation?.Dispose();
+        spinAnimation = null;
+        spinEasing?.Dispose();
+        spinEasing = null;
+        discVisual = null;
+    }
+
     private void OnPointerDown(object sender, PointerRoutedEventArgs e)
     {
         if (!CanSwipe() || !e.GetCurrentPoint(this).IsInContact) return;
@@ -158,6 +257,7 @@ public partial class MusicRecordView : UserControl
         pointerOrigin = e.GetCurrentPoint(this).Position;
         gestureOrigin = InterruptSwipeMotion(); pointerPending = true; gestureIdentity = SwipeIdentity;
     }
+
     private void OnPointerMove(object sender, PointerRoutedEventArgs e)
     {
         if (!pointerPending) return;
@@ -166,6 +266,7 @@ public partial class MusicRecordView : UserControl
         if (!IsSwiping && !CapturePointer(e.Pointer)) { pointerPending = false; return; }
         IsSwiping = true; e.Handled = true; UpdateSwipeOffset(gestureOrigin + delta);
     }
+
     private void OnPointerUp(object sender, PointerRoutedEventArgs e)
     {
         if (!pointerPending) return;
@@ -173,8 +274,10 @@ public partial class MusicRecordView : UserControl
         if (!IsSwiping) { gestureIdentity = null; AnimateSwipe(0, null); return; }
         e.Handled = true; ReleasePointerCapture(e.Pointer); EndSwipe(commit: true);
     }
+
     private void OnRecordKeyDown(object sender, KeyRoutedEventArgs e)
     { if (Navigate(e.Key)) e.Handled = true; }
+
     internal bool Navigate(VirtualKey key)
     {
         if (key is VirtualKey.Left or VirtualKey.Right && CanSwipe())
@@ -197,10 +300,12 @@ public partial class MusicRecordView : UserControl
         IsSwiping = true;
         gestureIdentity = SwipeIdentity;
     }
+
     internal void UpdateSwipe(double pointerX)
     {
         if (IsSwiping) UpdateSwipeOffset(gestureOrigin + pointerX - pointerOrigin.X);
     }
+
     internal void EndSwipe(bool commit)
     {
         if (!IsSwiping) return;
@@ -222,12 +327,14 @@ public partial class MusicRecordView : UserControl
             else ResolveSwipe(identity);
         });
     }
+
     internal void ResolveSwipe(string identity)
     {
         if (pendingIdentity != identity) return;
         pendingIdentity = null;
         AnimateSwipe(0, null);
     }
+
     internal void CancelSwipe(bool immediate = false)
     {
         pointerPending = IsSwiping = false;
@@ -241,13 +348,16 @@ public partial class MusicRecordView : UserControl
         }
         else AnimateSwipe(0, null);
     }
+
     private bool CanSwipe() => IsLoaded && IsVisible && SwipeEnabled && pendingIdentity is null &&
         !string.IsNullOrEmpty(SwipeIdentity);
+
     private void UpdateSwipeOffset(double value)
     {
         var limit = Math.Max(1, ActualWidth);
         SwipeTranslation.X = Math.Clamp(value, -limit, limit);
     }
+
     private double InterruptSwipeMotion()
     {
         swipeGeneration++;
@@ -256,6 +366,7 @@ public partial class MusicRecordView : UserControl
         SwipeTranslation.X = offset;
         return offset;
     }
+
     private void AnimateSwipe(double target, Action? completed)
     {
         var from = InterruptSwipeMotion();

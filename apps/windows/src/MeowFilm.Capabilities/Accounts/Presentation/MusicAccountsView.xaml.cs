@@ -1,9 +1,9 @@
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Windows.System;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -22,7 +22,7 @@ public partial class MusicAccountsView : UserControl
     private readonly ObservableCollection<MusicAccountTableRow> tableRows = [];
     private readonly MusicAccountTableRow[] publicCatalogs = [new("kw", "酷我音乐"), new("mg", "咪咕音乐")];
     private ObservableCollection<MusicPlatformSettingsRow>? tableSource;
-    private MusicCapability? observed;
+    private MusicAccountsController? observed;
     private bool loginShowing, logoutShowing;
     private Button? logoutAnchor;
     private DesktopWindow? window;
@@ -31,13 +31,15 @@ public partial class MusicAccountsView : UserControl
     private Task? polling;
     private DispatcherTimer? smsCountdown;
     private long seenSmsInputEpoch = -1;
-    private MusicCapability? loginOwner;
-    private (MusicCapability Owner, MusicPlatformAccount Account)? logoutConfirmation;
+    private MusicAccountsController? loginOwner;
+    private (MusicAccountsController Owner, MusicPlatformAccount Account)? logoutConfirmation;
+    public MusicAccountsController? Accounts { get; private set; }
+    public MusicSettingsController? Settings { get; private set; }
     public ReadOnlyObservableCollection<MusicAccountTableRow> AccountTableRows { get; }
     private bool SurfaceVisible => IsLoaded && DesktopVisual.IsVisible(this) && window?.WindowState != DesktopWindowState.Minimized;
     private bool Visible => SurfaceVisible && loginShowing;
     private bool QrVisible => Visible && QrPanel.Visibility == Visibility.Visible;
-    private MusicCapability? Owner => (DataContext as MusicAccountsState)?.Owner;
+    private MusicAccountsController? Owner => Accounts;
 
     public MusicAccountsView()
     {
@@ -45,14 +47,18 @@ public partial class MusicAccountsView : UserControl
         InitializeComponent();
         ModalStash.Children.Clear();
         Loaded += (_, _) => Attach();
-        Unloaded += (_, _) => Detach();
-        DataContextChanged += (_, _) =>
-        {
-            Detach();
-            if (IsLoaded) Attach();
-            else RebuildTableRows();
-        };
+        Unloaded += (_, _) => { if (!IsLoaded) Detach(); };
         RebuildTableRows();
+    }
+
+    internal void Bind(MusicAccountsController accounts, MusicSettingsController settings)
+    {
+        Detach();
+        Accounts = accounts;
+        Settings = settings;
+        Bindings.Update();
+        if (IsLoaded) Attach();
+        else RebuildTableRows();
     }
 
     private async void ShowLogin()
@@ -189,7 +195,7 @@ public partial class MusicAccountsView : UserControl
     {
         if (observed is not null) return;
         observed = Owner;
-        if (observed is not null) observed.AccountsState.PropertyChanged += OwnerChanged;
+        if (observed is not null) observed.PropertyChanged += OwnerChanged;
         ObserveTableRows();
         window = DesktopWindow.GetWindow(this);
         if (window is not null)
@@ -207,7 +213,7 @@ public partial class MusicAccountsView : UserControl
         var old = observed;
         var retiringLogin = loginOwner;
         observed = null;
-        if (old is not null) old.AccountsState.PropertyChanged -= OwnerChanged;
+        if (old is not null) old.PropertyChanged -= OwnerChanged;
         if (tableSource is not null)
             tableSource.CollectionChanged -= PlatformSettingsChanged;
         tableSource = null;
@@ -222,7 +228,7 @@ public partial class MusicAccountsView : UserControl
         if (old is not null && !ReferenceEquals(old, retiringLogin)) _ = Leave(old);
     }
 
-    private static async Task Leave(MusicCapability owner)
+    private static async Task Leave(MusicAccountsController owner)
     {
         try
         {
@@ -236,14 +242,14 @@ public partial class MusicAccountsView : UserControl
 
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!ReferenceEquals(sender, observed?.AccountsState)) return;
+        if (!ReferenceEquals(sender, observed)) return;
         if (logoutConfirmation is { } confirmation &&
             (!ReferenceEquals(observed, confirmation.Owner) || !confirmation.Owner.CanLogoutAccount(confirmation.Account)))
             RetireLogoutPopup();
-        if (e.PropertyName == nameof(MusicCapability.AccountSmsInputEpoch)) ClearSmsInputsIfChanged();
-        if (e.PropertyName == nameof(MusicCapability.AccountSmsRetrySeconds)) RefreshSmsCountdown();
-        if (e.PropertyName is nameof(MusicCapability.HasAccountQr) or nameof(MusicCapability.CanCheckAccountQr) or
-            nameof(MusicCapability.AccountBusy))
+        if (e.PropertyName == nameof(MusicAccountsController.AccountSmsInputEpoch)) ClearSmsInputsIfChanged();
+        if (e.PropertyName == nameof(MusicAccountsController.AccountSmsRetrySeconds)) RefreshSmsCountdown();
+        if (e.PropertyName is nameof(MusicAccountsController.HasAccountQr) or nameof(MusicAccountsController.CanCheckAccountQr) or
+            nameof(MusicAccountsController.AccountBusy))
             RefreshPolling();
         if (loginShowing && observed?.SelectedAccount is { HasSession: true } &&
             !observed.AccountBusy && !observed.HasAccountQr)
@@ -329,7 +335,9 @@ public partial class MusicAccountsView : UserControl
 
     private void CloseLogin_Click(object sender, RoutedEventArgs e) => RetireLoginPopup();
     private void QrMode_Click(object sender, RoutedEventArgs e) => QrMode();
-    private void SmsMode_Click(object sender, RoutedEventArgs e)
+    private void SmsMode_Click(object sender, RoutedEventArgs e) => SmsMode();
+
+    private void SmsMode()
     {
         if (Owner?.ShowAccountSms != true) return;
         QrPanel.Visibility = Visibility.Collapsed;
@@ -400,7 +408,7 @@ public partial class MusicAccountsView : UserControl
         polling = PollVisible(owner, cancellation);
     }
 
-    private async Task PollVisible(MusicCapability owner, CancellationTokenSource cancellation)
+    private async Task PollVisible(MusicAccountsController owner, CancellationTokenSource cancellation)
     {
         string? challenge = owner.AccountQrIdentity;
         try
@@ -492,5 +500,110 @@ public partial class MusicAccountsView : UserControl
         string captcha = SmsCodeInput.Password;
         SmsCodeInput.Password = "";
         await owner.LoginAccountSmsAsync(SmsPhoneInput.Text, "86", captcha);
+    }
+
+    private MusicPlatformSettingsRow ResolveDebugRow(MusicAccountsController owner, string? platform)
+    {
+        if (owner.PlatformSettings.Count == 0)
+            throw DebugApiException.InvalidState("Music account rows are not loaded.");
+        if (string.IsNullOrWhiteSpace(platform))
+            return owner.PlatformSettings.FirstOrDefault(r => r.ShowLogin) ?? owner.PlatformSettings[0];
+        var key = platform.Trim();
+        return owner.PlatformSettings.FirstOrDefault(r =>
+            string.Equals(r.Platform, key, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(r.Name, key, StringComparison.OrdinalIgnoreCase))
+            ?? throw DebugApiException.NotFound($"Music platform not found: '{platform}'.");
+    }
+
+    internal async Task<object> DebugAccountLoginAsync(string? platform, bool close, string? mode, CancellationToken cancellationToken)
+    {
+        if (Owner is not { } owner)
+            throw DebugApiException.InvalidState("Music accounts owner is unavailable.");
+        if (close)
+        {
+            RetireLoginPopup();
+            return new { executed = true, domain = "music", command = "account.login", closed = true, loginOpen = loginShowing };
+        }
+        if (observed is null) Attach();
+        var row = ResolveDebugRow(owner, platform);
+        if (!row.ShowLogin)
+            throw DebugApiException.InvalidState($"Music account '{row.Platform}' cannot start login right now.");
+        if (logoutShowing) RetireLogoutPopup();
+        LoginSurface.Title = row.Name;
+        RetireLoginPopup();
+        loginOwner = owner;
+        QrMode();
+        ShowLogin();
+        await owner.OpenPlatformLoginAsync(row);
+        cancellationToken.ThrowIfCancellationRequested();
+        var normalizedMode = mode?.Trim().ToLowerInvariant();
+        if (normalizedMode == "sms")
+        {
+            if (!owner.ShowAccountSms)
+                throw DebugApiException.InvalidState($"Music account '{row.Platform}' does not support SMS login.");
+            SmsMode();
+        }
+        else if (normalizedMode == "qr")
+        {
+            QrMode();
+        }
+        if (ReferenceEquals(loginOwner, owner)) VisibilityChanged();
+        return new
+        {
+            executed = true,
+            domain = "music",
+            command = "account.login",
+            platform = row.Platform,
+            name = row.Name,
+            loginOpen = loginShowing,
+            mode = SmsPanel.Visibility == Visibility.Visible ? "sms" : "qr",
+            hasQr = owner.HasAccountQr,
+            supportsSms = owner.ShowAccountSms
+        };
+    }
+
+    internal async Task<object> DebugAccountLogoutAsync(string? platform, bool close, bool confirm, CancellationToken cancellationToken)
+    {
+        if (Owner is not { } owner)
+            throw DebugApiException.InvalidState("Music accounts owner is unavailable.");
+        if (close)
+        {
+            RetireLogoutPopup();
+            return new { executed = true, domain = "music", command = "account.logout", closed = true };
+        }
+        if (observed is null) Attach();
+        var row = ResolveDebugRow(owner, platform);
+        if (!row.CanLogout)
+            throw DebugApiException.InvalidState($"Music account '{row.Platform}' cannot logout right now.");
+        if (loginShowing) RetireLoginPopup();
+        if (confirm)
+        {
+            RetireLogoutPopup();
+            await owner.LogoutAccountAsync(row.Account, confirmed: true);
+            cancellationToken.ThrowIfCancellationRequested();
+            return new
+            {
+                executed = true,
+                domain = "music",
+                command = "account.logout",
+                platform = row.Platform,
+                name = row.Name,
+                confirmed = true,
+                isLoggedIn = row.IsLoggedIn
+            };
+        }
+        RetireLogoutPopup();
+        logoutConfirmation = (owner, row.Account);
+        logoutAnchor = null;
+        ShowLogout();
+        return new
+        {
+            executed = true,
+            domain = "music",
+            command = "account.logout",
+            platform = row.Platform,
+            name = row.Name,
+            popupOpen = true
+        };
     }
 }

@@ -12,19 +12,11 @@ namespace MeowFilm.Capabilities;
 internal static class MusicVisuals
 {
     internal static bool Animate => SystemAppearance.AnimationsEnabled && !SystemAppearance.IsHighContrast;
-    internal static bool CanAnimate(DependencyObject view)
-    {
-        if (!Animate) return false;
-        for (DependencyObject? node = view; node is not null; node = VisualTreeHelper.GetParent(node))
-            if (MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(node)) return false;
-        return true;
-    }
+    internal static bool CanAnimate(DependencyObject view) =>
+        Animate && !MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(view);
     internal static SolidColorBrush Brush(byte r, byte g, byte b, byte a = 255) => new(Color.FromArgb(a, r, g, b));
     internal static SolidColorBrush Brush(string value) => new(SystemAppearance.ParseColor(value));
     internal static Geometry Geometry(string value) => (Geometry)XamlBindingHelper.ConvertValue(typeof(Geometry), value);
-    internal static void Bind(FrameworkElement target, DependencyProperty property, string path, object? source = null,
-        BindingMode mode = BindingMode.OneWay) => target.SetBinding(property,
-            new Binding { Path = new PropertyPath(path), Source = source, Mode = mode });
     internal static T? Descendant<T>(DependencyObject parent) where T : DependencyObject
     {
         for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)

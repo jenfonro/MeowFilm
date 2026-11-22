@@ -5,17 +5,48 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Win32.SafeHandles;
 using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Platform.Debug;
 
 public sealed class DebugSession : IDebugLogger, IDisposable
 {
+    // FILE_APPEND_DATA | SYNCHRONIZE (deliberately omitting FILE_WRITE_DATA) forces
+    // the Windows kernel to atomically position every WriteFile call at the true EOF,
+    // preventing cross-process overwrites with Node's O_APPEND writes to the same JSONL file.
+    private const uint FileAppendData = 0x00000004u;
+    private const uint Synchronize = 0x00100000u;
+    private const uint FileShareRead = 0x00000001u;
+    private const uint FileShareWrite = 0x00000002u;
+    private const uint FileShareDelete = 0x00000004u;
+    private const uint OpenAlways = 4u;
+    private const uint FileAttributeNormal = 0x00000080u;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        nint lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        nint hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WriteFile(
+        SafeFileHandle hFile,
+        byte[] lpBuffer,
+        uint nNumberOfBytesToWrite,
+        out uint lpNumberOfBytesWritten,
+        nint lpOverlapped);
+
     private readonly object fileGate = new();
     private readonly object configGate = new();
     private readonly object waiterGate = new();
     private readonly object sessionFileGate = new();
-    private readonly Dictionary<string, FileStream> logStreams = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SafeFileHandle> logHandles = new(StringComparer.Ordinal);
     private readonly List<LogWaiter> waiters = [];
     private readonly long startedTicks = Stopwatch.GetTimestamp();
     private readonly DateTimeOffset startedAt = DateTimeOffset.UtcNow;
@@ -250,14 +281,32 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             if (disposed) return 0;
             try
             {
-                if (!logStreams.TryGetValue(category, out var stream))
+                if (!logHandles.TryGetValue(category, out var handle) || handle.IsInvalid || handle.IsClosed)
                 {
                     var path = Path.Combine(LogsDir, category + ".jsonl");
-                    stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 16 * 1024);
-                    logStreams[category] = stream;
+                    handle = CreateFileW(
+                        path,
+                        FileAppendData | Synchronize,
+                        FileShareRead | FileShareWrite | FileShareDelete,
+                        0,
+                        OpenAlways,
+                        FileAttributeNormal,
+                        0);
+                    if (handle.IsInvalid)
+                    {
+                        handle.Dispose();
+                        handle = null;
+                    }
+                    else
+                    {
+                        logHandles[category] = handle;
+                    }
                 }
-                stream.Write(utf8, 0, utf8.Length);
-                stream.Flush();
+                if (handle is not null && !WriteFile(handle, utf8, (uint)utf8.Length, out _, 0))
+                {
+                    handle.Dispose();
+                    logHandles.Remove(category);
+                }
             }
             catch
             {
@@ -330,35 +379,72 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         {
             try
             {
-                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(fs, Encoding.UTF8);
-                while (reader.ReadLine() is { } line)
+                var parsed = ReadParsedLines(file);
+                int startIndex = sinceSeq > 0 ? ComputeSinceSeqStartIndex(parsed, sinceSeq) : 0;
+                for (int i = startIndex; i < parsed.Count; i++)
                 {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(line);
-                        var root = doc.RootElement;
-                        long itemSeq = root.TryGetProperty("seq", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out var sv) ? sv : 0;
-                        if (sinceSeq > 0 && itemSeq <= sinceSeq) continue;
-                        if (excludeAppSeqAtOrBelow is { } appFloor &&
-                            MatchesField(root, "proc", "app") && itemSeq <= appFloor)
-                            continue;
-                        if (minTimestamp is not null)
-                        {
-                            var ts = root.TryGetProperty("ts", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
-                            if (ts is null || string.CompareOrdinal(ts, minTimestamp) < 0) continue;
-                        }
-                        if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
-                        if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
-                        return root.Clone();
-                    }
-                    catch { }
+                    var entry = parsed[i];
+                    var root = entry.Element;
+                    if (sinceSeq > 0 && entry.IsApp && entry.Seq <= sinceSeq) continue;
+                    if (excludeAppSeqAtOrBelow is { } appFloor && entry.IsApp && entry.Seq <= appFloor) continue;
+                    if (minTimestamp is not null && (string.IsNullOrEmpty(entry.Ts) || string.CompareOrdinal(entry.Ts, minTimestamp) < 0))
+                        continue;
+                    if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
+                    if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
+                    return root.Clone();
                 }
             }
             catch { }
         }
         return null;
+    }
+
+    private sealed record ParsedLogLine(string RawLine, string Ts, long Seq, bool IsApp, JsonElement Element);
+
+    private static List<ParsedLogLine> ReadParsedLines(string file)
+    {
+        var entries = new List<ParsedLogLine>();
+        using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        while (reader.ReadLine() is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
+            {
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                long itemSeq = root.TryGetProperty("seq", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out var sv) ? sv : 0;
+                string ts = root.TryGetProperty("ts", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString()! : "";
+                bool isApp = !root.TryGetProperty("proc", out var p) ||
+                    (p.ValueKind == JsonValueKind.String && string.Equals(p.GetString(), "app", StringComparison.OrdinalIgnoreCase));
+                entries.Add(new(line, ts, itemSeq, isApp, root.Clone()));
+            }
+            catch { }
+        }
+        return entries;
+    }
+
+    // C# ("app") and Node ("runtime") maintain independent per-process seq counters.
+    // Never compare an app seq floor directly against runtime seq values; instead advance
+    // past the last line at or below the floor in append order.
+    private static int ComputeSinceSeqStartIndex(List<ParsedLogLine> entries, long floor)
+    {
+        bool hasApp = false;
+        int lastCutoff = -1;
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].IsApp)
+            {
+                hasApp = true;
+                if (entries[i].Seq <= floor) lastCutoff = i;
+            }
+        }
+        if (hasApp) return lastCutoff + 1;
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].Seq <= floor) lastCutoff = i;
+        }
+        return lastCutoff + 1;
     }
 
     public (string FullPath, string RelativePath) SaveScreenshot(byte[] pngBytes)
@@ -454,44 +540,68 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             if (File.Exists(path)) files.Add(path);
         }
 
-        var matches = new List<(string Ts, long Seq, JsonElement Element)>();
+        var perFile = new List<List<ParsedLogLine>>(files.Count);
+        bool anyAppAcrossFiles = false;
+        string? appCutoffTs = null;
         foreach (var file in files)
         {
             try
             {
-                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(fs, Encoding.UTF8);
-                while (reader.ReadLine() is { } line)
+                var parsed = ReadParsedLines(file);
+                perFile.Add(parsed);
+                if (sinceSeq is { } floor)
                 {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    if (!string.IsNullOrEmpty(query) &&
-                        !line.Contains(query, StringComparison.OrdinalIgnoreCase))
-                        continue;
-                    try
+                    foreach (var entry in parsed)
                     {
-                        using var doc = JsonDocument.Parse(line);
-                        var root = doc.RootElement;
-                        long itemSeq = root.TryGetProperty("seq", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out var sv) ? sv : 0;
-                        if (sinceSeq is { } floor && itemSeq <= floor) continue;
-                        if (!string.IsNullOrEmpty(level) && !MatchesField(root, "level", level)) continue;
-                        if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
-                        if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
-                        if (!string.IsNullOrEmpty(opId) && !MatchesField(root, "opId", opId)) continue;
-                        if (!string.IsNullOrEmpty(traceId) && !MatchesField(root, "traceId", traceId)) continue;
-                        string ts = root.TryGetProperty("ts", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString()! : "";
-                        matches.Add((ts, itemSeq, root.Clone()));
+                        if (!entry.IsApp) continue;
+                        anyAppAcrossFiles = true;
+                        if (entry.Seq <= floor && !string.IsNullOrEmpty(entry.Ts) &&
+                            (appCutoffTs is null || string.CompareOrdinal(entry.Ts, appCutoffTs) > 0))
+                        {
+                            appCutoffTs = entry.Ts;
+                        }
                     }
-                    catch { }
                 }
             }
             catch { }
+        }
+
+        var matches = new List<(string Ts, int Order, JsonElement Element)>();
+        int order = 0;
+        foreach (var parsed in perFile)
+        {
+            bool fileHasApp = parsed.Any(e => e.IsApp);
+            int startIndex = sinceSeq is { } floor && (fileHasApp || !anyAppAcrossFiles)
+                ? ComputeSinceSeqStartIndex(parsed, floor)
+                : 0;
+            for (int i = startIndex; i < parsed.Count; i++)
+            {
+                var entry = parsed[i];
+                if (sinceSeq is { } seqFloor)
+                {
+                    if (entry.IsApp && entry.Seq <= seqFloor) continue;
+                    if (!fileHasApp && anyAppAcrossFiles && appCutoffTs is not null &&
+                        !string.IsNullOrEmpty(entry.Ts) && string.CompareOrdinal(entry.Ts, appCutoffTs) < 0)
+                        continue;
+                }
+                if (!string.IsNullOrEmpty(query) &&
+                    !entry.RawLine.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var root = entry.Element;
+                if (!string.IsNullOrEmpty(level) && !MatchesField(root, "level", level)) continue;
+                if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
+                if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
+                if (!string.IsNullOrEmpty(opId) && !MatchesField(root, "opId", opId)) continue;
+                if (!string.IsNullOrEmpty(traceId) && !MatchesField(root, "traceId", traceId)) continue;
+                matches.Add((entry.Ts, order++, root));
+            }
         }
 
         if (files.Count > 1)
             matches.Sort((a, b) =>
             {
                 int cmp = string.CompareOrdinal(a.Ts, b.Ts);
-                return cmp != 0 ? cmp : a.Seq.CompareTo(b.Seq);
+                return cmp != 0 ? cmp : a.Order.CompareTo(b.Order);
             });
 
         if (matches.Count > limit)
@@ -648,11 +758,11 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         }
         lock (fileGate)
         {
-            foreach (var stream in logStreams.Values)
+            foreach (var handle in logHandles.Values)
             {
-                try { stream.Flush(); stream.Dispose(); } catch { }
+                try { handle.Dispose(); } catch { }
             }
-            logStreams.Clear();
+            logHandles.Clear();
         }
     }
 

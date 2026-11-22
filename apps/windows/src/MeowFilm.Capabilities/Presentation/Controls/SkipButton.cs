@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Shapes;
 using Windows.Foundation;
+using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
@@ -25,9 +26,9 @@ public sealed class SkipButton : Button
             Style = ghost;
         MinWidth = MinHeight = 36;
         CornerRadius = new CornerRadius(18);
-        Width = Height = 36; Padding = new Thickness(0); Background = MusicVisuals.Brush("#00000000"); BorderThickness = new Thickness(0);
+        Width = Height = 36; Padding = new Thickness(0); Background = DesktopVisual.Brush("#00000000"); BorderThickness = new Thickness(0);
         var moving = new Canvas { RenderTransform = translation };
-        first.Data = MusicVisuals.Geometry("M0,0 L12,8 L0,16 Z"); second.Data = MusicVisuals.Geometry("M0,0 L12,8 L0,16 Z");
+        first.Data = DesktopVisual.Geometry("M0,0 L12,8 L0,16 Z"); second.Data = DesktopVisual.Geometry("M0,0 L12,8 L0,16 Z");
         Canvas.SetLeft(second, -16); moving.Children.Add(first); moving.Children.Add(second); arrows.Children.Add(moving);
         Canvas.SetLeft(edge, 13); glyph.Children.Add(arrows); glyph.Children.Add(edge);
         glyph.RenderTransform = scale; Content = glyph;
@@ -48,7 +49,7 @@ public sealed class SkipButton : Button
     private void Reset() { motion?.Stop(); motion = null; translation.X = 0; }
     private void Animate()
     {
-        Reset(); if (!IsEnabled || !MusicVisuals.CanAnimate(this)) return;
-        motion = MusicVisuals.AnimateDouble(translation, "X", 0, 16, TimeSpan.FromMilliseconds(240), Reset);
+        Reset(); if (!IsEnabled || !DesktopVisual.CanAnimate(this)) return;
+        motion = DesktopVisual.AnimateDouble(translation, "X", 0, 16, TimeSpan.FromMilliseconds(240), Reset);
     }
 }

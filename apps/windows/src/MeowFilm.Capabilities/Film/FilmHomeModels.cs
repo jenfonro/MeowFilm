@@ -196,7 +196,20 @@ public sealed class FilmFilterRow
     }
 }
 
-public sealed record FilmCardItem(string Id, string Title, string Poster, string Score)
+public interface IFilmCardDisplay
+{
+    string Title { get; }
+    string Poster { get; }
+    string Score { get; }
+    bool HasScore { get; }
+    string TextBadge { get; }
+    bool HasTextBadge { get; }
+    string Subtitle { get; }
+    bool HasSubtitle { get; }
+    FilmCardItem ToCard();
+}
+
+public sealed record FilmCardItem(string Id, string Title, string Poster, string Score) : IFilmCardDisplay
 {
     public bool HasScore => Score.Length > 0;
     public string TextBadge { get; init; } = "";
@@ -205,6 +218,7 @@ public sealed record FilmCardItem(string Id, string Title, string Poster, string
     public bool HasSubtitle => Subtitle.Length > 0;
     public FilmSearchContext? SearchContext { get; init; }
     public FilmPlaybackRequest? PlaybackContext { get; init; }
+    public FilmCardItem ToCard() => this;
 
     internal bool HasSameContent(FilmCardItem other)
     {

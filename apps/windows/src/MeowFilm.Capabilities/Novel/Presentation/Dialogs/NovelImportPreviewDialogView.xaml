@@ -1,0 +1,50 @@
+<UserControl x:Class="MeowFilm.Capabilities.NovelImportPreviewDialogView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop">
+ <StackPanel Spacing="10">
+  <desktop:NoticeStack x:Name="Notices"/>
+  <CheckBox x:Name="SelectAllCheck" Style="{StaticResource MeowFilm.ManagementCheck}" Tag="round"
+            Click="SelectAll_Click"/>
+  <ListView x:Name="PreviewList" MaxHeight="390" SelectionMode="None"
+            HorizontalContentAlignment="Stretch"
+            ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+            ScrollViewer.VerticalScrollBarVisibility="Auto">
+   <ListView.ItemContainerStyle>
+    <Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.BareListViewItem}"/>
+   </ListView.ItemContainerStyle>
+   <ListView.ItemTemplate>
+    <DataTemplate x:DataType="local:NovelImportPreviewItem">
+     <Border BorderThickness="0,0,0,1" BorderBrush="{ThemeResource MeowFilm.Brush.Border}" Padding="0,8">
+      <Grid ColumnSpacing="12">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+       </Grid.ColumnDefinitions>
+       <CheckBox IsChecked="{x:Bind Selected, Mode=OneWay}" Tag="round"
+                 Style="{StaticResource MeowFilm.ManagementCheck}"
+                 VerticalAlignment="Center"
+                 AutomationProperties.Name="{x:Bind CheckAutomationName}"
+                 Click="ItemCheck_Click"/>
+       <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="3">
+        <TextBlock Text="{x:Bind Title}" Style="{StaticResource MeowFilm.Text}"
+                   FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="0" TextWrapping="Wrap"/>
+        <TextBlock Text="{x:Bind Detail}" Style="{StaticResource MeowFilm.MutedText}"
+                   FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0" TextWrapping="Wrap"/>
+       </StackPanel>
+       <Border Grid.Column="2" Style="{StaticResource MeowFilm.ImportStatusBadge}"
+               CornerRadius="10" Padding="8,3" VerticalAlignment="Center">
+        <TextBlock Text="{x:Bind Status}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}"
+                   Style="{StaticResource MeowFilm.AccentText}" Margin="0"/>
+       </Border>
+      </Grid>
+     </Border>
+    </DataTemplate>
+   </ListView.ItemTemplate>
+  </ListView>
+  <TextBlock x:Name="ErrorsText" Style="{StaticResource Capability.Muted}" FontSize="12"
+             TextWrapping="Wrap" Margin="0" Visibility="Collapsed"/>
+ </StackPanel>
+</UserControl>

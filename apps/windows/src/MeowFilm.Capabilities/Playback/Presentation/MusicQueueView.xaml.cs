@@ -1,24 +1,22 @@
 using Microsoft.UI.Xaml;
 using Windows.System;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
+using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
 public partial class MusicQueueView : UserControl
 {
-    private readonly MusicCapability module;
-    public MusicQueueState State => module.QueueState;
+    public MusicQueueController Queue { get; }
     private readonly UserScrollIntent scrollIntent;
     private bool loadingMore;
     private ScrollViewer? queueScroll;
 
-    public MusicQueueView(MusicCapability module)
+    public MusicQueueView(MusicQueueController queue)
     {
-        this.module = module;
+        Queue = queue;
         scrollIntent = new();
         InitializeComponent();
         ArtworkItemsScope.SetItemKeySelector(QueueList, item => ((MusicQueueSurfaceRow)item).EntryId);
@@ -37,10 +35,9 @@ public partial class MusicQueueView : UserControl
             var candidate = (MusicRecommendationCandidate)item;
             return [new("cover", candidate.Cover, candidate.Song.Id)];
         });
-        DataContext = module.QueueState;
         Loaded += (_, _) =>
         {
-            if (Descendant<ScrollViewer>(QueueList) is not { } scroll) return;
+            if (DesktopVisual.Descendant<ScrollViewer>(QueueList) is not { } scroll) return;
             queueScroll = scroll;
             scroll.ViewChanged -= QueueList_ViewChanged; scroll.ViewChanged += QueueList_ViewChanged;
             scrollIntent.Attach(scroll);
@@ -75,35 +72,24 @@ public partial class MusicQueueView : UserControl
 
     private async void LoadMoreNearEnd()
     {
-        if (loadingMore || !MeowFilm.Desktop.DesktopVisual.IsVisible(this) || !module.CanLoadMoreQueueSurface ||
+        if (loadingMore || !DesktopVisual.IsVisible(this) || !Queue.CanLoadMoreQueueSurface ||
             queueScroll is not { } scroll ||
             scroll.ExtentHeight <= 0 ||
             scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 80) return;
         loadingMore = true;
         scrollIntent.Clear();
-        try { await module.LoadMoreQueueSurfaceAsync(); }
+        try { await Queue.LoadMoreQueueSurfaceAsync(); }
         finally { loadingMore = false; }
     }
 
-    private static T? Descendant<T>(DependencyObject root) where T : DependencyObject
-    {
-        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
-        {
-            var child = VisualTreeHelper.GetChild(root, i);
-            if (child is T match) return match;
-            if (Descendant<T>(child) is { } nested) return nested;
-        }
-        return null;
-    }
-
     private async void Play_Click(object sender, RoutedEventArgs e)
-    { if (sender is Button { Tag: MusicQueueSurfaceRow row }) await module.PlayQueueSurfaceItemAsync(row); }
+    { if (sender is Button { Tag: MusicQueueSurfaceRow row }) await Queue.PlayQueueSurfaceItemAsync(row); }
     private async void Remove_Click(object sender, RoutedEventArgs e)
-    { if (sender is Button { Tag: MusicQueueSurfaceRow row }) await module.RemoveQueueSurfaceItemAsync(row); }
-    private async void Clear_Click(object sender, RoutedEventArgs e) => await module.ClearQueueSurfaceAsync();
-    private async void FavoriteAll_Click(object sender, RoutedEventArgs e) => await module.FavoriteQueueSurfaceAsync();
+    { if (sender is Button { Tag: MusicQueueSurfaceRow row }) await Queue.RemoveQueueSurfaceItemAsync(row); }
+    private async void Clear_Click(object sender, RoutedEventArgs e) => await Queue.ClearQueueSurfaceAsync();
+    private async void FavoriteAll_Click(object sender, RoutedEventArgs e) => await Queue.FavoriteQueueSurfaceAsync();
     private async void Recommendation_Click(object sender, RoutedEventArgs e)
-    { if (sender is Button { Tag: MusicRecommendationCandidate candidate }) await module.ChooseRecommendationAsync(candidate); }
-    private async void RetryRecommendation_Click(object sender, RoutedEventArgs e) => await module.RetryRecommendationAsync();
-    private async void ReconcileRecommendation_Click(object sender, RoutedEventArgs e) => await module.ReconcileRecommendationAsync();
+    { if (sender is Button { Tag: MusicRecommendationCandidate candidate }) await Queue.ChooseRecommendationAsync(candidate); }
+    private async void RetryRecommendation_Click(object sender, RoutedEventArgs e) => await Queue.RetryRecommendationAsync();
+    private async void ReconcileRecommendation_Click(object sender, RoutedEventArgs e) => await Queue.ReconcileRecommendationAsync();
 }

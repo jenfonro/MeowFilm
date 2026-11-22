@@ -1,25 +1,13 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 
 namespace MeowFilm.Desktop;
 
 public sealed partial class ShellWindow
 {
-    private ModuleSession? _searchOwnerSession;
-    private IDesktopSearchPage? _searchPage;
-    private string? _searchContext;
-
     private void InitializeHeaderPresentation()
     {
-        SearchTargetPicker.SearchField = SearchInput;
-        SearchTargetPicker.SurfaceSource = SearchBox;
-        _searchPage = _pages.Select(item => item.Page).OfType<IDesktopSearchPage>().SingleOrDefault();
-        if (_searchPage is { } searchPage)
-        {
-            SearchTargetPicker.ItemsSource = searchPage.Targets;
-            SearchTargetPicker.Visibility = Visibility.Visible;
-            SearchDivider.Visibility = Visibility.Visible;
-            SearchBox.Padding = new(100, 4, 52, 4);
-        }
+        _search.Initialize(_pages);
         PageHeaderHost.ContributionChanged += (_, _) =>
         {
             if (!_isClosing && _current is { } current && PageHeaderHost.Contribution is { } contribution)
@@ -44,7 +32,6 @@ public sealed partial class ShellWindow
                 token =>
                 {
                     token.ThrowIfCancellationRequested();
-                    // Activation transfers to the page request's own lifetime as the header retires.
                     return ActivatePageAsync(target);
                 },
                 () => !_isClosing, automationName: target.Page.Title)).ToArray()
@@ -61,29 +48,9 @@ public sealed partial class ShellWindow
 
     private void ApplyHeaderContext(ModuleSession current, DesktopHeaderContribution contribution)
     {
-        var previousSearchOwner = _searchOwnerSession;
-        if (_searchPage is { } searchPage && !current.IsSettingsOpen)
-        {
-            string? target = contribution.SearchTargetId;
-            string context = _currentPage is { } page ? "page/" + page.Page.Id + "/" + contribution.SearchContextId + "/" + target
-                : "module/" + current.Module.Id + "/" + current.Module.CaptureNavigationLocation() + "/" + target;
-            if (context != _searchContext && target is not null && searchPage.Targets.Any(item => item.Id == target))
-            {
-                _searchContext = context;
-                SearchTargetPicker.SelectedValue = target;
-            }
-        }
-        if (_currentPage is null && !current.IsSettingsOpen && current.Mounted &&
-            contribution.SearchVisible && contribution.SearchEnabled)
-            _searchOwnerSession = current;
-        if (!ReferenceEquals(previousSearchOwner, _searchOwnerSession))
-            ApplySearchPresentation(force: true);
-
-        var searchAvailable = !current.IsSettingsOpen && _searchOwnerSession is not null;
-        SearchInput.Visibility = searchAvailable ? Visibility.Visible : Visibility.Collapsed;
-        SearchBox.IsEnabled = SearchTargetPicker.IsEnabled = searchAvailable;
+        _search.ApplyHeaderContext(current, contribution);
         var title = string.IsNullOrWhiteSpace(contribution.Title) ? current.Module.Title : contribution.Title;
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(ContentDeck, title);
+        AutomationProperties.SetName(ContentDeck, title);
         Title = string.IsNullOrWhiteSpace(title) ? "meowfilm" : $"meowfilm · {title}";
     }
 
@@ -94,5 +61,5 @@ public sealed partial class ShellWindow
         return (current.IsSettingsOpen ? current.SettingsHost.Content : current.MainHost.Content) as IDesktopHeaderSource;
     }
 
-    private void RetireHeaderPresentation() => PageHeaderHost.Retire();
+    internal void RetireHeaderPresentation() => PageHeaderHost.Retire();
 }

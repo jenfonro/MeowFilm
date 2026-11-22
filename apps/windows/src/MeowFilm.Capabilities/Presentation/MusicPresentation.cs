@@ -3,7 +3,6 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Windows.UI;
 using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 
@@ -37,14 +36,19 @@ internal sealed class MusicPresentation
     internal OwnerDispatcher Dispatcher { get; }
     private T WithArtwork<T>(T view) where T : FrameworkElement
     { ArtworkScope.SetLoader(view, module.ArtworkLoader); return view; }
-    internal MusicView Page => page ??= WithArtwork(new MusicView(module));
-    internal MusicSettingsView Settings => settings ??= WithArtwork(new MusicSettingsView(module));
-    internal MusicAppearanceView Appearance => appearance ??= WithArtwork(new MusicAppearanceView(module));
-    internal MusicHomeSourceSettingsView HomeSourceSettings => homeSourceSettings ??= WithArtwork(new MusicHomeSourceSettingsView(module));
-    internal MusicCacheSettingsView CacheSettings => cacheSettings ??= WithArtwork(new MusicCacheSettingsView(module));
-    internal MusicPlayerView Player => player ??= WithArtwork(new MusicPlayerView(module));
-    internal MusicPlayerDetailView Detail => detail ??= WithArtwork(new MusicPlayerDetailView(module));
-    internal MusicQueueView Queue => queue ??= WithArtwork(new MusicQueueView(module));
+    internal MusicView Page => page ??= WithArtwork(new MusicView(
+        module.Library, module.Catalog, module.Search, module.Discovery, module.Playback, module.Settings,
+        CreatePlaylistAction, PageLoaded));
+    internal MusicSettingsView Settings => settings ??= WithArtwork(new MusicSettingsView(module.Settings, module.Accounts));
+    internal MusicAppearanceView Appearance => appearance ??= WithArtwork(new MusicAppearanceView(module.Settings));
+    internal MusicHomeSourceSettingsView HomeSourceSettings => homeSourceSettings ??= WithArtwork(new MusicHomeSourceSettingsView(module.Settings));
+    internal MusicCacheSettingsView CacheSettings => cacheSettings ??= WithArtwork(new MusicCacheSettingsView(module.Settings));
+    internal MusicPlayerView Player => player ??= WithArtwork(new MusicPlayerView(
+        module.Playback, module.Queue, module.Library, module.Lyrics, module.Settings, module.Catalog));
+    internal MusicPlayerDetailView Detail => detail ??= WithArtwork(new MusicPlayerDetailView(
+        module.Playback, module.Lyrics, module.Queue, module.Library, module.Settings, module.Catalog,
+        detailVisible => player?.SetBackgroundVisualsPaused(detailVisible)));
+    internal MusicQueueView Queue => queue ??= WithArtwork(new MusicQueueView(module.Queue));
     internal bool IsSettingsActive => settings is { IsLoaded: true, Visibility: Visibility.Visible };
     internal bool IsPageActive => page is { IsLoaded: true, Visibility: Visibility.Visible };
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }
@@ -77,7 +81,7 @@ internal sealed class MusicPresentation
     internal void RefreshAppearance(Brush sampled, bool animate = true)
     {
         playerSample = sampled;
-        var palette = module.PlayerPalette(sampled);
+        var palette = module.Settings.PlayerPalette(sampled);
         var next = (RadialGradientBrush)MusicPlayerArtwork.Backdrop(palette);
         var prior = PlayerBackground as RadialGradientBrush;
         var colors = next.GradientStops.Select(stop => stop.Color).ToArray();
@@ -109,7 +113,7 @@ internal sealed class MusicPresentation
             }
         }
         PlayerProgress = MusicPlayerArtwork.Progress(palette);
-        module.RefreshPlayerBackground();
+        module.Playback.RefreshPlayerBackground();
     }
     internal void ReapplyAppearance() => RefreshAppearance(playerSample);
 }

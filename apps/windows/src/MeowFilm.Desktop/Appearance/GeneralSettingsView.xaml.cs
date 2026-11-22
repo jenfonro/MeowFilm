@@ -17,7 +17,6 @@ public partial class GeneralSettingsView : UserControl
     private readonly Action? resetUserData;
     private string currentArea = "appearance";
     internal string CurrentArea => currentArea;
-    public static IValueConverter StatusVisibility { get; } = new StatusConverter();
     public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
         IDesktopClosePreferences? closePreferences = null, IDesktopMediaControlSettings? mediaControls = null,
         Action? resetUserData = null)
@@ -184,11 +183,5 @@ public partial class GeneralSettingsView : UserControl
             behavior == closePreferences.Behavior) return;
         await closePreferences.SaveAsync(behavior);
         RestoreCloseBehavior();
-    }
-    private sealed class StatusConverter : IValueConverter
-    {
-        public object Convert(object value, Type targetType, object parameter, string language) =>
-            value is string { Length: > 0 } ? Visibility.Visible : Visibility.Collapsed;
-        public object ConvertBack(object value, Type targetType, object parameter, string language) => throw new NotSupportedException();
     }
 }

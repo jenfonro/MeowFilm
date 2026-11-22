@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -15,11 +16,18 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicView : UserControl, IDesktopHeaderSource
 {
-    private readonly MusicCapability module;
+    public MusicLibraryController Library { get; }
+    public MusicCatalogController Catalog { get; }
+    public MusicSearchController Search { get; }
+    private readonly MusicDiscoveryController discovery;
+    private readonly MusicPlaybackController playback;
+    private readonly Action onPageLoaded;
     private readonly DesktopHeaderAction refreshAction, renamePlaylistAction, deletePlaylistAction;
     private readonly UserScrollIntent songScrollIntent;
     private readonly MusicPagePresenter content;
     private readonly Dictionary<ListView, ScrollViewer> songScrolls = [];
+    private readonly Dictionary<string, (long Epoch, bool Value)> favoriteCache = new(StringComparer.Ordinal);
+    private long favoritesEpoch;
     private bool loadingMoreSongs, syncingDate, projectedSearch;
     private bool playlistDialogOpen;
     private MenuFlyout? songMenu;
@@ -31,21 +39,45 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private ListViewItem? insertionRow;
     private bool insertAfter;
     private (bool CollectionActions, bool RefreshAction, bool Editable) publishedHeaderState;
-    private ListView ActiveSongsGrid => module.IsSearchPage ? SearchSongsGrid : SongsGrid;
+    private ListView ActiveSongsGrid => Search.IsSearchPage ? SearchSongsGrid : SongsGrid;
     internal bool IsPlaylistDialogOpen => playlistDialogOpen;
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }
-    public MusicView(MusicCapability module)
+
+    public MusicView(
+        MusicLibraryController library,
+        MusicCatalogController catalog,
+        MusicSearchController search,
+        MusicDiscoveryController discovery,
+        MusicPlaybackController playback,
+        MusicSettingsController settings,
+        DesktopNavigationGroupAction createPlaylistAction,
+        Action onPageLoaded)
     {
-        this.module = module; songScrollIntent = new();
-        CreatePlaylistAction = module.Presentation.CreatePlaylistAction;
-        refreshAction = new("music.refresh", "刷新", async token => { token.ThrowIfCancellationRequested(); await module.RefreshAsync(); token.ThrowIfCancellationRequested(); }, () => module.CanEdit, automationName: "刷新音乐内容");
-        renamePlaylistAction = new("music.playlist.rename", "重命名", RenamePlaylistNameAsync, () => module.CanEdit && module.CanDeleteCollection);
-        deletePlaylistAction = new("music.playlist.delete", "删除", token => { token.ThrowIfCancellationRequested(); return module.DeletePlaylistAsync(); }, () => module.CanEdit && module.CanDeleteCollection);
-        InitializeComponent(); DataContext = module.CatalogState; ((FrameworkElement)DailyStylePopup.Content).DataContext = module.CatalogState;
-        foreach (FrameworkElement page in BodyPages.Children) page.DataContext = module.CatalogState;
+        Library = library;
+        Catalog = catalog;
+        Search = search;
+        this.discovery = discovery;
+        this.playback = playback;
+        this.onPageLoaded = onPageLoaded;
+        songScrollIntent = new();
+        CreatePlaylistAction = createPlaylistAction;
+        refreshAction = new("music.refresh", "刷新", async token => { token.ThrowIfCancellationRequested(); await Library.RefreshAsync(); token.ThrowIfCancellationRequested(); }, () => Library.CanEdit, automationName: "刷新音乐内容");
+        renamePlaylistAction = new("music.playlist.rename", "重命名", RenamePlaylistNameAsync, () => Library.CanEdit && Library.CanDeleteCollection);
+        deletePlaylistAction = new("music.playlist.delete", "删除", token => { token.ThrowIfCancellationRequested(); return Library.DeletePlaylistAsync(); }, () => Library.CanEdit && Library.CanDeleteCollection);
+        InitializeComponent();
+        CatalogView.Bind(catalog, search, library, settings, playback);
+        DiscoveryView.Bind(discovery, settings);
         BodyPages.Children.Clear();
-        content = new(new() { [MusicContentPage.Catalog] = CatalogView, [MusicContentPage.Discovery] = DiscoveryView, [MusicContentPage.Archives] = ArchiveScroll, [MusicContentPage.Songs] = SongsPage, [MusicContentPage.SearchSongs] = SearchSongsPage });
-        BodyPages.Children.Add(content); content.Show(module.ContentPage);
+        content = new(new()
+        {
+            [MusicContentPage.Catalog] = CatalogView,
+            [MusicContentPage.Discovery] = DiscoveryView,
+            [MusicContentPage.Archives] = ArchiveScroll,
+            [MusicContentPage.Songs] = SongsPage,
+            [MusicContentPage.SearchSongs] = SearchSongsPage
+        });
+        BodyPages.Children.Add(content);
+        content.Show(Library.ContentPage);
         foreach (var list in new[] { SongsGrid, SearchSongsGrid })
         {
             if (ReferenceEquals(list, SearchSongsGrid)) ArtworkItemsScope.SetItemKeySelector(list, item => ((SongRow)item).Id);
@@ -56,13 +88,14 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             });
             list.Loaded += (_, _) =>
             {
-                if (MusicVisuals.Descendant<ScrollViewer>(list) is not { } scroll) return;
+                if (DesktopVisual.Descendant<ScrollViewer>(list) is not { } scroll) return;
                 songScrolls[list] = scroll;
                 scroll.ViewChanged -= SongsScrolled; scroll.ViewChanged += SongsScrolled;
                 songScrollIntent.Attach(scroll);
             };
             list.Unloaded += (_, _) =>
             {
+                if (list.IsLoaded) return;
                 if (songScrolls.Remove(list, out var scroll)) scroll.ViewChanged -= SongsScrolled;
             };
             list.ContainerContentChanging += (_, e) => RefreshSongRow(e.ItemContainer);
@@ -70,76 +103,145 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         publishedHeaderState = HeaderState();
         Loaded += (_, _) =>
         {
-            module.CatalogState.PropertyChanged -= ModuleChanged; module.CatalogState.PropertyChanged += ModuleChanged;
-            module.PlaybackState.PropertyChanged -= OnCurrentSongChanged; module.PlaybackState.PropertyChanged += OnCurrentSongChanged;
-            Refresh(); UpdateVisibilityActivity();
+            Library.PropertyChanged -= LibraryChanged; Library.PropertyChanged += LibraryChanged;
+            Catalog.PropertyChanged -= CatalogChanged; Catalog.PropertyChanged += CatalogChanged;
+            Search.PropertyChanged -= SearchChanged; Search.PropertyChanged += SearchChanged;
+            playback.PropertyChanged -= OnPlaybackChanged; playback.PropertyChanged += OnPlaybackChanged;
+            Library.SongFavoritesChanged -= OnSongFavoritesChanged; Library.SongFavoritesChanged += OnSongFavoritesChanged;
+            Library.Playlists.CollectionChanged -= OnPlaylistsChanged; Library.Playlists.CollectionChanged += OnPlaylistsChanged;
+            content.Show(Library.ContentPage);
+            Bindings?.Update();
+            Refresh();
+            PublishHeaderState();
+            if (Visibility == Visibility.Visible) UpdateLayout();
+            UpdateVisibilityActivity();
+            RefreshAllSongRows();
         };
         Unloaded += (_, _) =>
         {
-            module.CatalogState.PropertyChanged -= ModuleChanged;
-            module.PlaybackState.PropertyChanged -= OnCurrentSongChanged;
+            if (IsLoaded) return;
+            Library.PropertyChanged -= LibraryChanged;
+            Catalog.PropertyChanged -= CatalogChanged;
+            Search.PropertyChanged -= SearchChanged;
+            playback.PropertyChanged -= OnPlaybackChanged;
+            Library.SongFavoritesChanged -= OnSongFavoritesChanged;
+            Library.Playlists.CollectionChanged -= OnPlaylistsChanged;
             UpdateVisibilityActivity();
         };
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateVisibilityActivity());
     }
+
     internal void ResetSearchPresentation() => CatalogView.ResetSearchPlaylistProjection();
     internal void ProjectSearchResults(bool projected) { projectedSearch = projected; Refresh(); }
+
     private async void UpdateVisibilityActivity()
     {
         bool active = IsLoaded && Visibility == Visibility.Visible;
-        if (active) module.Presentation.PageLoaded();
-        else { module.InvalidateCatalogAction(); if (playlistDialogOpen) DesktopModalHost.CloseFor(this); songMenu?.Hide(); DailyStylePopup.Hide(); songScrollIntent.Clear(); EndDrag(); }
-        try { await Task.WhenAll(active ? module.ActivateDiscoveryViewAsync() : module.DeactivateDiscoveryViewAsync(), module.UpdateVipPageAsync(active), active ? module.ActivateCatalogLandingAsync() : Task.CompletedTask); }
+        if (active)
+        {
+            content.Show(Library.ContentPage);
+            Refresh();
+            onPageLoaded();
+        }
+        else { Catalog.InvalidateCatalogAction(); if (playlistDialogOpen) DesktopModalHost.CloseFor(this); songMenu?.Hide(); DailyStylePopup.Hide(); songScrollIntent.Clear(); EndDrag(); }
+        try { await Task.WhenAll(active ? discovery.ActivateDiscoveryViewAsync() : discovery.DeactivateDiscoveryViewAsync(), Catalog.UpdateVipPageAsync(active), active ? Catalog.ActivateCatalogLandingAsync() : Task.CompletedTask); }
         catch { /* Navigation and shutdown retain final drain ownership. */ }
     }
-    private void ModuleChanged(object? sender, PropertyChangedEventArgs e)
+
+    private void LibraryChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MusicCapability.ContentPage)) content.Show(module.ContentPage);
-        if (e.PropertyName == nameof(MusicCapability.CanReorderPlaylist) && !module.CanReorderPlaylist) EndDrag();
-        if (playlistDialogOpen && !playlistDialogSubmitting && e.PropertyName is nameof(MusicCapability.Heading) or nameof(MusicCapability.IsCollectionPage)) DesktopModalHost.CloseFor(this);
-        if (e.PropertyName == nameof(MusicCapability.IsDailyStyleEditorOpen))
+        if (e.PropertyName == nameof(MusicLibraryController.ContentPage))
+        {
+            content.Show(Library.ContentPage);
+            Refresh();
+        }
+        if (e.PropertyName == nameof(MusicLibraryController.CanReorderPlaylist) && !Library.CanReorderPlaylist) EndDrag();
+        if (playlistDialogOpen && !playlistDialogSubmitting && e.PropertyName is nameof(MusicLibraryController.Heading) or nameof(MusicLibraryController.IsCollectionPage)) DesktopModalHost.CloseFor(this);
+        if (e.PropertyName is nameof(MusicLibraryController.HistoryDate) or nameof(MusicLibraryController.CanEdit) or
+            nameof(MusicLibraryController.DetailArtwork) or nameof(MusicLibraryController.IsContentDetailPage)) Refresh();
+        if (e.PropertyName is nameof(MusicLibraryController.IsCollectionPage) or nameof(MusicLibraryController.CanDeleteCollection) or
+            nameof(MusicLibraryController.ContentPage) or nameof(MusicLibraryController.CanEdit))
+            PublishHeaderState();
+    }
+
+    private void CatalogChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MusicCatalogController.IsDailyStyleEditorOpen))
         {
             long request = ++dailyStyleRequest;
-            if (module.IsDailyStyleEditorOpen) _ = ShowDailyStylePopupAsync(request);
+            if (Catalog.IsDailyStyleEditorOpen) _ = ShowDailyStylePopupAsync(request);
             else if (dailyStyleOpen is not null) DailyStylePopup.Hide();
         }
-        if (e.PropertyName is nameof(MusicCapability.IsCatalogLanding) or nameof(MusicCapability.IsSearchPage) or
-            nameof(MusicCapability.ShowSearchLoading) or nameof(MusicCapability.IsSearchSongs) or nameof(MusicCapability.IsCatalogArtist) or
-            nameof(MusicCapability.HistoryDate) or nameof(MusicCapability.CanEdit)) Refresh();
-        if (e.PropertyName is nameof(MusicCapability.IsCollectionPage) or nameof(MusicCapability.CanDeleteCollection) or
-            nameof(MusicCapability.IsLocalLibraryPage) or nameof(MusicCapability.CanEdit))
-        {
-            var state = HeaderState(); if (state != publishedHeaderState) { publishedHeaderState = state; HeaderChanged?.Invoke(this, EventArgs.Empty); }
-        }
+        if (e.PropertyName is nameof(MusicCatalogController.IsCatalogHome) or nameof(MusicCatalogController.HasChannelTabs) or
+            nameof(MusicCatalogController.CurrentChannelKey) or nameof(MusicCatalogController.CanEdit) or
+            nameof(MusicCatalogController.IsCatalogArtist)) Refresh();
     }
-    private void OnCurrentSongChanged(object? sender, PropertyChangedEventArgs e)
+
+    private void SearchChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName != nameof(MusicPlaybackState.CurrentSongId)) return;
+        if (e.PropertyName is nameof(MusicSearchController.IsSearchPage) or nameof(MusicSearchController.ShowSearchLoading) or
+            nameof(MusicSearchController.SearchTab)) Refresh();
+    }
+
+    private void PublishHeaderState()
+    {
+        var state = HeaderState();
+        if (state != publishedHeaderState) { publishedHeaderState = state; HeaderChanged?.Invoke(this, EventArgs.Empty); }
+    }
+
+    private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(MusicPlaybackController.CurrentSongId))
+            RefreshAllSongRows();
+        else if (e.PropertyName == nameof(MusicPlaybackController.IsCurrentFavorite))
+            OnSongFavoritesChanged();
+    }
+
+    private void OnPlaylistsChanged(object? sender, NotifyCollectionChangedEventArgs e) => OnSongFavoritesChanged();
+
+    private void OnSongFavoritesChanged()
+    {
+        favoritesEpoch++;
+        favoriteCache.Clear();
+        RefreshAllSongRows();
+    }
+
+    private void RefreshAllSongRows()
+    {
         foreach (var list in new[] { SongsGrid, SearchSongsGrid })
             for (int i = 0; i < list.Items.Count; i++) if (list.ContainerFromIndex(i) is ListViewItem row) RefreshSongRow(row);
     }
+
     private void Refresh()
     {
-        PageContent.Margin = projectedSearch ? new Thickness(0) : module.IsCatalogLanding ? new Thickness(0, 12, 0, 0) : new Thickness(40, 16, 24, 20);
-        PageContent.MaxWidth = module.IsCatalogLanding ? double.PositiveInfinity : 1490;
-        SearchHeading.Visibility = !projectedSearch && module.IsSearchPage ? Visibility.Visible : Visibility.Collapsed;
-        SearchLoading.IsActive = module.ShowSearchLoading && module.IsSearchSongs;
+        PageContent.Margin = projectedSearch ? new Thickness(0) : Catalog.IsCatalogLanding ? new Thickness(0, 12, 0, 0) : new Thickness(40, 16, 24, 20);
+        PageContent.MaxWidth = Catalog.IsCatalogLanding ? double.PositiveInfinity : 1490;
+        SearchHeading.Visibility = !projectedSearch && Search.IsSearchPage ? Visibility.Visible : Visibility.Collapsed;
+        SearchLoading.IsActive = Search.ShowSearchLoading && Search.IsSearchSongs;
         SearchLoading.Visibility = SearchLoading.IsActive ? Visibility.Visible : Visibility.Collapsed;
-        DetailArtworkFrame.CornerRadius = new CornerRadius(module.IsCatalogArtist ? 76 : 18);
-        syncingDate = true; HistoryPicker.SelectedItem = module.HistoryDate; syncingDate = false;
+        double artworkRadius = Catalog.IsCatalogArtist ? 76 : 18;
+        DetailArtworkFrame.CornerRadius = new CornerRadius(artworkRadius);
+        CardClip.SetRadius(DetailArtworkFrame, artworkRadius);
+        DetailArtworkFallback.Visibility = string.IsNullOrWhiteSpace(Library.DetailArtwork) ? Visibility.Visible : Visibility.Collapsed;
+        syncingDate = true; HistoryPicker.SelectedItem = Library.HistoryDate; syncingDate = false;
         CreatePlaylistAction.Refresh();
     }
+
     private (bool CollectionActions, bool RefreshAction, bool Editable) HeaderState()
     {
-        bool collection = module.IsCollectionPage && module.CanDeleteCollection, refresh = module.IsLocalLibraryPage && !module.IsCollectionPage;
-        return (collection, refresh, (collection || refresh) && module.CanEdit);
+        bool collection = Library.IsCollectionPage && Library.CanDeleteCollection, refresh = Library.IsLocalLibraryPage && !Library.IsCollectionPage;
+        return (collection, refresh, (collection || refresh) && Library.CanEdit);
     }
+
     public DesktopHeaderContribution Header => new("", "", SearchVisible: true, SearchEnabled: true,
-        Actions: module.IsCollectionPage && module.CanDeleteCollection ? [renamePlaylistAction, deletePlaylistAction] : module.IsCollectionPage ? [] : module.IsLocalLibraryPage ? [refreshAction] : []) { SearchTargetId = "music" };
+        Actions: Library.IsCollectionPage && Library.CanDeleteCollection ? [renamePlaylistAction, deletePlaylistAction] : Library.IsCollectionPage ? [] : Library.IsLocalLibraryPage ? [refreshAction] : [])
+    { SearchTargetId = "music" };
+
     public event EventHandler? HeaderChanged;
+
     private async Task RenamePlaylistNameAsync(CancellationToken token)
     {
-        token.ThrowIfCancellationRequested(); var input = new TextBox { Text = module.Heading };
+        token.ThrowIfCancellationRequested(); var input = new TextBox { Text = Library.Heading };
         AutomationProperties.SetName(input, "歌单名称");
         var request = new DesktopDialogRequest
         {
@@ -153,11 +255,12 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         };
         input.TextChanged += (_, _) => request.IsPrimaryEnabled = input.Text.Trim().Length > 0;
         if (await DesktopModalHost.ShowDialogAsync(this, request, token) != DesktopDialogResult.Primary) return;
-        token.ThrowIfCancellationRequested(); await module.RenamePlaylistAsync(input.Text);
+        token.ThrowIfCancellationRequested(); await Library.RenamePlaylistAsync(input.Text);
     }
+
     internal async void OpenCreatePlaylistDialog()
     {
-        if (playlistDialogOpen || !module.CanEdit) return;
+        if (playlistDialogOpen || !Library.CanEdit) return;
         var input = new TextBox { PlaceholderText = "歌单名称" };
         var count = new TextBlock { Text = "0", HorizontalAlignment = HorizontalAlignment.Right, FontSize = 12 };
         var panel = new StackPanel { Spacing = 8 }; panel.Children.Add(input); panel.Children.Add(count);
@@ -174,45 +277,60 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             OnPrimaryAsync = async () =>
             {
                 playlistDialogSubmitting = true; input.IsEnabled = request.IsPrimaryEnabled = false;
-                try { return module.CanEdit && await module.TryCreatePlaylistAsync(input.Text); }
-                finally { playlistDialogSubmitting = false; input.IsEnabled = true; request.IsPrimaryEnabled = input.Text.Trim().Length > 0 && module.CanEdit; }
+                try { return Library.CanEdit && await Library.TryCreatePlaylistAsync(input.Text); }
+                finally { playlistDialogSubmitting = false; input.IsEnabled = true; request.IsPrimaryEnabled = input.Text.Trim().Length > 0 && Library.CanEdit; }
             }
         };
         playlistDialogOpen = true; CreatePlaylistAction.Refresh();
-        input.TextChanged += (_, _) => { count.Text = $"{input.Text.Length}"; request.IsPrimaryEnabled = input.Text.Trim().Length > 0 && module.CanEdit && !playlistDialogSubmitting; };
+        input.TextChanged += (_, _) => { count.Text = $"{input.Text.Length}"; request.IsPrimaryEnabled = input.Text.Trim().Length > 0 && Library.CanEdit && !playlistDialogSubmitting; };
         try { await DesktopModalHost.ShowDialogAsync(this, request); }
         finally { playlistDialogOpen = false; playlistDialogSubmitting = false; CreatePlaylistAction.Refresh(); }
     }
+
     internal double CaptureScroll() => ActiveScroll()?.VerticalOffset ?? 0;
+
     internal void RestoreScroll(double offset) { songScrollIntent.Clear(); if (Visibility == Visibility.Visible) UpdateLayout(); ActiveScroll()?.ChangeView(null, offset, null, true); }
-    private ScrollViewer? ActiveScroll() => module.ContentPage switch
-    { MusicContentPage.Archives => ArchiveScroll, MusicContentPage.Discovery => MusicVisuals.Descendant<ScrollViewer>(DiscoveryView), MusicContentPage.Catalog => CatalogView.ActiveScroll, _ => songScrolls.GetValueOrDefault(ActiveSongsGrid) };
-    private async void NetworkPlaylist_Click(object sender, RoutedEventArgs e) => await module.ToggleNetworkPlaylistAsync();
+
+    private ScrollViewer? ActiveScroll() => Library.ContentPage switch
+    {
+        MusicContentPage.Archives => ArchiveScroll,
+        MusicContentPage.Discovery => DesktopVisual.Descendant<ScrollViewer>(DiscoveryView),
+        MusicContentPage.Catalog => CatalogView.ActiveScroll,
+        _ => songScrolls.GetValueOrDefault(ActiveSongsGrid)
+    };
+
+    private async void NetworkPlaylist_Click(object sender, RoutedEventArgs e) => await Catalog.ToggleNetworkPlaylistAsync();
+
     private void DailyMore_Click(object sender, RoutedEventArgs e)
     {
-        var menu = new MenuFlyout(); var save = new MenuFlyoutItem { Text = "保存到本地歌单", IsEnabled = module.CanCatalogAction };
-        save.Click += async (_, _) => await module.SaveCatalogPlaylistAsync();
-        var refresh = new MenuFlyoutItem { Text = "重新读取", IsEnabled = module.CanCatalogBrowse }; refresh.Click += async (_, _) => await module.RefreshCatalogAsync();
+        var menu = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
+        var save = new MenuFlyoutItem { Text = "保存到本地歌单", IsEnabled = Catalog.CanCatalogAction };
+        save.Click += async (_, _) => await Catalog.SaveCatalogPlaylistAsync();
+        var refresh = new MenuFlyoutItem { Text = "重新读取", IsEnabled = Catalog.CanCatalogBrowse }; refresh.Click += async (_, _) => await Catalog.RefreshCatalogAsync();
         menu.Items.Add(save); menu.Items.Add(refresh); menu.ShowAt((FrameworkElement)sender);
     }
+
     private async Task ShowDailyStylePopupAsync(long request)
     {
         await dailyStyleRetired;
-        if (request != dailyStyleRequest || !module.IsDailyStyleEditorOpen || !DesktopVisual.IsVisible(DailyStyleButton)) return;
+        if (request != dailyStyleRequest || !Catalog.IsDailyStyleEditorOpen || !DesktopVisual.IsVisible(DailyStyleButton)) return;
         var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         void Closed(object? sender, object args) { DailyStylePopup.Closed -= Closed; retired.TrySetResult(); }
         DailyStylePopup.Closed += Closed; dailyStyleRetired = retired.Task; dailyStyleOpen = DailyStylePopup;
         DailyStylePopup.ShowAt(DailyStyleButton);
     }
+
     private void DailyStylePopup_Closing(FlyoutBase sender, FlyoutBaseClosingEventArgs args)
     {
         if (dailyStyleOpen is null) return;
         dailyStyleOpen = null;
-        if (module.IsDailyStyleEditorOpen) module.CancelDailyStyleEditor();
+        if (Catalog.IsDailyStyleEditorOpen) Catalog.CancelDailyStyleEditor();
     }
-    private async void DailyBranch_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string branch }) await module.SwitchDailyBranchAsync(branch); }
-    private async void DailyStyleOpen_Click(object sender, RoutedEventArgs e) => await module.OpenDailyStyleEditorAsync();
-    private void DailyStyleTag_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: MusicCatalogTag tag }) module.ToggleDailyStyleTag(tag); }
+
+    private async void DailyBranch_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string branch }) await Catalog.SwitchDailyBranchAsync(branch); }
+    private async void DailyStyleOpen_Click(object sender, RoutedEventArgs e) => await Catalog.OpenDailyStyleEditorAsync();
+    private void DailyStyleTag_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: MusicCatalogTag tag }) Catalog.ToggleDailyStyleTag(tag); }
+
     private void DailyTag_Loaded(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: MusicCatalogTag tag } button) return;
@@ -248,15 +366,20 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         }
         button.Unloaded += Unloaded; Refresh();
     }
-    private void DailyStyleCancel_Click(object sender, RoutedEventArgs e) => module.CancelDailyStyleEditor();
-    private async void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => await module.ConfirmDailyStyleAsync();
-    private async void PlayContentDetail_Click(object sender, RoutedEventArgs e) => await module.PlayContentDetailAsync();
+
+    private void DailyStyleCancel_Click(object sender, RoutedEventArgs e) => Catalog.CancelDailyStyleEditor();
+    private async void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => await Catalog.ConfirmDailyStyleAsync();
+    private async void PlayContentDetail_Click(object sender, RoutedEventArgs e) => await Library.PlayContentDetailAsync();
+
     private async void HistoryDate_Changed(object sender, SelectionChangedEventArgs e)
-    { if (!syncingDate && module.CanEdit && HistoryPicker.SelectedItem is string day && day != module.HistoryDate) await module.SelectHistoryDateAsync(day); }
-    private async void RestoreArchive_Click(object sender, RoutedEventArgs e) { if (module.CanEdit && sender is Button { Tag: string id }) await module.RestoreArchiveAsync(id); }
-    private async void DeleteArchive_Click(object sender, RoutedEventArgs e) { if (module.CanEdit && sender is Button { Tag: string id }) await module.DeleteArchiveAsync(id); }
+    { if (!syncingDate && Library.CanEdit && HistoryPicker.SelectedItem is string day && day != Library.HistoryDate) await Library.SelectHistoryDateAsync(day); }
+
+    private async void RestoreArchive_Click(object sender, RoutedEventArgs e) { if (Library.CanEdit && sender is Button { Tag: string id }) await Library.RestoreArchiveAsync(id); }
+    private async void DeleteArchive_Click(object sender, RoutedEventArgs e) { if (Library.CanEdit && sender is Button { Tag: string id }) await Library.DeleteArchiveAsync(id); }
+
     private void SongRow_Loaded(object sender, RoutedEventArgs e)
     { if (sender is FrameworkElement element && FindRow(element) is { } row) RefreshSongRow(row); }
+
     private void SongContainer_Loaded(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement template || FindRow(template) is not { } row) return;
@@ -275,10 +398,11 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         }
         template.Unloaded += Unloaded; RefreshSongRow(row);
     }
-    private static readonly SolidColorBrush SelectedSongBackground = MusicVisuals.Brush("#E9F0F6");
-    private static readonly SolidColorBrush HoveredSongBackground = MusicVisuals.Brush("#FFFFFF");
+
+    private static readonly SolidColorBrush SelectedSongBackground = DesktopVisual.Brush("#E9F0F6");
+    private static readonly SolidColorBrush HoveredSongBackground = DesktopVisual.Brush("#FFFFFF");
     private static readonly SolidColorBrush TransparentSongBackground = new(Microsoft.UI.Colors.Transparent);
-    private static readonly SolidColorBrush SelectedSongBorder = MusicVisuals.Brush("#9AAEBF");
+    private static readonly SolidColorBrush SelectedSongBorder = DesktopVisual.Brush("#9AAEBF");
 
     private void RefreshSongRow(SelectorItem container)
     {
@@ -304,18 +428,41 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         foreach (var node in SongDescendants(container))
         {
             if (node is TextBlock text)
-                text.Foreground = !contrast && text.Name == "SongTitle" && song.Id == module.CurrentSongId ? Resource("MeowFilm.Brush.Accent") :
+                text.Foreground = !contrast && text.Name == "SongTitle" && song.Id == playback.CurrentSongId ? Resource("MeowFilm.Brush.Accent") :
                     !contrast && text.Name == "SongArtist" ? Resource("MeowFilm.Brush.Muted") : foreground;
             else if (node is StackPanel { Name: "SongActions" } actions)
             {
                 actions.Opacity = showActions ? 1 : 0;
                 actions.IsHitTestVisible = showActions;
             }
+            else if (node is FavoriteButton favorite)
+            {
+                favorite.Foreground = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
+                SyncSongRowFavorite(favorite, song);
+            }
             else if (node is Button button)
                 button.Foreground = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
         }
-        AutomationProperties.SetItemStatus(container, song.Id == module.CurrentSongId ? "正在播放" : "");
+        AutomationProperties.SetItemStatus(container, song.Id == playback.CurrentSongId ? "正在播放" : "");
     }
+
+    private async void SyncSongRowFavorite(FavoriteButton button, SongRow song)
+    {
+        long epoch = favoritesEpoch;
+        if (favoriteCache.TryGetValue(song.Id, out var cached) && cached.Epoch == epoch)
+        {
+            button.IsFavorited = cached.Value;
+            AutomationProperties.SetName(button, cached.Value ? "取消收藏" : "收藏");
+            return;
+        }
+        bool favorited = await Library.IsSongFavoritedAsync(song);
+        if (!IsLoaded || epoch != favoritesEpoch) return;
+        favoriteCache[song.Id] = (epoch, favorited);
+        if (!button.IsLoaded || !ReferenceEquals(button.Tag, song)) return;
+        button.IsFavorited = favorited;
+        AutomationProperties.SetName(button, favorited ? "取消收藏" : "收藏");
+    }
+
     private static IEnumerable<DependencyObject> SongDescendants(DependencyObject parent)
     {
         for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
@@ -324,61 +471,74 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             foreach (var descendant in SongDescendants(child)) yield return descendant;
         }
     }
+
     private async void Song_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
-    { if (module.CanEdit && sender is FrameworkElement { DataContext: SongRow song }) { module.SelectedSong = song; e.Handled = true; await module.PlayContentSelectionAsync(); } }
+    { if (Library.CanEdit && sender is FrameworkElement { DataContext: SongRow song }) { Library.SelectedSong = song; e.Handled = true; await Library.PlayContentSelectionAsync(); } }
+
     private void Song_RightTapped(object sender, RightTappedRoutedEventArgs e)
     { if (sender is FrameworkElement host && OpenSongMenu(host) is not null) e.Handled = true; }
+
     internal MenuFlyout? OpenSongMenu(FrameworkElement host)
     {
-        if (host.DataContext is not SongRow song) { module.SelectedSong = null; return null; }
-        module.SelectedSong = song;
+        if (host.DataContext is not SongRow song) { Library.SelectedSong = null; return null; }
+        Library.SelectedSong = song;
         songMenu?.Hide();
-        var menu = new MenuFlyout(); module.PopulateSongMenu(menu, song, null, () => host.IsLoaded && DesktopVisual.IsVisible(host) && ReferenceEquals(host.DataContext, song));
-        MusicCapability.ApplyContentMenuStyles(host, menu);
+        var menu = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
+        Library.PopulateSongMenu(menu, song, null, () => host.IsLoaded && DesktopVisual.IsVisible(host) && ReferenceEquals(host.DataContext, song));
+        MusicLibraryController.ApplyContentMenuStyles(host, menu);
         var visibility = DesktopVisual.ObserveVisibility(host, visible => { if (!visible) menu.Hide(); });
         menu.Closed += (_, _) => { visibility.Dispose(); if (ReferenceEquals(songMenu, menu)) songMenu = null; };
         songMenu = menu; menu.ShowAt(host); return menu;
     }
+
     private async void Song_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if ((e.Key == VirtualKey.Enter && module.HasSelection) || (e.Key == VirtualKey.Delete && module.CanRemoveSelection)) e.Handled = true;
+        if ((e.Key == VirtualKey.Enter && Library.HasSelection) || (e.Key == VirtualKey.Delete && Library.CanRemoveSelection)) e.Handled = true;
         await ExecuteSongKeyAsync(e.Key);
     }
+
     internal async Task<bool> ExecuteSongKeyAsync(VirtualKey key)
     {
         songScrollIntent.Set(key is VirtualKey.Down or VirtualKey.PageDown or VirtualKey.End); if (songScrollIntent.Active) LoadMoreSongsNearEnd();
-        if (key == VirtualKey.Enter && module.HasSelection) { await module.PlayContentSelectionAsync(); return true; }
-        if (key == VirtualKey.Delete && module.CanRemoveSelection) { await module.RemoveSongAsync(); return true; }
+        if (key == VirtualKey.Enter && Library.HasSelection) { await Library.PlayContentSelectionAsync(); return true; }
+        if (key == VirtualKey.Delete && Library.CanRemoveSelection) { await Library.RemoveSongAsync(); return true; }
         return false;
     }
+
     private void SongsGrid_Wheel(object sender, PointerRoutedEventArgs e) { songScrollIntent.Set(e.GetCurrentPoint(this).Properties.MouseWheelDelta < 0); if (songScrollIntent.Active) LoadMoreSongsNearEnd(); }
     private void SongsScrolled(object? sender, ScrollViewerViewChangedEventArgs e) { if (songScrollIntent.Accepts(ActiveSongsGrid, e.IsIntermediate)) LoadMoreSongsNearEnd(); }
+
     private async void LoadMoreSongsNearEnd()
     {
-        if (loadingMoreSongs || !ActiveSongsGrid.IsLoaded || (!module.CanLoadMoreCollection && !module.CanLoadMoreCatalogPlaylist && !module.CanLoadMoreSearchSongs) || songScrolls.GetValueOrDefault(ActiveSongsGrid) is not { } scroll || scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
+        if (loadingMoreSongs || !ActiveSongsGrid.IsLoaded || (!Library.CanLoadMoreCollection && !Catalog.CanLoadMoreCatalogPlaylist && !Search.CanLoadMoreSearchSongs) || songScrolls.GetValueOrDefault(ActiveSongsGrid) is not { } scroll || scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
         loadingMoreSongs = true; songScrollIntent.Clear();
-        try { if (module.CanLoadMoreCollection) await module.LoadMoreCollectionAsync(); else if (module.CanLoadMoreCatalogPlaylist) await module.LoadMoreCatalogPlaylistAsync(); else if (module.CanLoadMoreSearchSongs) await module.MoreSearchAsync(); }
+        try { if (Library.CanLoadMoreCollection) await Library.LoadMoreCollectionAsync(); else if (Catalog.CanLoadMoreCatalogPlaylist) await Catalog.LoadMoreCatalogPlaylistAsync(); else if (Search.CanLoadMoreSearchSongs) await Search.MoreSearchAsync(); }
         finally { loadingMoreSongs = false; songScrollIntent.Clear(); }
     }
-    private bool SelectSong(object sender) { if (sender is Button { Tag: SongRow song }) module.SelectedSong = song; return module.CanEdit && module.HasSelection; }
-    private async void NextInQueue_Click(object sender, RoutedEventArgs e) { if (SelectSong(sender)) await module.AppendNextAsync(); }
-    private async void Favorite_Click(object sender, RoutedEventArgs e) { if (SelectSong(sender)) await module.FavoriteAsync(); }
+
+    private bool SelectSong(object sender) { if (sender is Button { Tag: SongRow song }) Library.SelectedSong = song; return Library.CanEdit && Library.HasSelection; }
+    private async void NextInQueue_Click(object sender, RoutedEventArgs e) { if (SelectSong(sender)) await Library.AppendNextAsync(); }
+    private async void Favorite_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: SongRow song } && SelectSong(sender)) await Library.ToggleSongFavoriteAsync(song); }
     private void SongMore_Click(object sender, RoutedEventArgs e) { if (sender is Button button && SelectSong(sender)) OpenSongMenu(button); }
-    private async void PreviousPage_Click(object sender, RoutedEventArgs e) => await module.PageAsync(-1);
-    private async void NextPage_Click(object sender, RoutedEventArgs e) => await module.PageAsync(1);
-    private async void SearchTab_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string tab }) await module.OpenSearchTabAsync(tab); }
+    private async void PreviousPage_Click(object sender, RoutedEventArgs e) => await Library.PageAsync(-1);
+    private async void NextPage_Click(object sender, RoutedEventArgs e) => await Library.PageAsync(1);
+    private async void SearchTab_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string tab }) await Search.OpenSearchTabAsync(tab); }
+
     private static ListViewItem? FindRow(DependencyObject? node)
     { while (node is not null) { if (node is ListViewItem row) return row; node = VisualTreeHelper.GetParent(node); } return null; }
+
     private void Songs_DragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
-        if (!module.CanReorderPlaylist || e.Items.Count != 1 || e.Items[0] is not SongRow song) { e.Cancel = true; return; }
+        if (!Library.CanReorderPlaylist || e.Items.Count != 1 || e.Items[0] is not SongRow song) { e.Cancel = true; return; }
         draggingSong = song; e.Data.RequestedOperation = DataPackageOperation.Move; e.Data.Properties["meowfilm.playlistSong"] = song;
     }
+
     private void Songs_DragItemsCompleted(ListViewBase sender, DragItemsCompletedEventArgs args) => EndDrag();
+
     private void Songs_DragOver(object sender, DragEventArgs e)
     {
         var row = FindRow(e.OriginalSource as DependencyObject);
-        if (!module.CanReorderPlaylist || draggingSong is null || row?.Content is not SongRow target || ReferenceEquals(target, draggingSong)) { e.AcceptedOperation = DataPackageOperation.None; ClearInsertion(); return; }
+        if (!Library.CanReorderPlaylist || draggingSong is null || row?.Content is not SongRow target || ReferenceEquals(target, draggingSong)) { e.AcceptedOperation = DataPackageOperation.None; ClearInsertion(); return; }
         bool after = e.GetPosition(row).Y >= row.ActualHeight / 2;
         if (!ReferenceEquals(row, insertionRow) || after != insertAfter)
         {
@@ -394,13 +554,15 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             else if (y > SongsGrid.ActualHeight - 36) scroll.ChangeView(null, Math.Min(scroll.ScrollableHeight, scroll.VerticalOffset + 12), null, true);
         }
     }
+
     private async void Songs_Drop(object sender, DragEventArgs e)
     {
         var source = draggingSong; var target = insertionRow?.Content as SongRow; bool after = insertAfter;
-        bool accepted = module.CanReorderPlaylist && source is not null && target is not null && !ReferenceEquals(source, target);
+        bool accepted = Library.CanReorderPlaylist && source is not null && target is not null && !ReferenceEquals(source, target);
         e.AcceptedOperation = accepted ? DataPackageOperation.Move : DataPackageOperation.None; e.Handled = true; EndDrag();
-        if (accepted) await module.ReorderPlaylistSongAsync(source!, target!, after);
+        if (accepted) await Library.ReorderPlaylistSongAsync(source!, target!, after);
     }
+
     private void ClearInsertion() { var row = insertionRow; insertionRow = null; if (row is not null) RefreshSongRow(row); }
     private void EndDrag() { ClearInsertion(); draggingSong = null; }
 }

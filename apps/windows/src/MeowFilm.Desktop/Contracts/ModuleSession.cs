@@ -7,6 +7,9 @@ namespace MeowFilm.Desktop;
 internal sealed class ModuleSession(IDesktopModule module)
 {
     public IDesktopModule Module { get; } = module;
+    public string ModuleTitle => Module.Title;
+    public string? HomeIconData => Module.Navigation.FirstOrDefault()?.IconData;
+    public string HomeGlyph => Module.Navigation.FirstOrDefault()?.Glyph ?? "";
     public SemaphoreSlim Gate { get; } = new(1, 1);
     public bool Initialized { get; set; }
     public bool Mounted { get; set; }

@@ -12,6 +12,7 @@ public partial class CloseWindowDialog : UserControl
     internal bool IsOpen => Visibility == Visibility.Visible;
     internal bool IsPending { get; private set; }
     internal bool ShouldRemember => RememberChoice.IsChecked == true;
+    internal FrameworkElement SurfaceElement => DialogSurface;
 
     public CloseWindowDialog() => InitializeComponent();
 

@@ -18,13 +18,30 @@ public sealed class DesktopViewport : IDisposable
     private bool hasViewport, nativeInViewport;
     private readonly List<FrameworkElement> clipOwners = [];
     private readonly List<(DependencyObject Owner, DependencyProperty Property, long Token)> geometrySubscriptions = [];
-    private bool clipsVisible = true, clipsQueued, geometryChanged, loaded, disposed, transformCheckPending;
+    private bool clipsVisible = true, clipsQueued, geometryChanged, loaded, disposed, transformCheckPending, hasScrollViewerAncestor;
     private double lastWidth, lastHeight;
     public bool IsVisible { get; private set; }
     public bool IsInViewport { get; private set; }
 
     /// <summary>Notifies viewports inside a translated/animated container (such as the queue drawer) once its transform settles.</summary>
     public static void NotifyTransformSettled(DependencyObject container) => TransformSettled?.Invoke(container);
+
+    internal void Refresh()
+    {
+        if (disposed) return;
+        if (!loaded && element.IsLoaded)
+        {
+            element.Loaded -= Loaded;
+            loaded = true;
+            TransformSettled -= OnTransformSettled;
+            TransformSettled += OnTransformSettled;
+            AttachGeometry();
+        }
+        if (!loaded) return;
+        transformCheckPending = true;
+        RefreshClips();
+        Publish();
+    }
 
     public DesktopViewport(FrameworkElement element, Action changed)
     {
@@ -43,7 +60,12 @@ public sealed class DesktopViewport : IDisposable
         {
             bool previous = IsVisible;
             IsVisible = value;
-            if (value && !previous) transformCheckPending = true;
+            if (value && !previous)
+            {
+                transformCheckPending = true;
+                if (element.ActualWidth <= 0 || element.ActualHeight <= 0)
+                    element.DispatcherQueue?.TryEnqueue(() => Refresh());
+            }
             Publish(previous != value);
         });
     }
@@ -94,11 +116,13 @@ public sealed class DesktopViewport : IDisposable
     private void AttachGeometry()
     {
         DetachGeometry();
+        hasScrollViewerAncestor = false;
         for (DependencyObject? node = element; node is not null; node = VisualTreeHelper.GetParent(node))
             if (node is FrameworkElement ancestor)
             {
                 if (!ReferenceEquals(ancestor, element))
                 {
+                    if (ancestor is ScrollViewer) hasScrollViewerAncestor = true;
                     Observe(ancestor, UIElement.ClipProperty, rebuild: true);
                     if (ancestor.Clip is { } clip)
                     {
@@ -136,8 +160,9 @@ public sealed class DesktopViewport : IDisposable
         UIElement from = element;
         foreach (var owner in clipOwners)
         {
+            if (owner.Clip is not { } clip) continue;
             bounds = from.TransformToVisual(owner).TransformBounds(bounds); from = owner;
-            bounds.Intersect(owner.Clip.Rect);
+            bounds.Intersect(clip.Rect);
             if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0) { clipsVisible = false; return; }
         }
     }
@@ -148,17 +173,34 @@ public sealed class DesktopViewport : IDisposable
     }
     private void Publish(bool visibilityChanged = false)
     {
+        if (!loaded && element.IsLoaded)
+        {
+            element.Loaded -= Loaded;
+            loaded = true;
+            TransformSettled -= OnTransformSettled;
+            TransformSettled += OnTransformSettled;
+            AttachGeometry();
+        }
+        bool liveVisible = loaded && DesktopVisual.IsVisible(element);
+        if (liveVisible != IsVisible)
+        {
+            IsVisible = liveVisible;
+            if (liveVisible) transformCheckPending = true;
+            visibilityChanged = true;
+        }
         bool current = false;
-        if (loaded && !clipsQueued && IsVisible && hasViewport && element.ActualWidth > 0 && element.ActualHeight > 0)
+        bool hasSize = element.ActualWidth > 0 && element.ActualHeight > 0;
+        if (loaded && !clipsQueued && IsVisible && hasViewport && hasSize)
         {
             var visible = viewport;
             visible.Intersect(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
             current = !visible.IsEmpty && visible.Width > 0 && visible.Height > 0;
         }
-        if (!current && loaded && !clipsQueued && IsVisible && element.ActualWidth > 0 && element.ActualHeight > 0 &&
-            (visibilityChanged || !hasViewport || transformCheckPending))
+        if (!current && loaded && IsVisible && hasSize &&
+            (visibilityChanged || !hasViewport || transformCheckPending || !hasScrollViewerAncestor))
         {
             transformCheckPending = false;
+            RefreshClips();
             current = IsVisibleInRoot();
         }
         else if (current)

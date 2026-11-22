@@ -1,0 +1,72 @@
+<UserControl x:Class="MeowFilm.Capabilities.NovelSourceEditorDialogView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop"
+ AutomationProperties.Name="编辑书源">
+ <Border Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="12" Padding="0"
+         Width="760" Height="700" TabFocusNavigation="Cycle">
+  <desktop:DockPanel>
+   <Border desktop:DockPanel.Dock="Top" MinHeight="52" Padding="16,8,16,8">
+    <Grid>
+     <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="*"/>
+      <ColumnDefinition Width="Auto"/>
+     </Grid.ColumnDefinitions>
+     <TextBlock Text="编辑书源" Style="{StaticResource Capability.Text}" FontSize="18"
+                Margin="0" VerticalAlignment="Center" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+     <StackPanel x:Name="ToolsPanel" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+      <ComboBox x:Name="ProtocolBox" Width="118" Height="32" MinHeight="32" Margin="0,0,4,0"
+                Style="{StaticResource MeowFilm.ComboBox}"
+                desktop:DropdownPlacement.Enabled="True"
+                DisplayMemberPath="Title" SelectedValuePath="Key"
+                AutomationProperties.Name="书源协议"
+                AutomationProperties.AutomationId="novel.source.protocol"
+                SelectionChanged="ProtocolBox_SelectionChanged"/>
+      <Button x:Name="MoreButton" Content="&#xE712;" Style="{StaticResource MeowFilm.IconButton}"
+              Width="32" Height="32" MinHeight="32" Margin="4,0,0,0" Padding="0"
+              AutomationProperties.Name="更多书源操作" ToolTipService.ToolTip="更多书源操作">
+       <Button.Flyout>
+        <MenuFlyout Placement="BottomEdgeAlignedLeft">
+         <MenuFlyoutItem Text="复制书源" Click="CopySource_Click"/>
+        </MenuFlyout>
+       </Button.Flyout>
+      </Button>
+      <Button x:Name="ImportButton" Content="&#xE8B5;" Style="{StaticResource MeowFilm.IconButton}"
+              Width="32" Height="32" MinHeight="32" Margin="4,0,0,0" Padding="0"
+              AutomationProperties.Name="导入书源" ToolTipService.ToolTip="导入书源">
+       <Button.Flyout>
+        <MenuFlyout Placement="BottomEdgeAlignedLeft">
+         <MenuFlyoutItem Text="本地导入" Click="ImportFile_Click"/>
+         <MenuFlyoutItem Text="网络导入" Click="ImportUrl_Click"/>
+         <MenuFlyoutItem Text="粘贴导入" Click="ImportClipboard_Click"/>
+        </MenuFlyout>
+       </Button.Flyout>
+      </Button>
+      <Button x:Name="ExportButton" Content="&#xE8A7;" Style="{StaticResource MeowFilm.IconButton}"
+              Width="32" Height="32" MinHeight="32" Margin="4,0,0,0" Padding="0"
+              AutomationProperties.Name="导出书源" ToolTipService.ToolTip="导出书源"
+              Click="ExportDraft_Click"/>
+      <Button x:Name="CloseButton" Content="&#xE711;" Style="{StaticResource MeowFilm.IconButton}"
+              Width="32" Height="32" MinHeight="32" Margin="4,0,0,0" Padding="0"
+              AutomationProperties.Name="关闭" ToolTipService.ToolTip="关闭"
+              AutomationProperties.AutomationId="novel.dialog.close"
+              Click="Cancel_Click"/>
+     </StackPanel>
+    </Grid>
+   </Border>
+   <desktop:NoticeStack x:Name="Notices" desktop:DockPanel.Dock="Top" Margin="16,0,16,0"/>
+   <Border desktop:DockPanel.Dock="Bottom" Style="{StaticResource MeowFilm.DialogFooter}"
+           BorderThickness="0,1,0,0" Padding="16,12,16,12"
+           AutomationProperties.AutomationId="novel.dialog.footer">
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+     <Button x:Name="CancelButton" Content="取消" Style="{StaticResource MeowFilm.GhostButton}" MinWidth="72"
+             AutomationProperties.Name="取消" Click="Cancel_Click"/>
+     <Button x:Name="SaveButton" Content="保存" Style="{StaticResource MeowFilm.PrimaryButton}" MinWidth="72"
+             AutomationProperties.Name="保存" Click="Save_Click"/>
+    </StackPanel>
+   </Border>
+   <local:NovelSourceEditor x:Name="Editor" Margin="12,0,12,12"/>
+  </desktop:DockPanel>
+ </Border>
+</UserControl>

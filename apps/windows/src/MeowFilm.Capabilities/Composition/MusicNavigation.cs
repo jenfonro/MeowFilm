@@ -1,44 +1,67 @@
-using System.Text.Json;
 using System.Collections.ObjectModel;
-using MeowFilm.Threading;
+using System.Text.Json;
 using Microsoft.UI.Dispatching;
-using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicCapability
 {
-    private sealed record Location(string Route, string Query = "", int Offset = 0,
+    internal sealed record Location(string Route, string Query = "", int Offset = 0,
         string? Date = null, string? Selected = null, double Scroll = 0)
     {
         public string Key => Route == "search" ? "search/" + Query : Route;
     }
+
     private Location location = new("catalog-home");
     private readonly Dictionary<string, Location> locations = [];
     private readonly HashSet<Task> loadDrains = [];
     private CancellationTokenSource? loadCancellation;
-    private CancellationTokenSource? collectionPageCancellation;
-    private long loadGeneration, libraryRead, libraryRevision = -1;
+    private long loadGeneration, navigationSubmission, searchSubmission;
     private bool publishing;
 
-    private void PublishContentSelection((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous)
+    internal string CurrentRoute => location.Route;
+    internal Location CurrentLocation => location;
+    internal Dictionary<string, Location> Locations => locations;
+    internal CancellationTokenSource? LoadCancellation { get => loadCancellation; set => loadCancellation = value; }
+    internal long LoadGeneration => loadGeneration;
+    internal long NavigationSubmission => navigationSubmission;
+    internal bool Publishing { get => publishing; set => publishing = value; }
+
+    internal long AdvanceLoadGeneration()
     {
-        if (!ReferenceEquals(previous.Sections, CatalogSections))
-        { Changed(nameof(CatalogSections)); Changed(nameof(DisplayCatalogSections)); }
-        if (previous.Route == location.Route && (!IsSearchPage || previous.SearchView == searchView)) return;
-        foreach (var name in new[] { nameof(ContentPage), nameof(Songs), nameof(IsHistory), nameof(IsArchives), nameof(IsSongList),
-            nameof(IsLocalLibraryPage), nameof(ShowsSongTable), nameof(IsUtilityCatalogSurface), nameof(IsCatalogHome),
-            nameof(IsCatalogPage), nameof(IsChannelDirectory), nameof(CurrentChannelKey), nameof(IsCatalogLanding),
-            nameof(IsCatalogUtilityPage), nameof(IsChannelLanding), nameof(IsCatalogPlaylist), nameof(IsCatalogArtist),
-            nameof(IsCatalogDetailPage), nameof(IsSearchPage), nameof(IsCatalogBrowsePage), nameof(SearchTab),
-            nameof(IsSearchOverview), nameof(IsSearchSongs), nameof(IsSearchPlaylists), nameof(IsDiscovery), nameof(IsCatalogContent) }) Changed(name);
+        Catalog.OnLoadGenerationAdvanced();
+        return ++loadGeneration;
     }
 
-    private Location CaptureLocation() => location with { Selected = selectedSong?.SelectionKey, Scroll = Presentation.CaptureScroll() };
-    private void RememberLocation()
+    internal (string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) CaptureContentSelection() =>
+        (location.Route, Search.SearchView, Catalog.CatalogSections);
+
+    internal void SetLocation(Location next, string? heading = null, bool clearLibrary = false,
+        bool clearCatalogSongs = false, bool clearSelection = false, bool clearTotal = false, bool clearCollection = false)
+    {
+        location = next;
+        Library.SetLocationState(heading, clearLibrary, clearCatalogSongs, clearSelection, clearTotal, clearCollection);
+    }
+
+    internal void PublishContentSelection((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous)
+    {
+        bool sectionsChanged = !ReferenceEquals(previous.Sections, Catalog.CatalogSections);
+        bool routeChanged = previous.Route != location.Route || (Search.IsSearchPage && previous.SearchView != Search.SearchView);
+        if (!sectionsChanged && !routeChanged) return;
+        Catalog.NotifyRouteChanged(sectionsChanged);
+        if (!routeChanged) return;
+        Search.NotifyRouteChanged();
+        Library.NotifyRouteChanged();
+        Discovery.NotifyRouteChanged();
+    }
+
+    internal Location CaptureLocation() =>
+        location with { Selected = Library.SelectedSong?.SelectionKey, Scroll = Presentation.CaptureScroll() };
+
+    internal void RememberLocation()
     {
         locations[location.Key] = CaptureLocation();
-        RememberCatalogLocation();
+        Catalog.RememberCatalogLocation();
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
@@ -55,21 +78,21 @@ public sealed partial class MusicCapability
         {
             RefreshBindings();
             // Restore App state without navigating or publishing a content page.
-            await PrepareStartupAsync(token);
-            await RefreshPlaylists(token);
-            await ReadMetadataSettings(token);
-            await ReadQueue(token);
+            await Catalog.PrepareStartupAsync(token);
+            await Library.RefreshPlaylists(token);
+            await Settings.ReadMetadataSettings(token);
+            await Playback.ReadQueue(token);
             if (stopping) return;
-            try { await ReadAppearance(token); }
+            try { await Settings.ReadAppearance(token); }
             catch (OperationCanceledException) { throw; }
-            catch { appearanceStatus = "外观设置读取失败"; AppearanceBindings(); }
-            try { await ReadDeviceSettings(token); }
+            catch { Settings.SetAppearanceReadFailed(); }
+            try { await Settings.ReadDeviceSettings(token); }
             catch (OperationCanceledException) { throw; }
-            catch { status = "播放设置读取失败"; Changed(nameof(Status)); }
-            try { await ReadFeedbackSettings(token); }
+            catch { SetStatus("播放设置读取失败"); }
+            try { await Settings.ReadFeedbackSettings(token); }
             catch (OperationCanceledException) { throw; }
             catch { /* Feedback preferences fail closed independently. */ }
-            try { await ReadSearchPreferences(token); }
+            try { await Settings.ReadSearchPreferences(token); }
             catch (OperationCanceledException) { throw; }
             catch { /* Search preferences fail closed independently. */ }
             await application.InitializeAsync(token);
@@ -81,28 +104,30 @@ public sealed partial class MusicCapability
             { loadCancellation = null; if (!disposed) RefreshBindings(); }
         }
     }
+
     public async Task NavigateAsync(string route, CancellationToken cancellationToken)
     {
-        if (stopping || IsUnsupportedCatalogRoute(route)) return;
+        if (stopping || Catalog.IsUnsupportedCatalogRoute(route)) return;
         RetireOperationStatus();
         long submission = ++navigationSubmission;
-        bool retiringDiscovery = route != "catalog-discovery" && (IsDiscovery || discoveryRequest is not null);
+        bool retiringDiscovery = route != "catalog-discovery" && (Discovery.IsDiscovery || Discovery.HasActiveRequest);
         if (retiringDiscovery)
         {
             RememberLocation();
-            await RetireDiscoveryPageAsync();
+            await Discovery.RetireDiscoveryPageAsync();
         }
         cancellationToken.ThrowIfCancellationRequested();
         if (stopping || submission != navigationSubmission) return;
         await NavigateCoreAsync(route, cancellationToken, remember: !retiringDiscovery);
     }
+
     private Task NavigateCoreAsync(string route, CancellationToken cancellationToken, bool remember)
     {
         if (stopping) return Task.CompletedTask;
-        if (route != location.Route) RetireDailyStyleEditor();
-        InvalidateCatalogAction();
+        if (route != location.Route) Catalog.RetireDailyStyleEditor();
+        Catalog.InvalidateCatalogAction();
         if (remember) RememberLocation();
-        if (route == "catalog-discovery") return LoadDiscoveryAsync(false, cancellationToken);
+        if (route == "catalog-discovery") return Discovery.LoadDiscoveryAsync(false, cancellationToken);
         if (route.StartsWith("search-local/", StringComparison.Ordinal))
         {
             string query = Uri.UnescapeDataString(route[13..]);
@@ -111,19 +136,21 @@ public sealed partial class MusicCapability
             var target = new Location("search", query);
             return LoadAsync(locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
         }
-        if (IsCatalogRoute(route))
-            return CatalogNavigateAsync(route, cancellationToken);
+        if (MusicCatalogController.IsCatalogRoute(route))
+            return Catalog.CatalogNavigateAsync(route, cancellationToken);
         if (route is not ("favorites" or "history" or "archives") &&
             !(route.StartsWith("playlist/", StringComparison.Ordinal) && route.Length > 9))
             throw new ArgumentException("Unknown music route", nameof(route));
         return LoadAsync(locations.GetValueOrDefault(route) ?? new(route), cancellationToken, publishStatus: false);
     }
+
     public string CaptureNavigationLocation() => location.Route switch
     {
         "search" => "search-local/" + Uri.EscapeDataString(location.Query),
-        "catalog-search" => "catalog-search/" + Uri.EscapeDataString(searchKeyword),
+        "catalog-search" => "catalog-search/" + Uri.EscapeDataString(Search.SearchKeyword),
         _ => location.Route
     };
+
     public async Task RestoreNavigationAsync(string navigationLocation, CancellationToken token)
     {
         if (stopping) return;
@@ -137,42 +164,43 @@ public sealed partial class MusicCapability
             throw new ArgumentException("Invalid search location", nameof(navigationLocation));
         if (local) { await NavigateAsync("search-local/" + Uri.EscapeDataString(query), token); return; }
         RetireOperationStatus();
-        InvalidateCatalogAction();
+        Catalog.InvalidateCatalogAction();
         RememberLocation();
         long submission = ++navigationSubmission;
-        if (IsDiscovery || discoveryRequest is not null) await RetireDiscoveryPageAsync();
+        if (Discovery.IsDiscovery || Discovery.HasActiveRequest) await Discovery.RetireDiscoveryPageAsync();
         token.ThrowIfCancellationRequested();
         if (stopping || submission != navigationSubmission) return;
-        if (HasSearchSession && searchKeyword == query && searchAccountEpoch == accountEpoch)
+        if (Search.HasSearchSession && Search.SearchKeyword == query && Search.SearchAccountEpoch == Accounts.AccountEpoch)
         {
-            await RestoreSearchAsync(token);
+            await Search.RestoreSearchAsync(token);
             return;
         }
         // Only the current valid online search is retained. Retired history uses the domain start path.
-        await BeginSearchAsync(query, token);
+        await Search.BeginSearchAsync(query, token);
     }
+
     public async Task SearchAsync(string query, CancellationToken cancellationToken)
     {
         if (stopping) return;
         RetireOperationStatus();
         long submission = ++searchSubmission;
-        InvalidateCatalogAction();
+        Catalog.InvalidateCatalogAction();
         RememberLocation();
         query = query.Trim();
         if (query.Length == 0)
         {
-            if (IsCatalogPage) await NavigateAsync("catalog-discovery", cancellationToken);
+            if (Catalog.IsCatalogPage) await NavigateAsync("catalog-discovery", cancellationToken);
             return;
         }
         if (query.Any(char.IsControl)) throw new ArgumentException("Invalid query", nameof(query));
-        bool online = IsCatalogPage;
+        bool online = Catalog.IsCatalogPage;
         long pageGeneration = loadGeneration;
         long navigation = navigationSubmission;
-        if (IsDiscovery || discoveryRequest is not null) await RetireDiscoveryPageAsync();
+        if (Discovery.IsDiscovery || Discovery.HasActiveRequest) await Discovery.RetireDiscoveryPageAsync();
         if (stopping || submission != searchSubmission || pageGeneration != loadGeneration || navigation != navigationSubmission) return;
-        await RecordSearchHistory(query, online, cancellationToken);
+        await Settings.RecordSearchHistory(query, online, cancellationToken);
         if (stopping || submission != searchSubmission || pageGeneration != loadGeneration) return;
-        if (online) { await BeginSearchAsync(query, cancellationToken); return; }
+        if (online) { await Search.BeginSearchAsync(query, cancellationToken); return; }
         var target = new Location("search", query);
         await LoadAsync(locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
     }
@@ -185,37 +213,33 @@ public sealed partial class MusicCapability
         if (query.Length < 1 || query.Any(char.IsControl))
             throw new ArgumentException("Invalid query", nameof(query));
         RetireOperationStatus();
-        InvalidateCatalogAction();
+        Catalog.InvalidateCatalogAction();
         RememberLocation();
         long submission = ++searchSubmission;
-        if (IsDiscovery || discoveryRequest is not null) await RetireDiscoveryPageAsync();
+        if (Discovery.IsDiscovery || Discovery.HasActiveRequest) await Discovery.RetireDiscoveryPageAsync();
         token.ThrowIfCancellationRequested();
         if (stopping || submission != searchSubmission) return;
-        await RecordSearchHistory(query, true, token);
+        await Settings.RecordSearchHistory(query, true, token);
         token.ThrowIfCancellationRequested();
         if (stopping || submission != searchSubmission) return;
-        if (HasSearchSession && searchKeyword == query && searchAccountEpoch == accountEpoch)
+        if (Search.HasSearchSession && Search.SearchKeyword == query && Search.SearchAccountEpoch == Accounts.AccountEpoch)
         {
-            await RestoreSearchAsync(token);
-            await OpenSearchTabAsync(SearchOverview);
+            await Search.RestoreSearchAsync(token);
+            await Search.OpenSearchTabAsync(MusicSearchController.SearchOverview);
             return;
         }
-        await BeginSearchAsync(query, token, overview: true);
+        await Search.BeginSearchAsync(query, token, overview: true);
     }
-    private void RetireOperationStatus()
-    {
-        ++statusEpoch;
-        status = ""; catalogAccountNotice = "";
-        Changed(nameof(Status));
-    }
-    private async Task LoadUiAsync(Location target)
+
+    internal async Task LoadUiAsync(Location target)
     {
         if (stopping) return;
         try { await LoadAsync(target, lifetime.Token); }
         catch (OperationCanceledException) { }
         catch { /* LoadAsync publishes a bounded error only for its current generation. */ }
     }
-    private Task LoadAsync(Location target, CancellationToken cancellationToken, int retry = 0,
+
+    internal Task LoadAsync(Location target, CancellationToken cancellationToken, int retry = 0,
         bool publishStatus = true)
     {
         if (stopping) return Task.CompletedTask;
@@ -228,12 +252,13 @@ public sealed partial class MusicCapability
             finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); }
         }
     }
+
     private async Task LoadCoreAsync(Location target, CancellationToken cancellationToken, int retry,
         bool publishStatus)
     {
         var generation = AdvanceLoadGeneration();
         var stamp = publishStatus ? ++statusEpoch : statusEpoch;
-        collectionPageCancellation?.Cancel();
+        Library.CancelCollectionPage();
         loadCancellation?.Cancel();
         using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
         loadCancellation = request;
@@ -306,15 +331,12 @@ public sealed partial class MusicCapability
             publishing = true;
             try
             {
-                var previousSelection = (location.Route, searchView, CatalogSections);
-                location = target; collection = detail; heading = title; total = count;
-                selectedSong = null; Changed(nameof(SelectedSong));
-                Songs.Clear(); foreach (var row in rows) Songs.Add(row);
-                HistoryDates.Clear(); foreach (var date in dates) HistoryDates.Add(date);
-                Archives.Clear(); foreach (var archive in archives) Archives.Add(archive);
-                SelectedSong = rows.FirstOrDefault(row => row.SelectionKey == target.Selected);
+                var previousSelection = CaptureContentSelection();
+                location = target;
+                Library.ApplyLoadedLocation(detail, title, count, rows, dates, archives, target.Selected);
                 locations[target.Key] = target;
-                PublishContentSelection(previousSelection); RefreshBindings();
+                PublishContentSelection(previousSelection);
+                RefreshBindings();
             }
             finally { publishing = false; }
             _ = Presentation.Dispatcher.EnqueueAsync(() =>
@@ -326,7 +348,7 @@ public sealed partial class MusicCapability
         catch (Exception error)
         {
             if (publishStatus && !stopping && generation == loadGeneration && stamp == statusEpoch)
-            { status = ErrorText(error); Changed(nameof(Status)); }
+                SetStatus(ErrorText(error));
             throw;
         }
         finally
@@ -335,6 +357,7 @@ public sealed partial class MusicCapability
             { loadCancellation = null; if (!disposed) RefreshBindings(); }
         }
     }
+
     private async Task<JsonElement[]> ReadHistoryAsync(string kind, CancellationToken token)
     {
         var rows = new List<JsonElement>();
@@ -347,60 +370,5 @@ public sealed partial class MusicCapability
             rows.AddRange(page);
             if (rows.Count >= MusicDto.Count(reply, "total")) return rows.ToArray();
         }
-    }
-    private async Task<(PlaylistRow[] Rows, long Revision)> FetchPlaylists(CancellationToken token)
-    {
-        var rows = new List<PlaylistRow>();
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        long revision = -1;
-        while (true)
-        {
-            var reply = await Call("music.library.list", new { offset = rows.Count, limit = 100 }, token);
-            var nextRevision = MusicDto.Integer(reply, "revision");
-            if (revision >= 0 && revision != nextRevision) throw new MusicOperationException("REVISION_CONFLICT");
-            revision = nextRevision;
-            var page = reply.GetProperty("items").EnumerateArray().Select(PlaylistRow.Read).ToArray();
-            MusicDto.Require(page.All(row => ids.Add(row.Id)));
-            rows.AddRange(page);
-            if (page.Length < 100) break;
-        }
-        return (rows.ToArray(), revision);
-    }
-    private async Task RefreshPlaylists(CancellationToken token)
-    {
-        if (stopping) return;
-        var serial = ++libraryRead;
-        var (rows, revision) = await FetchPlaylists(token);
-        if (!stopping && serial == libraryRead) PublishPlaylists(rows, revision);
-    }
-    private void PublishPlaylists(PlaylistRow[] rows, long revision)
-    {
-        if (revision < libraryRevision) return;
-        libraryRevision = revision;
-        Playlists.Clear(); foreach (var row in rows.Where(row => row.Kind != "network")) Playlists.Add(row);
-        NetworkPlaylists.Clear(); foreach (var row in rows.Where(row => row.Kind == "network")) NetworkPlaylists.Add(row);
-        RebuildNavigation(); Changed(nameof(CountText));
-        NetworkPlaylistBindings();
-        _ = RefreshCurrentFavoriteAsync();
-    }
-    private void RebuildNavigation()
-    {
-        NavigationItem[] items = [
-            new("catalog-home", "推荐", "\uE80F") { IconData = "M9,18 L9,5 21,3 21,16 M9,8 L21,6 M9,18 A3,2 0 1 1 3,18 A3,2 0 1 1 9,18 M21,16 A3,2 0 1 1 15,16 A3,2 0 1 1 21,16" },
-            new("catalog-channels", "频道", "\uE8A9"),
-            new("favorites", "我的收藏", "\uEB51", "我的", GroupAction: Presentation.CreatePlaylistAction),
-            ..Playlists.Where(item => item.Kind == "playlist").Select(item =>
-                new NavigationItem("playlist/" + item.Id, item.Name, "\uE8D6", "我的")),
-            ..NetworkPlaylists.Select(item => new NavigationItem(item.Route, item.Name, "\uE8D6", "网络歌单")),
-            // Declared routes remain reachable from content/settings and public-page handoff.
-            new("catalog-discovery", "搜索发现", "\uE721", ShowInSidebar: false),
-            new("catalog-personal", "平台歌单", "\uE8D6", ShowInSidebar: false),
-            new("catalog-daily", "每日推荐", "\uE734", ShowInSidebar: false),
-            new("catalog-fm", "私人 FM", "\uE93E", ShowInSidebar: false),
-            new("history", "最近播放", "\uE81C", ShowInSidebar: false),
-            new("archives", "已播队列", "\uE8D6", ShowInSidebar: false)
-        ];
-        if (Navigation.SequenceEqual(items)) return;
-        Navigation.Clear(); foreach (var item in items) Navigation.Add(item);
     }
 }

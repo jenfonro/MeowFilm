@@ -133,11 +133,11 @@ internal static class Program
                 _ = novel.StartSourcesAsync();
                 var settings = shell.MediaControls ?? throw new InvalidOperationException("MEDIA_CONTROLS_MISSING");
                 var attachment = pendingMediaAttachment = new AppMediaWindowAttachment(window, settings);
-                music.AttachDesktopLyricsOwner(window, shell.RestoreFromTray);
+                music.Lyrics.AttachDesktopLyricsOwner(window, shell.RestoreFromTray);
                 var systemMedia = new AppSystemMediaAttachment(window, musicPlayback!, filmPlayback!, film,
                     () => playbackCoordinator!.ActiveOwner,
-                    [new("music", _ => music.StepAsync(true), _ => music.StepAsync(false),
-                        Play: _ => music.ResumePlaybackAsync()),
+                    [new("music", _ => music.Playback.StepAsync(true), _ => music.Playback.StepAsync(false),
+                        Play: _ => music.Playback.ResumePlaybackAsync()),
                      new("film", _ => film.StepAsync(true), _ => film.StepAsync(false), Kind: SystemPlaybackKind.Video,
                         Play: _ => film.ResumePlaybackAsync())],
                     enabled: settings.IsAvailable && settings.Preferences.SystemMediaEnabled);

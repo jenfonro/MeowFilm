@@ -11,15 +11,15 @@
  </UserControl.Resources>
  <Grid x:Name="Root" Margin="0,12,0,0">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-  <StackPanel Margin="0,0,0,8" Visibility="{Binding LoadFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+  <StackPanel Margin="0,0,0,8" Visibility="{x:Bind Accounts.LoadFailed, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}, FallbackValue=Collapsed}">
    <Button Content="重试" Click="Reload_Click" HorizontalAlignment="Left" Style="{StaticResource Settings.Button}"
-           Visibility="{Binding LoadFailed,Converter={StaticResource MeowFilm.BoolToVisibility}}"
+           Visibility="{x:Bind Accounts.LoadFailed, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}, FallbackValue=Collapsed}"
            AutomationProperties.Name="重新读取网盘账号"/>
   </StackPanel>
   <ScrollViewer x:Name="TableScroll" Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                 Style="{StaticResource MeowFilm.SettingsScrollViewer}"
                 AutomationProperties.Name="网盘账号表">
-   <Grid x:Name="AccountTable" MinWidth="448" Width="{Binding ViewportWidth,ElementName=TableScroll}" VerticalAlignment="Top">
+   <Grid x:Name="AccountTable" MinWidth="448" Width="{x:Bind TableScroll.ViewportWidth, Mode=OneWay}" VerticalAlignment="Top">
     <Grid.RowDefinitions><RowDefinition Height="30"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <Grid x:Name="AccountTableHeader" Margin="7,0">
      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="96"/><ColumnDefinition Width="192"/></Grid.ColumnDefinitions>
@@ -28,30 +28,30 @@
      <TextBlock Grid.Column="2" Text="操作" Style="{StaticResource Account.Header}" HorizontalAlignment="Center"/>
     </Grid>
     <Border Grid.Row="1" Style="{StaticResource Settings.ListSurface}">
-     <ItemsControl x:Name="AccountRows" ItemsSource="{Binding Rows}">
-      <ItemsControl.ItemTemplate><DataTemplate>
+     <ItemsControl x:Name="AccountRows" ItemsSource="{x:Bind Accounts.Rows, Mode=OneWay}">
+      <ItemsControl.ItemTemplate><DataTemplate x:DataType="local:PanAccountRow">
        <Border Style="{StaticResource Account.Row}">
         <Grid x:Name="AccountCells">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="96"/><ColumnDefinition Width="192"/></Grid.ColumnDefinitions>
-         <TextBlock Text="{Binding Name}" Style="{StaticResource Settings.Text}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+         <TextBlock Text="{x:Bind Name}" Style="{StaticResource Settings.Text}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
          <Grid Grid.Column="1">
-          <TextBlock Text="{Binding StatusText}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center"
-                     Visibility="{Binding HasSnapshot,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+          <TextBlock Text="{x:Bind StatusText, Mode=OneWay}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center"
+                     Visibility="{x:Bind HasSnapshot, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
           <ProgressBar Height="3" Width="48" IsIndeterminate="True" HorizontalAlignment="Left"
-                       Visibility="{Binding IsBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}"
-                       VerticalAlignment="Bottom" Margin="0,0,0,14" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=正在处理}"/>
+                       Visibility="{x:Bind IsBusy, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}}"
+                       VerticalAlignment="Bottom" Margin="0,0,0,14" AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=正在处理}"/>
          </Grid>
          <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-          <Button Content="{Binding LoginText}" Click="Login_Click" Style="{StaticResource Settings.PrimaryButton}" Visibility="{Binding ShowLogin,Converter={StaticResource MeowFilm.BoolToVisibility}}"
-                  IsEnabled="{Binding CanLogin}" AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=登录}">
+          <Button Content="{x:Bind LoginText, Mode=OneWay}" Click="Login_Click" Style="{StaticResource Settings.PrimaryButton}" Visibility="{x:Bind ShowLogin, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}}"
+                  IsEnabled="{x:Bind CanLogin, Mode=OneWay}" AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=登录}">
 
           </Button>
-          <Button Content="编辑" Click="EditCredentials_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{Binding ShowEdit,Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{Binding CanEdit}"
-                  AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=编辑凭据}">
+          <Button Content="编辑" Click="EditCredentials_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{x:Bind ShowEdit, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}}" IsEnabled="{x:Bind CanEdit, Mode=OneWay}"
+                  AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=编辑凭据}">
 
           </Button>
-          <Button Content="退出登录" Click="Logout_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{Binding ShowLogout,Converter={StaticResource MeowFilm.BoolToVisibility}}" Margin="8,0,0,0" IsEnabled="{Binding CanLogout}"
-                  AutomationProperties.Name="{Binding Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=退出登录}">
+          <Button Content="退出登录" Click="Logout_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{x:Bind ShowLogout, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}}" Margin="8,0,0,0" IsEnabled="{x:Bind CanLogout, Mode=OneWay}"
+                  AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=退出登录}">
 
           </Button>
          </StackPanel>
@@ -62,40 +62,43 @@
     </Border>
    </Grid>
   </ScrollViewer>
-  <desktop:NoticeOutlet Message="{Binding Notice}"/>
+  <desktop:NoticeOutlet Message="{x:Bind Accounts.Notice, Mode=OneWay}"/>
   <Grid x:Name="ModalStash" Visibility="Collapsed">
-   <local:AccountLoginSurface x:Name="LoginSurface" Title="{Binding LoginTitle}"
+   <local:AccountLoginSurface x:Name="LoginSurface" Title="{x:Bind Accounts.LoginTitle, Mode=OneWay}"
           Style="{StaticResource Account.LoginSurface}" CloseRequested="CloseLogin_Click">
     <StackPanel>
      <Border x:Name="MethodBar" Background="{ThemeResource Settings.Brush.Active}" CornerRadius="6" Padding="2" Margin="0,0,0,16"
-             Visibility="{Binding LoginRow.SupportsQr,Converter={StaticResource MeowFilm.BoolToVisibility}}">
+             Visibility="{x:Bind Accounts.LoginRow.SupportsQr, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}, FallbackValue=Collapsed}">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
        <Button x:Name="QrModeButton" Content="二维码登录" Style="{StaticResource Login.Segment}" Click="QrMode_Click"
-               IsEnabled="{Binding CanChangeMethod}"/>
+               IsEnabled="{x:Bind Accounts.CanChangeMethod, Mode=OneWay, FallbackValue=False}"/>
        <Button Grid.Column="1" x:Name="ManualModeButton" Content="手动填写 Cookie" Style="{StaticResource Login.Segment}" Click="ManualMode_Click"
-               IsEnabled="{Binding CanChangeMethod}"/>
+               IsEnabled="{x:Bind Accounts.CanChangeMethod, Mode=OneWay, FallbackValue=False}"/>
       </Grid>
      </Border>
      <StackPanel x:Name="QrPanel" HorizontalAlignment="Center">
       <Border Style="{StaticResource Account.QrFrame}">
        <Grid>
-        <Image Source="{Binding QrImage}" Stretch="Uniform"
-               AutomationProperties.Name="{Binding QrAccessibleName}"/>
+        <Image Source="{x:Bind Accounts.QrImage, Mode=OneWay}" Stretch="Uniform"
+               AutomationProperties.Name="{x:Bind Accounts.QrAccessibleName, Mode=OneWay}"/>
         <ProgressBar Height="3" IsIndeterminate="True" VerticalAlignment="Center"
-                     Visibility="{Binding LoginBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+                     Visibility="{x:Bind Accounts.LoginBusy, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}, FallbackValue=Collapsed}"/>
        </Grid>
       </Border>
       <Button Content="刷新二维码" Click="RetryQr_Click" Style="{StaticResource Settings.QuietButton}"
-              IsEnabled="{Binding CanRetryQr}" HorizontalAlignment="Center" Margin="0,14,0,0"/>
-      <TextBlock Text="{Binding LoginStatus}" Style="{StaticResource Settings.Subtitle}"
+              IsEnabled="{x:Bind Accounts.CanRetryQr, Mode=OneWay, FallbackValue=False}" HorizontalAlignment="Center" Margin="0,14,0,0"/>
+      <TextBlock Text="{x:Bind Accounts.LoginStatus, Mode=OneWay}" Style="{StaticResource Settings.Subtitle}"
                  HorizontalAlignment="Center" Margin="0,8,0,0" AutomationProperties.LiveSetting="Polite"/>
      </StackPanel>
      <StackPanel x:Name="ManualPanel" Visibility="Collapsed">
-      <StackPanel x:Name="CredentialInputs"/>
+      <ContentControl IsEnabled="{x:Bind Accounts.CanSave, Mode=OneWay, FallbackValue=False}"
+                      IsTabStop="False" HorizontalContentAlignment="Stretch">
+       <StackPanel x:Name="CredentialInputs"/>
+      </ContentControl>
       <Button x:Name="SaveCredentials" Content="保存" Style="{StaticResource Settings.PrimaryButton}" Click="Save_Click"
-              IsEnabled="{Binding CanSave}" HorizontalAlignment="Right" Margin="0,4,0,0" AutomationProperties.Name="保存网盘凭据"/>
+              IsEnabled="{x:Bind Accounts.CanSave, Mode=OneWay, FallbackValue=False}" HorizontalAlignment="Right" Margin="0,4,0,0" AutomationProperties.Name="保存网盘凭据"/>
       <ProgressBar Height="3" IsIndeterminate="True" Margin="0,12,0,0"
-                   Visibility="{Binding LoginBusy,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+                   Visibility="{x:Bind Accounts.LoginBusy, Mode=OneWay, Converter={StaticResource MeowFilm.BoolToVisibility}, FallbackValue=Collapsed}"/>
      </StackPanel>
     </StackPanel>
    </local:AccountLoginSurface>

@@ -336,7 +336,7 @@ public sealed class ManagementRowView : Grid
             title.UseResource(FrameworkElement.StyleProperty, "MeowFilm.Text"); text.Children.Add(title);
             SetColumn(text, 1); Children.Add(text);
             enabled = new CheckBox { VerticalAlignment = VerticalAlignment.Center, Margin = new(8, 0, 12, 0) };
-            enabled.UseResource(StyleProperty, "MeowFilm.ManagementSwitch");
+            enabled.UseResource(StyleProperty, "MeowFilm.Switch");
             enabled.Click += (_, _) => state?.Row.Toggle(enabled.IsChecked == true); SetColumn(enabled, 2); Children.Add(enabled);
             edit = ManagementList.Button("编辑", () => state?.Row.Edit());
             edit.ClearValue(MinHeightProperty); edit.ClearValue(Control.PaddingProperty); edit.UseResource(StyleProperty, "MeowFilm.ManagementRowButton"); SetColumn(edit, 3); Children.Add(edit);
