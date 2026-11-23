@@ -3,6 +3,7 @@ import UIKit
 import MeowDebug
 
 /// Declarative row model for the unified native UIKit `SettingsListViewController`.
+/// All custom view slots are compile-time constrained to `ThemeableView` (`UIView & PageThemeable`).
 @MainActor
 public struct SettingsListRow {
     public enum Accessory {
@@ -12,15 +13,18 @@ public struct SettingsListRow {
         case value(String, disclosure: Bool = false)
         case toggle(isOn: Bool, enabled: Bool = true, onChange: @MainActor (Bool) -> Void)
         case menu(title: String, menu: UIMenu, enabled: Bool = true)
-        case custom(UIView)
+        case loading(accessibilityLabel: String)
+        case hint(String)
+        case action(title: String, enabled: Bool = true, destructive: Bool = false, onTap: @MainActor () -> Void)
+        case custom(ThemeableView)
     }
 
     public let id: String
     public let title: String
     public let detail: String?
     public let detailDestructive: Bool
-    public let leadingView: UIView?
-    public let embeddedContent: UIView?
+    public let leadingView: ThemeableView?
+    public let embeddedContent: ThemeableView?
     public let accessory: Accessory
     public let destructive: Bool
     public let enabled: Bool
@@ -34,8 +38,8 @@ public struct SettingsListRow {
         title: String = "",
         detail: String? = nil,
         detailDestructive: Bool = false,
-        leadingView: UIView? = nil,
-        embeddedContent: UIView? = nil,
+        leadingView: ThemeableView? = nil,
+        embeddedContent: ThemeableView? = nil,
         accessory: Accessory = .none,
         destructive: Bool = false,
         enabled: Bool = true,
@@ -58,6 +62,75 @@ public struct SettingsListRow {
         self.canMove = canMove
         self.action = action
     }
+
+    struct DisplaySignature: Equatable {
+        enum AccessorySignature: Equatable {
+            case none
+            case disclosure
+            case checkmark
+            case value(String, Bool)
+            case toggle(Bool, Bool)
+            case menu(String, Bool, [String])
+            case loading(String)
+            case hint(String)
+            case action(String, Bool, Bool)
+            case custom(ObjectIdentifier)
+        }
+
+        let title: String
+        let detail: String?
+        let detailDestructive: Bool
+        let destructive: Bool
+        let enabled: Bool
+        let hasAction: Bool
+        let canMove: Bool
+        let accessibilityLabel: String?
+        let accessibilityValue: String?
+        let leadingID: ObjectIdentifier?
+        let embeddedID: ObjectIdentifier?
+        let accessory: AccessorySignature
+        let first: Bool
+        let last: Bool
+    }
+
+    func displaySignature(first: Bool, last: Bool) -> DisplaySignature {
+        let acc: DisplaySignature.AccessorySignature
+        switch accessory {
+        case .none: acc = .none
+        case .disclosure: acc = .disclosure
+        case .checkmark: acc = .checkmark
+        case .value(let text, let disc): acc = .value(text, disc)
+        case .toggle(let isOn, let enabled, _): acc = .toggle(isOn, enabled)
+        case .menu(let title, let menu, let enabled):
+            let items = menu.children.map { element -> String in
+                if let action = element as? UIAction {
+                    return "\(action.title):\(action.state.rawValue):\(action.attributes.rawValue)"
+                }
+                return element.title
+            }
+            acc = .menu(title, enabled, items)
+        case .loading(let label): acc = .loading(label)
+        case .hint(let text): acc = .hint(text)
+        case .action(let title, let enabled, let destructive, _): acc = .action(title, enabled, destructive)
+        case .custom(let view): acc = .custom(ObjectIdentifier(view))
+        }
+        return DisplaySignature(
+            title: title,
+            detail: detail,
+            detailDestructive: detailDestructive,
+            destructive: destructive,
+            enabled: enabled,
+            hasAction: action != nil,
+            canMove: canMove,
+            accessibilityLabel: accessibilityLabel,
+            accessibilityValue: accessibilityValue,
+            leadingID: leadingView.map(ObjectIdentifier.init),
+            embeddedID: embeddedContent.map(ObjectIdentifier.init),
+            accessory: acc,
+            first: first,
+            last: last
+        )
+    }
 }
 
 @MainActor
@@ -73,8 +146,8 @@ public struct SettingsListSection {
     }
 }
 
-/// Unified pure UIKit settings table controller backed by `UITableViewDiffableDataSource`
-/// and reusable `SettingsTableCell` + `SettingsSectionHeaderView` (zero `reloadData()`).
+/// Unified pure UIKit settings table controller backed by `MeowUI.IndexedDiffableProjection`
+/// and persistent-slot `SettingsTableCell` + `SettingsSectionHeaderView` (zero `reloadData()`).
 @MainActor
 open class SettingsListViewController: PageViewController, UITableViewDelegate {
     public let table = SettingsTableView()
@@ -84,9 +157,14 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
     open var avoidsKeyboard: Bool { true }
     open var allowsRowReordering: Bool { false }
 
-    private var rowsByID: [String: SettingsListRow] = [:]
-    private var sectionMetaByRowID: [String: (first: Bool, last: Bool)] = [:]
-    private var sectionsByID: [String: SettingsListSection] = [:]
+    private struct ProjectedRow {
+        let row: SettingsListRow
+        let first: Bool
+        let last: Bool
+        let signature: SettingsListRow.DisplaySignature
+    }
+
+    private var projection = IndexedDiffableProjection<String, String, ProjectedRow>()
     private var dataSource: DataSource!
 
     private final class DataSource: UITableViewDiffableDataSource<String, String> {
@@ -95,15 +173,15 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
         override func tableView(_ tableView: UITableView, canEditRowAt indexPath: IndexPath) -> Bool {
             guard let owner, owner.allowsRowReordering,
                   let id = itemIdentifier(for: indexPath),
-                  let row = owner.rowsByID[id] else { return false }
-            return row.canMove
+                  let entry = owner.projection[id] else { return false }
+            return entry.row.canMove
         }
 
         override func tableView(_ tableView: UITableView, canMoveRowAt indexPath: IndexPath) -> Bool {
             guard let owner, owner.allowsRowReordering,
                   let id = itemIdentifier(for: indexPath),
-                  let row = owner.rowsByID[id] else { return false }
-            return row.canMove
+                  let entry = owner.projection[id] else { return false }
+            return entry.row.canMove
         }
 
         override func tableView(_ tableView: UITableView, moveRowAt sourceIndexPath: IndexPath,
@@ -118,6 +196,9 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
         table.delegate = self
         table.keyboardDismissMode = .interactive
         table.sectionFooterHeight = 0
+        if !usesSettingsColors {
+            table.separatorStyle = .singleLine
+        }
         view.addSubview(table)
         table.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -152,12 +233,12 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
     }
 
     public func row(forID id: String) -> SettingsListRow? {
-        rowsByID[id]
+        projection[id]?.row
     }
 
     @discardableResult
     public func invokeRow(id: String) -> Bool {
-        guard let row = rowsByID[id], row.enabled else { return false }
+        guard let row = projection[id]?.row, row.enabled else { return false }
         if let action = row.action {
             action()
             return true
@@ -166,54 +247,62 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
             onChange(!isOn)
             return true
         }
+        if case .action(_, let enabled, _, let onTap) = row.accessory, enabled {
+            onTap()
+            return true
+        }
         return false
     }
 
     open func applySections(_ sections: [SettingsListSection], animated: Bool = false) {
+        var seenSections: Set<String> = []
+        var seenRows: Set<String> = []
         var normalizedSections: [SettingsListSection] = []
+        var projectedInput: [(id: String, items: [ProjectedRow])] = []
         normalizedSections.reserveCapacity(sections.count)
-        var nextRows: [String: SettingsListRow] = [:]
-        var nextMeta: [String: (first: Bool, last: Bool)] = [:]
-        var nextSections: [String: SettingsListSection] = [:]
-        var snapshot = NSDiffableDataSourceSnapshot<String, String>()
-        var existingIDs = Set(dataSource?.snapshot().itemIdentifiers ?? [])
-        var toReconfigure: [String] = []
+        projectedInput.reserveCapacity(sections.count)
 
-        for section in sections {
-            guard nextSections[section.id] == nil else { continue }
+        for section in sections where seenSections.insert(section.id).inserted {
             var dedupedRows: [SettingsListRow] = []
             dedupedRows.reserveCapacity(section.rows.count)
-            for row in section.rows {
-                guard nextRows[row.id] == nil else { continue }
-                nextRows[row.id] = row
+            for row in section.rows where seenRows.insert(row.id).inserted {
                 dedupedRows.append(row)
             }
-            let normalized = SettingsListSection(id: section.id, title: section.title, rows: dedupedRows)
-            normalizedSections.append(normalized)
-            nextSections[section.id] = normalized
-            snapshot.appendSections([section.id])
+            normalizedSections.append(SettingsListSection(id: section.id, title: section.title, rows: dedupedRows))
             let count = dedupedRows.count
-            var ids: [String] = []
-            ids.reserveCapacity(count)
-            for (index, row) in dedupedRows.enumerated() {
-                nextMeta[row.id] = (index == 0, index == count - 1)
-                ids.append(row.id)
-                if existingIDs.remove(row.id) != nil {
-                    toReconfigure.append(row.id)
-                }
+            let projected = dedupedRows.enumerated().map { index, row in
+                let first = index == 0
+                let last = index == count - 1
+                return ProjectedRow(
+                    row: row,
+                    first: first,
+                    last: last,
+                    signature: row.displaySignature(first: first, last: last)
+                )
             }
-            snapshot.appendItems(ids, toSection: section.id)
+            projectedInput.append((id: section.id, items: projected))
         }
         currentSections = normalizedSections
-        rowsByID = nextRows
-        sectionMetaByRowID = nextMeta
-        sectionsByID = nextSections
+
+        let update = projection.update(
+            sections: projectedInput,
+            id: { $0.row.id },
+            isChanged: { $0.signature != $1.signature }
+        )
 
         guard isViewLoaded, let dataSource else { return }
-        if !toReconfigure.isEmpty {
-            snapshot.reconfigureItems(toReconfigure)
+        if update.hasChanges {
+            dataSource.apply(update.snapshot, animatingDifferences: animated)
         }
-        dataSource.apply(snapshot, animatingDifferences: animated)
+        // Refresh closures on unchanged visible cells without triggering a cell reconfigure pass.
+        let changedSet = Set(update.changedItemIDs)
+        for indexPath in table.indexPathsForVisibleRows ?? [] {
+            guard let rowID = dataSource.itemIdentifier(for: indexPath),
+                  !changedSet.contains(rowID),
+                  let entry = projection[rowID],
+                  let cell = table.cellForRow(at: indexPath) as? SettingsTableCell else { continue }
+            cell.refreshInteractiveHandlers(row: entry.row)
+        }
         refreshVisibleHeaders()
     }
 
@@ -244,54 +333,13 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
     }
 
     private func configure(cell: SettingsTableCell, rowID: String) {
-        guard let row = rowsByID[rowID], let meta = sectionMetaByRowID[rowID] else { return }
-        var value: String?
-        var disclosure = false
-        var selected = false
-        var toggle: (isOn: Bool, enabled: Bool, onChange: @MainActor (Bool) -> Void)?
-        var menu: (title: String, menu: UIMenu, enabled: Bool)?
-        var trailingView: UIView?
-
-        switch row.accessory {
-        case .none:
-            break
-        case .disclosure:
-            disclosure = true
-        case .checkmark:
-            selected = true
-        case .value(let text, let showsDisclosure):
-            value = text
-            disclosure = showsDisclosure
-        case .toggle(let isOn, let toggleEnabled, let onChange):
-            toggle = (isOn, toggleEnabled, onChange)
-        case .menu(let title, let uiMenu, let menuEnabled):
-            menu = (title, uiMenu, menuEnabled)
-        case .custom(let view):
-            trailingView = view
-        }
-
+        guard let entry = projection[rowID] else { return }
         cell.configure(
-            title: row.title,
-            detail: row.detail,
-            detailDestructive: row.detailDestructive,
-            value: value,
-            leadingView: row.leadingView,
-            trailingView: trailingView,
-            toggle: toggle,
-            menu: menu,
-            embeddedContent: row.embeddedContent,
+            row: entry.row,
             theme: theme,
-            first: meta.first,
-            last: meta.last,
-            destructive: row.destructive,
-            enabled: row.enabled,
-            actionable: row.action != nil,
-            selected: selected,
-            disclosure: disclosure,
-            usesSettingsColors: usesSettingsColors,
-            accessibilityIdentifier: row.id,
-            accessibilityLabel: row.accessibilityLabel,
-            accessibilityValue: row.accessibilityValue
+            first: entry.first,
+            last: entry.last,
+            usesSettingsColors: usesSettingsColors
         )
     }
 
@@ -317,7 +365,7 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard let rowID = dataSource.itemIdentifier(for: indexPath),
-              let row = rowsByID[rowID], row.enabled else { return }
+              let row = projection[rowID]?.row, row.enabled else { return }
         row.action?()
     }
 
@@ -367,6 +415,14 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
                 if enabled { actions.append("toggle") }
             case .menu(let title, _, _):
                 badge = title
+            case .loading(let label):
+                badge = label
+            case .hint(let text):
+                badge = text
+                if row.action != nil { actions.append("invoke") }
+            case .action(let title, let enabled, _, _):
+                badge = title
+                if enabled { actions.append("invoke") }
             case .custom:
                 if row.action != nil { actions.append("invoke") }
             }

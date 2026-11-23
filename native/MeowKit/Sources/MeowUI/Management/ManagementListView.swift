@@ -1,20 +1,6 @@
 #if os(iOS)
 import UIKit
 
-@MainActor
-enum ManagementAppearance {
-    static let surface = color { $0.surface }
-    static let input = color { $0.input }
-    static let inputBorder = color { $0.inputBorder }
-    static let line = color { $0.separator }
-    static let ink = color { $0.ink }
-    static let muted = color { $0.muted }
-    static let accent = color { $0.accent }
-    private static func color(_ value: @escaping @Sendable (SettingsTheme) -> PageColor) -> UIColor {
-        UIColor { UIColor(value(SettingsTheme(dark: $0.userInterfaceStyle == .dark))) }
-    }
-}
-
 /// Reader's management glyphs, drawn natively rather than substituted with unrelated symbols.
 @MainActor
 public enum ManagementIcon {
@@ -97,8 +83,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     private let batchActions = UIStackView()
     private lazy var footerHeight = footer.heightAnchor.constraint(equalToConstant: 52)
     private let empty = UILabel(), emptyContainer = UIView()
-    private var rows: [Row] = []
-    private var rowsByID: [String: Row] = [:]
+    private var projection = IndexedDiffableProjection<Int, String, Row>()
     private var total = 0
     private var currentTheme = PageTheme()
 
@@ -125,7 +110,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
 
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: table) { [weak self] tableView, indexPath, rowID in
             guard let self,
-                  let row = self.rowsByID[rowID],
+                  let row = self.projection[rowID],
                   let cell = tableView.dequeueReusableCell(
                       withIdentifier: ManagementRowCell.reuseIdentifier, for: indexPath
                   ) as? ManagementRowCell else {
@@ -170,7 +155,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         for button in [inverse, deleteButton, footerMore] { batchActions.addArrangedSubview(button) }
         for child in [count, batchActions] { footer.addArrangedSubview(child) }
         for button in [inverse, deleteButton, footerMore] {
-            button.backgroundColor = ManagementAppearance.input; button.layer.cornerRadius = 12
+            button.backgroundColor = UIColor(currentTheme.settings.input); button.layer.cornerRadius = 12
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 32).isActive = true
         }
         inverse.widthAnchor.constraint(greaterThanOrEqualToConstant: 60).isActive = true
@@ -312,29 +297,12 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     }
 
     public func setRows(_ rows: [Row], total: Int, validIDs: Set<String>, emptyMessage: String) {
-        let oldIDSet = Set(self.rows.map(\.id))
-        var seen: Set<String> = []
-        var uniqueRows: [Row] = []
-        uniqueRows.reserveCapacity(rows.count)
-        for row in rows where seen.insert(row.id).inserted {
-            uniqueRows.append(row)
-        }
-        self.rows = uniqueRows
-        self.rowsByID = Dictionary(uniqueRows.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+        let update = projection.update(section: 0, items: rows, id: \.id) { _, _ in true }
         self.total = total
         selected.formIntersection(validIDs)
         empty.text = emptyMessage
-        table.backgroundView = uniqueRows.isEmpty ? emptyContainer : nil
-
-        let newIDs = uniqueRows.map(\.id)
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(newIDs, toSection: 0)
-        let surviving = newIDs.filter { oldIDSet.contains($0) }
-        if !surviving.isEmpty {
-            snapshot.reconfigureItems(surviving)
-        }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        table.backgroundView = projection.items.isEmpty ? emptyContainer : nil
+        dataSource.apply(update.snapshot, animatingDifferences: false)
         updateCount()
     }
 
@@ -373,13 +341,13 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     private func reconfigureVisibleRows() {
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard let rowID = dataSource.itemIdentifier(for: indexPath),
-                  let row = rowsByID[rowID],
+                  let row = projection[rowID],
                   let cell = table.cellForRow(at: indexPath) as? ManagementRowCell else { continue }
             configureCell(cell, row: row)
         }
     }
 
-    private var selectableIDs: Set<String> { Set(rows.filter(\.showsSelection).map(\.id)) }
+    private var selectableIDs: Set<String> { Set(projection.items.filter(\.showsSelection).map(\.id)) }
     private func selectAll() {
         let ids = selectableIDs
         selected = !ids.isEmpty && ids.isSubset(of: selected) ? [] : ids
@@ -412,7 +380,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard let rowID = dataSource.itemIdentifier(for: indexPath),
-              let row = rowsByID[rowID] else { return }
+              let row = projection[rowID] else { return }
         if row.controlsEnabled { row.open?() }
     }
 
@@ -428,7 +396,7 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         button.widthAnchor.constraint(equalToConstant: 38).isActive = true
         button.heightAnchor.constraint(equalToConstant: 38).isActive = true
         button.layer.cornerRadius = 19
-        button.backgroundColor = ManagementAppearance.surface
+        button.backgroundColor = UIColor(PageTheme().settings.surface)
         if let action { button.addAction(UIAction { _ in action() }, for: .touchUpInside) }
         return button
     }

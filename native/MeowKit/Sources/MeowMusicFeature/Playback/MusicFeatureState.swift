@@ -142,9 +142,9 @@ public extension MusicViewModel {
                distinctChanges(playbackState.$state.map(MusicQueueProjection.init)),
                distinctChanges(playbackState.$isChangingQueue),
                distinctChanges(playbackState.$isFMActive),
-               changed(playbackState.$similarMode),
-               changed(playbackState.$queueRecommendations),
-               changed(playbackState.$fmPlayback),
+               distinctChanges(playbackState.$similarMode),
+               distinctChanges(playbackState.$queueRecommendations),
+               distinctChanges(playbackState.$fmPlayback),
                distinctChanges(playbackState.$canEnterSongRecommendations),
                distinctChanges(playbackState.$canEnterSimilarMode),
                distinctChanges(playbackState.$isChangingSimilarMode),
@@ -160,7 +160,6 @@ public extension MusicViewModel {
                distinctChanges(playbackState.$options),
                distinctChanges(playbackState.$scriptSourceError),
                distinctChanges(playbackState.$isPreparingRemoteQueue),
-               distinctChanges(playbackState.$canEnterSimilarMode),
                distinctChanges(playbackState.$activeHomeFM))
     }
 

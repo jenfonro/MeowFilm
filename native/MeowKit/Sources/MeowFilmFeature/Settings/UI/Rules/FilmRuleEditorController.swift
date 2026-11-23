@@ -76,7 +76,8 @@ final class FilmRuleEditorView: UIStackView, PageThemeable {
         ])
         addArrangedSubview(heading)
 
-        let patternView = FilmRulePatternTextView(rows: 4)
+        let patternView = SettingsTextView()
+        patternView.configureMinimumRows(4, minimumHeight: max(92, 4 * 19.5 + 18))
         patternView.text = rule.pattern
         patternView.inputAppearance = .underline
         patternView.autocorrectionType = .no
@@ -88,7 +89,7 @@ final class FilmRuleEditorView: UIStackView, PageThemeable {
         patternView.textContainer.lineFragmentPadding = 0
         patternView.accessibilityIdentifier = id + ".pattern"
         patternView.accessibilityLabel = "pattern"
-        patternView.onTextChanged = { [weak self] in self?.changed() }
+        patternView.onTextChanged = { [weak self] _ in self?.changed() }
         pattern = patternView
         let patternSection = makeInputSection(title: "pattern", input: patternView)
         addArrangedSubview(patternSection)
@@ -183,53 +184,6 @@ final class FilmRuleEditorView: UIStackView, PageThemeable {
         if replacement?.isEnabled != enabled { replacement?.isEnabled = enabled }
         if flags?.isEnabled != enabled { flags?.isEnabled = enabled }
         deleteButton.isEnabled = enabled
-    }
-}
-
-@MainActor
-private final class FilmRulePatternTextView: SettingsTextView, UITextViewDelegate {
-    var onTextChanged: (() -> Void)?
-    private let rows: Int
-    private let minimumHeight: CGFloat
-    private lazy var minimumHeightConstraint = heightAnchor.constraint(equalToConstant: minimumHeight)
-
-    init(rows: Int) {
-        self.rows = rows
-        self.minimumHeight = max(92, CGFloat(rows) * 19.5 + 18)
-        super.init(frame: .zero, textContainer: nil)
-        delegate = self
-        minimumHeightConstraint.isActive = true
-        updateHeight()
-        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (text: FilmRulePatternTextView, _: UITraitCollection) in
-            text.updateHeight()
-        }
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        updateHeight()
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let height = max(
-            UIFontMetrics.default.scaledValue(for: minimumHeight, compatibleWith: traitCollection),
-            ceil((font?.lineHeight ?? 20) * CGFloat(rows) + textContainerInset.top + textContainerInset.bottom)
-        )
-        if minimumHeightConstraint.constant != height {
-            minimumHeightConstraint.constant = height
-        }
-    }
-
-    private func updateHeight() {
-        minimumHeightConstraint.constant = UIFontMetrics.default.scaledValue(for: minimumHeight, compatibleWith: traitCollection)
-    }
-
-    func textViewDidChange(_ textView: UITextView) {
-        onTextChanged?()
     }
 }
 #endif

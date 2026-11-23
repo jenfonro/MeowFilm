@@ -2,7 +2,7 @@ import Foundation
 
 /// A read-only candidate batch for the current ordinary queue. Its token is
 /// bound to the queue and account generation, not to a durable playlist.
-public struct MusicQueueRecommendationSnapshot: Sendable, Identifiable {
+public struct MusicQueueRecommendationSnapshot: Sendable, Identifiable, Equatable {
     public let id: UUID
     public let status: MusicSimilarModeSnapshot.Status
     public let currentEntryID: String

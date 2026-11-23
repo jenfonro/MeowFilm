@@ -21,11 +21,16 @@ enum FilmPosterAddress {
         return parts.url
     }
 
+    private static let knownDoubanHosts: Set<String> = [
+        "img.doubanio.com", "img.douban.com", proxyHost, "img.doubanio.cmliussss.com"
+    ]
+    private static let doubanSuffixes = [".doubanio.com", ".douban.com"]
+
     private static func isDoubanHost(_ host: String) -> Bool {
-        if ["img.doubanio.com", "img.douban.com", proxyHost, "img.doubanio.cmliussss.com"].contains(host) {
+        if knownDoubanHosts.contains(host) {
             return true
         }
-        for suffix in [".doubanio.com", ".douban.com"] {
+        for suffix in doubanSuffixes {
             guard host.hasPrefix("img"), host.hasSuffix(suffix) else { continue }
             let index = host.dropFirst(3).dropLast(suffix.count)
             if !index.isEmpty, index.utf8.allSatisfy({ (48...57).contains($0) }) { return true }

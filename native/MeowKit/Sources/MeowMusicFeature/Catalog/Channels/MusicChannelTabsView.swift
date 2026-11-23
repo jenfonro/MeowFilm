@@ -16,6 +16,7 @@ final class MusicChannelTabsView: UIView, UIScrollViewDelegate {
     private var pendingCenter = false
     private var pendingCenterAnimated = false
     private var laidOutWidth: CGFloat = 0
+    private var lastEdgeFade: (size: CGSize, left: Bool, right: Bool)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -104,10 +105,17 @@ final class MusicChannelTabsView: UIView, UIScrollViewDelegate {
     private func updateEdgeFade() {
         let width = bounds.width
         guard width > 0 else { return }
-        let fadeFraction = min(0.25, Double(Self.edgeFadeWidth / width))
         let canScrollLeft = scroll.contentOffset.x > 1
         let canScrollRight = scroll.contentOffset.x + scroll.bounds.width <
             scroll.contentSize.width + scroll.contentInset.right - 1
+        if let lastEdgeFade,
+           lastEdgeFade.size == bounds.size,
+           lastEdgeFade.left == canScrollLeft,
+           lastEdgeFade.right == canScrollRight {
+            return
+        }
+        lastEdgeFade = (bounds.size, canScrollLeft, canScrollRight)
+        let fadeFraction = min(0.25, Double(Self.edgeFadeWidth / width))
         let clear = UIColor.clear.cgColor
         let opaque = UIColor.black.cgColor
         CATransaction.begin()
@@ -132,13 +140,16 @@ final class MusicChannelTabsView: UIView, UIScrollViewDelegate {
 @MainActor
 private final class MusicChannelTabButton: UIButton {
     let channel: MusicPublicBrowseChannel
+    let preferredWidth: CGFloat
     private let underline = UIView()
 
     init(channel: MusicPublicBrowseChannel) {
         self.channel = channel
+        let font = UIFont.systemFont(ofSize: 17)
+        self.preferredWidth = max(52, ceil((channel.title as NSString).size(withAttributes: [.font: font]).width) + 24)
         super.init(frame: .zero)
         setTitle(channel.title, for: .normal)
-        titleLabel?.font = .systemFont(ofSize: 17)
+        titleLabel?.font = font
         underline.layer.cornerRadius = 1.5
         addSubview(underline)
         accessibilityIdentifier = "music.channel.tab.\(channel.identity)"
@@ -146,11 +157,6 @@ private final class MusicChannelTabButton: UIButton {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    var preferredWidth: CGFloat {
-        let font = UIFont.systemFont(ofSize: 17)
-        return max(52, ceil((channel.title as NSString).size(withAttributes: [.font: font]).width) + 24)
-    }
 
     func configure(selected: Bool, theme: PageTheme) {
         titleLabel?.font = .systemFont(ofSize: 17)

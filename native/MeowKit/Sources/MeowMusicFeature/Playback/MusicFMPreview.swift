@@ -39,7 +39,7 @@ public extension MusicHomeAction {
     }
 }
 
-public struct MusicFMPlaybackSnapshot: Sendable {
+public struct MusicFMPlaybackSnapshot: Sendable, Equatable {
     public let id: UUID
     public let action: MusicHomeAction
     public let continueEnabled: Bool

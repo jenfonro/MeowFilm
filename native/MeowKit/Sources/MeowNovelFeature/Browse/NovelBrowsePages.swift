@@ -21,10 +21,9 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     private var kindsTop: NSLayoutConstraint!
     private var tableTop: NSLayoutConstraint!
     private var layoutWidth: CGFloat = -1
-    var renderedBooks: [NovelBook] = []
-    private var booksByRowID: [String: NovelBook] = [:]
+    private var bookProjection = IndexedDiffableProjection<Int, String, NovelBook>()
+    var renderedBooks: [NovelBook] { bookProjection.items }
     private var renderedTarget = ""
-    private var shownError: String?
 
     public init(feature: NovelFeature, themeProvider: any PageThemeProviding) {
         discovery = NovelDiscoverySession(feature: feature)
@@ -41,7 +40,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
         table.register(NovelBookCell.self, forCellReuseIdentifier: NovelBookCell.reuseIdentifier)
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: table) { [weak self] tableView, indexPath, rowID in
             let cell = tableView.dequeueReusableCell(withIdentifier: NovelBookCell.reuseIdentifier, for: indexPath) as! NovelBookCell
-            if let self, let book = self.booksByRowID[rowID] {
+            if let self, let book = self.bookProjection[rowID] {
                 cell.configure(book, feature: self.discovery.feature, theme: self.theme, loadCover: self.isPageVisible)
             }
             return cell
@@ -96,8 +95,18 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             backdrop.topAnchor.constraint(equalTo: contentTopAnchor), backdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             backdrop.leadingAnchor.constraint(equalTo: view.leadingAnchor), backdrop.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-        observe(discovery, whenVisible: true) { [weak self] in self?.render() }
-        observe(discovery.feature, whenVisible: true) { [weak self] in self?.presentErrors() }
+        let discoveryChanges = Publishers.MergeMany([
+            discovery.$selectedSource.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$channels.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$selectedChannelID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$selectedKindID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$books.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$loading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$canLoadMore.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(discoveryChanges, whenVisible: true) { [weak self] in self?.render() }
+        observe(discovery.feature.$error.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.presentErrors() }
         render()
     }
     public override func pageDidBecomeVisible() {
@@ -113,14 +122,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded, tableTop != nil {
-            channels.configure(filters: discovery.channels.map { FilterTag(id: $0.id, title: $0.title) },
-                               selectedID: discovery.selectedChannelID ?? "", theme: theme) { [weak self] id in
-                self?.discovery.selectChannel(id: id)
-            }
-            kinds.configure(filters: (discovery.selectedChannel?.items ?? []).map { FilterTag(id: $0.id, title: $0.title) },
-                            selectedID: discovery.selectedKindID ?? "", theme: theme) { [weak self] id in
-                self?.discovery.selectKind(id: id)
-            }
+            configureTags()
             empty.textColor = UIColor(theme.muted)
             more.tintColor = UIColor(theme.ink)
             activity.color = UIColor(theme.muted)
@@ -134,8 +136,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             more.frame.size.width = table.bounds.width; table.tableFooterView = more
         }
     }
-    private func render(reloadBooks: Bool = false) {
-        guard isViewLoaded, tableTop != nil else { return }
+    private func configureTags() {
         channels.configure(filters: discovery.channels.map { FilterTag(id: $0.id, title: $0.title) },
                            selectedID: discovery.selectedChannelID ?? "", theme: theme) { [weak self] id in
             self?.discovery.selectChannel(id: id)
@@ -144,6 +145,10 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
                         selectedID: discovery.selectedKindID ?? "", theme: theme) { [weak self] id in
             self?.discovery.selectKind(id: id)
         }
+    }
+    private func render(reloadBooks: Bool = false) {
+        guard isViewLoaded, tableTop != nil else { return }
+        configureTags()
         updateTagsLayout()
         let target = (discovery.selectedSource?.id ?? "") + "\n" + (discovery.selectedKind?.url ?? "")
         let changedTarget = target != renderedTarget
@@ -194,47 +199,23 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     }
 
     private func applyBooksSnapshot(_ books: [NovelBook]) {
-        let oldByID = booksByRowID
-        renderedBooks = books
-        var nextByID: [String: NovelBook] = [:]
-        var ids: [String] = []
-        var toReconfigure: [String] = []
-        var seen: Set<String> = []
-        for book in books {
-            let id = rowID(for: book)
-            guard seen.insert(id).inserted else { continue }
-            nextByID[id] = book
-            ids.append(id)
-            if let previous = oldByID[id], previous != book {
-                toReconfigure.append(id)
-            }
-        }
-        booksByRowID = nextByID
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(ids, toSection: 0)
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        let update = bookProjection.update(section: 0, items: books, id: rowID(for:))
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
     private func reconfigureVisibleBookCells() {
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard let rowID = dataSource.itemIdentifier(for: indexPath),
-                  let book = booksByRowID[rowID],
+                  let book = bookProjection[rowID],
                   let cell = table.cellForRow(at: indexPath) as? NovelBookCell else { continue }
             cell.configure(book, feature: discovery.feature, theme: theme, loadCover: isPageVisible)
         }
     }
     private func presentErrors() {
         guard isPageVisible else { return }
-        if discovery.error == nil { shownError = nil }
-        if let error = discovery.error, shownError != error {
-            shownError = error
-            enqueueError(error, retry: { [weak self] in
-                self?.shownError = nil
-                self?.discovery.retry()
-            })
-        }
+        syncErrorSource("discovery", message: discovery.error, retry: { [weak self] in
+            self?.discovery.retry()
+        })
         if let error = discovery.feature.error {
             discovery.feature.error = nil
             enqueueError(error)
@@ -242,7 +223,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     }
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let book = booksByRowID[rowID] else { return }
+        guard let rowID = dataSource.itemIdentifier(for: indexPath), let book = bookProjection[rowID] else { return }
         onSelect?(book)
     }
     public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
@@ -269,7 +250,8 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     private var theme: PageTheme
     private var subscription: AnyCancellable?
     private var active = false
-    private var rowsByID: [String: NovelSearchBook] = [:]
+    private var renderedStates: [NovelSearchSourceState]?
+    private var rowProjection = IndexedDiffableProjection<Int, String, NovelSearchBook>()
     var rows: [NovelSearchBook] { session.books }
     public init(feature: NovelFeature, theme: PageTheme, matchingBook: NovelBook? = nil) {
         session = NovelSearchSession(feature: feature, matchingBook: matchingBook); self.theme = theme
@@ -283,7 +265,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         table.register(NovelBookCell.self, forCellReuseIdentifier: NovelBookCell.reuseIdentifier)
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: table) { [weak self] tableView, indexPath, rowID in
             let cell = tableView.dequeueReusableCell(withIdentifier: NovelBookCell.reuseIdentifier, for: indexPath) as! NovelBookCell
-            if let self, let row = self.rowsByID[rowID] {
+            if let self, let row = self.rowProjection[rowID] {
                 cell.configure(row.book, sourceCount: row.candidates.count, feature: self.session.feature,
                                theme: self.theme, loadCover: self.active && self.view.window != nil)
             }
@@ -299,8 +281,15 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         let stack = UIStackView(arrangedSubviews: [table, footer]); stack.axis = .vertical
         view.addSubview(stack); stack.pinEdges(to: view)
         footer.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        subscription = session.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in
-            self?.render()
+        let sessionChanges = Publishers.MergeMany([
+            session.$books.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$states.dropFirst().removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$loading.dropFirst().removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$error.dropFirst().removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+        ])
+        subscription = sessionChanges.receive(on: RunLoop.main).sink { [weak self] in
+            guard let self, self.isViewLoaded, self.view.window != nil else { return }
+            self.render()
         }
         applyTheme(theme)
         render()
@@ -314,6 +303,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         if !session.query.isEmpty { submit(session.query) }
+        else { render() }
     }
     public override func viewDidDisappear(_ animated: Bool) { super.viewDidDisappear(animated); cancel() }
     public func cancel() { active = false; session.cancel(); if isViewLoaded { for cell in table.visibleCells { (cell as? NovelBookCell)?.cancelPendingLoad() } } }
@@ -332,12 +322,15 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         applyRowsSnapshot(rows)
         more.isEnabled = !session.loading && session.canLoadMore; more.isHidden = !session.canLoadMore
         cancelButton.isHidden = !session.loading
-        sources.menu = UIMenu(children: session.states.map { item in
-            let status: String
-            switch item.status { case .idle: status = "未开始"; case .loading: status = "加载中"; case .loaded: status = "第\(item.page)页";
-            case .exhausted: status = "已加载全部"; case .cancelled: status = "已取消"; case .failed(let error): status = error }
-            return UIAction(title: item.source.name, subtitle: status) { [weak self] _ in self?.active = true; self?.session.loadMore() }
-        })
+        if renderedStates != session.states {
+            renderedStates = session.states
+            sources.menu = UIMenu(children: session.states.map { item in
+                let status: String
+                switch item.status { case .idle: status = "未开始"; case .loading: status = "加载中"; case .loaded: status = "第\(item.page)页";
+                case .exhausted: status = "已加载全部"; case .cancelled: status = "已取消"; case .failed(let error): status = error }
+                return UIAction(title: item.source.name, subtitle: status) { [weak self] _ in self?.active = true; self?.session.loadMore() }
+            })
+        }
         emptyLabel.text = session.loading ? "搜索中" : session.states.isEmpty ? "没有可搜索书源" : "未找到书籍"
         table.backgroundView = rows.isEmpty ? emptyLabel : nil
         if let error = session.error, presentError(error) { session.error = nil }
@@ -358,33 +351,21 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     }
 
     private func applyRowsSnapshot(_ items: [NovelSearchBook]) {
-        let oldByID = rowsByID
-        var nextByID: [String: NovelSearchBook] = [:]
-        var ids: [String] = []
-        var toReconfigure: [String] = []
-        var seen: Set<String> = []
-        for row in items {
-            let id = searchRowID(row)
-            guard seen.insert(id).inserted else { continue }
-            nextByID[id] = row
-            ids.append(id)
-            if let prev = oldByID[id],
-               prev.book != row.book || prev.candidates.count != row.candidates.count {
-                toReconfigure.append(id)
+        let update = rowProjection.update(
+            section: 0,
+            items: items,
+            id: searchRowID,
+            isChanged: { prev, next in
+                prev.book != next.book || prev.candidates.count != next.candidates.count
             }
-        }
-        rowsByID = nextByID
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(ids, toSection: 0)
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        )
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
     private func reconfigureVisibleRows() {
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard let rowID = dataSource.itemIdentifier(for: indexPath),
-                  let row = rowsByID[rowID],
+                  let row = rowProjection[rowID],
                   let cell = table.cellForRow(at: indexPath) as? NovelBookCell else { continue }
             cell.configure(row.book, sourceCount: row.candidates.count, feature: session.feature,
                            theme: theme, loadCover: active && view.window != nil)
@@ -392,11 +373,11 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     }
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowsByID[rowID] else { return }
+        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowProjection[rowID] else { return }
         onSelect?(row.book)
     }
     public func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowsByID[rowID] else { return nil }
+        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowProjection[rowID] else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             UIMenu(children: row.candidates.map { candidate in
                 UIAction(title: self?.session.feature.sources.first { $0.id == candidate.installationId }?.name ?? candidate.installationId) { [weak self] _ in self?.onSelect?(candidate) }
@@ -406,5 +387,6 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
         (cell as? NovelBookCell)?.cancelPendingLoad()
     }
+    deinit { let session = session; Task { await session.close() } }
 }
 #endif

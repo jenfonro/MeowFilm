@@ -12,12 +12,18 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
     private static let fadeHeight: CGFloat = 20
     private static let headerHeight: CGFloat = 64
 
+    private struct ChannelItem: Equatable {
+        let channel: MusicPublicBrowseChannel
+        let selected: Bool
+    }
+
     var channels: [MusicPublicBrowseChannel]
-    private var channelsByID: [String: MusicPublicBrowseChannel] = [:]
+    private var projection = IndexedDiffableProjection<Int, String, ChannelItem>()
     var selectedID: String?
     private var emptyTitle: String
     private let onSelect: (MusicPublicBrowseChannel) -> Void
     private var lastLayoutWidth: CGFloat = 0
+    private var lastFadeState: (size: CGSize, showsFade: Bool)?
 
     private let closeButton = UIButton(type: .system)
     private let titleLabel = UILabel()
@@ -123,8 +129,8 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
 
         dataSource = UICollectionViewDiffableDataSource<Int, String>(collectionView: collectionView) { [weak self] cv, indexPath, id in
             let cell = cv.dequeueReusableCell(withReuseIdentifier: MusicChannelPickerCell.reuseIdentifier, for: indexPath) as! MusicChannelPickerCell
-            if let self, let channel = self.channelsByID[id] {
-                cell.configure(channel: channel, selected: channel.identity == self.selectedID, theme: self.theme)
+            if let self, let entry = self.projection[id] {
+                cell.configure(channel: entry.channel, selected: entry.selected, theme: self.theme)
             }
             return cell
         }
@@ -150,6 +156,12 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
         guard height > 0 else { return }
         let remaining = collectionView.contentSize.height - (collectionView.contentOffset.y + collectionView.bounds.height)
         let showsFade = remaining > 1
+        if let lastFadeState,
+           lastFadeState.size == collectionContainer.bounds.size,
+           lastFadeState.showsFade == showsFade {
+            return
+        }
+        lastFadeState = (collectionContainer.bounds.size, showsFade)
         let solid = height > Self.fadeHeight ? (height - Self.fadeHeight) / height : 0
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -173,9 +185,9 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
         guard dataSource != nil else { return }
         for indexPath in collectionView.indexPathsForVisibleItems {
             guard let id = dataSource.itemIdentifier(for: indexPath),
-                  let channel = channelsByID[id],
+                  let entry = projection[id],
                   let cell = collectionView.cellForItem(at: indexPath) as? MusicChannelPickerCell else { continue }
-            cell.configure(channel: channel, selected: channel.identity == selectedID, theme: theme)
+            cell.configure(channel: entry.channel, selected: entry.selected, theme: theme)
         }
     }
 
@@ -192,22 +204,9 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
         emptyLabel.isHidden = !channels.isEmpty
         collectionContainer.isHidden = channels.isEmpty
 
-        var nextByID: [String: MusicPublicBrowseChannel] = [:]
-        var ids: [String] = []
-        var seen: Set<String> = []
-        for channel in channels {
-            guard seen.insert(channel.identity).inserted else { continue }
-            nextByID[channel.identity] = channel
-            ids.append(channel.identity)
-        }
-        let existing = Set(dataSource.snapshot().itemIdentifiers)
-        channelsByID = nextByID
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(ids, toSection: 0)
-        let toReconfigure = ids.filter { existing.contains($0) }
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        let projected = channels.map { ChannelItem(channel: $0, selected: $0.identity == selectedID) }
+        let update = projection.update(section: 0, items: projected, id: { $0.channel.identity })
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
     func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
@@ -217,7 +216,8 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let channel = channelsByID[id] else { return }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let entry = projection[id] else { return }
+        let channel = entry.channel
         dismiss(animated: true) { [onSelect = self.onSelect] in onSelect(channel) }
     }
 }

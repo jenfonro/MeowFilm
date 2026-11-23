@@ -13,7 +13,6 @@ enum MusicAccountFeedbackNotSent: Error {
 /// The existing account owner drives this queue. The lock also lets explicit
 /// revocation fence persistence and cancel I/O without waiting for its actor.
 final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
-    static let key = "music.platform-playback-pending"
     static let retention: TimeInterval = 7 * 86_400
 
     struct Entry: Codable, Sendable {

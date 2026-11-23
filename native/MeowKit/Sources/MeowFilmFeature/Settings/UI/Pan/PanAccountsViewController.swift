@@ -9,11 +9,23 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
         case account(PanProviderID)
     }
 
+    private enum RowItem: Equatable {
+        case header(last: Bool)
+        case account(PanAccountRow, last: Bool)
+
+        var id: RowID {
+            switch self {
+            case .header: return .header
+            case .account(let row, _): return .account(row.id)
+            }
+        }
+    }
+
     let model: PanAccountsModel
     let table = SettingsTableView()
+    private var projection = IndexedDiffableProjection<Int, RowID, RowItem>()
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
     private weak var loginCard: PanLoginViewController?
-    private var displayedNotice: UUID?
 
     public init(model: PanAccountsModel, themeProvider: any PageThemeProviding) {
         self.model = model
@@ -66,14 +78,14 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
 
     private func render() {
         guard isViewLoaded, dataSource != nil else { return }
-        let items: [RowID] = [.header] + model.rows.map { .account($0.id) }
-        let existing = Set(dataSource.snapshot().itemIdentifiers)
-        var snapshot = NSDiffableDataSourceSnapshot<Int, RowID>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(items, toSection: 0)
-        let toReconfigure = items.filter { existing.contains($0) }
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        let rows = model.rows
+        var items: [RowItem] = [.header(last: rows.isEmpty)]
+        items.reserveCapacity(rows.count + 1)
+        for (index, row) in rows.enumerated() {
+            items.append(.account(row, last: index == rows.count - 1))
+        }
+        let update = projection.update(section: 0, items: items, id: { $0.id })
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
         showNotice()
     }
 
@@ -87,15 +99,13 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
     }
 
     private func configure(cell: PanAccountTableCell, rowID: RowID, rowIndex: Int) {
-        let total = model.rows.count + 1
+        guard let item = projection[rowID] else { return }
         let first = rowIndex == 0
-        let last = rowIndex == total - 1
         let accessibilityLayout = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
-        switch rowID {
-        case .header:
+        switch item {
+        case .header(let last):
             cell.configureHeader(theme: theme, first: first, last: last, accessibilityLayout: accessibilityLayout)
-        case .account(let providerID):
-            guard let row = model.rows.first(where: { $0.id == providerID }) else { return }
+        case .account(let row, let last):
             cell.configureAccount(
                 row: row,
                 theme: theme,
@@ -103,15 +113,17 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
                 last: last,
                 accessibilityLayout: accessibilityLayout
             ) { [weak self] action in
-                self?.perform(action, provider: providerID)
+                self?.perform(action, provider: row.id)
             }
         }
     }
 
     private func showNotice() {
-        guard let notice = model.notice, displayedNotice != notice.id else { return }
-        displayedNotice = notice.id
-        enqueueError(notice.message)
+        syncErrorSource(
+            "pan.notice",
+            message: model.notice?.message,
+            token: model.notice.map { AnyHashable($0.id) }
+        )
     }
 
     public func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
@@ -147,14 +159,66 @@ private final class PanAccountTableCell: UITableViewCell {
     static let reuseIdentifier = "pan.account.cell"
 
     private let background = SettingsRowBackgroundView(selected: false)
-    private var columns: PanAccountColumns?
-    private var isAccessibilityLayout = false
+    private let columns = PanAccountColumns()
+    private let headerLabels: [UILabel]
+    private let platformIcon = UIImageView(image: UIImage(systemName: "externaldrive"))
+    private let platformTitle = UILabel()
+    private let platformStack: UIStackView
+    private let statusSpinner = UIActivityIndicatorView(style: .medium)
+    private let statusBadge = SettingsStatusBadge(status: .neutral, text: "", theme: PageTheme())
+    private var actionButtons: [UIButton] = []
+    private var boundActions: [PanAccountAction] = []
+    private var onAction: (@MainActor (PanAccountAction) -> Void)?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        headerLabels = ["平台", "状态", "操作"].enumerated().map { index, text in
+            let label = UILabel()
+            label.text = text
+            label.numberOfLines = 0
+            label.lineBreakMode = .byWordWrapping
+            label.adjustsFontForContentSizeCategory = true
+            if index == 2 { label.textAlignment = .center }
+            label.isHidden = true
+            return label
+        }
+        platformStack = UIStackView(arrangedSubviews: [platformIcon, platformTitle])
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         selectionStyle = .none
         backgroundColor = .clear
         backgroundView = background
+
+        columns.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(columns)
+        NSLayoutConstraint.activate([
+            columns.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
+            columns.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
+            columns.topAnchor.constraint(equalTo: contentView.layoutMarginsGuide.topAnchor),
+            columns.bottomAnchor.constraint(equalTo: contentView.layoutMarginsGuide.bottomAnchor),
+        ])
+
+        for (column, label) in zip(columns.columns, headerLabels) {
+            column.addArrangedSubview(label)
+        }
+
+        platformIcon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
+        platformIcon.setContentHuggingPriority(.required, for: .horizontal)
+        platformIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        platformTitle.numberOfLines = 0
+        platformTitle.lineBreakMode = .byWordWrapping
+        platformTitle.adjustsFontForContentSizeCategory = true
+        platformStack.alignment = .center
+        platformStack.spacing = 8
+        platformStack.accessibilityIdentifier = "pan.accounts.platform"
+        platformStack.isHidden = true
+        columns.columns[0].addArrangedSubview(platformStack)
+
+        statusSpinner.hidesWhenStopped = true
+        statusSpinner.accessibilityLabel = "正在操作账号"
+        statusSpinner.isHidden = true
+        statusBadge.accessibilityIdentifier = "pan.accounts.status"
+        statusBadge.isHidden = true
+        columns.columns[1].addArrangedSubview(statusSpinner)
+        columns.columns[1].addArrangedSubview(statusBadge)
     }
 
     @available(*, unavailable)
@@ -162,54 +226,56 @@ private final class PanAccountTableCell: UITableViewCell {
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        clearColumns()
+        statusSpinner.stopAnimating()
+        onAction = nil
+        boundActions.removeAll()
         accessibilityIdentifier = nil
     }
 
-    private func ensureColumns(accessibilityLayout: Bool) -> PanAccountColumns {
-        if let existing = columns, isAccessibilityLayout == accessibilityLayout {
-            clearColumns()
-            return existing
-        }
-        columns?.removeFromSuperview()
-        let created = PanAccountColumns(accessibilityLayout: accessibilityLayout)
-        created.translatesAutoresizingMaskIntoConstraints = false
-        contentView.addSubview(created)
-        NSLayoutConstraint.activate([
-            created.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
-            created.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
-            created.topAnchor.constraint(equalTo: contentView.layoutMarginsGuide.topAnchor),
-            created.bottomAnchor.constraint(equalTo: contentView.layoutMarginsGuide.bottomAnchor),
-        ])
-        columns = created
-        isAccessibilityLayout = accessibilityLayout
-        return created
+    private func invokeAction(at index: Int) {
+        guard boundActions.indices.contains(index) else { return }
+        onAction?(boundActions[index])
     }
 
-    private func clearColumns() {
-        guard let columns else { return }
-        for column in columns.columns {
-            for child in column.arrangedSubviews {
-                column.removeArrangedSubview(child)
-                child.removeFromSuperview()
-            }
+    private func ensureActionButtons(count: Int) {
+        while actionButtons.count < count {
+            let index = actionButtons.count
+            let button = UIButton(configuration: .plain(), primaryAction: UIAction { [weak self] _ in
+                self?.invokeAction(at: index)
+            })
+            button.contentHorizontalAlignment = .center
+            button.titleLabel?.numberOfLines = 0
+            button.titleLabel?.textAlignment = .center
+            button.titleLabel?.adjustsFontForContentSizeCategory = true
+            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+            button.isHidden = true
+            columns.columns[2].addArrangedSubview(button)
+            actionButtons.append(button)
         }
     }
 
     func configureHeader(theme: PageTheme, first: Bool, last: Bool, accessibilityLayout: Bool) {
         background.update(theme: theme, first: first, last: last, selected: false, settings: true, showsSeparator: !last)
         accessibilityIdentifier = "pan.accounts.header"
-        let columns = ensureColumns(accessibilityLayout: accessibilityLayout)
-        for (column, text) in zip(columns.columns, ["平台", "状态", "操作"]) {
-            let label = UILabel()
-            label.text = text
-            label.font = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
-            label.numberOfLines = 0
-            label.lineBreakMode = .byWordWrapping
-            label.adjustsFontForContentSizeCategory = true
-            if column === columns.columns[2] { label.textAlignment = .center }
-            label.textColor = UIColor(theme.settings.muted)
-            column.addArrangedSubview(label)
+        columns.setAccessibilityLayout(accessibilityLayout)
+        columns.columns[1].alignment = .fill
+        onAction = nil
+        boundActions.removeAll()
+
+        let headerFont = UIFont.preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
+        let mutedColor = UIColor(theme.settings.muted)
+        for label in headerLabels {
+            label.font = headerFont
+            label.textColor = mutedColor
+            label.isHidden = false
+        }
+        platformStack.isHidden = true
+        statusSpinner.stopAnimating()
+        statusSpinner.isHidden = true
+        statusBadge.isHidden = true
+        for button in actionButtons {
+            button.isHidden = true
+            button.accessibilityIdentifier = nil
         }
     }
 
@@ -223,34 +289,28 @@ private final class PanAccountTableCell: UITableViewCell {
     ) {
         background.update(theme: theme, first: first, last: last, selected: false, settings: true, showsSeparator: !last)
         accessibilityIdentifier = "pan.accounts.row.\(row.id.rawValue)"
-        let columns = ensureColumns(accessibilityLayout: accessibilityLayout)
-        let font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
+        columns.setAccessibilityLayout(accessibilityLayout)
+        self.onAction = onAction
+        boundActions = row.actions
 
-        let icon = UIImageView(image: UIImage(systemName: "externaldrive"))
-        icon.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 16, weight: .regular)
-        icon.tintColor = UIColor(theme.settings.accent)
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
-        let title = UILabel()
-        title.text = row.id.title
-        title.font = font
-        title.numberOfLines = 0
-        title.lineBreakMode = .byWordWrapping
-        title.adjustsFontForContentSizeCategory = true
-        title.textColor = UIColor(theme.settings.ink)
-        let platform = UIStackView(arrangedSubviews: [icon, title])
-        platform.alignment = .center
-        platform.spacing = 8
-        platform.accessibilityIdentifier = "pan.accounts.platform"
-        columns.columns[0].addArrangedSubview(platform)
+        for label in headerLabels { label.isHidden = true }
+
+        let font = UIFont.preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
+        platformIcon.tintColor = UIColor(theme.settings.accent)
+        platformTitle.text = row.id.title
+        platformTitle.font = font
+        platformTitle.textColor = UIColor(theme.settings.ink)
+        platformStack.isHidden = false
 
         if row.busy {
-            let spinner = UIActivityIndicatorView(style: .medium)
-            spinner.color = UIColor(theme.settings.muted)
-            spinner.accessibilityLabel = "正在操作账号"
-            spinner.startAnimating()
-            columns.columns[1].addArrangedSubview(spinner)
+            columns.columns[1].alignment = .fill
+            statusBadge.isHidden = true
+            statusSpinner.color = UIColor(theme.settings.muted)
+            statusSpinner.isHidden = false
+            if !statusSpinner.isAnimating { statusSpinner.startAnimating() }
         } else {
+            statusSpinner.stopAnimating()
+            statusSpinner.isHidden = true
             let status: SettingsStatusBadge.Status
             switch row.account?.status {
             case .signedIn: status = .success
@@ -259,21 +319,27 @@ private final class PanAccountTableCell: UITableViewCell {
             case .signedOut: status = .neutral
             case nil: status = row.account?.errorCode == .corruptStorage ? .danger : .neutral
             }
-            let badge = SettingsStatusBadge(status: status, text: row.statusTitle, theme: theme)
-            badge.accessibilityIdentifier = "pan.accounts.status"
             columns.columns[1].alignment = accessibilityLayout ? .fill : .leading
-            columns.columns[1].addArrangedSubview(badge)
+            statusBadge.update(status: status, text: row.statusTitle, theme: theme)
+            statusBadge.isHidden = false
         }
 
-        for action in row.actions {
+        ensureActionButtons(count: row.actions.count)
+        let foreground = UIColor(row.busy ? theme.settings.muted : theme.settings.accent)
+        for (index, button) in actionButtons.enumerated() {
+            guard row.actions.indices.contains(index) else {
+                button.isHidden = true
+                button.accessibilityIdentifier = nil
+                continue
+            }
+            let action = row.actions[index]
             let labelText: String, suffix: String
             switch action {
             case .login: labelText = row.account?.status == .expired ? "重新登录" : "登录"; suffix = "login"
             case .refresh: labelText = "刷新"; suffix = "refresh"
             case .logout: labelText = "退出登录"; suffix = "logout"
             }
-            let foreground = UIColor(row.busy ? theme.settings.muted : theme.settings.accent)
-            var configuration = UIButton.Configuration.plain()
+            var configuration = button.configuration ?? UIButton.Configuration.plain()
             configuration.title = labelText
             configuration.baseForegroundColor = foreground
             configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
@@ -285,18 +351,11 @@ private final class PanAccountTableCell: UITableViewCell {
             configuration.titleAlignment = .center
             configuration.titleLineBreakMode = .byWordWrapping
             configuration.contentInsets = .init(top: 6, leading: 0, bottom: 6, trailing: 0)
-            let button = UIButton(configuration: configuration, primaryAction: UIAction { _ in
-                onAction(action)
-            })
-            button.contentHorizontalAlignment = .center
+            button.configuration = configuration
             button.titleLabel?.font = font
-            button.titleLabel?.numberOfLines = 0
-            button.titleLabel?.textAlignment = .center
-            button.titleLabel?.adjustsFontForContentSizeCategory = true
             button.accessibilityIdentifier = "pan.accounts.\(row.id.rawValue).\(suffix)"
             button.isEnabled = !row.busy
-            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-            columns.columns[2].addArrangedSubview(button)
+            button.isHidden = false
         }
     }
 }
@@ -306,19 +365,37 @@ private final class PanAccountTableCell: UITableViewCell {
 @MainActor
 final class PanAccountColumns: UIStackView {
     let columns = (0..<3).map { _ in UIStackView() }
-    init(accessibilityLayout: Bool) {
+    private var widthConstraints: [NSLayoutConstraint] = []
+    private var isAccessibilityLayout: Bool?
+
+    init(accessibilityLayout: Bool = false) {
         super.init(frame: .zero)
-        axis = accessibilityLayout ? .vertical : .horizontal
-        alignment = accessibilityLayout ? .fill : .center; spacing = 8
+        spacing = 8
         accessibilityIdentifier = "pan.accounts.columns"
-        for column in columns { column.axis = .vertical; column.spacing = 0; addArrangedSubview(column) }
-        if !accessibilityLayout {
-            NSLayoutConstraint.activate([
-                columns[0].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.38),
-                columns[1].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.30),
-            ])
+        for column in columns {
+            column.axis = .vertical
+            column.spacing = 0
+            addArrangedSubview(column)
+        }
+        widthConstraints = [
+            columns[0].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.38),
+            columns[1].widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.30),
+        ]
+        setAccessibilityLayout(accessibilityLayout)
+    }
+
+    func setAccessibilityLayout(_ accessibilityLayout: Bool) {
+        guard isAccessibilityLayout != accessibilityLayout else { return }
+        isAccessibilityLayout = accessibilityLayout
+        axis = accessibilityLayout ? .vertical : .horizontal
+        alignment = accessibilityLayout ? .fill : .center
+        if accessibilityLayout {
+            NSLayoutConstraint.deactivate(widthConstraints)
+        } else {
+            NSLayoutConstraint.activate(widthConstraints)
         }
     }
+
     @available(*, unavailable)
     required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

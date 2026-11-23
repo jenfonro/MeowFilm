@@ -16,7 +16,13 @@ actor MusicNativePublicBrowseQueueRead {
     func page(_ cursor: String?, intent: MusicQueueAuthorization) async throws -> MusicQueueReferencePage {
         try musicRequire(!closed, .closed); try Task.checkCancellation()
         let text = cursor ?? "0"
-        try musicRequire(text.range(of: "^(0|[1-9][0-9]{0,17})$", options: .regularExpression) != nil)
+        let bytes = text.utf8
+        let validCursor = text == "0" || (
+            !bytes.isEmpty && bytes.count <= 18 &&
+            (49...57).contains(bytes.first!) &&
+            bytes.allSatisfy { (48...57).contains($0) }
+        )
+        try musicRequire(validCursor)
         let offset = Int(text)!
         try musicRequire(offset % 30 == 0, .staleResult)
         try musicRequire(rows != nil || offset == 0, .staleResult)

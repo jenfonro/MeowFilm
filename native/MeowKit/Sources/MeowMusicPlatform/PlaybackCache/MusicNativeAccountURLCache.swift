@@ -9,10 +9,13 @@ import MeowStorage
 /// and ten seconds of safety before a declared expiry. Unknown expiry stays
 /// unknown in the returned audio; retention is NOT a fabricated media lifetime.
 struct MusicNativeAccountURLCache {
-    static let key = "music.platform.audio-values.v1"
     static let maximumBytes = 1_024 * 1_024
     static let retention: TimeInterval = 30 * 86_400
     private static let audioFields = ["url", "full", "actualQuality", "bitrate", "sampleRate", "duration", "expiresAt", "licenseExpiresAt"]
+    private static let forbiddenQueryKeys: Set<String> = [
+        "cookie", "authorization", "music_u", "music_a", "musickey",
+        "p_skey", "skey", "p_uin", "access_token", "refresh_token"
+    ]
 
     struct Key: Hashable, Sendable {
         let scope: String
@@ -55,10 +58,8 @@ struct MusicNativeAccountURLCache {
         }
         // Signed media capabilities (vkey, etc.) belong to the candidate URL.
         // Platform login credentials must never be copied into a candidate.
-        let forbidden: Set<String> = ["cookie", "authorization", "music_u", "music_a", "musickey",
-                                      "p_skey", "skey", "p_uin", "access_token", "refresh_token"]
         guard !(URLComponents(url: audio.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
-            .contains(where: { forbidden.contains($0.name.lowercased()) }) else {
+            .contains(where: { forbiddenQueryKeys.contains($0.name.lowercased()) }) else {
             throw MusicServiceError.invalidMediaCandidate
         }
         return audio

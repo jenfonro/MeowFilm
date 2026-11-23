@@ -359,8 +359,12 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
                              animated: foreground && window != nil && content.appearance.animatesPaletteChanges)
     }
 
-    deinit {
-        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            morphAnimator?.stopAnimation(true)
+            morphAnimator = nil
+            for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        }
     }
 }
 

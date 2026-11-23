@@ -85,8 +85,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private var logoHeight: NSLayoutConstraint!
     private var titleContainer = UIView()
     private var logoContainer = UIView()
-    var displayedLibraryError: FilmLibraryError?
-    var displayedPlaybackError: FilmPlaybackError?
 
     private lazy var back = PageHeaderButton(image: PageIcon.image(.back, size: 20),
         accessibilityLabel: "返回") { [weak self] in
@@ -115,7 +113,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
                             themeProvider: any PageThemeProviding, model: FilmPlaybackModel? = nil) {
         self.init(detail: searchContext.detail, library: library, images: images, themeProvider: themeProvider, model: model)
         self.searchContext = searchContext
-        observe(searchContext.session.$snapshot.eraseToAnyPublisher(), whenVisible: true) { [weak self] _ in
+        observe(searchContext.session.$snapshot.dropFirst().eraseToAnyPublisher(), whenVisible: true) { [weak self] _ in
             self?.receiveSearchUpdate()
         }
     }
@@ -187,9 +185,26 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         configureSections()
         observe(library, whenVisible: true) { [weak self] in self?.renderFavorite() }
         if let model {
-            // Observe ONLY low-frequency presentation store; framework coalesces while hidden behind fullscreen player.
-            observe(model.presentationStore, whenVisible: true) { [weak self] in
+            // Observe ONLY low-frequency presentation slices; framework coalesces while hidden behind fullscreen player.
+            let presentationVisuals = Publishers.MergeMany([
+                model.presentationStore.$snapshot.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$presentation.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$opening.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$metadataViewProvider.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$selectedAggregateProvider.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$nativeStatus.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ]).eraseToAnyPublisher()
+            observe(presentationVisuals, whenVisible: true) { [weak self] in
                 self?.renderPlayback()
+            }
+            let presentationErrors = Publishers.MergeMany([
+                model.presentationStore.$observationError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$actionError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$mediaStopError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                model.presentationStore.$sessionReleaseError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ]).eraseToAnyPublisher()
+            observe(presentationErrors, whenVisible: true) { [weak self] in
+                self?.presentPlaybackError()
             }
             renderPlayback()
         }
@@ -447,7 +462,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         metadata.text = facts.joined(separator: " · "); metadata.isHidden = facts.isEmpty
         metadata.superview?.isHidden = facts.isEmpty
         dateLabel.text = detail.releaseDate; dateLabel.isHidden = detail.releaseDate?.isEmpty != false
-        dateLabel.superview?.isHidden = dateLabel.isHidden
+        dateContainer?.isHidden = dateLabel.isHidden
         summary.text = detail.summary.isEmpty ? "暂无简介" : detail.summary
         summary.textColor = UIColor(detail.summary.isEmpty ? theme.muted : theme.ink)
         summaryButton.isHidden = detail.summary.isEmpty

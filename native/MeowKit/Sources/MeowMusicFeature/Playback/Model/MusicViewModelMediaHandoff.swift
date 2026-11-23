@@ -49,7 +49,6 @@ extension MusicViewModel {
         remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil
         cachedAudioRecovery = nil
         remoteAudioRecoveryTried = false
-        lyricTask?.cancel(); lyricTask = nil
         resolvingAttempt = nil
         playbackState.isResolving = false
         playbackState.options = []; playbackState.scriptSourceError = nil

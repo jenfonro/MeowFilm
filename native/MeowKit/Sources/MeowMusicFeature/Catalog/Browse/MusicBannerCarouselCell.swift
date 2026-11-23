@@ -10,6 +10,7 @@ final class MusicBannerCarouselCell: UICollectionViewCell, UIScrollViewDelegate 
     private let dots = UIPageControl()
     private var items: [MusicPublicBrowseItem] = []
     private var tiles: [MusicBrowseCell] = []
+    private var open: ((MusicPublicBrowseItem) -> Void)?
     private var active = false
     private var holdUntil = Date.distantPast
     private var task: Task<Void, Never>?
@@ -45,18 +46,34 @@ final class MusicBannerCarouselCell: UICollectionViewCell, UIScrollViewDelegate 
     func configure(_ items: [MusicPublicBrowseItem], theme: PageTheme, images: MusicArtworkImages, open: @escaping (MusicPublicBrowseItem) -> Void) {
         let changed = self.items.map(\.id) != items.map(\.id)
         self.items = items
-        if changed {
-            for tile in tiles { tile.removeFromSuperview() }
-            tiles = items.map { _ in
-                let tile = MusicBrowseCell(frame: .zero)
-                scroll.addSubview(tile)
-                return tile
+        self.open = open
+        while tiles.count < items.count {
+            let index = tiles.count
+            let tile = MusicBrowseCell(frame: .zero)
+            tile.setOpenAction { [weak self] in
+                guard let self, self.items.indices.contains(index) else { return }
+                self.open?(self.items[index])
             }
-            dots.currentPage = 0
+            scroll.addSubview(tile)
+            tiles.append(tile)
         }
-        for (tile, item) in zip(tiles, items) {
-            tile.configure(item: item, layout: .banner, theme: theme, images: images, onPlay: { open(item) })
-            tile.setOpenAction { open(item) }
+        if changed {
+            dots.currentPage = 0
+            scroll.contentOffset.x = 0
+        }
+        for (index, tile) in tiles.enumerated() {
+            guard items.indices.contains(index) else {
+                tile.isHidden = true
+                tile.setDisplayVisible(false)
+                tile.resetPressFeedback()
+                continue
+            }
+            let item = items[index]
+            tile.isHidden = false
+            tile.configure(item: item, layout: .banner, theme: theme, images: images, onPlay: { [weak self] in
+                guard let self, self.items.indices.contains(index) else { return }
+                self.open?(self.items[index])
+            })
             tile.setDisplayVisible(active)
         }
         dots.numberOfPages = items.count
@@ -72,7 +89,9 @@ final class MusicBannerCarouselCell: UICollectionViewCell, UIScrollViewDelegate 
 
     func setActive(_ value: Bool) {
         active = value
-        for tile in tiles { tile.setDisplayVisible(value) }
+        for (index, tile) in tiles.enumerated() {
+            tile.setDisplayVisible(value && items.indices.contains(index))
+        }
         updateAutoAdvance()
     }
 
@@ -85,15 +104,17 @@ final class MusicBannerCarouselCell: UICollectionViewCell, UIScrollViewDelegate 
         super.layoutSubviews()
         let changed = scroll.bounds.size != contentView.bounds.size
         scroll.frame = contentView.bounds
-        for (index, tile) in tiles.enumerated() {
-            tile.frame = CGRect(x: CGFloat(index) * scroll.bounds.width, y: 0,
-                                width: scroll.bounds.width, height: scroll.bounds.height)
+        for index in items.indices where tiles.indices.contains(index) {
+            tiles[index].frame = CGRect(x: CGFloat(index) * scroll.bounds.width, y: 0,
+                                        width: scroll.bounds.width, height: scroll.bounds.height)
         }
         scroll.contentSize = CGSize(width: CGFloat(items.count) * scroll.bounds.width, height: scroll.bounds.height)
         let dotWidth = min(max(0, bounds.width - 32), dots.size(forNumberOfPages: items.count).width)
         dots.frame = CGRect(x: bounds.width - 12 - dotWidth, y: bounds.height - 27, width: dotWidth, height: 26)
         let trailingInset = items.count > 1 ? 12 + dotWidth + 8 : 14
-        for tile in tiles { tile.bannerTrailingInset = trailingInset }
+        for index in items.indices where tiles.indices.contains(index) {
+            tiles[index].bannerTrailingInset = trailingInset
+        }
         if changed { scroll.contentOffset.x = CGFloat(dots.currentPage) * scroll.bounds.width }
     }
 

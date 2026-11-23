@@ -9,7 +9,6 @@ public final class NovelDetailViewController: PageViewController {
     var book: NovelBook
     private let titleLabel = UILabel(), author = UILabel(), intro = UILabel(), latest = UILabel()
     private let shelf = UIButton(type: .system), read = UIButton(type: .system)
-    private var task: Task<Void, Never>?
     private var metadataLoaded = false
     public init(book: NovelBook, feature: NovelFeature, themeProvider: any PageThemeProviding) {
         self.book = book; self.feature = feature; super.init(themeProvider: themeProvider)
@@ -25,11 +24,10 @@ public final class NovelDetailViewController: PageViewController {
         shelf.accessibilityIdentifier = "novel.detail.shelf"
         shelf.addAction(UIAction { [weak self] _ in
             guard let self else { return }
-            runPageTask { [weak self] in
+            runPageTask(key: "shelf") { [weak self] in
                 guard let self else { return }
-                do { try await feature.setShelf(book, present: !onShelf); render() }
-                catch is CancellationError { }
-                catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+                try await feature.setShelf(book, present: !onShelf)
+                render()
             }
         }, for: .touchUpInside)
         let buttons = UIStackView(arrangedSubviews: [shelf, read]); buttons.distribution = .fillEqually
@@ -49,20 +47,19 @@ public final class NovelDetailViewController: PageViewController {
     }
     public override func pageDidBecomeVisible() {
         guard !metadataLoaded else { return }
-        task?.cancel()
-        task = Task { [weak self] in
+        runPageTask(key: "detail") { [weak self] in
             guard let self else { return }
-            do {
-                let source = try feature.source(for: book)
-                let result = try await feature.sourcesClient.detail(book, source: source)
-                guard !Task.isCancelled, feature.accepts(source) else { return }
-                book = result; metadataLoaded = true; render()
-            } catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+            let source = try feature.source(for: book)
+            let result = try await feature.sourcesClient.detail(book, source: source)
+            guard !Task.isCancelled, feature.accepts(source) else { return }
+            book = result; metadataLoaded = true; render()
         }
     }
-    public override func pageDidBecomeInactive() { task?.cancel() }
+    public override func pageDidBecomeInactive() { cancelPageTask(key: "detail") }
     public override func pageDidBecomeHidden() {
-        if navigationController?.topViewController !== self || UIApplication.shared.applicationState != .active { task?.cancel() }
+        if navigationController?.topViewController !== self || UIApplication.shared.applicationState != .active {
+            cancelPageTask(key: "detail")
+        }
     }
     public override func applyTheme() {
         super.applyTheme()
@@ -140,11 +137,10 @@ final class NovelChapterPicker: PageViewController, UITableViewDelegate {
     override func pageDidBecomeInactive() { if !chosen { onCancel?() } }
 
     private func applyChapterSnapshot() {
-        var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
-        snapshot.appendSections([0])
+        var builder = DiffableSnapshotBuilder<Int, Int>()
         let indices = Array(chapters.indices)
-        snapshot.appendItems(reversed ? indices.reversed() : indices, toSection: 0)
-        dataSource.apply(snapshot, animatingDifferences: false)
+        builder.appendSection(0, items: reversed ? indices.reversed() : indices)
+        dataSource.apply(builder.build(), animatingDifferences: false)
     }
 
     private func scrollToCurrent() {

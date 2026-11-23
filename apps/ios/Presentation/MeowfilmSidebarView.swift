@@ -281,12 +281,12 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         case .music:
             break
         case .novel(let discovery, _):
-            discovery.feature.$sources.receive(on: RunLoop.main)
+            discovery.feature.$sources.dropFirst().receive(on: RunLoop.main)
                 .sink { [weak self] _ in self?.renderBooks() }.store(in: &observations)
-            discovery.$selectedSource.receive(on: RunLoop.main)
+            discovery.$selectedSource.dropFirst().receive(on: RunLoop.main)
                 .sink { [weak self] _ in self?.renderBooks() }.store(in: &observations)
         case .film(let settings):
-            settings?.$snapshot.receive(on: RunLoop.main).sink { [weak self] snapshot in
+            settings?.$snapshot.dropFirst().receive(on: RunLoop.main).sink { [weak self] snapshot in
                 self?.renderVideos(snapshot?.homeVideos ?? [])
             }.store(in: &observations)
         }

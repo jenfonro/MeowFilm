@@ -187,7 +187,11 @@ private final class FixedSheetAnimator: NSObject, UIViewControllerAnimatedTransi
         guard let controller = context.viewController(forKey: presenting ? .to : .from),
               let root = context.view(forKey: presenting ? .to : .from) else {
             let failed = UIViewPropertyAnimator(duration: 0, curve: .linear)
-            failed.addCompletion { [completion] _ in context.completeTransition(false); completion(false) }
+            failed.addCompletion { [weak self, completion] _ in
+                self?.animator = nil
+                context.completeTransition(false)
+                completion(false)
+            }
             animator = failed
             return failed
         }
@@ -215,6 +219,15 @@ private final class FixedSheetAnimator: NSObject, UIViewControllerAnimatedTransi
         }
         animator = value
         return value
+    }
+
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            if let animator, animator.state != .inactive {
+                animator.stopAnimation(true)
+            }
+            animator = nil
+        }
     }
 }
 

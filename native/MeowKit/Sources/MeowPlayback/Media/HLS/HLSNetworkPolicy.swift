@@ -40,6 +40,7 @@ enum HLSByteRange: Equatable {
 }
 
 struct HLSClientRequest {
+    private static let headerTokenBytes = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
     let method: String
     let path: String
     let range: HLSByteRange?
@@ -58,12 +59,11 @@ struct HLSClientRequest {
             throw PlaybackNetworkError.invalidResponse
         }
         var headers: [String: String] = [:]
-        let token = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
         for line in lines.dropFirst() {
             guard let colon = line.firstIndex(of: ":") else { throw PlaybackNetworkError.invalidResponse }
             let name = line[..<colon].lowercased()
             let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-            guard !name.isEmpty, name.utf8.allSatisfy({ token.contains($0) }),
+            guard !name.isEmpty, name.utf8.allSatisfy({ Self.headerTokenBytes.contains($0) }),
                   value.utf8.allSatisfy({ (32...126).contains($0) }), headers[name] == nil else {
                 throw PlaybackNetworkError.invalidResponse
             }

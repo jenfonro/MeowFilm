@@ -2,9 +2,18 @@
 #if os(iOS)
 import UIKit
 
+@MainActor
 enum MusicFMSceneIcon {
+    private struct CacheKey: Hashable {
+        let code: String
+        let sizeCentis: Int
+    }
+    private static var cache: [CacheKey: UIImage] = [:]
+
     static func image(code: String, size: CGFloat = 25) -> UIImage {
-        UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
+        let key = CacheKey(code: code, sizeCentis: Int((size * 100).rounded()))
+        if let cached = cache[key] { return cached }
+        let rendered = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
             let context = renderer.cgContext
             context.scaleBy(x: size / 32, y: size / 32)
             context.setFillColor(UIColor.black.cgColor)
@@ -12,6 +21,8 @@ enum MusicFMSceneIcon {
             context.setLineCap(.round); context.setLineJoin(.round)
             draw(code, in: context)
         }.withRenderingMode(.alwaysTemplate)
+        cache[key] = rendered
+        return rendered
     }
     private static func drawText(_ value: String, font: UIFont, centerX: CGFloat,
                                  baseline: CGFloat, in context: CGContext) {

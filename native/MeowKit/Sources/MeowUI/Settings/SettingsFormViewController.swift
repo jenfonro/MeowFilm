@@ -68,7 +68,9 @@ open class SettingsFormViewController: PageViewController {
     }
 
     public func registerMutedLabel(_ label: UILabel) {
-        mutedLabels.append(WeakLabel(label))
+        if !mutedLabels.contains(where: { $0.value === label }) {
+            mutedLabels.append(WeakLabel(label))
+        }
         if isViewLoaded { label.textColor = UIColor(theme.settings.muted) }
     }
 

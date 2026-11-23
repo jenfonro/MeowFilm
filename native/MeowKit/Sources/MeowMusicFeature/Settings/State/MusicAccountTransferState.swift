@@ -27,7 +27,6 @@ final class MusicAccountTransferState: ObservableObject {
     private(set) var plan: MusicAccountImportPlan?
     private var committing = false
     private var stagingFile: MusicAccountExportStagingFile?
-    var temporaryDirectory: URL? { stagingFile?.directory }
     var confirm: ((MusicAccountImportPlan) -> Void)?
     var exported: ((URL) -> Void)?
     var result: ((String) -> Void)?
@@ -141,6 +140,9 @@ final class MusicAccountTransferState: ObservableObject {
         if let error = error as? MusicServiceError { return error.message(operation: "账号导入导出") }
         return MusicAccountTransferError.fileOperation.localizedDescription
     }
-    var pendingOperation: Task<Void, Never>? { task }
+    deinit {
+        task?.cancel()
+        plan?.cancel()
+    }
 }
 #endif

@@ -4,6 +4,15 @@ import MeowUI
 
 @MainActor
 final class MusicQueueCurrentPage: UIViewController, UITableViewDelegate {
+    private struct IndexedCandidate: Equatable {
+        let candidate: MusicSimilarModeCandidate
+        let index: Int
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.candidate.song == rhs.candidate.song && lhs.index == rhs.index
+        }
+    }
+
     private let layout = MusicQueueListLayout()
     lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: layout)
     let mode = UIButton(type: .system)
@@ -11,8 +20,7 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDelegate {
     let recommendations = UITableView(frame: .zero, style: .plain)
     private var recommendationDataSource: UITableViewDiffableDataSource<Int, String>!
     private let recommendationStatus = UILabel()
-    private var candidates: [MusicSimilarModeCandidate] = []
-    private var candidatesByID: [String: (candidate: MusicSimilarModeCandidate, index: Int)] = [:]
+    private var candidateProjection = IndexedDiffableProjection<Int, String, IndexedCandidate>()
     private var snapshotID: UUID?
     private var theme = PageTheme()
     var onCandidate: ((UUID, String) -> Void)?
@@ -51,7 +59,7 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDelegate {
         recommendations.register(MusicQueueSongCell.self, forCellReuseIdentifier: MusicQueueSongCell.reuseIdentifier)
         recommendationDataSource = UITableViewDiffableDataSource<Int, String>(tableView: recommendations) { [weak self] tableView, indexPath, id in
             let cell = tableView.dequeueReusableCell(withIdentifier: MusicQueueSongCell.reuseIdentifier, for: indexPath)
-            if let self, let entry = self.candidatesByID[id] {
+            if let self, let entry = self.candidateProjection[id] {
                 self.configure(cell, candidate: entry.candidate, index: entry.index)
             }
             return cell
@@ -66,6 +74,7 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDelegate {
     func configure(snapshot: MusicSimilarModeSnapshot?, recommendations: MusicQueueRecommendationSnapshot?,
                    changing: Bool, returning: Bool, count: Int, modeTitle: String, theme: PageTheme, fm: MusicFMPlaybackSnapshot? = nil) {
         loadViewIfNeeded()
+        let themeChanged = self.theme != theme
         self.theme = theme
         let active = snapshot?.active == true
         let needsReadback = snapshot?.error == .commitUnconfirmed ||
@@ -83,39 +92,23 @@ final class MusicQueueCurrentPage: UIViewController, UITableViewDelegate {
             button.titleLabel?.font = .systemFont(ofSize: 13)
             button.isEnabled = button === returnToQueue || !changing
         }
-        let old = candidates
-        let oldByID = candidatesByID
-        candidates = recommendations?.candidates ?? []
-        snapshotID = recommendations?.id
-        var nextByID: [String: (candidate: MusicSimilarModeCandidate, index: Int)] = [:]
-        var ids: [String] = []
-        var toReconfigure: [String] = []
-        var seen: Set<String> = []
-        for (index, candidate) in candidates.enumerated() {
-            guard seen.insert(candidate.id).inserted else { continue }
-            nextByID[candidate.id] = (candidate, index)
-            ids.append(candidate.id)
-            if let prev = oldByID[candidate.id], prev.candidate.song != candidate.song || prev.index != index {
-                toReconfigure.append(candidate.id)
-            }
+        let indexed = (recommendations?.candidates ?? []).enumerated().map {
+            IndexedCandidate(candidate: $0.element, index: $0.offset)
         }
-        candidatesByID = nextByID
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(ids, toSection: 0)
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        recommendationDataSource.apply(snapshot, animatingDifferences: false)
-        if old.map(\.id) == candidates.map(\.id) {
+        snapshotID = recommendations?.id
+        let update = candidateProjection.update(section: 0, items: indexed, id: \.candidate.id)
+        recommendationDataSource.applyIfNeeded(update, animatingDifferences: false)
+        if themeChanged && !update.structureChanged {
             for indexPath in self.recommendations.indexPathsForVisibleRows ?? [] {
                 guard let id = recommendationDataSource.itemIdentifier(for: indexPath),
-                      let entry = candidatesByID[id],
+                      let entry = candidateProjection[id],
                       let cell = self.recommendations.cellForRow(at: indexPath) else { continue }
                 configure(cell, candidate: entry.candidate, index: entry.index)
             }
         }
-        self.recommendations.isHidden = candidates.isEmpty
+        self.recommendations.isHidden = candidateProjection.items.isEmpty
         self.recommendations.isUserInteractionEnabled = !changing
-        recommendationStatus.isHidden = candidates.isEmpty
+        recommendationStatus.isHidden = candidateProjection.items.isEmpty
         recommendationStatus.textColor = UIColor(theme.muted)
         recommendationStatus.text = "更多推荐"
         empty.text = count == 0 ? "没有正在播放歌曲" : nil

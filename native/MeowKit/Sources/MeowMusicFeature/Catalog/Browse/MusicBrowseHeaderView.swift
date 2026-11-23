@@ -11,6 +11,9 @@ final class MusicBrowseHeader: UICollectionReusableView {
     private let channelArrow = UIImageView(image: UIImage(systemName: "chevron.right",
         withConfiguration: UIImage.SymbolConfiguration(pointSize: 11, weight: .regular)))
     private let tabs = UIStackView()
+    private var tabButtons: [UIButton] = []
+    private var tabIDs: [String] = []
+    private var choiceAction: ((String) -> Void)?
     private let avatars = (0..<3).map { _ in MusicArtworkView(size: 0) }
     private var playAction: (() -> Void)?
     private var channelAction: (() -> Void)?
@@ -50,6 +53,8 @@ final class MusicBrowseHeader: UICollectionReusableView {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        choiceAction = nil
+        tabIDs.removeAll()
         cancelPendingAvatarLoads()
     }
 
@@ -92,15 +97,30 @@ final class MusicBrowseHeader: UICollectionReusableView {
         }
         choices.menu = UIMenu(children: actions)
         choices.isHidden = actions.isEmpty
-        for item in tabs.arrangedSubviews { tabs.removeArrangedSubview(item); item.removeFromSuperview() }
-        for tab in section.tabs {
+        choiceAction = onChoice
+        tabIDs = section.tabs.map(\.id)
+        while tabButtons.count < section.tabs.count {
+            let index = tabButtons.count
             let button = UIButton(type: .system)
+            button.addAction(UIAction { [weak self] _ in
+                guard let self, self.tabIDs.indices.contains(index) else { return }
+                self.choiceAction?(self.tabIDs[index])
+            }, for: .touchUpInside)
+            tabs.addArrangedSubview(button)
+            tabButtons.append(button)
+        }
+        for (index, button) in tabButtons.enumerated() {
+            guard section.tabs.indices.contains(index) else {
+                button.isHidden = true
+                continue
+            }
+            let tab = section.tabs[index]
+            button.isHidden = false
             button.setTitle(tab.title, for: .normal)
             button.tintColor = UIColor(tab.id == section.selectedTab ? theme.accent : theme.ink)
             button.accessibilityTraits = tab.id == section.selectedTab ? [.button, .selected] : .button
-            button.addAction(UIAction { _ in onChoice(tab.id) }, for: .touchUpInside)
-            tabs.addArrangedSubview(button)
         }
+        tabs.isHidden = section.tabs.isEmpty
         accessibilityIdentifier = "music.browse.heading.\(section.id)"
         setNeedsLayout()
     }

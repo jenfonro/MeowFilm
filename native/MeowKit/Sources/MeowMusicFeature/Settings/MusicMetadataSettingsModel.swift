@@ -117,7 +117,5 @@ final class MusicMetadataSettingsModel: ObservableObject {
         }
     }
 
-    func flush() async {
-        while let pending = work { await pending.value }
-    }
+    deinit { if !writing { work?.cancel() } }
 }

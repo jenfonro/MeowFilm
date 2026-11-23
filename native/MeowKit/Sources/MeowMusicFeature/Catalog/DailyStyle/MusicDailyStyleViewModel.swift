@@ -7,7 +7,7 @@ final class MusicDailyStyleViewModel: ObservableObject {
     @Published private(set) var categories: [MusicDailyStyleCategory] = []
     @Published private(set) var category = ""
     @Published private(set) var choices: [String: Set<String>] = [:]
-    @Published private var requestID: UUID?
+    @Published private(set) var requestID: UUID?
     @Published private(set) var error: String?
     @Published private(set) var saved = false
     private let page: MusicPublicBrowseViewModel

@@ -1,29 +1,6 @@
 #if os(iOS)
 import UIKit
 import Combine
-import MeowDebug
-
-/// Declarative chrome requirements owned by each page instead of type checks in the coordinator.
-public struct PageChromePolicy: Equatable, Sendable {
-    public var hidesDock: Bool
-    public var hidesMiniPlayer: Bool
-    public var isSettingsBranchRoot: Bool
-    public var isImmersiveReading: Bool
-
-    public static let standard = PageChromePolicy()
-
-    public init(
-        hidesDock: Bool = false,
-        hidesMiniPlayer: Bool = false,
-        isSettingsBranchRoot: Bool = false,
-        isImmersiveReading: Bool = false
-    ) {
-        self.hidesDock = hidesDock
-        self.hidesMiniPlayer = hidesMiniPlayer
-        self.isSettingsBranchRoot = isSettingsBranchRoot
-        self.isImmersiveReading = isImmersiveReading
-    }
-}
 
 /// Page resources live until removal; appearance and foreground only control
 /// visibility. Returning to a retained page does not reactivate its content.
@@ -79,26 +56,15 @@ open class PageViewController: UIViewController {
     private var observationFactories: [() -> AnyCancellable] = []
     private var subscriptions: [AnyCancellable] = []
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var keyedTaskIDs: [String: UUID] = [:]
     private var headerHeight: NSLayoutConstraint?
     private weak var defaultBackButton: PageHeaderButton?
     private var hasOwnHeader = false
-    private enum FeedbackKey: Equatable {
-        case error(String)
-        case notice(title: String, message: String?)
-    }
-    private enum QueuedFeedback {
-        case error(message: String, retry: (@MainActor () -> Void)?, acknowledged: (@MainActor () -> Void)?)
-        case notice(title: String, message: String?, acknowledged: (@MainActor () -> Void)?)
+    private let feedbackQueue = PageFeedbackQueue()
 
-        var key: FeedbackKey {
-            switch self {
-            case .error(let message, _, _): return .error(message)
-            case .notice(let title, let message, _): return .notice(title: title, message: message)
-            }
-        }
+    var hasActivePresentedModal: Bool {
+        presentedViewController != nil || presentedPageModal != nil
     }
-    private var queuedFeedback: [QueuedFeedback] = []
-    private var activeFeedbackKey: FeedbackKey?
 
     public init(themeProvider: any PageThemeProviding) {
         self.themeProvider = themeProvider
@@ -291,6 +257,7 @@ open class PageViewController: UIViewController {
     }
     /// False for a page nested under a page that uses a header; it shares that header.
     public var hasOwnPageHeader: Bool { hasOwnHeader }
+
     open override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         guard hasOwnHeader else { return }
@@ -341,6 +308,8 @@ open class PageViewController: UIViewController {
         appliedTheme = current
         applyTheme()
     }
+
+    // MARK: - Observation
 
     public func observe<Object: ObservableObject>(
         _ object: Object,
@@ -426,15 +395,67 @@ open class PageViewController: UIViewController {
         }
     }
 
-    public func runPageTask(_ operation: @escaping @MainActor () async -> Void) {
+    // MARK: - Page-Owned Tasks
+
+    /// Runs a page-scoped async task cancelled automatically when the page becomes inactive.
+    /// Passing a `key` cancels and replaces any previously running task for that same key.
+    public func runPageTask(
+        key: String? = nil,
+        _ operation: @escaping @MainActor () async -> Void
+    ) {
         guard isPageActive else { return }
+        if let key, let existingID = keyedTaskIDs.removeValue(forKey: key) {
+            tasks.removeValue(forKey: existingID)?.cancel()
+        }
         let id = UUID()
+        if let key { keyedTaskIDs[key] = id }
         tasks[id] = Task { [weak self] in
-            defer { self?.tasks[id] = nil }
+            defer {
+                if let self {
+                    self.tasks[id] = nil
+                    if let key, self.keyedTaskIDs[key] == id {
+                        self.keyedTaskIDs[key] = nil
+                    }
+                }
+            }
             guard !Task.isCancelled, self?.isPageActive == true else { return }
             await operation()
         }
     }
+
+    /// Runs a throwing page-scoped async task. Centrally ignores `CancellationError`,
+    /// cancelled `URLError`, and inactive-page errors, routing real failures to `enqueueError`.
+    public func runPageTask(
+        key: String? = nil,
+        retry: (@MainActor () -> Void)? = nil,
+        mapError: (@MainActor (Error) -> String)? = nil,
+        onFinally: (@MainActor () -> Void)? = nil,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
+        runPageTask(key: key) { [weak self] in
+            defer { onFinally?() }
+            do {
+                try await operation()
+            } catch is CancellationError {
+            } catch {
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled { return }
+                guard let self, self.isPageActive else { return }
+                let message = mapError?(error) ?? error.localizedDescription
+                self.enqueueError(message, retry: retry)
+            }
+        }
+    }
+
+    public func cancelPageTask(key: String) {
+        guard let existingID = keyedTaskIDs.removeValue(forKey: key) else { return }
+        tasks.removeValue(forKey: existingID)?.cancel()
+    }
+
+    public func hasActivePageTask(key: String) -> Bool {
+        keyedTaskIDs[key] != nil
+    }
+
+    // MARK: - Unified Feedback & Error-Source Queue
 
     public var canPresentPageAlert: Bool {
         guard isPageVisible, view.window != nil else { return false }
@@ -450,79 +471,48 @@ open class PageViewController: UIViewController {
         return true
     }
 
-    @discardableResult
-    public func showError(_ message: String?, acknowledged: (() -> Void)? = nil) -> Bool {
-        presentError(message, retry: nil, acknowledged: acknowledged)
-    }
-
-    /// Enqueue an error or notice so pages do not maintain separate `pendingFailure` / `pendingNotice` queues.
     public func enqueueError(_ message: String?, retry: (@MainActor () -> Void)? = nil,
                              acknowledged: (@MainActor () -> Void)? = nil) {
-        guard let message, !message.isEmpty else { return }
-        reconcileActiveFeedback()
-        let key = FeedbackKey.error(message)
-        if activeFeedbackKey == key || queuedFeedback.contains(where: { $0.key == key }) { return }
-        queuedFeedback.append(.error(message: message, retry: retry, acknowledged: acknowledged))
-        drainQueuedFeedback()
+        feedbackQueue.enqueueError(message, retry: retry, acknowledged: acknowledged, presenter: self)
     }
 
     public func enqueueNotice(title: String, message: String? = nil,
                               acknowledged: (@MainActor () -> Void)? = nil) {
-        reconcileActiveFeedback()
-        let key = FeedbackKey.notice(title: title, message: message)
-        if activeFeedbackKey == key || queuedFeedback.contains(where: { $0.key == key }) { return }
-        queuedFeedback.append(.notice(title: title, message: message, acknowledged: acknowledged))
-        drainQueuedFeedback()
+        feedbackQueue.enqueueNotice(title: title, message: message, acknowledged: acknowledged, presenter: self)
+    }
+
+    /// Reconciles a persistent state-backed error source without per-VC shadow dedup fields.
+    /// Passing `message == nil` resets the source; tapping `retry` automatically resets it too.
+    public func syncErrorSource(
+        _ sourceKey: String,
+        message: String?,
+        token: AnyHashable? = nil,
+        retry: (@MainActor () -> Void)? = nil,
+        acknowledged: (@MainActor () -> Void)? = nil
+    ) {
+        feedbackQueue.syncErrorSource(
+            sourceKey,
+            message: message,
+            token: token,
+            retry: retry,
+            acknowledged: acknowledged,
+            presenter: self
+        )
+    }
+
+    public func clearErrorSource(_ sourceKey: String) {
+        feedbackQueue.clearErrorSource(sourceKey)
     }
 
     public func clearQueuedFeedback() {
-        queuedFeedback.removeAll()
-        activeFeedbackKey = nil
-    }
-
-    private func reconcileActiveFeedback() {
-        if activeFeedbackKey != nil, presentedViewController == nil, presentedPageModal == nil {
-            activeFeedbackKey = nil
-        }
+        feedbackQueue.clear()
     }
 
     public func drainQueuedFeedback() {
-        reconcileActiveFeedback()
-        guard activeFeedbackKey == nil, !queuedFeedback.isEmpty, canPresentPageAlert else { return }
-        let next = queuedFeedback.removeFirst()
-        let key = next.key
-        activeFeedbackKey = key
-        switch next {
-        case .error(let message, let retry, let acknowledged):
-            let wrappedRetry: (@MainActor () -> Void)? = retry.map { action in
-                { [weak self] in
-                    if self?.activeFeedbackKey == key { self?.activeFeedbackKey = nil }
-                    action()
-                }
-            }
-            if !presentError(message, retry: wrappedRetry, acknowledged: { [weak self] in
-                if self?.activeFeedbackKey == key { self?.activeFeedbackKey = nil }
-                acknowledged?()
-            }) {
-                if activeFeedbackKey == key { activeFeedbackKey = nil }
-                queuedFeedback.insert(next, at: 0)
-            }
-        case .notice(let title, let message, let acknowledged):
-            let presented = PageAlertPresenter.present(
-                on: self,
-                title: title,
-                message: message,
-                actions: [PageAlertAction(title: "确定", style: .default) { [weak self] in
-                    if self?.activeFeedbackKey == key { self?.activeFeedbackKey = nil }
-                    acknowledged?()
-                }]
-            )
-            if presented == nil {
-                if activeFeedbackKey == key { activeFeedbackKey = nil }
-                queuedFeedback.insert(next, at: 0)
-            }
-        }
+        feedbackQueue.drain(presenter: self)
     }
+
+    // MARK: - Modals & Lifecycle
 
     /// Present a page inside the unified navigation sheet container.
     @discardableResult
@@ -568,19 +558,6 @@ open class PageViewController: UIViewController {
         transition = modal.transitionCoordinator ?? transition
     }
 
-    private func presentError(_ message: String?, retry: (() -> Void)?, acknowledged: (() -> Void)?) -> Bool {
-        guard let message, !message.isEmpty, canPresentPageAlert else { return false }
-        var actions: [PageAlertAction] = [
-            PageAlertAction(title: retry == nil ? "确定" : "取消", style: .cancel, handler: acknowledged)
-        ]
-        if let retry {
-            actions.append(PageAlertAction(title: "重试", style: .default, handler: retry))
-        }
-        return PageAlertPresenter.present(
-            on: self, title: "错误", message: message, preferredStyle: .alert, actions: actions
-        ) != nil
-    }
-
     private func updateVisibility() {
         let visible = contentVisible && foreground && isPageActive
         guard isPageVisible != visible else { return }
@@ -592,8 +569,9 @@ open class PageViewController: UIViewController {
             flushPendingVisibleObservations()
             pageDidBecomeVisible()
             finishAppearance()
+        } else {
+            pageDidBecomeHidden()
         }
-        else { pageDidBecomeHidden() }
     }
 
     private func finishAppearance(transition: (any UIViewControllerTransitionCoordinator)? = nil,
@@ -642,8 +620,7 @@ open class PageViewController: UIViewController {
     private func invalidatePage() {
         guard !invalidated else { return }
         invalidated = true
-        queuedFeedback.removeAll()
-        activeFeedbackKey = nil
+        feedbackQueue.clear()
         observationsDirtyOrder.removeAll()
         observationsDirtySet.removeAll()
         visibleObservationHandlers.removeAll()
@@ -662,6 +639,7 @@ open class PageViewController: UIViewController {
         observers.removeAll()
         for task in tasks.values { task.cancel() }
         tasks.removeAll()
+        keyedTaskIDs.removeAll()
         if wasActive { pageDidBecomeInactive() }
     }
 

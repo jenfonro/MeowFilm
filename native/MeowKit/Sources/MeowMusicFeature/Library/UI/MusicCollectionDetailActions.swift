@@ -20,7 +20,7 @@ extension MusicCollectionViewController {
         remoteFilter = ""
         table.setContentOffset(.zero, animated: false)
         automaticPaginationHeld = false
-        shownReadError = nil
+        clearErrorSource("read")
     }
 
     func selectDailyBranch() {
@@ -343,20 +343,17 @@ extension MusicCollectionViewController {
 
     func showRemoteReadErrorIfNeeded() {
         guard let page = remotePage, let error = page.error else {
-            shownReadError = nil
+            clearErrorSource("read")
             return
         }
         let message = error.message(
             operation: page.errorContext,
             diagnosticID: page.errorDiagnosticID
         )
-        guard shownReadError != message else { return }
         let request = page.actionPageID
-        shownReadError = message
-        enqueueError(message, retry: { [weak self, weak page] in
+        syncErrorSource("read", message: message, retry: { [weak self, weak page] in
             guard let self, let page, page === self.remotePage,
                   page.actionPageID == request else { return }
-            self.shownReadError = nil
             self.runPageTask { await page.retry() }
         })
     }

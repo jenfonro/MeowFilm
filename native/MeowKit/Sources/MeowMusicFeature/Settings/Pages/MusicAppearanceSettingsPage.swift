@@ -14,9 +14,9 @@ final class MusicAppearanceSettingsState: ObservableObject {
         self.store = store
         value = store.preferences
         error = store.persistenceError
-        store.$preferences.removeDuplicates().sink { [weak self] in self?.value = $0 }
+        store.$preferences.dropFirst().removeDuplicates().sink { [weak self] in self?.value = $0 }
             .store(in: &subscriptions)
-        store.$persistenceError.removeDuplicates().sink { [weak self] in self?.error = $0 }
+        store.$persistenceError.dropFirst().removeDuplicates().sink { [weak self] in self?.error = $0 }
             .store(in: &subscriptions)
     }
 
@@ -66,7 +66,6 @@ public final class MusicAppearanceSettingsViewController: SettingsListViewContro
 final class MusicColorSettingsViewController: SettingsListViewController {
     private let state: MusicAppearanceSettingsState
     private let appearance: MusicAppearancePreferencesStore
-    private var lastError: String?
 
     init(state: MusicAppearanceSettingsState) {
         self.state = state
@@ -92,10 +91,7 @@ final class MusicColorSettingsViewController: SettingsListViewController {
     }
 
     private func syncError() {
-        guard let error = state.error, !error.isEmpty else { lastError = nil; return }
-        guard error != lastError else { return }
-        lastError = error
-        enqueueError(error)
+        syncErrorSource("appearance", message: state.error)
     }
 
     private func render() {

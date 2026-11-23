@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 /// Pure UIKit daily style editor reusing `FilterTagRows` wrapping geometry.
@@ -14,7 +15,6 @@ public final class MusicDailyStyleViewController: PageViewController {
     private let busyLabel = UILabel()
     private let categoryWrap = MusicWrappingChipsView()
     private let tagWrap = MusicWrappingChipsView()
-    private var shownError: String?
 
     public init(
         page: MusicPublicBrowseViewModel,
@@ -75,7 +75,15 @@ public final class MusicDailyStyleViewController: PageViewController {
         contentStack.addArrangedSubview(categoryWrap)
         contentStack.addArrangedSubview(tagWrap)
 
-        observe(model, whenVisible: true) { [weak self] in self?.render() }
+        let changes = Publishers.MergeMany([
+            model.$categories.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$category.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$choices.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$requestID.map { $0 != nil }.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$saved.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ])
+        observe(changes.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
         render()
     }
 
@@ -134,24 +142,17 @@ public final class MusicDailyStyleViewController: PageViewController {
 
         done?.isEnabled = model.canSave
         if let error = model.error {
-            if shownError != error {
-                shownError = error
-                let retryAction: (@MainActor () -> Void)?
-                if model.canRetry {
-                    retryAction = { [weak self] in
-                        self?.shownError = nil
-                        self?.model.retry()
-                    }
-                } else {
-                    retryAction = nil
-                }
-                enqueueError(error, retry: retryAction, acknowledged: { [weak self, weak model] in
-                    if self?.shownError == error { self?.shownError = nil }
-                    model?.dismissError(error)
-                })
+            let retryAction: (@MainActor () -> Void)? = if model.canRetry {
+                { [weak self] in self?.model.retry() }
+            } else {
+                nil
             }
+            syncErrorSource("dailyStyle", message: error, retry: retryAction, acknowledged: { [weak self, weak model] in
+                self?.clearErrorSource("dailyStyle")
+                model?.dismissError(error)
+            })
         } else {
-            shownError = nil
+            clearErrorSource("dailyStyle")
         }
         if isPageVisible, model.saved {
             model.acknowledgeSave()

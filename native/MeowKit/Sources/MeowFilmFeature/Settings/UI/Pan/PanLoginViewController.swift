@@ -10,7 +10,6 @@ final class PanLoginViewController: FloatingCardDialogController {
     let model: PanLoginModel
     private let closeHandler: () -> Void
     private var qrImage: UIImage?
-    private var displayedNotice: UUID?
     private var observation: AnyCancellable?
 
     private let platformMark = AccountPlatformMarkView(symbol: "externaldrive")
@@ -121,9 +120,17 @@ final class PanLoginViewController: FloatingCardDialogController {
         manualContainer.addArrangedSubview(saveButton)
         addBodyView(manualContainer)
 
-        observation = model.objectWillChange.receive(on: RunLoop.main).sink { [weak self] _ in
-            self?.render()
-        }
+        observation = Publishers.MergeMany([
+            model.$method.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$challenge.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$progress.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$confirmed.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$saved.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$notice.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ])
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.render() }
         applyTheme()
         render()
     }
@@ -144,13 +151,10 @@ final class PanLoginViewController: FloatingCardDialogController {
         qrImage = nil
     }
 
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil {
-            observation?.cancel(); observation = nil
-            model.close()
-            qrImage = nil
-        }
+    override func dialogWillClose() {
+        observation?.cancel(); observation = nil
+        model.close()
+        qrImage = nil
     }
 
     override func requestDismiss() {
@@ -236,12 +240,7 @@ final class PanLoginViewController: FloatingCardDialogController {
             saveButton.isEnabled = !model.busy
         }
 
-        if let notice = model.notice, displayedNotice != notice.id {
-            setErrorMessage(notice.message)
-            displayedNotice = notice.id
-        } else if model.notice == nil {
-            setErrorMessage(nil)
-        }
+        setErrorMessage(model.notice?.message)
     }
 
     // MARK: - DebugDialogControllable

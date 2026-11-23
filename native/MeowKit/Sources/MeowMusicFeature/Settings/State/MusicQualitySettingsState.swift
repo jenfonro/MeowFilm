@@ -110,8 +110,6 @@ final class MusicQualitySettingsState: ObservableObject {
         work?.cancel()
     }
 
-    func flush() async { await work?.value }
-
     private func save(_ change: MusicSettingsChange, movingOrder: MusicQualityOrderPreview? = nil) {
         guard active, available, work == nil, model.isAvailable, !model.isClosed,
               generation == model.accountAccessGeneration else { return }

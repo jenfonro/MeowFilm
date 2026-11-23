@@ -1,7 +1,9 @@
 #if os(iOS)
 import UIKit
+import MeowDebug
 
-/// A reusable settings row with shared typography, spacing, surface, and divider rules.
+/// A reusable settings row built once with persistent slots (zero view-hierarchy
+/// teardown or reallocation on diffable `reconfigureItems`).
 @MainActor
 public final class SettingsTableCell: UITableViewCell {
     public static let reuseIdentifier = "meow.settings.cell"
@@ -9,27 +11,110 @@ public final class SettingsTableCell: UITableViewCell {
     private let normalBackground = SettingsRowBackgroundView(selected: false)
     private let selectedBackground = SettingsRowBackgroundView(selected: true)
     private var heightConstraint: NSLayoutConstraint?
-    private weak var hostedContent: UIView?
+
+    // Persistent standard row slot hierarchy (allocated once in init, updated in place).
+    private let rowStack = UIStackView()
+    private let textStack = UIStackView()
+    private let titleLabel = UILabel()
+    private let detailLabel = UILabel()
+    private let valueLabel = UILabel()
+    private let switchView = SettingsSwitch()
+    private let menuButton = UIButton(type: .system)
+    private let actionButton = UIButton(type: .system)
+    private let loadingSpinner = UIActivityIndicatorView(style: .medium)
+    private let hintLabel = UILabel()
+
+    private weak var leadingSlot: ThemeableView?
+    private weak var customTrailingSlot: ThemeableView?
+    private weak var hostedContent: ThemeableView?
+    private var rowStackConstraints: [NSLayoutConstraint] = []
     private var hostedConstraints: [NSLayoutConstraint] = []
-    private var trailingSwitch: SettingsSwitch?
-    private var trailingMenuButton: UIButton?
-    private var trailingValueLabel: UILabel?
-    private var customStack: UIStackView?
-    private var customLeadingSlot: UIView?
-    private var customTitleLabel: UILabel?
-    private var customDetailLabel: UILabel?
-    private var customTrailingSlot: UIView?
+    private var onActionTap: (@MainActor () -> Void)?
 
     public override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
-        super.init(style: .subtitle, reuseIdentifier: reuseIdentifier)
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        DebugUIMetrics.shared.increment("settings.cell.created")
         backgroundColor = .clear
         backgroundView = normalBackground
         selectedBackgroundView = selectedBackground
         selectionStyle = .default
+
         let constraint = contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: SettingsVisualMetrics.rowHeight)
         constraint.priority = UILayoutPriority(999)
         constraint.isActive = true
         heightConstraint = constraint
+
+        titleLabel.font = .preferredFont(forTextStyle: .body)
+        titleLabel.adjustsFontForContentSizeCategory = true
+        titleLabel.numberOfLines = 0
+        titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        detailLabel.font = .preferredFont(forTextStyle: .subheadline)
+        detailLabel.adjustsFontForContentSizeCategory = true
+        detailLabel.numberOfLines = 0
+        detailLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        detailLabel.isHidden = true
+
+        textStack.axis = .vertical
+        textStack.spacing = 2
+        textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        textStack.addArrangedSubview(titleLabel)
+        textStack.addArrangedSubview(detailLabel)
+
+        valueLabel.font = .preferredFont(forTextStyle: .subheadline)
+        valueLabel.adjustsFontForContentSizeCategory = true
+        valueLabel.textAlignment = .right
+        valueLabel.numberOfLines = 0
+        valueLabel.setContentHuggingPriority(.required, for: .horizontal)
+        valueLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        valueLabel.isHidden = true
+
+        switchView.setContentHuggingPriority(.required, for: .horizontal)
+        switchView.setContentCompressionResistancePriority(.required, for: .horizontal)
+        switchView.isHidden = true
+
+        menuButton.showsMenuAsPrimaryAction = true
+        menuButton.setContentHuggingPriority(.required, for: .horizontal)
+        menuButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        menuButton.isHidden = true
+
+        actionButton.titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
+        actionButton.titleLabel?.adjustsFontForContentSizeCategory = true
+        actionButton.setContentHuggingPriority(.required, for: .horizontal)
+        actionButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        actionButton.addAction(UIAction { [weak self] _ in self?.onActionTap?() }, for: .touchUpInside)
+        actionButton.isHidden = true
+
+        loadingSpinner.hidesWhenStopped = true
+        loadingSpinner.setContentHuggingPriority(.required, for: .horizontal)
+        loadingSpinner.setContentCompressionResistancePriority(.required, for: .horizontal)
+        loadingSpinner.isHidden = true
+
+        hintLabel.font = .preferredFont(forTextStyle: .body)
+        hintLabel.adjustsFontForContentSizeCategory = true
+        hintLabel.textAlignment = .right
+        hintLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        hintLabel.setContentHuggingPriority(.required, for: .horizontal)
+        hintLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        hintLabel.isHidden = true
+
+        rowStack.axis = .horizontal
+        rowStack.alignment = .center
+        rowStack.spacing = 12
+        rowStack.translatesAutoresizingMaskIntoConstraints = false
+        for view in [textStack, valueLabel, switchView, menuButton, actionButton, loadingSpinner, hintLabel] as [UIView] {
+            rowStack.addArrangedSubview(view)
+        }
+
+        contentView.addSubview(rowStack)
+        rowStackConstraints = [
+            rowStack.topAnchor.constraint(equalTo: contentView.layoutMarginsGuide.topAnchor),
+            rowStack.bottomAnchor.constraint(equalTo: contentView.layoutMarginsGuide.bottomAnchor),
+            rowStack.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
+            rowStack.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
+        ]
+        NSLayoutConstraint.activate(rowStackConstraints)
     }
 
     @available(*, unavailable)
@@ -38,7 +123,25 @@ public final class SettingsTableCell: UITableViewCell {
     public override func prepareForReuse() {
         super.prepareForReuse()
         detachHostedContent()
-        detachCustomLayout()
+        detachLeadingSlot()
+        detachCustomTrailingSlot()
+        switchView.changed = nil
+        switchView.isHidden = true
+        menuButton.menu = nil
+        menuButton.isHidden = true
+        onActionTap = nil
+        actionButton.isHidden = true
+        loadingSpinner.stopAnimating()
+        loadingSpinner.isHidden = true
+        hintLabel.text = nil
+        hintLabel.isHidden = true
+        valueLabel.text = nil
+        valueLabel.isHidden = true
+        titleLabel.text = nil
+        detailLabel.text = nil
+        detailLabel.isHidden = true
+        rowStack.isHidden = false
+        NSLayoutConstraint.activate(rowStackConstraints)
         accessoryType = .none
         accessoryView = nil
         accessibilityIdentifier = nil
@@ -46,7 +149,6 @@ public final class SettingsTableCell: UITableViewCell {
         accessibilityValue = nil
         accessibilityTraits = .none
         isAccessibilityElement = false
-        contentConfiguration = nil
     }
 
     private func detachHostedContent() {
@@ -56,43 +158,41 @@ public final class SettingsTableCell: UITableViewCell {
         hostedContent = nil
     }
 
-    private func detachCustomLayout() {
-        customLeadingSlot?.removeFromSuperview()
-        customTrailingSlot?.removeFromSuperview()
-        customStack?.removeFromSuperview()
-        customStack = nil
-        customLeadingSlot = nil
-        customTitleLabel = nil
-        customDetailLabel = nil
+    private func detachLeadingSlot() {
+        guard let existing = leadingSlot else { return }
+        rowStack.removeArrangedSubview(existing)
+        existing.removeFromSuperview()
+        leadingSlot = nil
+    }
+
+    private func detachCustomTrailingSlot() {
+        guard let existing = customTrailingSlot else { return }
+        rowStack.removeArrangedSubview(existing)
+        existing.removeFromSuperview()
         customTrailingSlot = nil
-        trailingSwitch = nil
-        trailingMenuButton = nil
-        trailingValueLabel = nil
+    }
+
+    public func refreshInteractiveHandlers(row: SettingsListRow) {
+        switch row.accessory {
+        case .toggle(_, _, let onChange):
+            switchView.changed = onChange
+        case .menu(_, let menu, _):
+            menuButton.menu = menu
+        case .action(_, _, _, let onTap):
+            onActionTap = onTap
+        default:
+            break
+        }
     }
 
     public func configure(
-        title: String,
-        detail: String? = nil,
-        detailDestructive: Bool = false,
-        value: String? = nil,
-        leadingView: UIView? = nil,
-        trailingView: UIView? = nil,
-        toggle: (isOn: Bool, enabled: Bool, onChange: @MainActor (Bool) -> Void)? = nil,
-        menu: (title: String, menu: UIMenu, enabled: Bool)? = nil,
-        embeddedContent: UIView? = nil,
+        row: SettingsListRow,
         theme: PageTheme,
         first: Bool,
         last: Bool,
-        destructive: Bool = false,
-        enabled: Bool = true,
-        actionable: Bool = false,
-        selected: Bool = false,
-        disclosure: Bool = false,
-        usesSettingsColors: Bool = true,
-        accessibilityIdentifier: String? = nil,
-        accessibilityLabel: String? = nil,
-        accessibilityValue: String? = nil
+        usesSettingsColors: Bool = true
     ) {
+        DebugUIMetrics.shared.increment("settings.cell.configured")
         let showsSeparator = !last
         normalBackground.update(theme: theme, first: first, last: last, selected: false,
                                 settings: usesSettingsColors, showsSeparator: showsSeparator)
@@ -115,251 +215,240 @@ public final class SettingsTableCell: UITableViewCell {
         )
         contentView.directionalLayoutMargins = margins
 
-        if let embeddedContent {
-            detachCustomLayout()
-            contentConfiguration = nil
-            if let themeable = embeddedContent as? any PageThemeable {
-                themeable.applyTheme(theme)
-            }
-            if hostedContent !== embeddedContent || embeddedContent.superview !== contentView {
+        if let embedded = row.embeddedContent {
+            NSLayoutConstraint.deactivate(rowStackConstraints)
+            rowStack.isHidden = true
+            titleLabel.text = nil
+            detailLabel.text = nil
+            detailLabel.isHidden = true
+            detachLeadingSlot()
+            detachCustomTrailingSlot()
+            switchView.changed = nil
+            onActionTap = nil
+            menuButton.menu = nil
+            loadingSpinner.stopAnimating()
+            embedded.applyTheme(theme)
+            if hostedContent !== embedded || embedded.superview !== contentView {
                 detachHostedContent()
-                embeddedContent.removeFromSuperview()
-                contentView.addSubview(embeddedContent)
-                embeddedContent.translatesAutoresizingMaskIntoConstraints = false
+                embedded.removeFromSuperview()
+                contentView.addSubview(embedded)
+                embedded.translatesAutoresizingMaskIntoConstraints = false
                 let constraints = [
-                    embeddedContent.topAnchor.constraint(equalTo: contentView.layoutMarginsGuide.topAnchor),
-                    embeddedContent.bottomAnchor.constraint(equalTo: contentView.layoutMarginsGuide.bottomAnchor),
-                    embeddedContent.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
-                    embeddedContent.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
+                    embedded.topAnchor.constraint(equalTo: contentView.layoutMarginsGuide.topAnchor),
+                    embedded.bottomAnchor.constraint(equalTo: contentView.layoutMarginsGuide.bottomAnchor),
+                    embedded.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
+                    embedded.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
                 ]
                 NSLayoutConstraint.activate(constraints)
-                hostedContent = embeddedContent
+                hostedContent = embedded
                 hostedConstraints = constraints
             }
             selectionStyle = .none
             accessoryType = .none
             isAccessibilityElement = false
-            self.accessibilityIdentifier = (accessibilityIdentifier?.isEmpty == false)
-                ? accessibilityIdentifier : embeddedContent.accessibilityIdentifier
+            accessibilityIdentifier = row.id.isEmpty ? embedded.accessibilityIdentifier : row.id
             return
         }
 
         detachHostedContent()
+        rowStack.isHidden = false
+        NSLayoutConstraint.activate(rowStackConstraints)
+
+        var value: String?
+        var disclosure = false
+        var selected = false
+        var toggleSpec: (isOn: Bool, enabled: Bool, onChange: @MainActor (Bool) -> Void)?
+        var menuSpec: (title: String, menu: UIMenu, enabled: Bool)?
+        var actionSpec: (title: String, enabled: Bool, destructive: Bool, onTap: @MainActor () -> Void)?
+        var loadingLabel: String?
+        var hintText: String?
+        var customTrailing: ThemeableView?
+
+        switch row.accessory {
+        case .none:
+            break
+        case .disclosure:
+            disclosure = true
+        case .checkmark:
+            selected = true
+        case .value(let text, let showsDisclosure):
+            value = text
+            disclosure = showsDisclosure
+        case .toggle(let isOn, let toggleEnabled, let onChange):
+            toggleSpec = (isOn, toggleEnabled, onChange)
+        case .menu(let title, let uiMenu, let menuEnabled):
+            menuSpec = (title, uiMenu, menuEnabled)
+        case .loading(let label):
+            loadingLabel = label
+        case .hint(let text):
+            hintText = text
+        case .action(let title, let actionEnabled, let destructive, let onTap):
+            actionSpec = (title, actionEnabled, destructive, onTap)
+        case .custom(let view):
+            customTrailing = view
+        }
+
+        let hasTrailing = value != nil || toggleSpec != nil || menuSpec != nil
+            || actionSpec != nil || loadingLabel != nil || hintText != nil || customTrailing != nil
+        let isActionTitle = row.action != nil && !disclosure && !hasTrailing && row.leadingView == nil
 
         let titleColor: UIColor
         let detailColor: UIColor
         if usesSettingsColors {
-            titleColor = UIColor(!enabled ? theme.settings.muted :
-                (destructive ? theme.settings.danger :
-                    (actionable && !disclosure && toggle == nil && menu == nil && value == nil && trailingView == nil && leadingView == nil
-                        ? theme.settings.accent : theme.settings.ink)))
-            detailColor = UIColor(detailDestructive ? theme.settings.danger : theme.settings.muted)
+            titleColor = UIColor(!row.enabled ? theme.settings.muted :
+                (row.destructive ? theme.settings.danger :
+                    (isActionTitle ? theme.settings.accent : theme.settings.ink)))
+            detailColor = UIColor(row.detailDestructive ? theme.settings.danger : theme.settings.muted)
         } else {
-            titleColor = UIColor(enabled ? theme.ink : theme.muted)
-            detailColor = UIColor(detailDestructive ? theme.settings.danger : theme.muted)
+            titleColor = UIColor(row.enabled ? theme.ink : theme.muted)
+            detailColor = UIColor(row.detailDestructive ? theme.settings.danger : theme.muted)
         }
 
-        // Preserve live SettingsSwitch instance across diffable reconfigureItems so native
-        // toggle animations are not torn down mid-flight (including rows with a leading icon).
-        if let toggle, trailingView == nil, menu == nil, value == nil,
-           let switchView = trailingSwitch, let titleLabel = customTitleLabel,
-           let row = customStack, customTrailingSlot == nil,
-           (detail?.isEmpty == false) == (customDetailLabel != nil) {
-            if let leadingView {
-                if let themeable = leadingView as? any PageThemeable { themeable.applyTheme(theme) }
-                if customLeadingSlot !== leadingView {
-                    customLeadingSlot?.removeFromSuperview()
-                    leadingView.removeFromSuperview()
-                    leadingView.setContentHuggingPriority(.required, for: .horizontal)
-                    leadingView.setContentCompressionResistancePriority(.required, for: .horizontal)
-                    row.insertArrangedSubview(leadingView, at: 0)
-                    customLeadingSlot = leadingView
-                }
-            } else if let existing = customLeadingSlot {
-                existing.removeFromSuperview()
-                customLeadingSlot = nil
+        // Leading slot (ThemeableView enforced at compile time).
+        if let leading = row.leadingView {
+            leading.applyTheme(theme)
+            if leadingSlot !== leading || leading.superview !== rowStack {
+                detachLeadingSlot()
+                leading.removeFromSuperview()
+                leading.setContentHuggingPriority(.required, for: .horizontal)
+                leading.setContentCompressionResistancePriority(.required, for: .horizontal)
+                rowStack.insertArrangedSubview(leading, at: 0)
+                leadingSlot = leading
             }
-            titleLabel.text = title
-            titleLabel.textColor = titleColor
-            if let detailLabel = customDetailLabel {
-                detailLabel.text = detail
-                detailLabel.textColor = detailColor
-            }
+        } else {
+            detachLeadingSlot()
+        }
+
+        titleLabel.text = row.title
+        titleLabel.font = .preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
+        titleLabel.textColor = titleColor
+
+        if let detail = row.detail, !detail.isEmpty {
+            detailLabel.text = detail
+            detailLabel.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
+            detailLabel.textColor = detailColor
+            detailLabel.isHidden = false
+        } else {
+            detailLabel.text = nil
+            detailLabel.isHidden = true
+        }
+
+        if let value, !value.isEmpty {
+            valueLabel.text = value
+            valueLabel.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
+            valueLabel.textColor = detailColor
+            valueLabel.isHidden = false
+        } else {
+            valueLabel.text = nil
+            valueLabel.isHidden = true
+        }
+
+        if let toggleSpec {
+            switchView.isHidden = false
             switchView.applyTheme(theme)
-            if switchView.control.isOn != toggle.isOn {
-                switchView.control.setOn(toggle.isOn, animated: window != nil)
+            if switchView.control.isOn != toggleSpec.isOn {
+                switchView.control.setOn(toggleSpec.isOn, animated: window != nil)
             }
-            switchView.control.isEnabled = enabled && toggle.enabled
-            switchView.control.accessibilityLabel = accessibilityLabel ?? title
-            switchView.control.accessibilityIdentifier = (accessibilityIdentifier?.isEmpty == false) ? accessibilityIdentifier : nil
-            switchView.changed = toggle.onChange
-            accessoryType = selected ? .checkmark : (disclosure ? .disclosureIndicator : .none)
-            selectionStyle = .none
-            self.accessibilityIdentifier = accessibilityIdentifier
-            isAccessibilityElement = false
-            return
+            switchView.control.isEnabled = row.enabled && toggleSpec.enabled
+            switchView.control.accessibilityLabel = row.accessibilityLabel ?? row.title
+            switchView.control.accessibilityIdentifier = row.id.isEmpty ? nil : row.id
+            switchView.changed = toggleSpec.onChange
+        } else {
+            switchView.changed = nil
+            switchView.isHidden = true
         }
 
-        detachCustomLayout()
-
-        let needsCustomRow = leadingView != nil || trailingView != nil || toggle != nil || menu != nil || value != nil
-        if needsCustomRow {
-            contentConfiguration = nil
-            let row = UIStackView()
-            row.axis = .horizontal
-            row.alignment = .center
-            row.spacing = 12
-            row.translatesAutoresizingMaskIntoConstraints = false
-
-            if let leadingView {
-                leadingView.removeFromSuperview()
-                if let themeable = leadingView as? any PageThemeable { themeable.applyTheme(theme) }
-                leadingView.setContentHuggingPriority(.required, for: .horizontal)
-                leadingView.setContentCompressionResistancePriority(.required, for: .horizontal)
-                row.addArrangedSubview(leadingView)
-                customLeadingSlot = leadingView
+        if let menuSpec {
+            menuButton.isHidden = false
+            var configuration = UIButton.Configuration.plain()
+            configuration.title = menuSpec.title
+            configuration.image = UIImage(
+                systemName: "chevron.up.chevron.down",
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+            )
+            configuration.imagePlacement = .trailing
+            configuration.imagePadding = 5
+            configuration.contentInsets = .zero
+            configuration.baseForegroundColor = UIColor(row.enabled && menuSpec.enabled ? theme.settings.accent : theme.settings.muted)
+            configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak self] incoming in
+                var attributes = incoming
+                attributes.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: self?.traitCollection)
+                return attributes
             }
-
-            let titleLabel = UILabel()
-            titleLabel.text = title
-            titleLabel.font = .preferredFont(forTextStyle: .body)
-            titleLabel.adjustsFontForContentSizeCategory = true
-            titleLabel.textColor = titleColor
-            titleLabel.numberOfLines = 0
-            titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-            customTitleLabel = titleLabel
-
-            if let detail, !detail.isEmpty {
-                let detailLabel = UILabel()
-                detailLabel.text = detail
-                detailLabel.font = .preferredFont(forTextStyle: .subheadline)
-                detailLabel.adjustsFontForContentSizeCategory = true
-                detailLabel.textColor = detailColor
-                detailLabel.numberOfLines = 0
-                detailLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-                customDetailLabel = detailLabel
-                let textStack = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
-                textStack.axis = .vertical
-                textStack.spacing = 2
-                textStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-                textStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-                row.addArrangedSubview(textStack)
-            } else {
-                titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-                titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-                row.addArrangedSubview(titleLabel)
-            }
-
-            if let value, !value.isEmpty {
-                let valueLabel = UILabel()
-                valueLabel.text = value
-                valueLabel.font = .preferredFont(forTextStyle: .subheadline)
-                valueLabel.adjustsFontForContentSizeCategory = true
-                valueLabel.textColor = detailColor
-                valueLabel.textAlignment = .right
-                valueLabel.numberOfLines = 0
-                valueLabel.setContentHuggingPriority(.required, for: .horizontal)
-                valueLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-                row.addArrangedSubview(valueLabel)
-                trailingValueLabel = valueLabel
-            }
-
-            if let toggle {
-                let switchView = SettingsSwitch()
-                switchView.applyTheme(theme)
-                switchView.control.isOn = toggle.isOn
-                switchView.control.isEnabled = enabled && toggle.enabled
-                switchView.control.accessibilityLabel = accessibilityLabel ?? title
-                if let id = accessibilityIdentifier, !id.isEmpty {
-                    switchView.control.accessibilityIdentifier = id
-                }
-                switchView.changed = toggle.onChange
-                row.addArrangedSubview(switchView)
-                trailingSwitch = switchView
-            } else if let menu {
-                let button = UIButton(type: .system)
-                var configuration = UIButton.Configuration.plain()
-                configuration.title = menu.title
-                configuration.image = UIImage(systemName: "chevron.up.chevron.down",
-                    withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .regular))
-                configuration.imagePlacement = .trailing
-                configuration.imagePadding = 5
-                configuration.contentInsets = .zero
-                configuration.baseForegroundColor = UIColor(enabled && menu.enabled ? theme.settings.accent : theme.settings.muted)
-                configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
-                    var attributes = incoming
-                    attributes.font = .preferredFont(forTextStyle: .subheadline)
-                    return attributes
-                }
-                button.configuration = configuration
-                button.menu = menu.menu
-                button.showsMenuAsPrimaryAction = true
-                button.isEnabled = enabled && menu.enabled
-                button.setContentHuggingPriority(.required, for: .horizontal)
-                button.setContentCompressionResistancePriority(.required, for: .horizontal)
-                button.accessibilityLabel = accessibilityLabel ?? title
-                button.accessibilityValue = menu.title
-                if let id = accessibilityIdentifier, !id.isEmpty {
-                    button.accessibilityIdentifier = id
-                }
-                row.addArrangedSubview(button)
-                trailingMenuButton = button
-            } else if let trailingView {
-                trailingView.removeFromSuperview()
-                if let themeable = trailingView as? any PageThemeable { themeable.applyTheme(theme) }
-                trailingView.setContentHuggingPriority(.required, for: .horizontal)
-                trailingView.setContentCompressionResistancePriority(.required, for: .horizontal)
-                row.addArrangedSubview(trailingView)
-                customTrailingSlot = trailingView
-            }
-
-            contentView.addSubview(row)
-            NSLayoutConstraint.activate([
-                row.topAnchor.constraint(equalTo: contentView.layoutMarginsGuide.topAnchor),
-                row.bottomAnchor.constraint(equalTo: contentView.layoutMarginsGuide.bottomAnchor),
-                row.leadingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.leadingAnchor),
-                row.trailingAnchor.constraint(equalTo: contentView.layoutMarginsGuide.trailingAnchor),
-            ])
-            customStack = row
-            accessoryType = selected ? .checkmark : (disclosure ? .disclosureIndicator : .none)
-            selectionStyle = (!actionable || !enabled || toggle != nil || menu != nil) ? .none : .default
-            self.accessibilityIdentifier = accessibilityIdentifier
-            if toggle != nil || menu != nil {
-                isAccessibilityElement = false
-            } else {
-                isAccessibilityElement = true
-                self.accessibilityLabel = accessibilityLabel ?? title
-                self.accessibilityValue = accessibilityValue ?? value ?? detail
-                accessibilityTraits = actionable ? .button : .staticText
-                if !enabled { accessibilityTraits.insert(.notEnabled) }
-                if selected { accessibilityTraits.insert(.selected) }
-            }
-            return
+            menuButton.configuration = configuration
+            menuButton.menu = menuSpec.menu
+            menuButton.isEnabled = row.enabled && menuSpec.enabled
+            menuButton.accessibilityLabel = row.accessibilityLabel ?? row.title
+            menuButton.accessibilityValue = menuSpec.title
+            menuButton.accessibilityIdentifier = row.id.isEmpty ? nil : row.id
+        } else {
+            menuButton.menu = nil
+            menuButton.isHidden = true
         }
 
-        var content = UIListContentConfiguration.subtitleCell()
-        content.text = title
-        content.secondaryText = detail
-        content.directionalLayoutMargins = margins
-        content.textProperties.font = .preferredFont(forTextStyle: .body)
-        content.textProperties.adjustsFontForContentSizeCategory = true
-        content.textProperties.color = titleColor
-        content.textProperties.numberOfLines = 0
-        content.secondaryTextProperties.font = .preferredFont(forTextStyle: .subheadline)
-        content.secondaryTextProperties.adjustsFontForContentSizeCategory = true
-        content.secondaryTextProperties.color = detailColor
-        content.secondaryTextProperties.numberOfLines = 0
-        contentConfiguration = content
+        if let actionSpec {
+            actionButton.isHidden = false
+            actionButton.setTitle(actionSpec.title, for: .normal)
+            actionButton.titleLabel?.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
+            let isInteractive = row.enabled && actionSpec.enabled
+            let color = isInteractive ? (actionSpec.destructive ? theme.settings.danger : theme.settings.accent) : theme.settings.muted
+            actionButton.setTitleColor(UIColor(color), for: .normal)
+            actionButton.isEnabled = isInteractive
+            actionButton.accessibilityLabel = actionSpec.title
+            onActionTap = actionSpec.onTap
+        } else {
+            onActionTap = nil
+            actionButton.isHidden = true
+        }
+
+        if let loadingLabel {
+            loadingSpinner.color = UIColor(theme.settings.muted)
+            loadingSpinner.accessibilityLabel = loadingLabel
+            loadingSpinner.isHidden = false
+            if !loadingSpinner.isAnimating { loadingSpinner.startAnimating() }
+        } else {
+            loadingSpinner.stopAnimating()
+            loadingSpinner.isHidden = true
+        }
+
+        if let hintText {
+            hintLabel.text = hintText
+            hintLabel.font = .preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
+            hintLabel.textColor = UIColor(theme.settings.accent)
+            hintLabel.isHidden = false
+        } else {
+            hintLabel.text = nil
+            hintLabel.isHidden = true
+        }
+
+        if let customTrailing {
+            customTrailing.applyTheme(theme)
+            if customTrailingSlot !== customTrailing || customTrailing.superview !== rowStack {
+                detachCustomTrailingSlot()
+                customTrailing.removeFromSuperview()
+                customTrailing.setContentHuggingPriority(.required, for: .horizontal)
+                customTrailing.setContentCompressionResistancePriority(.required, for: .horizontal)
+                rowStack.addArrangedSubview(customTrailing)
+                customTrailingSlot = customTrailing
+            }
+        } else {
+            detachCustomTrailingSlot()
+        }
 
         accessoryType = selected ? .checkmark : (disclosure ? .disclosureIndicator : .none)
-        selectionStyle = (!actionable || !enabled) ? .none : .default
-        isAccessibilityElement = true
-        self.accessibilityIdentifier = accessibilityIdentifier
-        self.accessibilityLabel = accessibilityLabel ?? title
-        self.accessibilityValue = accessibilityValue ?? detail
-        accessibilityTraits = actionable ? .button : .staticText
-        if !enabled { accessibilityTraits.insert(.notEnabled) }
-        if selected { accessibilityTraits.insert(.selected) }
+        let hasInlineControl = toggleSpec != nil || menuSpec != nil || actionSpec != nil
+        selectionStyle = (row.action == nil || !row.enabled || hasInlineControl) ? .none : .default
+        accessibilityIdentifier = row.id.isEmpty ? nil : row.id
+        if hasInlineControl {
+            isAccessibilityElement = false
+        } else {
+            isAccessibilityElement = true
+            accessibilityLabel = row.accessibilityLabel ?? row.title
+            accessibilityValue = row.accessibilityValue ?? value ?? row.detail
+            accessibilityTraits = row.action != nil ? .button : .staticText
+            if !row.enabled { accessibilityTraits.insert(.notEnabled) }
+            if selected { accessibilityTraits.insert(.selected) }
+        }
     }
 }
 #endif

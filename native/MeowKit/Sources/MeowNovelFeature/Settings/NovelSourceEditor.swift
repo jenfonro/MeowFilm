@@ -17,7 +17,7 @@ final class NovelSourceEditor: ManagementPageViewController {
     private var optionChecks: [UIButton] = []
     private var tabButtons: [UIButton] = [], indicators: [UIView] = [], separators: [UIView] = []
     private let saveButton = PageHeaderButton(image: ManagementIcon.save, accessibilityLabel: "保存") {}
-    private var activeTab = 0, saving = false
+    private var activeTab = 0
     init(source: NovelSource?, protocol: NovelSourceProtocol, definition: String?, feature: NovelFeature, themeProvider: any PageThemeProviding) throws {
         self.source = source; self.feature = feature; draft = try NovelSourceDraft(protocol: `protocol`, definition: definition)
         super.init(themeProvider: themeProvider); pageTitle = "编辑\(`protocol`.title)"
@@ -132,31 +132,28 @@ final class NovelSourceEditor: ManagementPageViewController {
         form.applyTheme(theme)
     }
     private func save() {
-        guard !saving else { return }; view.endEditing(true)
+        guard !hasActivePageTask(key: "save") else { return }; view.endEditing(true)
         do {
-            let definition = try draft.definition(); saving = true; saveButton.isEnabled = false
-            runPageTask { [weak self] in
-                guard let self else { return }; defer { saving = false; saveButton.isEnabled = true }
-                do {
-                    if let source { self.source = try await feature.sourcesClient.save(source, definition: definition) }
-                    else {
-                        let receipt = try await feature.sourcesClient.importSources(text: definition)
-                        guard receipt.failures.isEmpty, let item = receipt.sources.first else { throw NovelError.importFailures(receipt.failures.map { $0.code }) }
-                        source = item
-                    }
-                    try await feature.refreshSources(); source = feature.sources.first { $0.id == self.source?.id }
-                    enqueueNotice(title: "书源已保存")
-                } catch is CancellationError { } catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+            let definition = try draft.definition(); saveButton.isEnabled = false
+            runPageTask(key: "save", onFinally: { [weak self] in
+                self?.saveButton.isEnabled = true
+            }) { [weak self] in
+                guard let self else { return }
+                if let source { self.source = try await feature.sourcesClient.save(source, definition: definition) }
+                else {
+                    let receipt = try await feature.sourcesClient.importSources(text: definition)
+                    guard receipt.failures.isEmpty, let item = receipt.sources.first else { throw NovelError.importFailures(receipt.failures.map { $0.code }) }
+                    source = item
+                }
+                try await feature.refreshSources(); source = feature.sources.first { $0.id == self.source?.id }
+                enqueueNotice(title: "书源已保存")
             }
         } catch { enqueueError(error.localizedDescription) }
     }
     private func copy() { do { UIPasteboard.general.string = try draft.definition() } catch { enqueueError(error.localizedDescription) } }
     private func export() {
         do {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("meowfilm-novel-export", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("book-source.json"); try Data(draft.definition().utf8).write(to: url, options: .atomic)
-            present(UIDocumentPickerViewController(forExporting: [url], asCopy: true), animated: true)
+            try presentNovelExport(draft.definition(), name: "book-source.json")
         } catch { enqueueError(error.localizedDescription) }
     }
 }

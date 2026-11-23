@@ -38,9 +38,7 @@ final class FilmRuleTestView: NSObject, UITextViewDelegate, PageThemeable {
 }
 
 @MainActor
-final class FilmRulePageViewController: FilmSettingsListController {
-    override var avoidsKeyboard: Bool { true }
-    override var usesSettingsTable: Bool { false }
+final class FilmRulePageViewController: PageViewController {
     let owner: FilmRulesDraft
     let group: FilmRuleGroup
     let testFields: FilmRuleTestView
@@ -58,7 +56,6 @@ final class FilmRulePageViewController: FilmSettingsListController {
     private var renderedRules: [FilmMatchRule] = []
     private var editGeneration = UUID()
     private var testGeneration = UUID()
-    private var testTask: Task<Void, Never>?
     private var pendingTest: (generation: UUID, request: FilmRuleRequest, rules: [FilmMatchRule])?
     private lazy var saveButton = PageHeaderTextButton(title: "保存") { [weak self] in self?.save() }
     private lazy var addButton = PageHeaderTextButton(title: "＋ 添加规则") { [weak self] in
@@ -66,7 +63,9 @@ final class FilmRulePageViewController: FilmSettingsListController {
         cancelTest(); owner.add(group); render()
     }
     private lazy var restoreButton = PageHeaderTextButton(title: "恢复默认") { [weak self] in
-        self?.confirm("恢复默认规则？") { [weak self] in self?.restore() }
+        self?.presentPageConfirmation(title: "恢复默认规则？", confirmTitle: "确认", destructive: true) { [weak self] in
+            self?.restore()
+        }
     }
     private lazy var testButton = PageHeaderTextButton(title: "测试") { [weak self] in
         guard let self else { return }
@@ -154,11 +153,9 @@ final class FilmRulePageViewController: FilmSettingsListController {
         updateActionLayout(); render(); applyTheme()
     }
     override func pageDidBecomeActive() {
-        runPageTask { [weak self] in
-            guard let self else { return }
-            do { try await owner.load(); render() }
-            catch is CancellationError { }
-            catch { if !Task.isCancelled { failure(error, retry: { [weak self] in self?.pageDidBecomeActive() }) } }
+        runPageTask(key: "load", retry: { [weak self] in self?.pageDidBecomeActive() }) { [weak self, owner] in
+            try await owner.load()
+            self?.render()
         }
     }
     override func pageDidBecomeVisible() { render(); startPendingTest() }
@@ -173,7 +170,7 @@ final class FilmRulePageViewController: FilmSettingsListController {
         actionLine.backgroundColor = UIColor(theme.settings.separator)
         updateControls()
     }
-    override func render() {
+    func render() {
         guard isViewLoaded else { return }
         let rules = owner.rules(group)
         if renderedRules != rules {
@@ -206,7 +203,6 @@ final class FilmRulePageViewController: FilmSettingsListController {
         let enabled = owner.draft != nil && !owner.busy && !writing
         for editor in editors { editor.setEnabled(enabled) }
         saveButton.isEnabled = owner.draft != nil && !owner.busy && !writing
-        saveButton.applyTheme(theme)
         addButton.isEnabled = enabled; restoreButton.isEnabled = enabled
         testButton.isEnabled = testing || enabled
         testButton.setTitle(testing ? "取消" : "测试", for: .normal)
@@ -241,11 +237,11 @@ final class FilmRulePageViewController: FilmSettingsListController {
                 try await owner.save(group)
                 guard let self else { return }
                 writing = false; render()
-                if isPageVisible { notice("已保存") }
+                if isPageVisible { enqueueNotice(title: "已保存") }
             } catch {
                 guard let self else { return }
                 writing = false; render()
-                if isPageActive { failure(error, retry: { [weak self] in self?.save() }) }
+                if isPageActive { enqueueError(error.localizedDescription, retry: { [weak self] in self?.save() }) }
             }
         }
     }
@@ -286,30 +282,29 @@ final class FilmRulePageViewController: FilmSettingsListController {
         testing = true
         for editor in editors { editor.showResult(.init(text: "测试中"), theme: theme) }
         updateControls()
-        testTask = Task { [weak self, service = owner.service, group] in
-            do {
-                let value = try await service.process(request, group: group, rules: rules)
-                guard let self, !Task.isCancelled, isPageActive, isPageVisible,
-                      testGeneration == generation else { return }
-                guard testRequest == request, owner.rules(group) == rules else { cancelTest(); return }
-                let results = try FilmRuleCardResult.values(value, group: group, count: rules.count)
-                result = value; testing = false; testTask = nil
-                for (editor, row) in zip(editors, results) { editor.showResult(row, theme: theme) }
-                updateControls()
-                scrollFocusedField()
-            } catch {
-                guard let self, !Task.isCancelled, isPageActive, isPageVisible,
-                      testGeneration == generation else { return }
-                guard testRequest == request, owner.rules(group) == rules else { cancelTest(); return }
-                cancelTest()
-                failure(error, retry: { [weak self] in self?.runTest() })
+        runPageTask(
+            key: "test",
+            retry: { [weak self] in self?.runTest() },
+            onFinally: { [weak self] in
+                guard let self, self.testGeneration == generation, self.testing else { return }
+                self.cancelTest()
             }
+        ) { [weak self, service = owner.service, group] in
+            let value = try await service.process(request, group: group, rules: rules)
+            guard let self, !Task.isCancelled, self.isPageActive, self.isPageVisible,
+                  self.testGeneration == generation else { return }
+            guard self.testRequest == request, self.owner.rules(group) == rules else { self.cancelTest(); return }
+            let results = try FilmRuleCardResult.values(value, group: group, count: rules.count)
+            self.result = value; self.testing = false
+            for (editor, row) in zip(self.editors, results) { editor.showResult(row, theme: self.theme) }
+            self.updateControls()
+            self.scrollFocusedField()
         }
     }
     func cancelTest() {
         testGeneration = UUID()
         pendingTest = nil
-        testTask?.cancel(); testTask = nil
+        cancelPageTask(key: "test")
         testing = false; result = nil
         for editor in editors { editor.showResult(nil, theme: theme) }
         if isViewLoaded { updateControls() }
@@ -319,16 +314,16 @@ final class FilmRulePageViewController: FilmSettingsListController {
         guard isPageActive, !owner.busy, !writing else { return }
         cancelTest()
         view.endEditing(true); writing = true; render()
-        runPageTask { [weak self] in
-            guard let self else { return }
-            defer { writing = false; render() }
-            do {
-                try await owner.restore(group)
-                try Task.checkCancellation()
-            } catch is CancellationError {
-            } catch {
-                if !Task.isCancelled { failure(error, retry: { [weak self] in self?.restore() }) }
+        runPageTask(
+            key: "restore",
+            retry: { [weak self] in self?.restore() },
+            onFinally: { [weak self] in
+                guard let self else { return }
+                self.writing = false
+                self.render()
             }
+        ) { [owner, group] in
+            try await owner.restore(group)
         }
     }
     override func pageDidBecomeHidden() { cancelTest() }

@@ -12,7 +12,6 @@ public protocol MusicHomeSnapshotStoring: Sendable {
 }
 
 public final class MusicNativeHomeSnapshotDocument: MusicHomeSnapshotStoring, @unchecked Sendable {
-    public static let namespace = "music.home.display.v2"
     private let database: SQLiteDatabase
     public init(database: SQLiteDatabase) { self.database = database }
     public func read() throws -> Data? {
@@ -95,10 +94,6 @@ enum MusicNativeHomeSnapshot {
         let data = try JSONEncoder().encode(value)
         try musicRequire(data.count <= maximumBytes, .limit)
         return data
-    }
-    static func decode(_ data: Data, source: MusicPublicBrowsePlatform) throws -> MusicNativePublicBrowseDiscovery? {
-        let value = try read(data)
-        return value.source == source ? value.page : nil
     }
     static func restore(_ data: Data) throws -> (source: MusicPublicBrowsePlatform, page: MusicNativePublicBrowseDiscovery) {
         let value = try read(data)
