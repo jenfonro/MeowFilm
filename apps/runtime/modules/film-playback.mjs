@@ -170,11 +170,14 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     diagnostics() {
       return {
         closed,
+        cache: cache.diagnostics(),
+        data: data.diagnostics(),
         media: media.diagnostics(),
         search: search.diagnostics(),
         playback: service.diagnostics(),
       };
     },
+    clearMemoryCache: () => cache.clearMemory(),
     async settingsChanged(block) {
       debug?.emit({ level: 'info', cat: 'film-playback', sub: 'film.settings', event: 'settings.changed', data: { block } });
       if (block === 'film.rules') await rules.settingsChanged();

@@ -99,9 +99,10 @@ final class MusicAccountTransferState: ObservableObject {
     private func makeTemporaryFile(_ payload: MusicAccountFilePayload) throws -> URL {
         cleanupExport()
         guard stagingFile == nil else { throw MusicAccountTransferError.fileOperation }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("music-account-export-" + UUID().uuidString, isDirectory: true)
+        let root = AppTempDirectory.rootURL()
+        let directory = root.appendingPathComponent("music-account-export-" + UUID().uuidString, isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                 attributes: [.protectionKey: FileProtectionType.complete])
             stagingFile = MusicAccountExportStagingFile(directory: directory)
             let file = directory.appendingPathComponent("meowfilm-music-accounts.json")

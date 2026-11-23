@@ -3,14 +3,88 @@ import MeowMusicFeature
 import MeowStorage
 
 enum MusicSourceDiscoveryStore {
-    static func allSongIDs(_ db: SQLiteConnection) throws -> [String] {
-        try db.query("SELECT song_id FROM ios_music_source_discovery") { try $0.text(0) }
+    static let ttlMillis: Int64 = 30 * 86_400 * 1_000
+
+    static func readAll(_ db: SQLiteConnection, nowMs: Int64) throws -> [String: [String: MusicSourceDiscoveryEntry]] {
+        let cutoff = nowMs - ttlMillis
+        let validSongIDs = Set(try db.query(
+            "SELECT song_id FROM ios_music_source_discovery WHERE updated_at_ms>? AND updated_at_ms<=?",
+            [.integer(cutoff), .integer(nowMs)]
+        ) { try $0.text(0) })
+        guard !validSongIDs.isEmpty else { return [:] }
+
+        var platformsBySong: [String: [(platform: String, checkedAtMs: Int64)]] = [:]
+        try db.scan("SELECT song_id,platform,checked_at_ms FROM ios_music_source_discovery_platforms") { c in
+            let songID = try c.text(0)
+            guard validSongIDs.contains(songID) else { return }
+            platformsBySong[songID, default: []].append((try c.text(1), try c.int64(2)))
+        }
+
+        struct KeyPair: Hashable { let songID: String; let platform: String }
+        var keysByPair: [KeyPair: [String]] = [:]
+        try db.scan(
+            "SELECT song_id,platform,source_key FROM ios_music_source_discovery_keys ORDER BY song_id,platform,position"
+        ) { c in
+            let songID = try c.text(0)
+            guard validSongIDs.contains(songID) else { return }
+            keysByPair[KeyPair(songID: songID, platform: try c.text(1)), default: []].append(try c.text(2))
+        }
+
+        var obsByPair: [KeyPair: [MusicSearchObservation]] = [:]
+        try db.scan(
+            "SELECT song_id,platform,request_id,started_at_ms,sort_order,checked_at_ms,obs_platform,query_text," +
+            "context,page,limit_count,obs_scope,outcome,failure_code " +
+            "FROM ios_music_source_discovery_observations ORDER BY song_id,platform,position"
+        ) { c in
+            let songID = try c.text(0)
+            guard validSongIDs.contains(songID) else { return }
+            let platform = try c.text(1)
+            guard let requestID = UUID(uuidString: try c.text(2)),
+                  let scope = MusicSearchObservation.Scope(rawValue: try c.text(11)),
+                  let outcome = MusicSearchObservation.Outcome(rawValue: try c.text(12)) else {
+                throw MusicServiceError.corruptStorage
+            }
+            let failure = (try c.optionalText(13)).flatMap(MusicServiceError.init(rawValue:))
+            let obs = MusicSearchObservation(
+                requestID: requestID,
+                startedAt: Double(try c.int64(3)),
+                order: UInt64(bitPattern: try c.int64(4)),
+                checkedAt: Double(try c.int64(5)),
+                platform: try c.text(6),
+                query: try c.text(7),
+                context: try c.text(8),
+                page: try c.integer(9),
+                limit: try c.integer(10),
+                scope: scope,
+                outcome: outcome,
+                failure: failure
+            )
+            obsByPair[KeyPair(songID: songID, platform: platform), default: []].append(obs)
+        }
+
+        var result: [String: [String: MusicSourceDiscoveryEntry]] = [:]
+        result.reserveCapacity(validSongIDs.count)
+        for (songID, rows) in platformsBySong {
+            var platforms: [String: MusicSourceDiscoveryEntry] = [:]
+            platforms.reserveCapacity(rows.count)
+            for row in rows {
+                let pair = KeyPair(songID: songID, platform: row.platform)
+                platforms[row.platform] = MusicSourceDiscoveryEntry(
+                    checkedAt: Double(row.checkedAtMs),
+                    sourceKeys: keysByPair[pair] ?? [],
+                    observations: obsByPair[pair] ?? []
+                )
+            }
+            result[songID] = platforms
+        }
+        return result
     }
 
-    static func read(_ db: SQLiteConnection, songID: String) throws -> [String: MusicSourceDiscoveryEntry]? {
+    static func read(_ db: SQLiteConnection, songID: String, nowMs: Int64) throws -> [String: MusicSourceDiscoveryEntry]? {
+        let cutoff = nowMs - ttlMillis
         guard try db.queryOne(
-            "SELECT 1 FROM ios_music_source_discovery WHERE song_id=?",
-            [.text(songID)],
+            "SELECT 1 FROM ios_music_source_discovery WHERE song_id=? AND updated_at_ms>? AND updated_at_ms<=?",
+            [.text(songID), .integer(cutoff), .integer(nowMs)],
             map: { _ in true }
         ) != nil else { return nil }
 
@@ -75,7 +149,13 @@ enum MusicSourceDiscoveryStore {
     static func persist(_ db: SQLiteConnection,
                         retained: Set<String>,
                         records: [(songID: String, storedBytes: Int, platforms: [String: MusicSourceDiscoveryEntry])],
-                        maximumBytes: Int) throws {
+                        maximumBytes: Int,
+                        nowMs: Int64) throws {
+        let cutoff = nowMs - ttlMillis
+        try db.execute(
+            "DELETE FROM ios_music_source_discovery WHERE updated_at_ms<=? OR updated_at_ms>?",
+            [.integer(cutoff), .integer(nowMs)]
+        )
         let existingIDs = try db.query("SELECT song_id FROM ios_music_source_discovery") { try $0.text(0) }
         for id in existingIDs where !retained.contains(id) {
             try db.execute("DELETE FROM ios_music_source_discovery WHERE song_id=?", [.text(id)])
@@ -84,11 +164,10 @@ enum MusicSourceDiscoveryStore {
         for record in records {
             try db.upsert(
                 "ios_music_source_discovery",
-                columns: ["song_id", "stored_bytes"],
-                values: [.text(record.songID), .integer(max(0, record.storedBytes))],
+                columns: ["song_id", "updated_at_ms", "stored_bytes"],
+                values: [.text(record.songID), .integer(nowMs), .integer(max(0, record.storedBytes))],
                 key: ["song_id"]
             )
-            // Cascades to ios_music_source_discovery_keys and _observations.
             try db.execute("DELETE FROM ios_music_source_discovery_platforms WHERE song_id=?", [.text(record.songID)])
             for (platform, entry) in record.platforms.sorted(by: { $0.key < $1.key }) {
                 let checkedAtMs = Int64(entry.checkedAt.isFinite ? entry.checkedAt.rounded() : 0)
@@ -138,9 +217,7 @@ enum MusicSourceDiscoveryStore {
         var bytes = try db.queryOne("SELECT COALESCE(SUM(stored_bytes), 0) FROM ios_music_source_discovery") { try $0.integer(0) } ?? 0
         if bytes > maximumBytes {
             let rows: [(songID: String, storedBytes: Int)] = try db.query(
-                "SELECT song_id,stored_bytes FROM ios_music_source_discovery ORDER BY " +
-                "(SELECT max(checked_at_ms) FROM ios_music_source_discovery_platforms " +
-                "WHERE ios_music_source_discovery_platforms.song_id=ios_music_source_discovery.song_id)"
+                "SELECT song_id,stored_bytes FROM ios_music_source_discovery ORDER BY updated_at_ms ASC, song_id ASC"
             ) { c in
                 (songID: try c.text(0), storedBytes: try c.integer(1))
             }
@@ -150,5 +227,15 @@ enum MusicSourceDiscoveryStore {
                 bytes -= row.storedBytes
             }
         }
+    }
+
+    static func clear(_ db: SQLiteConnection) throws {
+        try db.execute("DELETE FROM ios_music_source_discovery")
+    }
+
+    static func stats(_ db: SQLiteConnection) throws -> (songCount: Int, storedBytes: Int64) {
+        try db.queryOne("SELECT count(*), coalesce(sum(stored_bytes), 0) FROM ios_music_source_discovery") {
+            (try $0.integer(0), try $0.int64(1))
+        } ?? (0, 0)
     }
 }

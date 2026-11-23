@@ -67,6 +67,27 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
         catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return null; }
     }
 
+    internal async Task ClearAsync(string? platform, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        await database.WriteAsync(db =>
+        {
+            if (string.IsNullOrEmpty(platform))
+                db.Execute("DELETE FROM cached_music_chorus");
+            else
+                db.Execute("DELETE FROM cached_music_chorus WHERE platform=$platform", ("$platform", platform));
+            return true;
+        }, token, 256).ConfigureAwait(false);
+    }
+
+    internal async Task<(int EntryCount, int MaximumEntries)> GetStatsAsync(CancellationToken token = default)
+    {
+        int count = await database.ReadAsync(
+            db => db.Scalar<int>("SELECT count(*) FROM cached_music_chorus"),
+            token).ConfigureAwait(false);
+        return (count, MaximumEntries);
+    }
+
     private static bool Fits(double start, double end, double duration) =>
         double.IsFinite(start) && double.IsFinite(end) && start >= 0 && end > start && end <= duration;
 }

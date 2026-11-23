@@ -9,8 +9,8 @@ Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/` 下物理分离�
 
 Windows 平台表定义按数据库角色与域组织在 `packages/storage/schema/{data,cache}/`，由 `scripts/storage/generate-schema.py` 生成两份独立产物并嵌入 `MeowFilm.Platform.csproj`：
 
-- `packages/storage/generated/schema-data-windows.sql`（125 张 `STRICT` 表、52 个索引，嵌入逻辑名 `MeowFilm.Storage.data-schema.sql`）
-- `packages/storage/generated/schema-cache-windows.sql`（32 张 `STRICT` 表、21 个索引，嵌入逻辑名 `MeowFilm.Storage.cache-schema.sql`）
+- `packages/storage/generated/schema-data-windows.sql`（125 张 `STRICT` 表、43 个索引，嵌入逻辑名 `MeowFilm.Storage.data-schema.sql`）
+- `packages/storage/generated/schema-cache-windows.sql`（32 张 `STRICT` 表、23 个索引，嵌入逻辑名 `MeowFilm.Storage.cache-schema.sql`）
 
 两份产物均不含任何 `ios_*` 表，同时由 Windows 聚合 Node runtime 以 `target: 'windows'` 校验同一对 schema identity。所有表均为手写强类型 `STRICT` 关系表，时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），零 `shape_mask`/`null_mask`/泛化内部扩展槽；仅对第三方来源/规则定义等真正动态结构使用纯强类型 `StorageValue` + `TypedValueNodes` 有界节点表。当前 schema identity／版本／hash 不匹配、损坏或孤立 journal 失败关闭，不执行升级或旧数据转换。
 
@@ -43,7 +43,7 @@ Windows 平台表定义按数据库角色与域组织在 `packages/storage/schem
 
 `NativeDatabase` 采用 WAL 读写分离连接模型：写事务在单一 writer lane 串行执行，只读查询路由至独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`），并内置有界 `PreparedStatementCache`（LRU 256）避免热点 SQL 重复编译。连接打开时统一应用基准 PRAGMA：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`synchronous=FULL`（`data` 库）/`NORMAL`（`cache` 库）、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`。常规读写直接运行在已打开句柄之上，不执行每请求目录/inode 文件系统 syscall，也不获取跨进程维护锁；仅开库、周期维护（checkpoint / incremental_vacuum）与 `data` 库在线备份执行目录检查及角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）协调。数据库关闭先拒绝新操作并排空已接纳事务，然后释放连接；不在关闭时执行 checkpoint／vacuum。SQLite backup API 仅对 `data` 库生成一致全库快照，`cache` 库显式拒绝；本地 SQLite 不等同于服务器集群或跨设备多主高可用。
 
-缓存按所属表／记录策略失效，`meowfilm-cache.sqlite3` 故障不破坏或删除永久库 `meowfilm-data.sqlite3`。图片、音频、源码等原始 bytes 不进入数据库（在线展示歌词保存在缓存库 `cached_music_lyrics*`，手工本地歌词保存在永久库 `windows_music_local_lyrics*`）。`resources-v1` 是资源文件目录，不是第二份结构化数据库。
+缓存按所属表／记录策略失效，`meowfilm-cache.sqlite3` 故障不破坏或删除永久库 `meowfilm-data.sqlite3`。图片、音频、源码等原始 bytes 不进入数据库（在线展示歌词保存在缓存库 `cached_music_lyrics*`，手工本地歌词保存在永久库 `windows_music_local_lyrics*`）。`resources-v1` 是资源文件目录，不是第二份结构化数据库；所有运行期临时文件（含小说 WebView2 临时 profile）统一落在 `<dataRoot>/tmp` 并在启动时自动清扫。正常退出统一走 `AppShutdown` 并受 5 秒排空超时保护（超时强杀残留 Node 子进程并记录告警）。
 
 JSON 仍允许用于 HTTP/IPC、脚本 API、构建元数据、源码与锁文件，以及用户主动导入／导出的交换文件。第三方脚本自建 private volume 由其脚本和现有宿主文件 capability 管理，应用不按 `.json` 扩展名禁止或接管。仅禁止应用自身内部运行期业务／缓存 JSON 文档直接落盘或整文档 JSON 入数据库。
 

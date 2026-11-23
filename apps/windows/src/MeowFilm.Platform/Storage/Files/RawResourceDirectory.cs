@@ -1,87 +1,188 @@
+using System.IO;
 using System.Security.Cryptography;
+
 namespace MeowFilm.Platform.Storage;
 
-/// <summary>Original content files in a pinned current resource directory, never metadata documents.</summary>
+/// <summary>Content-addressed local resource file directory with atomic staged writes.</summary>
 public sealed class RawResourceDirectory : IDisposable
 {
-    private readonly WindowsStorageFiles.Root root;
+    private readonly string directory;
+
     public RawResourceDirectory(string productRoot, string name)
     {
         if (name.Length is < 1 or > 64 || name.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-'))
             throw new StorageException(StorageError.InvalidRequest);
-        root = WindowsStorageFiles.Root.OpenOrCreate(Path.Combine(productRoot, "resources-v1", name));
+        directory = Path.Combine(Path.GetFullPath(productRoot), "resources-v1", name);
+        Directory.CreateDirectory(directory);
     }
+
+    public string DirectoryPath => directory;
+
     private string PathFor(string id)
     {
         if (id.Length != 64 || id.Any(c => c is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
             throw new StorageException(StorageError.InvalidRequest);
-        return Path.Combine(root.Path, id + ".resource");
+        return Path.Combine(directory, id + ".resource");
     }
-    public byte[] Read(string id, int bytes)
+
+    /// <summary>Reads a verified resource file. Missing or corrupted files self-heal and return null.</summary>
+    public byte[]? Read(string id, int expectedBytes)
     {
-        using var handle = WindowsStorageFiles.OpenFile(PathFor(id), WindowsStorageFiles.Read, WindowsStorageFiles.ShareRead, WindowsStorageFiles.OpenExisting)!;
-        if (WindowsStorageFiles.FileLength(handle) != bytes) throw new StorageException(StorageError.Corrupt);
-        using var stream = new FileStream(handle, FileAccess.Read);
-        var data = new byte[bytes]; stream.ReadExactly(data);
-        if (Convert.ToHexStringLower(SHA256.HashData(data)) != id) throw new StorageException(StorageError.Corrupt);
-        return data;
-    }
-    public (string Id, bool Created) Write(byte[] bytes)
-    {
-        var id = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        if (expectedBytes <= 0) return null;
         var path = PathFor(id);
-        using (var existing = WindowsStorageFiles.OpenFile(path, WindowsStorageFiles.Read,
-            WindowsStorageFiles.ShareRead, WindowsStorageFiles.OpenExisting, allowMissing: true))
-        {
-            if (existing is not null)
-            {
-                if (WindowsStorageFiles.FileLength(existing) != bytes.Length)
-                    throw new StorageException(StorageError.Corrupt);
-                using var input = new FileStream(existing, FileAccess.Read);
-                var data = new byte[bytes.Length];
-                input.ReadExactly(data);
-                if (Convert.ToHexStringLower(SHA256.HashData(data)) != id)
-                    throw new StorageException(StorageError.Corrupt);
-                return (id, false);
-            }
-        }
-        using var handle = WindowsStorageFiles.OpenFile(path,
-            WindowsStorageFiles.Write | WindowsStorageFiles.Delete, 0, WindowsStorageFiles.CreateNew)!;
-        bool committed = false;
+        if (!File.Exists(path)) return null;
         try
         {
-            using var stream = new FileStream(handle, FileAccess.Write, 4096, isAsync: false);
-            stream.Write(bytes);
-            stream.Flush(flushToDisk: true);
-            committed = true;
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            if (stream.Length != expectedBytes)
+            {
+                stream.Dispose();
+                TryDeletePath(path);
+                return null;
+            }
+            var data = new byte[expectedBytes];
+            stream.ReadExactly(data);
+            if (Convert.ToHexStringLower(SHA256.HashData(data)) != id)
+            {
+                stream.Dispose();
+                TryDeletePath(path);
+                return null;
+            }
+            return data;
+        }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+        catch (IOException)
+        {
+            TryDeletePath(path);
+            return null;
+        }
+    }
+
+    /// <summary>Atomically stages and commits bytes under their SHA-256 content ID.</summary>
+    public (string Id, bool Created) Write(byte[] bytes)
+    {
+        Directory.CreateDirectory(directory);
+        var id = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        var target = PathFor(id);
+
+        if (File.Exists(target))
+        {
+            if (TryVerifyExisting(target, id, bytes.Length))
+                return (id, false);
+            // Existing file is truncated or corrupted; fall through to atomic overwrite.
+        }
+
+        var stage = Path.Combine(directory, $".{id}.{Guid.NewGuid():N}.stage");
+        try
+        {
+            using (var stream = new FileStream(stage, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, useAsync: false))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(stage, target, overwrite: true);
+            stage = null!;
             return (id, true);
         }
         finally
         {
-            if (!committed)
-            {
-                try { WindowsStorageFiles.DeleteEntry(handle); }
-                catch { }
-            }
+            if (stage is not null) TryDeletePath(stage);
         }
     }
-    public void Delete(string id)
+
+    public void Delete(string id) => TryDeletePath(PathFor(id));
+
+    /// <summary>Deletes unreferenced resource files and any stray or interrupted stage files.</summary>
+    public void RemoveUnreferenced(IReadOnlySet<string> ids, bool throwOnError = false)
     {
-        using var handle = WindowsStorageFiles.OpenDeletionEntry(PathFor(id));
-        if (handle is null) return;
-        _ = WindowsStorageFiles.FileLength(handle);
-        WindowsStorageFiles.DeleteEntry(handle);
-    }
-    public void RemoveUnreferenced(IReadOnlySet<string> ids)
-    {
-        var entries = Directory.EnumerateFileSystemEntries(WindowsStorageFiles.NativePath(root.Path)).ToArray();
-        foreach (var entry in entries)
+        if (!Directory.Exists(directory)) return;
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
         {
             var name = Path.GetFileName(entry);
-            if (!name.EndsWith(".resource", StringComparison.Ordinal) || name.Length != 73) continue;
-            var id = name[..64];
-            if (!ids.Contains(id)) Delete(id);
+            if (IsValidResourceName(name))
+            {
+                var id = name[..64];
+                if (!ids.Contains(id))
+                {
+                    if (throwOnError) DeletePathStrict(entry);
+                    else TryDeletePath(entry);
+                }
+                continue;
+            }
+            // Sweep interrupted .stage files or stray leftovers instead of failing recovery.
+            if (throwOnError) DeleteEntryStrict(entry);
+            else TryDeleteEntry(entry);
         }
     }
-    public void Dispose() => root.Dispose();
+
+    public (int FileCount, long TotalBytes) GetDiskStats()
+    {
+        if (!Directory.Exists(directory)) return (0, 0);
+        int count = 0;
+        long total = 0;
+        foreach (var entry in Directory.EnumerateFiles(directory))
+        {
+            var name = Path.GetFileName(entry);
+            if (!IsValidResourceName(name)) continue;
+            try
+            {
+                total += new FileInfo(entry).Length;
+                count++;
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return (count, total);
+    }
+
+    public void Dispose() { }
+
+    private static bool IsValidResourceName(string name) =>
+        name.Length == 73 &&
+        name.EndsWith(".resource", StringComparison.Ordinal) &&
+        name.AsSpan(0, 64).IndexOfAnyExcept("0123456789abcdef") < 0;
+
+    private static bool TryVerifyExisting(string path, string id, int expectedLength)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            if (stream.Length != expectedLength) return false;
+            var data = new byte[expectedLength];
+            stream.ReadExactly(data);
+            return Convert.ToHexStringLower(SHA256.HashData(data)) == id;
+        }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
+    }
+
+    private static void DeletePathStrict(string path)
+    {
+        if (File.Exists(path)) File.Delete(path);
+    }
+
+    private static void DeleteEntryStrict(string path)
+    {
+        if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+        else if (File.Exists(path)) File.Delete(path);
+    }
+
+    private static void TryDeletePath(string path)
+    {
+        try { File.Delete(path); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    private static void TryDeleteEntry(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+            else File.Delete(path);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
 }

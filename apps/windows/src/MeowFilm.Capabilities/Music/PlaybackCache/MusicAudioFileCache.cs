@@ -1,5 +1,6 @@
 using System.IO;
 using System.Security.Cryptography;
+using System.Text.Json.Serialization;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Media;
 using MeowFilm.Platform.Storage;
@@ -14,27 +15,49 @@ internal sealed record AudioFileReceipt(
     long? ExpiresAt,
     AudioFileInfoRecord Info);
 
-/// <summary>Evictable playback bytes. No DownloadService, export target or durable download task.</summary>
-internal sealed partial class MusicAudioFileCache
+internal sealed record MusicAudioFileCacheStats(
+    [property: JsonPropertyName("entryCount")] int EntryCount,
+    [property: JsonPropertyName("totalDiskBytes")] long TotalDiskBytes,
+    [property: JsonPropertyName("pendingDeleteCount")] int PendingDeleteCount,
+    [property: JsonPropertyName("pendingDeleteBytes")] long PendingDeleteBytes,
+    [property: JsonPropertyName("activeReadLeases")] int ActiveReadLeases,
+    [property: JsonPropertyName("activeTemporaries")] int ActiveTemporaries,
+    [property: JsonPropertyName("capacityBytes")] long CapacityBytes,
+    [property: JsonPropertyName("closed")] bool Closed,
+    [property: JsonPropertyName("rootPath")] string RootPath);
+
+/// <summary>
+/// Evictable local playback audio cache (256 MiB, 30-day TTL), aligned with iOS:
+/// - Multi-dimensional key Hash(scope, song, signature) isolates distinct sources/qualities.
+/// - Atomic .part -> .audio commit prevents truncated files on crash.
+/// - Active read leases defer unlink until playback finishes.
+/// - SHA-256 verification runs outside the metadata gate.
+/// </summary>
+internal sealed partial class MusicAudioFileCache : IAsyncDisposable
 {
     internal const string StorageOwner = "music.playback-files.v1";
     internal const long Capacity = 256L * 1024 * 1024, Ttl = 30L * 86400000;
     private const int MaximumIndexBytes = 1024 * 1024, MaximumEntries = 2048;
 
-    // Stable provenance, not the runtime generation or settings revision. Each tier/provider is isolated.
     internal static string ScriptSignature(string installation, string platform, string recording, string quality) =>
         MusicRules.CanonicalTupleHash(installation, platform, recording, quality);
 
     private readonly string root;
     private readonly IStorageDatabase database;
-    private bool readable = true;
     private readonly SemaphoreSlim metadataGate = new(1, 1), transferGate = new(1, 1);
     private readonly Func<string, double, CancellationToken, Task<double>> validate;
     private readonly NativeHttpMediaOptions? httpOptions;
-    private readonly object transferState = new();
+    private readonly CancellationTokenSource lifetime = new();
+    private readonly object stateGate = new();
+    private readonly Dictionary<string, int> activeReadLeases = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long> pendingDeletes = new(StringComparer.Ordinal);
+    private readonly HashSet<string> activeTemporaries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, PreparedFile> activeByKey = new(StringComparer.Ordinal);
     private CancellationTokenSource? activeTransfer;
     private PreparedFile? activePrepared;
-    private long clearEpoch;
+    private long clearEpoch, officialClearEpoch;
+    private bool closed, startupSwept;
+    private Task? disposal;
 
     private sealed class Index
     {
@@ -58,17 +81,24 @@ internal sealed partial class MusicAudioFileCache
 
     internal sealed partial class PreparedFile : IDisposable
     {
-        internal readonly string Scope, Song, Signature;
+        internal readonly string Scope, Song, Signature, ResourceKey;
         internal readonly AudioFileReceipt Receipt;
         internal readonly bool Speculative;
+        internal readonly bool IsOfficial;
+        private readonly MusicAudioFileCache owner;
 
-        internal PreparedFile(string scope, string song, string signature, AudioFileReceipt receipt, CancellationToken token, bool speculative)
+        internal PreparedFile(MusicAudioFileCache owner, string scope, string song, string signature,
+            AudioFileReceipt receipt, CancellationToken token, bool speculative)
         {
-            Scope = scope; Song = song; Signature = signature; Receipt = receipt; Speculative = speculative;
-            Cancellation = CancellationTokenSource.CreateLinkedTokenSource(token); SourceToken = Cancellation.Token;
+            this.owner = owner;
+            Scope = scope; Song = song; Signature = signature;
+            ResourceKey = Key(scope, song, signature);
+            Receipt = receipt; Speculative = speculative;
+            IsOfficial = receipt.Info.Kind == "official";
+            Cancellation = CancellationTokenSource.CreateLinkedTokenSource(token, owner.lifetime.Token);
+            SourceToken = Cancellation.Token;
         }
 
-        // Read only after Ready's completion establishes the publication barrier.
         internal AudioFileInfoRecord? VerifiedReceipt { get; private set; }
         internal void AcceptReceipt(AudioFileInfoRecord value) => VerifiedReceipt = value;
         internal readonly CancellationTokenSource Cancellation;
@@ -89,12 +119,13 @@ internal sealed partial class MusicAudioFileCache
             try
             {
                 stream = new FileStream(source.Value.Path, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.Asynchronous);
+                    FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.Asynchronous);
                 token.ThrowIfCancellationRequested();
                 var lease = new GrowingReadLease(this, stream, source.Value.Length, token);
                 stream = null;
                 lock (bytesGate) readers++;
-                Interlocked.Exchange(ref opened, 1); return lease;
+                Interlocked.Exchange(ref opened, 1);
+                return lease;
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception e) when (OptionalFileFailure(e)) { return null; }
@@ -114,7 +145,32 @@ internal sealed partial class MusicAudioFileCache
     internal PreparedFile Prepare(string scope, string song, string signature, AudioFileReceipt receipt,
         Func<bool> isCurrent, CancellationToken token, bool speculative = true)
     {
-        var prepared = new PreparedFile(scope, song, signature, receipt, token, speculative);
+        var key = Key(scope, song, signature);
+        PreparedFile? previousToCancel = null;
+        var prepared = new PreparedFile(this, scope, song, signature, receipt, token, speculative);
+        lock (stateGate)
+        {
+            if (closed)
+            {
+                prepared.Cancellation.Cancel();
+                prepared.FinishWork();
+                return prepared;
+            }
+            if (activeByKey.TryGetValue(key, out var existing))
+            {
+                if (speculative && !existing.Cancellation.IsCancellationRequested)
+                {
+                    // Avoid duplicate speculative work for a key already in flight.
+                    prepared.Cancellation.Cancel();
+                    prepared.FinishWork();
+                    return prepared;
+                }
+                if (!speculative && existing.Speculative)
+                    previousToCancel = existing;
+            }
+            activeByKey[key] = prepared;
+        }
+        try { previousToCancel?.Cancellation.Cancel(); } catch (ObjectDisposedException) { }
         prepared.Work = StoreAsync(scope, song, signature, receipt, isCurrent, prepared.Cancellation.Token, prepared);
         return prepared;
     }
@@ -129,18 +185,94 @@ internal sealed partial class MusicAudioFileCache
     }
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-    private static string Key(string scope, string song) => MusicRules.CanonicalTupleHash(scope, song);
-    private static bool ValidFileName(string name) =>
-        name.Length == 38 && name.EndsWith(".audio", StringComparison.Ordinal) &&
-        LowerHex(name[..32], 32) && Guid.TryParseExact(name[..32], "N", out _);
+    private static string Key(string scope, string song, string signature) =>
+        MusicRules.CanonicalTupleHash(scope, song, signature);
 
-    private void CheckRoot() => Directory.CreateDirectory(root);
+    private static bool ValidCommittedName(string name) =>
+        name.Length == 38 && name.EndsWith(".audio", StringComparison.Ordinal) && LowerHex(name[..32], 32);
+
+    private static bool ValidPartName(string name) =>
+        name.Length == 37 && name.EndsWith(".part", StringComparison.Ordinal) && LowerHex(name[..32], 32);
+
+    private void EnsureRoot() => Directory.CreateDirectory(root);
 
     private string FilePath(string name)
     {
-        if (!ValidFileName(name)) throw new IOException("CACHE_UNSAFE_PATH");
-        CheckRoot();
+        if (!ValidCommittedName(name) && !ValidPartName(name))
+            throw new IOException("CACHE_INVALID_NAME");
+        EnsureRoot();
         return Path.Combine(root, name);
+    }
+
+    private void AcquireReadLease(string fileName)
+    {
+        lock (stateGate)
+            activeReadLeases[fileName] = activeReadLeases.GetValueOrDefault(fileName) + 1;
+    }
+
+    private void ReleaseReadLease(string fileName)
+    {
+        bool shouldDelete = false;
+        lock (stateGate)
+        {
+            if (!activeReadLeases.TryGetValue(fileName, out int count)) return;
+            if (count <= 1)
+            {
+                activeReadLeases.Remove(fileName);
+                shouldDelete = pendingDeletes.Remove(fileName);
+            }
+            else
+            {
+                activeReadLeases[fileName] = count - 1;
+            }
+        }
+        if (shouldDelete) TryDeleteFile(fileName);
+    }
+
+    private void DeleteOrDefer(string fileName, long fileSize)
+    {
+        if (!ValidCommittedName(fileName) && !ValidPartName(fileName)) return;
+        bool deferred = false;
+        lock (stateGate)
+        {
+            if (activeReadLeases.GetValueOrDefault(fileName) > 0)
+            {
+                pendingDeletes[fileName] = Math.Max(pendingDeletes.GetValueOrDefault(fileName), fileSize);
+                deferred = true;
+            }
+            else
+            {
+                pendingDeletes.Remove(fileName);
+            }
+        }
+        if (!deferred) TryDeleteFile(fileName);
+    }
+
+    private void RegisterTemporary(string fileName)
+    {
+        lock (stateGate) activeTemporaries.Add(fileName);
+    }
+
+    private void UnregisterTemporary(string fileName)
+    {
+        lock (stateGate) activeTemporaries.Remove(fileName);
+    }
+
+    private bool IsProtectedFile(string fileName)
+    {
+        lock (stateGate)
+            return activeReadLeases.ContainsKey(fileName) || pendingDeletes.ContainsKey(fileName) ||
+                   activeTemporaries.Contains(fileName);
+    }
+
+    private long DeferredDeleteBytes()
+    {
+        lock (stateGate)
+        {
+            long sum = 0;
+            foreach (var v in pendingDeletes.Values) sum += v;
+            return sum;
+        }
     }
 
     private static bool Accepted(Entry entry, string signature, long now)
@@ -157,7 +289,6 @@ internal sealed partial class MusicAudioFileCache
             return await database.ReadSnapshotAsync(db =>
             {
                 var index = new Index { Revision = db.Revision(StorageOwner), Epoch = Interlocked.Read(ref clearEpoch) };
-                if (!Volatile.Read(ref readable)) return index;
                 IReadOnlyList<AudioFileCacheRecord> rows;
                 if (key is not null) rows = AudioFileCacheStore.ReadOne(db, key) is { } one ? [one] : [];
                 else if (song is not null) rows = AudioFileCacheStore.ReadByScriptSong(db, song);
@@ -173,7 +304,7 @@ internal sealed partial class MusicAudioFileCache
                         record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0)
                         throw MusicPlaybackCacheDataException.Corrupt();
                     ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration, decoded: true);
-                    if (!ValidFileName(record.FileName) || record.FileSize > Capacity ||
+                    if (!ValidCommittedName(record.FileName) || record.FileSize > Capacity ||
                         !LowerHex(record.Sha256, 64) || !LowerHex(record.Signature, 64))
                         throw MusicPlaybackCacheDataException.Corrupt();
                     index.Before.Add(id, record);
@@ -203,7 +334,8 @@ internal sealed partial class MusicAudioFileCache
         string song = RequireField(info.SongId, 2048);
         string recording = RequireField(info.SourceKey, 8192);
         string scope = RequireField(info.Scope, 128);
-        if (!(script ? NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") || Key(scope, song) != key)
+        if (!(script ? NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") ||
+            Key(scope, song, signature) != key)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (!script && (info.Generation is null || info.Generation <= 0))
             throw MusicPlaybackCacheDataException.Corrupt();
@@ -258,91 +390,105 @@ internal sealed partial class MusicAudioFileCache
             changes.Add(id, row);
         }
         foreach (var id in index.Before.Keys.Where(id => !index.Entries.ContainsKey(id))) changes.Add(id, null);
-        bool cleared = false;
         await database.WriteAsync(db =>
         {
             if (db.Revision(StorageOwner) != index.Revision) throw new StorageException(StorageError.Conflict);
-            if (!Volatile.Read(ref readable)) { db.Execute("DELETE FROM windows_music_audio_files"); cleared = true; }
             foreach (var (id, value) in changes)
-            {
                 AudioFileCacheStore.Save(db, id, value);
-            }
-            db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key IN (SELECT resource_key FROM windows_music_audio_files ORDER BY confirmed_at_ms DESC,resource_key DESC LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
             return db.CommitRevision(StorageOwner, index.Revision);
         }, token, bytes, commit: commit =>
         {
-            if (index.Epoch != Interlocked.Read(ref clearEpoch) || current is not null && !current()) throw new OperationCanceledException(token);
+            if (index.Epoch != Interlocked.Read(ref clearEpoch) || current is not null && !current())
+                throw new OperationCanceledException(token);
             commit();
         }).ConfigureAwait(false);
-        if (cleared && index.Epoch == Interlocked.Read(ref clearEpoch)) Volatile.Write(ref readable, true);
-    }
-
-    private async Task<IReadOnlyList<string>> ClearIndex(CancellationToken token)
-    {
-        var epoch = Interlocked.Read(ref clearEpoch);
-        var files = await database.WriteAsync(db =>
-        {
-            var names = db.Query("SELECT file_name FROM windows_music_audio_files", row => row.GetString(0));
-            db.Execute("DELETE FROM windows_music_audio_files");
-            db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-            return names;
-        }, token).ConfigureAwait(false);
-        if (epoch == Interlocked.Read(ref clearEpoch)) Volatile.Write(ref readable, true);
-        return files;
     }
 
     internal async Task<INativeMediaReadLease?> OpenAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
+        lock (stateGate) if (closed) return null;
         long epoch = Interlocked.Read(ref clearEpoch);
         FileStream? file = null;
+        string? leasedFile = null;
         try
         {
-            string key = Key(scope, song);
+            string key = Key(scope, song, signature);
             var index = await Read(token, key: key).ConfigureAwait(false);
-            // Initial disk reads do not own the mutation gate. File access and hit
-            // publication do: clear cannot finish between eligibility and opening.
+            Entry entry;
             await metadataGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
                 token.ThrowIfCancellationRequested();
                 if (epoch != Interlocked.Read(ref clearEpoch) ||
-                    !index.Entries.TryGetValue(key, out var entry) || !Accepted(entry, signature, Now)) return null;
-                string path = FilePath(entry.File);
-                file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous);
-                if (file.Length != entry.Size || file.Length is <= 0 or > Capacity) return null;
-                string digest = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, token).ConfigureAwait(false));
-                token.ThrowIfCancellationRequested();
-                if (digest != entry.Sha256 || epoch != Interlocked.Read(ref clearEpoch)) return null;
-                file.Position = 0;
-                var lease = new ReadLease(file, token); file = null; return lease;
+                    !index.Entries.TryGetValue(key, out entry!) || !Accepted(entry, signature, Now))
+                    return null;
+                AcquireReadLease(entry.File);
+                leasedFile = entry.File;
             }
             finally { metadataGate.Release(); }
+
+            // Perform file I/O and SHA-256 verification outside metadataGate so concurrent ops never stall.
+            string path = FilePath(entry.File);
+            if (!File.Exists(path))
+            {
+                ReleaseReadLease(leasedFile); leasedFile = null;
+                _ = EraseAsync(scope, song, signature, CancellationToken.None);
+                return null;
+            }
+            file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous);
+            if (file.Length != entry.Size || file.Length is <= 0 or > Capacity)
+            {
+                await file.DisposeAsync(); file = null;
+                ReleaseReadLease(leasedFile); leasedFile = null;
+                _ = EraseAsync(scope, song, signature, CancellationToken.None);
+                return null;
+            }
+            string digest = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, token).ConfigureAwait(false));
+            token.ThrowIfCancellationRequested();
+            if (digest != entry.Sha256)
+            {
+                await file.DisposeAsync(); file = null;
+                ReleaseReadLease(leasedFile); leasedFile = null;
+                _ = EraseAsync(scope, song, signature, CancellationToken.None);
+                return null;
+            }
+            if (epoch != Interlocked.Read(ref clearEpoch))
+            {
+                await file.DisposeAsync(); file = null;
+                ReleaseReadLease(leasedFile); leasedFile = null;
+                return null;
+            }
+            file.Position = 0;
+            var lease = new ReadLease(this, leasedFile, file, token);
+            file = null;
+            leasedFile = null;
+            return lease;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e) || OptionalFileFailure(e))
         { token.ThrowIfCancellationRequested(); return null; }
-        finally { if (file is not null) await file.DisposeAsync(); }
+        finally
+        {
+            if (file is not null) await file.DisposeAsync();
+            if (leasedFile is not null) ReleaseReadLease(leasedFile);
+        }
     }
 
     internal async Task<AudioFileInfoRecord?> ReadInfoAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
+        lock (stateGate) if (closed) return null;
         long epoch = Interlocked.Read(ref clearEpoch);
         try
         {
-            string key = Key(scope, song);
+            string key = Key(scope, song, signature);
             var index = await Read(token, key: key).ConfigureAwait(false);
-            await metadataGate.WaitAsync(token).ConfigureAwait(false);
-            try
-            {
-                token.ThrowIfCancellationRequested();
-                if (epoch != Interlocked.Read(ref clearEpoch) ||
-                    !index.Entries.TryGetValue(key, out var entry) || !Accepted(entry, signature, Now) ||
-                    !File.Exists(FilePath(entry.File))) return null;
-                return entry.Info;
-            }
-            finally { metadataGate.Release(); }
+            if (epoch != Interlocked.Read(ref clearEpoch) ||
+                !index.Entries.TryGetValue(key, out var entry) || !Accepted(entry, signature, Now) ||
+                !File.Exists(FilePath(entry.File)))
+                return null;
+            return entry.Info;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e) || OptionalFileFailure(e))
@@ -352,21 +498,16 @@ internal sealed partial class MusicAudioFileCache
     internal async Task<AudioFileInfoRecord[]> ReadScriptHistoryAsync(string song, CancellationToken token)
     {
         RequireText(song, 2048);
+        lock (stateGate) if (closed) return [];
         long epoch = Interlocked.Read(ref clearEpoch);
         try
         {
             var index = await Read(token, song: song).ConfigureAwait(false);
-            await metadataGate.WaitAsync(token).ConfigureAwait(false);
-            try
-            {
-                token.ThrowIfCancellationRequested();
-                if (epoch != Interlocked.Read(ref clearEpoch)) return [];
-                return index.Entries.Values.Where(entry => entry.Info.Kind == "script" &&
-                    entry.Info.SongId == song && Accepted(entry, entry.Signature, Now) &&
-                    File.Exists(FilePath(entry.File))).OrderByDescending(entry => entry.ConfirmedAt)
-                    .Select(entry => entry.Info).ToArray();
-            }
-            finally { metadataGate.Release(); }
+            if (epoch != Interlocked.Read(ref clearEpoch)) return [];
+            return index.Entries.Values.Where(entry => entry.Info.Kind == "script" &&
+                entry.Info.SongId == song && Accepted(entry, entry.Signature, Now) &&
+                File.Exists(FilePath(entry.File))).OrderByDescending(entry => entry.ConfirmedAt)
+                .Select(entry => entry.Info).ToArray();
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e) || OptionalFileFailure(e))
@@ -376,36 +517,39 @@ internal sealed partial class MusicAudioFileCache
     internal async Task TouchAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
+        lock (stateGate) if (closed) return;
         await metadataGate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            string key = Key(scope, song);
+            string key = Key(scope, song, signature);
             var index = await Read(token, key: key).ConfigureAwait(false);
             if (!index.Entries.TryGetValue(key, out var entry) || !Accepted(entry, signature, Now)) return;
-            entry.ConfirmedAt = Now; await Write(index, token).ConfigureAwait(false);
+            entry.ConfirmedAt = Now;
+            await Write(index, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e)) { }
         finally { metadataGate.Release(); }
     }
 
-    internal async Task EraseAsync(string scope, string song, CancellationToken token)
+    internal async Task EraseAsync(string scope, string song, string signature, CancellationToken token)
     {
-        ValidateIdentity(scope, song);
+        ValidateIdentity(scope, song, signature);
+        lock (stateGate) if (closed) return;
         await metadataGate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            string key = Key(scope, song);
-            var files = await database.WriteAsync(db =>
+            string key = Key(scope, song, signature);
+            var removed = await database.WriteAsync(db =>
             {
-                var names = db.Query("SELECT file_name FROM windows_music_audio_files WHERE resource_key=$key",
-                    row => row.GetString(0), ("$key", key));
+                var rows = db.Query("SELECT file_name,file_size FROM windows_music_audio_files WHERE resource_key=$key",
+                    row => (File: row.GetString(0), Size: row.GetInt64(1)), ("$key", key));
                 db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key=$key", ("$key", key));
                 db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-                return names;
+                return rows;
             }, token).ConfigureAwait(false);
-            foreach (var file in files)
-                if (ValidFileName(file)) TryDelete(file);
+            foreach (var item in removed)
+                DeleteOrDefer(item.File, item.Size);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e)) { }
@@ -420,13 +564,22 @@ internal sealed partial class MusicAudioFileCache
             await StoreCoreAsync(scope, song, signature, receipt, isCurrent, token, prepared).ConfigureAwait(false);
         }
         catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
-        finally { prepared.FinishWork(); }
+        finally
+        {
+            lock (stateGate)
+            {
+                if (activeByKey.TryGetValue(prepared.ResourceKey, out var current) && ReferenceEquals(current, prepared))
+                    activeByKey.Remove(prepared.ResourceKey);
+            }
+            prepared.FinishWork();
+        }
     }
 
     private async Task StoreCoreAsync(string scope, string song, string signature, AudioFileReceipt receipt,
         Func<bool> isCurrent, CancellationToken token, PreparedFile prepared)
     {
         long epoch = Interlocked.Read(ref clearEpoch);
+        long officialEpoch = Interlocked.Read(ref officialClearEpoch);
         ValidateReceipt(receipt, scope, song, signature, out long? expires);
         var info = receipt.Info;
         double expected = info.Duration!.Value;
@@ -435,65 +588,74 @@ internal sealed partial class MusicAudioFileCache
         if (expectedSize > Capacity ||
             expires is { } urlExpiry && urlExpiry <= Now)
             return;
-        // Actual playback may wait asynchronously for a retiring speculative producer;
-        // prefetch never queues work or stalls the player's read path.
+
         if (!prepared.Speculative) await transferGate.WaitAsync(token).ConfigureAwait(false);
         else if (!await transferGate.WaitAsync(0, token).ConfigureAwait(false)) return;
-        string? candidate = null;
-        FileStream? producerLease = null;
+
+        string? partFileName = null;
+        string? committedFileName = null;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         try
         {
-            lock (transferState)
+            lock (stateGate)
             {
+                if (closed) return;
                 activeTransfer = deadline;
                 activePrepared = prepared;
-                if (epoch != Interlocked.Read(ref clearEpoch)) deadline.Cancel();
+                if (epoch != Interlocked.Read(ref clearEpoch) ||
+                    prepared.IsOfficial && officialEpoch != Interlocked.Read(ref officialClearEpoch))
+                    deadline.Cancel();
             }
             long confirmed = Now;
             deadline.CancelAfter(TimeSpan.FromMinutes(30));
             var ct = deadline.Token;
             ct.ThrowIfCancellationRequested();
             if (!isCurrent()) return;
-            // Reserve at most the remaining cache capacity, including orphan files, before fetching.
-            CheckRoot();
-            producerLease = AcquireProducer();
-            await PruneAsync(expectedSize > 0 ? expectedSize : Capacity / 4, ct).ConfigureAwait(false);
-            long occupied = Directory.EnumerateFiles(root, "*.audio").Sum(p => new FileInfo(p).Length);
+
+            EnsureRoot();
+            long occupied = await PruneAsync(expectedSize > 0 ? expectedSize : Capacity / 4, ct).ConfigureAwait(false);
             long maximum = Capacity - occupied;
             if (maximum <= 0 || expectedSize > maximum) return;
-            candidate = Guid.NewGuid().ToString("N") + ".audio";
-            string path = FilePath(candidate);
+
+            // Stage downloads to a .part file so crashes never leave truncated .audio files.
+            string fileId = Guid.NewGuid().ToString("N");
+            partFileName = fileId + ".part";
+            string partPath = FilePath(partFileName);
+            RegisterTemporary(partFileName);
+
             var headers = info.Kind == "script" && receipt.Headers.Count > 0
                 ? new Dictionary<string, string>(receipt.Headers, StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, string>();
-            await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write,
-                FileShare.Read | FileShare.Delete, 1, FileOptions.Asynchronous))
+            await using (var output = new FileStream(partPath, FileMode.CreateNew, FileAccess.Write,
+                FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous))
             {
                 long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(receipt.Url),
                     headers, output, maximum, httpOptions, ct,
                     prepared.ReceivedBytes,
-                    length => prepared.BeginFile(path, length)).ConfigureAwait(false);
+                    length => prepared.BeginFile(partPath, length)).ConfigureAwait(false);
                 if (expectedSize > 0 && size != expectedSize) return;
                 await output.FlushAsync(ct).ConfigureAwait(false);
                 output.Flush(flushToDisk: true);
                 prepared.CompleteBody(size);
             }
-            // Unknown completeness can still be played from the sequential
-            // file, but is not evidence for a persistent complete-file hit.
+
             if (!full) return;
             deadline.CancelAfter(TimeSpan.FromSeconds(120));
             if (!isCurrent()) return;
+
             string sha;
             long length;
             AudioCacheStructure.AudioFacts? facts;
-            await using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            await using (var file = new FileStream(partPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
             {
-                length = file.Length; facts = AudioCacheStructure.Inspect(file, ct); file.Position = 0;
+                length = file.Length;
+                facts = AudioCacheStructure.Inspect(file, ct);
+                file.Position = 0;
                 sha = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct).ConfigureAwait(false));
             }
-            double duration = await validate(path, expected, ct).ConfigureAwait(false);
+            double duration = await validate(partPath, expected, ct).ConfigureAwait(false);
             if (!double.IsFinite(duration) || duration <= 0 || expected > 0 && Math.Abs(duration - expected) > 10) return;
+
             var updatedInfo = info with { Duration = duration, Size = length };
             if (facts is { Quality.Length: > 0 })
             {
@@ -511,62 +673,83 @@ internal sealed partial class MusicAudioFileCache
             }
             var storedInfo = SafeInfo(updatedInfo);
             prepared.AcceptReceipt(storedInfo);
-            prepared.Ready.TrySetResult(path);
-            if (epoch != Interlocked.Read(ref clearEpoch)) return;
+            prepared.Ready.TrySetResult(partPath);
+
+            if (epoch != Interlocked.Read(ref clearEpoch) ||
+                prepared.IsOfficial && officialEpoch != Interlocked.Read(ref officialClearEpoch))
+                return;
+
             deadline.CancelAfter(prepared.Speculative ? TimeSpan.FromSeconds(120) : Timeout.InfiniteTimeSpan);
             var playedAt = await prepared.Played.Task.WaitAsync(ct).ConfigureAwait(false);
             if (playedAt is null || playedAt <= 0 || playedAt > Now) return;
             confirmed = playedAt.Value;
             ct.ThrowIfCancellationRequested();
             if (!isCurrent()) return;
+
             await metadataGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                if (!isCurrent() || epoch != Interlocked.Read(ref clearEpoch)) return;
-                string key = Key(scope, song);
-                var row = new AudioFileCacheRecord(key, candidate, length, sha, signature, confirmed, duration, storedInfo);
+                if (!isCurrent() || epoch != Interlocked.Read(ref clearEpoch) ||
+                    prepared.IsOfficial && officialEpoch != Interlocked.Read(ref officialClearEpoch))
+                    return;
+
+                // Atomically commit .part -> .audio before publishing index row.
+                string finalName = fileId + ".audio";
+                string finalPath = FilePath(finalName);
+                File.Move(partPath, finalPath, overwrite: false);
+                committedFileName = finalName;
+                UnregisterTemporary(partFileName);
+                partFileName = null;
+
+                string key = Key(scope, song, signature);
+                var row = new AudioFileCacheRecord(key, finalName, length, sha, signature, confirmed, duration, storedInfo);
                 int bytes = row.EstimateBytes();
                 if (bytes > MaximumIndexBytes) throw MusicPlaybackCacheDataException.Limit();
-                bool cleared = false;
+
                 var (previous, evicted) = await database.WriteAsync(db =>
                 {
-                    if (!Volatile.Read(ref readable)) { db.Execute("DELETE FROM windows_music_audio_files"); cleared = true; }
-                    string? prevFile = db.TryQuerySingle(
-                        "SELECT file_name FROM windows_music_audio_files WHERE resource_key=$key",
-                        r => r.GetString(0), out var existingFile, ("$key", key))
-                        ? existingFile : null;
-                    var evictedFiles = new List<string>();
-                    if (prevFile is null)
+                    var expectedRev = db.Revision(StorageOwner);
+                    (string File, long Size)? prev = db.TryQuerySingle(
+                        "SELECT file_name,file_size FROM windows_music_audio_files WHERE resource_key=$key",
+                        r => (r.GetString(0), r.GetInt64(1)), out var existingRow, ("$key", key))
+                        ? existingRow : null;
+                    var evictedFiles = new List<(string File, long Size)>();
+                    if (prev is null)
                     {
                         long count = db.Scalar<long>("SELECT count(*) FROM windows_music_audio_files");
                         long overflow = count - (MaximumEntries - 1);
                         if (overflow > 0)
                         {
                             var victims = db.Query("""
-                                SELECT resource_key,file_name FROM windows_music_audio_files
+                                SELECT resource_key,file_name,file_size FROM windows_music_audio_files
                                 ORDER BY confirmed_at_ms ASC, resource_key ASC
-                                LIMIT $n
-                                """, r => (Key: r.GetString(0), File: r.GetString(1)), ("$n", overflow));
+                                """, r => (Key: r.GetString(0), File: r.GetString(1), Size: r.GetInt64(2)));
                             foreach (var v in victims)
                             {
+                                if (overflow <= 0) break;
+                                if (IsProtectedFile(v.File)) continue;
                                 db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key=$k", ("$k", v.Key));
-                                evictedFiles.Add(v.File);
+                                evictedFiles.Add((v.File, v.Size));
+                                overflow--;
                             }
                         }
                     }
                     AudioFileCacheStore.Save(db, key, row);
-                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-                    return (prevFile, evictedFiles);
+                    db.CommitRevision(StorageOwner, expectedRev);
+                    return (prev, evictedFiles);
                 }, ct, bytes, commit: commit =>
                 {
-                    if (epoch != Interlocked.Read(ref clearEpoch) || !isCurrent()) throw new OperationCanceledException(ct);
+                    if (epoch != Interlocked.Read(ref clearEpoch) ||
+                        prepared.IsOfficial && officialEpoch != Interlocked.Read(ref officialClearEpoch) ||
+                        !isCurrent())
+                        throw new OperationCanceledException(ct);
                     commit();
                 }).ConfigureAwait(false);
-                if (cleared && epoch == Interlocked.Read(ref clearEpoch)) Volatile.Write(ref readable, true);
-                candidate = null; // Publish index last; crash before this is an orphan, never a cache hit.
-                prepared.Published();
-                if (previous is not null) TryDelete(previous);
-                foreach (string file in evicted) TryDelete(file);
+
+                committedFileName = null;
+                prepared.Published(finalPath, finalName);
+                if (previous is { } old) DeleteOrDefer(old.File, old.Size);
+                foreach (var item in evicted) DeleteOrDefer(item.File, item.Size);
             }
             finally { metadataGate.Release(); }
         }
@@ -577,68 +760,157 @@ internal sealed partial class MusicAudioFileCache
         { prepared.SourceFailed(e); }
         finally
         {
-            if (candidate is not null && !prepared.KeepsFile) TryDelete(candidate);
-            producerLease?.Dispose();
-            lock (transferState) if (ReferenceEquals(activeTransfer, deadline)) { activeTransfer = null; activePrepared = null; }
+            if (partFileName is not null && !prepared.KeepsFile)
+            {
+                UnregisterTemporary(partFileName);
+                TryDeleteFile(partFileName);
+            }
+            if (committedFileName is not null)
+                DeleteOrDefer(committedFileName, 0);
+            lock (stateGate)
+            {
+                if (ReferenceEquals(activeTransfer, deadline))
+                {
+                    activeTransfer = null;
+                    activePrepared = null;
+                }
+            }
             transferGate.Release();
         }
     }
 
+    /// <summary>Explicitly clears all cached audio. Active read leases defer unlink until playback stops.</summary>
     internal async Task ClearAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         Interlocked.Increment(ref clearEpoch);
-        Volatile.Write(ref readable, false);
         bool keepReader;
-        lock (transferState)
+        List<CancellationTokenSource> toCancel = [];
+        lock (stateGate)
         {
+            if (closed) return;
             keepReader = activePrepared?.Opened == true;
-            if (!keepReader) activeTransfer?.Cancel();
-            else activePrepared!.Played.TrySetResult(null);
-        }
-        if (keepReader)
-        {
-            // Do not wait for the current sequential download or unlink its
-            // growing file. The epoch forbids its later cache publication.
-            await metadataGate.WaitAsync(token).ConfigureAwait(false);
-            try
+            if (!keepReader && activeTransfer is not null) toCancel.Add(activeTransfer);
+            else activePrepared?.Played.TrySetResult(null);
+            foreach (var queued in activeByKey.Values)
             {
-                var names = await ClearIndex(token).ConfigureAwait(false);
-                foreach (var name in names) TryDelete(name);
+                if (queued.Opened) queued.Played.TrySetResult(null);
+                else toCancel.Add(queued.Cancellation);
             }
-            finally { metadataGate.Release(); }
-            return;
         }
-        await transferGate.WaitAsync(token).ConfigureAwait(false);
+        foreach (var cts in toCancel)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+        }
+
+        if (!keepReader)
+            await transferGate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            using var producerLease = AcquireProducer();
             await metadataGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                await ClearIndex(token).ConfigureAwait(false);
-                CheckRoot();
-                // Our read leases allow delete sharing: unlink now, let the OS keep
-                // their already-open bytes alive until disposal. Other failures are real
-                // explicit-cleanup failures, not optional automatic eviction failures.
-                foreach (var path in Directory.EnumerateFiles(root, "*.audio"))
+                var rows = await database.WriteAsync(db =>
                 {
-                    token.ThrowIfCancellationRequested();
-                    File.Delete(FilePath(Path.GetFileName(path)));
+                    var items = db.Query("SELECT file_name,file_size FROM windows_music_audio_files",
+                        r => (File: r.GetString(0), Size: r.GetInt64(1)));
+                    db.Execute("DELETE FROM windows_music_audio_files");
+                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                    return items;
+                }, token).ConfigureAwait(false);
+
+                foreach (var item in rows)
+                    DeleteOrDefer(item.File, item.Size);
+
+                if (Directory.Exists(root))
+                {
+                    foreach (var entry in Directory.EnumerateFileSystemEntries(root))
+                    {
+                        token.ThrowIfCancellationRequested();
+                        string name = Path.GetFileName(entry);
+                        if (IsProtectedFile(name)) continue;
+                        if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+                        else if (File.Exists(entry)) File.Delete(entry);
+                    }
                 }
             }
             finally { metadataGate.Release(); }
         }
-        finally { transferGate.Release(); }
+        finally
+        {
+            if (!keepReader) transferGate.Release();
+        }
     }
 
-    private FileStream AcquireProducer()
+    /// <summary>Clears official account audio files while keeping independent script history.</summary>
+    internal async Task ClearOfficialAsync(CancellationToken token)
     {
-        CheckRoot();
-        string path = Path.Combine(root, ".producer.lock");
-        if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new IOException("CACHE_UNSAFE_PATH");
-        return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+        token.ThrowIfCancellationRequested();
+        Interlocked.Increment(ref officialClearEpoch);
+        List<CancellationTokenSource> toCancel = [];
+        lock (stateGate)
+        {
+            if (closed) return;
+            if (activePrepared is { IsOfficial: true })
+            {
+                if (activePrepared.Opened) activePrepared.Played.TrySetResult(null);
+                else if (activeTransfer is not null) toCancel.Add(activeTransfer);
+            }
+            foreach (var queued in activeByKey.Values)
+            {
+                if (!queued.IsOfficial) continue;
+                if (queued.Opened) queued.Played.TrySetResult(null);
+                else toCancel.Add(queued.Cancellation);
+            }
+        }
+        foreach (var cts in toCancel)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+        }
+        await metadataGate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var officialRows = await database.WriteAsync(db =>
+            {
+                var items = AudioFileCacheStore.ReadOfficialFiles(db);
+                AudioFileCacheStore.DeleteOfficial(db);
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                return items;
+            }, token).ConfigureAwait(false);
+
+            foreach (var item in officialRows)
+                DeleteOrDefer(item.FileName, item.FileSize);
+        }
+        finally { metadataGate.Release(); }
+    }
+
+    internal async Task<MusicAudioFileCacheStats> GetStatsAsync(CancellationToken token = default)
+    {
+        bool isClosed;
+        int leaseCount, pendingCount, tempCount;
+        long pendingBytes;
+        lock (stateGate)
+        {
+            isClosed = closed;
+            leaseCount = activeReadLeases.Values.Sum();
+            pendingCount = pendingDeletes.Count;
+            pendingBytes = pendingDeletes.Values.Sum();
+            tempCount = activeTemporaries.Count;
+        }
+        if (isClosed)
+            return new MusicAudioFileCacheStats(0, 0, 0, 0, 0, 0, Capacity, true, root);
+
+        var (count, indexedBytes) = await database.ReadSnapshotAsync(AudioFileCacheStore.ReadStats, token).ConfigureAwait(false);
+        return new MusicAudioFileCacheStats(
+            EntryCount: count,
+            TotalDiskBytes: indexedBytes + pendingBytes,
+            PendingDeleteCount: pendingCount,
+            PendingDeleteBytes: pendingBytes,
+            ActiveReadLeases: leaseCount,
+            ActiveTemporaries: tempCount,
+            CapacityBytes: Capacity,
+            Closed: false,
+            RootPath: root);
     }
 
     private static AudioFileInfoRecord SafeInfo(AudioFileInfoRecord info) =>
@@ -671,25 +943,24 @@ internal sealed partial class MusicAudioFileCache
         if (info.Duration is not { } duration || !double.IsFinite(duration) || duration < 0 ||
             info.Size is not { } size || size < 0)
             throw MusicPlaybackCacheDataException.Corrupt();
-        // Receipts may have unknown extents; persisted entries must have measured positive extents.
-        ValidateInfoRecord(SafeInfo(info), Key(scope, song), signature, size, duration, decoded: false);
+        ValidateInfoRecord(SafeInfo(info), Key(scope, song, signature), signature, size, duration, decoded: false);
         expires = receipt.ExpiresAt;
     }
 
-    private async Task PruneAsync(long requiredBytes, CancellationToken token)
+    private async Task<long> PruneAsync(long requiredBytes, CancellationToken token)
     {
         await metadataGate.WaitAsync(token).ConfigureAwait(false);
         try
         {
             long epoch = Interlocked.Read(ref clearEpoch);
             long now = Now;
-            var keep = await database.WriteAsync(db =>
+            long deferredBytes = DeferredDeleteBytes();
+            var (keep, deletedRows, retainedBytes) = await database.WriteAsync(db =>
             {
-                if (!Volatile.Read(ref readable)) return new HashSet<string>(StringComparer.Ordinal);
                 var summaries = AudioFileCacheStore.ReadSummaries(db);
                 var alive = new List<(string Key, string FileName, long FileSize)>(summaries.Count);
-                var toDelete = new List<string>();
-                long used = 0;
+                var toDelete = new List<(string Key, string FileName, long FileSize)>();
+                long used = deferredBytes;
                 foreach (var item in summaries)
                 {
                     bool valid = item.ConfirmedAtMs > 0 && item.ConfirmedAtMs <= now &&
@@ -697,57 +968,134 @@ internal sealed partial class MusicAudioFileCache
                         item.FileSize is > 0 and <= Capacity;
                     if (!valid)
                     {
-                        toDelete.Add(item.Key);
+                        toDelete.Add((item.Key, item.FileName, item.FileSize));
                         continue;
                     }
                     alive.Add((item.Key, item.FileName, item.FileSize));
                     used += item.FileSize;
                 }
-                int keptStart = 0;
-                while (keptStart < alive.Count && used > Capacity - requiredBytes)
+                var retained = new HashSet<string>(StringComparer.Ordinal);
+                long retainedSize = 0;
+                foreach (var item in alive)
                 {
-                    used -= alive[keptStart].FileSize;
-                    toDelete.Add(alive[keptStart].Key);
-                    keptStart++;
+                    if (used > Capacity - requiredBytes && !IsProtectedFile(item.FileName))
+                    {
+                        used -= item.FileSize;
+                        toDelete.Add(item);
+                    }
+                    else
+                    {
+                        retained.Add(item.FileName);
+                        retainedSize += item.FileSize;
+                    }
                 }
                 if (toDelete.Count > 0)
                 {
-                    foreach (string key in toDelete)
-                        db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key=$key", ("$key", key));
+                    foreach (var item in toDelete)
+                        db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key=$key", ("$key", item.Key));
                     db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 }
-                var retained = new HashSet<string>(alive.Count - keptStart, StringComparer.Ordinal);
-                for (int i = keptStart; i < alive.Count; i++) retained.Add(alive[i].FileName);
-                return retained;
+                return (retained, toDelete, retainedSize);
             }, token, commit: commit =>
             {
                 if (epoch != Interlocked.Read(ref clearEpoch)) throw new OperationCanceledException(token);
                 commit();
             }).ConfigureAwait(false);
-            CheckRoot();
-            foreach (var path in Directory.EnumerateFiles(root, "*.audio"))
+
+            foreach (var item in deletedRows)
+                DeleteOrDefer(item.FileName, item.FileSize);
+
+            long activeTempBytes = 0;
+            if (Directory.Exists(root))
             {
-                token.ThrowIfCancellationRequested();
-                string name = Path.GetFileName(path);
-                if (!keep.Contains(name)) TryDelete(name);
+                bool sweepAll = !startupSwept;
+                startupSwept = true;
+                foreach (var path in Directory.EnumerateFiles(root))
+                {
+                    token.ThrowIfCancellationRequested();
+                    string name = Path.GetFileName(path);
+                    if (keep.Contains(name)) continue;
+                    if (IsProtectedFile(name))
+                    {
+                        bool isPendingDelete;
+                        lock (stateGate) isPendingDelete = pendingDeletes.ContainsKey(name);
+                        if (!isPendingDelete && ValidPartName(name))
+                        {
+                            try { activeTempBytes += new FileInfo(path).Length; }
+                            catch (IOException) { }
+                            catch (UnauthorizedAccessException) { }
+                        }
+                        continue;
+                    }
+                    if (sweepAll || ValidCommittedName(name) || ValidPartName(name))
+                        TryDeletePath(path);
+                }
             }
+            return retainedBytes + DeferredDeleteBytes() + activeTempBytes;
         }
         finally { metadataGate.Release(); }
     }
 
-    private void TryDelete(string file)
+    private void TryDeleteFile(string fileName) => TryDeletePath(Path.Combine(root, fileName));
+
+    private static void TryDeletePath(string path)
     {
-        try { File.Delete(FilePath(file)); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* Active read leases keep the file; prune on next use. */ }
+        try { if (File.Exists(path)) File.Delete(path); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
     private static bool OptionalFileFailure(Exception e) => e is IOException or UnauthorizedAccessException;
 
-    private sealed class ReadLease(FileStream file, CancellationToken revoked) : INativeMediaReadLease
+    public ValueTask DisposeAsync()
     {
+        lock (stateGate)
+        {
+            closed = true;
+            return new(disposal ??= DisposeCoreAsync());
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
+        try { lifetime.Cancel(); } catch (ObjectDisposedException) { }
+        CancellationTokenSource? transfer;
+        lock (stateGate) transfer = activeTransfer;
+        try { transfer?.Cancel(); } catch (ObjectDisposedException) { }
+
+        await transferGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            await metadataGate.WaitAsync().ConfigureAwait(false);
+            metadataGate.Release();
+        }
+        finally
+        {
+            transferGate.Release();
+        }
+        lock (stateGate)
+        {
+            activeByKey.Clear();
+            activeReadLeases.Clear();
+            pendingDeletes.Clear();
+            activeTemporaries.Clear();
+        }
+        transferGate.Dispose();
+        metadataGate.Dispose();
+        lifetime.Dispose();
+    }
+
+    private sealed class ReadLease(MusicAudioFileCache owner, string fileName, FileStream file,
+        CancellationToken revoked) : INativeMediaReadLease
+    {
+        private int released;
         public Stream Content => file;
         public long Length => file.Length;
         public CancellationToken Revoked => revoked;
-        public ValueTask DisposeAsync() => file.DisposeAsync();
+        public async ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref released, 1) != 0) return;
+            try { await file.DisposeAsync().ConfigureAwait(false); }
+            finally { owner.ReleaseReadLease(fileName); }
+        }
     }
 }

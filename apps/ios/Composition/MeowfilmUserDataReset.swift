@@ -38,13 +38,15 @@ final class MeowfilmUserDataReset: @unchecked Sendable {
 
     static func isolated(dataRoot: URL) throws -> MeowfilmUserDataReset {
         let normalized = dataRoot.standardizedFileURL
-        try FileManager.default.createDirectory(at: normalized, withIntermediateDirectories: true)
         let markerParent = normalized.deletingLastPathComponent()
         return .init(
             support: markerParent,
             markerName: ".\(normalized.lastPathComponent)-reset.pending",
             directories: [normalized],
             clearNetworkState: {
+                let cookies = HTTPCookieStorage.shared
+                for cookie in cookies.cookies ?? [] { cookies.deleteCookie(cookie) }
+                guard cookies.cookies?.isEmpty != false else { throw Failure.cookies }
                 URLCache.shared.removeAllCachedResponses()
             }
         )

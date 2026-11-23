@@ -228,7 +228,11 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var collectionCatalogueID = UUID()
     public var accountAccessGeneration: UUID { lifecycle }
     public private(set) var searchAccessGeneration = UUID() {
-        didSet { searchResultsCache = MusicSearchResultsCache.make() }
+        didSet {
+            let previous = searchResultsCache
+            searchResultsCache = MusicSearchResultsCache.make()
+            Task { await previous.invalidate() }
+        }
     }
     var searchResultsCache = MusicSearchResultsCache.make()
     var sourceIntent = MusicSourceIntent.automatic
@@ -585,6 +589,25 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         prepareForClose()
         await closingTask?.value
     }
+    public func debugCacheStats() async -> DebugJSONValue {
+        let searchStats = await searchResultsCache.stats()
+        return .object([
+            "lyricMemoryCache": playbackMetadata.debugLyricCacheStats(),
+            "searchResultsCache": .object([
+                "entryCount": .int(searchStats.entryCount),
+                "inFlightCount": .int(searchStats.inFlightCount),
+                "totalCost": .int(searchStats.totalCost),
+                "capacity": searchStats.capacity.map(DebugJSONValue.int) ?? .null,
+                "maximumCost": .int(searchStats.maximumCost)
+            ])
+        ])
+    }
+
+    public func debugClearMemoryCaches() async {
+        playbackMetadata.clearMemoryLyricCache()
+        await searchResultsCache.invalidate()
+    }
+
     private func completeClose(attemptID: String?) async {
         await searchPreferences.close()
         do { try await searchHistory.close() } catch { self.error = "搜索历史关闭失败" }
@@ -604,6 +627,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         metadataPreferencesRefreshRequested = false
         metadataPreferencesRefreshTask?.cancel()
         await playbackMetadata.close()
+        await searchResultsCache.invalidate()
         notifyCollectionPages(.access)
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false
         invalidateSelection(stopMedia: true)

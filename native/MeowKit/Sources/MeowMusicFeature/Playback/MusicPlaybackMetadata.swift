@@ -1,5 +1,6 @@
 import Foundation
 #if os(iOS) || os(macOS)
+import MeowDebug
 
 /// Lyrics use permanent-song/source references. Artwork bytes belong only to
 /// the shared image loader; this owner publishes the repository's chosen URL.
@@ -98,6 +99,8 @@ import Foundation
     func flush() async {
         await task?.value; await artworkTask?.value; await lyrics.flush()
     }
+    func debugLyricCacheStats() -> DebugJSONValue { lyrics.debugStats() }
+    func clearMemoryLyricCache() { lyrics.removeAll() }
     private func load(_ entry: MusicQueueEntry, session id: UUID, access: UUID) async {
         do {
             guard let service else { throw MusicServiceError.unavailable }

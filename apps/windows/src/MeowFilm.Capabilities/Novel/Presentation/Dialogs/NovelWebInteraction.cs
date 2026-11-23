@@ -58,7 +58,8 @@ internal sealed record NovelWebRequest(string Mode, string Url, string Html, str
 /// <summary>One ephemeral browser profile per pending source interaction, physically retired before returning.</summary>
 internal static class NovelWebInteraction
 {
-    internal static async Task<object?> ShowAsync(FrameworkElement owner, NovelRuleProgram rules, JsonElement pending, CancellationToken token)
+    internal static async Task<object?> ShowAsync(FrameworkElement owner, NovelRuleProgram rules, JsonElement pending,
+        CancellationToken token, string? tempRoot = null)
     {
         var input = NovelWebRequest.Parse(pending);
         if ((input.Mode is "verificationCode" or "getVerificationCode") && input.Url.Length == 0)
@@ -82,7 +83,8 @@ internal static class NovelWebInteraction
         bool navigationSucceeded = false;
         bool navigationFailed = false;
         var selectedUrl = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        string profile = Path.Combine(Path.GetTempPath(), "meowfilm", "novel-web", Guid.NewGuid().ToString("N"));
+        ArgumentException.ThrowIfNullOrWhiteSpace(tempRoot);
+        string profile = Path.Combine(tempRoot, "novel-web", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(profile);
         using var retired = CancellationTokenSource.CreateLinkedTokenSource(token);
         CoreWebView2Environment? environment = null;

@@ -12,6 +12,7 @@ internal sealed partial class MusicAudioFileCache
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource changed = NewSignal();
         private string? path;
+        private string? leasedFinalName;
         private long length, received, visiblePrefix;
         private int opened;
         private int readers;
@@ -41,7 +42,6 @@ internal sealed partial class MusicAudioFileCache
             lock (bytesGate)
             {
                 received = count;
-                // The final write is not a successful EOF/inspection/commit.
                 if (length > 0 && count < length) visiblePrefix = count;
             }
             Pulse();
@@ -55,9 +55,20 @@ internal sealed partial class MusicAudioFileCache
             }
             Pulse();
         }
-        internal void Published()
+        internal void Published(string committedPath, string committedName)
         {
-            lock (bytesGate) published = true;
+            bool acquireLease = false;
+            lock (bytesGate)
+            {
+                path = committedPath;
+                published = true;
+                if (readers > 0 && leasedFinalName is null)
+                {
+                    leasedFinalName = committedName;
+                    acquireLease = true;
+                }
+            }
+            if (acquireLease) owner.AcquireReadLease(committedName);
             Pulse();
         }
         internal void SourceFailed(Exception error)
@@ -81,13 +92,25 @@ internal sealed partial class MusicAudioFileCache
         private void CleanupRetiredFile()
         {
             string? remove;
+            string? releaseLease = null;
             lock (bytesGate)
             {
+                if (readers == 0 && leasedFinalName is not null)
+                {
+                    releaseLease = leasedFinalName;
+                    leasedFinalName = null;
+                }
                 remove = workFinished && !published && readers == 0 && disposed != 0 ? path : null;
                 if (remove is not null) path = null;
             }
+            if (releaseLease is not null)
+                owner.ReleaseReadLease(releaseLease);
             if (remove is not null)
-                try { File.Delete(remove); } catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            {
+                owner.UnregisterTemporary(Path.GetFileName(remove));
+                try { if (File.Exists(remove)) File.Delete(remove); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
         }
         private void CheckSource()
         {
@@ -137,7 +160,7 @@ internal sealed partial class MusicAudioFileCache
                     SeekOrigin.End => length, _ => throw new ArgumentOutOfRangeException(nameof(origin)) }) + offset);
                 if (next < 0 || next > length) throw new IOException("CACHE_READ_SEEK");
                 file.Position = position = next;
-                return position; // No producer cancellation, seek or network request.
+                return position;
             }
             public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
             {
@@ -165,7 +188,7 @@ internal sealed partial class MusicAudioFileCache
             public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
                 ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
             public override int Read(byte[] buffer, int offset, int count) =>
-                ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+                throw new NotSupportedException("Use ReadAsync on GrowingStream.");
             public override void Flush() { }
             public override void SetLength(long value) => throw new NotSupportedException();
             public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();

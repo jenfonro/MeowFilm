@@ -179,8 +179,11 @@ CREATE TABLE ios_music_audio_files (
 -- Disposable source discovery cache (logical song_id reference; never holds cross-DB FK into permanent data DB).
 CREATE TABLE ios_music_source_discovery (
     song_id TEXT PRIMARY KEY NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
+
+CREATE INDEX idx_ios_music_source_discovery_updated ON ios_music_source_discovery(updated_at_ms, song_id);
 
 CREATE TABLE ios_music_source_discovery_platforms (
     song_id TEXT NOT NULL REFERENCES ios_music_source_discovery(song_id) ON DELETE CASCADE,

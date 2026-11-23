@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 import MeowStorage
 
@@ -18,6 +19,7 @@ public protocol MusicSourceDiscoveryCaching: Sendable {
     func entries(songID: String) async -> [String: MusicSourceDiscoveryEntry]
     func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) async
     func persist(retaining songIDs: [String]) async
+    func clear() async throws
 }
 public extension MusicSourceDiscoveryCaching {
     func entries(songID: String) async -> [String: MusicSourceDiscoveryEntry] {
@@ -69,6 +71,7 @@ public actor MusicNativeMemorySourceDiscoveryCache: MusicSourceDiscoveryCaching 
         state.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
     }
     public func persist(retaining songIDs: [String]) {}
+    public func clear() { state.records.removeAll() }
 }
 
 public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCaching {
@@ -76,17 +79,22 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
     private let database: SQLiteDatabase
     private let maximumBytes: Int
     private var loaded: Set<String> = []
+    private var allLoaded = false
     private var dirty: Set<String> = []
     private var state = SourceDiscoveryState()
     public init(database: SQLiteDatabase, maximumBytes: Int = 4 * 1024 * 1024) {
         self.database = database; self.maximumBytes = maximumBytes
     }
+    private static func nowMillis() -> Int64 {
+        Int64((Date().timeIntervalSince1970 * 1000).rounded())
+    }
     private func prepare(_ songID: String) -> Bool {
-        if loaded.contains(songID) { return true }
+        if allLoaded || loaded.contains(songID) { return true }
         do {
+            let nowMs = Self.nowMillis()
             let saved = try database.readSync { db in
                 try SQLiteDatabase.readSnapshot(db) { db in
-                    try MusicSourceDiscoveryStore.read(db, songID: songID)
+                    try MusicSourceDiscoveryStore.read(db, songID: songID, nowMs: nowMs)
                 }
             }
             if let saved {
@@ -105,8 +113,26 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
         } catch { return false }
     }
     public func entries() -> [String: [String: MusicSourceDiscoveryEntry]] {
-        if let ids = try? database.readSync({ try MusicSourceDiscoveryStore.allSongIDs($0) }) {
-            for id in ids { _ = prepare(id) }
+        if !allLoaded {
+            let nowMs = Self.nowMillis()
+            if let all = try? database.readSync({ db in
+                try SQLiteDatabase.readSnapshot(db) { try MusicSourceDiscoveryStore.readAll($0, nowMs: nowMs) }
+            }) {
+                for (songID, saved) in all where !loaded.contains(songID) {
+                    var combined = SourceDiscoveryState(records: [songID: saved])
+                    if let platforms = state.records[songID] {
+                        for entry in platforms.values {
+                            for observation in entry.observations.sorted(by: { $1.isNewer(than: $0) }) {
+                                combined.observe(songID: songID, observation: observation, sourceKeys: entry.sourceKeys,
+                                              maximumBytes: maximumBytes)
+                            }
+                        }
+                    }
+                    state.records[songID] = combined.records[songID]
+                    loaded.insert(songID)
+                }
+                allLoaded = true
+            }
         }
         return state.records
     }
@@ -115,25 +141,50 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
         return state.records[songID] ?? [:]
     }
     public func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) {
-        // A failed disk read is a recoverable cache miss, not permission to
-        // overwrite unread storage. The in-memory query status remains usable.
         _ = prepare(songID)
         state.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
         dirty.insert(songID)
     }
     public func persist(retaining songIDs: [String]) {
         let retained = Set(songIDs)
+        // Evict unretained songs from in-memory state as well as SQLite.
+        for id in Array(state.records.keys) where !retained.contains(id) {
+            state.records.removeValue(forKey: id)
+            loaded.remove(id)
+            dirty.remove(id)
+        }
         let savedIDs = dirty.intersection(retained).filter { prepare($0) }
         let records = savedIDs.compactMap { id -> (songID: String, storedBytes: Int, platforms: [String: MusicSourceDiscoveryEntry])? in
             guard let platforms = state.records[id] else { return nil }
             return (id, SourceDiscoveryState.bytes(platforms), platforms)
         }
         do {
+            let nowMs = Self.nowMillis()
             try database.transactionSync { db in
-                try MusicSourceDiscoveryStore.persist(db, retained: retained, records: records, maximumBytes: maximumBytes)
+                try MusicSourceDiscoveryStore.persist(db, retained: retained, records: records,
+                                                      maximumBytes: maximumBytes, nowMs: nowMs)
             }
             dirty.subtract(savedIDs); dirty.formIntersection(state.records.keys)
         } catch {}
+    }
+    public func clear() throws {
+        state.records.removeAll()
+        loaded.removeAll()
+        dirty.removeAll()
+        allLoaded = true
+        try database.transactionSync { db in
+            try MusicSourceDiscoveryStore.clear(db)
+        }
+    }
+    public func debugStats() -> DebugJSONValue {
+        let dbStats = (try? database.readSync { try MusicSourceDiscoveryStore.stats($0) }) ?? (songCount: 0, storedBytes: 0)
+        return .object([
+            "songCount": .int(dbStats.songCount),
+            "storedBytes": .integer(dbStats.storedBytes),
+            "memorySongCount": .int(state.records.count),
+            "dirtyCount": .int(dirty.count),
+            "capacityBytes": .int(maximumBytes)
+        ])
     }
 }
 

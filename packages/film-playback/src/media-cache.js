@@ -37,7 +37,16 @@ export function cacheGaps(entry, start, end) {
 
 export function createMediaCachePool() {
   let allocated = 0;
+  const activeOwners = new Set();
   return {
+    diagnostics() {
+      return {
+        allocatedBytes: allocated,
+        poolBudgetBytes: poolBudget,
+        ownerBudgetBytes: ownerBudget,
+        activeOwners: activeOwners.size,
+      };
+    },
     create() {
       const records = new Map(), pending = new Map();
       let allocatedOwner = 0, revoked = false;
@@ -55,7 +64,7 @@ export function createMediaCachePool() {
           ranges: values.map(record => ({ start: record.start, end: record.end, body: record.body }))
             .sort((a, b) => a.start - b.start || b.end - a.end) };
       }
-      return {
+      const handle = {
         binary,
         document(key) {
           return [...records.values()].find(record => record.kind === 'document' && record.documentKey === key);
@@ -100,7 +109,7 @@ export function createMediaCachePool() {
           return promise;
         },
         get bytes() {
-          return [...records.values()].filter(record => record.kind === 'binary')
+          return [...records.values()]
             .reduce((total, record) => total + record.body.length, 0);
         },
         revoke() { revoked = true; },
@@ -109,8 +118,11 @@ export function createMediaCachePool() {
           await Promise.allSettled([...pending.values()].map(value => value.promise));
           for (const record of records.values()) unreserve(record.body.length);
           records.clear();
+          activeOwners.delete(handle);
         },
       };
+      activeOwners.add(handle);
+      return handle;
     },
   };
 }
