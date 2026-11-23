@@ -15,7 +15,7 @@ import MeowStorage
     public init() {}
     public func bind(database: SQLiteDatabase) async throws {
         guard self.database == nil, !closed else { return }
-        let saved = try await database.read { try $0.query("SELECT channel_key FROM ios_music_channel_selection WHERE singleton=1").first?.text("channel_key") }
+        let saved = try await database.read { try MusicChannelSelectionRepository.load($0) }
         guard !closed else { return }
         self.database = database
         if remembered == nil { remembered = saved }
@@ -32,8 +32,7 @@ import MeowStorage
                 pending = nil
                 do {
                     try await database.transaction { db in
-                        try db.upsert("ios_music_channel_selection", columns: ["singleton", "channel_key"],
-                            values: [.integer(1), .text(next)], key: ["singleton"])
+                        try MusicChannelSelectionRepository.save(next, db)
                     }
                     persistenceError = nil
                 } catch { persistenceError = "频道选择保存失败" }

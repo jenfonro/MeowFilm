@@ -42,12 +42,12 @@ extension NativeMusicService: MusicHomeBrowsing {
         try musicRequire(current.revision == ifRevision, .staleRevision)
         guard current.platform != source else { return homeSourceSelection(current) }
         let saved: (platform: MusicPublicBrowsePlatform, revision: Int) =
-            try transaction(["catalogSource"], reportingCancellationAfterCommit: false) { document in
-            let revision = document.catalogSource["revision"].int
+            try transaction([.catalogSource], reportingCancellationAfterCommit: false) { state in
+            let revision = state.catalogSource.revision
             try musicRequire(revision == ifRevision, .staleRevision)
-            try musicRequire(revision < 9_007_199_254_740_991, .limit)
-            document.catalogSource["revision"] = .n(revision + 1)
-            document.catalogSource["platform"] = .string(source.rawValue)
+            try musicRequire(revision < musicMaxSafeInteger, .limit)
+            state.catalogSource.revision = revision + 1
+            state.catalogSource.platform = source.rawValue
             return (platform: source, revision: revision + 1)
         }
         adoptHomeSource(saved)
@@ -57,11 +57,12 @@ extension NativeMusicService: MusicHomeBrowsing {
     /// never becomes a request against a default platform.
     func loadHomeSource() throws -> (platform: MusicPublicBrowsePlatform, revision: Int) {
         let value = try read().catalogSource
-        guard value["schema"] == .n(1), value["revision"].isInteger,
-              let platform = MusicPublicBrowsePlatform(rawValue: value["platform"].string), Self.homeSources.contains(platform) else {
-            throw MusicServiceError.corruptDocument
+        guard (0...musicMaxSafeInteger).contains(value.revision),
+              let platform = MusicPublicBrowsePlatform(rawValue: value.platform),
+              Self.homeSources.contains(platform) else {
+            throw MusicServiceError.corruptStorage
         }
-        let result = (platform: platform, revision: value["revision"].int)
+        let result = (platform: platform, revision: value.revision)
         adoptHomeSource(result)
         return result
     }
@@ -249,8 +250,8 @@ extension NativeMusicService: MusicHomeBrowsing {
         let display = try access.perform {
             if !homeDisplayPrepared {
                 homeDisplayPrepared = true
-                if let data = try? homeSnapshot?.read() {
-                    homeDisplay = try? MusicNativeHomeSnapshot.restore(data)
+                if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
+                    homeDisplay = try? store.readDisplay()
                 }
             }
             return homeDisplay
@@ -485,10 +486,10 @@ extension NativeMusicService: MusicHomeBrowsing {
                     homeCache = (load.source, load.binding.scope, load.binding.revision,
                                  now().addingTimeInterval(600), cachedDisplay)
                 }
-                if let data = try? MusicNativeHomeSnapshot.encode(display, source: load.source) {
-                    // Serialization/storage failure keeps the previous durable
-                    // success without discarding the usable in-memory display.
-                    try? homeSnapshot?.write(data)
+                if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
+                    // Storage failure keeps the previous durable success
+                    // without discarding the usable in-memory display.
+                    try? store.writeDisplay(display, source: load.source)
                 }
                 return page
             }
@@ -510,7 +511,7 @@ extension NativeMusicService: MusicHomeBrowsing {
     }
     private func finishHome(_ value: MusicNativePublicBrowseDiscovery, destination: MusicPublicBrowseDestination,
                             position: MusicNativePublicBrowseCursor, key: String, source: MusicPublicBrowsePlatform, epoch own: UUID,
-                            songs: [Data: MJ]) throws -> MusicPublicBrowsePage {
+                            songs: [Data: MusicSongRecord]) throws -> MusicPublicBrowsePage {
         try check(own)
         let prefix = source.rawValue + ":" + MusicNativePublicBrowseDiscovery.key(destination) + ":"
         let sections = try publicSections(value, prefix: prefix, songs: songs)

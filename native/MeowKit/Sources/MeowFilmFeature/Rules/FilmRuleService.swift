@@ -7,7 +7,7 @@ import MeowRuntime
 public actor FilmRuleService {
     public typealias Request = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
     private let request: Request
-    private let settingsDocument: FilmSettingsDocument
+    private let settingsRepository: FilmSettingsRepository
     private var saved: FilmRuleSet?
     private var savedStorageRevision: Int64?
     public private(set) var revision: RuntimeValue?
@@ -22,15 +22,15 @@ public actor FilmRuleService {
     private var closed = false
     private var closing: Task<Void, Never>?
 
-    public init(settingsDocument: FilmSettingsDocument,
+    public init(settingsRepository: FilmSettingsRepository,
                 connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
-        self.settingsDocument = settingsDocument
+        self.settingsRepository = settingsRepository
         let transport = FilmPlaybackTransport(connectionProvider: connection)
         request = { try await transport.call($0, parameters: $1) }
     }
 
-    public init(settingsDocument: FilmSettingsDocument, request: @escaping Request) {
-        self.settingsDocument = settingsDocument; self.request = request
+    public init(settingsRepository: FilmSettingsRepository, request: @escaping Request) {
+        self.settingsRepository = settingsRepository; self.request = request
     }
 
     public func initialize() async throws {
@@ -54,19 +54,15 @@ public actor FilmRuleService {
     }
 
     private func saveGroup(_ group: FilmRuleGroup, rules: [FilmMatchRule]) async throws -> FilmRuleSet {
-        let document = try await settingsDocument.updateSnapshot { current in
-            var snapshot = try FilmRuleSettings.read(current)
+        let saved = try await settingsRepository.updateRules { current in
+            var snapshot = FilmRuleSettings.ruleSet(from: current)
             snapshot.replace(group, with: rules)
             let normalized = FilmRuleSettings.normalize(snapshot)
-            var fields = try current?.filmObject?["rules"]?.filmObject ??
-                Self.value(FilmRuleSettings.initial).filmRequiredObject()
-            let key = FilmRuleSettings.key(group)
-            fields[key] = try Self.value(normalized).filmObject![key]
-            var envelope = current?.filmObject ?? ["version": .number(1)]
-            envelope["rules"] = .object(fields)
-            return .object(envelope)
+            var merged = FilmRuleSettings.ruleSet(from: current)
+            merged.replace(group, with: normalized.rules(in: group))
+            return FilmRuleSettings.record(from: merged)
         }
-        return try accept(FilmRuleSettings.read(document.document), storageRevision: document.revision)
+        return try accept(FilmRuleSettings.ruleSet(from: saved.value), storageRevision: saved.revision)
     }
 
     /// Defaults are a draft value; requesting them never writes the document.
@@ -95,15 +91,15 @@ public actor FilmRuleService {
 
     private func restoreLocal(_ section: FilmRuleSection, draft: FilmRuleSet?) async throws -> FilmRuleSet {
         let expected = draft == nil ? nil : savedStorageRevision
-        let document = try await settingsDocument.updateSnapshot(expectedRevision: expected) { current in
-            var snapshot = try draft ?? FilmRuleSettings.read(current)
+        let saved = try await settingsRepository.updateRules(expectedRevision: expected) { current in
+            var snapshot = draft ?? FilmRuleSettings.ruleSet(from: current)
             let defaults = FilmRuleSettings.restore
             for group in FilmRuleGroup.allCases where group.section == section {
                 snapshot.replace(group, with: defaults.rules(in: group))
             }
-            return try Self.document(current, rules: FilmRuleSettings.normalize(snapshot))
+            return FilmRuleSettings.record(from: FilmRuleSettings.normalize(snapshot))
         }
-        return try accept(FilmRuleSettings.read(document.document), storageRevision: document.revision)
+        return try accept(FilmRuleSettings.ruleSet(from: saved.value), storageRevision: saved.revision)
     }
 
     /// Preview goes directly to Node, with no preliminary get or local execution.
@@ -190,8 +186,8 @@ public actor FilmRuleService {
     }
 
     private func refresh() async throws {
-        let snapshot = try await settingsDocument.snapshot()
-        let rules = try FilmRuleSettings.read(snapshot.document)
+        let snapshot = try await settingsRepository.readRules()
+        let rules = FilmRuleSettings.ruleSet(from: snapshot.value)
         try Task.checkCancellation()
         _ = try accept(rules, storageRevision: snapshot.revision)
     }
@@ -199,20 +195,11 @@ public actor FilmRuleService {
     private func saveLocal(_ draft: FilmRuleSet) async throws -> FilmRuleSet {
         let expected: Int64
         if let savedStorageRevision { expected = savedStorageRevision }
-        else { expected = try await settingsDocument.snapshot().revision }
-        let document = try await settingsDocument.updateSnapshot(expectedRevision: expected) { current in
-            try Self.document(current, rules: FilmRuleSettings.normalize(draft))
+        else { expected = try await settingsRepository.readRules().revision }
+        let saved = try await settingsRepository.updateRules(expectedRevision: expected) { _ in
+            FilmRuleSettings.record(from: FilmRuleSettings.normalize(draft))
         }
-        return try accept(FilmRuleSettings.read(document.document), storageRevision: document.revision)
-    }
-
-    private static func document(_ current: RuntimeValue?, rules: FilmRuleSet) throws -> RuntimeValue {
-        _ = try FilmRuleSettings.read(current)
-        var fields = current?.filmObject?["rules"]?.filmObject ?? RuntimeObject()
-        for (key, value) in try Self.value(rules).filmRequiredObject() { fields[key] = value }
-        var envelope = current?.filmObject ?? ["version": .number(1)]
-        envelope["rules"] = .object(fields)
-        return .object(envelope)
+        return try accept(FilmRuleSettings.ruleSet(from: saved.value), storageRevision: saved.revision)
     }
 
     private func accept(_ snapshot: FilmRuleSet, storageRevision: Int64) throws -> FilmRuleSet {

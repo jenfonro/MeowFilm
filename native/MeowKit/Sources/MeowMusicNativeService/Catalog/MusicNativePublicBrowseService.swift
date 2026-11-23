@@ -1,21 +1,34 @@
 import Foundation
 import MeowMusicFeature
+import MeowMusicPlatform
+import MeowRuntime
 
 /// Page continuation belongs to one native request/access lifetime. It carries
 /// the provider's continuation, never a content digest or platform authority.
 struct MusicNativePublicBrowseCursor {
     let offset: Int
-    let remote: MJ
+    let remote: RuntimeValue
     static func read(_ text: String?, key: String, epoch: UUID) throws -> Self {
-        guard let text else { return .init(offset: 0, remote: .obj()) }
+        guard let text else { return .init(offset: 0, remote: .object([:])) }
         guard let data = Data(base64Encoded: text) else { throw MusicServiceError.invalidRequest }
-        let row = try MJ.parse(data)
-        try musicRequire(row["key"].string == key && row["epoch"].string == epoch.uuidString, .staleResult)
-        return .init(offset: try row["offset"].integer(), remote: row["remote"])
+        let row: RuntimeValue
+        do { row = try RuntimeJSON.decode(data) } catch { throw MusicServiceError.invalidRequest }
+        try musicRequire(row[music: "key"].musicText == key && row[music: "epoch"].musicText == epoch.uuidString, .staleResult)
+        guard let num = row[music: "offset"].musicNumber, num.isFinite, num.rounded(.towardZero) == num,
+              let offset = Int(exactly: num) else {
+            throw MusicServiceError.invalidRequest
+        }
+        let remote = row[music: "remote"]
+        return .init(offset: offset, remote: remote == .null ? .object([:]) : remote)
     }
-    func encode(key: String, epoch: UUID, offset: Int, remote: MJ = .obj()) throws -> String {
-        MJ.obj([("key", .string(key)), ("epoch", .string(epoch.uuidString)),
-            ("offset", .n(offset)), ("remote", remote)]).bytes.base64EncodedString()
+    func encode(key: String, epoch: UUID, offset: Int, remote: RuntimeValue = .object([:])) throws -> String {
+        let payload: RuntimeValue = .object([
+            "key": .string(key),
+            "epoch": .string(epoch.uuidString),
+            "offset": .number(Double(offset)),
+            "remote": remote
+        ])
+        return try RuntimeJSON.encode(payload).base64EncodedString()
     }
 }
 
@@ -79,7 +92,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         let rows = try await metadataPage(.init(items: result.tracks)).items
         try check(own); try musicRequire(revision == publicCollectionRevision, .staleResult)
         let members = try rows.enumerated().map { index, track in
-            MusicPublicBrowseMember(nativeID: try MJ.parse(result.tracks[index].data)["songmid"].id,
+            MusicPublicBrowseMember(nativeID: try MusicWireCodec.extractSongmid(from: result.tracks[index].data),
                 sourcePosition: result.sourcePositions.indices.contains(index) ? result.sourcePositions[index] : nil, track: track)
         }
         return .init(collection: result.collection, members: members, total: result.total, cursor: next,
@@ -115,7 +128,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             let key = "daily:" + platform.rawValue, own = epoch
             let position = try MusicNativePublicBrowseCursor.read(cursor, key: key, epoch: own)
             guard let accounts else { throw MusicServiceError.authRequired }
-            let remote = position.remote["cursor"].string
+            let remote = position.remote[music: "cursor"].musicText
             let page = try await work(label: "publicBrowse") {
                 try await accounts.nativeRecommendations(platform: platform, kind: "daily", cursor: remote.isEmpty ? nil : remote)
             }
@@ -124,7 +137,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
             let items = tracks.map { MusicPublicBrowseItem(id: $0.songId, title: $0.title, subtitle: $0.artist,
                 artwork: $0.artwork, content: .track($0)) }
             let next = try page.cursor.map { try position.encode(key: key, epoch: own, offset: position.offset + items.count,
-                remote: .obj([("cursor", .string($0))])) }
+                remote: .object(["cursor": .string($0)])) }
             return .init(sections: [.init(id: key, title: "每日推荐", items: items)], cursor: next)
         }
         let selectedSource = try currentHomeSource(), sourceRevision = homeSourceRevision, own = epoch
@@ -146,7 +159,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
                      notice: result.notice, consumed: result.consumed)
     }
     func publicSections(_ result: MusicNativePublicBrowseDiscovery, prefix: String,
-                        songs: [Data: MJ]) throws -> [MusicPublicBrowseSection] {
+                        songs: [Data: MusicSongRecord]) throws -> [MusicPublicBrowseSection] {
         try result.sections.map { section in
             let tabs = try section.tabs.map { tab in
                 MusicPublicBrowseSectionTab(id: tab.id, title: tab.title,
@@ -160,7 +173,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         }
     }
     private func publicItems(_ rows: [MusicNativePublicBrowseItem], layout: MusicPublicBrowseSection.Layout,
-                             songs: [Data: MJ]) throws -> [MusicPublicBrowseItem] {
+                             songs: [Data: MusicSongRecord]) throws -> [MusicPublicBrowseItem] {
         try rows.map { item in
             let content: MusicPublicBrowseContent
             var title = item.title, subtitle = item.subtitle, artwork = item.artwork
@@ -203,8 +216,4 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
                 contextText: item.contextText, playCount: item.playCount)
         }
     }
-}
-
-enum MusicNativePublicBrowseSupport {
-    static func artwork(_ value: MJ) -> URL? { MusicArtworkURL.normalized(value.string) }
 }

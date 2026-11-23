@@ -12,11 +12,11 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
     @Published public private(set) var busy = false
     @Published public private(set) var preferencesBusy = false
     private let transport: FilmPlaybackTransport
-    private let settingsDocument: FilmSettingsDocument
+    private let settingsRepository: FilmSettingsRepository
     public var playbackSnapshot: (@MainActor () -> FilmPlaybackSnapshot?)?
 
-    public init(transport: FilmPlaybackTransport, settingsDocument: FilmSettingsDocument) {
-        self.transport = transport; self.settingsDocument = settingsDocument
+    public init(transport: FilmPlaybackTransport, settingsRepository: FilmSettingsRepository) {
+        self.transport = transport; self.settingsRepository = settingsRepository
     }
 
     public func loadPreferences() async throws {
@@ -25,7 +25,8 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
     }
 
     func reloadPreferences() async throws {
-        let value = try await FilmPlaybackPreferences(Self.preferences(in: settingsDocument.read()))
+        let record = try await settingsRepository.readPreferences().value
+        let value = try Self.preferences(from: record)
         try Task.checkCancellation()
         if preferences != value { preferences = value }
         if draft == nil { draft = value }
@@ -33,14 +34,12 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
 
     func setMetadataViewProvider(_ provider: FilmMetadataProvider) async throws {
         try beginPreferences(); defer { preferencesBusy = false }
-        let document = try await settingsDocument.update { current in
-            var value = try FilmPlaybackPreferences(Self.preferences(in: current))
+        let savedRecord = try await settingsRepository.updatePreferences { current in
+            var value = try Self.preferences(from: current)
             value.metadataViewProvider = provider
-            var envelope = current?.filmObject ?? ["version": .number(1)]
-            envelope["preferences"] = value.value
-            return .object(envelope)
+            return Self.record(from: value)
         }
-        let saved = try FilmPlaybackPreferences(Self.preferences(in: document))
+        let saved = try Self.preferences(from: savedRecord.value)
         if preferences != saved { preferences = saved }
         if draft == nil { draft = saved }
     }
@@ -96,23 +95,40 @@ public final class FilmPlaybackSettingsModel: ObservableObject {
         var patch = try Self.normalize(draft.editedValues)
         patch["metadataViewProvider"] = nil
         let savedPatch = patch
-        let document = try await settingsDocument.update { current in
-            var values = try Self.preferences(in: current).filmRequiredObject()
+        let savedRecord = try await settingsRepository.updatePreferences { current in
+            let currentPrefs = try Self.preferences(from: current)
+            var values = try currentPrefs.value.filmRequiredObject()
             for (key, value) in savedPatch { values[key] = value }
-            var envelope = current?.filmObject ?? ["version": .number(1)]
-            envelope["preferences"] = .object(values)
-            return .object(envelope)
+            let merged = try FilmPlaybackPreferences(.object(values))
+            return Self.record(from: merged)
         }
-        let saved = try FilmPlaybackPreferences(Self.preferences(in: document))
+        let saved = try Self.preferences(from: savedRecord.value)
         // The native CAS is the publication boundary, not a runtime receipt.
         preferences = saved; self.draft = saved
     }
 
-    nonisolated private static func preferences(in document: RuntimeValue?) throws -> RuntimeValue {
-        guard let document else { return FilmPlaybackPreferences.defaults.value }
-        guard let fields = document.filmObject, fields["version"] == .number(1),
-              case .object? = fields["preferences"] else { throw FilmSettingsStorageError.invalidDocument }
-        return fields["preferences"]!
+    nonisolated private static func preferences(from record: FilmPreferencesRecord?) throws -> FilmPlaybackPreferences {
+        guard let record else { return FilmPlaybackPreferences.defaults }
+        let value: RuntimeValue = .object([
+            "iosAutoPrepare": .bool(record.iosAutoPrepare),
+            "metadataViewProvider": .string(record.metadataViewProvider),
+            "ruleOrder": .array(record.ruleOrder.map(RuntimeValue.string)),
+            "panOrder": .array(record.panOrder.map(RuntimeValue.string)),
+            "keywords": .array(record.keywords.map(RuntimeValue.string)),
+            "siteCleanKeywords": .array(record.siteCleanKeywords.map(RuntimeValue.string))
+        ])
+        return try FilmPlaybackPreferences(value)
+    }
+
+    nonisolated private static func record(from value: FilmPlaybackPreferences) -> FilmPreferencesRecord {
+        FilmPreferencesRecord(
+            iosAutoPrepare: value.iosAutoPrepare,
+            metadataViewProvider: value.metadataViewProvider.rawValue,
+            ruleOrder: value.ruleOrder.map(\.rawValue),
+            panOrder: value.panOrder.map(\.rawValue),
+            keywords: value.keywords,
+            siteCleanKeywords: value.siteCleanKeywords
+        )
     }
 
     private static let inputWhitespace = CharacterSet(charactersIn:

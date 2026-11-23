@@ -9,7 +9,7 @@ extension NativeMusicService: MusicPlaybackFeedbackClosePreparing {
 
 struct MusicNativeFeedbackAdmission {
     let attemptID: String, occurrenceID: String
-    let song: MJ
+    let song: MusicSongRecord
     let sourceKey: String
     let authorization: MusicQueueAuthorization?
     var ended = false
@@ -18,35 +18,33 @@ struct MusicNativeFeedbackAdmission {
 }
 
 struct MusicNativeQueueFeedbackOrigin {
-    let value: MJ
+    let value: MusicRecommendationMetadata
     let authorization: MusicQueueAuthorization
     let action: MusicHomeAction?
     let seedIDs: [String]
 }
 
 extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedbackSettingsServing {
-    func similarFeedbackTargets(entry: MJ, song: MJ, context: MJ, selectedSourceKey: String? = nil) throws -> [MusicPlaybackFeedbackTarget] {
-        let selectedNativeID = song["sources"].array.first { $0["sourceKey"].string == selectedSourceKey }
+    func similarFeedbackTargets(entry: MusicQueueEntryRecord, song: MusicSongRecord, context: MusicPlayContextRecord,
+                                automatic: Bool, selectedSourceKey: String? = nil) throws -> [MusicPlaybackFeedbackTarget] {
+        let selectedNativeID = song.sources.first { $0.sourceKey == selectedSourceKey }
             .flatMap { MusicNativeFeedbackMapping.recording($0, platform: .netease)?.nativeID }
-        guard let live = liveRecommendation(entryID: entry["id"].string), live.authorization.isActive else {
-            return try MusicNativeFeedbackMapping.targets(song: song, context: context, preferredNativeID: selectedNativeID)
+        guard let live = liveRecommendation(entryID: entry.id), live.authorization.isActive else {
+            return try MusicNativeFeedbackMapping.targets(song: song, context: context, automatic: automatic, preferredNativeID: selectedNativeID)
         }
         return try live.authorization.perform {
             let recommendation = live.value
-            let nativeID = recommendation["songId"].id
-            let targets = try MusicNativeFeedbackMapping.targets(song: song, context: context,
+            let nativeID = recommendation.songID
+            let targets = try MusicNativeFeedbackMapping.targets(song: song, context: context, automatic: automatic,
                 preferredNativeID: selectedNativeID ?? nativeID)
             return targets.map { target in
                 guard target.platform == .netease, target.nativeID == nativeID,
                       selectedNativeID == nil || selectedNativeID == nativeID else { return target }
-                let kind = recommendation["source"].string
-                let source = recommendation["feedbackSource"].string
-                let sourceID = recommendation["feedbackSourceId"].id
-                let algorithm = recommendation["alg"].string
-                let proof = MusicPlaybackRecommendationProof(occurrenceID: entry["id"].string, nativeID: nativeID,
-                    source: source, sourceID: sourceID, algorithm: algorithm, authorization: live.authorization)
+                let proof = MusicPlaybackRecommendationProof(occurrenceID: entry.id, nativeID: nativeID,
+                    source: recommendation.feedbackSource, sourceID: recommendation.feedbackSourceID,
+                    algorithm: recommendation.algorithm, authorization: live.authorization)
                 let originKind: MusicPlaybackFeedbackOrigin.Kind
-                switch kind {
+                switch recommendation.source {
                 case "fm": originKind = .fm
                 case "daily": originKind = .daily
                 case "heartbeat": originKind = .heartbeat
@@ -54,17 +52,18 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 default: originKind = .similar
                 }
                 return .init(platform: target.platform, nativeID: nativeID, mixsongID: target.mixsongID,
-                    source: source, sourceID: sourceID, algorithm: algorithm, automatic: target.automatic,
+                    source: recommendation.feedbackSource, sourceID: recommendation.feedbackSourceID,
+                    algorithm: recommendation.algorithm, automatic: target.automatic,
                     recommendationProof: proof, origin: .init(kind: originKind, platform: .netease,
-                        sourceID: recommendation["sourceId"].id, action: live.action, seedIDs: live.seedIDs))
+                        sourceID: recommendation.sourceID, action: live.action, seedIDs: live.seedIDs))
             }
         }
     }
-    func retainQueueFeedbackOrigins(_ values: [String: MJ], authorization: MusicQueueAuthorization,
+
+    func retainQueueFeedbackOrigins(_ values: [String: MusicRecommendationMetadata], authorization: MusicQueueAuthorization,
                                     action: MusicHomeAction? = nil, seedIDs: [String] = []) {
         for (id, value) in values {
-            let heartbeatSeed = value["source"].string == "heartbeat" && !value["seedId"].id.isEmpty
-                ? value["seedId"].id : nil
+            let heartbeatSeed = value.source == "heartbeat" && !value.seedID.isEmpty ? value.seedID : nil
             queueFeedbackOrigins[id] = .init(value: value, authorization: authorization,
                 action: heartbeatSeed.map { .heartbeatSong(songID: $0) } ?? action,
                 seedIDs: heartbeatSeed.map { [$0] } ?? seedIDs)
@@ -74,8 +73,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
     public func playbackFeedbackSettings() async throws -> MusicPlaybackFeedbackSettings {
         try MusicNativeFeedbackSettings.decode(read().playback)
     }
-    /// Startup reads the existing authoritative playback settings before account
-    /// readiness can trigger recovery of a safe pending file.
+
     public func preparePlaybackFeedback() async throws {
         let settings = try MusicNativeFeedbackSettings.decode(read().playback)
         if let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
@@ -83,25 +81,25 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
             catch { /* Failed feedback storage stays closed without blocking music startup or erasing it. */ }
         }
     }
+
     public func setPlaybackFeedback(platform: MusicAccountPlatform, enabled: Bool,
                                     expectedRevision: Int) async throws -> MusicPlaybackFeedbackSettings {
         try check(); try requirePlatform(platform.rawValue)
-        // Revoke before CAS, even when the write conflicts or its outcome is
-        // unknown. A failed UI save must not keep an in-flight report authorized.
         playbackFeedback.revoke(platform: platform)
         (accounts as? any MusicNativeFeedbackLifecycleProviding)?.cancelPendingPlaybackFeedback(platform: platform)
-        let result = try transaction(["playback"]) { draft in
+        let result = try transaction([.playback]) { draft in
             let old = try MusicNativeFeedbackSettings.decode(draft.playback)
             try musicRequire(old.revision == expectedRevision, .staleRevision)
             let setting = old.platforms[platform] ?? .init()
-            try musicRequire(setting.generation < 9_007_199_254_740_991 &&
-                old.revision < 9_007_199_254_740_991, .limit)
-            var stored = draft.playback["feedback"]
-            if stored == .null { stored = .obj([("schema", .n(1)), ("platforms", .obj())]) }
-            stored["platforms"][platform.rawValue]["enabled"] = .bool(enabled)
-            stored["platforms"][platform.rawValue]["generation"] = .n(setting.generation + 1)
-            draft.playback["feedback"] = stored
-            draft.playback["revision"] = .n(old.revision + 1)
+            try musicRequire(setting.generation < musicMaxSafeInteger &&
+                old.revision < musicMaxSafeInteger, .limit)
+            let updated = MusicFeedbackPlatformRecord(platform: platform.rawValue, enabled: enabled, generation: setting.generation + 1)
+            if let index = draft.playback.feedback.firstIndex(where: { $0.platform == platform.rawValue }) {
+                draft.playback.feedback[index] = updated
+            } else {
+                draft.playback.feedback.append(updated)
+            }
+            draft.playback.revision = old.revision + 1
             return try MusicNativeFeedbackSettings.decode(draft.playback)
         }
         if let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
@@ -110,6 +108,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
         }
         return result
     }
+
     public func consumePlaybackFeedback(_ sample: MusicPlaybackFeedbackSample) async {
         do {
             try check()
@@ -125,13 +124,11 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                playbackFeedback.ownsAttempt(sample.attemptID),
                let port = accounts as? any MusicNativeFeedbackProviding {
                 if ![.failed, .unavailable, .stopped].contains(sample.kind),
-                   !MusicMediaDuration.matches(expected: previous.song["duration"].number, actual: sample.duration) {
+                   !MusicMediaDuration.matches(expected: previous.song.effectiveDuration, actual: sample.duration) {
                     playbackFeedback.invalidate(); playbackFeedbackAdmission = nil
                     return
                 }
                 let settings = try MusicNativeFeedbackSettings.decode(draft.playback), own = epoch
-                // Only this outgoing listen's captured targets may settle.
-                // A retired queue/source grant cannot admit another start.
                 playbackFeedback.consume(sample, settings: settings,
                     targets: previous.targets.filter { platformEnabled($0.platform.rawValue) },
                     accounts: port) { [weak self] platform, generation in
@@ -140,8 +137,8 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 }
                 return
             }
-            guard draft.queue["currentId"].string == sample.occurrenceID,
-                  let entry = draft.queue["entries"].array.first(where: { $0["id"].string == sample.occurrenceID }),
+            guard draft.queue.currentID == sample.occurrenceID,
+                  let entry = draft.queue.entries.first(where: { $0.id == sample.occurrenceID }),
                   let port = accounts as? any MusicNativeFeedbackProviding else { return }
             let prepared = preparedSources[sample.attemptID]
             let cached = preparedCacheSources[sample.attemptID]
@@ -150,12 +147,10 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 prepared?.armed == true && prepared?.candidate.resourceId == sample.resourceID ||
                 cached?.armed == true && cached?.playback.candidate.resourceId == sample.resourceID else { return }
             if ![.failed, .unavailable, .stopped].contains(sample.kind),
-               !MusicMediaDuration.matches(expected: try draft.song(entry["songId"].string)["duration"].number, actual: sample.duration) {
+               !MusicMediaDuration.matches(expected: try draft.song(entry.songID).effectiveDuration, actual: sample.duration) {
                 playbackFeedback.invalidate(); playbackFeedbackAdmission = nil
                 return
             }
-            // Feedback and durable progress have separate queues. The first
-            // accepted native event commits prepared media in either ordering.
             try commitPreparedSource(.init(attemptId: sample.attemptID, occurrenceId: sample.occurrenceID,
                 resourceId: sample.resourceID, kind: sample.kind == .playing ? .playing : .progress,
                 position: sample.position, duration: sample.duration))
@@ -171,45 +166,42 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 admission = .init(attemptID: attempt.id, occurrenceID: attempt.occurrence,
                     song: song, sourceKey: attempt.sourceKey, authorization: attempt.authorization, ended: attempt.ended)
             } else {
-                // Legacy resolve/renewal can own an unready successor while the
-                // old native resource still sounds. Its admitted observations
-                // remain valid until an actual committed handoff, not URL work.
                 guard let previous = playbackFeedbackAdmission, previous.attemptID == sample.attemptID,
                       previous.occurrenceID == sample.occurrenceID,
                       playbackFeedback.ownsAttempt(sample.attemptID),
-                      previous.song["songId"] == entry["songId"] else { return }
+                      previous.song.songID == entry.songID else { return }
                 try previous.authorization?.check()
                 admission = previous
             }
             _ = try target(admission.song, admission.sourceKey)
             playbackFeedbackAdmission = admission
-            var context = entry["context"]
-            if let automatic = sample.automatic { context["automatic"] = .bool(automatic) }
-            let targets = try similarFeedbackTargets(entry: entry, song: admission.song, context: context, selectedSourceKey: admission.sourceKey)
-                .filter { platformEnabled($0.platform.rawValue) }
+            let targets = try similarFeedbackTargets(
+                entry: entry,
+                song: admission.song,
+                context: entry.context,
+                automatic: sample.automatic ?? false,
+                selectedSourceKey: admission.sourceKey
+            ).filter { platformEnabled($0.platform.rawValue) }
             let settings = try MusicNativeFeedbackSettings.decode(draft.playback)
             let own = epoch
-            // Audio/source grants retire on a normal handoff. The independent
-            // exact-account feedback lease owns already admitted final reports.
             playbackFeedback.consume(sample, settings: settings, targets: targets, accounts: port) { [weak self] platform, generation in
                 guard let self else { throw MusicServiceError.closed }
                 try await self.checkFeedbackAuthorization(epoch: own, platform: platform, generation: generation)
             }
-        } catch { /* Storage/access/mapping failure closes feedback, not audio. */
+        } catch {
             playbackFeedbackAdmission = nil
             playbackFeedback.invalidate(attemptID: sample.attemptID)
         }
     }
+
     func checkFeedbackAuthorization(epoch own: UUID, platform: MusicAccountPlatform, generation: Int) throws {
         try check(own)
         try requirePlatform(platform.rawValue)
         let setting = try MusicNativeFeedbackSettings.decode(read().playback).platforms[platform]
         try musicRequire(setting?.enabled == true && setting?.generation == generation, .staleAccess)
     }
+
     public func finishPlaybackFeedback(attemptID: String?, reason: MusicPlaybackFeedbackReport.Reason) async {
-        // Selection invalidation can arrive before resolve/cancel on this actor.
-        // Settle its last observed position once, never UI elapsed time. A
-        // revoked owner only cancels and cannot manufacture a terminal report.
         guard (try? check()) != nil else {
             playbackFeedback.invalidate(attemptID: attemptID)
             return
@@ -218,17 +210,19 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
         playbackFeedback.invalidate(attemptID: attemptID, preservingEnds: true)
         if attemptID == nil || playbackFeedbackAdmission?.attemptID == attemptID { playbackFeedbackAdmission = nil }
     }
+
     public func rejectPlaybackFeedback(attemptID: String) async {
         playbackFeedback.invalidate(attemptID: attemptID)
         if playbackFeedbackAdmission?.attemptID == attemptID { playbackFeedbackAdmission = nil }
     }
-    func replaceFeedbackAttempt(attemptID: String, occurrenceID: String, song: MJ, sourceKey: String,
+
+    func replaceFeedbackAttempt(attemptID: String, occurrenceID: String, song: MusicSongRecord, sourceKey: String,
                                 authorization: MusicQueueAuthorization?) {
         let old = playbackFeedbackAdmission
         if let old, let reason = old.retiringReason {
             playbackFeedback.finishCurrent(attemptID: old.attemptID, reason: reason)
         }
-        let same = old?.occurrenceID == occurrenceID && old?.ended == false && old?.song["songId"] == song["songId"]
+        let same = old?.occurrenceID == occurrenceID && old?.ended == false && old?.song.songID == song.songID
         playbackFeedback.replaceAttempt(attemptID: attemptID, occurrenceID: occurrenceID, preserving: same)
         playbackFeedbackAdmission = .init(attemptID: attemptID, occurrenceID: occurrenceID,
                                           song: song, sourceKey: sourceKey, authorization: authorization)
@@ -236,40 +230,40 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
 }
 
 enum MusicNativeFeedbackSettings {
-    static func decode(_ playback: MJ) throws -> MusicPlaybackFeedbackSettings {
-        try musicRequire(playback["revision"].isInteger, .corruptDocument)
+    static func decode(_ playback: MusicPlaybackSettingsState) throws -> MusicPlaybackFeedbackSettings {
+        try musicRequire((0...musicMaxSafeInteger).contains(playback.revision), .corruptStorage)
         var result: [MusicAccountPlatform: MusicPlaybackFeedbackSetting] = [:]
-        let data = playback["feedback"]
-        if data != .null {
-            try musicRequire(data["schema"] == .n(1) && data["platforms"].isObject, .corruptDocument)
-        }
+        let byPlatform = Dictionary(uniqueKeysWithValues: playback.feedback.map { ($0.platform, $0) })
         for platform in [MusicAccountPlatform.netease, .qq, .kugou] {
-            let row = data["platforms"][platform.rawValue]
-            if row == .null { result[platform] = .init(); continue }
-            try musicRequire(row["enabled"].isBool && row["generation"].isInteger, .corruptDocument)
-            result[platform] = .init(enabled: row["enabled"].bool, generation: row["generation"].int)
+            guard let row = byPlatform[platform.rawValue] else {
+                result[platform] = .init()
+                continue
+            }
+            try musicRequire((0...musicMaxSafeInteger).contains(row.generation), .corruptStorage)
+            result[platform] = .init(enabled: row.enabled, generation: row.generation)
         }
-        return .init(revision: playback["revision"].int, platforms: result)
+        return .init(revision: playback.revision, platforms: result)
     }
 }
 
 enum MusicNativeFeedbackMapping {
-    static func recording(_ raw: MJ, platform: MusicAccountPlatform) -> MusicPlaybackFeedbackTarget? {
-        let data = MusicModel.sourceData(raw)
-        guard data["source"].string == platform.rawValue else { return nil }
-        let id = platform == .kugou ? data["hash"].string : data["songmid"].id
+    static func recording(_ row: MusicSongSourceRecord, platform: MusicAccountPlatform) -> MusicPlaybackFeedbackTarget? {
+        let sourcePlatform = row.infoSource.isEmpty ? row.platform : row.infoSource
+        guard sourcePlatform == platform.rawValue else { return nil }
+        let id = platform == .kugou ? (row.hash ?? "") : row.resolvedSongmid
         guard !id.isEmpty else { return nil }
+        let mixsong = row.resolvedAlbumAudioID
         return .init(platform: platform, nativeID: id,
-                     mixsongID: platform == .kugou && !data["albumAudioId"].id.isEmpty ? data["albumAudioId"].id : nil)
+                     mixsongID: platform == .kugou && !mixsong.isEmpty ? mixsong : nil)
     }
-    static func targets(song: MJ, context: MJ, preferredNativeID: String? = nil) throws -> [MusicPlaybackFeedbackTarget] {
-        // The authoritative source array, including an empty one, wins. Never
-        // invent another recording from delivery provider or candidate order.
+
+    static func targets(song: MusicSongRecord, context: MusicPlayContextRecord, automatic: Bool = false,
+                        preferredNativeID: String? = nil) throws -> [MusicPlaybackFeedbackTarget] {
         _ = try MusicModel.sources(song)
         var result: [MusicPlaybackFeedbackTarget] = []
         for platform in [MusicAccountPlatform.netease, .qq, .kugou] {
             var values: [MusicPlaybackFeedbackTarget] = []
-            for row in song["sources"].array {
+            for row in song.sources {
                 guard let value = recording(row, platform: platform), !values.contains(value) else { continue }
                 values.append(value)
             }
@@ -277,7 +271,7 @@ enum MusicNativeFeedbackMapping {
                 let known = Set(values.filter { $0.mixsongID != nil }.map(\.nativeID))
                 values.removeAll { $0.mixsongID == nil && known.contains($0.nativeID) }
             }
-            let primary = recording(song, platform: platform)
+            let primary = song.sources.first.flatMap { recording($0, platform: platform) }
             let chosen = values.first { platform == .netease && $0.nativeID == preferredNativeID } ??
                 values.first { $0 == primary } ??
                 (values.count == 1 ? values.first : nil) ??
@@ -286,32 +280,31 @@ enum MusicNativeFeedbackMapping {
             guard let chosen else { continue }
             var source = "", sourceID = ""
             if platform == .netease {
-                let type = context["sourceType"].string, id = context["sourceId"].id
-                if context["platform"].string == "wy" && ["playlist", "album"].contains(type) && !id.isEmpty {
+                let type = context.sourceType ?? "", id = context.sourceId ?? ""
+                if context.platform == "wy" && ["playlist", "album"].contains(type) && !id.isEmpty {
                     source = type == "playlist" ? "list" : "album"; sourceID = id
-                } else if context["platform"].string == "wy" && type == "daily" &&
-                    ["", "default"].contains(context["dailyBranch"].string) {
+                } else if context.platform == "wy" && type == "daily" &&
+                    ["", "default"].contains(context.dailyBranch ?? "") {
                     source = "dailySongRecommend"
                 } else if ["search", "search-song"].contains(type) {
-                    let query = context["searchKeyword"].string
-                    source = "search"; sourceID = query
+                    source = "search"; sourceID = context.searchKeyword ?? ""
                 } else if type == "song" { source = "song" }
             }
             result.append(.init(platform: platform, nativeID: chosen.nativeID, mixsongID: chosen.mixsongID,
-                source: source, sourceID: sourceID, automatic: context["automatic"].bool, origin: origin(context)))
+                source: source, sourceID: sourceID, automatic: automatic, origin: origin(context)))
         }
         return result
     }
-    static func origin(_ context: MJ) -> MusicPlaybackFeedbackOrigin? {
-        let platform = MusicPublicBrowsePlatform(rawValue: context["platform"].string)
-        switch context["sourceType"].string {
+
+    static func origin(_ context: MusicPlayContextRecord) -> MusicPlaybackFeedbackOrigin? {
+        let platform = context.platform.flatMap(MusicPublicBrowsePlatform.init(rawValue:))
+        switch context.sourceType ?? "" {
         case "playlist", "album":
             guard let platform else { return nil }
-            return .init(kind: context["sourceType"].string == "playlist" ? .playlist : .album,
-                         platform: platform, sourceID: context["sourceId"].id)
+            return .init(kind: context.sourceType == "playlist" ? .playlist : .album,
+                         platform: platform, sourceID: context.sourceId ?? "")
         case "search", "search-song":
-            let query = context["searchKeyword"].string
-            return .init(kind: .search, platform: platform, searchKeyword: query)
+            return .init(kind: .search, platform: platform, searchKeyword: context.searchKeyword ?? "")
         case "daily":
             guard platform == .netease else { return nil }
             return .init(kind: .daily, platform: platform)

@@ -33,7 +33,10 @@ let package = Package(
         .target(name: "MeowJSON", dependencies: []),
         .target(name: "MeowDebug", dependencies: []),
         .target(name: "MeowStorage", dependencies: ["MeowContracts", "MeowDebug", "MeowSQLite"],
-                resources: [.copy("Resources/storage-schema.sql")]),
+                resources: [
+                    .copy("Resources/storage-data-schema.sql"),
+                    .copy("Resources/storage-cache-schema.sql")
+                ]),
         .target(name: "MeowAccounts", dependencies: ["MeowContracts"]),
         .target(name: "MeowAudio", dependencies: ["MeowDebug",
             .product(name: "CMeowAudioKernel", package: "audiokernel")]),

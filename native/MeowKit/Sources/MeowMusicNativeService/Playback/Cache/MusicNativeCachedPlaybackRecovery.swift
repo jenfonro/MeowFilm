@@ -1,8 +1,6 @@
 import Foundation
 import MeowMusicFeature
 
-/// Ephemeral continuation of an actual cached attempt. No persisted marker,
-/// UI-authored listening fact, account rebind or second resolver.
 struct MusicNativeCacheRecoveryPin: Sendable {
     let id = UUID()
     let epoch: UUID
@@ -36,9 +34,9 @@ extension NativeMusicService: MusicCachedPlaybackRecoveryServing {
         try pin.authorization.check()
         try musicRequire(cachedPlaybackRecovery?.id == pin.id, .staleResult)
         let d = try read()
-        try musicRequire(d.queue["currentId"].string == pin.occurrenceID, .targetChanged)
+        try musicRequire(d.queue.currentID == pin.occurrenceID, .targetChanged)
         let song = try song(.init(kind: .queue, id: pin.occurrenceID), d)
-        try musicRequire(song["songId"].string == pin.songID, .targetChanged)
+        try musicRequire(song.songID == pin.songID, .targetChanged)
     }
 
     public func recoverCachedPlayback(previousAttemptID: String, selection: MusicPlaybackSelection?,
@@ -54,8 +52,8 @@ extension NativeMusicService: MusicCachedPlaybackRecoveryServing {
         try cache.scopeAuthorization.check()
         try musicRequire(selection == nil || selection == old.selection, .targetChanged)
         let d = try read(), song = try song(.init(kind: .queue, id: old.occurrence), d)
-        try musicRequire(d.queue["currentId"].string == old.occurrence, .staleRevision)
-        try musicRequire(song["songId"].string == cache.identity.songID, .targetChanged)
+        try musicRequire(d.queue.currentID == old.occurrence, .staleRevision)
+        try musicRequire(song.songID == cache.identity.songID, .targetChanged)
         let authorization = MusicQueueAuthorization(parent: cache.scopeAuthorization), registration = UUID()
         access.register(registration) { authorization.revoke() }
         let pin = MusicNativeCacheRecoveryPin(epoch: epoch, previousAttemptID: previousAttemptID,
@@ -68,8 +66,6 @@ extension NativeMusicService: MusicCachedPlaybackRecoveryServing {
             if cachedPlaybackRecovery?.id == pin.id { retireCachedPlaybackRecovery() }
         }
         do {
-            // Evict only the failed complete file. The independent scope fence
-            // survives file retirement, but not account/protection revocation.
             retireAudioCacheAttempt()
             await audioFileCache.remove(cache.identity, version: fileVersion)
             try checkCachedPlaybackRecovery(pin)
@@ -79,7 +75,7 @@ extension NativeMusicService: MusicCachedPlaybackRecoveryServing {
             try checkCachedPlaybackRecovery(pin)
             try musicRequire(scope.scope == pin.scope, .targetChanged)
             let session = try candidateDiscoverySession(occurrenceID: old.occurrence,
-                expectedQueueRevision: d.queue["revision"].int, cacheRecovery: pin)
+                expectedQueueRevision: d.queue.revision, cacheRecovery: pin)
             do {
                 let mode: MusicCandidateDiscoveryMode
                 if let selection {
@@ -92,7 +88,7 @@ extension NativeMusicService: MusicCachedPlaybackRecoveryServing {
                 } else { mode = .automatic() }
                 let consumer = MusicCandidateDiscoveryConsumer(provider: MusicCachedRecoveryDiscovery(session: session))
                 result = try await consumer.resolve(occurrenceID: old.occurrence,
-                    expectedQueueRevision: d.queue["revision"].int, mode: mode)
+                    expectedQueueRevision: d.queue.revision, mode: mode)
             } catch {
                 await session.close(retainingAttemptID: nil)
                 throw error
@@ -104,22 +100,20 @@ extension NativeMusicService: MusicCachedPlaybackRecoveryServing {
                   current.cacheRecoveryID == pin.id, current.ready else { throw MusicServiceError.staleResult }
             try current.authorization?.check()
             let latest = try read(), song = try repositorySong(pin.songID, latest)
-            try musicRequire(latest.queue["revision"] == d.queue["revision"] &&
-                latest.playback["revision"] == d.playback["revision"], .staleRevision)
+            try musicRequire(latest.queue.revision == d.queue.revision &&
+                latest.playback.revision == d.playback.revision, .staleRevision)
             try admitSource(song, selection: result.candidate.resolvedSelection)
             if let duration = current.resolvedDuration {
-                try musicRequire(MusicMediaDuration.matches(expected: song["duration"].number, actual: duration),
+                try musicRequire(MusicMediaDuration.matches(expected: song.effectiveDuration, actual: duration),
                     .invalidMediaCandidate)
             }
             let value = result.candidate
             let candidate = MusicPlaybackCandidate(attemptId: value.attemptId, occurrenceId: value.occurrenceId,
-                resourceId: value.resourceId, url: value.url, headers: value.headers, title: song["title"].string,
+                resourceId: value.resourceId, url: value.url, headers: value.headers, title: song.title,
                 startPosition: value.startPosition, requestedQuality: value.requestedQuality,
                 resolvedSelection: value.resolvedSelection, expiresAt: value.expiresAt,
                 fileAuthorization: value.fileAuthorization, delivery: value.delivery,
                 playbackAuthorization: value.playbackAuthorization, byteSource: value.byteSource)
-            // The next real playing fact belongs to this attempt. The only
-            // transferred bit came from the old owner's successful history CAS.
             attempt?.cacheRecoveryID = nil
             return .init(candidate: candidate, selection: candidate.resolvedSelection)
         } catch {

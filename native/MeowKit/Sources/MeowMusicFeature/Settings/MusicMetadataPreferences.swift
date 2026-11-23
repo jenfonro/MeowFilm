@@ -74,7 +74,7 @@ public protocol MusicArtworkSelecting: Sendable {
 /// document/CAS writer, preserve unavailable platforms and unrelated records,
 /// and never replay a stale or unconfirmed write.
 ///
-/// Errors use MusicServiceError (including staleRevision, corruptDocument,
+/// Errors use MusicServiceError (including staleRevision, corruptStorage,
 /// storageConflict, commitUnconfirmed and access/cancellation failures).
 /// Candidate reads perform no search, audio resolution, network or script work.
 /// Empty candidates mean no eligible established mapping, not permission to

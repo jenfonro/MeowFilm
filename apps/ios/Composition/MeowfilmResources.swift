@@ -13,13 +13,14 @@ import MeowNovelFeature
 /// script session; their installations and private data belong to Node.
 struct MeowfilmResources: Sendable {
     let database: SQLiteDatabase
+    let cacheDatabase: SQLiteDatabase
     let musicLibrary: MusicNativeLibraryDatabase
     let musicAccounts: NativeMusicAccountService?
     let musicAccountGate: MusicAccountAccessGate?
     let musicAudioCache: NativeMusicAudioFileCache?
     let musicPresentationCache: MusicNativePresentationCache
     let musicSourceDiscoveryCache: MusicNativePersistentSourceDiscoveryCache
-    let musicHomeSnapshot: MusicNativeHomeSnapshotDocument
+    let musicHomeSnapshot: MusicNativeHomeSnapshotStorage
     let musicPlatform: MusicPlatformClient
     let musicScripts: NativeMusicScriptService
     let scriptSession: RuntimeSession
@@ -47,18 +48,20 @@ struct MeowfilmResources: Sendable {
                 .appendingPathComponent("meowfilm", isDirectory: true)
         }
         DebugRuntime.current?.session.updateDataRoot(root)
-        let database = try SQLiteDatabase(dataRoot: root)
+        let database = try SQLiteDatabase.openData(dataRoot: root)
+        let cacheDatabase = try SQLiteDatabase.openCache(dataRoot: root)
         self.database = database
+        self.cacheDatabase = cacheDatabase
         let resources = root.appendingPathComponent("resources-v1", isDirectory: true)
         try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         musicLibrary = MusicNativeLibraryDatabase(database: database)
-        musicPresentationCache = MusicNativePresentationCache(database: database)
-        musicAudioCache = NativeMusicAudioFileCache(database: database,
+        musicPresentationCache = MusicNativePresentationCache(database: cacheDatabase)
+        musicAudioCache = NativeMusicAudioFileCache(database: cacheDatabase,
             rootURL: resources.appendingPathComponent("music-audio", isDirectory: true),
             presentationCache: musicPresentationCache)
-        musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(database: database)
-        musicHomeSnapshot = MusicNativeHomeSnapshotDocument(database: database)
+        musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(database: cacheDatabase)
+        musicHomeSnapshot = MusicNativeHomeSnapshotStorage(database: cacheDatabase)
         let filmSettings = MeowfilmNativeSettings(database: database)
         self.filmSettings = filmSettings
         let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(
@@ -77,20 +80,20 @@ struct MeowfilmResources: Sendable {
         novelRules = NovelRuleProcessor(runtime: novelRuntime)
         musicScripts = NativeMusicScriptService(connection: connection)
         musicPlatform = MusicPlatformClient(connection: connection)
-        filmMetadata = FilmTMDBService(settingsDocument: filmSettings[.tmdb], connection: connection)
-        filmDoubanSettings = FilmDoubanSettingsService(settingsDocument: filmSettings[.douban])
-        filmRules = FilmRuleService(settingsDocument: filmSettings[.rules], connection: connection)
+        filmMetadata = FilmTMDBService(settingsRepository: filmSettings.repository, connection: connection)
+        filmDoubanSettings = FilmDoubanSettingsService(settingsRepository: filmSettings.repository)
+        filmRules = FilmRuleService(settingsRepository: filmSettings.repository, connection: connection)
         filmSourceSettings = FilmSourceService(transport: CatScriptTransport(connectionProvider: connection),
             database: database,
-            settingsDocument: filmSettings[.catSources],
+            settingsRepository: filmSettings.repository,
             runtimeSourceRoot: root.appendingPathComponent("cat"),
             observeConnection: { await scriptSession.connectionIfStarted() })
         musicAccountGate = try MusicAccountAccessGate(
             database: database,
+            cacheDatabase: cacheDatabase,
             audioCache: musicAudioCache,
             platformClient: musicPlatform
         )
         musicAccounts = musicAccountGate?.service
     }
-
 }

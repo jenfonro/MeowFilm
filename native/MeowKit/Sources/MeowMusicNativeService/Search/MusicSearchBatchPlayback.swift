@@ -10,21 +10,31 @@ extension NativeMusicService: MusicSearchBatchPlaying {
                                    intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
         try check(); try intent.check(); try musicRequire(request.targets.indices.contains(request.startIndex))
         let result = try intent.perform {
-            try similarQueueTransaction(["queue", "playback", "history"]) { document in
-                try musicRequire(document.queue["revision"].int == expectedRevision, .staleRevision)
-                let songs = try request.targets.map { try song($0.track.ref, document) }
-                let old = document.queue
-                let rows = try makeEntries(songs, document: &document, context: .obj([
-                    ("sourceTitle", .string("搜索")), ("sourceType", .string(songs.count == 1 ? "search-song" : "search")),
-                    ("searchKeyword", .string(request.query))]))
-                try archive(old, into: &document)
-                document.queue["entries"] = .array(rows); document.queue["currentId"] = rows[request.startIndex]["id"]
-                for key in ["history", "priority", "failed"] { document.queue[key] = .array([]) }
-                document.queue["source"] = .obj([("sourceType", .string(songs.count == 1 ? "search-song" : "search")), ("sourceTitle", .string("搜索"))])
-                if songs.count == 1 { document.queue["source"]["seedEntryId"] = rows[0]["id"] }
-                similarWillChangeQueue(.replace, queue: &document.queue)
-                document.queue["revision"] = .n(expectedRevision + 1); document.resetPosition()
-                return stateDTO(document)
+            try similarQueueTransaction([.queue, .playback, .history]) { state in
+                try musicRequire(state.queue.revision == expectedRevision, .staleRevision)
+                let songs = try request.targets.map { try song($0.track.ref, state) }
+                let old = state.queue
+                let sourceType = songs.count == 1 ? "search-song" : "search"
+                let rows = try makeEntries(
+                    songs,
+                    state: &state,
+                    context: MusicPlayContextRecord(
+                        sourceTitle: "搜索",
+                        sourceType: sourceType,
+                        searchKeyword: request.query
+                    )
+                )
+                try archive(old, into: &state)
+                state.queue.entries = rows; state.queue.currentID = rows[request.startIndex].id
+                state.queue.history = []; state.queue.priority = []; state.queue.failed = []
+                state.queue.source = MusicSourceRecord(
+                    sourceType: sourceType,
+                    sourceTitle: "搜索",
+                    seedEntryId: songs.count == 1 ? rows[0].id : nil
+                )
+                similarWillChangeQueue(.replace, queue: &state.queue)
+                state.queue.revision = expectedRevision + 1; state.resetPosition()
+                return stateDTO(state)
             }
         }
         invalidatePlayback(reason: .ui); similarDidChangeQueue(.replace)

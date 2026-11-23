@@ -5,10 +5,10 @@ extension NativeMusicService {
     func restoreSimilarSessionIfNeeded() async throws {
         try check()
         guard !similarMode.restored else { return }
-        let d = try read(), saved = d.queue["similar"]
-        guard saved != .null else { similarMode.restored = true; return }
+        let d = try read()
+        guard let saved = d.queue.similar else { similarMode.restored = true; return }
         try d.requireQueue()
-        try MusicNativeSimilarData.validateSession(saved, serial: d.queue["serial"].int, songs: d.queueSongs())
+        try MusicNativeSimilarData.validateSession(saved, serial: d.queue.serial, songs: d.queueSongs())
         try musicRequire(similarMode.restoring == nil, .busy)
         let restoration = UUID(), own = epoch
         similarMode.restoring = restoration
@@ -23,9 +23,9 @@ extension NativeMusicService {
         }
         var acquired: MusicNativeSimilarLease?
         do {
-            let sourceIDs = saved["sourceIds"].strings
-            guard let provider = MusicSimilarModeProvider(rawValue: saved["provider"].string) else {
-                throw MusicServiceError.corruptDocument
+            let sourceIDs = saved.sourceIDs
+            guard let provider = MusicSimilarModeProvider(rawValue: saved.provider) else {
+                throw MusicServiceError.corruptStorage
             }
             let lease = try await openSimilarLease(provider: provider, workID: restoration)
             acquired = lease
@@ -33,23 +33,36 @@ extension NativeMusicService {
             try await checkSimilarLease(lease); try check(own); try lease.authorization.check()
             let current = try read()
             try musicRequire(similarMode.restoring == restoration &&
-                current.queue["similar"].stable.digest == saved.stable.digest, .targetChanged)
-            try musicRequire(!scope.isEmpty && musicSame(scope, saved["scope"].string), .staleAccess)
-            let context = saved["providerContext"].isObject ? MusicSimilarHeartbeatContext(
-                playlistID: saved["providerContext"]["pid"].id, seedID: saved["providerContext"]["sid"].id,
-                count: try saved["providerContext"]["count"].integer()) : nil
-            let session = MusicNativeSimilarSession(seed: saved["seedSongId"] == .null ? .obj([("title", saved["seedTitle"])]) : try repositorySong(saved["seedSongId"].string, current),
-                seedEntryID: saved["seedEntryId"].isString ? saved["seedEntryId"].string : nil,
-                returnQueue: saved["returnQueue"], fromHome: saved["fromHome"].bool, provider: provider,
+                current.queue.similar == saved, .targetChanged)
+            try musicRequire(!scope.isEmpty && musicSame(scope, saved.similarScope), .staleAccess)
+            let context: MusicSimilarHeartbeatContext?
+            if let pid = saved.providerPID, let sid = saved.providerSID, let count = saved.providerCount {
+                context = MusicSimilarHeartbeatContext(playlistID: pid, seedID: sid, count: count)
+            } else {
+                context = nil
+            }
+            let seed: MusicSongRecord
+            if let seedSongID = saved.seedSongID {
+                seed = try repositorySong(seedSongID, current)
+            } else {
+                seed = MusicSongRecord(title: saved.seedTitle)
+            }
+            let session = MusicNativeSimilarSession(seed: seed,
+                seedEntryID: saved.seedEntryID,
+                returnQueue: saved.returnQueue, fromHome: saved.fromHome, provider: provider,
                 sourceIDs: sourceIDs, context: context, scope: scope, lease: lease)
-            session.continueEnabled = saved["continue"].bool &&
-                current.playback["mode"].int == MusicPlaybackMode.loop.rawValue
-            session.offset = saved["offset"].int; session.exhausted = saved["exhausted"].bool
-            session.batches = saved["batches"].array; session.attempted = Set(saved["attempted"].strings)
-            session.status = [.error, .empty].contains(MusicSimilarModeSnapshot.Status(rawValue: saved["status"].string) ?? .ready) ?
-                MusicSimilarModeSnapshot.Status(rawValue: saved["status"].string)! : .ready
+            session.continueEnabled = saved.continueEnabled &&
+                current.playback.mode == MusicPlaybackMode.loop.rawValue
+            session.offset = saved.offsetVal; session.exhausted = saved.exhausted
+            session.batches = saved.batches; session.attempted = Set(saved.attempted)
+            if let parsedStatus = MusicSimilarModeSnapshot.Status(rawValue: saved.status),
+               [.error, .empty].contains(parsedStatus) {
+                session.status = parsedStatus
+            } else {
+                session.status = .ready
+            }
             if session.status == .error { session.error = .upstreamFailed }
-            if saved["continue"].bool && !session.continueEnabled { try persistSimilarSession(session) }
+            if saved.continueEnabled && !session.continueEnabled { try persistSimilarSession(session) }
             similarMode.active = session; similarMode.restored = true
             watchSimilarLease(lease); acquired = nil; emitSimilar()
         } catch {
@@ -60,8 +73,8 @@ extension NativeMusicService {
             guard similarMode.restoring == restoration else { throw MusicServiceError.cancelled }
             if failure.isAuthenticationFailure || [.staleAccess, .notFound].contains(failure) {
                 // Keep the ordinary queue and all its media/collection data.
-                try similarQueueTransaction(["queue"]) { draft in
-                    if draft.queue["similar"].stable.digest == saved.stable.digest { draft.queue["similar"] = .null }
+                try similarQueueTransaction([.queue]) { draft in
+                    if draft.queue.similar == saved { draft.queue.similar = nil }
                 }
                 similarMode.restored = true; emitSimilar()
             } else { throw failure }

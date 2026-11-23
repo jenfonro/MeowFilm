@@ -158,7 +158,7 @@ final class MeowfilmDebugNavigator {
         switch target {
         // --- Unsupported on iOS ---
         case "novel.shelf":
-            throw DebugAPIError.unsupported("iOS has no standalone novel shelf page; query ios_novel_books via storage/query or use novel/command toggle_shelf")
+            throw DebugAPIError.unsupported("iOS has no standalone novel shelf page; query novel_books via storage/query or use novel/command toggle_shelf")
         case "settings.media-controls":
             throw DebugAPIError.unsupported("settings.media-controls is Windows-only")
 

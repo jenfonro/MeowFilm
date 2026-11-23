@@ -3,72 +3,126 @@ import MeowStorage
 
 /// Native editable video intent and read-only runtime probe facts.
 struct FilmSourceRepository: Sendable {
+    private static let ownerKey = "film.sources"
     let database: SQLiteDatabase
 
-    func load() async throws -> (FilmSourceDocument, Int) {
+    func load() async throws -> (FilmSourceState, Int) {
         try await database.snapshot { db in
-            let revision = try db.query("SELECT revision FROM ios_film_source_state WHERE singleton=1").first!.integer("revision")
-            func grouped(_ table: String, ordered: Bool = false) throws -> [FilmSourceKey: [SQLiteRow]] {
-                try Dictionary(grouping: db.query("SELECT * FROM \(table)" + (ordered ? " ORDER BY ordinal" : ""))) {
-                    FilmSourceKey(installationId: try $0.text("installationId"), siteKey: try $0.text("siteKey"))
-                }
+            let revision = Int(try db.ownerRevision(Self.ownerKey))
+
+            var sourceActions: [FilmSourceKey: [String]] = [:]
+            try db.scan("SELECT installation_id,site_key,action FROM film_source_site_actions ORDER BY installation_id,site_key,position") { c in
+                let key = FilmSourceKey(installationId: try c.text(0), siteKey: try c.text(1))
+                sourceActions[key, default: []].append(try c.text(2))
             }
-            func actions(_ rows: [SQLiteRow]) throws -> [String] { try rows.map { try $0.text("action") } }
-            func methods(_ rows: [SQLiteRow]) throws -> [String: String] {
-                Dictionary(uniqueKeysWithValues: try rows.map { (try $0.text("action"), try $0.text("method")) })
+
+            var sourceMethods: [FilmSourceKey: [String: String]] = [:]
+            try db.scan("SELECT installation_id,site_key,action,method FROM film_source_site_methods") { c in
+                let key = FilmSourceKey(installationId: try c.text(0), siteKey: try c.text(1))
+                sourceMethods[key, default: [:]][try c.text(2)] = try c.text(3)
             }
-            let siteRows = try Dictionary(grouping: db.query("SELECT * FROM ios_film_source_sites ORDER BY ordinal")) {
-                Data(try $0.text("installationId").utf8)
-            }
-            let sourceActions = try grouped("ios_film_source_actions", ordered: true)
-            let sourceMethods = try grouped("ios_film_source_methods")
-            let videoActions = try grouped("ios_film_video_actions", ordered: true)
-            let videoMethods = try grouped("ios_film_video_methods")
-            let detections = try grouped("ios_film_video_detections")
-            let probeSteps = try grouped("ios_film_video_probe_steps", ordered: true)
-            let cats = try db.query("SELECT * FROM ios_film_source_probes ORDER BY installationId").map { row in
-                let id = try row.text("installationId")
-                let sites = try (siteRows[Data(id.utf8)] ?? []).map { site in
-                    let key = try site.text("siteKey")
-                    let identity = FilmSourceKey(installationId: id, siteKey: key)
-                    return FilmSourceSite(key: key, name: try site.text("name"), api: try site.text("api"),
-                        actions: try actions(sourceActions[identity] ?? []), methods: try methods(sourceMethods[identity] ?? []))
-                }
-                return StoredFilmCat(FilmCatSource(installationId: id, name: "", sourceType: "network",
-                    importedAt: try row.optionalInteger("importedAt").map(Int64.init),
-                    updatedAt: try row.optionalInteger("updatedAt").map(Int64.init),
-                    updateState: try row.text("updateState"), updateError: try row.optionalText("updateError"),
-                    sourceHash: try row.optionalText("sourceHash"), sites: sites,
-                    inputRevision: Int64(try row.integer("inputRevision"))))
-            }
-            let videos = try db.query("SELECT * FROM ios_film_video_intents ORDER BY ordinal,installationId,siteKey").map { row in
-                let id = try row.text("installationId"), key = try row.text("siteKey")
+
+            var sitesByCat: [String: [FilmSourceSite]] = [:]
+            try db.scan("SELECT installation_id,site_key,name,api FROM film_source_sites ORDER BY installation_id,position") { c in
+                let id = try c.text(0)
+                let key = try c.text(1)
                 let identity = FilmSourceKey(installationId: id, siteKey: key)
-                var detection: FilmSourceDetection?
-                if let probe = detections[identity]?.first {
-                    let steps = try (probeSteps[identity] ?? []).map {
-                        FilmSourceProbeStep(try $0.text("operation"), try $0.text("state"), try $0.optionalText("error"))
-                    }
-                    detection = FilmSourceDetection(result: try probe.text("result"),
-                        checkedAt: Int64(try probe.integer("checkedAt")), playbackResolved: try probe.bool("playbackResolved"), steps: steps)
+                sitesByCat[id, default: []].append(FilmSourceSite(
+                    key: key,
+                    name: try c.text(2),
+                    api: try c.text(3),
+                    actions: sourceActions[identity] ?? [],
+                    methods: sourceMethods[identity] ?? [:]
+                ))
+            }
+
+            let cats: [StoredFilmCat] = try db.query(
+                "SELECT installation_id,input_revision,imported_at_ms,updated_at_ms,update_state,update_error,source_hash " +
+                "FROM film_source_probes ORDER BY position,installation_id"
+            ) { c in
+                let id = try c.text(0)
+                return StoredFilmCat(FilmCatSource(
+                    installationId: id,
+                    name: "",
+                    sourceType: "network",
+                    importedAt: try c.optionalInt64(2),
+                    updatedAt: try c.optionalInt64(3),
+                    updateState: try c.text(4),
+                    updateError: try c.optionalText(5),
+                    sourceHash: try c.optionalText(6),
+                    sites: sitesByCat[id] ?? [],
+                    inputRevision: try c.int64(1)
+                ))
+            }
+
+            var videoActions: [FilmSourceKey: [String]] = [:]
+            try db.scan("SELECT installation_id,site_key,action FROM film_video_actions ORDER BY installation_id,site_key,position") { c in
+                let key = FilmSourceKey(installationId: try c.text(0), siteKey: try c.text(1))
+                videoActions[key, default: []].append(try c.text(2))
+            }
+
+            var videoMethods: [FilmSourceKey: [String: String]] = [:]
+            try db.scan("SELECT installation_id,site_key,action,method FROM film_video_methods") { c in
+                let key = FilmSourceKey(installationId: try c.text(0), siteKey: try c.text(1))
+                videoMethods[key, default: [:]][try c.text(2)] = try c.text(3)
+            }
+
+            var probeSteps: [FilmSourceKey: [FilmSourceProbeStep]] = [:]
+            try db.scan("SELECT installation_id,site_key,operation,state,error FROM film_video_probe_steps ORDER BY installation_id,site_key,position") { c in
+                let key = FilmSourceKey(installationId: try c.text(0), siteKey: try c.text(1))
+                probeSteps[key, default: []].append(FilmSourceProbeStep(
+                    try c.text(2), try c.text(3), try c.optionalText(4)
+                ))
+            }
+
+            let videos: [FilmVideoSource] = try db.query(
+                "SELECT installation_id,site_key,sort_order,name,api,enabled,home_visible,search_enabled,aggregate_images," +
+                "detection_result,detection_checked_at_ms,detection_playback_resolved " +
+                "FROM film_video_sources ORDER BY sort_order,position,installation_id,site_key"
+            ) { c in
+                let id = try c.text(0)
+                let key = try c.text(1)
+                let identity = FilmSourceKey(installationId: id, siteKey: key)
+                let detection: FilmSourceDetection?
+                if let result = try c.optionalText(9),
+                   let checkedAt = try c.optionalInt64(10),
+                   let playbackResolved = try c.optionalBool(11) {
+                    detection = FilmSourceDetection(
+                        result: result,
+                        checkedAt: checkedAt,
+                        playbackResolved: playbackResolved,
+                        steps: probeSteps[identity] ?? []
+                    )
+                } else {
+                    detection = nil
                 }
-                return FilmVideoSource(key: .init(installationId: id, siteKey: key),
-                    name: try row.text("name"), api: try row.text("api"),
-                    actions: try actions(videoActions[identity] ?? []), methods: try methods(videoMethods[identity] ?? []),
-                    options: .init(enabled: try row.bool("enabled"), homeVisible: try row.bool("homeVisible"),
-                                   searchEnabled: try row.bool("searchEnabled"), aggregateImages: try row.bool("aggregateImages")),
-                    order: try row.integer("ordinal"), detection: detection)
+                return FilmVideoSource(
+                    key: identity,
+                    name: try c.text(3),
+                    api: try c.text(4),
+                    actions: videoActions[identity] ?? [],
+                    methods: videoMethods[identity] ?? [:],
+                    options: .init(
+                        enabled: try c.bool(5),
+                        homeVisible: try c.bool(6),
+                        searchEnabled: try c.bool(7),
+                        aggregateImages: try c.bool(8)
+                    ),
+                    order: try c.integer(2),
+                    detection: detection
+                )
             }
-            let deleted = try db.query("SELECT * FROM ios_film_source_deletions ORDER BY installationId,siteKey").map {
-                FilmSourceKey(installationId: try $0.text("installationId"), siteKey: try $0.text("siteKey"))
+
+            let deleted = try db.query("SELECT installation_id,site_key FROM film_source_deletions ORDER BY position,installation_id,site_key") {
+                FilmSourceKey(installationId: try $0.text(0), siteKey: try $0.text(1))
             }
-            let document = FilmSourceDocument(cats: cats, videos: videos, deleted: deleted)
-            try Self.validate(document)
-            return (document, revision)
+            let state = FilmSourceState(cats: cats, videos: videos, deleted: deleted)
+            try Self.validate(state)
+            return (state, revision)
         }
     }
 
-    func save(_ value: FilmSourceDocument, expected: Int) async throws -> Int {
+    func save(_ value: FilmSourceState, previous: FilmSourceState, expected: Int) async throws -> Int {
         try Self.validate(value)
         var ownedBytes = 0
         for cat in value.cats {
@@ -79,67 +133,166 @@ struct FilmSourceRepository: Sendable {
             for action in video.actions { ownedBytes += action.utf8.count }
         }
         return try await database.transaction(ownedBytes: ownedBytes) { db in
-            guard try db.query("SELECT revision FROM ios_film_source_state WHERE singleton=1").first!.integer("revision") == expected else {
+            let current = try db.ownerRevision(Self.ownerKey)
+            guard current == Int64(expected), current < 9_007_199_254_740_991 else {
                 throw FilmSourceError(code: "STORAGE_CONFLICT")
             }
-            try db.reconcile("ios_film_source_probes",
-                columns: ["installationId", "inputRevision", "importedAt", "updatedAt", "updateState", "updateError", "sourceHash"],
-                key: ["installationId"], rows: value.cats.map {
-                    [.text($0.installationId), .integer($0.inputRevision), $0.importedAt.map(SQLiteValue.integer) ?? .null,
-                     $0.updatedAt.map(SQLiteValue.integer) ?? .null, .text($0.updateState), .optional($0.updateError), .optional($0.sourceHash)]
-                })
-            var sites: [[SQLiteValue]] = [], siteActions: [[SQLiteValue]] = [], siteMethods: [[SQLiteValue]] = []
-            for cat in value.cats {
-                for (ordinal, site) in cat.sites.enumerated() {
-                    let identity: [SQLiteValue] = [.text(cat.installationId), .text(site.key)]
-                    sites.append(identity + [.integer(ordinal), .text(site.name), .text(site.api)])
-                    siteActions += site.actions.enumerated().map { identity + [.integer($0.offset), .text($0.element)] }
-                    siteMethods += site.methods.map { identity + [.text($0.key), .text($0.value)] }
-                }
+
+            // Incremental diff on film_source_probes (cascades to sites, site actions, site methods).
+            let prevCats = Dictionary(uniqueKeysWithValues: previous.cats.enumerated().map { ($0.element.installationId, ($0.offset, $0.element)) })
+            let nextCatIDs = Set(value.cats.map(\.installationId))
+            for removedID in prevCats.keys where !nextCatIDs.contains(removedID) {
+                try db.execute("DELETE FROM film_source_probes WHERE installation_id=?", [.text(removedID)])
             }
-            try db.reconcile("ios_film_source_sites", columns: ["installationId", "siteKey", "ordinal", "name", "api"],
-                             key: ["installationId", "siteKey"], rows: sites)
-            try saveChildren(db, prefix: "ios_film_source", actions: siteActions, methods: siteMethods)
-            if let selected = value.videos.first(where: { $0.options.aggregateImages }) {
-                try db.execute("UPDATE ios_film_video_intents SET aggregateImages=0 WHERE aggregateImages=1 AND NOT(installationId=? AND siteKey=?)",
-                               [.text(selected.key.installationId), .text(selected.key.siteKey)])
-            } else { try db.execute("UPDATE ios_film_video_intents SET aggregateImages=0 WHERE aggregateImages=1") }
-            let videoRows = value.videos.map {
-                [SQLiteValue.text($0.key.installationId), .text($0.key.siteKey), .integer($0.order), .text($0.name), .text($0.api),
-                 .bool($0.options.enabled), .bool($0.options.homeVisible), .bool($0.options.searchEnabled), .bool($0.options.aggregateImages)]
-            }
-            try db.reconcile("ios_film_video_intents",
-                columns: ["installationId", "siteKey", "ordinal", "name", "api", "enabled", "homeVisible", "searchEnabled", "aggregateImages"],
-                key: ["installationId", "siteKey"], rows: videoRows)
-            var actions: [[SQLiteValue]] = [], methods: [[SQLiteValue]] = [], detections: [[SQLiteValue]] = [], steps: [[SQLiteValue]] = []
-            for video in value.videos {
-                let identity: [SQLiteValue] = [.text(video.key.installationId), .text(video.key.siteKey)]
-                actions += video.actions.enumerated().map { identity + [.integer($0.offset), .text($0.element)] }
-                methods += video.methods.map { identity + [.text($0.key), .text($0.value)] }
-                if let probe = video.detection {
-                    detections.append(identity + [.text(probe.result), .integer(probe.checkedAt), .bool(probe.playbackResolved)])
-                    steps += probe.steps.enumerated().map {
-                        identity + [.integer($0.offset), .text($0.element.operation), .text($0.element.state), .optional($0.element.error)]
+            for (catPos, cat) in value.cats.enumerated() {
+                let old = prevCats[cat.installationId]
+                if let old, old.0 == catPos, old.1 == cat { continue }
+                try db.upsert(
+                    "film_source_probes",
+                    columns: [
+                        "installation_id", "position", "input_revision",
+                        "imported_at_ms", "updated_at_ms", "update_state", "update_error", "source_hash"
+                    ],
+                    values: [
+                        .text(cat.installationId), .integer(catPos), .integer(cat.inputRevision),
+                        cat.importedAt.map(SQLiteValue.integer) ?? .null,
+                        cat.updatedAt.map(SQLiteValue.integer) ?? .null,
+                        .text(cat.updateState), .optional(cat.updateError), .optional(cat.sourceHash)
+                    ],
+                    key: ["installation_id"]
+                )
+                if old == nil || old!.1.sites != cat.sites {
+                    try db.execute("DELETE FROM film_source_sites WHERE installation_id=?", [.text(cat.installationId)])
+                    for (sitePos, site) in cat.sites.enumerated() {
+                        try db.execute(
+                            "INSERT INTO film_source_sites(installation_id,site_key,position,name,api) VALUES(?,?,?,?,?)",
+                            [.text(cat.installationId), .text(site.key), .integer(sitePos), .text(site.name), .text(site.api)]
+                        )
+                        for (actionPos, action) in site.actions.enumerated() {
+                            try db.execute(
+                                "INSERT INTO film_source_site_actions(installation_id,site_key,position,action) VALUES(?,?,?,?)",
+                                [.text(cat.installationId), .text(site.key), .integer(actionPos), .text(action)]
+                            )
+                        }
+                        for (action, method) in site.methods {
+                            try db.execute(
+                                "INSERT INTO film_source_site_methods(installation_id,site_key,action,method) VALUES(?,?,?,?)",
+                                [.text(cat.installationId), .text(site.key), .text(action), .text(method)]
+                            )
+                        }
                     }
                 }
             }
-            try saveChildren(db, prefix: "ios_film_video", actions: actions, methods: methods)
-            try db.reconcile("ios_film_video_detections",
-                             columns: ["installationId", "siteKey", "result", "checkedAt", "playbackResolved"],
-                             key: ["installationId", "siteKey"], rows: detections)
-            try db.reconcile("ios_film_video_probe_steps",
-                             columns: ["installationId", "siteKey", "ordinal", "operation", "state", "error"],
-                             key: ["installationId", "siteKey", "ordinal"], rows: steps)
-            try db.reconcile("ios_film_source_deletions", columns: ["installationId", "siteKey"],
-                             key: ["installationId", "siteKey"],
-                             rows: value.deleted.map { [.text($0.installationId), .text($0.siteKey)] })
-            guard try db.execute("UPDATE ios_film_source_state SET revision=revision+1 WHERE singleton=1 AND revision=? AND revision<9007199254740991",
-                                 [.integer(expected)]) == 1 else { throw FilmSourceError(code: "STORAGE_CONFLICT") }
-            return expected + 1
+
+            // Incremental diff on film_video_sources (cascades to actions, methods, probe steps).
+            let prevVideos = Dictionary(uniqueKeysWithValues: previous.videos.enumerated().map { ($0.element.key, ($0.offset, $0.element)) })
+            let nextVideoKeys = Set(value.videos.map(\.key))
+            for removedKey in prevVideos.keys where !nextVideoKeys.contains(removedKey) {
+                try db.execute(
+                    "DELETE FROM film_video_sources WHERE installation_id=? AND site_key=?",
+                    [.text(removedKey.installationId), .text(removedKey.siteKey)]
+                )
+            }
+            // Clear aggregate_images before upserts if the unique aggregate-images owner is moving between rows.
+            let prevAgg = previous.videos.first(where: { $0.options.aggregateImages })?.key
+            let nextAgg = value.videos.first(where: { $0.options.aggregateImages })?.key
+            if let oldAgg = prevAgg, oldAgg != nextAgg, nextVideoKeys.contains(oldAgg) {
+                try db.execute(
+                    "UPDATE film_video_sources SET aggregate_images=0 WHERE installation_id=? AND site_key=?",
+                    [.text(oldAgg.installationId), .text(oldAgg.siteKey)]
+                )
+            }
+            for (videoPos, video) in value.videos.enumerated() {
+                let old = prevVideos[video.key]
+                if let old, old.0 == videoPos, old.1 == video { continue }
+                let probe = video.detection
+                try db.upsert(
+                    "film_video_sources",
+                    columns: [
+                        "installation_id", "site_key", "position", "sort_order", "name", "api",
+                        "enabled", "home_visible", "search_enabled", "aggregate_images",
+                        "detection_result", "detection_checked_at_ms", "detection_playback_resolved"
+                    ],
+                    values: [
+                        .text(video.key.installationId), .text(video.key.siteKey),
+                        .integer(videoPos), .integer(video.order),
+                        .text(video.name), .text(video.api),
+                        .bool(video.options.enabled), .bool(video.options.homeVisible),
+                        .bool(video.options.searchEnabled), .bool(video.options.aggregateImages),
+                        .optional(probe?.result),
+                        probe.map { .integer($0.checkedAt) } ?? .null,
+                        probe.map { .bool($0.playbackResolved) } ?? .null
+                    ],
+                    key: ["installation_id", "site_key"]
+                )
+                if old == nil || old!.1.actions != video.actions {
+                    try db.execute(
+                        "DELETE FROM film_video_actions WHERE installation_id=? AND site_key=?",
+                        [.text(video.key.installationId), .text(video.key.siteKey)]
+                    )
+                    for (actionPos, action) in video.actions.enumerated() {
+                        try db.execute(
+                            "INSERT INTO film_video_actions(installation_id,site_key,position,action) VALUES(?,?,?,?)",
+                            [.text(video.key.installationId), .text(video.key.siteKey), .integer(actionPos), .text(action)]
+                        )
+                    }
+                }
+                if old == nil || old!.1.methods != video.methods {
+                    try db.execute(
+                        "DELETE FROM film_video_methods WHERE installation_id=? AND site_key=?",
+                        [.text(video.key.installationId), .text(video.key.siteKey)]
+                    )
+                    for (action, method) in video.methods {
+                        try db.execute(
+                            "INSERT INTO film_video_methods(installation_id,site_key,action,method) VALUES(?,?,?,?)",
+                            [.text(video.key.installationId), .text(video.key.siteKey), .text(action), .text(method)]
+                        )
+                    }
+                }
+                if old == nil || old!.1.detection?.steps != probe?.steps {
+                    try db.execute(
+                        "DELETE FROM film_video_probe_steps WHERE installation_id=? AND site_key=?",
+                        [.text(video.key.installationId), .text(video.key.siteKey)]
+                    )
+                    if let probe {
+                        for (stepPos, step) in probe.steps.enumerated() {
+                            try db.execute(
+                                "INSERT INTO film_video_probe_steps(installation_id,site_key,position,operation,state,error) VALUES(?,?,?,?,?,?)",
+                                [
+                                    .text(video.key.installationId), .text(video.key.siteKey), .integer(stepPos),
+                                    .text(step.operation), .text(step.state), .optional(step.error)
+                                ]
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Incremental diff on film_source_deletions.
+            let prevDeleted = Dictionary(uniqueKeysWithValues: previous.deleted.enumerated().map { ($0.element, $0.offset) })
+            let nextDeletedSet = Set(value.deleted)
+            for removedKey in prevDeleted.keys where !nextDeletedSet.contains(removedKey) {
+                try db.execute(
+                    "DELETE FROM film_source_deletions WHERE installation_id=? AND site_key=?",
+                    [.text(removedKey.installationId), .text(removedKey.siteKey)]
+                )
+            }
+            for (pos, key) in value.deleted.enumerated() {
+                if prevDeleted[key] == pos { continue }
+                try db.upsert(
+                    "film_source_deletions",
+                    columns: ["installation_id", "site_key", "position"],
+                    values: [.text(key.installationId), .text(key.siteKey), .integer(pos)],
+                    key: ["installation_id", "site_key"]
+                )
+            }
+
+            let next = try db.commitOwnerRevision(Self.ownerKey, expectedRevision: current)
+            return Int(next)
         }
     }
 
-    private static func validate(_ value: FilmSourceDocument) throws {
+    private static func validate(_ value: FilmSourceState) throws {
         func valid(_ key: FilmSourceKey) -> Bool { !key.installationId.isEmpty && !key.siteKey.isEmpty }
         guard Set(value.cats.map(\.installationId)).count == value.cats.count,
               value.cats.allSatisfy({ cat in
@@ -150,14 +303,7 @@ struct FilmSourceRepository: Sendable {
               Set(value.videos.map(\.key)).count == value.videos.count,
               value.videos.filter({ $0.options.aggregateImages }).count <= 1,
               value.deleted.allSatisfy(valid), Set(value.deleted).count == value.deleted.count else {
-            throw FilmSourceError(code: "INVALID_DOCUMENT")
+            throw FilmSourceError(code: "INVALID_DATA")
         }
-    }
-
-    private func saveChildren(_ db: SQLiteConnection, prefix: String, actions: [[SQLiteValue]], methods: [[SQLiteValue]]) throws {
-        try db.reconcile("\(prefix)_actions", columns: ["installationId", "siteKey", "ordinal", "action"],
-                         key: ["installationId", "siteKey", "ordinal"], rows: actions)
-        try db.reconcile("\(prefix)_methods", columns: ["installationId", "siteKey", "action", "method"],
-                         key: ["installationId", "siteKey", "action"], rows: methods)
     }
 }

@@ -100,8 +100,7 @@ public enum ImportedFileReader {
         catch { throw ImportedFileError.unavailable }
     }
 
-    /// Internal deterministic test seam for short reads and EOF.
-    static func readChunks(read: (Int) throws -> Data?) throws -> Data {
+    private static func readChunks(read: (Int) throws -> Data?) throws -> Data {
         var output = Data()
         while true {
             try checkCancellation()

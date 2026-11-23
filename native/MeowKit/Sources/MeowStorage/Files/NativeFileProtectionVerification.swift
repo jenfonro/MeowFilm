@@ -17,9 +17,7 @@ public enum NativeFileProtectionVerification: Equatable, Sendable {
         #endif
     }
 
-    // Internal seam tests both policies on every Apple runner. Callers cannot
-    // opt a real device into the Simulator exception.
-    static func inspect(_ attribute: Any?, simulator: Bool) -> Self {
+    private static func inspect(_ attribute: Any?, simulator: Bool) -> Self {
         if attribute == nil { return simulator ? .unavailableInSimulator : .rejected }
         #if os(iOS)
         if (attribute as? FileProtectionType) == .completeUntilFirstUserAuthentication {

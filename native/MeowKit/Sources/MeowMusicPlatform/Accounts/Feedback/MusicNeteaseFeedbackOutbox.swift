@@ -15,7 +15,7 @@ enum MusicAccountFeedbackNotSent: Error {
 final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     static let retention: TimeInterval = 7 * 86_400
 
-    struct Entry: Codable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
         enum Phase: String, Codable { case start, end }
         enum State: String, Codable { case pending, inflight }
         let id: UUID, instance: UUID
@@ -39,6 +39,51 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             occurredAt = report.occurredAt; reason = report.reason?.rawValue
             self.startConfirmed = startConfirmed
         }
+        init(cursor: SQLiteCursor) throws {
+            guard let phase = Phase(rawValue: try cursor.text(4)),
+                  let state = State(rawValue: try cursor.text(15)) else {
+                throw SQLiteStorageError.invalidValue
+            }
+            self.id = try cursor.uuid(0)
+            self.instance = try cursor.uuid(1)
+            self.scope = try cursor.text(2)
+            self.generation = try cursor.integer(3)
+            self.phase = phase
+            self.nativeID = try cursor.text(5)
+            self.source = try cursor.text(6)
+            self.sourceID = try cursor.text(7)
+            self.algorithm = try cursor.text(8)
+            self.heartbeat = try cursor.bool(9)
+            self.listened = try cursor.double(10)
+            self.media = try cursor.double(11)
+            self.rate = try cursor.double(12)
+            self.occurredAt = Double(try cursor.int64(13)) / 1000.0
+            self.reason = try cursor.optionalText(14)
+            self.state = state
+            self.startConfirmed = try cursor.bool(16)
+        }
+        var sqliteValues: [SQLiteValue] {
+            let occurredAtMs = Int64((occurredAt * 1000.0).rounded())
+            return [
+                .text(id.uuidString),
+                .text(instance.uuidString),
+                .text(scope),
+                .integer(generation),
+                .text(phase.rawValue),
+                .text(nativeID),
+                .text(source),
+                .text(sourceID),
+                .text(algorithm),
+                .bool(heartbeat),
+                .real(listened),
+                .real(media),
+                .real(rate),
+                .integer(max(0, occurredAtMs)),
+                .optional(reason),
+                .text(state.rawValue),
+                .bool(startConfirmed)
+            ]
+        }
         func eventBody() throws -> Data {
             guard [listened, media, rate, occurredAt].allSatisfy({ $0.isFinite && $0 >= 0 }), rate > 0,
                   phase == .start ? listened == 0 && media == 0 && reason == nil :
@@ -61,8 +106,10 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     }
     private let lock = NSLock()
     private let database: SQLiteDatabase?
-    private static let columns = ["id", "instance", "scope", "generation", "phase", "nativeID", "source", "sourceID",
-        "algorithm", "heartbeat", "listened", "media", "rate", "occurredAt", "reason", "state", "startConfirmed"]
+    private static let columns = [
+        "event_id", "instance", "scope", "generation", "phase", "native_id", "source", "source_id",
+        "algorithm", "heartbeat", "listened", "media", "rate", "occurred_at_ms", "reason", "state", "start_confirmed"
+    ]
     private var loaded = false, writable = true, frozen = false, armed = false, configured = false
     private var dispatchStopped = false
     private var entries: [Entry] = []
@@ -75,14 +122,35 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     private func locked<T>(_ action: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }; return try action()
     }
-    private func save(_ draft: [Entry]) throws {
+    private func save(_ draft: [Entry], clearAll: Bool = false) throws {
         // A failed ordinary write must not prevent a later explicit safe unlink.
         guard writable || draft.isEmpty else { throw MusicServiceError.storageFailed }
         do {
             guard let database else { throw MusicServiceError.storageFailed }
-            let rows = try draft.map { try SQLiteRecord.values($0, columns: Self.columns) }
-            try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
-                try db.reconcile("ios_music_feedback_outbox", columns: Self.columns, key: ["id"], rows: rows)
+            let prevByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+            let nextIDs = Set(draft.map(\.id))
+            let removedIDs = prevByID.keys.filter { !nextIDs.contains($0) }
+            let changed = draft.filter { entry in
+                guard let old = prevByID[entry.id] else { return true }
+                return old != entry
+            }
+            if !clearAll && removedIDs.isEmpty && changed.isEmpty {
+                entries = draft
+                return
+            }
+            let changedRows = changed.map(\.sqliteValues)
+            let ownedBytes = changedRows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }
+            try database.transactionSync(ownedBytes: ownedBytes) { db in
+                if clearAll {
+                    try db.execute("DELETE FROM ios_music_feedback_outbox")
+                } else {
+                    for removed in removedIDs {
+                        try db.execute("DELETE FROM ios_music_feedback_outbox WHERE event_id=?", [.text(removed.uuidString)])
+                    }
+                }
+                for row in changedRows {
+                    try db.upsert("ios_music_feedback_outbox", columns: Self.columns, values: row, key: ["event_id"])
+                }
             }
             entries = draft
         } catch {
@@ -97,10 +165,11 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         do {
             if let database {
                 let saved = try database.readSync { db in
-                    try db.query("SELECT * FROM ios_music_feedback_outbox ORDER BY occurredAt,id").map {
-                        try SQLiteRecord.decode(Entry.self, row: $0, columns: Self.columns,
-                            booleans: ["heartbeat", "startConfirmed"])
-                    }
+                    try db.query(
+                        "SELECT event_id, instance, scope, generation, phase, native_id, source, source_id, " +
+                        "algorithm, heartbeat, listened, media, rate, occurred_at_ms, reason, state, start_confirmed " +
+                        "FROM ios_music_feedback_outbox ORDER BY occurred_at_ms, event_id"
+                    ) { try Entry(cursor: $0) }
                 }
                 guard Set(saved.map(\.id)).count == saved.count, saved.allSatisfy({
                           !$0.scope.isEmpty && $0.generation >= 0 &&
@@ -237,8 +306,9 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             let uncertain = Set(entries.filter { $0.state == .inflight && $0.phase == .start }.map(\.instance))
             let draft = preserving ? entries.filter { $0.state == .pending && !uncertain.contains($0.instance) } : []
             do {
+                let wasLoaded = loaded
                 if !loaded { loaded = true }
-                try save(draft)
+                try save(draft, clearAll: !preserving && !wasLoaded)
             } catch { writable = false }
         }
     }

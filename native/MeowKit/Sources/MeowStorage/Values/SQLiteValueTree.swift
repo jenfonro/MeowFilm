@@ -1,6 +1,6 @@
 import Foundation
 
-public struct SQLiteTreeField: Sendable {
+public struct SQLiteTreeField: Equatable, Sendable {
     public let name: String
     public let value: SQLiteTreeValue
     public init(_ name: String, _ value: SQLiteTreeValue) { self.name = name; self.value = value }
@@ -8,15 +8,64 @@ public struct SQLiteTreeField: Sendable {
 
 /// Only genuinely dynamic guest/provider fields use trees. Known business
 /// entities belong in their repositories' typed columns and relations.
-public indirect enum SQLiteTreeValue: Sendable {
+public indirect enum SQLiteTreeValue: Equatable, Sendable {
     case null, boolean(Bool), number(Double), exactNumber(String), text(String)
     case array([SQLiteTreeValue]), object([SQLiteTreeField])
+}
+
+public struct SQLiteTreeNodeRow: Equatable, Sendable {
+    public let nodeID: Int
+    public let parentID: Int?
+    public let propKey: String?
+    public let itemIndex: Int?
+    public let kind: String
+    public let boolValue: Bool?
+    public let intValue: Int64?
+    public let realValue: Double?
+    public let textValue: String?
+
+    public init(
+        nodeID: Int,
+        parentID: Int?,
+        propKey: String?,
+        itemIndex: Int?,
+        kind: String,
+        boolValue: Bool?,
+        intValue: Int64?,
+        realValue: Double?,
+        textValue: String?
+    ) {
+        self.nodeID = nodeID
+        self.parentID = parentID
+        self.propKey = propKey
+        self.itemIndex = itemIndex
+        self.kind = kind
+        self.boolValue = boolValue
+        self.intValue = intValue
+        self.realValue = realValue
+        self.textValue = textValue
+    }
 }
 
 public enum SQLiteValueTree {
     public static let columns = ["node_id", "parent_id", "prop_key", "item_index", "kind",
                                  "bool_value", "int_value", "real_value", "text_value"]
+    public static let selectColumns = "node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value"
     private static let number = try! NSRegularExpression(pattern: #"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$"#)
+
+    public static func readNodeRow(_ cursor: SQLiteCursor, offset: Int32 = 0) throws -> SQLiteTreeNodeRow {
+        SQLiteTreeNodeRow(
+            nodeID: try cursor.integer(offset),
+            parentID: try cursor.optionalInteger(offset + 1),
+            propKey: try cursor.optionalText(offset + 2),
+            itemIndex: try cursor.optionalInteger(offset + 3),
+            kind: try cursor.text(offset + 4),
+            boolValue: try cursor.optionalBool(offset + 5),
+            intValue: try cursor.optionalInt64(offset + 6),
+            realValue: try cursor.optionalDouble(offset + 7),
+            textValue: try cursor.optionalText(offset + 8)
+        )
+    }
 
     public static func rows(_ value: SQLiteTreeValue) throws -> [[SQLiteValue]] {
         var rows: [[SQLiteValue]] = []
@@ -61,55 +110,62 @@ public enum SQLiteValueTree {
         return rows
     }
 
-    public static func value(_ rows: [SQLiteRow]) throws -> SQLiteTreeValue {
+    public static func decode(_ rows: [SQLiteTreeNodeRow]) throws -> SQLiteTreeValue {
         guard !rows.isEmpty else { throw SQLiteStorageError.invalidValue }
-        var indexed: [Int: SQLiteRow] = [:], children: [Int: [Int]] = [:]
+        var indexed: [Int: SQLiteTreeNodeRow] = [:], children: [Int: [Int]] = [:]
         var root: Int?
         for row in rows {
-            let id = try row.integer("node_id")
-            guard indexed.updateValue(row, forKey: id) == nil, id >= 0 else { throw SQLiteStorageError.corrupt }
-            if let parent = try row.optionalInteger("parent_id") { children[parent, default: []].append(id) }
+            guard indexed.updateValue(row, forKey: row.nodeID) == nil, row.nodeID >= 0 else { throw SQLiteStorageError.corrupt }
+            if let parent = row.parentID { children[parent, default: []].append(row.nodeID) }
             else {
                 guard root == nil else { throw SQLiteStorageError.corrupt }
-                root = id
+                root = row.nodeID
             }
         }
         guard let root else { throw SQLiteStorageError.corrupt }
         var visited = Set<Int>()
         func build(_ id: Int, depth: Int) throws -> SQLiteTreeValue {
             guard depth <= 64, visited.insert(id).inserted, let row = indexed[id] else { throw SQLiteStorageError.corrupt }
-            let kind = try row.text("kind"), descendants = children[id] ?? []
-            guard kind == "array" || kind == "object" || descendants.isEmpty else { throw SQLiteStorageError.corrupt }
-            switch kind {
+            let descendants = children[id] ?? []
+            guard row.kind == "array" || row.kind == "object" || descendants.isEmpty else { throw SQLiteStorageError.corrupt }
+            switch row.kind {
             case "null": return .null
-            case "boolean": return .boolean(try row.bool("bool_value"))
+            case "boolean":
+                guard let value = row.boolValue else { throw SQLiteStorageError.corrupt }
+                return .boolean(value)
             case "integer":
-                let integer = try row.integer("int_value")
+                guard let integer = row.intValue else { throw SQLiteStorageError.corrupt }
                 return (-9_007_199_254_740_991...9_007_199_254_740_991).contains(integer) ?
                     .number(Double(integer)) : .exactNumber(String(integer))
-            case "real": return .number(try row.double("real_value"))
+            case "real":
+                guard let value = row.realValue, value.isFinite else { throw SQLiteStorageError.corrupt }
+                return .number(value)
             case "number_text":
-                let value = try row.text("text_value")
-                guard number.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value))?.range.length == value.utf16.count else {
+                guard let value = row.textValue,
+                      number.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value))?.range.length == value.utf16.count else {
                     throw SQLiteStorageError.corrupt
                 }
                 return .exactNumber(value)
-            case "text": return .text(try row.text("text_value"))
+            case "text":
+                guard let value = row.textValue else { throw SQLiteStorageError.corrupt }
+                return .text(value)
             case "array":
                 let list = try descendants.map { child -> (Int, Int) in
-                    guard indexed[child]!["prop_key"] == .null else { throw SQLiteStorageError.corrupt }
-                    return (try indexed[child]!.integer("item_index"), child)
+                    guard let childRow = indexed[child], childRow.propKey == nil, let idx = childRow.itemIndex else {
+                        throw SQLiteStorageError.corrupt
+                    }
+                    return (idx, child)
                 }.sorted { $0.0 < $1.0 }
                 guard list.enumerated().allSatisfy({ $0.offset == $0.element.0 }) else { throw SQLiteStorageError.corrupt }
                 return .array(try list.map { try build($0.1, depth: depth + 1) })
             case "object":
                 var names = Set<Data>()
-                return .object(try descendants.map {
-                    let name = try indexed[$0]!.text("prop_key")
-                    guard indexed[$0]!["item_index"] == .null, names.insert(Data(name.utf8)).inserted else {
+                return .object(try descendants.sorted().map { child in
+                    guard let childRow = indexed[child], let name = childRow.propKey, childRow.itemIndex == nil,
+                          names.insert(Data(name.utf8)).inserted else {
                         throw SQLiteStorageError.corrupt
                     }
-                    return SQLiteTreeField(name, try build($0, depth: depth + 1))
+                    return SQLiteTreeField(name, try build(child, depth: depth + 1))
                 })
             default: throw SQLiteStorageError.corrupt
             }

@@ -69,11 +69,11 @@ public struct PanAccountService: Sendable {
     public typealias Request = @Sendable (String, RuntimeValue, TimeInterval?) async throws -> RuntimeValue
     private let request: Request
     private let settings: PanSettingsStore
-    public init(document: FilmSettingsDocument, request: @escaping Request) {
-        settings = PanSettingsStore(document: document); self.request = request
+    public init(settingsRepository: FilmSettingsRepository, request: @escaping Request) {
+        settings = PanSettingsStore(repository: settingsRepository); self.request = request
     }
-    public init(document: FilmSettingsDocument, connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
-        settings = PanSettingsStore(document: document)
+    public init(settingsRepository: FilmSettingsRepository, connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
+        settings = PanSettingsStore(repository: settingsRepository)
         request = { operation, parameters, timeout in
             let client = try await connection()
             return try await client.call(module: .pan, operation: operation, parameters: parameters, timeout: timeout)
@@ -83,6 +83,9 @@ public struct PanAccountService: Sendable {
     /// credential updates. Errors deliberately contain no document contents.
     public static func validateSettingsDocument(_ document: RuntimeValue) throws {
         try PanSettingsStore.validate(document)
+    }
+    public static func validateCredentials(_ provider: PanProviderID, _ credentials: RuntimeValue) throws {
+        try PanSettingsStore.validateCredentials(provider, credentials)
     }
     public func providers() -> [PanProvider] { PanProvider.all }
     public func accounts() async throws -> [PanAccount] { try await settings.accounts() }

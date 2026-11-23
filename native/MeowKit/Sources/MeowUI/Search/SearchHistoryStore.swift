@@ -25,14 +25,11 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
         guard self.database == nil, !closed else { return }
         self.database = database; await reload()
     }
-    nonisolated private static func load(_ db: SQLiteConnection) throws -> [SearchHistoryEntry] {
-        try db.query("SELECT text FROM ios_search_history ORDER BY used_at DESC,text").map { .init(text: try $0.text("text")) }
-    }
     public func reload() async {
         guard !closed, let database else { return }
         let ticket = UUID(); epoch = ticket
         do {
-            let result = try await database.read(Self.load)
+            let result = try await database.read { try SearchHistoryRepository.load($0) }
             guard epoch == ticket, !closed else { return }
             entries = result; persistenceError = nil
         } catch { if epoch == ticket, !closed { persistenceError = "搜索历史读取失败" } }
@@ -45,9 +42,7 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
             let result: [SearchHistoryEntry]
             if let database {
                 result = try await database.transaction(ownedBytes: keyword.utf8.count) { db in
-                    try db.execute("INSERT INTO ios_search_history(text,used_at) VALUES(?,?) " +
-                        "ON CONFLICT(text) DO UPDATE SET used_at=excluded.used_at", [.text(keyword), .optional(Date())])
-                    return try Self.load(db)
+                    try SearchHistoryRepository.record(keyword, db)
                 }
             } else {
                 let entry = SearchHistoryEntry(text: keyword)
@@ -60,7 +55,7 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
         guard !closed else { return }
         let ticket = UUID(); epoch = ticket
         do {
-            if let database { try await database.transaction { try $0.execute("DELETE FROM ios_search_history") } }
+            if let database { try await database.transaction { try SearchHistoryRepository.clear($0) } }
             if epoch == ticket, !closed { entries = []; persistenceError = nil }
         } catch { if epoch == ticket, !closed { persistenceError = "搜索历史清除失败" } }
     }

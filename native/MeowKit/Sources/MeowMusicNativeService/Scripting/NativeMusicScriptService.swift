@@ -399,7 +399,7 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                 case "STALE_SOURCE", "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "CAPABILITY_UNAVAILABLE": return .sourceUnavailable
                 case "CLOSED": return .scriptRuntimeUnavailable
                 case "SCRIPT_CLEANUP": return .scriptCleanupFailed
-                case "CORRUPT_STORAGE": return .corruptDocument
+                case "CORRUPT_STORAGE": return .corruptStorage
                 case "STORAGE_ERROR": return .storageFailed
                 case "SCRIPT_ENCODING", "SCRIPT_INTEGRITY", "SCRIPT_PROTOCOL_ERROR": return .invalidScript
                 case "INVALID_MEDIA_CANDIDATE", "MEDIA_UNAVAILABLE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED", "RECORDING_MISMATCH":

@@ -12,9 +12,9 @@ actor MusicAccountAccessGate {
 
     init(service: NativeMusicAccountService) { self.service = service }
 
-    /// The same App database holds typed account credentials and cache/outbox
-    /// rows. Local access/consent fences remain independent of persistence.
+    /// Permanent credentials and feedback outbox use the data DB; URL and chorus caches use the cache DB.
     init(database: SQLiteDatabase,
+         cacheDatabase: SQLiteDatabase,
          audioCache: (any MusicAudioFileCaching)?,
          platformClient: MusicPlatformClient) throws {
         let store = MusicSQLiteCredentialStore(database: database)
@@ -33,7 +33,7 @@ actor MusicAccountAccessGate {
             )
         }
         service = NativeMusicAccountService(accounts: coordinator, scopes: scopes, platformClient: platformClient,
-            database: database, cacheLifecycle: { event in
+            database: database, cacheDatabase: cacheDatabase, cacheLifecycle: { event in
                 switch event {
                 case .accountChanged:
                     await audioCache?.clearOfficial()

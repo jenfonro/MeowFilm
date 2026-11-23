@@ -32,14 +32,8 @@ public struct NovelLibrarySnapshot: Codable, Equatable, Sendable {
 /// A position update touches one book and one progress row, never the whole shelf.
 public actor NovelLibrary {
     private let database: SQLiteDatabase
+    private var cachedRules: [NovelRule]?
     private var closed = false
-    private static let bookColumns = ["id", "installationId", "bookUrl", "identity", "name", "author",
-                                      "tocUrl", "coverUrl", "intro", "latestChapterTitle", "onShelf", "pinnedAt", "addedAt"]
-    private static let anchorColumns = ["chapterUrl", "chapterTitle", "chapterIndex", "blockIndex", "utf16Offset", "ratio"]
-    private static let settingsColumns = ["mode", "fontSize", "fontWeight", "fontName", "lineSpacing",
-        "paragraphSpacing", "margin", "contentWidth", "conversion", "theme", "foreground", "background", "automaticSpeed"]
-    private static let ruleColumns = ["id", "name", "group", "isEnabled", "order", "timeoutMillisecond",
-        "pattern", "replacement", "isRegex", "scope", "excludeScope", "scopeTitle", "scopeContent"]
 
     public init(database: SQLiteDatabase) { self.database = database }
 
@@ -48,94 +42,30 @@ public actor NovelLibrary {
     }
     public func snapshot() async throws -> NovelLibrarySnapshot {
         try checkOpen()
-        return try await database.snapshot { db in
-            var result = NovelLibrarySnapshot()
-            let variables = try Dictionary(grouping: db.query("SELECT * FROM ios_novel_variable_nodes ORDER BY node_id")) {
-                try $0.text("book_id")
-            }
-            result.entries = try db.query("SELECT b.*,p.chapterUrl,p.chapterTitle,p.chapterIndex,p.blockIndex,p.utf16Offset,p.ratio,p.readAt " +
-                "FROM ios_novel_books b LEFT JOIN ios_novel_progress p ON p.book_id=b.id ORDER BY b.addedAt,b.id").map {
-                    try Self.entry($0, nodes: variables[try $0.text("id")] ?? [])
-                }
-            if let row = try db.query("SELECT * FROM ios_novel_reading_settings WHERE singleton=1").first {
-                result.settings = try SQLiteRecord.decode(NovelReadingSettings.self, row: row, columns: Self.settingsColumns)
-                switch row["background_image"] {
-                case .blob(let image): result.settings.backgroundImage = image
-                case .null: break
-                default: throw NovelError.corruptStorage
-                }
-            }
-            result.rules = try db.query("SELECT * FROM ios_novel_rules ORDER BY \"order\",id").map {
-                try SQLiteRecord.decode(NovelRule.self, row: $0, columns: Self.ruleColumns,
-                    booleans: ["isEnabled", "isRegex", "scopeTitle", "scopeContent"])
-            }
-            guard Self.valid(result) else { throw NovelError.corruptStorage }
-            return result
-        }
-    }
-    private static func entry(_ row: SQLiteRow, _ db: SQLiteConnection) throws -> NovelLibraryEntry {
-        try entry(row, nodes: db.query("SELECT * FROM ios_novel_variable_nodes WHERE book_id=? ORDER BY node_id", [.text(try row.text("id"))]))
-    }
-    private static func entry(_ row: SQLiteRow, nodes: [SQLiteRow]) throws -> NovelLibraryEntry {
-        let id = try row.text("id")
-        var book = NovelBook(id: id, installationId: try row.text("installationId"), bookUrl: try row.text("bookUrl"),
-            name: try row.text("name"), author: try row.text("author"), tocUrl: try row.text("tocUrl"),
-            coverUrl: try row.text("coverUrl"), intro: try row.text("intro"), latestChapterTitle: try row.text("latestChapterTitle"))
-        if !nodes.isEmpty {
-            guard case .object(let fields) = try RuntimeValue(storageTree: SQLiteValueTree.value(nodes)) else {
-                throw NovelError.corruptStorage
-            }
-            book.storedExtensions = fields
-        }
-        let readAt = try row.optionalDouble("readAt").map(Date.init(timeIntervalSince1970:))
-        return .init(book: book, identity: try row.text("identity"), onShelf: try row.bool("onShelf"),
-            pinnedAt: try row.optionalDouble("pinnedAt").map(Date.init(timeIntervalSince1970:)),
-            addedAt: Date(timeIntervalSince1970: try row.double("addedAt")), readAt: readAt,
-            anchor: readAt == nil ? nil : try SQLiteRecord.decode(NovelAnchor.self, row: row, columns: anchorColumns))
-    }
-    private static func saveBook(_ entry: NovelLibraryEntry, _ db: SQLiteConnection) throws {
-        var value = NovelLibrarySnapshot(); value.entries = [entry]
-        guard valid(value) else { throw NovelError.corruptStorage }
-        let book = entry.book
-        let values: [SQLiteValue] = [.text(book.id), .text(book.installationId), .text(book.bookUrl), .text(entry.identity),
-            .text(book.name), .text(book.author), .text(book.tocUrl), .text(book.coverUrl), .text(book.intro),
-            .text(book.latestChapterTitle), .bool(entry.onShelf), .optional(entry.pinnedAt), .optional(entry.addedAt)]
-        let revision = try db.query("SELECT row_revision FROM ios_novel_books WHERE id=?", [.text(book.id)]).first?.integer("row_revision") ?? 1
-        let changed = try db.upsert("ios_novel_books", columns: bookColumns + ["row_revision"], values: values + [.integer(revision)], key: ["id"])
-        if changed > 0 {
-            try db.execute("UPDATE ios_novel_books SET row_revision=row_revision+1 WHERE id=?", [.text(book.id)])
-        }
-        let nodes = try SQLiteValueTree.rows(RuntimeValue.object(book.storedExtensions).storageTree)
-        try db.reconcile("ios_novel_variable_nodes", columns: ["book_id"] + SQLiteValueTree.columns,
-            key: ["book_id", "node_id"], rows: nodes.map { [.text(book.id)] + $0 }, where: "book_id=?", bindings: [.text(book.id)])
+        let raw = try await database.snapshot { try NovelLibraryRepository.loadSnapshot($0) }
+        let result = try Self.projectSnapshot(raw)
+        guard Self.valid(result) else { throw NovelError.corruptStorage }
+        cachedRules = result.rules
+        return result
     }
     @discardableResult public func retain(_ book: NovelBook, identity: String, shelf: Bool = false) async throws -> NovelBook {
         try checkOpen()
-        return try await database.transaction { db in
-            let row = try db.query("SELECT b.* FROM ios_novel_books b WHERE id=? OR (installationId=? AND bookUrl=?) " +
-                "OR (?<>'' AND identity=?) ORDER BY CASE WHEN id=? THEN 0 WHEN installationId=? AND bookUrl=? THEN 1 ELSE 2 END LIMIT 1",
-                [.text(book.id), .text(book.installationId), .text(book.bookUrl), .text(identity), .text(identity),
-                 .text(book.id), .text(book.installationId), .text(book.bookUrl)]).first
-            var local = book
-            let current: NovelLibraryEntry
-            if let row {
-                current = try Self.entry(row, db)
-                local.id = current.id
-            } else {
-                local.id = UUID().uuidString.lowercased()
-                current = .init(book: local, identity: identity, onShelf: false, addedAt: Date())
-            }
-            var next = current; next.book = local; next.identity = identity
-            if shelf { next.onShelf = true }
-            try Self.saveBook(next, db)
-            return local
+        let record = try Self.makeStorageRecord(book, identity: identity, onShelf: shelf)
+        let savedID = try await database.transaction { db in
+            try NovelLibraryRepository.retain(record, shelf: shelf, validate: { candidate in
+                guard let entry = try? Self.projectEntry(candidate) else { return false }
+                var value = NovelLibrarySnapshot(); value.entries = [entry]
+                return Self.valid(value)
+            }, db)
         }
+        var updated = book
+        updated.id = savedID
+        return updated
     }
     public func setShelf(_ id: String, present: Bool) async throws {
         try checkOpen()
         try await database.transaction { db in
-            guard try db.execute("UPDATE ios_novel_books SET onShelf=?,row_revision=row_revision+1 WHERE id=?",
-                [.bool(present), .text(id)]) == 1 else { throw NovelError.invalidResponse }
+            try NovelLibraryRepository.setShelf(id, present: present, db)
         }
         DebugRuntime.log(.novel, sub: "shelf", event: "set", level: .debug, data: .object([
             "bookId": .string(id),
@@ -145,53 +75,110 @@ public actor NovelLibrary {
     public func pin(_ id: String) async throws {
         try checkOpen()
         try await database.transaction { db in
-            guard try db.execute("UPDATE ios_novel_books SET pinnedAt=CASE WHEN pinnedAt IS NULL THEN ? ELSE NULL END," +
-                "row_revision=row_revision+1 WHERE id=?", [.optional(Date()), .text(id)]) == 1 else { throw NovelError.invalidResponse }
+            try NovelLibraryRepository.pin(id, db)
         }
     }
     public func deleteHistory(_ id: String) async throws {
         try checkOpen()
         try await database.transaction { db in
-            guard try !db.query("SELECT id FROM ios_novel_books WHERE id=?", [.text(id)]).isEmpty else { throw NovelError.invalidResponse }
-            try db.execute("DELETE FROM ios_novel_progress WHERE book_id=?", [.text(id)])
+            try NovelLibraryRepository.deleteHistory(id, db)
         }
     }
     public func record(_ book: NovelBook, identity: String, anchor: NovelAnchor) async throws {
         try checkOpen()
         guard !anchor.chapterUrl.isEmpty, anchor.chapterIndex >= 0, anchor.blockIndex >= 0,
               anchor.utf16Offset >= 0, anchor.ratio.isFinite, (0...1).contains(anchor.ratio) else { throw NovelError.noChapter }
+        let record = try Self.makeStorageRecord(book, identity: identity, onShelf: false)
         try await database.transaction { db in
-            guard let row = try db.query("SELECT * FROM ios_novel_books WHERE id=?", [.text(book.id)]).first else { throw NovelError.invalidResponse }
-            var entry = try Self.entry(row, db); entry.book = book; entry.identity = identity
-            try Self.saveBook(entry, db)
-            try db.execute("INSERT INTO ios_novel_progress(book_id,chapterUrl,chapterTitle,chapterIndex,blockIndex,utf16Offset,ratio,readAt,row_revision) " +
-                "VALUES(?,?,?,?,?,?,?,?,1) ON CONFLICT(book_id) DO UPDATE SET chapterUrl=excluded.chapterUrl,chapterTitle=excluded.chapterTitle," +
-                "chapterIndex=excluded.chapterIndex,blockIndex=excluded.blockIndex,utf16Offset=excluded.utf16Offset,ratio=excluded.ratio," +
-                "readAt=excluded.readAt,row_revision=ios_novel_progress.row_revision+1",
-                [.text(book.id)] + (try SQLiteRecord.values(anchor, columns: Self.anchorColumns)) + [.optional(Date())])
+            try NovelLibraryRepository.record(record, anchor: anchor, validate: { candidate in
+                guard let entry = try? Self.projectEntry(candidate) else { return false }
+                var value = NovelLibrarySnapshot(); value.entries = [entry]
+                return Self.valid(value)
+            }, db)
         }
     }
     public func saveSettings(_ settings: NovelReadingSettings) async throws {
         try checkOpen()
         var value = NovelLibrarySnapshot(); value.settings = settings
         guard Self.valid(value) else { throw NovelError.corruptStorage }
-        var flat = settings; flat.backgroundImage = nil
-        let fields = try SQLiteRecord.values(flat, columns: Self.settingsColumns)
         try await database.transaction(ownedBytes: settings.backgroundImage?.count ?? 0) { db in
-            let revision = try db.query("SELECT row_revision FROM ios_novel_reading_settings WHERE singleton=1").first?.integer("row_revision") ?? 0
-            try db.upsert("ios_novel_reading_settings", columns: ["singleton"] + Self.settingsColumns + ["background_image", "row_revision"],
-                values: [.integer(1)] + fields + [settings.backgroundImage.map(SQLiteValue.blob) ?? .null, .integer(revision + 1)], key: ["singleton"])
+            try NovelLibraryRepository.saveSettings(settings, db)
         }
     }
     public func saveRules(_ rules: [NovelRule]) async throws {
         try checkOpen()
         var value = NovelLibrarySnapshot(); value.rules = rules
         guard Self.valid(value) else { throw NovelError.corruptStorage }
-        let rows = try rules.map { try SQLiteRecord.values($0, columns: Self.ruleColumns) }
+        let previous = cachedRules
         try await database.transaction { db in
-            try db.reconcile("ios_novel_rules", columns: Self.ruleColumns, key: ["id"], rows: rows)
+            try NovelLibraryRepository.saveRules(rules, previous: previous, db)
         }
+        cachedRules = rules
     }
+
+    // MARK: - Domain <-> Repository Projection
+
+    private static func projectSnapshot(_ raw: NovelLibraryStorageSnapshot) throws -> NovelLibrarySnapshot {
+        var result = NovelLibrarySnapshot()
+        result.entries = try raw.entries.map(projectEntry)
+        result.settings = raw.settings
+        result.rules = raw.rules
+        return result
+    }
+
+    private static func projectEntry(_ record: NovelBookStorageRecord) throws -> NovelLibraryEntry {
+        var book = NovelBook(
+            id: record.id,
+            installationId: record.installationId,
+            bookUrl: record.bookUrl,
+            name: record.name,
+            author: record.author,
+            tocUrl: record.tocUrl,
+            coverUrl: record.coverUrl,
+            intro: record.intro,
+            latestChapterTitle: record.latestChapterTitle
+        )
+        if let tree = record.variables {
+            guard case .object(let fields) = try RuntimeValue(storageTree: tree) else {
+                throw NovelError.corruptStorage
+            }
+            book.storedExtensions = fields
+        }
+        return NovelLibraryEntry(
+            book: book,
+            identity: record.identity,
+            onShelf: record.onShelf,
+            pinnedAt: record.pinnedAt,
+            addedAt: record.addedAt,
+            readAt: record.readAt,
+            anchor: record.anchor
+        )
+    }
+
+    private static func makeStorageRecord(_ book: NovelBook, identity: String, onShelf: Bool) throws -> NovelBookStorageRecord {
+        let variables: SQLiteTreeValue? = book.storedExtensions.isEmpty
+            ? nil
+            : RuntimeValue.object(book.storedExtensions).storageTree
+        return NovelBookStorageRecord(
+            id: book.id,
+            installationId: book.installationId,
+            bookUrl: book.bookUrl,
+            identity: identity,
+            name: book.name,
+            author: book.author,
+            tocUrl: book.tocUrl,
+            coverUrl: book.coverUrl,
+            intro: book.intro,
+            latestChapterTitle: book.latestChapterTitle,
+            onShelf: onShelf,
+            pinnedAt: nil,
+            addedAt: Date(),
+            readAt: nil,
+            anchor: nil,
+            variables: variables
+        )
+    }
+
     private static func valid(_ value: NovelLibrarySnapshot) -> Bool {
         let settings = value.settings
         func color(_ text: String) -> Bool {
